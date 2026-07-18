@@ -724,6 +724,21 @@ def fetch_work_items_by_unit(
         return {"claimed": [], "error": "class-not-routed"}
 
     type_ph = ",".join("?" * len(allowed_types))
+    # High-signal fallback predicate — mirror fetch_work_items_by_priority so an
+    # `unknown` row is only routable when it carries a gf: vuln signal. Without it,
+    # a unit holding ONLY low-signal unknown rows satisfies the EXISTS selection
+    # and is fetched as candidates, yet every candidate is dropped by
+    # _assigned_agent_for_row (returns None) — no status changes, the same unit is
+    # re-selected on the next call, and routable work in lower-ranked units starves.
+    fallback_ph = ",".join("?" * len(_VULN_SIGNAL_FALLBACK_TYPES))
+    exists_signal_sql = (
+        f" AND (wi.type NOT IN ({fallback_ph}) "
+        "OR (wi.priority_score > 0 AND wi.cluster_key LIKE 'gf:%'))"
+    )
+    claim_signal_sql = (
+        f" AND (type NOT IN ({fallback_ph}) "
+        "OR (priority_score > 0 AND cluster_key LIKE 'gf:%'))"
+    )
     class_sql = " AND wi.type = ?" if work_class else ""
     claim_class_sql = " AND type = ?" if work_class else ""
     class_params: tuple[Any, ...] = (work_class,) if work_class else ()
@@ -753,6 +768,7 @@ def fetch_work_items_by_unit(
                       AND wi.application_unit_id = au.id
                       AND wi.status = 'pending' AND wi.terminal_reason IS NULL
                       AND wi.type IN ({type_ph})
+                      {exists_signal_sql}
                       {class_sql}
                       {path_sql}
                )
@@ -764,6 +780,7 @@ def fetch_work_items_by_unit(
                 engagement.id,
                 *unit_params,
                 *allowed_types,
+                *_VULN_SIGNAL_FALLBACK_TYPES,
                 *class_params,
                 *path_params,
             ),
@@ -798,6 +815,7 @@ def fetch_work_items_by_unit(
              WHERE engagement_id = ? AND application_unit_id = ?
                AND status = 'pending' AND terminal_reason IS NULL
                AND type IN ({type_ph})
+               {claim_signal_sql}
                {claim_class_sql}
                {claim_path_sql}
              ORDER BY priority_score DESC, cluster_key, id
@@ -807,6 +825,7 @@ def fetch_work_items_by_unit(
                 engagement.id,
                 unit["id"],
                 *allowed_types,
+                *_VULN_SIGNAL_FALLBACK_TYPES,
                 *class_params,
                 *path_params,
                 effective_limit,

@@ -113,7 +113,7 @@ _SPECIALIST_ONLY_PHASES: frozenset[str] = frozenset({"exploit", "verify"})
 def _extract_target_host(tool_name: str, cmd: list[str]) -> str:
     """C30: extract a parsed target host from argv for high-traffic verbs.
 
-    Operators query coverage with ``vigil assess list-command-runs
+    Operators query coverage with ``vigil assess command-run list
     --target-host <host>``; the backend stores this in the
     ``target_host`` column. Per-verb extraction keeps the logic simple
     and deterministic — each kali wrapper knows its argv shape, so the

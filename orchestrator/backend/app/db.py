@@ -3913,13 +3913,19 @@ def get_credential(engagement_id: int, identity_name: str) -> dict[str, Any] | N
 
 
 def get_active_credential(engagement_id: int) -> dict[str, Any] | None:
-    """Return the active identity's material, or the first one if none is
-    explicitly active, or None when the engagement has no live credentials."""
+    """Return the active identity's material, or the first USABLE one if none is
+    explicitly active, or None when the engagement has no live credentials.
+
+    The no-active fallback is restricted to ``use_for_requests`` rows so an
+    unreviewed opt-in identity (e.g. a discovered secret minted
+    ``use_for_requests=0``) is never replayed by default; an explicitly activated
+    row (``is_active=1``) is always returned regardless of that flag."""
     with get_connection() as connection:
         _sweep_credential_age(connection, engagement_id)
         row = connection.execute(
             "SELECT * FROM engagement_credentials "
             "WHERE engagement_id = ? AND state != 'dead' "
+            "AND (is_active = 1 OR use_for_requests = 1) "
             "ORDER BY is_active DESC, identity_name LIMIT 1",
             (engagement_id,),
         ).fetchone()

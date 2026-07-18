@@ -43,6 +43,10 @@ _DB_ACTIONS = (
     "requeue",
     "reclassify",
     "link-surface",
+    # folded-in list-clusters (2026-07 CLI consolidation); handled in
+    # work_buffer.run by delegating to commands.list_clusters, so it never
+    # reaches the dispatch.run action switch.
+    "clusters",
 )
 
 # Chunk size for the reclassify backend update POST.
@@ -370,6 +374,11 @@ def _requeue(client) -> None:
             "priority_reason": assignment["priority_reason"],
             "cluster_key": assignment["cluster_key"],
             "terminal_reason": assignment["terminal_reason"],
+            # A terminal row (inert image/video/font/archive, out-of-scope) is
+            # `skipped` at normal ingest; omitting status here would let the
+            # backend default it to `pending`, so a skip-worthy row would show in
+            # pending stats and be claimed by typed fetches. Mirror ingest.
+            "status": "skipped" if assignment["terminal_reason"] else "pending",
             "classifier_version": CLASSIFIER_VERSION,
         })
 

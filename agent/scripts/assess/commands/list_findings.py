@@ -1,4 +1,4 @@
-"""vigil assess list-findings — filtered finding listing."""
+"""vigil assess finding list — filtered finding listing."""
 from __future__ import annotations
 
 import argparse
@@ -12,16 +12,16 @@ from assess.lib.finding_render import blocked_reason_summary
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
-        "list-findings",
+        "list",
         help="List findings with common CLI-side filters",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  vigil assess list-findings --severity high --status active\n"
-            "  vigil assess list-findings --root-cause auth-bypass-root\n"
-            "  vigil assess list-findings --verification-disposition false_positive --json\n"
-            "  vigil assess list-findings --search parser --source-name vulnerability-analyst\n"
-            "  vigil assess list-findings --all --json  # explicit unbounded fetch"
+            "  vigil assess finding list --severity high --status active\n"
+            "  vigil assess finding list --root-cause auth-bypass-root\n"
+            "  vigil assess finding list --verification-disposition false_positive --json\n"
+            "  vigil assess finding list --search parser --source-name vulnerability-analyst\n"
+            "  vigil assess finding list --all --json  # explicit unbounded fetch"
         ),
     )
     p.add_argument("--severity")
@@ -85,12 +85,46 @@ def _matches_search(finding: dict, search: str) -> bool:
     return search in haystack
 
 
+def _print_root_cause_group(group: dict, root_slug: str) -> None:
+    """Render a root-cause finding group with sibling effect/order detail.
+
+    Ported from the retired ``list-finding-group`` verb: the root header, the
+    sibling count, and per-sibling ``sibling_order`` / ``root_cause_effect`` /
+    ``root_cause_note`` columns that the plain ``list-findings`` row does not
+    surface.
+    """
+    root = group.get("root", {})
+    print(
+        f"Root: {root.get('slug', root_slug)} [{root.get('severity', 'info')}] "
+        f"{root.get('title', '')}"
+    )
+    print(f"Siblings: {group.get('sibling_count', 0)}")
+    for sibling in group.get("siblings", []):
+        order = sibling.get("sibling_order")
+        prefix = f"{order}. " if order is not None else "- "
+        effect = sibling.get("root_cause_effect", "eliminates_finding")
+        residual = " residual path" if effect == "eliminates_attack_path" else ""
+        print(
+            f"{prefix}{sibling.get('slug', '')} [{sibling.get('severity', 'info')}]"
+            f"{residual} - {sibling.get('title', '')}"
+        )
+        note = sibling.get("root_cause_note", "")
+        if note:
+            print(f"   note: {note}")
+
+
 def run(args) -> None:
     cfg = load_config(args.engagement_dir)
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         root_cause_slug = getattr(args, "root_cause_slug", None)
         if root_cause_slug:
             group = client.get(f"finding-groups/{root_cause_slug}")
+            # Non-JSON root-cause listing renders the dedicated group view with
+            # sibling effect/order/note detail (folded-in list-finding-group);
+            # --json still emits the flattened root+siblings finding list below.
+            if not args.json:
+                _print_root_cause_group(group, root_cause_slug)
+                return
             root = dict(group.get("root", {}))
             root["root_cause_role"] = "root"
             findings = [root]

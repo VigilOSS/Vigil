@@ -21,7 +21,8 @@ drains the work-items FK-linked to that coverage item, and one carrying
 variant to ``partially-covered`` — no extra verbs. ``--work-item-ids`` /
 ``--resolve-surface`` narrow those to explicit ids; ``--no-drain`` suppresses the
 cascade. This replaces the old raw ``vigil assess post probe-runs <json-file>``
-(now redirected here). The shared flag set + payload assembly live in
+(that raw POST is now disabled at the ``post`` guard, which points here). The
+shared flag set + payload assembly live in
 ``assess.lib.probe_args``.
 """
 from __future__ import annotations

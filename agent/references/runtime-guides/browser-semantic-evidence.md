@@ -40,9 +40,9 @@ This matches the major tool ecosystems:
   timing, which is the low-level substrate behind most browser automation:
   <https://chromedevtools.github.io/devtools-protocol/tot/Network/>
 
-Future implementation notes for a typed Playwright `browser-observe` verb live
-in `docs/plans/browser-observe-typed-playwright.md`. This runtime reference stays
-focused on current engagement decisions and evidence requirements.
+The shipped typed path is `vigil assess kali browser`; it owns Playwright
+execution, scope admission, attribution, and bounded evidence capture. This
+reference focuses on engagement decisions and evidence requirements.
 
 ## When to use browser mode
 
@@ -165,7 +165,7 @@ scoped one-off audited Playwright script through `vigil assess kali exec`.
   browser-enforced outcome, so treat it as a baseline check rather than browser
   evidence.
 - `LinkFinder` belongs to static JavaScript route extraction and the
-  `gau-js-endpoints` pipeline. It complements browser mode by finding route
+  `gau js-endpoints` pipeline. It complements browser mode by finding route
   strings before runtime execution.
 - `jwt_tool` and SAML toolkits belong to `jwt-testing` and `saml-sso-testing`.
   Browser mode may capture tokens or redirects, but protocol manipulation is

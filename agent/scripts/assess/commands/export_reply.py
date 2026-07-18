@@ -65,7 +65,7 @@ _INLINE_PRIOR_CAP = 3
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
-        "export-reply",
+        "reply",
         help=(
             "Render one reply-N.md (pasteable body + never-paste THREAD HISTORY) for a "
             "reply to the program on an already-submitted finding. Pure render: never "

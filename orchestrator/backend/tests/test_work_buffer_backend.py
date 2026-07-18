@@ -169,6 +169,39 @@ def test_app_unit_scoring_links_work_items_and_fetch_claims_coherent_unit(
     assert all(row["assigned_agent"] == "vulnerability-analyst" for row in body["claimed"])
 
 
+def test_fetch_by_unit_skips_unit_with_only_unroutable_unknown_rows(
+    client, isolate_settings
+):
+    # A unit holding ONLY low-signal `unknown` rows (priority 0, no gf: signal) is
+    # unroutable: every candidate is dropped by _assigned_agent_for_row. Before the
+    # fix, EV selection still chose such a unit and returned an empty claim, then
+    # re-selected it on the next call — starving routable work in other units.
+    # fetch-by-unit must now apply the same high-signal predicate as
+    # fetch-by-priority and exclude the unit from selection entirely.
+    _seed(client, isolate_settings)
+    for i in range(4):
+        _observe(
+            client,
+            url=f"https://app.example/junk/blob{i}",
+            case_type="unknown",
+            priority_score=0,
+            cluster_key="",
+        )
+    engagement = client.get(f"/engagements/{ENGAGEMENT_KEY}").json()
+    state_manager.score_application_units(int(engagement["id"]))
+
+    # The rows DID form an application unit (otherwise the test is vacuous).
+    pending = client.get(f"{BASE}/work-items?status=pending").json()
+    assert pending and all(row["application_unit_id"] is not None for row in pending)
+
+    body = client.post(
+        f"{BASE}/work-items/fetch-by-unit", json={"agent": "auto"}
+    ).json()
+    assert body["claimed"] == []
+    assert body["unit"] is None
+    assert body["error"] == "no-unsatisfied-unit"
+
+
 def test_bare_ev_fetch_selects_highest_unsatisfied_unit_and_derives_limit(
     client, isolate_settings
 ):

@@ -94,7 +94,7 @@ def test_known_goal_tags_are_present():
 
 def test_representative_command_goal_assignments(capsys):
     rows = {r["name"]: r for r in _run_json(capsys, ["list-commands", "--json"])}
-    assert "finding-lifecycle" in rows["record-finding"]["goals"]
+    assert "finding-lifecycle" in rows["finding"]["goals"]
     assert "artifact" in rows["artifact"]["goals"]
     assert "discovery" in rows["list-commands"]["goals"]
     # code-dispatch carries BOTH the dispatch and code-analysis lenses.
@@ -104,7 +104,7 @@ def test_representative_command_goal_assignments(capsys):
 
 
 def test_render_contract_surfaces_goals_for_tagged_command():
-    rendered = contracts.render_contract("record-finding")
+    rendered = contracts.render_contract("finding record")
     assert "Goals: finding-lifecycle" in rendered
 
 
@@ -115,15 +115,15 @@ def test_render_contract_omits_goals_line_for_untagged_command():
 
 
 def test_goal_and_composes_with_phase(capsys):
-    # record-finding is tagged goal=finding-lifecycle and phase includes
-    # consume-test, so the AND-composed filter must include it and every
-    # returned row must satisfy BOTH predicates.
+    # The collapsed `finding` group is tagged goal=finding-lifecycle and its
+    # phase union includes consume-test (from record-finding), so the AND-composed
+    # filter must include it and every returned row must satisfy BOTH predicates.
     rows = _run_json(
         capsys,
         ["list-commands", "--goal", "finding-lifecycle", "--phase", "consume-test", "--json"],
     )
     assert rows
-    assert "record-finding" in {r["name"] for r in rows}
+    assert "finding" in {r["name"] for r in rows}
     for row in rows:
         assert "finding-lifecycle" in row["goals"]
         assert "consume-test" in row["phases"]

@@ -13,16 +13,16 @@ Plan reference: ``Blue Team Engagement.plan.md`` §8.3 (CLI surface) and §8.4
 Critical CLI-verb drift handled here (per Unit 7 audit):
 
 * ``vigil assess log-entry`` does NOT exist — the real verb is ``vigil assess log``.
-* ``vigil assess verify-finding --disposition`` accepts CLI vocab
+* ``vigil assess finding verify --disposition`` accepts CLI vocab
   ``{confirmed | downgraded | false_positive | disputed}`` while blue
   specialists speak ``{verified | false_positive | downgraded | escalated}``.
   ``vigil blue verify`` translates blue → CLI for the storage row and
   separately stamps the blue word into ``details.disposition`` so the
   report-writer sees the blue vocabulary verbatim.
-* ``vigil assess link-finding --intel <id>`` attaches one or more intel
+* ``vigil assess finding link --intel <id>`` attaches one or more intel
   rows to a finding's ``details.related_intel_ids[]`` (merges with the
   existing list, dedupe-preserve-order). ``vigil blue`` does not wrap
-  this directly; specialists call ``vigil assess link-finding`` from the
+  this directly; specialists call ``vigil assess finding link`` from the
   ioc-enrichment skill.
 """
 from __future__ import annotations
@@ -658,7 +658,7 @@ def _cmd_show(args: argparse.Namespace, install_root: Path) -> None:
                     print(f"    {key}: {headers[key]}")
     print()
     print("## Findings")
-    _run_assess(install_root, eng_dir, ["list-findings"], check=False)
+    _run_assess(install_root, eng_dir, ["finding", "list"], check=False)
     print()
     print("## Resume brief (tenant scope)")
     _run_assess(install_root, eng_dir, ["resume-brief"], check=False)
@@ -782,7 +782,8 @@ def _cmd_tier(args: argparse.Namespace, install_root: Path) -> None:
         install_root,
         eng_dir,
         [
-            "update-finding",
+            "finding",
+            "update",
             args.finding_slug,
             "--details-inline",
             json.dumps(details),
@@ -846,7 +847,8 @@ def _cmd_verify(args: argparse.Namespace, install_root: Path) -> None:
             "evidence_refs": evidence_refs,
         }
         assess_args = [
-            "verify-finding",
+            "finding",
+            "verify",
             args.finding_slug,
             "--disposition",
             cli_disp,
@@ -1211,7 +1213,8 @@ def _cmd_contain(args: argparse.Namespace, install_root: Path) -> None:
         install_root,
         eng_dir,
         [
-            "update-finding",
+            "finding",
+            "update",
             args.finding_slug,
             "--status",
             "contained",
@@ -1242,7 +1245,7 @@ def _cmd_report(args: argparse.Namespace, install_root: Path) -> None:
     _read_scope(eng_dir / "scope.json", require_blue=True)
     # Pre-flight: emit the gathered report-findings table so the operator sees
     # the input set before report-writer is dispatched.
-    preflight_rc = _run_assess(install_root, eng_dir, ["list-report-findings", "--mode", "final"], check=False)
+    preflight_rc = _run_assess(install_root, eng_dir, ["finding", "report", "--mode", "final"], check=False)
     if preflight_rc != 0:
         raise SystemExit(preflight_rc)
     template_hint = (
@@ -1291,7 +1294,7 @@ def _cmd_report(args: argparse.Namespace, install_root: Path) -> None:
 def _cmd_closeout(args: argparse.Namespace, install_root: Path) -> None:
     eng_dir = _resolve_blue_engagement(install_root, args)
     _read_scope(eng_dir / "scope.json", require_blue=True)
-    preflight_rc = _run_assess(install_root, eng_dir, ["list-report-findings", "--mode", "final"], check=False)
+    preflight_rc = _run_assess(install_root, eng_dir, ["finding", "report", "--mode", "final"], check=False)
     if preflight_rc != 0:
         raise SystemExit(preflight_rc)
     task = (

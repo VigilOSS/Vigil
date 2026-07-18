@@ -68,12 +68,12 @@ sibling specialists' jobs are not touched.
 
 Synchronous `kali exec` runs and every typed verb write the in-container
 PID to `/tmp/vigil-pid-<run_uuid>.pid` for the duration of the run. The
-`run_uuid` is the audit row's run UUID — pull it from `list-command-runs`
+`run_uuid` is the audit row's run UUID — pull it from `command-run list`
 if you need to signal a still-running synchronous call from another shell:
 
 ```bash
 # Find the running call (look for status=running).
-vigil assess list-command-runs --q ffuf --json | jq -r '.[]
+vigil assess command-run list --q ffuf --json | jq -r '.[]
   | select(.status=="running") | .run_uuid'
 
 # Signal only that run.
@@ -164,4 +164,4 @@ cheap to inspect and never finalizes a row whose process is still alive.
 ## See also
 
 - `agent/skills/kali-exec/SKILL.md` — verb menu, audit-flag mapping, sync-vs-async decision, examples per verb.
-- `agent/references/runtime-guides/command-history-auditing.md` — how to read `vigil assess list-command-runs` as a coverage map.
+- `agent/references/runtime-guides/command-history-auditing.md` — how to read `vigil assess command-run list` as a coverage map.

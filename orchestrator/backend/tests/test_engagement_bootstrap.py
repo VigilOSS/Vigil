@@ -353,7 +353,7 @@ def test_aith_engagement_create_writes_engagement_brief_stub(
 ) -> None:
     """`create_engagement` seeds a STUB `ENGAGEMENT.md` program brief into the run
     dir so the "no template scaffolded" gap is closed. The stub carries the
-    canonical program-brief section headings (PROMPT-TODO §2 / plan §3.10), points
+    canonical program-brief section headings, points
     operators at the `agent/references/_template-engagement.md` template, and stays
     ENGAGEMENT-NEUTRAL — no host/program specifics are baked in at creation time."""
     _isolate_orchestrator_url(monkeypatch)
@@ -376,7 +376,7 @@ def test_aith_engagement_create_writes_engagement_brief_stub(
     assert brief.exists(), "create_engagement must scaffold an ENGAGEMENT.md program brief"
     text = brief.read_text(encoding="utf-8")
 
-    # Canonical program-brief section headings (PROMPT-TODO §2 / plan §3.10).
+    # Canonical program-brief section headings.
     for heading in (
         "## In-Scope / Out-of-Scope",
         "## Required Request Headers / Deconfliction Marker",

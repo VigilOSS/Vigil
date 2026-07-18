@@ -39,8 +39,8 @@ Before producing any output, confirm:
 - [ ] Full file listing from code-ingest is available with path, language, LOC, and file hash for every file
 - [ ] Git churn data attached (or confirmed unavailable)
 - [ ] Structural index checked — if `tools/analysis-state/structural-index/` exists, it's loaded for call graph construction
-- [ ] Helper contracts checked — `code-classify`, `code-record-modules`,
-      `code-record-threat-model`, and `code-dispatch` are the machine-output shape source
+- [ ] Helper contracts checked — `code-record classify`, `code-record modules`,
+      `code-record threat-model`, and `code-dispatch` are the machine-output shape source
 
 If any item is missing, stop and request it from the operator before proceeding.
 
@@ -230,7 +230,7 @@ Structured document covering:
   me a bug.")
 
 ### `#### File Classifications`
-Use `vigil assess contract code-classify` as the classification shape source. Every classification
+Use `vigil assess contract code-record classify` as the classification shape source. Every classification
 record should include backend `file_id`; `file_path` is helper context and `repo_id` only
 disambiguates path lookup. The machine JSON is an array, not an object keyed by path, and uses
 `analysis_priority` for ordering. Put rationale in the surrounding markdown or Recommended
@@ -263,12 +263,12 @@ REQUIRED. Declare every self-check item you could NOT complete. If none, state "
 
 After producing output, the operator records via:
 ```bash
-vigil assess contract code-classify
-vigil assess contract code-record-threat-model
-vigil assess contract code-record-modules
-vigil assess code-classify <classifications-json>
-vigil assess code-record-threat-model <repo-id> <threat-model-json>
-vigil assess code-record-modules <repo-id> <modules-json>
+vigil assess contract code-record classify
+vigil assess contract code-record threat-model
+vigil assess contract code-record modules
+vigil assess code-record classify <classifications-json>
+vigil assess code-record threat-model <repo-id> <threat-model-json>
+vigil assess code-record modules <repo-id> <modules-json>
 ```
 
 ## Mandatory Closing Sequence
@@ -277,11 +277,11 @@ vigil assess code-record-modules <repo-id> <modules-json>
 
 Before your dispatch returns, run in this order:
 
-1. `vigil assess code-record-threat-model <repo-id> <threat-model-json>`
-2. `vigil assess code-record-modules <repo-id> <modules-json>`
-3. `vigil assess code-classify <classifications-json>` (per-file)
-4. `vigil assess record-intel note <intel-json>` for each attack hypothesis (so the hunter inherits them as intel notes)
-5. `vigil assess record-finding code-architect <finding-json>` for each architectural finding (rare — only when an obvious vulnerability is visible from project structure)
+1. `vigil assess code-record threat-model <repo-id> <threat-model-json>`
+2. `vigil assess code-record modules <repo-id> <modules-json>`
+3. `vigil assess code-record classify <classifications-json>` (per-file)
+4. `vigil assess intel record note <intel-json>` for each attack hypothesis (so the hunter inherits them as intel notes)
+5. `vigil assess finding record code-architect <finding-json>` for each architectural finding (rare — only when an obvious vulnerability is visible from project structure)
 6. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (point at `tools/analysis-state/file-analysis-queue.json`), open questions, and role-specific extras (`modules_classified`, `critical_count`, `high_count`)
 7. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
@@ -291,7 +291,7 @@ Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, hand
 
 You rarely produce findings directly, but if an obvious vulnerability is visible from
 project structure alone (e.g., hardcoded credentials in config, known-vulnerable dependency
-version), omit `slug` from the finding JSON and let `vigil assess record-finding
+version), omit `slug` from the finding JSON and let `vigil assess finding record
 code-architect <finding-json>` allocate the next `CA-*` slug.
 
 ## Output Contract (Dispatch Response)

@@ -143,3 +143,36 @@ def test_aggregate_rate_reserves_target_facing_indeterminate_command(
     )
 
     assert reserved == 9
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        ["httpx", "-rl=500", "-u", "https://example.test"],
+        ["httpx", "--rate-limit=500"],
+        ["nuclei", "--rate=500"],
+        ["nuclei", "-rate-limit=500"],
+    ],
+)
+def test_aggregate_rate_parses_attached_rate_flag(tmp_path, cmd):
+    # A Go/pflag attached value (`-rl=500`) must be honored; falling back to the
+    # 150-rps tool default here would admit a lease running above the ROE cap.
+    (tmp_path / "scope.json").write_text(
+        '{"hosts":["example.test"],"rate_limit_aggregate_rps":400}',
+        encoding="utf-8",
+    )
+    reserved = rate_leases.aggregate_rate_reservation(
+        str(tmp_path), cmd, cmd[0], {"target_facing": True}
+    )
+    assert reserved == 500.0
+
+
+def test_aggregate_rate_still_parses_spaced_rate_flag(tmp_path):
+    (tmp_path / "scope.json").write_text(
+        '{"hosts":["example.test"],"rate_limit_aggregate_rps":400}',
+        encoding="utf-8",
+    )
+    reserved = rate_leases.aggregate_rate_reservation(
+        str(tmp_path), ["httpx", "-rl", "500"], "httpx", {"target_facing": True}
+    )
+    assert reserved == 500.0

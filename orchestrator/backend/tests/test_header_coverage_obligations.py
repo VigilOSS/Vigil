@@ -222,6 +222,60 @@ def test_unanchored_auth_context_labels_do_not_satisfy_two_principal_gate(
     assert "two distinct principals" in str(exc.value.detail)
 
 
+def test_cookie_only_identities_without_principal_ids_do_not_satisfy_gate(
+    client, isolate_settings
+):
+    # Two DISTINCT cookie-only identities: credential rows EXIST (the LEFT JOIN
+    # matches) but principal_id is empty, as legacy/manual/cookie-only sessions
+    # commonly are. Falling back to identity_name would count them as two durable
+    # principals and falsely close the cross-principal WRITE gate; an unanchored
+    # identity must contribute no principal.
+    engagement_id = _seed(client, isolate_settings, "2026-07-15-100001-header-cookieonly-gate")
+    first = _variant(engagement_id, auth="cap-aaaa")
+    second = _variant(engagement_id, auth="cap-bbbb")
+    for identity_name in ("cap-aaaa", "cap-bbbb"):
+        credentials.upsert_material(
+            engagement_id,
+            identity_name,
+            {"principal_id": "", "cookies": {"sid": identity_name}},
+        )
+    item = next(
+        row
+        for row in state_manager.list_coverage_items(engagement_id)
+        if row["request_variant_id"] == first["id"]
+        and row["input_slot"] == "header:x-tenant-id"
+    )
+    for variant, auth in ((first, "cap-aaaa"), (second, "cap-bbbb")):
+        state_manager.record_probe_run(
+            engagement_id,
+            request_variant_id=variant["id"],
+            service_id=None,
+            coverage_item_id=None,
+            auth_context=auth,
+            input_slot="header:x-tenant-id",
+            attack_family="identity-header-review",
+            payload_family="cross-principal",
+            payload_value=auth,
+            tool_name="browser",
+            agent_name="vulnerability-analyst",
+            result_status="tested",
+            observed_http_status=403,
+            signal_type="",
+            evidence_ref=f"scans/{auth}.json",
+            notes="cookie-only session, no durable principal",
+        )
+
+    with pytest.raises(HTTPException) as exc:
+        state_manager.update_coverage_item_status(
+            engagement_id,
+            coverage_item_id=item["id"],
+            status_value="covered",
+            notes="two cookie-only sessions are not two principals",
+        )
+    assert exc.value.status_code == 409
+    assert "two distinct principals" in str(exc.value.detail)
+
+
 def test_identity_header_read_only_variant_cannot_be_marked_covered(client, isolate_settings):
     engagement_id = _seed(client, isolate_settings, "2026-07-15-100002-header-read")
     variant = _variant(engagement_id, auth="alice", method="GET")

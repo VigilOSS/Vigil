@@ -51,10 +51,10 @@ are off-limits — those are L2 verbs.
   classification. Always run this first on continuation; on a fresh
   engagement it returns an empty brief but still records the dispatch
   intent.
-- `vigil assess record-finding <agent-name> <finding-json>` — draft the
+- `vigil assess finding record <agent-name> <finding-json>` — draft the
   finding skeleton with severity, MITRE techniques, actor, target, time
   window, platform.
-- `vigil assess kill-finding <slug>` — only on a mechanical-FP match against
+- `vigil assess finding verify <slug> --disposition false_positive` — only on a mechanical-FP match against
   the tenant ref's known-benign register; never on operator hunch.
 - `vigil assess artifact search --kind alert_intake` — confirm the operator
   registered the raw alert intake artifact so the chain of custody survives audit.
@@ -200,7 +200,7 @@ register entry already carries the rigor of a previous five-check pass.
 If all five hold, auto-close as `false_positive`:
 
 ```bash
-vigil assess kill-finding <draft-slug> \
+vigil assess finding verify <draft-slug> --disposition false_positive \
   --kill-reason "Mechanical FP — matches tenant-ref pattern <pattern-id>" \
   --kill-check 0 \
   --inline '{"evidence_refs": [<alert-intake-artifact-id>], "tenant_ref_path": "<path>", "tenant_ref_section": "Known benign patterns / <pattern-id>", "matched_fields": {"actor": "...", "action_verb": "...", "time_pattern": "...", "source_signal": "..."}}'
@@ -218,7 +218,7 @@ register after the verifier confirms it.
 ### Step 5 — Draft the finding skeleton
 
 ```bash
-vigil assess record-finding alert-triage-specialist /tmp/finding.json
+vigil assess finding record alert-triage-specialist /tmp/finding.json
 ```
 
 With `/tmp/finding.json` shaped:

@@ -1,4 +1,4 @@
-"""vigil assess merge-finding — POST merge + emit event."""
+"""vigil assess finding merge — POST merge + emit event."""
 from __future__ import annotations
 
 import os
@@ -8,7 +8,7 @@ from assess.lib.config import load_config
 
 
 def register(subparsers) -> None:
-    p = subparsers.add_parser("merge-finding", help="Merge one finding into another")
+    p = subparsers.add_parser("merge", help="Merge one finding into another")
     p.add_argument("source_slug", help="Source finding slug (will be merged away)")
     p.add_argument("target_slug", help="Target finding slug (will absorb source)")
     p.add_argument("reason", help="Reason for the merge")

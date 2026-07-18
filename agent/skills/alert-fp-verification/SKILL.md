@@ -22,7 +22,7 @@ escalated`), and the evidence sources are telemetry instead of source code.
   about to propose containment on must be `verified` first. The verifier
   is the only role that can write a disposition.
 - Reopening of a previously dispositioned finding when new evidence
-  contradicts the prior verdict (the `reset-finding` lifecycle transition
+  contradicts the prior verdict (the `finding update --status draft` lifecycle transition
   routes through this skill again).
 
 This skill is for L3 verification only. Initial triage belongs to L1's
@@ -71,14 +71,14 @@ investigator's annotations are inputs, never trusted on their own.
   reproduction needs the token feed). Every cross-source pull lands in
   the audit pipeline with the same envelope as the investigator's pulls:
   `--technique`, `--intent`, `--phase verify`, `--scope-host <tenant>`.
-- `vigil assess verify-finding <slug>` — record `verified`, `downgraded`,
+- `vigil assess finding verify <slug>` — record `verified`, `downgraded`,
   or `escalated` disposition with cited evidence. (Note: the CLI's
   `--disposition` flag uses `confirmed | downgraded | false_positive |
   disputed`; the blue vocabulary maps `verified` → `confirmed` and
   `escalated` → `disputed` at the storage layer. Use the
   `--inline` payload's `details.disposition` field to record the blue
   vocabulary verbatim for the report-writer.)
-- `vigil assess kill-finding <slug>` — record `false_positive` disposition
+- `vigil assess finding verify <slug> --disposition false_positive` — record `false_positive` disposition
   with cited counter-evidence. Enforces required fields
   (`kill_check`, `kill_reason`) before the request leaves the CLI.
 - `vigil assess log` — every check outcome is recorded as an
@@ -506,12 +506,12 @@ Forbidden vocabulary: `partially_verified`, `pending`, `unknown`,
 `under_review`, `confirmed-but`, anything not in the four-value list.
 `unreviewed` is the lifecycle default and is never a disposition.
 
-The CLI's `verify-finding --disposition` flag uses the legacy
+The CLI's `finding verify --disposition` flag uses the legacy
 red-mode vocabulary (`confirmed | downgraded | false_positive |
 disputed`). The blue mapping is:
 
 - `verified` → `--disposition confirmed` + `--inline '{"details": {"disposition": "verified", ...}}'`
-- `false_positive` → `vigil assess kill-finding` (preferred — enforces
+- `false_positive` → `vigil assess finding verify --disposition false_positive` (preferred — enforces
   required fields)
 - `downgraded` → `--disposition downgraded` + `--new-severity <new>`
 - `escalated` → `--disposition disputed` + `--inline '{"details": {"disposition": "escalated", "voting_summary": "..."}}'`
@@ -524,7 +524,7 @@ narrative, not the CLI's storage field. Keep both in sync.
 `verified`:
 
 ```bash
-vigil assess verify-finding <slug> \
+vigil assess finding verify <slug> \
   --disposition confirmed \
   --reason "Five-check complete: Checks 1-4 PASS, Check 5 survives" \
   --evidence-ref <artifact-id-1>,<artifact-id-2>,<artifact-id-3> \
@@ -548,7 +548,7 @@ vigil assess verify-finding <slug> \
 `false_positive`:
 
 ```bash
-vigil assess kill-finding <slug> \
+vigil assess finding verify <slug> --disposition false_positive \
   --kill-reason "Mailbox rule add was the delegate's routine — Gmail delegate-list confirms" \
   --kill-check 5 \
   --reason "DA hypothesis confirmed: delegated mailbox owner" \
@@ -567,7 +567,7 @@ vigil assess kill-finding <slug> \
 `downgraded`:
 
 ```bash
-vigil assess verify-finding <slug> \
+vigil assess finding verify <slug> \
   --disposition downgraded \
   --new-severity medium \
   --reason "Check 4 DOWNGRADE: reproduction confirms sign-in anomaly but not exfil action" \
@@ -586,7 +586,7 @@ vigil assess verify-finding <slug> \
 `escalated`:
 
 ```bash
-vigil assess verify-finding <slug> \
+vigil assess finding verify <slug> \
   --disposition disputed \
   --reason "Check 5 ESCALATE: travel-approval ticket exists but covers different window" \
   --inline '{
@@ -692,8 +692,8 @@ The verifier's dispatch closes with the following steps in order. Skipping
 any step breaks resume-brief, the artifact chain of custody, or the
 handoff schema.
 
-1. **Record the disposition** via `verify-finding` (verified, downgraded,
-   escalated) or `kill-finding` (false_positive). The `--inline` payload
+1. **Record the disposition** via `finding verify` — `--disposition confirmed|downgraded|disputed`
+   (verified, downgraded, escalated) or `--disposition false_positive` (false_positive). The `--inline` payload
    carries the blue vocabulary in `details.disposition` even when the
    CLI's `--disposition` flag uses the legacy red vocabulary.
 2. **Register devil's-advocate research notes** if Check 5 produced
@@ -706,7 +706,7 @@ handoff schema.
    `severity` no longer aligns with `details.mitre_techniques` (e.g.,
    downgraded from `critical` to `medium` but the technique list still
    reads `T1486` ransomware), update the finding via
-   `update-finding --inline '{"details": {"mitre_techniques": [...],
+   `finding update --inline '{"details": {"mitre_techniques": [...],
    "severity_rationale": "..."}}'`.
 5. **Record the closing activity entry:**
 

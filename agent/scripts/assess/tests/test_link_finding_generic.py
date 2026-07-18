@@ -1,4 +1,4 @@
-"""CLI tests for the generalized `vigil assess link-finding` generic-link mode.
+"""CLI tests for the generalized `vigil assess finding link` generic-link mode.
 
 Covers the P1-C addition: a generic typed link (POST /findings/{slug}/links)
 via --link-kind / --target-kind / --target-id / --target-ref, in addition to
@@ -67,7 +67,7 @@ def test_generic_unblocked_by_posts_to_links(tmp_path, monkeypatch, capsys):
     _install(monkeypatch, tmp_path, fake)
     args = _parse(
         [
-            "link-finding", "VA-070",
+            "link", "VA-070",
             "--link-kind", "unblocked_by",
             "--target-kind", "finding",
             "--target-ref", "VA-071",
@@ -97,7 +97,7 @@ def test_generic_unblocks_blocked_technique_posts_to_links(tmp_path, monkeypatch
     _install(monkeypatch, tmp_path, fake)
     args = _parse(
         [
-            "link-finding", "VA-071",
+            "link", "VA-071",
             "--link-kind", "unblocks",
             "--target-kind", "blocked_technique",
             "--target-ref", "bfla:host:api-example-com",
@@ -121,7 +121,7 @@ def test_generic_link_by_target_id(tmp_path, monkeypatch, capsys):
     fake = _FakeClient()
     _install(monkeypatch, tmp_path, fake)
     args = _parse(
-        ["link-finding", "VA-070", "--link-kind", "related", "--target-kind", "chain", "--target-id", "12"],
+        ["link", "VA-070", "--link-kind", "related", "--target-kind", "chain", "--target-id", "12"],
         str(tmp_path),
     )
     link_finding.run(args)
@@ -137,7 +137,7 @@ def test_generic_link_defaults_kind_related_when_only_target_given(tmp_path, mon
     fake = _FakeClient()
     _install(monkeypatch, tmp_path, fake)
     args = _parse(
-        ["link-finding", "VA-070", "--target-kind", "finding", "--target-ref", "VA-071"],
+        ["link", "VA-070", "--target-kind", "finding", "--target-ref", "VA-071"],
         str(tmp_path),
     )
     link_finding.run(args)
@@ -148,7 +148,7 @@ def test_generic_link_defaults_kind_related_when_only_target_given(tmp_path, mon
 def test_generic_link_requires_target_id_or_ref(tmp_path, monkeypatch, capsys):
     fake = _FakeClient()
     _install(monkeypatch, tmp_path, fake)
-    args = _parse(["link-finding", "VA-070", "--link-kind", "unblocked_by", "--target-kind", "finding"], str(tmp_path))
+    args = _parse(["link", "VA-070", "--link-kind", "unblocked_by", "--target-kind", "finding"], str(tmp_path))
     with pytest.raises(SystemExit) as exc:
         link_finding.run(args)
     assert exc.value.code == 1
@@ -160,7 +160,7 @@ def test_generic_link_rejects_root_cause_kind(tmp_path, monkeypatch, capsys):
     fake = _FakeClient()
     _install(monkeypatch, tmp_path, fake)
     args = _parse(
-        ["link-finding", "VA-070", "--link-kind", "root_cause", "--target-kind", "finding", "--target-ref", "VA-071"],
+        ["link", "VA-070", "--link-kind", "root_cause", "--target-kind", "finding", "--target-ref", "VA-071"],
         str(tmp_path),
     )
     with pytest.raises(SystemExit) as exc:
@@ -174,7 +174,7 @@ def test_generic_link_conflicts_with_root_cause_mode(tmp_path, monkeypatch, caps
     fake = _FakeClient()
     _install(monkeypatch, tmp_path, fake)
     args = _parse(
-        ["link-finding", "VA-070", "--root-cause", "VA-001", "--target-kind", "finding", "--target-ref", "VA-071"],
+        ["link", "VA-070", "--root-cause", "VA-001", "--target-kind", "finding", "--target-ref", "VA-071"],
         str(tmp_path),
     )
     with pytest.raises(SystemExit) as exc:
@@ -188,7 +188,7 @@ def test_root_cause_mode_still_uses_put(tmp_path, monkeypatch, capsys):
     and never the generic /links route."""
     fake = _FakeClient()
     _install(monkeypatch, tmp_path, fake)
-    args = _parse(["link-finding", "VA-070", "--root-cause", "VA-001", "--effect", "eliminates_finding"], str(tmp_path))
+    args = _parse(["link", "VA-070", "--root-cause", "VA-001", "--effect", "eliminates_finding"], str(tmp_path))
     link_finding.run(args)
     capsys.readouterr()
     assert fake.posts == []

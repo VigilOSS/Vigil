@@ -371,6 +371,12 @@ def _mint_discovered_identity(
     material.setdefault(
         "notes", f"Minted from discovered credential {credential_key}"
     )
+    # A discovered secret is unreviewed: keep it opt-in. `make_active=False` alone
+    # is not enough because default resolution falls back to the first non-dead row
+    # when nothing is active — so mark it not-usable-for-requests too. It stays
+    # selectable by explicit `--identity` and becomes usable once the operator
+    # activates it (or a proxy capture of the same login upgrades it).
+    material.setdefault("use_for_requests", False)
     _credential_store.upsert_material(
         engagement_id, identity_name, material, make_active=False
     )

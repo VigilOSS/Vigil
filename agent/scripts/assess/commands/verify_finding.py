@@ -1,4 +1,4 @@
-"""vigil assess verify-finding — dedicated verifier flow for canonical findings."""
+"""vigil assess finding verify — dedicated verifier flow for canonical findings."""
 from __future__ import annotations
 
 import argparse
@@ -14,10 +14,10 @@ from assess.lib.json_inputs import parse_json_argument, parse_optional_inline_js
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
-        "verify-finding",
+        "verify",
         help="Verify a finding with a JSON payload file, inline JSON, or explicit flags",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=render_contract_epilog("verify-finding"),
+        epilog=render_contract_epilog("finding verify"),
     )
     p.add_argument(
         "finding_slug",
@@ -86,7 +86,7 @@ def run(args) -> None:
         if t in _KNOWN_DISPOSITIONS:
             print(
                 f"'{t}' looks like a disposition, not a finding slug.\n"
-                f"Use: vigil assess verify-finding {example_slug} --disposition {t} --reason \"...\"",
+                f"Use: vigil assess finding verify {example_slug} --disposition {t} --reason \"...\"",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -120,7 +120,7 @@ def run(args) -> None:
     else:
         if not args.disposition or not args.reason_text:
             print(
-                "verify-finding requires a payload file, --inline JSON, or both --disposition and --reason",
+                "finding verify requires a payload file, --inline JSON, or both --disposition and --reason",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -227,7 +227,7 @@ def run(args) -> None:
         for result in results:
             print(json.dumps(result, ensure_ascii=False))
         print(
-            f"[verify-finding] verified {len(results)} finding(s); {failed} failed.",
+            f"[finding verify] verified {len(results)} finding(s); {failed} failed.",
             file=sys.stderr,
         )
     if failed:

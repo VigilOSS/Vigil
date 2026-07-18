@@ -1,5 +1,5 @@
 ---
-description: Detecting a WAF/edge block before it burns the engagement — AWS-WAF+CloudFront signatures (403 + `server: CloudFront` + `x-cache: Error from cloudfront`, the example-rate-rule rate-based rule) vs a per-request WAF deny vs an estate-wide IP/rate block; the load-bearing rule that a WAF challenge is PENDING, never a clean negative (hunting.md rule 23d); aggregate request-rate budgeting across ALL concurrent dispatches sharing one egress IP; finding a WAF-clean routing path (worked example: `*.acme-portal.example/~api/...` vs bare `/people/v2/`); and a brief pointer to request-mutation bypass classes. Consolidates wafw00f.md detection + sqlmap.md's tamper-script map into one field reference instead of duplicating them.
+description: Detecting a WAF/edge block before it burns the engagement — AWS-WAF+CloudFront signatures (403 + `server: CloudFront` + `x-cache: Error from cloudfront`, the example-rate-rule rate-based rule) vs a per-request WAF deny vs an estate-wide IP/rate block; the load-bearing rule that a fingerprint/edge 403 is PENDING, never a clean negative (general hunting.md rule 23; the browser-re-render remedy is only for a true JS-challenge interstitial, rule 23d); aggregate request-rate budgeting across ALL concurrent dispatches sharing one egress IP; finding a WAF-clean routing path (worked example: `*.acme-portal.example/~api/...` vs bare `/people/v2/`); and a brief pointer to request-mutation bypass classes. Consolidates wafw00f.md detection + sqlmap.md's tamper-script map into one field reference instead of duplicating them.
 skill: web-recon
 ---
 
@@ -41,12 +41,24 @@ straight through), and Bot-Manager scanner-UA blocks:
 
 ## B. Safe-testing discipline (LOAD-BEARING)
 
-**A WAF challenge / CloudFront 403 block is PENDING, never a clean negative.** This is
-`agent/rules/hunting.md` rule 23(d): the response belongs to the edge, not the application
-behind it. It proves neither presence nor absence of a finding and decides nothing about the
-surface. Do not record a WAF-blocked lane as "clean," "ruled out," "patched," or
-"not-present" — re-render with `vigil assess kali browser <url>` (headless Chromium executes
-the challenge JS and returns the real origin response) before closing the lead.
+**A fingerprint-based edge 403 (the §A AWS-WAF + CloudFront signature) is PENDING, never a
+clean negative.** The response belongs to the edge, not the application behind it, so it proves
+neither presence nor absence of a finding and decides nothing about the surface. This is
+`agent/rules/hunting.md` rule 23 in its general form — a non-conclusive response is a LEAD, not
+a verdict. Do not record a WAF-blocked lane as "clean," "ruled out," "patched," or
+"not-present." **The remedy is NOT a browser re-render.** A signature/fingerprint block matches
+on the request bytes and returns the same `403` to headless Chromium — there is no challenge JS
+for the browser to execute, so `kali browser` changes nothing here. Get past a fingerprint block
+by re-encoding / pivoting the probe past the signature (§E) or by finding a WAF-clean sibling
+route (§D).
+
+*(Distinct case — do not conflate.)* A true **JS / bot-challenge interstitial** — Imperva
+`reese84` / *"Pardon Our Interruption,"* Akamai `_abck` / *"Access Denied,"* Cloudflare
+`cf-chl` / *"Just a moment"* — is the one place `agent/rules/hunting.md` rule 23(d) prescribes
+`vigil assess kali browser <url>`: there the bytes ARE a challenge page whose JS the headless
+browser executes to reach the real origin. The AWS-WAF + CloudFront deny in §A is a hard
+signature block, not a solvable challenge, so 23(d)'s browser-re-render remedy does not apply to
+it.
 
 **Back off on an estate-wide IP block instead of pushing through it.** Once the control
 request in §A also fails, every subsequent response from that egress is a **false-403
@@ -113,5 +125,7 @@ reproduce it.
   to classify a path as not-exposed vs edge-authz-denied vs origin-answered.
 - `agent/references/recon/rate-calibration.md` — per-target-trait rate table for nmap/dir-fuzz/
   nuclei/DNS; this file adds the aggregate-across-dispatches budget on top of it.
-- `agent/rules/hunting.md` rule 23(d) (WAF challenge is PENDING) and rule 23a (aggregate-rate
-  discipline / `kali job` vs orphaned `kali exec`).
+- `agent/rules/hunting.md` rule 23 (general — a non-conclusive/edge response is a LEAD, not a
+  verdict; the frame for a fingerprint 403 in §B), rule 23(d) (the JS/bot-challenge interstitial
+  special case where a browser re-render IS the fix), and rule 23a (aggregate-rate discipline /
+  `kali job` vs orphaned `kali exec`).

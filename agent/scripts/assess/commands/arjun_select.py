@@ -308,7 +308,7 @@ def run(args: argparse.Namespace) -> None:
             f"this {len(targets)}-target list (historic/Wayback rows may be dead .nsf/.do "
             "paths, 301 redirects, or PDFs). Arjun burns a full slow pass on each and "
             "finds nothing — a large junk list is the #1 cause of an arjun timeout that "
-            "reports a false 0. Prefer confirming liveness first (`vigil assess ingest-httpx` "
+            "reports a false 0. Prefer confirming liveness first (`vigil assess ingest httpx` "
             "then drop --include-unknown), and keep the list small enough to FINISH "
             "(`--max-per-host`, fewer targets).",
             file=sys.stderr,
@@ -320,7 +320,7 @@ def run(args: argparse.Namespace) -> None:
     if not targets and rows and not args.include_unknown:
         print(
             "arjun-select: 0 targets — work_items appear to have no live_status. "
-            "Run `vigil assess ingest-httpx` to populate liveness, or pass "
+            "Run `vigil assess ingest httpx` to populate liveness, or pass "
             "--include-unknown to include NULL/unknown rows.",
             file=sys.stderr,
         )

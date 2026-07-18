@@ -123,55 +123,56 @@ five-check protocol above establishes bug-**existence**; before recording `confi
 - **Author the result into the finding's `details`, not just assert it clears the bar:** the
   report-ready `evidence` (exact taint path + guard-failure proof), `impact` (the one-sentence
   attacker outcome), a justified `cvss_vector`/`cvss_score` recomputed against the C5 checks, and
-  `remediation`, via `vigil assess update-finding <slug> --inline '{"details": {...}}'` — so the
+  `remediation`, via `vigil assess finding update <slug> --inline '{"details": {...}}'` — so the
   report phase formats the story rather than re-authoring it.
 
-Do this before the closing verbs run — `verify-finding`/`kill-finding` persist the disposition,
-but the report-ready `details` must already be on the finding when they fire.
+Do this before the closing verbs run — `finding verify` (including a `false_positive` kill via
+`--disposition false_positive`) persists the disposition, but the report-ready `details` must
+already be on the finding when it fires.
 
 ## FP Persistence
 
 When a finding is killed, persist that decision durably through the finding verification
-lifecycle. Use `kill-finding` for direct false-positive decisions and `verify-finding` for
-confirm, downgrade, or dispute outcomes. The goal is suppression by identity: later
-rediscovery of the same `(defect_family, root_cause_key, canonical_location, auth_context)`
-should merge back into that false-positive record instead of reappearing as a live finding.
-If later evidence disproves a kill or verified verdict, reopen the finding with `reset-finding`
-so the backend clears the prior verification state and the finding returns to active triage.
+lifecycle. Use `finding verify --disposition false_positive` for direct false-positive decisions
+and `finding verify --disposition <confirmed|downgraded|disputed>` for confirm, downgrade, or
+dispute outcomes. The goal is suppression by identity: later rediscovery of the same
+`(defect_family, root_cause_key, canonical_location, auth_context)` should merge back into that
+false-positive record instead of reappearing as a live finding. If later evidence disproves a
+kill or verified verdict, reopen the finding with `finding update --status draft` so the backend
+clears the prior verification state and the finding returns to active triage.
 
 ## State Recording
 
 ```bash
 # Persist confirm/downgrade/dispute decisions through the verification endpoint
-vigil assess verify-finding <slug> --disposition <verdict> --reason "<rationale>"
+vigil assess finding verify <slug> --disposition <verdict> --reason "<rationale>"
 
-# Persist kills with the dedicated helper (enforces kill_reason + kill_check fields)
-vigil assess kill-finding <slug> --reason "<kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
+# Persist kills via the same verb (enforces kill_reason + kill_check fields for a false_positive disposition)
+vigil assess finding verify <slug> --disposition false_positive --reason "<kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
 
 # Batch form: dispositioning several false positives that share one root rationale
 # (same payload/flags applied to every slug, resilient loop with a per-slug failure tally)
-vigil assess kill-finding <slug1> <slug2> <slug3> --reason "<shared kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
+vigil assess finding verify <slug1> <slug2> <slug3> --disposition false_positive --reason "<shared kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
 
 # Reopen a previously verified or false-positive finding when retest disproves the prior verdict
-vigil assess reset-finding <slug> --reason "<why the prior verdict no longer holds>" --status draft
+vigil assess finding update <slug> --reason "<why the prior verdict no longer holds>" --status draft
 
 # Record attack chains
 vigil assess record-chain code-vuln-verifier <chain-json>
 
-# Only use record-finding when the verifier discovers a net-new spot-check bug
-vigil assess record-finding code-vuln-verifier <new-finding-json>
+# Only use finding record when the verifier discovers a net-new spot-check bug
+vigil assess finding record code-vuln-verifier <new-finding-json>
 ```
 
 ### Closing verbs
 
 Before your dispatch returns, run in this order:
 
-1. `vigil assess verify-finding <slug> --disposition <verdict> --reason "<rationale>"` for each confirm/downgrade/dispute decision
-2. `vigil assess kill-finding <slug> ...` for each kill decision
-3. `vigil assess record-chain code-vuln-verifier <chain-json>` for any composed chains
-4. `vigil assess record-finding code-vuln-verifier <new-finding-json>` for net-new spot-check bugs (rare)
-5. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (e.g. report-writer dispatch when verification gate complete), runtime issues, working artifacts, open questions, and role-specific extras (`reviewed`, `confirmed`, `downgraded`, `killed`)
-6. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+1. `vigil assess finding verify <slug> --disposition <verdict> --reason "<rationale>"` for each confirm/downgrade/dispute decision (use `--disposition false_positive` for a kill)
+2. `vigil assess record-chain code-vuln-verifier <chain-json>` for any composed chains
+3. `vigil assess finding record code-vuln-verifier <new-finding-json>` for net-new spot-check bugs (rare)
+4. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (e.g. report-writer dispatch when verification gate complete), runtime issues, working artifacts, open questions, and role-specific extras (`reviewed`, `confirmed`, `downgraded`, `killed`)
+5. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`.
 
@@ -184,14 +185,14 @@ Reason through the verification work in your response — describe the
 five-check protocol applied to each finding, the devil's-advocate counter-
 arguments you considered, why you reached confirm/downgrade/kill on each one,
 which findings need a multi-perspective vote. Backend writes via the
-Closing verbs above (verify-finding / kill-finding / record-chain payloads)
+Closing verbs above (`finding verify` / `record-chain` payloads)
 are what makes the state durable; the response is your reflection on top of
 that.
 
 Don't truncate reasoning to be brief — careful verifier reasoning is what
 keeps false-positives out of the report (see `agent/shared-specialist-core.md`
 "Reasoning quality > response brevity"). Per-finding disposition tables, five-check-protocol walkthroughs, and
-devil's-advocate rationale all live in the verify-finding / kill-finding
+devil's-advocate rationale all live in the `finding verify`
 payloads on the backend — so the response can stay focused on verification
 narrative rather than restating canonical state.
 
@@ -199,7 +200,7 @@ narrative rather than restating canonical state.
 
 Your primary role is to update existing findings (confirm, downgrade, kill) and create attack
 chains linking them. Only net-new spot-check findings should create fresh `VF` finding slugs;
-omit `slug` from those rare new finding payloads and let `vigil assess record-finding
+omit `slug` from those rare new finding payloads and let `vigil assess finding record
 code-vuln-verifier <new-finding-json>` allocate the canonical slug.
 
 ## Key Principles

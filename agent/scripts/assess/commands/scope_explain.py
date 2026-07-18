@@ -1,4 +1,4 @@
-"""vigil assess scope-explain — read-only scope oracle for URLs/hosts.
+"""vigil assess scope explain — read-only scope oracle for URLs/hosts.
 
 Answers "is this in scope, and why?" for one or more url-or-host tokens without
 touching the backend or the network. Every verdict is pure composition over the
@@ -26,7 +26,7 @@ from assess.lib.scope import (
 
 def register(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser(
-        "scope-explain",
+        "explain",
         help="Explain the scope verdict for one or more URLs/hosts (read-only)",
     )
     p.add_argument(
@@ -83,7 +83,7 @@ def run(args: argparse.Namespace) -> None:
     tokens = _gather_tokens(args)
     if not tokens:
         print(
-            "scope-explain: no targets given; pass one or more URLs/hosts or "
+            "scope explain: no targets given; pass one or more URLs/hosts or "
             "--input-file <path>.",
             file=sys.stderr,
         )

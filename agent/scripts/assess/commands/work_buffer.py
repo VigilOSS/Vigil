@@ -74,6 +74,13 @@ _ACTION_HELP: dict[str, str] = {
         "Link backend surfaces to the request variants behind selected "
         "work_items (by --cluster and/or --queue-key).\n"
     ),
+    "clusters": (
+        "Usage: vigil assess work-buffer clusters "
+        "[--limit N] [--status STATUS] [--host HOST]\n\n"
+        "Summarize work_items grouped by cluster_key (folded-in list-clusters), "
+        "ordered by max priority then count, with up to 5 representative URLs "
+        "per cluster.\n"
+    ),
 }
 
 
@@ -138,8 +145,31 @@ def register(subparsers) -> None:
     p.add_argument("--relation", default="", help="(link-surface) Free-text relation label, e.g. primary-endpoint.")
     p.add_argument("--link-evidence-ref", dest="link_evidence_ref", default="",
                    help="(link-surface) Evidence reference for the surface link.")
+    # clusters (folded-in list-clusters) flags.
+    p.add_argument("--status", dest="cluster_status", default="pending",
+                   help="(clusters) Work-item status filter (default: pending; 'skipped' audits deferred clusters).")
+    p.add_argument("--host", dest="cluster_host", default="",
+                   help="(clusters) Only clusters containing a work_item whose URL matches this host "
+                        "(exact, or leading-'*' fnmatch wildcard).")
     p.set_defaults(func=run)
 
 
 def run(args) -> None:
+    if args.action == "clusters":
+        # Folded-in list-clusters: delegate to the standalone renderer with a
+        # clusters-scoped namespace (its own --limit/--status/--host semantics).
+        from types import SimpleNamespace
+
+        from assess.commands import list_clusters
+
+        limit = getattr(args, "unit_limit", None)
+        list_clusters.run(
+            SimpleNamespace(
+                engagement_dir=getattr(args, "engagement_dir", None),
+                limit=limit if limit is not None else 100,
+                status=getattr(args, "cluster_status", "pending") or "pending",
+                host=getattr(args, "cluster_host", "") or "",
+            )
+        )
+        return
     dispatch.run(args)

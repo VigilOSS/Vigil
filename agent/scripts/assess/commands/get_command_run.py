@@ -1,4 +1,4 @@
-"""vigil assess get-command-run — fetch a single command-run record with full previews."""
+"""vigil assess command-run get — fetch a single command-run record with full previews."""
 from __future__ import annotations
 
 import json
@@ -10,11 +10,11 @@ from assess.lib.config import load_config
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
-        "get-command-run",
+        "get",
         help="Fetch a single `vigil assess kali` command-run record by id, including previews and artifact refs",
     )
-    p.add_argument("command_run_id", type=int, help="numeric id from list-command-runs")
-    p.add_argument("--json", dest="as_json", action="store_true", help="No-op: get-command-run always emits JSON.")
+    p.add_argument("command_run_id", type=int, help="numeric id from `vigil assess command-run list`")
+    p.add_argument("--json", dest="as_json", action="store_true", help="No-op: `command-run get` always emits JSON.")
     p.add_argument(
         "--live",
         action="store_true",

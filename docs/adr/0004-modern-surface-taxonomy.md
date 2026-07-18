@@ -3,7 +3,10 @@
 - **Status:** Accepted — implemented. Code: `agent/scripts/assess/lib/classify_buckets.py` (`_TYPE_FLOOR`, the 13 new/extended `_BUCKETS`, the regex-fragment mechanism, `normalize_path_for_cluster`, and the `_PATH_OBJECT_REF_SEGMENT` redesign) + `orchestrator/backend/lib/vuln_taxonomy.py` (`GF_BUCKET_TO_CLASS` additions). Shipped TDD in commit b3a9a6d7 (floor-key reconciliation follow-up in 12b143bb).
 - **Date:** 2026-06-15 (decided 2026-06-15; shipped same day).
 - **Deciders:** Project owner + Claude.
-- **Supersedes / relates to:** implements **Area C (C-1/C-2/C-4/C-5)** of `docs/plans/rd-prompt-recon-classify-2026-06-15.md`. The authoritative implementation contract is `docs/plans/research/classify-surface-2026-06/IMPLEMENTATION-SPEC.md`; the empirical basis is `docs/plans/research/classify-surface-2026-06/` (README + curated label artifacts). Relates to ADR 0001 (the "no silent drops" / harness-not-gate philosophy this extends to the classifier).
+- **Supersedes / relates to:** the authoritative implementation contract is
+  `docs/research/classify-surface-2026-06/IMPLEMENTATION-SPEC.md`; the empirical
+  basis is the adjacent README and curated label artifacts. Relates to ADR 0001
+  (the "no silent drops" philosophy this extends to the classifier).
 
 ---
 
@@ -73,9 +76,8 @@ A third corpus — **Zendesk** (a live modern SaaS, used qualitatively because i
 4. **Add a bare `/api/` path fragment to the `api` bucket** (the research §4b proposal). Rejected: a bare `/api/` fragment fires on `/api/users/avatar` and corrupts the regression-pinned reason chain. The generic params-less `/api/...` rescue is delivered by the `api_route` type-floor (the semantically correct home); `/api/v<n>/` is covered by the `api-versioning` regex.
 
 ## References
-- `docs/plans/research/classify-surface-2026-06/IMPLEMENTATION-SPEC.md` — the authoritative implementation CONTRACT (bucket declaration order, the `_TYPE_FLOOR` table, the `_PATH_OBJECT_REF_SEGMENT` redesign, `normalize_path_for_cluster`, the 11 soundness overrides, and the 93-row test matrix). Where the spec conflicts with the research findings, the spec wins.
-- `docs/plans/research/classify-surface-2026-06/README.md` — the empirical basis: four labeling sweeps, the three+one corpora, the curated label artifacts, and the §4b cross-corpus validation detail (Zendesk graphql/api counts and endpoint shapes).
+- `docs/research/classify-surface-2026-06/IMPLEMENTATION-SPEC.md` — the authoritative implementation CONTRACT (bucket declaration order, the `_TYPE_FLOOR` table, the `_PATH_OBJECT_REF_SEGMENT` redesign, `normalize_path_for_cluster`, the 11 soundness overrides, and the 93-row test matrix). Where the spec conflicts with the research findings, the spec wins.
+- `docs/research/classify-surface-2026-06/README.md` — the empirical basis: four labeling sweeps, the three+one corpora, the curated label artifacts, and the §4b cross-corpus validation detail (Zendesk graphql/api counts and endpoint shapes).
 - `agent/references/gf-patterns/DRIFT.md` — the per-bucket accept/skip drift rationale (type-floor mechanism, all 13 buckets, precision tightenings, regex mechanism, corpus grounding).
 - `agent/references/gf-patterns/*.md` — per-bucket reference docs (`graphql.md`, `api.md`, `auth.md`, `api-versioning.md`, `oauth-oidc.md`, `object-storage.md`, `deserialization.md`, `sso.md`, `webhook.md`, etc.), each carrying its corpus grounding and attack-class notes.
-- `docs/plans/rd-prompt-recon-classify-2026-06-15.md` — Area C (the plan this implements; C-1/C-2/C-4/C-5 shipped here, C-3 deferred, C-6 dropped).
 - ADR 0001 — the "no silent drops" / harness-not-gate philosophy this extends to URL triage.

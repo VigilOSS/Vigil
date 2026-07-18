@@ -5,7 +5,7 @@ Renders ONE finding into a submission-ready ``submission.md`` (+ a machine-reada
 for a bug-bounty platform (Bugcrowd / HackerOne) or a direct company disclosure.
 
 This is the submission-first replacement for the retired red/code ``report.md``
-path (docs/plans/submission-first-reporting-2026-07.md). Two modes:
+path. Two modes:
 
   * ``--draft`` (the normal report-writer entrypoint) always writes, inserting
     ``[NEEDS: <field>]`` markers wherever a proof-critical field is missing.
@@ -76,9 +76,9 @@ from pathlib import Path
 
 from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import load_config
-# ``_fence_for`` and ``header_lines`` are the same PoC-formatting primitives the
-# shared finding renderer uses (finding_render.py); reusing them keeps submission
-# PoC blocks byte-identical to export-findings rather than reimplementing. The
+# ``_fence_for`` is the same PoC-formatting primitive the shared finding renderer
+# uses (finding_render.py); reusing it keeps submission PoC blocks byte-identical
+# to export-findings rather than reimplementing. The
 # hygiene gate (``collect_internal_ids`` / ``hygiene_warnings`` / ``pasteable_body``)
 # and the structured-proof / path helpers (``poc_lines`` / ``engagement_relative``)
 # now live there too so ``export_reply`` shares one source of truth (aliased to the
@@ -89,7 +89,6 @@ from assess.lib.finding_render import (
     detail_value,
     details_object,
     engagement_relative as _engagement_relative,
-    header_lines,
     hygiene_warnings as _hygiene_warnings,
     poc_lines as _poc_lines,
     string_list,
@@ -103,7 +102,7 @@ _PLATFORM_LABEL = {"bugcrowd": "Bugcrowd", "hackerone": "HackerOne", "direct": "
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
-        "export-submission",
+        "submission",
         help=(
             "Render one finding into a platform-shaped, submission-ready "
             "submission.md (+ context JSON). --draft always writes with "
@@ -442,7 +441,7 @@ def _operator_details_block(
     if linked_runs:
         lines += [
             "**Linked command runs** (author Evidence from these; run "
-            "`vigil assess list-command-runs` to find more):",
+            "`vigil assess command-run list` to find more):",
             "",
         ]
         for row in linked_runs:

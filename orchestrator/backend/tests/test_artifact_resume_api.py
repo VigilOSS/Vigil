@@ -353,9 +353,9 @@ def test_resume_brief_returns_bounded_operating_picture(client, isolate_settings
     assert body["target_finding"]["slug"] == "VA-047"
     assert body["command_runs"][0]["stdout_preview"] == ""
     assert any(row["relative_path"] == "notes/VA-047-note.md" for row in body["artifacts"])
-    assert any("list-command-runs" in row["command"] for row in body["recommended_next_actions"])
+    assert any("command-run list" in row["command"] for row in body["recommended_next_actions"])
     assert any(
-        row["entity_kind"] == "command_run" and row["command"] == f"vigil assess get-command-run {command.json()['id']}"
+        row["entity_kind"] == "command_run" and row["command"] == f"vigil assess command-run get {command.json()['id']}"
         for row in body["recommended_next_actions"]
     )
     artifact_id = next(row["id"] for row in body["artifacts"] if row["relative_path"] == "notes/VA-047-note.md")
@@ -784,7 +784,7 @@ def test_report_readiness_validates_evidence_ref_when_artifact_id_is_present(cli
         for blocker in blockers
         if blocker["kind"] == "finding_evidence_artifact_mismatch" and blocker["slug"] == "VA-047"
     )
-    assert "vigil assess update-finding VA-047 --evidence-ref notes/replacement-evidence.md" in mismatch["detail"]
+    assert "vigil assess finding update VA-047 --evidence-ref notes/replacement-evidence.md" in mismatch["detail"]
 
 
 def test_mark_scratch_clears_unlinked_markdown_advisory(client, isolate_settings) -> None:

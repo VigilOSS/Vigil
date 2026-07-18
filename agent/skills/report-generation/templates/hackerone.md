@@ -6,7 +6,7 @@ category: Disclosure & Reporting Formats
 
 # HackerOne Submission Template
 
-HackerOne-specific scaffold for `vigil assess export-submission <slug> --platform hackerone`.
+HackerOne-specific scaffold for `vigil assess export submission <slug> --platform hackerone`.
 Shared rules (voice, section budgets, PII redaction, PoC authoring, de-harnessing, the
 pre-submission checklist, and the finding-is-source-of-truth flow — author each section, write it
 back to the finding, re-render) live in `agent/references/submission-format.md` — this
@@ -15,7 +15,7 @@ derives its severity bucket.
 
 ## Strict-gate fields
 
-Same gate as Bugcrowd (the strict-gate rule in `export-submission` is platform-agnostic), with
+Same gate as Bugcrowd (the strict-gate rule in `export submission` is platform-agnostic), with
 **Weakness (CWE)** in place of VRT:
 
 | Field | Populated from |
@@ -51,7 +51,7 @@ row above empty.
 
 ### Evidence
 [AUTHORED from the OPERATOR DETAILS section's structured proof + linked runs + a targeted
-`list-command-runs` search, third-party PII partial-masked only (self-owned/synthetic data shown
+`command-run list` search, third-party PII partial-masked only (self-owned/synthetic data shown
 in full — see submission-format.md "PII redaction"), truncated to the proof lines, annotated with
 <-- proof markers. Stored back on the finding as `details.evidence`; the raw output stays in `scans/`.]
 
@@ -79,7 +79,7 @@ the steps — this is the severity justification. See "Attack Scenario vs Impact
   that weakness and severity are decoupled — never carry a Bugcrowd P-rating into this field.
 - **PoC is an operator-side attachment, not a rendered body line.** If the proof is a script, stage
   it as `submissions/<slug>/poc.<ext>` and attach it in the HackerOne form — see
-  `submission-format.md` "PoC block". `export-submission` emits no PoC line into the body; a
+  `submission-format.md` "PoC block". `export submission` emits no PoC line into the body; a
   hand-inserted one is wiped on the next `--overwrite`.
 - Some HackerOne programs add an "Asset" field mapped to their published scope (e.g.,
   `api.example.com` vs `www.example.com`). Name the exact in-scope asset in Steps to Reproduce —

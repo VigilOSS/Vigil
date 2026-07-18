@@ -177,12 +177,9 @@ def _doc_files() -> list[Path]:
     - the top-level user docs (README, CODE-MAP, root maintainer AGENTS.md),
     - the editor-rule pointer (.cursor) and the eval harness README.
 
-    Deliberately EXCLUDED (these are historical / backlog / per-engagement
-    work product, not living operator docs, and name verbs that were renamed
-    or never shipped — e.g. TODOv2 references ``vigil assess code-audit`` and
-    ``vigil assess migrate-scope``, neither a registered assess verb):
+    Deliberately EXCLUDED (historical release notes and per-engagement work
+    product are not living operator docs and may name retired verbs):
       - CHANGELOG.md
-      - TODOv2.md
       - tools/analysis-state/**  (engagement analysis snapshots)
     """
     files: list[Path] = []
@@ -307,13 +304,13 @@ def test_registries_are_non_trivial(assess_registries, oob_registries):
     kali_job_verbs = assess_registries["kali_job"]
     oob_verbs = oob_registries["oob"]
     oob_client_verbs = oob_registries["oob_client"]
-    # Anchor on a few stable verbs that must always exist.
+    # Anchor on a few stable verbs that must always exist. `finding` is the
+    # Tier-3 subcommand group parent (record/verify/... are its actions).
     assert {
-        "record-finding",
+        "finding",
         "kali",
         "log",
         "transition-phase",
-        "eval-capture",
         "scaffold-probe",
     } <= assess_verbs
     assert {"nmap-scan", "exec", "httpx", "job"} <= kali_verbs
@@ -417,14 +414,12 @@ def test_documented_oob_verbs_exist(oob_registries, doc_files):
 # deliberate one-line decision (document it, or allowlist it) for every future
 # verb. Removing a verb from the CLI without removing its allowlist entry is
 # caught by ``test_known_undocumented_allowlist_has_no_stale_entries``.
-_KNOWN_UNDOCUMENTED_ASSESS = {
-    "approve-exploit",            # exploit-gate plumbing; operator uses review-exploits
-    "export-surfaces",            # surface export plumbing
-    "launch-session",             # session bootstrap called by the orchestrator
-    "record-proposal",            # exploit-proposal plumbing
-    "supersede-intel",            # intel-lifecycle knob (named in prose, never invoked)
-    "validate-dispatch-contract",  # dispatch contract self-check
-}
+# Tier-3 cosmetic namespacing folded the former top-level `export-surfaces` and
+# `supersede-intel` verbs under subcommand-group parents (`export surfaces`,
+# `intel supersede`), so they are no longer top-level assess verbs and no longer
+# belong on this top-level allowlist. The subverb doc debt is carried by the
+# pending prompt sweep and surfaced by the docs<->CLI parity assertions.
+_KNOWN_UNDOCUMENTED_ASSESS: set[str] = set()
 _KNOWN_UNDOCUMENTED_OOB = {
     "restart",  # stop+start convenience; ops doc start/stop/status/test/mint/poll
     "stop",     # lifecycle verb; the docs lean on `vigil oob start`/`status`
@@ -568,7 +563,9 @@ def test_known_undocumented_allowlist_has_no_stale_entries(assess_registries, oo
 #                           (advanced provenance knobs, undocumented by design).
 #   scaffold-probe       — omits --purpose/--no-register (advanced).
 _EXPECTED_FLAGS = {
-    "verify-finding": {
+    # Tier-3: `verify-finding` is now the `verify` action under the `finding`
+    # subcommand group; the flag set is unchanged (pure re-parent).
+    "finding verify": {
         "--disposition",
         "--reason",
         "--narrative",
@@ -576,20 +573,6 @@ _EXPECTED_FLAGS = {
         "--new-severity",
         "--kill-check",
         "--inline",
-    },
-    "eval-capture": {
-        "--definition",
-        "--check",
-        "--strict",
-        "--severity",
-        "--out",
-        # The docs (tests/eval/README.md) document the list-findings filter as
-        # `--workflow-status` (the canonical long form); `--status` is only a
-        # registered *alias*. Curate the documented form so the verb-scoped
-        # docs check tracks the prose, not the alias. (The whole-corpus search
-        # this replaced passed `--status` vacuously — it matches `vigil oob
-        # status`, `list-findings --status`, etc. on unrelated verbs.)
-        "--workflow-status",
     },
     "scaffold-probe": {
         "--finding",
@@ -613,8 +596,15 @@ def test_expected_flags_are_registered(assess_registries):
     top = assess_registries["_top_parsers"]
     missing: list[str] = []
     for verb, flags in _EXPECTED_FLAGS.items():
-        assert verb in top, f"expected verb `{verb}` not registered"
-        registered = _long_flags(top[verb])
+        # A verb may be a Tier-3 two-token group action (e.g. `finding verify`);
+        # walk the parent subparser chain to reach the leaf action parser.
+        parts = verb.split()
+        parser = top.get(parts[0])
+        assert parser is not None, f"expected verb `{verb}` not registered"
+        for token in parts[1:]:
+            parser = _subparser_choices(parser).get(token)
+            assert parser is not None, f"expected verb `{verb}` not registered"
+        registered = _long_flags(parser)
         for flag in sorted(flags):
             if flag not in registered:
                 missing.append(f"vigil assess {verb} {flag}")

@@ -38,7 +38,7 @@ disposition, and any notes you tagged `coverage` / `read-first`). Use the
 drill-down commands it prints for exact evidence:
 
 ```bash
-vigil assess get-command-run <id>
+vigil assess command-run get <id>
 vigil assess artifact search <query>
 vigil assess artifact get <id>
 vigil assess agent render-handoff <agent-id>
@@ -46,7 +46,7 @@ vigil assess check-phase-readiness --phase report   # advisory (red engagements)
 ```
 
 Use command history as a coverage map, not as a reuse gate. If you cite a prior run
-instead of re-running, fetch it with `vigil assess get-command-run <id>` first because
+instead of re-running, fetch it with `vigil assess command-run get <id>` first because
 a successful return code does not prove the preview answers the current question.
 
 Treat unlinked markdown notes as scratch, not engagement memory. State that must
@@ -55,7 +55,7 @@ finding, chain, dispatch/agent, surface, request variant, or command run.
 
 ### Keep resume bounded
 
-- Drill down by id (`get-command-run`, `artifact get`, `fetch findings/<slug>`) — the brief already names the surfaces and command runs you need. The brief carries only the **aggregate** Surfaces (status×type + top uncovered) and Work Buffer (pending counts by gf-bucket) rollups; the per-item `coverage-items`, `request-variants`, and full `work-buffer` dumps stay out of the resume picture as operational detail — reach for them only after the rollup flags a bucket worth opening.
+- Drill down by id (`command-run get`, `artifact get`, `fetch findings/<slug>`) — the brief already names the surfaces and command runs you need. The brief carries only the **aggregate** Surfaces (status×type + top uncovered) and Work Buffer (pending counts by gf-bucket) rollups; the per-item `coverage-items`, `request-variants`, and full `work-buffer` dumps stay out of the resume picture as operational detail — reach for them only after the rollup flags a bucket worth opening.
 - Treat `artifact search` as the engagement memory index — `.md` files under the engagement directory that are not in the index are scratch.
 - Use `vigil assess agent render-handoff <agent-id>` for prior dispatch context — it stays bounded where raw transcripts grow linearly.
 - Read command history before re-running probes — the history is canonical, and rerunning is warranted only when the variant differs.

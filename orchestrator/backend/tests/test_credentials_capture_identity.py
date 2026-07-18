@@ -102,6 +102,29 @@ def test_derive_jwt_sub_coalesces_across_token_refresh():
     assert a is not None and a == b and a != c
 
 
+def test_derive_jwt_same_sub_different_issuer_stays_distinct():
+    # Same `sub` minted by two DIFFERENT issuers (multi-tenant / multi-app) is NOT
+    # the same principal: coalescing would share one identity row and let the
+    # globally-stored Authorization header from issuer B replay against issuer A.
+    a = creds.derive_capture_identity(
+        {}, {"Authorization": f"Bearer {_jwt({'sub': 'user-1', 'iss': 'https://a.idp'})}"}, {}
+    )
+    b = creds.derive_capture_identity(
+        {}, {"Authorization": f"Bearer {_jwt({'sub': 'user-1', 'iss': 'https://b.idp'})}"}, {}
+    )
+    assert a is not None and b is not None and a != b
+
+
+def test_derive_jwt_same_sub_same_issuer_coalesces_across_refresh():
+    # A real token refresh keeps the SAME issuer, so the identity still coalesces
+    # (the issuer fold must never split a legitimate refresh of one login).
+    t1 = _jwt({"sub": "user-1", "iss": "https://a.idp", "iat": 1})
+    t2 = _jwt({"sub": "user-1", "iss": "https://a.idp", "iat": 999})
+    a = creds.derive_capture_identity({}, {"Authorization": f"Bearer {t1}"}, {})
+    b = creds.derive_capture_identity({}, {"Authorization": f"Bearer {t2}"}, {})
+    assert a is not None and a == b
+
+
 def test_derive_bearer_from_tokens_bag():
     got = creds.derive_capture_identity(
         {}, {}, {"access_token": _jwt({"sub": "tok-user"})}

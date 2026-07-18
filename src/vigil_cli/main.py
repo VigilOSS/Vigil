@@ -405,12 +405,6 @@ def main(argv: list[str] | None = None) -> None:
     path_p = engagement_sub.add_parser("path")
     path_p.add_argument("key", nargs="?")
     path_p.add_argument("--select", action="store_true")
-    eng_use_p = engagement_sub.add_parser(
-        "use", help="Alias for `vigil use`: set the active-engagement pointer."
-    )
-    eng_use_p.add_argument("key", nargs="?")
-    eng_use_p.add_argument("--select", action="store_true")
-    eng_use_p.add_argument("--clear", action="store_true")
     engagement_sub.add_parser(
         "current",
         help="Print the resolved active engagement and which tier won (flag/cwd/pointer/env).",
@@ -439,7 +433,7 @@ def main(argv: list[str] | None = None) -> None:
             "tar.gz; --format markdown-tree writes a diffable per-finding tree "
             "(one dir per finding: draft.md / debate.md / report.md) sourced "
             "from the backend. For a single consolidated findings.md report doc "
-            "instead, use `vigil assess export-findings`."
+            "instead, use `vigil assess export findings`."
         ),
     )
     export_p.add_argument("key", nargs="?")
@@ -451,7 +445,7 @@ def main(argv: list[str] | None = None) -> None:
         default="tar.gz",
         help=(
             "Export format (default: tar.gz archive). markdown-tree = diffable "
-            "per-finding tree (vs `vigil assess export-findings` = single "
+            "per-finding tree (vs `vigil assess export findings` = single "
             "findings.md report doc)."
         ),
     )
@@ -460,24 +454,6 @@ def main(argv: list[str] | None = None) -> None:
     export_pdf_p.add_argument("key", nargs="?")
     export_pdf_p.add_argument("--select", action="store_true")
     export_pdf_p.add_argument("--output", help="Output PDF path (default: <engagement>/report.pdf)")
-    migrate_p = engagement_sub.add_parser(
-        "migrate-scope",
-        help=(
-            "One-shot migration: set code_phase=ingest on legacy "
-            "engagement_type=both engagements created before dual-track "
-            "phase tracking landed. Idempotent."
-        ),
-    )
-    migrate_p.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Report what would change without writing scope.json.",
-    )
-    migrate_p.add_argument(
-        "--json",
-        action="store_true",
-        help="Emit migrated entries as JSON.",
-    )
 
     blue_module.register_blue_parser(sub)
     bench_module.register_bench_parser(sub)
@@ -557,8 +533,6 @@ def main(argv: list[str] | None = None) -> None:
     mitm_routes = mitm_sub.add_parser("routes", help="Print the proxy's loaded engagement→scope mapping.")
     mitm_routes.add_argument("--json", action="store_true")
 
-    # `vigil mcp` retired in the typed-CLI cutover. Keep the parser so calls fail with a clear message
-    # instead of argparse's generic "unknown command" error; downstream handler prints the deprecation note.
     email_p = sub.add_parser(
         "email",
         help="Read recent messages from a local Mail.app mailbox (e.g. fetch a verification code)",
@@ -619,9 +593,6 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="emit results as JSON for programmatic parsing",
     )
-
-    mcp_p = sub.add_parser("mcp", help="(removed) Kali MCP support retired; use `vigil assess kali ...`")
-    mcp_p.add_argument("mcp_args", nargs=argparse.REMAINDER)
 
     auth_p = sub.add_parser("auth")
     auth_sub = auth_p.add_subparsers(dest="auth_command", required=True)
@@ -1070,8 +1041,6 @@ def main(argv: list[str] | None = None) -> None:
         _mitmproxy(args, install_root)
     elif args.command == "email":
         _email(args)
-    elif args.command == "mcp":
-        _mcp(args)
     elif args.command == "auth":
         _auth(args, install_root)
     elif args.command == "backup":
@@ -1271,8 +1240,6 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         print(f"[vigil] {args.key} out_of_scope: {json.dumps(entries)}", file=sys.stderr)
     elif command == "path":
         print(_resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select))
-    elif command == "use":
-        _use(args, install_root)
     elif command == "current":
         _engagement_current(install_root)
     elif command == "cd-init":
@@ -1318,22 +1285,6 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
         pdf_output = Path(args.output).expanduser() if args.output else None
         print(export_pdf(path, pdf_output))
-    elif command == "migrate-scope":
-        from .engagements import migrate_legacy_both_engagements
-
-        migrated = migrate_legacy_both_engagements(install_root, dry_run=args.dry_run)
-        if args.json:
-            print(json.dumps(migrated, indent=2))
-        else:
-            prefix = "[dry-run] would migrate" if args.dry_run else "migrated"
-            if not migrated:
-                print(
-                    "No legacy `engagement_type=both` engagements need migration."
-                    + ("" if not args.dry_run else " (dry-run)")
-                )
-            else:
-                for entry in migrated:
-                    print(f"[vigil] {prefix}: {entry['key']} code_phase -> {entry['to']}")
 
 
 def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
@@ -1871,20 +1822,6 @@ def _email(args: argparse.Namespace) -> None:
         if do_extract:
             line += f"\t{extracted if extracted is not None else '-'}"
         print(line)
-
-
-def _mcp(args: argparse.Namespace) -> None:
-    """Stub: Kali MCP support was removed in the typed-CLI cutover."""
-    print(
-        "vigil mcp install/status/uninstall/remove/repair were removed in the typed-CLI cutover.",
-        file=sys.stderr,
-    )
-    print(
-        "Use `vigil assess kali ...` for target-facing tool execution and `vigil runtime status` "
-        "or `vigil runtime resources` for runtime visibility.",
-        file=sys.stderr,
-    )
-    raise SystemExit(2)
 
 
 def _auth(args: argparse.Namespace, install_root: Path) -> None:

@@ -6,7 +6,7 @@ category: Disclosure & Reporting Formats
 
 # Bugcrowd Submission Template
 
-Bugcrowd-specific scaffold for `vigil assess export-submission <slug> --platform bugcrowd`.
+Bugcrowd-specific scaffold for `vigil assess export submission <slug> --platform bugcrowd`.
 Every shared rule — voice, section budgets, PII redaction, PoC authoring, de-harnessing, the
 pre-submission checklist, and the finding-is-source-of-truth flow (author each section, write it
 back to the finding, re-render) — lives in `agent/references/submission-format.md`. This
@@ -15,7 +15,7 @@ to the CVSS vector.
 
 ## Strict-gate fields
 
-`export-submission bugcrowd` (final, non-`--draft`) refuses to write unless every row below is
+`export submission bugcrowd` (final, non-`--draft`) refuses to write unless every row below is
 populated. `--draft` writes the same scaffold with `[NEEDS: ...]` markers for whatever is missing —
 that's the normal report-writer entrypoint.
 
@@ -49,7 +49,7 @@ that's the normal report-writer entrypoint.
 
 ### Evidence
 [AUTHORED from the OPERATOR DETAILS section's structured proof + linked runs + a targeted
-`list-command-runs` search, third-party PII partial-masked only (self-owned/synthetic data shown
+`command-run list` search, third-party PII partial-masked only (self-owned/synthetic data shown
 in full — see submission-format.md "PII redaction"), truncated to the proof lines, annotated with
 <-- proof markers. Stored back on the finding as `details.evidence`; the raw output stays in `scans/`.]
 
@@ -81,7 +81,7 @@ the steps — this is the severity justification. See "Attack Scenario vs Impact
   VRT default, not by inflating the vector.
 - **PoC is an operator-side attachment, not a rendered body line.** If the proof is a script, stage
   it as `submissions/<slug>/poc.<ext>` and attach it in the Bugcrowd form — see
-  `submission-format.md` "PoC block". `export-submission` emits no PoC line into the body; a
+  `submission-format.md` "PoC block". `export submission` emits no PoC line into the body; a
   hand-inserted one is wiped on the next `--overwrite`.
 - Bugcrowd programs frequently require a deconfliction line (researcher ID / source IP / UTC
   window) for active-testing categories. If the brief asks for one, add it after Remediation — 3

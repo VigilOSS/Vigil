@@ -95,6 +95,12 @@ Bucket content falls into one of four classes; the dispatch shape changes with e
 
 The classification comes from the actual sample, not the bucket name. A bucket called `internal-prod-secrets` may turn out to hold only product imagery; a bucket called `marketing-assets` may turn out to hold an archived source tarball.
 
+When the credentials/secrets sample is an AWS access key, session token, or role-assumable ARN,
+`exploit-developer` loads `agent/skills/aws-iam-privesc/SKILL.md` before testing the key live —
+that skill's methodology (the 14-vector privesc matrix, cross-account role assumption, IMDS
+exploitation) is what turns "the key authenticates" into a proved blast radius, rather than a
+single `get-caller-identity` call.
+
 ### Step 4 — Swarm dispatch for large source corpora
 
 When Step 3 lands the corpus in the "Source code / repos" class and the listing shows 100+ source files, **do not** dispatch one `code-vuln-hunter` at full reasoning over the whole corpus — that runs out of context. Use the swarm helper:
@@ -150,11 +156,11 @@ CRITICAL requires exploit-developer proving the keys work against the live provi
 
 ## What to Record
 
-- `record-intel note` with the bucket name, region, listing-URL, consumer mapping from Step 2, and a one-line content classification from Step 3.
-- `record-finding info-disclosure-testing` for LOW–MEDIUM disclosures (public logs, schemas, internal docs).
-- `record-finding code-vuln-hunter` for HIGH source-disclosure (the swarm workers record these per-batch).
-- `record-finding exploit-developer` for CRITICAL credential exposures **after** target-proven replay.
-- `record-intel cve` if the exposed source matches a known vulnerable version.
+- `intel record note` with the bucket name, region, listing-URL, consumer mapping from Step 2, and a one-line content classification from Step 3.
+- `finding record info-disclosure-testing` for LOW–MEDIUM disclosures (public logs, schemas, internal docs).
+- `finding record code-vuln-hunter` for HIGH source-disclosure (the swarm workers record these per-batch).
+- `finding record exploit-developer` for CRITICAL credential exposures **after** target-proven replay.
+- `intel record cve` if the exposed source matches a known vulnerable version.
 
 Cleanup obligation: any object downloaded to the runtime container or the host should land in `/engagements/$ENGAGEMENT_KEY/scans/cloud-exposure/<bucket>/` so the engagement directory captures the evidence with the audit row. Do not delete the listing after recording — it is the durable proof of exposure shape at the time of the finding.
 

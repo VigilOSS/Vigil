@@ -1,5 +1,5 @@
 ---
-description: "Reply voice + budgets for export-reply/record-reply — answering a program/company on an already-submitted finding. Not a mini-submission."
+description: "Reply voice + budgets for export reply/record-reply — answering a program/company on an already-submitted finding. Not a mini-submission."
 skill: report-generation
 category: Disclosure & Reporting Formats
 ---
@@ -8,15 +8,15 @@ category: Disclosure & Reporting Formats
 
 Use this when the operator replies to a program or company on an already-submitted finding — a
 Bugcrowd comment, a HackerOne activity reply, or a direct vendor follow-up — via `vigil assess
-export-reply` / `record-reply`. A reply answers one question with the new proof and stops; it is not
+export reply` / `record-reply`. A reply answers one question with the new proof and stops; it is not
 a resubmission.
 
 ## When to use
 
 Typically triggered by `submission_status=needs_info` (the triager asked a question), but also used
 to push new proof to any already-open submission. See "Reply mode" in `agent/agents/report-writer.md`
-for the full CLI flow (`export-reply --draft` scaffold → author → `record-reply` write-back →
-`export-reply --overwrite` re-render → send → `record-reply --sent`).
+for the full CLI flow (`export reply --draft` scaffold → author → `record-reply` write-back →
+`export reply --overwrite` re-render → send → `record-reply --sent`).
 
 ## A reply is not a mini-submission
 

@@ -1,4 +1,4 @@
-"""vigil assess code-classify — bulk-classify code files by tier and role."""
+"""vigil assess code-record classify — bulk-classify code files by tier and role."""
 from __future__ import annotations
 
 from fnmatch import fnmatch
@@ -33,7 +33,7 @@ _VALID_SLOT_TYPES = frozenset(
 
 
 def register(subparsers) -> None:
-    p = subparsers.add_parser("code-classify", help="Bulk-classify code files for analysis prioritization")
+    p = subparsers.add_parser("classify", help="Bulk-classify code files for analysis prioritization")
     p.add_argument("classifications_json", help="Path to JSON file with array of classification objects")
     p.set_defaults(func=run)
 

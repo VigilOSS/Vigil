@@ -41,7 +41,7 @@ Each iteration:
     # re-apply the new weights to already-ingested rows.
 
     # Review clusters and defer low-signal ones before dispatch:
-    vigil assess list-clusters
+    vigil assess work-buffer clusters
     vigil assess work-buffer defer-cluster <cluster_key> --reason "..."
 
     # Fetch across types by priority. `fetch-by-priority` is route-aware: it
@@ -58,8 +58,8 @@ Each iteration:
 
 4. On subagent return:
    - Done: vigil assess work-buffer done "id1,id2,..."
-   - New endpoints: feed them back through `vigil assess ingest-endpoints <source>` or `vigil assess ingest-spec <spec-file>` — those paths run inline classification so the new rows enter the priority queue with scores immediately
-   - Findings: write structured finding state with `vigil assess record-finding`
+   - New endpoints: feed them back through `vigil assess ingest endpoints <source>` or `vigil assess ingest spec <spec-file>` — those paths run inline classification so the new rows enter the priority queue with scores immediately
+   - Findings: write structured finding state with `vigil assess finding record`
    - Errors: vigil assess work-buffer error "id1,id2,..."
 5. pending=0 and producers stopped → report completion
 6. Otherwise → loop back to step 1
@@ -194,7 +194,7 @@ Selection is by `--cluster` (the work buffer's `cluster_key`) or `--queue-key`; 
 
 - Use `vigil assess work-buffer <action>` for all work-buffer operations — calling the backend API directly bypasses the classification/priority logic these verbs apply and can produce stale or inconsistent state
 - Treat this skill as host-side coordination only. All real target testing stays in `vigil assess kali ...`.
-- Record findings in backend state immediately via `vigil assess record-finding`
+- Record findings in backend state immediately via `vigil assess finding record`
 - Re-ingest new endpoints through backend-first producers; let the work buffer mirror the resulting canonical ids
 - Use reset-stale at start of each iteration
 - **Loop until pending=0 for all consumable types** — stopping early leaves tested surfaces unrecorded and forces a re-dispatch to pick up the tail

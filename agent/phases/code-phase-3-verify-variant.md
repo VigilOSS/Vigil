@@ -112,7 +112,7 @@ contradicts a Phase 2 finding (e.g., discovers a guard the original hunter misse
 #### Handling spot-check findings
 
 If the verifier's clean-file spot-check discovers a missed vulnerability:
-1. Record the finding via `vigil assess record-finding code-vuln-verifier <finding-json>`
+1. Record the finding via `vigil assess finding record code-vuln-verifier <finding-json>`
 2. Dispatch the file back to Phase 2B with a CWE directive targeting the missed class
 3. After re-analysis completes, re-check the effort matrix for the affected file
 
@@ -120,26 +120,26 @@ If the verifier's clean-file spot-check discovers a missed vulnerability:
 
 ```bash
 # Record verification results (updates existing findings)
-vigil assess verify-finding <slug> --disposition <verdict> --reason "<rationale>"
-# Or use the dedicated false-positive helper when you already have the kill rationale
-vigil assess kill-finding <slug> --reason "<kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
+vigil assess finding verify <slug> --disposition <verdict> --reason "<rationale>"
+# Or pass the dedicated false-positive disposition when you already have the kill rationale
+vigil assess finding verify <slug> --disposition false_positive --reason "<kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
 # Batch-kill several FPs that share one root rationale (same payload/flags applied to every slug)
-vigil assess kill-finding <slug1> <slug2> <slug3> --reason "<shared kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
+vigil assess finding verify <slug1> <slug2> <slug3> --disposition false_positive --reason "<shared kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
 # Reopen a previously verified or false-positive finding when new evidence requires re-triage
-vigil assess reset-finding <slug> --reason "<why the prior verdict no longer holds>" --status draft
+vigil assess finding update <slug> --reason "<why the prior verdict no longer holds>" --status draft
 # Record variant findings (new findings)
-vigil assess record-finding code-variant-hunter <variant-finding-json>
+vigil assess finding record code-variant-hunter <variant-finding-json>
 ```
 
 **D4 killed-finding re-mint guard:** Agent A (killing FPs) and Agent B (minting variants) run in
-parallel on overlapping files, so Agent B may `record-finding` a candidate at a file the verifier
+parallel on overlapping files, so Agent B may `finding record` a candidate at a file the verifier
 just killed. The backend's D4 guard refuses a net-new record that shares `defect_family` (technique)
 and a normalized endpoint/canonical-location signal with a finding already killed as
 `false_positive` — this is expected here, not a bug. On a 409: re-check the kill first (was it
 rigorous, on the same code path as the new candidate?). If the kill was right and this is a
 genuinely distinct bug at that file:line (different variable, different guard failure, different
-sink), re-record with `--allow-remint` (alias `--force`). If the kill was wrong, `reset-finding
-<slug>` on the killed finding instead of forcing the re-mint.
+sink), re-record with `--allow-remint` (alias `--force`). If the kill was wrong, `finding update
+--status draft <slug>` on the killed finding instead of forcing the re-mint.
 
 **Pre-report deduplication:**
 Before dispatching report-writer, check for duplicates across hunter and variant-hunter prefixes.
@@ -149,14 +149,14 @@ reported at different points on a single taint path. Keep them distinct when the
 vulnerability classes, involve different variables, or are independent bugs that merely sit near
 each other. Merge the weaker into the stronger:
 ```bash
-vigil assess merge-finding <source-slug> <target-slug> "<reason>"
+vigil assess finding merge <source-slug> <target-slug> "<reason>"
 ```
 
 **Pre-report deduplication (cross-phase):**
 Before dispatching report-writer, also check for duplicate findings between Phase 3 and Phase 4
 (fuzz findings that confirm static findings):
 ```bash
-vigil assess merge-finding <source-slug> <target-slug> "<reason>"
+vigil assess finding merge <source-slug> <target-slug> "<reason>"
 ```
 
 **Phase 3 exit:**

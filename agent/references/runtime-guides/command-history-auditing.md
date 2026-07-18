@@ -1,5 +1,5 @@
 ---
-description: How to read vigil assess list-command-runs as a coverage map — use it to pick variants that haven't been probed, not to gate-keep reruns; includes field-interpretation guide for retention/suppression
+description: How to read vigil assess command-run list as a coverage map — use it to pick variants that haven't been probed, not to gate-keep reruns; includes field-interpretation guide for retention/suppression
 ---
 
 # Command History — Coverage Check Before Probing
@@ -23,7 +23,7 @@ something that hasn't.
    usually the most valuable coverage signal:
 
    ```bash
-   vigil assess list-command-runs --q <keyword> --show-matches
+   vigil assess command-run list --q <keyword> --show-matches
    ```
 
    Narrow with `--agent-name` or `--phase` only if the broad result is
@@ -43,7 +43,7 @@ something that hasn't.
 
 4. **When a prior run is genuinely on-point for your current question,
    cite its id** in your output (e.g. "reused command-run #142"). Before
-   citing, open the preview with `vigil assess get-command-run <id>` — `success=true`
+   citing, open the preview with `vigil assess command-run get <id>` — `success=true`
    only means `return_code=0`, not that the output answers your question.
    Soft-failure pages, WAF intercepts, and rate-limited stubs all exit
    cleanly.
@@ -52,31 +52,31 @@ something that hasn't.
 
 ```bash
 # Broad search for prior work on an objective
-vigil assess list-command-runs --q "nmap 10.0.0.1" --show-matches
+vigil assess command-run list --q "nmap 10.0.0.1" --show-matches
 
 # Scoped to a specific agent and phase
-vigil assess list-command-runs \
+vigil assess command-run list \
     --agent-name recon-specialist --phase recon
 
 # Only successful runs with a specific typed verb
-vigil assess list-command-runs --tool-name nmap_scan --success
+vigil assess command-run list --tool-name nmap_scan --success
 
 # Filter by the underlying binary, even when it ran inside the generic
 # execute_command wrapper. The backend derives tool_bin from the command
 # string (peeling off timeout/sudo/env/sh -c wrappers), so --tool-bin catches
 # generic-wrapper rows that --tool-name would miss.
-vigil assess list-command-runs --q nuclei --tool-bin nuclei --show-matches
-vigil assess list-command-runs --tool-bin sqlmap
-vigil assess list-command-runs --tool-bin httpx --success
+vigil assess command-run list --q nuclei --tool-bin nuclei --show-matches
+vigil assess command-run list --tool-bin sqlmap
+vigil assess command-run list --tool-bin httpx --success
 
 # Table rendering shows `tool_bin(tool_name)` whenever the two differ — e.g.
 # `nuclei(command)` means nuclei was invoked through the execute_command wrapper.
 
 # Runs that timed out (prior coverage likely incomplete)
-vigil assess list-command-runs --timed-out
+vigil assess command-run list --timed-out
 
 # Fetch one run with previews and artifact refs
-vigil assess get-command-run 142
+vigil assess command-run get 142
 ```
 
 ## Coverage-vs-duplicate decision table
@@ -93,7 +93,7 @@ vigil assess get-command-run 142
 
 ## Data Volume — Default to the Lightweight Listing
 
-`list-command-runs` returns **lightweight rows by default** so a sub-agent
+`command-run list` returns **lightweight rows by default** so a sub-agent
 can scan 50 prior runs without flooding its context. Each row carries
 metadata, hashes, retention status, suppression reasons, artifact refs,
 and `stdout_preview_chars` / `stderr_preview_chars` (the preview length
@@ -103,12 +103,12 @@ thumb: ~1 KiB per row in JSON, ~80 bytes per row in the CLI table.
 When you've identified the one run worth inspecting, drill in:
 
 ```bash
-vigil assess get-command-run <id>
+vigil assess command-run get <id>
 ```
 
 That returns the full preview (up to 64 KiB) and any artifact refs.
 
-`list-command-runs --include-output` and the equivalent
+`command-run list --include-output` and the equivalent
 `?include_output=true` query param force previews into the listing — only
 use this when you genuinely need bulk preview text (e.g. an operator
 diff'ing two scans). A single run with retained 64 KiB output is ~16,000
@@ -118,7 +118,7 @@ introspection.
 ## Interpreting Key Fields
 
 - `output_retention_status`: `retained` (preview + full bytes in DB), `artifact` (preview in DB, full bytes in artifact file — fetch via `stdout_artifact_ref`/`stderr_artifact_ref`), `suppressed` (preview dropped by retention policy; `stdout_sha256` still uniquely identifies the output), `empty` (tool produced no output on that stream).
-- `stdout_preview_chars` / `stderr_preview_chars`: the size of the preview the backend holds for this run. Lightweight listings omit the text but expose this so a caller can decide whether `get-command-run` is worth a follow-up call.
+- `stdout_preview_chars` / `stderr_preview_chars`: the size of the preview the backend holds for this run. Lightweight listings omit the text but expose this so a caller can decide whether `command-run get` is worth a follow-up call.
 - `stdout_suppression_reason` / `stderr_suppression_reason`: populated when retention policy skipped the preview (for example `static-asset-filter` for grep'd URL lists, `binary-dump` for xxd/hexdump). The command and the hash are still recorded, so a coverage check by command text still succeeds.
 - `timed_out`: the command exceeded its tool timeout. `return_code` will be `-1`. Treat coverage as incomplete.
 - `success`: `true` when the command exited cleanly, or when it timed out with partial output the upstream Kali tool flags as usable. Always cross-check `timed_out` before accepting a success.
@@ -126,7 +126,7 @@ introspection.
 
 ## Scope
 
-- Records are keyed by engagement. `list-command-runs` only returns rows for
+- Records are keyed by engagement. `command-run list` only returns rows for
   the current engagement.
 - The backend never shares command history across engagements — each
   engagement's audit log is isolated by `engagement_id`.

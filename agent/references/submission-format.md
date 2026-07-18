@@ -12,7 +12,7 @@ three targets; each finding is a standalone submission.
 
 ## Platform selector
 
-`vigil assess export-submission <slug> --platform <p> --draft` generates the per-finding draft; pick the platform below and use its scaffold for the platform-specific fields. This doc holds the cross-platform authoring rules all three share (voice, section budgets, PII redaction, PoC authoring, de-harnessing, and one consolidated pre-submission / report QA checklist) — the templates link back here rather than repeating them.
+`vigil assess export submission <slug> --platform <p> --draft` generates the per-finding draft; pick the platform below and use its scaffold for the platform-specific fields. This doc holds the cross-platform authoring rules all three share (voice, section budgets, PII redaction, PoC authoring, de-harnessing, and one consolidated pre-submission / report QA checklist) — the templates link back here rather than repeating them.
 
 | Target | Scaffold | Platform-specific field | Taxonomy lookup |
 |---|---|---|---|
@@ -20,18 +20,18 @@ three targets; each finding is a standalone submission.
 | HackerOne | `agent/skills/report-generation/templates/hackerone.md` | CWE weakness | `agent/references/reporting/hackerone-weaknesses.md` (leaf table in `hackerone-weaknesses.tsv`) |
 | Direct (company / vendor) | `agent/skills/report-generation/templates/direct.md` | none (VRT / H1 fields dropped) | n/a |
 
-For a vendor/CERT disclosure *email* rather than a platform submission, use `agent/references/disclosure-email-format.md` instead. For a REPLY to a program/company on an already-submitted finding (a Bugcrowd comment, a HackerOne activity reply, a direct follow-up), use `agent/references/reply-format.md` and `vigil assess export-reply`/`record-reply` instead — a reply is not a resubmission and does not follow the structure below.
+For a vendor/CERT disclosure *email* rather than a platform submission, use `agent/references/disclosure-email-format.md` instead. For a REPLY to a program/company on an already-submitted finding (a Bugcrowd comment, a HackerOne activity reply, a direct follow-up), use `agent/references/reply-format.md` and `vigil assess export reply`/`record-reply` instead — a reply is not a resubmission and does not follow the structure below.
 
 ## Finding is the source of truth
 
-`submission.md` is a RENDER of the finding, not the durable copy. `export-submission --draft`
+`submission.md` is a RENDER of the finding, not the durable copy. `export submission --draft`
 renders each section FROM the finding's own fields — `summary` (Summary), `details.steps_to_reproduce`
 (Steps to Reproduce), `details.evidence` (Evidence), `details.attack_scenario` (Attack Scenario),
 `details.impact` (Impact), `remediation`/`details.remediation` (Remediation) — and consolidates the
 finding metadata, any hygiene warnings, the structured proof, and every linked command run into ONE
 "OPERATOR DETAILS — NOT FOR SUBMISSION" reference section below the second `---` (present in both
 draft and final, always below the never-paste line). You AUTHOR each section, then write it back to the finding with `vigil assess
-update-finding <slug> --summary "..." --details-inline '{...}'`, and re-render. A hand edit made
+finding update <slug> --summary "..." --details-inline '{...}'`, and re-render. A hand edit made
 only in `submission.md` is overwritten on the next render; a write to the finding is durable and
 reproduces at publish. Because the MASKED evidence lives in the finding (raw tool output stays in
 `scans/` and is only referenced), a re-render never re-leaks PII. Full procedure: "Submission-First
@@ -54,7 +54,7 @@ PoC artifacts live here alongside `submission.md`. Do NOT place them under `tool
 After staging `submission.md` and submitting to the platform, set the finding's submission status:
 
 ```bash
-vigil assess update-finding <slug> --submission-status submitted --reason "Submitted to <program>"
+vigil assess finding update <slug> --submission-status submitted --reason "Submitted to <program>"
 ```
 
 Update `submission_status` as the program responds (`accepted` / `needs_info` / `rejected` / `duplicate`). This field is orthogonal to `workflow_status` — it tracks program-facing state only and never changes whether the finding is included in the internal report. See "Submission Status Lifecycle" in `agent/skills/report-generation/SKILL.md` for the full sequence.
@@ -74,7 +74,7 @@ The first `---` separator exists so the operator can select the entire body bloc
 
 ## Structure
 
-`export-submission` renders the layout below FROM the finding's fields. The PoC is NOT a body slot —
+`export submission` renders the layout below FROM the finding's fields. The PoC is NOT a body slot —
 it is an attachment the operator adds in the platform form (see "PoC block"); the renderer emits no
 PoC line into the body, and a hand-inserted one is wiped on the next `--overwrite`.
 
@@ -118,7 +118,7 @@ inline requests — whichever form the PoC takes.]
 
 ### Evidence
 [AUTHORED proof, not a raw command dump. Author it from the OPERATOR DETAILS section's structured
-proof and linked command runs plus a targeted `vigil assess list-command-runs --q
+proof and linked command runs plus a targeted `vigil assess command-run list --q
 <finding's url/param/header/uri>` for reproducing runs the linked set missed. Annotate the critical
 lines with <-- proof markers.
 Truncated to only the lines that matter. No full tool dumps.
@@ -188,7 +188,7 @@ Cutting that overlap is also what keeps every sentence load-bearing (reporting.m
 ## PoC block
 
 The PoC block is **operator-side attachment guidance, not a `submission.md` body slot.**
-`export-submission` renders no PoC line into the body (see "Structure"), so a block hand-inserted
+`export submission` renders no PoC line into the body (see "Structure"), so a block hand-inserted
 into the body is wiped on the next `--overwrite`. Use it when the finding's proof is an attached
 script rather than inline requests: stage the file as `submissions/<slug>/poc.<ext>` and, when the
 operator submits, attach it in the platform's attachment / PoC area with the run command and pass
@@ -280,9 +280,9 @@ shell/clone/account, outside any agent session) belongs to whoever BUILDS the Po
 exploitation, so the captured evidence already carries that provenance. The report-writer does NOT
 re-run it — it works from the captured evidence and confirms the PoC is agent-independent by READING
 it against the de-harness rules above. A script that only works inside the sandbox that wrote it
-leaks its own origin and fails those static checks. (Empirical clean-env reproduction is a hunt-time
-responsibility today; a future blind-triage reproduce gate will re-validate it at report time — the
-report-writer still never re-runs.)
+leaks its own origin and fails those static checks. Empirical clean-environment
+reproduction is a hunt-time responsibility; the report-writer never re-runs
+target-facing proof.
 
 ## Section budgets
 
@@ -380,6 +380,7 @@ Where a row's rationale is a reporting rule it cites the rule (`agent/rules/repo
 - [ ] **[submission]** Evidence does not retype a request Steps to Reproduce already shows — it references the step and carries only the response/outcome ("Steps to Reproduce vs Evidence" above; reporting.md Rule 21)
 - [ ] **[both]** Title and summary claim no reach, read, or impact beyond what the Evidence block literally shows — read them once as a blind triager would before publish, pre-empting the blind-triage lens rather than waiting for it to catch overclaim
 - [ ] **[both]** A reachable-but-not-fully-exploited finding separates a Demonstrated CVSS (what the proof shows) from a Potential CVSS (the further reach a defender should still fix); the potential vector never appears in the title or summary
+- [ ] **[submission]** For any finding with claimed CVSS ≥ 8.0 (critical-severity), `agent/skills/disclosure-deployment-shape-check/SKILL.md`'s eight-category audit ran and passed before send — it catches the deployment-shape overstatement class (allocator dependence, build-flag gates, claim-vs-evidence fidelity, vendor-distro variation) that source-only verification does not, because those facts live in the runtime deployment, not the code. The audit memo lives at `tools/analysis-state/disclosure-shape-check-<slug>.md`.
 - [ ] **[submission]** PoC form matches the reproduction: inline-only → no attachment; a script → staged `poc.<ext>` with the correct extension, its run command, and a one-line pass criterion; multi-file → every file staged and attached
 - [ ] **[submission]** The attached PoC is agent-independent by inspection (de-harness rules above) and its clean-environment reproduction was established at exploit time — the report-writer does not re-run it here
 - [ ] **[submission]** The PoC script is minimal — no line that does not contribute to the decisive observable; a reviewer unfamiliar with the finding could read it end to end in under a minute
@@ -424,3 +425,4 @@ Where a row's rationale is a reporting rule it cites the rule (`agent/rules/repo
 - `agent/references/examples/submission-hackerone-ssrf-webhook.md` — HackerOne SSRF (CWE weakness, `poc_code` proof)
 - `agent/references/examples/submission-direct-sql-injection-login.md` — Direct disclosure SQL injection (no platform-specific fields)
 - `agent/references/examples/bugbounty-submission-ldap-injection.md` — LDAP injection with a working PoC
+- `agent/references/examples/submission-direct-buffer-overflow-fuzz.md` — Direct disclosure memory-safety/buffer-overflow from a fuzzing campaign (reachable from `agent/phases/code-phase-4-fuzz.md`)

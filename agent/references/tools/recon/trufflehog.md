@@ -9,7 +9,7 @@ skill: source-analysis
 tokens, API keys, and credentials. v3 ships 800+ detectors and can optionally verify
 discovered secrets by making live API calls.
 
-**In this repo**: primary secret scanner for stored HTTP response bodies. The `vigil assess gau-secrets` wrapper composes gau → uro → httpx body capture → trufflehog filesystem mode in one verb (default `--no-verification`; pass `--verify` to enable verification). For ad-hoc scans against existing artifacts, invoke via `vigil assess kali exec --technique INFO-DISCLOSURE --intent "<why>" --probe-kind fingerprint --phase <phase> --timeout <seconds> -- trufflehog ...` with the standard audit-flag set; never from host-side bash against in-scope artifacts.
+**In this repo**: primary secret scanner for stored HTTP response bodies. The `vigil assess gau secrets` wrapper composes gau → uro → httpx body capture → trufflehog filesystem mode in one verb (default `--no-verification`; pass `--verify` to enable verification). For ad-hoc scans against existing artifacts, invoke via `vigil assess kali exec --technique INFO-DISCLOSURE --intent "<why>" --probe-kind fingerprint --phase <phase> --timeout <seconds> -- trufflehog ...` with the standard audit-flag set; never from host-side bash against in-scope artifacts.
 
 ## CLI syntax (v3)
 
@@ -40,7 +40,7 @@ trufflehog github --repo https://github.com/org/repo --json
 |---|---|
 | `--json` (`-j`) | Structured NDJSON output (one finding per line) |
 | `--no-update` | Skip version-check network call — faster, offline-safe |
-| `--no-verification` | Do **not** attempt to verify detected secrets against third-party APIs. **Default in `gau-secrets`.** |
+| `--no-verification` | Do **not** attempt to verify detected secrets against third-party APIs. **Default in `gau secrets`.** |
 | `--results=RESULTS` | Comma-separated filter: `verified,unverified,unknown,filtered_unverified`. Use `--results=verified` to report only confirmed-live secrets (triggers external HTTP). Default: `verified,unverified,unknown`. |
 | `--include-detectors=<list>` | Comma-separated detector names/IDs or `all` |
 | `--exclude-detectors=<list>` | Skip noisy detectors (takes precedence over include) |
@@ -124,5 +124,5 @@ Full list: `trufflehog --help` or upstream detector index.
   default (`4`) is fine for typical stored-response sets.
 - `--only-verified` does **not** exist in v3 filesystem mode. Use `--results=verified`.
 - `Raw` contains the actual secret. Do **not** upload raw results to untrusted sinks; keep
-  them in `$DIR/scans/gau-pipeline/<target>/<cache_key>/` (where `gau-secrets` writes
+  them in `$DIR/scans/gau-pipeline/<target>/<cache_key>/` (where `gau secrets` writes
   `trufflehog.json` namespaced per target + gau-flag-set).

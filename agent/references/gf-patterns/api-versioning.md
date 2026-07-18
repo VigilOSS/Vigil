@@ -81,7 +81,7 @@ in the single declaration-ordered iteration for tie-break and reason-chain order
 30 `unknown_should_classify` templates across xfinity (all at priority 0 before 2026-06),
 covering `/v1/` through `/v4/`, deeply-nested versioned Comcast API paths, and
 `/templates/v2/:namespace/:templateName`. Long-tail cms-gov sweeps: 2 additional actionable
-templates. See `docs/plans/research/classify-surface-2026-06/README.md` §4b and the regex-fragment mechanism in `docs/plans/research/classify-surface-2026-06/IMPLEMENTATION-SPEC.md` §3.
+templates. See `docs/research/classify-surface-2026-06/README.md` §4b and the regex-fragment mechanism in `docs/research/classify-surface-2026-06/IMPLEMENTATION-SPEC.md` §3.
 
 ## Sources
 

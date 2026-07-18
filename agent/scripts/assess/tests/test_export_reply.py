@@ -165,7 +165,7 @@ def test_draft_scaffolds_reply_1_with_needs_marker_and_ask_below_line(tmp_path, 
     fake = _FakeClient(_finding())  # no replies yet
     _install(monkeypatch, tmp_path, fake)
     args = _parse(
-        ["export-reply", "VA-047", "--in-response-to", "Can you show the raw response?", "--draft"],
+        ["reply", "VA-047", "--in-response-to", "Can you show the raw response?", "--draft"],
         str(tmp_path),
     )
     export_reply.run(args)
@@ -192,7 +192,7 @@ def test_draft_scaffolds_reply_1_with_needs_marker_and_ask_below_line(tmp_path, 
 def test_final_refuses_unauthored_reply_and_writes_nothing(tmp_path, monkeypatch, capsys):
     fake = _FakeClient(_finding())
     _install(monkeypatch, tmp_path, fake)
-    args = _parse(["export-reply", "VA-047", "--in-response-to", "why?"], str(tmp_path))
+    args = _parse(["reply", "VA-047", "--in-response-to", "why?"], str(tmp_path))
     with pytest.raises(AssessError) as exc:
         export_reply.run(args)
     assert "reply body" in str(exc.value)
@@ -203,7 +203,7 @@ def test_final_refuses_unauthored_reply_and_writes_nothing(tmp_path, monkeypatch
 def test_new_reply_requires_in_response_to(tmp_path, monkeypatch, capsys):
     fake = _FakeClient(_finding())
     _install(monkeypatch, tmp_path, fake)
-    args = _parse(["export-reply", "VA-047", "--draft"], str(tmp_path))
+    args = _parse(["reply", "VA-047", "--draft"], str(tmp_path))
     with pytest.raises(AssessError) as exc:
         export_reply.run(args)
     assert "--in-response-to" in str(exc.value)
@@ -218,7 +218,7 @@ def test_next_seq_targets_max_plus_one(tmp_path, monkeypatch, capsys):
     ]
     fake = _FakeClient(_finding(replies=replies))
     _install(monkeypatch, tmp_path, fake)
-    args = _parse(["export-reply", "VA-047", "--in-response-to", "q3", "--draft"], str(tmp_path))
+    args = _parse(["reply", "VA-047", "--in-response-to", "q3", "--draft"], str(tmp_path))
     export_reply.run(args)
     out = capsys.readouterr().out
 
@@ -235,7 +235,7 @@ def test_seq_flag_rerenders_existing_entry(tmp_path, monkeypatch, capsys):
     ]
     fake = _FakeClient(_finding(replies=replies))
     _install(monkeypatch, tmp_path, fake)
-    args = _parse(["export-reply", "VA-047", "--seq", "2"], str(tmp_path))
+    args = _parse(["reply", "VA-047", "--seq", "2"], str(tmp_path))
     export_reply.run(args)
     capsys.readouterr()
 
@@ -255,7 +255,7 @@ def test_prior_replies_and_ask_render_below_line_only(tmp_path, monkeypatch, cap
     fake = _FakeClient(_finding(replies=replies))
     _install(monkeypatch, tmp_path, fake)
     # Render a fresh seq-3 draft so the pasteable block is just the NEEDS marker.
-    args = _parse(["export-reply", "VA-047", "--in-response-to", "the third ask", "--draft"], str(tmp_path))
+    args = _parse(["reply", "VA-047", "--in-response-to", "the third ask", "--draft"], str(tmp_path))
     export_reply.run(args)
     capsys.readouterr()
 
@@ -285,7 +285,7 @@ def test_hygiene_flags_body_leaks_without_mutating(tmp_path, monkeypatch, capsys
     finding["engagement_id"] = _UUID
     fake = _FakeClient(finding)
     _install(monkeypatch, tmp_path, fake)
-    args = _parse(["export-reply", "VA-047", "--seq", "1", "--json"], str(tmp_path))
+    args = _parse(["reply", "VA-047", "--seq", "1", "--json"], str(tmp_path))
     export_reply.run(args)
     captured = capsys.readouterr()
     out = json.loads(captured.out)
@@ -312,7 +312,7 @@ def test_export_reply_never_patches_or_writes_submission_status(tmp_path, monkey
     replies = [_reply(1, body="answered", ask="q1")]
     fake = _FakeClient(_finding(replies=replies))
     _install(monkeypatch, tmp_path, fake)
-    args = _parse(["export-reply", "VA-047", "--seq", "1"], str(tmp_path))
+    args = _parse(["reply", "VA-047", "--seq", "1"], str(tmp_path))
     export_reply.run(args)
     capsys.readouterr()
 
@@ -327,13 +327,13 @@ def test_export_reply_never_patches_or_writes_submission_status(tmp_path, monkey
 def test_overwrite_guard(tmp_path, monkeypatch, capsys):
     fake = _FakeClient(_finding(replies=[_reply(1, body="answered", ask="q1")]))
     _install(monkeypatch, tmp_path, fake)
-    args = _parse(["export-reply", "VA-047", "--seq", "1"], str(tmp_path))
+    args = _parse(["reply", "VA-047", "--seq", "1"], str(tmp_path))
     export_reply.run(args)
     capsys.readouterr()
 
     fake2 = _FakeClient(_finding(replies=[_reply(1, body="answered", ask="q1")]))
     _install(monkeypatch, tmp_path, fake2)
-    args = _parse(["export-reply", "VA-047", "--seq", "1"], str(tmp_path))
+    args = _parse(["reply", "VA-047", "--seq", "1"], str(tmp_path))
     with pytest.raises(AssessError) as exc:
         export_reply.run(args)
     assert "already exists" in str(exc.value)
@@ -341,7 +341,7 @@ def test_overwrite_guard(tmp_path, monkeypatch, capsys):
 
     fake3 = _FakeClient(_finding(replies=[_reply(1, body="answered", ask="q1")]))
     _install(monkeypatch, tmp_path, fake3)
-    args = _parse(["export-reply", "VA-047", "--seq", "1", "--overwrite"], str(tmp_path))
+    args = _parse(["reply", "VA-047", "--seq", "1", "--overwrite"], str(tmp_path))
     export_reply.run(args)
     capsys.readouterr()
     assert any(ep == "artifacts" for ep, _ in fake3.posts)
@@ -354,7 +354,7 @@ def test_json_summary_shape(tmp_path, monkeypatch, capsys):
     fake = _FakeClient(_finding(replies=replies))
     _install(monkeypatch, tmp_path, fake)
     # A fresh seq-2 draft (export-reply has no --body flag — body comes from the entry).
-    args = _parse(["export-reply", "VA-047", "--in-response-to", "q2", "--draft", "--json"], str(tmp_path))
+    args = _parse(["reply", "VA-047", "--in-response-to", "q2", "--draft", "--json"], str(tmp_path))
     export_reply.run(args)
     out = json.loads(capsys.readouterr().out)
     assert out["slug"] == "VA-047"

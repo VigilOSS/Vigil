@@ -109,8 +109,7 @@ XML-RPC, cron, and debug:
 and scored 0 because it carries `-login`, not a `/login` segment). The remaining fragments
 (`/xmlrpc.php`, `/wp-cron.php`, `/wp-content/debug.log`, `/wp-json/wp/v2/users`, `/wp-admin`) are
 forward-looking coverage: WordPress is a ubiquitous CMS, so these are sized for recurrence across
-future engagements rather than the immediate corpus. See
-`docs/plans/classify-context-and-surface-buckets-2026-06.md` Part 3 §A.2 and the `wordpress`
+future engagements rather than the immediate corpus. See ADR 0008, `DRIFT.md`, and the `wordpress`
 `_BUCKETS` comment in `agent/scripts/assess/lib/classify_buckets.py`.
 
 ## Sources

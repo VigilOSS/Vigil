@@ -128,8 +128,7 @@ Generic IdP / AD FS:
 remaining product surfaces (PingFederate `/as/*.oauth2`, AD FS `/adfs/ls`, NetIQ `/nidp/`)
 are **forward-looking coverage**: zero corpus hits in the validation sweep, but IdPs are
 near-ubiquitous across enterprise engagements, so the fragments are seeded ahead of need per
-the plan's stated generic-coverage goal. See
-`docs/plans/classify-context-and-surface-buckets-2026-06.md` Part 3 §A.5.
+the generic-coverage goal. See ADR 0008 and `DRIFT.md` for the accepted rationale.
 
 ## Sources
 

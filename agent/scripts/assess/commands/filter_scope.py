@@ -1,4 +1,4 @@
-"""vigil assess filter-scope — filter URL/host lists to scope.json hosts."""
+"""vigil assess scope filter — filter URL/host lists to scope.json hosts."""
 from __future__ import annotations
 
 import argparse
@@ -49,7 +49,7 @@ def _vendor_saas_decided_hosts(cfg: Config) -> set[str]:
 
 def register(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser(
-        "filter-scope",
+        "filter",
         help="Filter a URL/host list to entries matching scope.json hosts",
     )
     p.add_argument(

@@ -1239,12 +1239,12 @@ def supersede_intel(
         if new_id == intel_id:
             # The natural key matched the existing row; this is an in-place
             # upsert, not a supersede. Surface it as 409 so the operator can
-            # call update-intel instead.
+            # call intel update instead.
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
                     f"supersede target (id={intel_id}) collided with the new payload's "
-                    "natural key — use update-intel for in-place edits"
+                    "natural key — use intel update for in-place edits"
                 ),
             )
 
@@ -1374,7 +1374,7 @@ def list_open_high_cves(engagement_id: int) -> list[dict[str, Any]]:
         open_high.append(
             {
                 # Backend id so the operator can act on the exact row
-                # (`vigil assess update-intel cve <id>` takes the numeric id).
+                # (`vigil assess intel update cve <id>` takes the numeric id).
                 "id": row.get("id"),
                 "cve_id": row.get("cve_id"),
                 "cvss_score": score,
@@ -1490,7 +1490,7 @@ def intel_readiness(engagement_id: int) -> dict[str, Any]:
                 )
 
     # id included so the operator can disposition the exact lead row
-    # (`vigil assess update-intel note <id>`).
+    # (`vigil assess intel update note <id>`).
     open_leads = [
         {"id": row.get("id"), "title": row.get("title"), "lead_status": row.get("lead_status")}
         for row in list_leads(engagement_id, open_only=True)

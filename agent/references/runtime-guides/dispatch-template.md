@@ -82,7 +82,7 @@ vigil assess agent done <agent_id> --status completed --finding-slugs <slugs>
 | `rate-limit budget` | Required when target-facing | § Dispatch Context Template "Rate-limit budget" |
 | `oob` | Required when the dispatch may need a callback | § Dispatch Context Template "OOB / listener availability" |
 | `auth_context` / `credential_id` | Required | § Dispatch Context Template "Auth context" |
-| `coverage` | Required | § Dispatch Context Template "Coverage statement" — source it from `vigil assess resume-brief` (its Surfaces / Work Buffer / Attempts sections) or `vigil assess list-command-runs --q <surface> --show-matches` |
+| `coverage` | Required | § Dispatch Context Template "Coverage statement" — source it from `vigil assess resume-brief` (its Surfaces / Work Buffer / Attempts sections) or `vigil assess command-run list --q <surface> --show-matches` |
 | `cleanup` | Required when server-side state may be left | § Dispatch Context Template "Cleanup constraints" |
 | `human_reach_decision` | Required when an open gate exists on the target surface | § Dispatch Context Template "Human-reach gate state" |
 | role-specific additions | Required per role | § Dispatch Context Template "Role-specific additions" |
@@ -152,7 +152,7 @@ human_reach_decision: none open on this surface
 
 Candidate surface: /api/v1/orders/{id}, /api/v1/invoices/{id} — REST JSON API behind session-cookie
 auth. Recon observed sequential integer IDs on both. Prior probe-run ids for this surface:
-`vigil assess list-command-runs --q orders --show-matches`. Let the analyst choose which
+`vigil assess command-run list --q orders --show-matches`. Let the analyst choose which
 access-control variants to pursue beyond the base IDOR replay (BFLA on state-transition
 endpoints, mass-assignment on the update verb, etc.) — the objective above is the surface and
 result wanted, not the boundary of the hunt.

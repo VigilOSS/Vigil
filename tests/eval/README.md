@@ -43,15 +43,17 @@ Assertions supported: `min_findings`, `max_findings`, `expected_cwes`,
 ## Capturing a fixture from a real engagement
 
 Hand-authoring fixtures is one path; the other is snapshotting the backend
-findings of a real, human-blessed engagement with `vigil assess eval-capture`.
-Replay stays zero-token.
+findings of a real, human-blessed engagement with `eval_capture.py`. This is a
+maintainer/CI tool, intentionally NOT registered on the operator `vigil assess`
+surface — invoke the module directly (its import chain is stdlib-only, so no
+extra venv is required). Replay stays zero-token.
 
 Run a seeded engagement against a known-vulnerable app (e.g. DVWA, juice-shop)
 via the normal `vigil engagement create` / `start` flow and let the agent record
 findings as usual. Then, with the orchestrator backend running:
 
 ```bash
-vigil assess eval-capture \
+python agent/scripts/assess/commands/eval_capture.py \
   --engagement-dir <engagement-dir> \
   --out tests/eval/fixtures/golden_<name>.json \
   --definition tests/eval/definitions/<name>.yaml
@@ -67,7 +69,7 @@ stable-sorts the findings for byte-reproducible output, and writes the fixture.
 from the captured data (count bounds, present CWEs, severity mins, strict
 attacker-outcome). Commit the fixture + definition — replay is then offline.
 
-Filters mirror `list-findings` (`--severity`, `--workflow-status`, `--slug`,
+Filters mirror `finding list` (`--severity`, `--workflow-status`, `--slug`,
 `--search`, ...) to capture a subset. `--strict` turns the empty-`details.impact`
 warning into a hard failure.
 
@@ -77,7 +79,7 @@ After re-running an engagement, diff the fresh capture against the committed
 baseline without overwriting it:
 
 ```bash
-vigil assess eval-capture --engagement-dir <engagement-dir> \
+python agent/scripts/assess/commands/eval_capture.py --engagement-dir <engagement-dir> \
   --out tests/eval/fixtures/golden_<name>.json --check
 ```
 

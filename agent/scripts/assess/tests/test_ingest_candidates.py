@@ -1,4 +1,4 @@
-"""Scope-filter tests for `vigil assess ingest-candidates` + the shared resolver.
+"""Scope-filter tests for `vigil assess ingest candidates` + the shared resolver.
 
 ingest-candidates ingests curated, metadata-rich candidate JSONL. Each record
 carries an arbitrary per-record URL, so — exactly like ingest-endpoints — a

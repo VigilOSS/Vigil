@@ -125,7 +125,7 @@ def _confirm_runtime_restart(options: UpOptions) -> bool:
 
 def _start_mitmproxy_if_needed(install_root: Path, options: UpOptions, *, runner: docker.Runner) -> None:
     if docker.container_running("vigil-proxy", runner=runner):
-        if _proxy_image_drift(runner=runner):
+        if proxy_image_drift(runner=runner):
             print("mitmproxy\trunning old image; restart to pick up rebuilt image")
             print("Run `vigil mitmproxy start` to recreate the container on the current image.")
         else:
@@ -209,15 +209,6 @@ def _runtime_image_drift(options: RuntimeOptions, *, runner: docker.Runner) -> b
     container_id = docker.container_image_id(options.container_name, runner=runner)
     configured_id = docker.image_id(options.image, runner=runner)
     return bool(container_id and configured_id and container_id != configured_id)
-
-
-def _proxy_image_drift(*, runner: docker.Runner) -> bool:
-    """True when the running proxy container predates the current proxy image.
-
-    Mirrors ``_runtime_image_drift`` for the mitmproxy container. Single-sourced
-    in ``image_freshness`` so ``vigil status`` reports the same verdict.
-    """
-    return proxy_image_drift(runner=runner)
 
 
 def _build_mitmproxy_image(install_root: Path, *, runner: docker.Runner = docker.run_command_streaming) -> None:

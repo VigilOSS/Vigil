@@ -131,7 +131,7 @@ bucket (unlike `dotnet_handler` ≈835, `servicenow` 877 + 2,826 `.do`, `wordpre
 attributed to the `servicenow` bucket plus the compound-key fix. `privileged_action` is a
 generic, recurrence-driven BFLA surface (the roster's "write/grant/sendotp" note), not a
 corpus-volume play — it exists to catch function-level-authz routes wherever they appear in
-future engagements. See `docs/plans/classify-context-and-surface-buckets-2026-06.md` §A.9.
+future engagements. See ADR 0008 and `DRIFT.md` for the accepted rationale.
 
 ## Sources
 

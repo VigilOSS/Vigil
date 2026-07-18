@@ -70,7 +70,7 @@ This skill operationalizes gates that live elsewhere; read them rather than re-d
   Run every confirmed debate-skipped runtime-proven finding through it (data-exposure, write, auth-bypass, race, business-logic): it catches the real-world-impact
   gaps a CVSS-band check misses (no-PII "reads", orphan writes, insider-only enumerability,
   inflated `S:C`/`I:H`).
-- **Severity ↔ CVSS bands** — `agent/shared-specialist-core.md` "Finding IDs and the `record-finding` Contract" (the canonical band table).
+- **Severity ↔ CVSS bands** — `agent/shared-specialist-core.md` "Finding IDs and the `finding record` Contract" (the canonical band table).
 
 ## Methodology
 
@@ -109,16 +109,16 @@ For each finding under review:
 Write exactly one per reviewed finding (these are the operator-facing verbs, kept in
 operator-core Phase 5 — listed here so the reviewer self-serves them):
 
-- **Confirmed** — reproduced, severity accurate → `vigil assess verify-finding <slug> --disposition confirmed --reason "..."`
-- **Upgraded** — real, severity understated → `vigil assess update-finding <slug> --severity <higher> --reason "..."` then `verify-finding ... --disposition confirmed`
-- **Downgraded** — real, severity overstated → `vigil assess verify-finding <slug> --disposition downgraded --reason "..." --new-severity <lower>`
-- **Killed** — false positive / unreproducible / stacked self-induced preconditions → `vigil assess kill-finding <slug> --reason "..." --kill-reason "..." --kill-check <1-6>`
+- **Confirmed** — reproduced, severity accurate → `vigil assess finding verify <slug> --disposition confirmed --reason "..."`
+- **Upgraded** — real, severity understated → `vigil assess finding update <slug> --severity <higher> --reason "..."` then `finding verify ... --disposition confirmed`
+- **Downgraded** — real, severity overstated → `vigil assess finding verify <slug> --disposition downgraded --reason "..." --new-severity <lower>`
+- **Killed** — false positive / unreproducible / stacked self-induced preconditions → `vigil assess finding verify <slug> --disposition false_positive --reason "..." --kill-reason "..." --kill-check <1-6>`
 
 **Dedup:** merge findings with overlapping `canonical_location` + similar `defect_family` across
-agent prefixes — `vigil assess merge-finding <source-slug> <target-slug> "<reason>"`.
+agent prefixes — `vigil assess finding merge <source-slug> <target-slug> "<reason>"`.
 
 **Chain-only primitives** stay in the normal finding table: when a finding is real only as part
-of a proved/expected escalation path, `vigil assess update-finding <slug>` to populate
+of a proved/expected escalation path, `vigil assess finding update <slug>` to populate
 `details.chain_required`, `details.chain_rationale`, `details.required_followup`. Do not invent a
 chain-specific status.
 
@@ -141,7 +141,7 @@ speculative findings).
 ## Root-Cause Review Mode (Phase 5 → 6 exit)
 
 When dispatched as `mode=root_cause_review`, additionally run the operator's root-cause grouping
-intent: group intentional root/sibling relationships (`vigil assess link-finding`), picking the
+intent: group intentional root/sibling relationships (`vigil assess finding link`), picking the
 root as the broadest attacker-controllable cause. See "Root-Cause Review Mode" in
 `agent/agents/vulnerability-analyst.md`.
 

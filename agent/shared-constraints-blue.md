@@ -400,7 +400,7 @@ agents cannot query unindexed local files.
    by `register` or `sync` in the handoff's `evidence_refs`. Never put local
    paths there — the downstream consumer cannot resolve them.
 
-4. **Record the finding(s).** `vigil assess record-finding <agent-name>
+4. **Record the finding(s).** `vigil assess finding record <agent-name>
    <finding-json>` per finding. The JSON must include
    `details_json.mitre_techniques`, `details_json.confidence`, and
    `details_json.timeline` (UTC ISO-8601 entries with `source_file` citations
@@ -444,7 +444,7 @@ Use the IDs in the block (finding slugs, command-run IDs, handoff agent IDs,
 artifact IDs) for drill-down through:
 
 ```bash
-vigil assess get-command-run <id>
+vigil assess command-run get <id>
 vigil assess artifact get <id>
 vigil assess artifact search <query>
 vigil assess agent render-handoff <agent-id>

@@ -231,10 +231,10 @@ def test_cli_register_adds_submission_status_choice():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers()
     uf.register(sub)
-    args = parser.parse_args(["update-finding", "VA-001", "--submission-status", "accepted"])
+    args = parser.parse_args(["update", "VA-001", "--submission-status", "accepted"])
     assert args.submission_status == "accepted"
     # Optional — defaults to no submission-status change.
-    args_default = parser.parse_args(["update-finding", "VA-001", "--workflow-status", "reported"])
+    args_default = parser.parse_args(["update", "VA-001", "--workflow-status", "reported"])
     assert getattr(args_default, "submission_status", None) is None
 
 
@@ -244,7 +244,7 @@ def test_cli_accepts_every_valid_submission_state(state):
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers()
     uf.register(sub)
-    args = parser.parse_args(["update-finding", "VA-001", "--submission-status", state])
+    args = parser.parse_args(["update", "VA-001", "--submission-status", state])
     assert args.submission_status == state
 
 
@@ -254,7 +254,7 @@ def test_cli_rejects_invalid_submission_status():
     sub = parser.add_subparsers()
     uf.register(sub)
     with pytest.raises(SystemExit):
-        parser.parse_args(["update-finding", "VA-001", "--submission-status", "bogus"])
+        parser.parse_args(["update", "VA-001", "--submission-status", "bogus"])
 
 
 def test_cli_plumbs_submission_status_into_patch_payload(monkeypatch):
@@ -264,7 +264,7 @@ def test_cli_plumbs_submission_status_into_patch_payload(monkeypatch):
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers()
     uf.register(sub)
-    args = parser.parse_args(["update-finding", "VA-001", "--submission-status", "accepted"])
+    args = parser.parse_args(["update", "VA-001", "--submission-status", "accepted"])
     args.engagement_dir = "/tmp/does-not-matter"
 
     captured: dict = {}
@@ -298,7 +298,7 @@ def test_cli_plumbs_submission_status_into_patch_payload(monkeypatch):
 def test_contract_documents_submission_status_flag():
     from assess.lib import contracts
 
-    text = contracts.render_contract("update-finding")
+    text = contracts.render_contract("finding update")
     assert "--submission-status" in text
     # The allowed vocabulary is surfaced in the contract.
     for state in ALL_STATES:

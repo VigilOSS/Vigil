@@ -98,3 +98,29 @@ def test_resume_brief_per_input_cells_default_cap_and_all(client, isolate_settin
     capped = client.get(f"{BASE}/resume-brief?per_input_limit=5").json()["per_input_coverage"]
     assert len(capped["cells"]) == 5            # explicit smaller cap honored
     assert capped["cells_count"] == 25
+
+
+def test_resume_brief_all_cells_bypasses_source_fetch_cap(client, isolate_settings, monkeypatch):
+    # `--all-cells` (per_input_limit=0) must build the grid from EVERY probe run,
+    # not just the newest _PER_INPUT_FETCH_LIMIT rows: an unconditional source cap
+    # silently dropped older cells while cells_count still reported them, sending
+    # operators back to already-covered inputs. Shrink the fetch cap so a modest
+    # fixture exceeds it without seeding hundreds of rows.
+    from app.services import assessment_memory
+
+    _seed(client, isolate_settings)
+    monkeypatch.setattr(assessment_memory, "_PER_INPUT_FETCH_LIMIT", 3)
+    for i in range(6):
+        assert client.post(
+            f"{BASE}/probe-runs", json=_probe(attack_family="sqli", target_path=f"/q{i}")
+        ).status_code == 201
+
+    # Sampled path stays bounded by the (patched) fetch cap.
+    sampled = client.get(f"{BASE}/resume-brief?per_input_limit=20").json()["per_input_coverage"]
+    assert len(sampled["cells"]) == 3
+    assert sampled["cells_count"] == 6
+
+    # All-cells sees every cell — before the fix it too was clamped to the newest 3.
+    allc = client.get(f"{BASE}/resume-brief?per_input_limit=0").json()["per_input_coverage"]
+    assert len(allc["cells"]) == 6
+    assert allc["cells_count"] == 6

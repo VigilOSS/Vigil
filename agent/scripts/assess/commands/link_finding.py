@@ -1,4 +1,4 @@
-"""vigil assess link-finding — root-cause/sibling finding grouping helper."""
+"""vigil assess finding link — root-cause/sibling finding grouping helper."""
 from __future__ import annotations
 
 import argparse
@@ -19,10 +19,10 @@ _ROOT_CAUSE_LINK_KIND = "root_cause"
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
-        "link-finding",
+        "link",
         help="Group findings by root cause, attach intel rows, record a generic typed link (incl. the unblock path), or clear the root-cause link",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=render_contract_epilog("link-finding"),
+        epilog=render_contract_epilog("finding link"),
     )
     p.add_argument(
         "finding_slug",

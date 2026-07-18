@@ -45,6 +45,13 @@ Identify the build system and dependency graph. Read these files in full:
 
 Extract: project name, version, dependencies (especially native/unsafe ones), build targets, feature flags, compile-time options.
 
+Also check for CI/CD pipeline definitions: `.github/workflows/*.yml`, `.gitlab-ci.yml`,
+`Jenkinsfile`, `.circleci/config.yml`. These are a distinct supply-chain attack surface from
+application source (expression injection, untrusted checkout, secret exfiltration, self-hosted
+runner escalation) — flag them in the classification for a Phase 2 dispatch that loads
+`agent/skills/cicd-security/SKILL.md` instead of the standard code-vulnerability-analysis
+methodology, since the bug classes and evidence shape differ from application-source review.
+
 ### Step 3: Read Project Documentation
 
 Read in full if present:
@@ -209,7 +216,7 @@ Is this file executable source code?
 
 ## Priority Scoring
 
-Each file receives an `analysis_priority` score for analysis ordering. The code-classify
+Each file receives an `analysis_priority` score for analysis ordering. The code-record classify
 machine JSON field is named `analysis_priority`; do not emit `priority_score` or
 `classification_tier` in classification artifacts. When building the Phase 2 file-analysis
 queue, map this value to the queue item's `priority` field; the two names belong to different
@@ -328,8 +335,8 @@ Score = reachability x impact_severity x guard_absence. Include hypotheses scori
 
 ## Output Format
 
-Use `vigil assess contract code-classify`, `vigil assess contract code-record-modules`,
-`vigil assess contract code-record-threat-model`, and `vigil assess contract code-dispatch`
+Use `vigil assess contract code-record classify`, `vigil assess contract code-record modules`,
+`vigil assess contract code-record threat-model`, and `vigil assess contract code-dispatch`
 as the canonical machine-artifact shape references. Cite those contract names in your handoff
 instead of duplicating payload templates, because the operator records your outputs through those
 helpers and their backend validation.

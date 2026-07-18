@@ -1,5 +1,5 @@
 ---
-description: Historical URL discovery (Wayback, OTX, Common Crawl, URLScan); `vigil assess gau-endpoints` is the recommended wrapper (cache-aware, ingests in one shot), with `gau-secrets` and `gau-js-endpoints` for body capture and JS-extracted route recovery
+description: Historical URL discovery (Wayback, OTX, Common Crawl, URLScan); `vigil assess gau endpoints` is the recommended wrapper (cache-aware, ingests in one shot), with `gau secrets` and `gau js-endpoints` for body capture and JS-extracted route recovery
 skill: gau-triage
 ---
 
@@ -7,7 +7,7 @@ skill: gau-triage
 
 **Purpose:** Fetch known URLs from multiple archive sources (Wayback Machine, AlienVault OTX, Common Crawl, URLScan).
 
-**Recommended verb:** `vigil assess gau-endpoints` for the standard collection-and-ingest flow (cache-aware, runs gau and seats URLs into `work_items` in one shot). For body-fetch + secret extraction use `vigil assess gau-secrets`. For LinkFinder-style extraction over JS bundles use `vigil assess gau-js-endpoints`. Drop down to the typed `vigil assess kali gau` verb only for ad-hoc archive sweeps that do not need to feed the work buffer.
+**Recommended verb:** `vigil assess gau endpoints` for the standard collection-and-ingest flow (cache-aware, runs gau and seats URLs into `work_items` in one shot). For body-fetch + secret extraction use `vigil assess gau secrets`. For LinkFinder-style extraction over JS bundles use `vigil assess gau js-endpoints`. Drop down to the typed `vigil assess kali gau` verb only for ad-hoc archive sweeps that do not need to feed the work buffer.
 
 ## Basic Usage
 
@@ -39,7 +39,7 @@ gau makes **zero requests to the target** — it queries third-party archives
   archived URLs for *every* subdomain of the root, including ones not explicitly
   in scope. That is acceptable for passive collection precisely because gau issues
   no target traffic — the collected corpus is filtered to scope at ingestion/triage
-  (`vigil assess filter-scope`, work-buffer classification) **before** any active
+  (`vigil assess scope filter`, work-buffer classification) **before** any active
   tool probes it. Do **not** relax active-crawler scoping (katana `-fs fqdn`) on
   the strength of this — the passive/active distinction is the whole point.
   - For roots where the program carves out specific OOS subdomains (e.g.
@@ -65,7 +65,7 @@ gau supports `~/.gau.toml` for persistent settings (API keys for OTX, custom pro
 
 ## Pipeline Usage
 
-The `gau-endpoints` / `gau-secrets` / `gau-js-endpoints` verbs already implement the
+The `gau endpoints` / `gau secrets` / `gau js-endpoints` verbs already implement the
 standard pipelines (collect → dedup → ingest, and collect → uro → httpx body capture →
 trufflehog). Use the snippet below only when composing a one-off chain manually.
 

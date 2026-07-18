@@ -129,8 +129,7 @@ ubiquitous enterprise surface, not artifacts of any one target. The bucket also
 closes Issue 3: under the prior `/admin` boundary matcher, hyphenated and
 product-specific consoles (`/wp-admin`, `/administrator`, `/admin-console`,
 `/management`, `/manage-users`) missed the matcher and 63 of 67 such rows were
-zero-priority. See `docs/plans/classify-context-and-surface-buckets-2026-06.md`
-(Part 1 Issue 3, Part 3 §A.3).
+zero-priority. See ADR 0008 and `DRIFT.md` for the accepted rationale.
 
 ## Sources
 

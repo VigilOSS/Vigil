@@ -117,11 +117,11 @@ The output file lands at `/engagements/$ENGAGEMENT_KEY/scans/nikto_app.json` bec
 
 Nikto produces these classes of result; map each to the right intel/finding write:
 
-- **Outdated server versions** (`outdated.db` plugin) — record as `vigil assess record-intel tech-component` with `version` and `note=outdated`. Promote to a finding only after osint-analyst confirms a relevant CVE has a working PoC.
-- **Exposed `.htaccess` / `.svn` / `.git` directories** — record as a finding via `vigil assess record-finding` with `defect_family=info-disclosure` and the leaked path in `details.evidence`.
+- **Outdated server versions** (`outdated.db` plugin) — record as `vigil assess intel record tech-component` with `version` and `note=outdated`. Promote to a finding only after osint-analyst confirms a relevant CVE has a working PoC.
+- **Exposed `.htaccess` / `.svn` / `.git` directories** — record as a finding via `vigil assess finding record` with `defect_family=info-disclosure` and the leaked path in `details.evidence`.
 - **Dangerous methods enabled (PUT, DELETE, TRACE)** — TRACE is usually finding-worthy on its own (cross-site tracing). PUT/DELETE require `put_del_test` to actively demonstrate write capability before promoting to a finding; a methods-allowed banner alone is intel.
 - **Default / backup pages** (admin consoles, install scripts, phpMyAdmin defaults) — record as `record-surface` with `type=privileged_write` or `type=auth_entry` depending on what the page exposes.
-- **Known CVE matches** (`outdated.db` advisory engine) — record via `vigil assess record-intel cve` and dispatch exploit-developer to validate before promoting to a finding.
+- **Known CVE matches** (`outdated.db` advisory engine) — record via `vigil assess intel record cve` and dispatch exploit-developer to validate before promoting to a finding.
 
 ## Plugin set — the unique-value-add over nuclei
 

@@ -206,7 +206,7 @@ def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_com
     # C36: surface legacy engagement_type=both engagements that predate
     # dual-track phase tracking. They are not broken — they just have no
     # `code_phase` field, which makes `vigil assess transition-phase --track
-    # code` confusing. `vigil engagement migrate-scope` sets the default.
+    # code` confusing. Setting code_phase=ingest in scope.json clears it.
     from .engagements import _both_engagements_missing_code_phase
     legacy_both_missing_code_phase = [
         eng_dir.name for eng_dir in _both_engagements_missing_code_phase(install_root)
@@ -312,7 +312,8 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
         preview = ", ".join(legacy_keys[:3]) + (" ..." if len(legacy_keys) > 3 else "")
         print(
             f"warn\t{len(legacy_keys)} legacy `engagement_type=both` engagement(s) "
-            f"missing `code_phase` ({preview}); run `vigil engagement migrate-scope`"
+            f"missing `code_phase` ({preview}); set code_phase=ingest in each "
+            "scope.json to clear this"
         )
     _print_install_staleness_warning(status.get("install_staleness"))
 

@@ -73,14 +73,6 @@ def _load_update_finding_module():
     return _load_assess_module("update_finding.py", "test_update_finding_command")
 
 
-def _load_reset_finding_module():
-    return _load_assess_module("reset_finding.py", "test_reset_finding_command")
-
-
-def _load_kill_finding_module():
-    return _load_assess_module("kill_finding.py", "test_kill_finding_command")
-
-
 def _load_list_findings_module():
     return _load_assess_module("list_findings.py", "test_list_findings_command")
 
@@ -1712,8 +1704,8 @@ def test_post_rejects_raw_finding_creation_and_points_to_helper(capsys):
 
     assert excinfo.value.code == 1
     err = capsys.readouterr().err
-    assert "record-finding" in err
-    assert "vigil assess contract record-finding" in err
+    assert "finding record" in err
+    assert "vigil assess contract finding record" in err
 
 
 def test_post_rejects_raw_verify_endpoint_and_points_to_helper(capsys):
@@ -1731,14 +1723,15 @@ def test_post_rejects_raw_verify_endpoint_and_points_to_helper(capsys):
 
     assert excinfo.value.code == 1
     err = capsys.readouterr().err
-    assert "verify-finding" in err
+    assert "finding verify" in err
     assert "kill-finding" in err
-    assert "vigil assess contract verify-finding" in err
+    assert "vigil assess contract finding verify" in err
 
 
 def test_raw_finding_patch_is_rejected_and_points_to_helper():
     """A raw PATCH to findings/{slug} is rejected and points operators at the
-    typed update-finding / reset-finding verbs.
+    typed update-finding verb (reset-finding folded into
+    ``update-finding --status draft`` in the 2026-07 CLI consolidation).
 
     The generic ``patch`` verb was removed in WS5, but the ``_RAW_ENDPOINT_RULES``
     redirect survives as the client-layer guard, so this asserts the guard
@@ -1749,19 +1742,18 @@ def test_raw_finding_patch_is_rejected_and_points_to_helper():
         "PATCH", "findings/VA-001", {"workflow_status": "draft"}
     )
     assert error is not None
-    assert "update-finding" in error
-    assert "reset-finding" in error
-    assert "vigil assess contract update-finding" in error
-    assert "vigil assess contract reset-finding" in error
+    assert "finding update" in error
+    assert "finding update <slug> --status draft" in error
+    assert "vigil assess contract finding update" in error
 
 
 def test_contract_prints_record_finding_contract(capsys):
     module = _load_contract_module()
 
-    module.run(SimpleNamespace(name="record-finding"))
+    module.run(SimpleNamespace(name="finding", variant=["record"]))
 
     out = capsys.readouterr().out
-    assert "Command: record-finding" in out
+    assert "Command: finding record" in out
     assert "Schema: finding-record.schema.json" in out
     assert "Helper defaults:" in out
     assert "workflow_status = active" in out
@@ -1770,24 +1762,27 @@ def test_contract_prints_record_finding_contract(capsys):
     assert "Examples:" in out
 
 
-def test_contract_prints_reset_finding_contract(capsys):
+def test_contract_update_finding_documents_reopen_fold(capsys):
+    # reset-finding folded into update-finding --status draft (2026-07 CLI
+    # consolidation); the update-finding contract documents the reopen flow.
     module = _load_contract_module()
 
-    module.run(SimpleNamespace(name="reset-finding"))
+    module.run(SimpleNamespace(name="finding", variant=["update"]))
 
     out = capsys.readouterr().out
-    assert "Command: reset-finding" in out
+    assert "Command: finding update" in out
+    assert "--status draft" in out
     assert "reopen" in out.lower()
-    assert "vigil assess reset-finding <slug>" in out
 
 
 def test_contract_prints_code_record_analysis_contract(capsys):
+    # code-record-analysis folded into `code-record analysis` (two-token verb).
     module = _load_contract_module()
 
-    module.run(SimpleNamespace(name="code-record-analysis"))
+    module.run(SimpleNamespace(name="code-record", variant="analysis"))
 
     out = capsys.readouterr().out
-    assert "Command: code-record-analysis" in out
+    assert "Command: code-record analysis" in out
     assert "Schema: code-analysis-result.schema.json" in out
     assert "queue_item_id" in out
     assert "file_id = derived by the backend from queue_item_id" in out
@@ -1797,10 +1792,10 @@ def test_contract_prints_code_record_analysis_contract(capsys):
 def test_contract_prints_record_intel_variant_contract(capsys):
     module = _load_contract_module()
 
-    module.run(SimpleNamespace(name="record-intel", variant="tech-component"))
+    module.run(SimpleNamespace(name="intel", variant=["record", "tech-component"]))
 
     out = capsys.readouterr().out
-    assert "Command: record-intel tech-component" in out
+    assert "Command: intel record tech-component" in out
     assert "Schema: intel-tech-component.schema.json" in out
     assert "Required top-level fields:" in out
     assert "component" in out
@@ -1811,12 +1806,12 @@ def test_verify_finding_help_is_rendered_from_contract_registry(capsys):
     cli = _load_cli_module()
 
     with pytest.raises(SystemExit) as excinfo:
-        cli.main(["verify-finding", "--help"])
+        cli.main(["finding", "verify", "--help"])
 
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
-    assert "vigil assess verify-finding <slug> --disposition confirmed --reason" in out
-    assert "vigil assess contract verify-finding" in out
+    assert "vigil assess finding verify <slug> --disposition confirmed --reason" in out
+    assert "vigil assess contract finding verify" in out
     assert "Contract:" not in out
 
 
@@ -1824,16 +1819,18 @@ def test_update_finding_help_drops_patch_finding_alias(capsys):
     cli = _load_cli_module()
 
     with pytest.raises(SystemExit) as excinfo:
-        cli.main(["update-finding", "--help"])
+        cli.main(["finding", "update", "--help"])
 
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
-    assert "vigil assess update-finding <slug> --inline" in out
+    assert "vigil assess finding update <slug> --inline" in out
     assert "patch-finding" not in out
 
 
-def test_kill_finding_builds_false_positive_payload_from_flags(monkeypatch, tmp_path, capsys):
-    module = _load_kill_finding_module()
+def test_verify_finding_builds_false_positive_payload_from_flags(monkeypatch, tmp_path, capsys):
+    # kill-finding folded into `verify-finding --disposition false_positive`
+    # (2026-07 CLI consolidation): the FP kill fields ride the verify verb.
+    module = _load_verify_finding_module()
 
     monkeypatch.setattr(
         module,
@@ -1871,10 +1868,13 @@ def test_kill_finding_builds_false_positive_payload_from_flags(monkeypatch, tmp_
         SimpleNamespace(
             engagement_dir=tmp_path,
             finding_slug="VA-001",
-            payload=None,
+            payload_file=None,
             inline_payload=None,
+            disposition="false_positive",
             reason_text="Guard blocks the path",
             reason_code="manual-kill",
+            new_severity=None,
+            narrative="",
             kill_reason="validate_length() enforces an 8KB cap",
             kill_check=2,
             evidence_ref="findings.md",
@@ -1954,7 +1954,7 @@ def test_record_finding_reports_normalized_contract_errors_before_backend(monkey
     assert "payload.details.evidence is required" in err
     assert "payload.details.impact is required" in err
     assert "workflow_status = active" in err
-    assert "vigil assess contract record-finding" in err
+    assert "vigil assess contract finding record" in err
 
 
 def test_update_finding_patches_by_slug_from_flags(monkeypatch, tmp_path):
@@ -2023,8 +2023,10 @@ def test_update_finding_patches_by_slug_from_flags(monkeypatch, tmp_path):
     assert captured["payload"]["details"] == {"impact": "limited"}
 
 
-def test_reset_finding_reopens_to_draft(monkeypatch, tmp_path):
-    module = _load_reset_finding_module()
+def test_update_finding_reopens_to_draft(monkeypatch, tmp_path):
+    # reset-finding folded into `update-finding --status draft` (2026-07 CLI
+    # consolidation): reopening for re-triage is a workflow_status patch.
+    module = _load_update_finding_module()
 
     monkeypatch.setattr(
         module,
@@ -2062,14 +2064,29 @@ def test_reset_finding_reopens_to_draft(monkeypatch, tmp_path):
         SimpleNamespace(
             engagement_dir=tmp_path,
             finding_slug="VA-003",
-            workflow_status="draft",
+            inline_payload=None,
+            payload_file=None,
+            title=None,
             severity=None,
-            reason_text="Needs another review pass",
-            reason_code="retriage",
-            artifact_ref="review.json",
+            workflow_status="draft",
+            submission_status=None,
+            defect_family=None,
+            root_cause_key=None,
+            auth_context=None,
+            canonical_location=None,
+            summary=None,
+            evidence_ref=None,
             notes="Undoing prior false positive",
             source_name="operator",
+            reason_code="retriage",
+            reason_text="Needs another review pass",
+            artifact_ref="review.json",
+            expected_row_version=None,
+            details_inline=None,
             provenance_inline='{"reviewed_by":"operator"}',
+            notes_replace=False,
+            details_replace=False,
+            evidence_type=None,
         )
     )
 

@@ -3,7 +3,10 @@
 - **Status:** Accepted — implemented. Code: `agent/scripts/assess/lib/classify_buckets.py` (the `_context_bonus` boost layer + the optional `url`/`source`/`live_status` kwargs on `classify_row`/`classify_from_fields`, the 9 net-new path/param buckets + the `cloud_metadata` regex bucket + the `_FULL_URL_REGEX_BUCKETS` pass, the `path_has_privileged_action` predicate, the Part 6 param/extension additions, and the default-OFF `demote_dead_archive` path) + `agent/scripts/assess/lib/vuln_taxonomy.py` (`GF_BUCKET_TO_CLASS` additions) + `agent/scripts/assess/lib/classify.py` / `db.py` / `candidate_records.py` (typer + ingest wiring). Shipped TDD.
 - **Date:** 2026-06-29 (decided 2026-06-29).
 - **Deciders:** Project owner + Claude.
-- **Supersedes / relates to:** the second wave on top of **ADR 0004** (deterministic-first modern surface taxonomy) — it inherits every mechanism ADR 0004 established (the single declaration-ordered `_BUCKETS` pass, boundary-anchored `fragment_in_path`, the regex-bucket mechanism, the `_TYPE_FLOOR`, and soundness override #9 "no regression"). Implementation plan: `docs/plans/classify-context-and-surface-buckets-2026-06.md`. Per-bucket accept/override rationale: `agent/references/gf-patterns/DRIFT.md` (section "Accepted Bucket-Expansion Decisions (2026-06 context + surface buckets)"). Extends ADR 0001 ("no silent drops") to URL context.
+- **Supersedes / relates to:** the second wave on top of **ADR 0004**
+  (deterministic-first modern surface taxonomy). Per-bucket accept/override
+  rationale lives in `agent/references/gf-patterns/DRIFT.md`. Extends ADR 0001
+  ("no silent drops") to URL context.
 
 ---
 
@@ -69,7 +72,6 @@ These are surgical recall + context gaps, not a wholesale re-score: most of the 
 4. **Adding `code` to `rce` and the generic data extensions to `interestingext` for maximal recall.** Rejected: `code` at weight 50 would mis-cluster every OAuth authorization-code callback as `gf:rce`, and `.xml`/`.json`/`.csv`/… would flood `interestingext` with content already typed `data`. Both are documented FP guards.
 
 ## References
-- `docs/plans/classify-context-and-surface-buckets-2026-06.md` — the implementation plan (Part 1 verdict on the prior 6 issues; Parts 2–3 the issues + 16 classifications; Part 4 the cross-cutting fixes incl. the boost-only context layer and Fix 4 (compound keys, landed tiered); Part 5 the sequenced rollout; Part 6 the param/extension enrichment).
 - `agent/references/gf-patterns/DRIFT.md` — per-bucket accept/override rationale: the context layer, the 10 new buckets with canonical classes, the `privileged_action` precision override, the `cloud_metadata` full-URL match, the tiered Fix 4 mechanism, and the Part 6 FP guards.
 - `agent/references/gf-patterns/*.md` — per-bucket reference docs (`dotnet_handler.md`, `wordpress.md`, `cms_db_admin.md`, `servicenow.md`, `idp_admin.md`, `secret_vault.md`, `devops_console.md`, `nosqli.md`, `privileged_action.md`, `cloud_metadata.md`).
 - `agent/scripts/assess/lib/vuln_taxonomy.py` — `GF_BUCKET_TO_CLASS` (the drift-gated bucket→class map).

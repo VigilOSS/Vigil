@@ -15,8 +15,8 @@ one-line ``BLOCKED: <reason>`` marker from EITHER read shape:
 The marker is gated strictly on ``verification_disposition == 'blocked'`` — a
 block_reason may sit on a non-blocked finding (a pending hold), and labelling
 that BLOCKED would be wrong. These pin the marker semantics and that
-`list_findings._finding_row` appends it. (unblock_requirements surfacing is
-deferred — see roadmap.md.)
+`list_findings._finding_row` appends it. The compact projection intentionally
+omits richer prerequisite metadata, which remains available on finding detail.
 """
 from __future__ import annotations
 

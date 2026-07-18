@@ -1,4 +1,4 @@
-"""vigil assess record-finding — most complex command.
+"""vigil assess finding record — most complex command.
 
 Slug allocate → normalize defaults → schema validate → POST → emit event.
 """
@@ -19,9 +19,9 @@ from assess.lib.schema_validation import collect_validation_errors, load_schema
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
-        "record-finding",
+        "record",
         help="Record a structured finding",
-        epilog="See `vigil assess contract record-finding` for the canonical payload shape and examples.",
+        epilog="See `vigil assess contract finding record` for the canonical payload shape and examples.",
     )
     p.add_argument("agent_name", help="Agent name (e.g. vulnerability-analyst)")
     p.add_argument("json_file", help="Path to finding JSON file")
@@ -242,7 +242,7 @@ def _refuse_clobber(existing: dict) -> None:
         f"{existing_status} finding.\n"
         f"  - Distinct sibling on the same root cause? Give it a DISTINCT root_cause_key/"
         f"defect_family, then attach it after recording with "
-        f"`vigil assess link-finding <this-slug> --root-cause {existing_slug}`.\n"
+        f"`vigil assess finding link <this-slug> --root-cause {existing_slug}`.\n"
         f"  - Intend to MODIFY {existing_slug}? Re-run with `--update {existing_slug}`.",
         file=sys.stderr,
     )
@@ -328,16 +328,16 @@ def _report_validation_errors(payload: dict, errors: list[str]) -> None:
     for error in errors:
         print(f"  - {error}", file=sys.stderr)
 
-    hints = common_mistake_hints("record-finding", payload)
+    hints = common_mistake_hints("finding record", payload)
     if hints:
         print("Common legacy-field fixes:", file=sys.stderr)
         for hint in hints:
             print(f"  - {hint}", file=sys.stderr)
 
     print("", file=sys.stderr)
-    print("Run `vigil assess contract record-finding` for the canonical helper contract.", file=sys.stderr)
+    print("Run `vigil assess contract finding record` for the canonical helper contract.", file=sys.stderr)
     print("", file=sys.stderr)
-    print(render_contract("record-finding"), file=sys.stderr)
+    print(render_contract("finding record"), file=sys.stderr)
     sys.exit(1)
 
 

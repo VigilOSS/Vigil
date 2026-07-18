@@ -100,7 +100,7 @@ Second deep sweep (xhigh-corrected): 56 actionable templates (112 rows) — majo
 static-looking Salesforce/Siteforce `/sfsites/l/{json}/...` loader-state URLs upgraded from
 `static-low` to `deserialization` by GPT-5.5 xhigh review. Third targeted sweep: 199 actionable
 templates (199 rows), same Aura pattern. The `/sfsites/` path fragment was added specifically to
-capture this Siteforce pattern. See `docs/plans/research/classify-surface-2026-06/README.md` §4b
+capture this Siteforce pattern. See `docs/research/classify-surface-2026-06/README.md` §4b
 (deserialization cross-corpus validation) and the per-sweep tables in that README.
 
 ## Sources

@@ -880,7 +880,7 @@ class FindingRecordRequest(BaseModel):
     @model_validator(mode="after")
     def _root_cause_links_use_helper(self) -> "FindingRecordRequest":
         if any(link.link_kind == state_manager.ROOT_CAUSE_LINK_KIND for link in self.links):
-            raise ValueError("root_cause links must be created with link-finding / PUT /findings/{slug}/root-cause")
+            raise ValueError("root_cause links must be created with `finding link` / PUT /findings/{slug}/root-cause")
         return self
 
     @model_validator(mode="after")
