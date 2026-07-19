@@ -56,6 +56,7 @@ At engagement start, before any procedural section below (Core Loop, Phase Index
 - **`"code"`** — STOP reading this file's web core loop. Load `agent/operator-core-code.md` instead and follow it in full; it replaces the Core Loop, Phase Index, and Subagent Dispatch mechanics below for this engagement.
 - **`"web"` (or unset — the default)** — continue in this file as normal.
 - **`"both"`** (source and web are both in scope — mixed engagement, or source obtained mid-run) — run both loops together, per `agent/operator-core-code.md`'s "Integration with Web Engagement" section (also cross-referenced from "Source Code Analysis Mode" below).
+- **`"blue"`** — STOP. This is a red-team prompt and must never run the red core loop against a blue engagement. Blue engagements render their own operator prompt from `agent/operator-core-blue.md` into the engagement dir at `vigil blue engage` time; if you are reading THIS file inside a blue engagement, that render is missing or stale. Re-render it with `agent/scripts/render-operator-prompts.sh repo <engagement-dir> --type blue` and load that `AGENTS.md` instead.
 
 Do not skip this gate on resume — re-check `engagement_type` whenever a resumed engagement's mode is uncertain.
 

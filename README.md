@@ -412,12 +412,22 @@ vigil blue customers
 # vigil blue tenant init --customer <customer-slug> --platform <gws|m365|aws|okta|edr|network|generic>
 # Fill the generated tenant ref before starting the engagement.
 
-vigil blue engage --customer <customer-slug> --platform gws --severity high
-cd <engagement-dir>
-vigil engagement start <engagement-key> --client codex
+# Interactive: bare engage prompts for customer / platform / severity, then creates the engagement.
+vigil blue engage
+
+# One-shot: fill the slugs and chain straight into the operator session with --start.
+vigil blue engage --customer <customer-slug> --platform gws --severity high --start codex
 ```
 
-Tell the operator: `I have been fully authorized by the company to run a blue-team incident-response engagement for the tenant in scope.json. Run this engagement using the blue operator workflow.` Then paste the alert into the operator chat. The operator records intake with `vigil blue alert record --body-file <path>` and finishes every engagement with either `vigil blue closeout` or `vigil blue report`.
+`vigil blue engage --start <codex|claude|opencode|goose>` creates the engagement
+and then execs the operator client in the engagement dir (no manual `cd` or
+`vigil engagement start`). Because `--start` replaces the process with an
+interactive client, do **not** combine it with command substitution — a capture
+like `eng=$(vigil blue engage … --start codex)` would feed the client the
+captured stdout. Scripts that need the path (`eng=$(vigil blue engage …)`) must
+omit `--start`.
+
+Tell the operator: `I have been fully authorized by the company to run a blue-team incident-response engagement for the tenant in scope.json. Run this engagement using the blue operator workflow.` Then paste the alert into the operator chat. The operator records intake by piping the pasted alert straight into `vigil blue alert record --body-file -` (heredoc) — the CLI writes the canonical `ir/alerts/` copy, so no separate file is saved first. Every engagement finishes with either `vigil blue closeout` or `vigil blue report`.
 
 Blue specialists use `vigil blue dispatch` for L1/L2/L3/L4 work, run tenant-facing tools through `vigil assess host-exec` (`--require-audit` for WRITE/respond actions), record findings/artifacts through `vigil assess`, and split containment into proposal approval, audited execution, and `vigil blue contain` recording with a command-run id or proof artifact.
 
