@@ -6269,16 +6269,263 @@ def test_blue_engage_guides_operator_to_start_session_and_paste_alert(
             severity="high",
             source=None,
             skip_permissions=True,
+            start=None,
         ),
         tmp_path,
     )
 
     captured = capsys.readouterr()
+    # stdout stays the bare engagement path (the eng=$(vigil blue engage …) contract).
     assert captured.out.strip() == str(created_path)
+    # Single blue footer on stderr — no red-infra noise, no duplicate paste hint.
     assert "vigil blue alert paste" not in captured.err
-    assert f"cd {created_path}" in captured.err
+    assert "[vigil blue] engagement: eng-1" in captured.err
     assert "vigil engagement start eng-1 --client codex" in captured.err
+    assert "Then paste the alert into the operator chat" in captured.err
+    assert "vigil blue alert record" in captured.err
+    assert (
+        "Shortcut next time: vigil blue engage --customer acme "
+        "--platform gws --start codex" in captured.err
+    )
+    # The red footer (mitmproxy/oob plumbing) must never leak into a blue engage.
+    assert "mitmproxy" not in captured.err
+    assert "oob" not in captured.err
+
+
+def test_blue_engage_start_chains_into_operator_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from vigil_cli import blue as blue_module
+
+    tenant_root = tmp_path / "agent" / "references" / "tenants"
+    tenant_root.mkdir(parents=True)
+    (tenant_root / "acme-workspace.md").write_text("tenant\n", encoding="utf-8")
+    created_path = tmp_path / "agent" / "engagements" / "eng-1"
+
+    monkeypatch.setattr(
+        blue_module,
+        "create_engagement",
+        lambda _options: SimpleNamespace(path=created_path, key="eng-1"),
+    )
+    start_calls: list[tuple] = []
+    monkeypatch.setattr(
+        blue_module,
+        "start_engagement",
+        lambda *args: start_calls.append(args),
+    )
+
+    blue_module._cmd_engage(
+        SimpleNamespace(
+            customer="acme",
+            platform="gws",
+            severity="high",
+            source=None,
+            skip_permissions=True,
+            start="codex",
+        ),
+        tmp_path,
+    )
+
+    captured = capsys.readouterr()
+    # stdout is still just the path — flushed before the (mocked) execv launcher.
+    assert captured.out.strip() == str(created_path)
+    # start_engagement is the final statement: (install_root, path, client, []).
+    assert start_calls == [(tmp_path, created_path, "codex", [])]
+    assert "[vigil blue] launching operator session (codex)" in captured.err
     assert "Paste the alert into the operator chat" in captured.err
+    assert "mitmproxy" not in captured.err
+    assert "oob" not in captured.err
+
+
+def test_blue_engage_non_tty_without_flags_lists_combos(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vigil_cli import blue as blue_module
+
+    tenant_root = tmp_path / "agent" / "references" / "tenants"
+    tenant_root.mkdir(parents=True)
+    (tenant_root / "acme-workspace.md").write_text("tenant\n", encoding="utf-8")
+
+    # pytest's captured stdin isn't a TTY; make that explicit and deterministic.
+    monkeypatch.setattr(blue_module.sys, "stdin", SimpleNamespace(isatty=lambda: False))
+
+    with pytest.raises(SystemExit, match="Available customer/platform combinations"):
+        blue_module._cmd_engage(
+            SimpleNamespace(
+                customer=None,
+                platform=None,
+                severity=None,
+                source=None,
+                skip_permissions=False,
+                start=None,
+            ),
+            tmp_path,
+        )
+
+
+def test_blue_engage_interactive_picker_numbered_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vigil_cli import blue as blue_module
+
+    tenant_root = tmp_path / "agent" / "references" / "tenants"
+    tenant_root.mkdir(parents=True)
+    (tenant_root / "acme-workspace.md").write_text("tenant\n", encoding="utf-8")
+    (tenant_root / "acme-m365.md").write_text("tenant\n", encoding="utf-8")
+    created_path = tmp_path / "agent" / "engagements" / "eng-1"
+
+    seen: dict[str, object] = {}
+
+    def fake_create(options: object) -> SimpleNamespace:
+        seen["customer"] = options.customer
+        seen["platforms"] = options.platforms
+        seen["severity"] = options.severity_hint
+        return SimpleNamespace(path=created_path, key="eng-1")
+
+    monkeypatch.setattr(blue_module, "create_engagement", fake_create)
+    # Force the numbered-menu fallback (no fzf) and a TTY so the picker runs.
+    monkeypatch.setattr(blue_module.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(blue_module.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    responses = iter(["1", "2", "high"])  # customer=acme, platform=m365, severity=high
+    monkeypatch.setattr("builtins.input", lambda *_args, **_kwargs: next(responses))
+
+    blue_module._cmd_engage(
+        SimpleNamespace(
+            customer=None,
+            platform=None,
+            severity=None,
+            source=None,
+            skip_permissions=True,
+            start=None,
+        ),
+        tmp_path,
+    )
+
+    assert seen["customer"] == "acme"
+    assert seen["platforms"] == ["m365"]
+    assert seen["severity"] == "high"
+
+
+def test_engagement_create_blue_skips_red_footer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from vigil_cli import docker as docker_mod
+    from vigil_cli import engagements as engagements_module
+    from vigil_cli import oob as oob_mod
+    from vigil_cli.engagements import CreateEngagementOptions, create_engagement
+
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+    _isolate_orchestrator_url(monkeypatch)
+    # Deliberately do NOT patch _emit_post_create_footer — the type-gate itself
+    # must suppress the red footer for blue engagements.
+    monkeypatch.setattr(engagements_module, "_verify_backend_install_root", lambda *_a, **_k: None)
+    monkeypatch.setattr(docker_mod, "container_running", lambda *_a, **_k: False)
+    monkeypatch.setattr(oob_mod, "oob_status", lambda *_a, **_k: {"state": "stopped"})
+    monkeypatch.setattr(
+        engagements_module.subprocess,
+        "run",
+        lambda *_a, **_k: SimpleNamespace(returncode=0),
+    )
+
+    create_engagement(
+        CreateEngagementOptions(
+            install_root=install_root,
+            engagement_type="blue",
+            customer="acme",
+            platforms=["gws"],
+            tenant_reference_paths=["agent/references/tenants/acme-workspace.md"],
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert "mitmproxy" not in captured.err
+    assert "oob" not in captured.err
+    assert "vigil engagement start" not in captured.err
+
+
+def test_blue_alert_record_body_file_stdin_reads_piped_alert(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from vigil_cli import blue as blue_module
+
+    eng_dir = tmp_path / "engagement"
+    _write_blue_scope(eng_dir)
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
+    monkeypatch.setattr(
+        blue_module,
+        "_run_assess",
+        lambda _install_root, _eng_dir, assess_args, **_kwargs: calls.append(assess_args) or 0,
+    )
+    body = '{"alert_id":"AL-9","actor":"sam@example.com"}\n'
+    monkeypatch.setattr(
+        blue_module.sys,
+        "stdin",
+        SimpleNamespace(read=lambda: body, isatty=lambda: False),
+    )
+
+    blue_module._cmd_alert_record(
+        SimpleNamespace(
+            body_file="-",
+            external_id="AL-9",
+            severity=None,
+            source=None,
+            engagement_key=None,
+            select=False,
+        ),
+        tmp_path,
+    )
+
+    scope = json.loads((eng_dir / "scope.json").read_text(encoding="utf-8"))
+    alert_md = scope["alert_metadata"]
+    assert alert_md["raw_body"] == body
+    assert alert_md["parsed"]["format"] == "json"
+
+    raw_path = eng_dir / "ir" / "alerts" / "AL-9.txt"
+    assert raw_path.read_text(encoding="utf-8") == body
+    assert ["artifact", "register", str(raw_path), "--kind", "alert_intake", "--sensitive"] in calls
+    assert capsys.readouterr().out.strip() == str(raw_path)
+
+
+def test_blue_alert_record_stdin_empty_body_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vigil_cli import blue as blue_module
+
+    eng_dir = tmp_path / "engagement"
+    _write_blue_scope(eng_dir)
+
+    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
+    monkeypatch.setattr(blue_module, "_run_assess", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(
+        blue_module.sys,
+        "stdin",
+        SimpleNamespace(read=lambda: "   \n", isatty=lambda: False),
+    )
+
+    with pytest.raises(SystemExit, match="stdin body was empty"):
+        blue_module._cmd_alert_record(
+            SimpleNamespace(
+                body_file="-",
+                external_id=None,
+                severity=None,
+                source=None,
+                engagement_key=None,
+                select=False,
+            ),
+            tmp_path,
+        )
 
 
 def test_blue_alert_record_body_file_updates_scope_and_registers_artifact(

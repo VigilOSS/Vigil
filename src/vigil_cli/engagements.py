@@ -610,7 +610,11 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
     _write_launchers(agent_root, eng_dir, client_kind, skip_permissions=options.skip_permissions)
     _emit_bootstrap_scope_summary(scope)
     _verify_backend_install_root(install_root, eng_dir)
-    _emit_post_create_footer(key)
+    # Blue engagements own their own footer (blue.py:_cmd_engage) and must not
+    # emit the red-infra footer (mitmproxy/oob are irrelevant to incident
+    # response). Skip entirely for blue so blue.py has sole footer ownership.
+    if options.engagement_type != "blue":
+        _emit_post_create_footer(key)
     return CreatedEngagement(key=key, path=eng_dir)
 
 
@@ -620,7 +624,8 @@ def _emit_post_create_footer(key: str, *, runner: docker.Runner = docker.run_com
     Reuses the existing helpers from ``docker`` and ``oob`` so we don't
     re-implement liveness probes. stdout still carries just the path so
     ``eng=$(vigil engagement create ...)`` keeps working — this writes to
-    stderr only.
+    stderr only. Blue engagements skip this entirely — blue.py owns its own
+    footer (no mitmproxy/oob lines).
     """
     try:
         mitm_running = docker.container_running("vigil-proxy", runner=runner)

@@ -145,7 +145,7 @@ under `vigil blue <subcommand>` and are thin wrappers over the generic assess in
 |------|---------|
 | `vigil blue customers [--platform <p>] [--json]` | List customers/platforms with tenant refs available for blue engagements. |
 | `vigil blue engage --customer <slug> --platform <p[,p...]>` | Create blue engagement; resolve tenant refs into `scope.json:tenant_reference_paths[]`. |
-| `vigil blue alert record --body-file <path>` | Record the alert body pasted into operator chat; write to `scope.json:alert_metadata`; auto-register as `kind=alert_intake --sensitive` artifact; log the first `activity_entries` row. |
+| `vigil blue alert record --body-file -` | Record the alert body pasted into operator chat by piping it straight in via heredoc (`--body-file -` reads stdin); the CLI writes the canonical `ir/alerts/` copy — do **not** save a separate file first. Writes `scope.json:alert_metadata`; auto-registers as `kind=alert_intake --sensitive` artifact; logs the first `activity_entries` row. |
 | `vigil blue show <key>` | Status + alert summary + finding table + last 10 activity entries. |
 | `vigil blue dispatch --role <role> --skills <names> [--tier L1|L2|L3|L4]` | Wraps `vigil assess agent start`; auto-injects tenant-ref paths into the dispatch prompt; writes `tier` on the dispatch row. |
 | `vigil blue tier <finding-slug> --tier L1|L2|L3|L4 [--notes ...]` | Records current tier on `details_json`. |
@@ -170,7 +170,13 @@ overrides with a stated reason.
 - **Definition of Done:**
   - [ ] `scope.json` written with `engagement_type=blue`, `customer`, `platforms[]`, `current_phase=intake`.
   - [ ] Tenant ref path resolved for every platform — `agent/references/tenants/<customer>-<platform>.md` exists on disk for each entry in `scope.json:tenant_reference_paths[]`. Missing tenant ref → **halt** with a message naming the expected path.
-  - [ ] Alert pasted into operator chat, saved under `ir/alerts/`, and recorded with `vigil blue alert record --body-file <path>` so `scope.json:alert_metadata.{source, external_id, received_at, severity_hint, raw_body, parsed}` is populated.
+  - [ ] Alert pasted into operator chat and recorded by piping it straight into `vigil blue alert record --body-file -` via heredoc — the CLI writes the canonical `ir/alerts/` copy, so do **not** save a separate file first — populating `scope.json:alert_metadata.{source, external_id, received_at, severity_hint, raw_body, parsed}`. Example:
+
+    ```
+    vigil blue alert record --body-file - --external-id <id> <<'ALERT'
+    <pasted alert text>
+    ALERT
+    ```
   - [ ] Alert artifact auto-registered as `kind=alert_intake --sensitive` so it appears in resume-brief and `artifact search`.
   - [ ] First `activity_entries` row logged with `action=alert_intake`.
 - **Transition:** `vigil assess transition-phase triage`
@@ -374,7 +380,7 @@ specialist's would have been.
 `vigil assess` helpers, never raw bash):
 
 - **Tenant-ref resolution** — `vigil blue customers`; missing → `vigil blue tenant init`
-- **Alert intake mechanics** — save the chat-pasted alert under `ir/alerts/` and run `vigil blue alert record --body-file <path>`
+- **Alert intake mechanics** — pipe the chat-pasted alert straight into `vigil blue alert record --body-file -` via heredoc; the CLI writes the canonical `ir/alerts/` copy — do **not** save a separate file first (e.g. `vigil blue alert record --body-file - --external-id <id> <<'ALERT'` … `ALERT`)
 - **Resume-brief read** — `vigil assess resume-brief` and scoped variants
 - **Backend-write helpers for specialist-produced state** — `finding record`, `intel record`, `finding link`, `finding verify` (incl. `--disposition false_positive`), `finding update`, `agent decision`, `log`
 - **Containment approval/execution** — `vigil blue propose-contain` is specialist-side; `vigil blue contain` is operator-side. Operator approves; specialist composes the underlying platform command via `host-exec`
