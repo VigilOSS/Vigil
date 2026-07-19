@@ -16,7 +16,8 @@ from .backup import latest_backup
 from .image_freshness import proxy_image_drift
 from .config import get_config_value
 from .engagements import list_engagements
-from .oob import DEFAULT_OOB_DOMAIN, oob_status
+from .oob import oob_options, oob_status
+from .oob_tenants import load_tenant_route
 from .orchestrator import orchestrator_status
 from .paths import default_runtime_container, engagements_root, resolve_orchestrator_base_url
 from .runtime import runtime_mounts_ok, runtime_resource_state, runtime_status
@@ -205,7 +206,7 @@ def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_com
     # C36: surface legacy engagement_type=both engagements that predate
     # dual-track phase tracking. They are not broken — they just have no
     # `code_phase` field, which makes `vigil assess transition-phase --track
-    # code` confusing. `vigil engagement migrate-scope` sets the default.
+    # code` confusing. Setting code_phase=ingest in scope.json clears it.
     from .engagements import _both_engagements_missing_code_phase
     legacy_both_missing_code_phase = [
         eng_dir.name for eng_dir in _both_engagements_missing_code_phase(install_root)
@@ -217,11 +218,7 @@ def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_com
     mitm_image_drift = mitm_running and proxy_image_drift(runner=runner)
     backup = latest_backup(install_root)
     oob_token_configured = bool(os.environ.get("VIGIL_FRP_TOKEN") or get_config_value("oob.frp_token"))
-    oob_domain = (
-        os.environ.get("VIGIL_OOB_DOMAIN")
-        or get_config_value("oob.domain", DEFAULT_OOB_DOMAIN)
-        or DEFAULT_OOB_DOMAIN
-    )
+    resolved_oob = oob_options(install_root)
     return {
         "install_root": str(install_root),
         "install_exists": install_root.exists(),
@@ -245,7 +242,14 @@ def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_com
         },
         # deep=False keeps `vigil status` cheap (no per-client log reads / DNS probe);
         # `vigil oob status` runs the full health check.
-        "oob": oob_status(oob_domain=oob_domain, runner=runner, deep=False) | {"frp_token_configured": oob_token_configured},
+        "oob": oob_status(
+            oob_domain=resolved_oob.oob_domain,
+            tenant_prefix=resolved_oob.tenant_prefix,
+            dns_remote_port=resolved_oob.dns_remote_port,
+            reverse_remote_port=resolved_oob.reverse_remote_port,
+            runner=runner,
+            deep=False,
+        ) | {"frp_token_configured": oob_token_configured},
         "backup": {
             "latest": str(backup.path) if backup else None,
             "modified_at": backup.modified_at if backup else None,
@@ -299,6 +303,7 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
     print(f"mitmproxy\t{mitm_dict.get('state', '-')}\tca_volume={mitm_dict.get('ca_volume')}{drift_note}")
     print(
         f"oob\t{oob.get('state', '-')}\tclients={len(oob.get('clients') or [])}"
+        f"\ttenant={oob.get('tenant_prefix') or '-'}\tports={oob.get('port_range') or '-'}"
         f"\tdomain={oob.get('domain') or '-'}"
     )
     print(f"backup\t{backup['latest'] or '-'}")  # type: ignore[index]
@@ -307,7 +312,8 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
         preview = ", ".join(legacy_keys[:3]) + (" ..." if len(legacy_keys) > 3 else "")
         print(
             f"warn\t{len(legacy_keys)} legacy `engagement_type=both` engagement(s) "
-            f"missing `code_phase` ({preview}); run `vigil engagement migrate-scope`"
+            f"missing `code_phase` ({preview}); set code_phase=ingest in each "
+            "scope.json to clear this"
         )
     _print_install_staleness_warning(status.get("install_staleness"))
 
@@ -395,6 +401,7 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
     checks.append(Check("backup-latest", "OK" if backup else "MISSING", str(backup.path) if backup else ""))
     checks.append(_failed_audit_marker_check(install_root))
     checks.append(_host_recon_tools_check())
+    checks.append(_oob_tenant_check(install_root))
     checks.append(Check("oob.frp_token", "OK" if os.environ.get("VIGIL_FRP_TOKEN") or get_config_value("oob.frp_token") else "MISSING"))
     return checks
 
@@ -403,6 +410,25 @@ def print_doctor(checks: list[Check]) -> None:
     for check in checks:
         suffix = f"\t{check.detail}" if check.detail else ""
         print(f"{check.status}\t{check.name}{suffix}")
+
+
+def _oob_tenant_check(install_root: Path) -> Check:
+    try:
+        route = load_tenant_route(install_root)
+    except SystemExit as exc:
+        return Check("oob.tenant-routing", "FAIL", str(exc))
+    if route is None:
+        return Check(
+            "oob.tenant-routing",
+            "WARN",
+            "legacy install has no tenant metadata; run `vigil install` to pin its current route",
+        )
+    mode = "legacy-pinned" if route.legacy else "tenant"
+    return Check(
+        "oob.tenant-routing",
+        "OK",
+        f"{mode}={route.tenant_prefix} domain={route.oob_domain} ports={route.dns_remote_port}-{route.reverse_remote_port}",
+    )
 
 
 def _host_recon_tools_check() -> Check:

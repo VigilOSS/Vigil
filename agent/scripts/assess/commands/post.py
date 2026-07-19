@@ -22,7 +22,7 @@ def register(subparsers) -> None:
             "  vigil assess post blocked-techniques payload.json"
         ),
     )
-    p.add_argument("endpoint", help="e.g. credentials, credential-tests, access-records (probe-runs is redirected to record-probe/record-attempt)")
+    p.add_argument("endpoint", help="e.g. credentials, credential-tests, access-records (raw probe-runs POST is disabled here — use record-probe)")
     p.add_argument("payload", nargs="?", help="Path to JSON payload file or inline JSON object/array")
     p.add_argument("--inline", dest="inline_payload", help="Raw JSON payload text")
     p.set_defaults(func=run)

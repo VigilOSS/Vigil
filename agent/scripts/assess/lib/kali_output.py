@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from . import scope as scope_lib
 from .kali_tool_naming import _SHELL_BINARIES
 
 
@@ -980,6 +981,27 @@ def _shell_script_index(cmd: list[str]) -> Optional[int]:
     return None
 
 
+def _wrapped_shell_script_index(cmd: list[str]) -> Optional[int]:
+    """Locate a shell command string behind supported transparent launchers."""
+    offset = 0
+    current = [str(token) for token in cmd]
+    for _ in range(16):
+        local = _shell_script_index(current)
+        if local is not None:
+            return offset + local
+        if not current:
+            return None
+        head = Path(current[0]).name.lower()
+        if head not in scope_lib._LAUNCHERS:
+            return None
+        inner_index, ambiguous = scope_lib._launcher_inner_index(current, head)
+        if ambiguous or inner_index is None:
+            return None
+        offset += inner_index
+        current = current[inner_index:]
+    return None
+
+
 def _shell_segment_end(script: str, start: int) -> int:
     """First index at/after ``start`` that ends the current sub-command — the
     next unquoted top-level separator (``;`` ``|`` ``&`` newline ``)``) or
@@ -1114,7 +1136,7 @@ def _apply_required_headers(
     if not headers:
         return "noop"
 
-    script_idx = _shell_script_index(cmd)
+    script_idx = _wrapped_shell_script_index(cmd)
     if script_idx is not None:
         status, new_script = _inject_headers_into_script(cmd[script_idx], headers)
         if status == "injected":
@@ -1138,6 +1160,39 @@ def _apply_required_headers(
     if name_lower not in _REQUIRED_HEADER_INJECTABLE:
         return "warned"
 
+    existing = _existing_header_names(cmd)
+    injected = False
+    for name, value in headers.items():
+        if name.lower() in existing:
+            continue
+        cmd.extend(["-H", f"{name}: {value}"])
+        existing.add(name.lower())
+        injected = True
+    return "injected" if injected else "noop"
+
+
+def _apply_identity_headers(
+    cmd: list[str], tool_name: str, headers: dict[str, str]
+) -> str:
+    """Inject identity headers through the required-header transformer.
+
+    Existing header names win. This preserves required-attribution precedence
+    when credential material happens to carry the same header name.
+    """
+    if not headers:
+        return "noop"
+    script_idx = _wrapped_shell_script_index(cmd)
+    if script_idx is not None:
+        status, new_script = _inject_headers_into_script(cmd[script_idx], headers)
+        if status in {"injected", "noop"}:
+            cmd[script_idx] = new_script
+            return status
+        return "warned"
+    tool = tool_name.lower()
+    if tool in _REQUIRED_HEADER_FLAG_SPECS:
+        return _inject_tool_flag_headers(cmd, tool, headers)
+    if tool not in _REQUIRED_HEADER_INJECTABLE:
+        return "warned"
     existing = _existing_header_names(cmd)
     injected = False
     for name, value in headers.items():
@@ -1231,8 +1286,8 @@ def required_header_attribution_gap(
     #     name-only and does not re-canonicalize an operator's spacing)
     #   * ``{"x-bug-bounty": "handle"}`` → ``name": "value`` (a tool that threads
     #     its attribution header JSON-encoded into argv rather than as a ``-H``
-    #     flag — e.g. the ``browser`` verb hands the driver a JSON headers blob it
-    #     sets over CDP ``Network.setExtraHTTPHeaders``). Without tolerating the
+    #     flag — e.g. the ``browser`` verb hands its Playwright request router a
+    #     JSON execution plan containing the required header map). Without tolerating the
     #     JSON key/value quoting the marker is PRESENT in the command yet the
     #     backstop cannot see it and the run is falsely refused.
     # The optional quote + whitespace on each side of the colon covers all three

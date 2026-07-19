@@ -443,7 +443,7 @@ def run(args) -> None:
         cmd_i = _substitute(template, placeholder, value)
         tool_name = cmd_i[0] if cmd_i else "command"
         # The batch id + value rides in the per-row intent so a later
-        # `vigil assess list-command-runs --intent-q "sweep <id>"` recovers the
+        # `vigil assess command-run list --intent-q "sweep <id>"` recovers the
         # whole fan-out, and each row links back to ITS value.
         per_intent = f"{base_intent} [sweep {batch_id[:8]} value={value}]"
         result = kali_exec(cmd_i, tool_name=tool_name, intent=per_intent, **kwargs)

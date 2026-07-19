@@ -219,14 +219,18 @@ def _execute_plan(plan: list[InstallStep], runner: Runner) -> list[tuple[Install
 
 
 def _next_commands(install_root: Path, target: str | None, hosts: str | None) -> list[str]:
+    # Shell-quote every interpolated value so the printed command is safe to
+    # copy-paste: a target with `&` in its query string, or whitespace in the
+    # host list / install path, would otherwise split or background the command
+    # and `vigil engagement create` would receive a truncated argument.
     if target:
-        create = f"vigil engagement create {target}"
+        create = f"vigil engagement create {shlex.quote(target)}"
         if hosts:
-            create += f" --hosts {hosts}"
+            create += f" --hosts {shlex.quote(hosts)}"
     else:
         create = "vigil engagement create https://target.example --hosts target.example"
     return [
-        f"vigil install {install_root}",
+        f"vigil install {shlex.quote(str(install_root))}",
         "vigil up",
         create,
         "vigil engagement start <key> --client claude",

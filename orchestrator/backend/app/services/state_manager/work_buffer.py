@@ -168,6 +168,7 @@ _WORK_ITEM_INSERT_COLUMNS: tuple[str, ...] = (
     "request_variant_id",
     "service_id",
     "coverage_item_id",
+    "application_unit_id",
     "auth_context",
     "method",
     "url",
@@ -236,6 +237,7 @@ def _upsert_work_item(connection, engagement_id: int, *, fields: dict[str, Any])
         "request_variant_id": _int_or_none(fields.get("request_variant_id")),
         "service_id": _int_or_none(fields.get("service_id")),
         "coverage_item_id": _int_or_none(fields.get("coverage_item_id")),
+        "application_unit_id": _int_or_none(fields.get("application_unit_id")),
         "auth_context": str(fields.get("auth_context") or "anonymous"),
         "method": method,
         "url": url,
@@ -282,6 +284,7 @@ def _upsert_work_item(connection, engagement_id: int, *, fields: dict[str, Any])
             request_variant_id = excluded.request_variant_id,
             service_id = excluded.service_id,
             coverage_item_id = COALESCE(excluded.coverage_item_id, assessment_work_items.coverage_item_id),
+            application_unit_id = COALESCE(excluded.application_unit_id, assessment_work_items.application_unit_id),
             auth_context = excluded.auth_context,
             method = excluded.method,
             url = excluded.url,
@@ -676,6 +679,193 @@ def fetch_work_items_by_priority(engagement_id: int, *, limit: int, agent: str) 
                 if r["type"] not in allowed_types
             ]
     return {"claimed": claimed, "non_routable": non_routable, "allowed_types": list(allowed_types)}
+
+
+_UNIT_BATCH_BY_TIER = {
+    "application": 12,
+    "app-unit": 8,
+    "endpoint-cluster": 5,
+    "thin": 2,
+}
+
+
+def _literal_like_prefix(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return escaped.rstrip("/") + "/%"
+
+
+def fetch_work_items_by_unit(
+    engagement_id: int,
+    *,
+    unit_id: int | None,
+    path: str,
+    work_class: str,
+    limit: int | None,
+    agent: str,
+) -> dict[str, Any]:
+    """Atomically claim one coherent application unit selected explicitly or by EV.
+
+    EV selection uses the depth scorer's persisted facts and only considers units
+    with pending, routable work. It never rewrites work-item priority. When the
+    operator omits ``limit``, the tier batch is reduced by recent probe saturation
+    so already-active units yield smaller follow-on batches.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    normalized_agent = (agent or "auto").strip()
+    auto_route = normalized_agent.lower() in {"auto", "routed", "route"}
+    allowed_types = (
+        _ROUTED_TYPES + _VULN_SIGNAL_FALLBACK_TYPES
+        if auto_route
+        else _agent_route(normalized_agent)
+    )
+    if allowed_types is None:
+        return {"claimed": [], "error": "not-routed-agent"}
+    if work_class and work_class not in allowed_types:
+        return {"claimed": [], "error": "class-not-routed"}
+
+    type_ph = ",".join("?" * len(allowed_types))
+    # High-signal fallback predicate — mirror fetch_work_items_by_priority so an
+    # `unknown` row is only routable when it carries a gf: vuln signal. Without it,
+    # a unit holding ONLY low-signal unknown rows satisfies the EXISTS selection
+    # and is fetched as candidates, yet every candidate is dropped by
+    # _assigned_agent_for_row (returns None) — no status changes, the same unit is
+    # re-selected on the next call, and routable work in lower-ranked units starves.
+    fallback_ph = ",".join("?" * len(_VULN_SIGNAL_FALLBACK_TYPES))
+    exists_signal_sql = (
+        f" AND (wi.type NOT IN ({fallback_ph}) "
+        "OR (wi.priority_score > 0 AND wi.cluster_key LIKE 'gf:%'))"
+    )
+    claim_signal_sql = (
+        f" AND (type NOT IN ({fallback_ph}) "
+        "OR (priority_score > 0 AND cluster_key LIKE 'gf:%'))"
+    )
+    class_sql = " AND wi.type = ?" if work_class else ""
+    claim_class_sql = " AND type = ?" if work_class else ""
+    class_params: tuple[Any, ...] = (work_class,) if work_class else ()
+    path_value = (path or "").strip()
+    unit_filter = " AND au.id = ?" if unit_id is not None else ""
+    unit_params: tuple[Any, ...] = (int(unit_id),) if unit_id is not None else ()
+    path_sql = " AND (wi.url_path = ? OR wi.url_path LIKE ? ESCAPE '\\')" if path_value else ""
+    claim_path_sql = " AND (url_path = ? OR url_path LIKE ? ESCAPE '\\')" if path_value else ""
+    path_params: tuple[Any, ...] = (
+        (path_value, _literal_like_prefix(path_value)) if path_value else ()
+    )
+
+    with _common.get_connection() as connection:
+        # Selection, saturation sizing, and the row claims are one write
+        # transaction. Serializing before the SELECT prevents two workers from
+        # both sizing/claiming the same highest-EV unit from a stale snapshot.
+        connection.execute("BEGIN IMMEDIATE")
+        unit = connection.execute(
+            f"""
+            SELECT au.*
+              FROM assessment_application_units au
+             WHERE au.engagement_id = ?
+               {unit_filter}
+               AND EXISTS (
+                   SELECT 1 FROM assessment_work_items wi
+                    WHERE wi.engagement_id = au.engagement_id
+                      AND wi.application_unit_id = au.id
+                      AND wi.status = 'pending' AND wi.terminal_reason IS NULL
+                      AND wi.type IN ({type_ph})
+                      {exists_signal_sql}
+                      {class_sql}
+                      {path_sql}
+               )
+             ORDER BY au.deep_required DESC, au.total_score DESC,
+                      au.risk_score DESC, au.structure_score DESC, au.id
+             LIMIT 1
+            """,
+            (
+                engagement.id,
+                *unit_params,
+                *allowed_types,
+                *_VULN_SIGNAL_FALLBACK_TYPES,
+                *class_params,
+                *path_params,
+            ),
+        ).fetchone()
+        if unit is None:
+            return {
+                "claimed": [],
+                "unit": None,
+                "selection": "explicit" if unit_id is not None else "highest-ev-unsatisfied",
+                "error": "no-unsatisfied-unit",
+            }
+        unit_row = dict(unit)
+        recent_probes = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM assessment_probe_runs "
+                "WHERE engagement_id = ? AND application_unit_id = ? "
+                "AND created_at >= datetime('now', '-24 hours')",
+                (engagement.id, unit["id"]),
+            ).fetchone()[0]
+        )
+        if limit is None:
+            tier_limit = _UNIT_BATCH_BY_TIER.get(str(unit["depth_tier"]), 4)
+            effective_limit = max(1, tier_limit - min(tier_limit - 1, recent_probes // 4))
+            limit_source = "depth-tier-and-saturation"
+        else:
+            effective_limit = int(limit)
+            limit_source = "explicit"
+
+        candidates = connection.execute(
+            f"""
+            SELECT * FROM assessment_work_items
+             WHERE engagement_id = ? AND application_unit_id = ?
+               AND status = 'pending' AND terminal_reason IS NULL
+               AND type IN ({type_ph})
+               {claim_signal_sql}
+               {claim_class_sql}
+               {claim_path_sql}
+             ORDER BY priority_score DESC, cluster_key, id
+             LIMIT ?
+            """,
+            (
+                engagement.id,
+                unit["id"],
+                *allowed_types,
+                *_VULN_SIGNAL_FALLBACK_TYPES,
+                *class_params,
+                *path_params,
+                effective_limit,
+            ),
+        ).fetchall()
+        stamp = _stamp_liveness_sql()
+        claimed: list[dict[str, Any]] = []
+        for candidate in candidates:
+            row_agent = _assigned_agent_for_row(candidate) if auto_route else normalized_agent
+            if not row_agent:
+                continue
+            updated = connection.execute(
+                f"""
+                UPDATE assessment_work_items
+                   SET status = 'processing', assigned_agent = ?,
+                       consumed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP,
+                       live_status = {stamp}
+                 WHERE id = ? AND engagement_id = ? AND status = 'pending'
+                RETURNING *
+                """,
+                (row_agent, candidate["id"], engagement.id),
+            ).fetchone()
+            if updated is not None:
+                claimed.append(dict(updated))
+    claimed.sort(
+        key=lambda row: (
+            -(row.get("priority_score") or 0),
+            row.get("cluster_key") or "",
+            row.get("id") or 0,
+        )
+    )
+    return {
+        "claimed": claimed,
+        "unit": unit_row,
+        "selection": "explicit" if unit_id is not None else "highest-ev-unsatisfied",
+        "effective_limit": effective_limit,
+        "effective_limit_source": limit_source,
+        "recent_probe_count": recent_probes,
+        "allowed_types": list(allowed_types),
+    }
 
 
 # ---------------------------------------------------------------------------

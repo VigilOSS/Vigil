@@ -12,10 +12,10 @@ from assess.lib.contracts import render_contract_epilog
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
-        "list-report-findings",
+        "report",
         help="Show grouped findings; final mode is report-readiness gated, draft mode is for inspection",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=render_contract_epilog("list-report-findings"),
+        epilog=render_contract_epilog("finding report"),
     )
     p.add_argument(
         "--mode",

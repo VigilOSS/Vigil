@@ -53,8 +53,9 @@ def _finding_summary(row: Any) -> dict[str, Any]:
         # active/verified line, so surface WHY it stalled via the required
         # block_reason. Empty for non-blocked findings; bounded so the brief stays
         # compact. Rendered by resume_brief._finding_line via the shared
-        # finding_render.blocked_reason_summary helper. (Surfacing
-        # unblock_requirements is deferred — see roadmap.md.)
+        # finding_render.blocked_reason_summary helper. The compact projection
+        # intentionally carries only the reason; full prerequisite metadata
+        # remains available on the finding detail endpoint.
         "block_reason": str(details.get("block_reason") or "")[:300],
         "updated_at": row["updated_at"],
     }
@@ -404,7 +405,7 @@ def _work_buffer_section(connection, engagement_id: int) -> dict[str, Any]:
 def _resume_note_pointers(engagement_id: int, *, since: str) -> list[dict[str, Any]]:
     """Intel notes tagged ``coverage`` / ``read-first`` — projected as bounded
     pointers (id + title + matching tags + lead_status), not bodies, so the
-    operator opens them via list-intel/search. Bounded list, so since-filtered
+    operator opens them via intel list/search. Bounded list, so since-filtered
     like the other intel worklists."""
     matches: list[dict[str, Any]] = []
     for row in intel.list_notes(engagement_id, include_superseded=False):
@@ -530,18 +531,26 @@ def _per_input_coverage_section(
     cell list itself is since-filtered — a cell only appears if it has a probe in
     the window — so a future ``--since`` cutoff yields no cells.
     """
-    rows = connection.execute(
-        """
+    # ``row_limit <= 0`` is the ``--all-cells`` escape valve: it must see EVERY
+    # probe run, not just the newest _PER_INPUT_FETCH_LIMIT. Capping the source
+    # query unconditionally would silently drop older cells from the grid while
+    # ``cells_count`` (uncapped, below) still reported them — sending operators
+    # back to already-covered inputs. Only bound the fetch for the sampled path.
+    fetch_sql = """
         SELECT id, attack_family, result_status, tool_name,
                target_host, target_path, input_slot, auth_context, lens,
                observed_http_status, evidence_ref, created_at
         FROM assessment_probe_runs
         WHERE engagement_id = ?
         ORDER BY created_at DESC, id DESC
-        LIMIT ?
-        """,
-        (engagement_id, _PER_INPUT_FETCH_LIMIT),
-    ).fetchall()
+    """
+    if row_limit <= 0:
+        rows = connection.execute(fetch_sql, (engagement_id,)).fetchall()
+    else:
+        rows = connection.execute(
+            fetch_sql + "        LIMIT ?\n",
+            (engagement_id, _PER_INPUT_FETCH_LIMIT),
+        ).fetchall()
     probes = _since_filter(
         [
             {
@@ -726,7 +735,7 @@ def build_resume_brief(
         "summary": intel.intel_summary(engagement_id),
         "open_high_cves": open_high_cves,
         # Project a pointer (title + status), not the note body — keep the brief
-        # compact; the operator opens the lead via list-intel/search.
+        # compact; the operator opens the lead via intel list/search.
         "open_leads": [
             {"id": row.get("id"), "title": row.get("title"), "lead_status": row.get("lead_status")}
             for row in open_leads
@@ -806,10 +815,10 @@ def _recommended_actions(
 
     if finding:
         add("inspect finding", f"vigil assess fetch findings/{finding}", entity_kind="finding", entity_id=finding)
-        add("command coverage", f"vigil assess list-command-runs --q {finding} --show-matches", entity_kind="finding", entity_id=finding)
+        add("command coverage", f"vigil assess command-run list --q {finding} --show-matches", entity_kind="finding", entity_id=finding)
         add("artifact context", f"vigil assess artifact search --finding {finding}", entity_kind="finding", entity_id=finding)
     elif not command_matches:
-        add("recent command coverage", "vigil assess list-command-runs --limit 20")
+        add("recent command coverage", "vigil assess command-run list --limit 20")
     if agent_id:
         add("handoff continuation", f"vigil assess agent render-handoff {agent_id}", entity_kind="agent", entity_id=agent_id)
     if stale_dispatches:
@@ -828,7 +837,7 @@ def _recommended_actions(
         if run_id is not None:
             add(
                 "inspect matching command run",
-                f"vigil assess get-command-run {run_id}",
+                f"vigil assess command-run get {run_id}",
                 entity_kind="command_run",
                 entity_id=run_id,
             )

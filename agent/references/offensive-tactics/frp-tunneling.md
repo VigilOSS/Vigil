@@ -55,8 +55,16 @@ vigil config set oob.domain oob.example.com
 vigil config set oob.frp_token <token>
 ```
 
-Defaults exist for host, port, and OOB domain, but `oob.frp_token` is required. Environment
-variables override config when needed:
+Fresh installs persist an isolated tenant domain and FRP port block under
+`.runtime-data/oob/tenant-routing.json`. Inspect that authoritative allocation with
+`vigil oob routing --format all`; apply its DNS/Caddy output to the shared edge before relying on callbacks.
+Existing single-tenant installs retain their legacy domain and ports until an explicitly
+coordinated migration. See README "Per-tenant OOB routing and upgrade behavior" for the deployment
+contract.
+
+Defaults exist for host, port, and base OOB domain, but `oob.frp_token` is required. Environment
+variables override config where allowed; a persisted tenant route rejects a conflicting ambient
+OOB domain so callback correlation cannot move silently:
 
 ```bash
 VIGIL_FRP_HOST

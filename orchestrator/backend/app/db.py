@@ -7,7 +7,7 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -438,6 +438,7 @@ _ENGAGEMENT_SCOPED_TABLES = {
     "assessment_command_runs",
     "assessment_artifacts",
     "assessment_jobs",
+    "assessment_rate_leases",
     "code_repos",
     "code_modules",
     "code_files",
@@ -662,6 +663,8 @@ def _create_core_tables(connection: sqlite3.Connection) -> None:
 # (created_at/last_seen_at) or by the liveness probe (liveness_verdict/
 # last_probed_at); the age sweep tolerates NULL last_seen_at.
 _CREDENTIAL_ADDITIVE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("principal_id", "TEXT NOT NULL DEFAULT ''"),
+    ("mfa_factor", "TEXT NOT NULL DEFAULT ''"),
     ("created_at", "TEXT"),
     ("last_seen_at", "TEXT"),
     ("liveness_verdict", "TEXT"),
@@ -689,6 +692,8 @@ def _create_credentials_table(connection: sqlite3.Connection) -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 engagement_id INTEGER NOT NULL,
                 identity_name TEXT NOT NULL,
+                principal_id TEXT NOT NULL DEFAULT '',
+                mfa_factor TEXT NOT NULL DEFAULT '',
                 mode TEXT NOT NULL DEFAULT 'manual',
                 state TEXT NOT NULL DEFAULT 'missing',
                 use_for_requests INTEGER NOT NULL DEFAULT 1,
@@ -732,6 +737,39 @@ def _create_credentials_table(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_engagement_credentials_active "
         "ON engagement_credentials(engagement_id, is_active DESC, identity_name)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS engagement_credential_aliases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL,
+            alias TEXT NOT NULL,
+            principal_id TEXT NOT NULL,
+            scope_key TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(engagement_id, alias, scope_key),
+            FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS engagement_credential_liveness (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL,
+            identity_name TEXT NOT NULL,
+            scope_key TEXT NOT NULL DEFAULT '',
+            verdict TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            UNIQUE(engagement_id, identity_name, scope_key),
+            FOREIGN KEY(engagement_id, identity_name)
+                REFERENCES engagement_credentials(engagement_id, identity_name)
+                ON DELETE CASCADE
+        )
+        """
     )
     # Ordering + the age-backstop sweep both scan by (engagement, last_seen_at).
     connection.execute(
@@ -1128,6 +1166,7 @@ def _create_assessment_finding_tables(connection: sqlite3.Connection) -> None:
                 submission_status TEXT NOT NULL DEFAULT 'none',
                 merged_into_finding_id INTEGER,
                 last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                row_version INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, slug),
@@ -1913,7 +1952,7 @@ def _create_artifacts_table_and_fts(connection: sqlite3.Connection) -> None:
 def _create_jobs_table(connection: sqlite3.Connection) -> None:
     # assessment_jobs tracks long-running dtach-supervised workers spawned
     # by `vigil assess kali job start`. parent_command_run_id links the
-    # synchronous audit row that initiated the job; SET NULL on cascade
+    # pre-exec command audit owned by that async job; SET NULL on cascade
     # so cleaning up an orphaned command-run does not destroy the job
     # record we still need for forensics.
     connection.execute(
@@ -1942,6 +1981,37 @@ def _create_jobs_table(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_assessment_jobs_command_run "
         "ON assessment_jobs(parent_command_run_id)"
+    )
+
+
+def _create_rate_leases_table(connection: sqlite3.Connection) -> None:
+    """Durable engagement-wide target-rate reservations.
+
+    Tool-local throttles remain the execution mechanism. This table is the
+    concurrency truth that prevents several individually polite agents from
+    exceeding an engagement's aggregate ceiling together.
+    """
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assessment_rate_leases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+            lease_token TEXT NOT NULL UNIQUE,
+            owner TEXT NOT NULL,
+            effective_rate_rps REAL NOT NULL,
+            aggregate_limit_rps REAL,
+            override_reason TEXT,
+            command_run_id INTEGER REFERENCES assessment_command_runs(id) ON DELETE SET NULL,
+            expires_at TEXT NOT NULL,
+            released_at TEXT,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_rate_leases_active "
+        "ON assessment_rate_leases(engagement_id, released_at, expires_at)"
     )
 
 
@@ -2102,6 +2172,9 @@ def _create_code_analysis_tables(connection: sqlite3.Connection) -> None:
                 threat_model_json TEXT NOT NULL DEFAULT '{}',
                 git_churn_json TEXT NOT NULL DEFAULT '{}',
                 lsp_config_json TEXT NOT NULL DEFAULT '{}',
+                active_generation INTEGER NOT NULL DEFAULT 0,
+                pending_refresh_token TEXT NOT NULL DEFAULT '',
+                pending_refresh_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, repo_key),
@@ -2171,6 +2244,9 @@ def _create_code_analysis_tables(connection: sqlite3.Connection) -> None:
                 priority INTEGER NOT NULL DEFAULT 50,
                 status TEXT NOT NULL DEFAULT 'pending',
                 assigned_agent TEXT NOT NULL DEFAULT '',
+                lease_token TEXT NOT NULL DEFAULT '',
+                repo_generation INTEGER NOT NULL DEFAULT 0,
+                last_heartbeat_at TEXT,
                 disposition TEXT NOT NULL DEFAULT '',
                 analysis_notes TEXT NOT NULL DEFAULT '',
                 skip_reason TEXT NOT NULL DEFAULT '',
@@ -2200,6 +2276,7 @@ def _create_code_analysis_tables(connection: sqlite3.Connection) -> None:
                 function_name TEXT NOT NULL DEFAULT '',
                 hypothesis TEXT NOT NULL DEFAULT '',
                 evidence TEXT NOT NULL DEFAULT '',
+                evidence_ref TEXT NOT NULL DEFAULT '',
                 disposition TEXT NOT NULL DEFAULT '',
                 confidence TEXT NOT NULL DEFAULT 'medium',
                 finding_slug TEXT NOT NULL DEFAULT '',
@@ -2209,12 +2286,32 @@ def _create_code_analysis_tables(connection: sqlite3.Connection) -> None:
                 audit_metadata_json TEXT NOT NULL DEFAULT '{}',
                 cwe_coverage_json TEXT NOT NULL DEFAULT '[]',
                 cross_file_triggers_json TEXT NOT NULL DEFAULT '[]',
+                lease_token TEXT NOT NULL DEFAULT '',
+                repo_generation INTEGER NOT NULL DEFAULT 0,
+                result_fingerprint TEXT NOT NULL DEFAULT '',
+                superseded_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
                 FOREIGN KEY(queue_item_id) REFERENCES code_analysis_queue(id) ON DELETE CASCADE,
                 FOREIGN KEY(file_id) REFERENCES code_files(id) ON DELETE CASCADE
             )
             """
+    )
+    connection.execute(
+        """
+            CREATE TABLE IF NOT EXISTS code_ingest_staging (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                repo_id INTEGER NOT NULL,
+                refresh_token TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                file_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(repo_id, refresh_token, file_path),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(repo_id) REFERENCES code_repos(id) ON DELETE CASCADE
+            )
+        """
     )
     connection.execute(
         """
@@ -2279,6 +2376,7 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         "submission_status": "TEXT NOT NULL DEFAULT 'none'",
         "merged_into_finding_id": "INTEGER",
         "last_seen_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        "row_version": "INTEGER NOT NULL DEFAULT 1",
         "evidence_artifact_id": "INTEGER REFERENCES assessment_artifacts(id) ON DELETE SET NULL",
     }
     for column_name, definition in finding_column_defaults.items():
@@ -2334,8 +2432,20 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
 
     # Migrate code_repos: add lsp_config_json if missing
     repo_columns = {row[1] for row in connection.execute("PRAGMA table_info(code_repos)").fetchall()}
-    if repo_columns and "lsp_config_json" not in repo_columns:
-        connection.execute("ALTER TABLE code_repos ADD COLUMN lsp_config_json TEXT NOT NULL DEFAULT '{}'")
+    legacy_repos_need_generation_backfill = bool(repo_columns) and "active_generation" not in repo_columns
+    for col_name, col_def in {
+        "lsp_config_json": "TEXT NOT NULL DEFAULT '{}'",
+        "active_generation": "INTEGER NOT NULL DEFAULT 0",
+        "pending_refresh_token": "TEXT NOT NULL DEFAULT ''",
+        "pending_refresh_json": "TEXT NOT NULL DEFAULT '{}'",
+    }.items():
+        if repo_columns and col_name not in repo_columns:
+            connection.execute(f"ALTER TABLE code_repos ADD COLUMN {col_name} {col_def}")
+    if legacy_repos_need_generation_backfill:
+        # Repositories created before refresh generations existed are already
+        # authoritative snapshots. Generation zero is reserved for an
+        # uncommitted first refresh, so preserve legacy visibility as gen 1.
+        connection.execute("UPDATE code_repos SET active_generation = 1")
 
     result_columns = {row[1] for row in connection.execute("PRAGMA table_info(code_analysis_results)").fetchall()}
     if result_columns and "audit_metadata_json" not in result_columns:
@@ -2354,6 +2464,9 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         # silent deferral. Operators tag skips with a structured reason
         # (test-fixture, generated-code, minified, out-of-scope-language).
         "skip_reason": "TEXT NOT NULL DEFAULT ''",
+        "lease_token": "TEXT NOT NULL DEFAULT ''",
+        "repo_generation": "INTEGER NOT NULL DEFAULT 0",
+        "last_heartbeat_at": "TEXT",
     }
     for col_name, col_def in queue_new_columns.items():
         if queue_columns and col_name not in queue_columns:
@@ -2364,6 +2477,20 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE code_analysis_results ADD COLUMN cwe_coverage_json TEXT NOT NULL DEFAULT '[]'")
     if result_columns and "cross_file_triggers_json" not in result_columns:
         connection.execute("ALTER TABLE code_analysis_results ADD COLUMN cross_file_triggers_json TEXT NOT NULL DEFAULT '[]'")
+    for col_name, col_def in {
+        "lease_token": "TEXT NOT NULL DEFAULT ''",
+        "repo_generation": "INTEGER NOT NULL DEFAULT 0",
+        "evidence_ref": "TEXT NOT NULL DEFAULT ''",
+        "result_fingerprint": "TEXT NOT NULL DEFAULT ''",
+        "superseded_at": "TEXT",
+    }.items():
+        if result_columns and col_name not in result_columns:
+            connection.execute(f"ALTER TABLE code_analysis_results ADD COLUMN {col_name} {col_def}")
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_code_analysis_results_idempotent "
+        "ON code_analysis_results(queue_item_id, lease_token, result_fingerprint) "
+        "WHERE queue_item_id IS NOT NULL AND lease_token != '' AND result_fingerprint != ''"
+    )
 
     # Migrate code_files: add structural metadata columns from tree-sitter index
     file_columns = _table_columns(connection, "code_files")
@@ -2871,6 +2998,8 @@ def _create_oob_correlation_tables(connection: sqlite3.Connection) -> None:
                 probe_kind TEXT NOT NULL DEFAULT '',
                 request_hash TEXT NOT NULL DEFAULT '',
                 oob_domain TEXT NOT NULL DEFAULT '',
+                client_name TEXT NOT NULL DEFAULT '',
+                client_payload_host TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -2878,6 +3007,22 @@ def _create_oob_correlation_tables(connection: sqlite3.Connection) -> None:
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
             )
             """
+    )
+    probe_columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(assessment_oob_probes)").fetchall()
+    }
+    if "client_name" not in probe_columns:
+        connection.execute(
+            "ALTER TABLE assessment_oob_probes ADD COLUMN client_name TEXT NOT NULL DEFAULT ''"
+        )
+    if "client_payload_host" not in probe_columns:
+        connection.execute(
+            "ALTER TABLE assessment_oob_probes ADD COLUMN client_payload_host TEXT NOT NULL DEFAULT ''"
+        )
+    connection.execute(
+        "UPDATE assessment_oob_probes SET status = 'expired', updated_at = CURRENT_TIMESTAMP "
+        "WHERE status = 'pending' AND (client_name = '' OR client_payload_host = '')"
     )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_oob_probes_engagement_status "
@@ -3127,6 +3272,7 @@ def _create_assessment_work_items_table(connection: sqlite3.Connection) -> None:
             request_variant_id INTEGER,
             service_id INTEGER,
             coverage_item_id INTEGER,
+            application_unit_id INTEGER,
             auth_context TEXT NOT NULL DEFAULT 'anonymous',
             method TEXT NOT NULL DEFAULT 'GET',
             url TEXT NOT NULL,
@@ -3168,7 +3314,8 @@ def _create_assessment_work_items_table(connection: sqlite3.Connection) -> None:
             FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
             FOREIGN KEY(request_variant_id) REFERENCES assessment_request_variants(id) ON DELETE CASCADE,
             FOREIGN KEY(service_id) REFERENCES assessment_services(id) ON DELETE SET NULL,
-            FOREIGN KEY(coverage_item_id) REFERENCES assessment_coverage_items(id) ON DELETE SET NULL
+            FOREIGN KEY(coverage_item_id) REFERENCES assessment_coverage_items(id) ON DELETE SET NULL,
+            FOREIGN KEY(application_unit_id) REFERENCES assessment_application_units(id) ON DELETE SET NULL
         )
         """
     )
@@ -3191,6 +3338,18 @@ def _create_assessment_work_items_table(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_assessment_work_items_source "
         "ON assessment_work_items(engagement_id, source)"
+    )
+    columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(assessment_work_items)")
+    }
+    if "application_unit_id" not in columns:
+        connection.execute(
+            "ALTER TABLE assessment_work_items ADD COLUMN application_unit_id INTEGER "
+            "REFERENCES assessment_application_units(id) ON DELETE SET NULL"
+        )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_work_items_unit_pending "
+        "ON assessment_work_items(engagement_id, application_unit_id, status, type, id)"
     )
 
 
@@ -3217,6 +3376,7 @@ def init_db() -> None:
         _create_artifacts_table_and_fts(connection)
         _create_http_flow_tables(connection)
         _create_jobs_table(connection)
+        _create_rate_leases_table(connection)
         _create_code_analysis_tables(connection)
         _apply_additive_migrations(connection)
         _create_intel_tables(connection)
@@ -3628,6 +3788,8 @@ def _credential_row_to_material(row: sqlite3.Row) -> dict[str, Any]:
     material.update(
         {
             "identity_name": row["identity_name"],
+            "principal_id": row["principal_id"],
+            "mfa_factor": row["mfa_factor"],
             "mode": row["mode"],
             "state": row["state"],
             "use_for_requests": bool(row["use_for_requests"]),
@@ -3722,6 +3884,10 @@ def list_credentials(
             (engagement_id,),
         ).fetchall()
     materials = [_credential_row_to_material(row) for row in rows]
+    for material in materials:
+        material["liveness_observations"] = list_credential_liveness(
+            engagement_id, str(material["identity_name"])
+        )
     if not include_dead:
         materials = [m for m in materials if m.get("state") != "dead"]
     if host:
@@ -3737,17 +3903,29 @@ def get_credential(engagement_id: int, identity_name: str) -> dict[str, Any] | N
             "WHERE engagement_id = ? AND identity_name = ?",
             (engagement_id, identity_name),
         ).fetchone()
-    return _credential_row_to_material(row) if row else None
+    if not row:
+        return None
+    material = _credential_row_to_material(row)
+    material["liveness_observations"] = list_credential_liveness(
+        engagement_id, identity_name
+    )
+    return material
 
 
 def get_active_credential(engagement_id: int) -> dict[str, Any] | None:
-    """Return the active identity's material, or the first one if none is
-    explicitly active, or None when the engagement has no live credentials."""
+    """Return the active identity's material, or the first USABLE one if none is
+    explicitly active, or None when the engagement has no live credentials.
+
+    The no-active fallback is restricted to ``use_for_requests`` rows so an
+    unreviewed opt-in identity (e.g. a discovered secret minted
+    ``use_for_requests=0``) is never replayed by default; an explicitly activated
+    row (``is_active=1``) is always returned regardless of that flag."""
     with get_connection() as connection:
         _sweep_credential_age(connection, engagement_id)
         row = connection.execute(
             "SELECT * FROM engagement_credentials "
             "WHERE engagement_id = ? AND state != 'dead' "
+            "AND (is_active = 1 OR use_for_requests = 1) "
             "ORDER BY is_active DESC, identity_name LIMIT 1",
             (engagement_id,),
         ).fetchone()
@@ -3758,6 +3936,8 @@ def upsert_credential(
     engagement_id: int,
     identity_name: str,
     *,
+    principal_id: str,
+    mfa_factor: str,
     mode: str,
     state: str,
     use_for_requests: bool,
@@ -3791,12 +3971,14 @@ def upsert_credential(
         connection.execute(
             """
             INSERT INTO engagement_credentials (
-                engagement_id, identity_name, mode, state, use_for_requests,
+                engagement_id, identity_name, principal_id, mfa_factor, mode, state, use_for_requests,
                 auth_context, is_active, cookies_json, headers_json, tokens_json,
                 host_cookies_json, raw_json, notes, expires_at,
                 created_at, last_seen_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(engagement_id, identity_name) DO UPDATE SET
+                principal_id = excluded.principal_id,
+                mfa_factor = excluded.mfa_factor,
                 mode = excluded.mode,
                 state = excluded.state,
                 use_for_requests = excluded.use_for_requests,
@@ -3813,7 +3995,8 @@ def upsert_credential(
                 updated_at = excluded.updated_at
             """,
             (
-                engagement_id, identity_name, mode, state, 1 if use_for_requests else 0,
+                engagement_id, identity_name, principal_id, mfa_factor,
+                mode, state, 1 if use_for_requests else 0,
                 auth_context, 1 if make_active else 0,
                 json.dumps(cookies), json.dumps(headers), json.dumps(tokens),
                 json.dumps(host_cookies), json.dumps(raw), notes, expires_at,
@@ -3824,6 +4007,102 @@ def upsert_credential(
     result = get_credential(engagement_id, identity_name)
     assert result is not None  # just written
     return result
+
+
+def set_credential_alias(
+    engagement_id: int, alias: str, principal_id: str, scope_key: str = ""
+) -> None:
+    with get_connection() as connection:
+        connection.execute(
+            "INSERT INTO engagement_credential_aliases "
+            "(engagement_id, alias, principal_id, scope_key, updated_at) "
+            "VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(engagement_id, alias, scope_key) DO UPDATE SET "
+            "principal_id=excluded.principal_id, updated_at=excluded.updated_at",
+            (engagement_id, alias.strip(), principal_id.strip(), scope_key.strip()),
+        )
+
+
+def record_credential_liveness(
+    engagement_id: int,
+    identity_name: str,
+    *,
+    scope_key: str,
+    verdict: str,
+    observed_at: str,
+    ttl_seconds: int,
+    source: str,
+    reason: str = "",
+) -> dict[str, Any] | None:
+    try:
+        observed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+    except ValueError:
+        observed = datetime.now(timezone.utc)
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    observed = observed.astimezone(timezone.utc)
+    observed_at = observed.strftime("%Y-%m-%dT%H:%M:%SZ")
+    expires_at = (observed + timedelta(seconds=max(int(ttl_seconds), 1))).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    with get_connection() as connection:
+        exists = connection.execute(
+            "SELECT 1 FROM engagement_credentials WHERE engagement_id=? AND identity_name=?",
+            (engagement_id, identity_name),
+        ).fetchone()
+        if not exists:
+            return None
+        connection.execute(
+            "INSERT INTO engagement_credential_liveness "
+            "(engagement_id, identity_name, scope_key, verdict, observed_at, expires_at, source, reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(engagement_id, identity_name, scope_key) DO UPDATE SET "
+            "verdict=excluded.verdict, observed_at=excluded.observed_at, "
+            "expires_at=excluded.expires_at, source=excluded.source, reason=excluded.reason "
+            "WHERE excluded.observed_at >= engagement_credential_liveness.observed_at",
+            (engagement_id, identity_name, scope_key.strip(), verdict, observed_at, expires_at, source, reason),
+        )
+    return get_credential(engagement_id, identity_name)
+
+
+def list_credential_liveness(engagement_id: int, identity_name: str) -> list[dict[str, Any]]:
+    with get_connection() as connection:
+        rows = connection.execute(
+            "SELECT scope_key, verdict, observed_at, expires_at, source, reason "
+            "FROM engagement_credential_liveness WHERE engagement_id=? AND identity_name=? "
+            "ORDER BY observed_at DESC, scope_key",
+            (engagement_id, identity_name),
+        ).fetchall()
+    now = datetime.now(timezone.utc)
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        try:
+            expiry = datetime.fromisoformat(str(row["expires_at"]).replace("Z", "+00:00"))
+        except ValueError:
+            expiry = now
+        item["fresh"] = expiry > now
+        result.append(item)
+    return result
+
+
+def resolve_credential_alias(
+    engagement_id: int, alias: str, scope_key: str
+) -> dict[str, Any] | None:
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT c.identity_name FROM engagement_credential_aliases a "
+            "JOIN engagement_credentials c ON c.engagement_id=a.engagement_id "
+            "AND c.principal_id=a.principal_id "
+            "JOIN engagement_credential_liveness l ON l.engagement_id=c.engagement_id "
+            "AND l.identity_name=c.identity_name AND l.scope_key=a.scope_key "
+            "WHERE a.engagement_id=? AND a.alias=? AND a.scope_key=? "
+            "AND c.state != 'dead' AND l.verdict='live' AND l.expires_at>? "
+            "ORDER BY l.observed_at DESC, COALESCE(c.last_seen_at,c.updated_at) DESC LIMIT 1",
+            (engagement_id, alias.strip(), scope_key.strip(), now),
+        ).fetchone()
+    return get_credential(engagement_id, row["identity_name"]) if row else None
 
 
 def set_liveness(

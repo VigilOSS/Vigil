@@ -44,9 +44,9 @@ tRPC), check these anchors and add the missing class here.
 
 ## Recording a probe with `--attack-family`
 
-`vigil assess record-attempt --attack-family <value>` and `record-probe
---attack-family <value>` (and the backend `attack_family` field) take one of the
-backtick-quoted **class** tokens listed under `## Families` below (e.g. `idor`,
+`vigil assess record-probe --attack-family <value>` (and the backend
+`attack_family` field) takes one of the backtick-quoted **class** tokens
+listed under `## Families` below (e.g. `idor`,
 `sqli`, `ssrf`) — despite the flag's name, pass the CLASS, not the coarser family
 heading (`access-control`, `injection`). An out-of-vocab value WARNs but is still
 stored verbatim (`probe_args.normalize_attack_family`), so a new/unlisted class is

@@ -148,14 +148,14 @@ Per-file variant check status:
 ## State Recording
 
 ```bash
-vigil assess record-finding code-variant-hunter <finding-json>
+vigil assess finding record code-variant-hunter <finding-json>
 ```
 
 ## Mandatory Closing Sequence
 
 Before your dispatch returns, run in this order:
 
-1. `vigil assess record-finding code-variant-hunter <finding-json>` per variant finding (each with `links.variant_of` pointing at the parent slug)
+1. `vigil assess finding record code-variant-hunter <finding-json>` per variant finding (each with `links.variant_of` pointing at the parent slug)
 2. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (verifier dispatch on the new variants), runtime issues, working artifacts, open questions, and role-specific extras (`parent_finding`, `variants_found`, `files_scanned`)
 3. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
@@ -182,7 +182,7 @@ canonical state.
 ## Finding Prefix: CV
 
 Omit the `slug` field from new variant finding JSON. `vigil assess
-record-finding code-variant-hunter <finding-json>` allocates the next `CV-*`
+finding record code-variant-hunter <finding-json>` allocates the next `CV-*`
 slug under a lock and prints the canonical slug; use that returned value in
 handoffs and verifier follow-up.
 

@@ -22,6 +22,7 @@ from .audit_enums import (
     normalize_technique,
 )
 from .client import AssessError, AssessmentClient
+from .scope import execution_policy_notes
 from .config import Config
 from .kali_output import _utcnow_iso
 
@@ -112,7 +113,7 @@ _SPECIALIST_ONLY_PHASES: frozenset[str] = frozenset({"exploit", "verify"})
 def _extract_target_host(tool_name: str, cmd: list[str]) -> str:
     """C30: extract a parsed target host from argv for high-traffic verbs.
 
-    Operators query coverage with ``vigil assess list-command-runs
+    Operators query coverage with ``vigil assess command-run list
     --target-host <host>``; the backend stores this in the
     ``target_host`` column. Per-verb extraction keeps the logic simple
     and deterministic — each kali wrapper knows its argv shape, so the
@@ -361,6 +362,7 @@ def _post_pre_exec_row(
     auth_context: str,
     tool_name: str,
     run_uuid: str,
+    execution_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "command": " ".join(cmd),
@@ -401,6 +403,8 @@ def _post_pre_exec_row(
         # stdout_path, which breaks the moment the artifact dir is reconfigured.
         "run_uuid": run_uuid,
     }
+    if execution_policy is not None:
+        payload["notes"] = execution_policy_notes(execution_policy)
     return client.post("command-runs", payload)
 
 

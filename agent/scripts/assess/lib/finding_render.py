@@ -3,7 +3,7 @@
 Single source of truth for turning one persisted finding record into the
 ``## [slug] title`` markdown block used by both finding exporters:
 
-  * ``vigil assess export-findings`` — concatenates these blocks into a single
+  * ``vigil assess export findings`` — concatenates these blocks into a single
     ``findings.md`` report document (one section per finding, with the
     root-cause grouping context inline). See
     ``agent/scripts/assess/commands/export_findings.py``.
@@ -16,7 +16,7 @@ Single source of truth for turning one persisted finding record into the
 Both callers share this module so the field selection, ordering, and PoC
 formatting never drift between the report doc and the diffable tree. The only
 behavioural knob is ``include_root_cause_group``; the trailing newline is left
-to the caller (export-findings strips and re-joins; the tree appends one).
+to the caller (export findings strips and re-joins; the tree appends one).
 
 This module lives under ``agent/scripts/assess/lib`` so the assess command
 imports it directly; the ``src`` CLI package reaches it through the same
@@ -26,12 +26,45 @@ imports it directly; the ``src`` CLI package reaches it through the same
 from __future__ import annotations
 
 import json
+import os
 import re
+from pathlib import Path
 from typing import Any
 
 # Longest run of backticks anywhere in a string — used to pick a code fence
 # that the content cannot prematurely close.
 _BACKTICK_RUN = re.compile(r"`+")
+
+# A leading enumerator an author may have baked into a ``steps_to_reproduce``
+# item ("1. ", "2) "). Stripped before a renderer prepends its own ``N. ``
+# counter so the two never double up into "1. 1. …".
+_STEP_ENUMERATOR = re.compile(r"^\s*\d+[.)]\s+")
+
+# UUID shape — used only to confirm a collected internal id is genuinely a UUID
+# before we FLAG (never rewrite) its presence in an outward-facing render. A
+# target-application UUID in PoC proof (an IDOR/BOLA on a UUID-keyed resource)
+# is never touched.
+_UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+# Detects a reference to the internal cases.db work database (presence only).
+_CASES_DB_RE = re.compile(r"cases\.db")
+
+
+def nonempty(value: object) -> str:
+    """``str(value)`` stripped of surrounding whitespace ("" for falsy input)."""
+    return str(value or "").strip()
+
+
+def strip_step_enumerator(step: str) -> str:
+    """Drop a leading ``N.`` / ``N)`` enumerator from a steps_to_reproduce item.
+
+    Both step renderers prepend their own ``{i}. `` counter; an item the author
+    already numbered would otherwise render as ``1. 1. …``. Only a single leading
+    ``<digits><.|)><whitespace>`` run is removed, so a step whose prose merely
+    contains a number ("Request 3 times") is left untouched.
+    """
+    return _STEP_ENUMERATOR.sub("", str(step), count=1)
 
 
 def _fence_for(*parts: str) -> str:
@@ -92,10 +125,10 @@ def blocked_reason_summary(finding: dict) -> str:
     hold), and labelling that "BLOCKED" would be wrong. Returns "" otherwise, so a
     normal finding never grows a marker. The reason is read via ``detail_value``
     so it resolves whether it is a top-level projected field (resume-brief) or
-    nested in ``details_json`` (list-findings' raw record).
+    nested in ``details_json`` (finding list' raw record).
 
-    (Surfacing ``details.unblock_requirements`` — the class of the missing
-    precondition and who it was requested from — is deferred; see roadmap.md.)
+    The compact marker intentionally omits richer prerequisite metadata; callers
+    can fetch the finding detail when they need it.
     """
     disposition = str(finding.get("verification_disposition") or "").strip().lower()
     if disposition != "blocked":
@@ -121,9 +154,9 @@ def header_lines(headers: object) -> list[str]:
 
 
 def _root_cause_lines(finding: dict) -> list[str]:
-    """Render the root-cause grouping block (export-findings only).
+    """Render the root-cause grouping block (export findings only).
 
-    ``export-findings`` flattens grouping context onto each finding before
+    ``export findings`` flattens grouping context onto each finding before
     rendering (root/sibling role + effect + note); the markdown-tree draft
     omits this because each finding's ``report.md`` renders grouping from the
     report projection instead.
@@ -148,11 +181,11 @@ def render_finding(finding: dict, *, include_root_cause_group: bool = False) -> 
     """Render one finding to its markdown block (no trailing newline).
 
     ``include_root_cause_group`` adds the root/sibling grouping bullet(s) that
-    ``export-findings`` flattens onto the finding; leave it ``False`` for the
+    ``export findings`` flattens onto the finding; leave it ``False`` for the
     per-finding ``draft.md`` in the markdown-tree export.
 
     The returned string is the stripped block; callers decide whether to append
-    a trailing newline (export-findings re-joins blocks; the tree adds one).
+    a trailing newline (export findings re-joins blocks; the tree adds one).
     """
     slug = str(finding.get("slug") or "")
     title = str(finding.get("title") or "(untitled)")
@@ -229,7 +262,7 @@ def render_finding(finding: dict, *, include_root_cause_group: bool = False) -> 
         lines.append("")
         lines.append("**Steps to Reproduce:**")
         for i, step in enumerate(steps, 1):
-            lines.append(f"{i}. {step}")
+            lines.append(f"{i}. {strip_step_enumerator(step)}")
     if poc_code:
         lines.append("")
         lines.append("**PoC Code:**")
@@ -274,3 +307,175 @@ def render_finding(finding: dict, *, include_root_cause_group: bool = False) -> 
     if notes:
         block = f"{block}\n\n{notes}"
     return block.strip()
+
+
+# ---------------------------------------------------------------------------
+# Shared submission / reply render + hygiene helpers
+# ---------------------------------------------------------------------------
+#
+# Promoted from ``export_submission`` so both the submission renderer and the
+# reply renderer (``export_reply``) share one source of truth for structured-proof
+# formatting and the FLAG-not-strip internal-identifier hygiene gate. The
+# submission renderer keeps its exact prior behaviour (``separator_ordinal``
+# defaults to 2 — its OPERATOR DETAILS divider); the reply renderer passes 1
+# (its single THREAD HISTORY divider).
+
+
+def poc_lines(finding: dict) -> list[str]:
+    """Render poc_code / poc_request / poc_response, reusing the shared fencing.
+
+    Emits the ``**PoC Code:**`` / ``**PoC Request:**`` / ``**PoC Response:**``
+    blocks a submission or reply surfaces as structured reference proof (never
+    pasted raw — masked + woven into authored Evidence). Fences are chosen with
+    :func:`_fence_for` so a backtick run inside any part cannot close the block
+    early.
+    """
+    lines: list[str] = []
+    poc_code = nonempty(detail_value(finding, "poc_code", ""))
+    if poc_code:
+        fence = _fence_for(poc_code)
+        lines += ["**PoC Code:**", f"{fence}\n{poc_code}\n{fence}", ""]
+
+    poc_request = detail_value(finding, "poc_request")
+    if isinstance(poc_request, dict) and poc_request:
+        req_headers = header_lines(poc_request.get("headers"))
+        req_body = str(poc_request.get("body") or "")
+        request_line = f"{poc_request.get('method', '')} {poc_request.get('url', '')}".strip()
+        fence = _fence_for(request_line, "\n".join(req_headers), req_body)
+        block = [f"{fence}\n{request_line}"]
+        block += req_headers
+        if poc_request.get("body"):
+            block.append(f"\n{poc_request['body']}")
+        block.append(fence)
+        lines += ["**PoC Request:**", "\n".join(block), ""]
+
+    poc_response = detail_value(finding, "poc_response")
+    if isinstance(poc_response, dict) and poc_response:
+        resp_headers = header_lines(poc_response.get("headers"))
+        resp_body = str(poc_response.get("body_excerpt") or "")
+        status_line = f"HTTP {poc_response.get('status', '')}".strip()
+        fence = _fence_for(status_line, "\n".join(resp_headers), resp_body)
+        block = [f"{fence}\n{status_line}"]
+        block += resp_headers
+        if poc_response.get("body_excerpt"):
+            block.append(f"\n{poc_response['body_excerpt']}")
+        block.append(fence)
+        lines += ["**PoC Response:**", "\n".join(block), ""]
+    return lines
+
+
+def collect_internal_ids(finding: dict, linked_runs: list[dict]) -> list[str]:
+    """UUID-shaped internal identifiers to FLAG (never rewrite) in the output.
+
+    Only ids the backend assigns to its own records — this finding, its
+    engagement, and the agents/rows behind any linked command runs. Never the
+    target-application identifiers, so PoC proof is never mistaken for internal
+    state. Integer ids (e.g. a command-run row's ``id``) collected here are
+    harmless: :func:`hygiene_warnings` flags a value only when it is a full UUID.
+    """
+    ids: list[str] = []
+    for key in ("id", "engagement_id", "merged_into_finding_id"):
+        ids.append(nonempty(finding.get(key)))
+    for row in linked_runs:
+        for key in ("producer_agent_id", "agent_id", "engagement_id", "finding_id"):
+            ids.append(nonempty(row.get(key)))
+    seen: set[str] = set()
+    unique: list[str] = []
+    for value in ids:
+        if value and value not in seen:
+            seen.add(value)
+            unique.append(value)
+    return unique
+
+
+def pasteable_body(text: str, *, separator_ordinal: int = 2) -> str:
+    """The copy-paste body = everything ABOVE the ``separator_ordinal``-th ``---``.
+
+    A submission emits two standalone ``---`` lines (header/body split, then the
+    OPERATOR DETAILS divider): its pasteable body ends at the SECOND separator
+    (``separator_ordinal=2``, the default). A reply emits a single ``---`` (its
+    THREAD HISTORY divider): its pasteable body ends at the FIRST
+    (``separator_ordinal=1``). Identifiers that LEGITIMATELY live in the
+    never-paste reference below that divider (the finding slug, absolute
+    engagement paths, internal-record UUIDs echoed by ``evidence_ref`` paths and
+    linked runs) must be scanned only within this body, or the hygiene gate
+    false-positives on every render. If the divider is somehow absent (defensive),
+    fall back to the whole text so a real leak is never silently unflagged.
+    """
+    lines = text.split("\n")
+    separators = 0
+    for idx, line in enumerate(lines):
+        if line == "---":
+            separators += 1
+            if separators == separator_ordinal:
+                return "\n".join(lines[:idx])
+    return text
+
+
+def hygiene_warnings(
+    text: str,
+    slug: str,
+    internal_ids: list[str],
+    engagement_dir: str,
+    title: str = "",
+    *,
+    separator_ordinal: int = 2,
+) -> list[str]:
+    """Non-destructively FLAG internal identifiers that leaked into the output.
+
+    Returns advisory strings; it NEVER mutates ``text``. The finding's content
+    reaches the report-writer verbatim — a target-app UUID, filename, or path must
+    survive — and these warnings let the report-writer (and the blind-triage gate)
+    decide what to strip before an EXTERNAL submission or reply.
+
+    The slug / engagement-path / internal-UUID checks scan ONLY the PASTEABLE body
+    (above the ``separator_ordinal``-th ``---``): those identifiers routinely and
+    legitimately appear in the never-paste reference below it, so scanning the
+    whole document flagged every render. ``cases.db`` is the exception — a target
+    application never references the internal work database, so ANY mention
+    (reference section included) is a genuine leak and is scanned whole-document.
+    """
+    warnings: list[str] = []
+    body = pasteable_body(text, separator_ordinal=separator_ordinal)
+    slug = nonempty(slug)
+    if slug and slug in body:
+        warnings.append(
+            f"finding slug '{slug}' appears in the pasteable body — remove before external submission"
+        )
+    eng = nonempty(engagement_dir).rstrip("/")
+    if eng and eng in body:
+        warnings.append(
+            f"absolute engagement path '{eng}' appears — make paths relative before external submission"
+        )
+    for value in internal_ids:
+        if value and _UUID_RE.fullmatch(value) and value in body:
+            warnings.append(
+                f"internal identifier '{value}' appears — remove before external submission"
+            )
+    if _CASES_DB_RE.search(text):
+        warnings.append(
+            "reference to the internal cases.db work database appears — remove before external submission"
+        )
+    # Title length is a submission-QUALITY warning (advisory, never a hard gate):
+    # a title over 12 words reads as a run-on and weakens triage. Surfaced through
+    # the same hygiene mechanism (context JSON, stderr, OPERATOR DETAILS block).
+    title = nonempty(title)
+    if title:
+        word_count = len(title.split())
+        if word_count > 12:
+            warnings.append(
+                f"submission title is {word_count} words (max 12) — tighten it to a concise, "
+                "specific one-liner before external submission"
+            )
+    return warnings
+
+
+def engagement_relative(path: Path, engagement_dir: str) -> str | None:
+    """Engagement-relative form of ``path``, or None if it lies outside the tree."""
+    try:
+        rel = os.path.relpath(str(path), str(engagement_dir))
+    except ValueError:
+        return None
+    if rel.startswith(".."):
+        return None
+    return rel

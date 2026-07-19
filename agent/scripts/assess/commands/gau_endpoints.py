@@ -1,4 +1,4 @@
-"""vigil assess gau-endpoints — cache-aware gau → ingest-endpoints pipeline.
+"""vigil assess gau endpoints — cache-aware gau → ingest endpoints pipeline.
 
 One verb that runs gau (or reuses a fresh cached corpus) and seats the URLs
 into `work_items` with inline classification. The cache check makes reuse
@@ -38,7 +38,7 @@ from assess.lib.kali import kali_exec
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
-        "gau-endpoints",
+        "endpoints",
         help=(
             "Run gau (cached) and ingest the resulting URLs into the work "
             "buffer with inline classification."
@@ -100,7 +100,7 @@ def _run_ingest_endpoints(
 
     Calling `cli.main(argv)` directly avoids a subprocess boundary while
     still routing through the same argparse + audit + backend-ingest code path
-    `vigil assess ingest-endpoints` uses on the host. SystemExit raised by
+    `vigil assess ingest endpoints` uses on the host. SystemExit raised by
     the inner command propagates as a non-zero exit, which we translate
     into AssessError so the wrapper can surface it cleanly.
     """
@@ -108,7 +108,8 @@ def _run_ingest_endpoints(
     argv = [
         "--engagement-dir",
         str(engagement_dir),
-        "ingest-endpoints",
+        "ingest",
+        "endpoints",
         source,
         "--file",
         str(input_file),

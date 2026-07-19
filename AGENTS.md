@@ -171,12 +171,13 @@ heading), so a skill with neither is discoverable only by directory name. Always
 
 ## Add a reference
 
-References are the payload / checklist / tooling library specialists load on dispatch. Like skills,
-discovery is a frontmatter scan, so a reference is self-registering — but ONLY if its frontmatter
-carries the keys the pipeline keys on.
+References are the payload / checklist / tooling library specialists load on
+dispatch. Like skills, discovery is a frontmatter scan. References intended for
+skill-routed discovery need a resolvable `skill:` key; general templates and
+engagement-owned references may intentionally remain unpaired.
 
-1. Create `agent/references/<area>/<name>.md` with YAML frontmatter that includes BOTH a `description`
-   and a `skill:` key:
+1. Create `agent/references/<area>/<name>.md` with YAML frontmatter that includes
+   a `description` and, when the reference belongs to a skill, a `skill:` key:
 
    ```markdown
    ---
@@ -189,11 +190,11 @@ carries the keys the pipeline keys on.
    ```
 
    `agent/scripts/assess/commands/list_references.py` globs `agent/references/**/*.md` and parses the
-   frontmatter. **A reference with no `skill:` key is orphaned** — it never appears under
-   `vigil assess list-references --skill <name>`, so a threat hunter navigating by skill never finds
-   it. The `skill:` value must resolve to a real `agent/skills/<name>/` directory (comma-separate to
-   pair with several). If no skill fits, that is a signal to author one — not to ship the reference
-   unpaired.
+   frontmatter. A reference with no `skill:` key still appears in the global
+   listing but not under `list-references --skill <name>`. The `skill:` value must
+   resolve to a real `agent/skills/<name>/` directory (comma-separate to pair with
+   several). Tool and methodology references should be paired; omit `skill:` only
+   for deliberately general templates or engagement-specific material.
 
 2. Confirm discovery and pairing — no other file needs editing:
 
@@ -287,8 +288,12 @@ quality checks — no LLM, no network, no real backend. Cases live under `tests/
    the orchestrator running. This transforms each row into a schema-valid record, validates every one
    (hard-fail on drift), and can scaffold a green-by-construction definition:
 
+   `eval-capture` is a maintainer/CI tool, intentionally off the operator
+   `vigil assess` surface — invoke the module directly (its import chain is
+   stdlib-only, so no venv is needed):
+
    ```bash
-   vigil assess eval-capture \
+   python agent/scripts/assess/commands/eval_capture.py \
      --engagement-dir <engagement-dir> \
      --out tests/eval/fixtures/golden_<name>.json \
      --definition tests/eval/definitions/<name>.yaml
@@ -302,8 +307,8 @@ quality checks — no LLM, no network, no real backend. Cases live under `tests/
    ```
 
    Commit the fixture and definition together so replay stays zero-token. Use
-   `vigil assess eval-capture ... --check` after a re-run to diff a fresh capture against the committed
-   baseline without overwriting it; it exits non-zero on a coverage regression.
+   `python agent/scripts/assess/commands/eval_capture.py ... --check` after a re-run to diff a fresh
+   capture against the committed baseline without overwriting it; it exits non-zero on a coverage regression.
 
 # Code map maintenance
 
@@ -392,8 +397,9 @@ so edits land in the right place and do not create drift.
 - Put role-specific reasoning guidance in `agent/agents/*.md`, because that is where identity,
   examples, and handoff semantics live.
 - Put payload-shape and lifecycle truth in CLI helpers when possible. Prompts should reference
-  helper commands such as `vigil assess contract`, `record-finding`, `verify-finding`, `kill-finding`,
-  `reset-finding`, and `update-finding` rather than duplicating raw schema details.
+  helper commands such as `vigil assess contract`, `finding record`, `finding verify`
+  (`--disposition false_positive` for a kill), and `finding update` (`--status draft` to reopen)
+  rather than duplicating raw schema details.
 - Treat generated artifacts as drift detectors, not authoring targets. If you edit a generated
   prompt directly, the next render will overwrite it.
 
@@ -477,7 +483,10 @@ The verification surface is **not one command**: 4 pytest scopes + a render-chec
 
 The benchmark harness kills a stuck run at a **per-family** wall-clock budget, defined in the editable table `FAMILY_TIMEOUTS` in `src/vigil_cli/bench/models.py`. A measured family uses a budget derived from its observed runs (≈1.5–2× the observed max wall time under `~/.vigil-bench/runs/`); an unmeasured family (no table entry) falls back to the generous `GENEROUS_UNKNOWN_FAMILY_TIMEOUT` so it is never killed before its real duration is known.
 
-- [ ] **TODO — record a new family's wall time and set its timeout.** When a new benchmark family is run for the first time, record its observed wall-clock time and set/refresh its per-family timeout in the codebase (`FAMILY_TIMEOUTS` in `src/vigil_cli/bench/models.py`) if none exists yet. Until then it runs under the generous unmeasured-family fallback; do not leave a family on the fallback once you have real timing data.
+After a new benchmark family completes its first measured run, record the
+observed wall-clock time and set or refresh its entry in `FAMILY_TIMEOUTS`. Until
+that evidence exists, the generous unmeasured-family fallback is intentional;
+never invent a tighter timeout from the family level alone.
 
 # Orchestrator backend
 
@@ -518,4 +527,3 @@ Build the primary runtime image from the repo root:
 ```bash
 docker build -t vigil:latest -f agent/docker/runtime-full/Dockerfile .
 ```
-

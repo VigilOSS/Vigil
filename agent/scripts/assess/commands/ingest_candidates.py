@@ -1,4 +1,4 @@
-"""vigil assess ingest-candidates — ingest metadata-rich surface candidate JSONL."""
+"""vigil assess ingest candidates — ingest metadata-rich surface candidate JSONL."""
 from __future__ import annotations
 
 import json
@@ -37,7 +37,7 @@ def _coerce_header_params(value: object) -> dict[str, str]:
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
-        "ingest-candidates",
+        "candidates",
         help="Ingest metadata-rich surface candidate JSONL into assessment state",
     )
     p.add_argument("source", help="Source name (e.g. surface-collector-curated)")
@@ -62,7 +62,7 @@ def run(args) -> None:
     # ingest-endpoints. A curated candidate row whose host is not admitted by
     # scope.json (e.g. carried through from a gau/wayback corpus) is recorded
     # skipped instead of admitted as probeable work. Inactive when scope.json has
-    # no allowlist (see scope.ingest_scope_filter).
+    # no allowlist or enables the global bypass (see scope.ingest_scope_filter).
     scope_allow, scope_deny, scope_filter_active = ingest_scope_filter(eng_dir)
     out_of_scope_count = 0
     out_of_scope_warned_hosts: set[str] = set()

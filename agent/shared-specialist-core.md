@@ -27,10 +27,10 @@ already listed below.
 
 ---
 
-## Finding IDs and the `record-finding` Contract
+## Finding IDs and the `finding record` Contract
 
 > **Offensive/code roles only.** Blue/IR roles use the IR-evidence confidence
-> model and `record-finding` fields in `agent/shared-constraints-blue.md` (§8 +
+> model and `finding record` fields in `agent/shared-constraints-blue.md` (§8 +
 > the Artifact-Registration closing step) — no CVSS score, no letter prefix. The
 > prefix table and CVSS↔severity mapping below do not apply to you.
 
@@ -59,10 +59,10 @@ Bad: "IDOR vulnerability found." Good: "IDOR in /api/users/{id} allows anonymous
 
 If your CVSS score does not fall within the matching severity range, adjust one or the other before recording.
 
-Record every finding with `vigil assess record-finding <agent-name>
+Record every finding with `vigil assess finding record <agent-name>
 <finding-json-file>`; the payload must match
 `schemas/finding-record.schema.json`. Run `vigil assess contract
-record-finding` for the canonical field list, lifecycle defaults, and an
+finding record` for the canonical field list, lifecycle defaults, and an
 example payload before your first call (Contract-First Rule). Full recording
 rules — dedup, chain metadata, the `notes` replayable-commands requirement —
 live in `agent/shared-constraints.md` §4.
@@ -103,8 +103,8 @@ it in role prompts.
 ## Output Hygiene — Backend Is Canonical
 
 The backend stores the canonical, queryable state of the engagement: findings in
-the findings table (`vigil assess record-finding`), intel rows in `intel_*` tables
-(`record-intel`), surface candidates in the surfaces table (`record-surface`),
+the findings table (`vigil assess finding record`), intel rows in `intel_*` tables
+(`intel record`), surface candidates in the surfaces table (`record-surface`),
 credentials and attack chains in their tables, and the cross-cutting handoff
 (summary / coverage gaps / next steps / runtime issues / working artifacts /
 open questions / specialty extras) in `assessment_dispatch_handoffs`
@@ -112,7 +112,7 @@ open questions / specialty extras) in `assessment_dispatch_handoffs`
 
 The operator queries those tables through bounded primitives — `resume-brief`,
 `render-handoff <agent-id>`, `artifact search/get`, `fetch findings`,
-`list-intel`, `list-clusters` — to assemble the next dispatch's context. The
+`intel list`, `work-buffer clusters` — to assemble the next dispatch's context. The
 markdown response you return is your *reflection* on the work, not the canonical
 record of it.
 

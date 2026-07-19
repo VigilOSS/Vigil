@@ -27,7 +27,7 @@ def register(subparsers) -> None:
     p = subparsers.add_parser("code-dispatch", help="Code analysis queue dispatch engine")
     p.add_argument(
         "action",
-        help="stats|fetch|done|error|needs-context|reset-stale|retry-error|queue|requeue-triggers|list-triggers|resolve-triggers",
+        help="stats|fetch|heartbeat|done|error|needs-context|reset-stale|retry-error|retry-needs-context|queue|requeue-triggers|list-triggers|resolve-triggers",
     )
     p.add_argument("extra", nargs="*", help="Action-specific arguments")
     p.set_defaults(func=run)
@@ -43,13 +43,18 @@ def run(args) -> None:
         _stats(cfg)
     elif action == "fetch":
         if len(extra) < 2:
-            print("Usage: code-dispatch fetch <limit> <agent-name>", file=sys.stderr)
-            sys.exit(1)
-        _fetch(cfg, int(extra[0]), extra[1])
-    elif action == "done":
-        if len(extra) < 3:
             print(
-                "Usage: code-dispatch done <item-id> <disposition> <cwe-coverage-json-file> [notes] [--dry-run] [--skip-reason <reason>]\n"
+                "Usage: code-dispatch fetch <limit> <agent-name> "
+                "[--repo-id ID] [--classification TIER] [--batch-theme THEME] "
+                "[--ids-file PATH]",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        _fetch(cfg, int(extra[0]), extra[1], _parse_fetch_filters(extra[2:]))
+    elif action == "done":
+        if len(extra) < 5:
+            print(
+                "Usage: code-dispatch done <item-id> <agent-name> <lease-token> <disposition> <cwe-coverage-json-file> [notes] [--dry-run] [--skip-reason <reason>]\n"
                 f"Valid dispositions: {', '.join(_DONE_DISPOSITIONS)}\n"
                 "CWE coverage must be a JSON array like "
                 "[{\"family\":\"ssrf\",\"effort\":80}]\n"
@@ -61,7 +66,7 @@ def run(args) -> None:
         notes_parts: list[str] = []
         dry_run = False
         skip_reason = ""
-        tokens = list(extra[3:])
+        tokens = list(extra[5:])
         idx = 0
         while idx < len(tokens):
             token = tokens[idx]
@@ -78,19 +83,26 @@ def run(args) -> None:
                 notes_parts.append(token)
                 idx += 1
         notes = " ".join(notes_parts)
-        _done(cfg, extra[0], extra[1], extra[2], notes, dry_run=dry_run, skip_reason=skip_reason)
+        _done(
+            cfg, extra[0], extra[1], extra[2], extra[3], extra[4], notes,
+            dry_run=dry_run, skip_reason=skip_reason,
+        )
+    elif action == "heartbeat":
+        if len(extra) != 3:
+            print("Usage: code-dispatch heartbeat <item-id> <agent-name> <lease-token>", file=sys.stderr)
+            sys.exit(1)
+        _heartbeat(cfg, extra[0], extra[1], extra[2])
     elif action == "error":
-        if not extra:
-            print("Usage: code-dispatch error <id1,id2,...> [notes]", file=sys.stderr)
+        if len(extra) < 3:
+            print("Usage: code-dispatch error <item-id> <agent-name> <lease-token> [notes]", file=sys.stderr)
             sys.exit(1)
-        notes = extra[1] if len(extra) > 1 else ""
-        _error(cfg, extra[0], notes)
+        _error(cfg, extra[0], extra[1], extra[2], " ".join(extra[3:]))
     elif action == "needs-context":
-        if not extra:
-            print("Usage: code-dispatch needs-context <id1,id2,...> [expansion-json-file]", file=sys.stderr)
+        if len(extra) < 3:
+            print("Usage: code-dispatch needs-context <item-id> <agent-name> <lease-token> [expansion-json-file]", file=sys.stderr)
             sys.exit(1)
-        expansion_file = extra[1] if len(extra) > 1 else None
-        _needs_context(cfg, extra[0], expansion_file)
+        expansion_file = extra[3] if len(extra) > 3 else None
+        _needs_context(cfg, extra[0], extra[1], extra[2], expansion_file)
     elif action == "reset-stale":
         if not extra:
             print("Usage: code-dispatch reset-stale <minutes>", file=sys.stderr)
@@ -106,6 +118,11 @@ def run(args) -> None:
             sys.exit(1)
         reason = " ".join(extra[1:])
         _retry_error(cfg, extra[0], reason)
+    elif action == "retry-needs-context":
+        if len(extra) < 2:
+            print("Usage: code-dispatch retry-needs-context <id1,id2,...> <reason>", file=sys.stderr)
+            sys.exit(1)
+        _retry_needs_context(cfg, extra[0], " ".join(extra[1:]))
     elif action == "queue":
         if not extra:
             print("Usage: code-dispatch queue <queue-items-json-file>", file=sys.stderr)
@@ -131,7 +148,7 @@ def run(args) -> None:
     else:
         print(f"Unknown action: {action}", file=sys.stderr)
         print(
-            "Actions: stats, fetch, done, error, needs-context, reset-stale, retry-error, queue, "
+            "Actions: stats, fetch, heartbeat, done, error, needs-context, reset-stale, retry-error, retry-needs-context, queue, "
             "requeue-triggers, list-triggers, resolve-triggers",
             file=sys.stderr,
         )
@@ -166,19 +183,78 @@ def _stats(cfg) -> None:
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
-def _fetch(cfg, limit: int, agent_name: str) -> None:
+def _ids_from_file(path_value: str) -> list[int]:
+    path = Path(path_value)
+    if not path.is_file():
+        print(f"Queue ids file not found: {path_value}", file=sys.stderr)
+        raise SystemExit(1)
+    text = path.read_text(encoding="utf-8").strip()
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError:
+        raw = [token for token in text.replace(",", " ").split() if token]
+    if isinstance(raw, dict):
+        raw = raw.get("item_ids", raw.get("ids"))
+    if not isinstance(raw, list) or not raw:
+        print("Queue ids file must contain a non-empty JSON array or id list", file=sys.stderr)
+        raise SystemExit(1)
+    try:
+        return sorted({int(value) for value in raw})
+    except (TypeError, ValueError):
+        print("Queue ids file contains a non-integer id", file=sys.stderr)
+        raise SystemExit(1) from None
+
+
+def _parse_fetch_filters(tokens: list[str]) -> dict[str, object]:
+    filters: dict[str, object] = {}
+    index = 0
+    options = {
+        "--repo-id": "repo_id",
+        "--classification": "classification",
+        "--batch-theme": "batch_theme",
+        "--ids-file": "ids_file",
+    }
+    while index < len(tokens):
+        option = tokens[index]
+        field = options.get(option)
+        if field is None or index + 1 >= len(tokens):
+            print(f"Unknown or incomplete code-dispatch fetch option: {option}", file=sys.stderr)
+            raise SystemExit(1)
+        value = tokens[index + 1]
+        if field == "repo_id":
+            try:
+                filters[field] = int(value)
+            except ValueError:
+                print("--repo-id must be an integer", file=sys.stderr)
+                raise SystemExit(1) from None
+        elif field == "ids_file":
+            filters["item_ids"] = _ids_from_file(value)
+        else:
+            filters[field] = value
+        index += 2
+    return filters
+
+
+def _fetch(cfg, limit: int, agent_name: str, filters: dict[str, object] | None = None) -> None:
+    payload: dict[str, object] = {
+        'limit': limit,
+        'agent_name': agent_name,
+        **(filters or {}),
+    }
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        result = client.post('code/analysis-queue/fetch', {
-            'limit': limit,
-            'agent_name': agent_name,
-        })
+        result = client.post('code/analysis-queue/fetch', payload)
 
     snapshot = write_json_snapshot(
         cfg.engagement_dir,
         category="code-queue-fetch",
         label=agent_name,
         payload=result,
-        metadata={"command": "code-dispatch fetch", "agent_name": agent_name, "limit": limit},
+        metadata={
+            "command": "code-dispatch fetch",
+            "agent_name": agent_name,
+            "limit": limit,
+            "filters": filters or {},
+        },
     )
     print(f"Saved audit snapshot: {snapshot.name}", file=sys.stderr)
     print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -187,6 +263,8 @@ def _fetch(cfg, limit: int, agent_name: str) -> None:
 def _done(
     cfg,
     id_list: str,
+    agent_name: str,
+    lease_token: str,
     disposition: str,
     cwe_file: str,
     notes: str = "",
@@ -241,7 +319,12 @@ def _done(
             print(f"CWE coverage entry {idx} has a non-numeric effort", file=sys.stderr)
             sys.exit(1)
 
-    payload: dict = {'item_ids': ids, 'disposition': normalized_disposition}
+    payload: dict = {
+        'item_ids': ids,
+        'agent_name': agent_name,
+        'lease_token': lease_token,
+        'disposition': normalized_disposition,
+    }
     if notes:
         payload['notes'] = notes
     payload['cwe_coverage'] = cwe_data
@@ -268,9 +351,24 @@ def _done(
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
-def _error(cfg, id_list: str, notes: str = "") -> None:
+def _heartbeat(cfg, item_id: str, agent_name: str, lease_token: str) -> None:
+    ids = _validate_id_list(item_id)
+    if len(ids) != 1:
+        print("ERROR: code-dispatch heartbeat accepts exactly one queue item id", file=sys.stderr)
+        sys.exit(1)
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        result = client.post('code/analysis-queue/heartbeat', {
+            'item_id': ids[0], 'agent_name': agent_name, 'lease_token': lease_token,
+        })
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def _error(cfg, id_list: str, agent_name: str, lease_token: str, notes: str = "") -> None:
     ids = _validate_id_list(id_list)
-    payload: dict = {'item_ids': ids}
+    if len(ids) != 1:
+        print("ERROR: code-dispatch error accepts exactly one queue item id", file=sys.stderr)
+        sys.exit(1)
+    payload: dict = {'item_ids': ids, 'agent_name': agent_name, 'lease_token': lease_token}
     if notes:
         payload['notes'] = notes
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
@@ -290,10 +388,15 @@ def _error(cfg, id_list: str, notes: str = "") -> None:
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
-def _needs_context(cfg, id_list: str, expansion_file: str | None) -> None:
+def _needs_context(
+    cfg, id_list: str, agent_name: str, lease_token: str, expansion_file: str | None
+) -> None:
     ids = _validate_id_list(id_list)
+    if len(ids) != 1:
+        print("ERROR: code-dispatch needs-context accepts exactly one queue item id", file=sys.stderr)
+        sys.exit(1)
 
-    payload: dict = {'item_ids': ids}
+    payload: dict = {'item_ids': ids, 'agent_name': agent_name, 'lease_token': lease_token}
     if expansion_file:
         ep = Path(expansion_file)
         if not ep.is_file():
@@ -364,6 +467,16 @@ def _retry_error(cfg, id_list: str, reason: str = "") -> None:
     print(f"Saved audit snapshot: {snapshot.name}")
     if isinstance(result, dict) and result:
         print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def _retry_needs_context(cfg, id_list: str, reason: str) -> None:
+    ids = _validate_id_list(id_list)
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        result = client.post('code/analysis-queue/retry-needs-context', {
+            'item_ids': ids, 'reason': reason,
+        })
+    print(f"Retried (needs_context -> pending): {result.get('retried', 0)} item(s)")
+    print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 def _fetch_code_files(cfg) -> list[dict]:

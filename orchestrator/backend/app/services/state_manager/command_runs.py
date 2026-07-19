@@ -558,7 +558,7 @@ def record_command_run(
         # Audit-truthfulness rationale: the previous behavior returned the
         # predecessor's row id on dedup hit. Under the CLI's warn-and-continue
         # default the second subprocess still ran, so two executions collapsed
-        # to one audit row and ``list-command-runs`` lied about coverage. By
+        # to one audit row and ``command-run list`` lied about coverage. By
         # always inserting we get one row per execution attempt; readers that
         # want to filter to "primary" runs can join on
         # ``superseded_by_id IS NULL``. The predecessor lookup itself scans all
@@ -1017,11 +1017,11 @@ def update_job(
             )
         where = "WHERE engagement_id = ? AND id = ?"
         where_values: list[Any] = [engagement.id, int(job_id)]
-        guard_terminal_update = (
-            status_value in _JOB_TERMINAL_STATUSES
+        guard_pre_terminal_update = (
+            status_value is not None
             and existing_status in _JOB_PRE_TERMINAL_STATUSES
         )
-        if guard_terminal_update:
+        if guard_pre_terminal_update:
             pre_terminal_statuses = tuple(sorted(str(s) for s in _JOB_PRE_TERMINAL_STATUSES))
             placeholders = ", ".join("?" for _ in pre_terminal_statuses)
             where += f" AND status IN ({placeholders})"
@@ -1119,7 +1119,7 @@ def _serialize_command_run(row, *, include_output: bool) -> dict[str, Any]:
         # Listings default to lightweight rows so a sub-agent fetching 50
         # records does not load 50 × 64 KiB of preview text into context.
         # Hashes, suppression reasons, artifact refs, and byte counts stay
-        # so the caller can decide whether a follow-up get-command-run is
+        # so the caller can decide whether a follow-up command-run get is
         # warranted. The full preview is always available via that detail
         # endpoint or by passing include_output=true on the list call.
         stdout_len = len(data.get("stdout_preview") or "")

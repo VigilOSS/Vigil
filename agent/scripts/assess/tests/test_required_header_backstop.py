@@ -149,8 +149,8 @@ def test_unknown_future_tool_reaching_in_scope_is_refused() -> None:
 
 # --------------------------------------------------------------------------- #
 # JSON-threaded attribution (the ``browser`` verb): the marker rides argv as a
-# JSON headers blob ``{"X-Bug-Bounty": "handle"}`` the driver sets over CDP
-# (``Network.setExtraHTTPHeaders``), NOT as a ``-H`` flag. The ``name": "value``
+# JSON headers blob ``{"X-Bug-Bounty": "handle"}`` the Playwright request router
+# installs before navigation, NOT as a ``-H`` flag. The ``name": "value``
 # quoting must be recognized as PRESENT — otherwise a render of an in-scope host
 # is falsely refused even though it carries the attribution header.
 # --------------------------------------------------------------------------- #
@@ -159,7 +159,7 @@ def _browser_cmd(url: str, headers_json: str) -> list[str]:
     # Mirrors commands/kali_browser.py's argv layout: python3 -c <driver> url
     # screenshot dom page_timeout settle wait_selector headers_json.
     return [
-        "python3", "-c", "<selenium driver body>", url,
+        "python3", "-c", "<browser driver body>", url,
         "scans/browser/x.png", "scans/browser/x.html", "30.0", "2.0", "",
         headers_json,
     ]

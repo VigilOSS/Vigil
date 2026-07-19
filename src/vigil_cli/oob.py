@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -12,6 +13,7 @@ from pathlib import Path
 
 from . import config as config_module
 from . import docker
+from .oob_tenants import OobTenantRoute, legacy_tenant_route, load_tenant_route
 from .paths import default_runtime_container
 
 DEFAULT_FRP_HOST = "oob-relay.example.com"
@@ -23,7 +25,9 @@ DEFAULT_OOB_DOMAIN = "oob.example.com"
 OOB_TCP_REMOTE_PORT = 8443
 OOB_UDP_REMOTE_PORT = 53
 OOB_ROOT = "/data/oob"
+OOB_TENANT_ROUTE_FILE = f"{OOB_ROOT}/active-tenant-routing.json"
 FRPC_READY_TIMEOUT_SECONDS = 15.0
+MAX_OOB_POLL_RECORDS = 10_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +37,10 @@ class OobOptions:
     frp_port: int = DEFAULT_FRP_PORT
     frp_token: str = ""
     oob_domain: str = DEFAULT_OOB_DOMAIN
+    tenant_prefix: str = "legacy"
+    dns_remote_port: int = OOB_UDP_REMOTE_PORT
+    reverse_remote_port: int = OOB_TCP_REMOTE_PORT
+    tenant_route: OobTenantRoute | None = None
     container_name: str = field(default_factory=default_runtime_container)
 
 
@@ -41,8 +49,31 @@ def oob_options(install_root: Path) -> OobOptions:
     token = os.environ.get("VIGIL_FRP_TOKEN") or config_module.get_config_value("oob.frp_token") or ""
     host = os.environ.get("VIGIL_FRP_HOST") or config_module.get_config_value("oob.frp_host", DEFAULT_FRP_HOST) or DEFAULT_FRP_HOST
     port = int(os.environ.get("VIGIL_FRP_PORT") or config_module.get_config_value("oob.frp_port", str(DEFAULT_FRP_PORT)) or DEFAULT_FRP_PORT)
-    domain = os.environ.get("VIGIL_OOB_DOMAIN") or config_module.get_config_value("oob.domain", DEFAULT_OOB_DOMAIN) or DEFAULT_OOB_DOMAIN
-    return OobOptions(install_root=install_root, frp_host=host, frp_port=port, frp_token=token, oob_domain=domain)
+    configured_domain = config_module.get_config_value("oob.domain", DEFAULT_OOB_DOMAIN) or DEFAULT_OOB_DOMAIN
+    route = load_tenant_route(install_root)
+    if route is None:
+        domain = os.environ.get("VIGIL_OOB_DOMAIN") or configured_domain
+        route = legacy_tenant_route(install_root, base_domain=domain)
+    else:
+        external_domain = os.environ.get("VIGIL_OOB_DOMAIN")
+        external_value = external_domain.strip().rstrip(".").lower() if external_domain else ""
+        if external_value and external_value not in {route.base_domain, route.oob_domain}:
+            raise SystemExit(
+                "VIGIL_OOB_DOMAIN cannot override persisted Vigil tenant routing. "
+                f"Expected tenant domain {route.oob_domain!r} or its persisted base domain "
+                f"{route.base_domain!r}, got {external_domain!r}."
+            )
+    return OobOptions(
+        install_root=install_root,
+        frp_host=host,
+        frp_port=port,
+        frp_token=token,
+        oob_domain=route.oob_domain,
+        tenant_prefix=route.tenant_prefix,
+        dns_remote_port=route.dns_remote_port,
+        reverse_remote_port=route.reverse_remote_port,
+        tenant_route=route,
+    )
 
 
 def start_oob(
@@ -55,6 +86,41 @@ def start_oob(
     if not options.frp_token:
         raise SystemExit("Missing OOB FRP token. Set it with `vigil config set oob.frp_token <token>`.")
     _require_runtime_tools(options.container_name, runner=runner)
+    active = any(
+        _tmux_has_session(options.container_name, session, runner=runner)
+        for session in ("oob-server", "frpc")
+    )
+    runtime_route, route_issue = _runtime_tenant_route(options.container_name, runner=runner)
+    route_matches: bool | None = None
+    if route_issue:
+        route_matches = False
+    elif runtime_route:
+        route_matches = _route_matches_options(runtime_route, options)
+    running_clients = list_running_oob_clients(options.container_name, runner=runner)
+    for client_name in running_clients:
+        client_metadata, client_issue = _read_oob_client_metadata(
+            options.container_name, client_name, runner=runner
+        )
+        if client_issue or client_metadata is None:
+            detail = client_issue or "client route metadata is missing"
+            raise SystemExit(
+                f"The running OOB client {client_name!r} route cannot be verified: {detail}. "
+                f"Stop it explicitly with `vigil oob client stop {client_name}` before switching routes."
+            )
+        if not _client_metadata_matches_options(client_metadata, options):
+            raise SystemExit(
+                f"The running OOB client {client_name!r} belongs to another tenant route. "
+                f"Stop it explicitly with `vigil oob client stop {client_name}` before switching routes."
+            )
+    if active and (
+        route_matches is False
+        or (route_matches is None and options.tenant_prefix != "legacy")
+    ):
+        detail = route_issue or "the active sessions do not match this install's persisted route"
+        raise SystemExit(
+            "OOB sessions are already active for another tenant (or their tenant route cannot be verified): "
+            f"{detail}. Run `vigil oob restart` intentionally before switching tenant routes."
+        )
     _kill_stale_oob_processes(options.container_name, runner=runner)
     _render_runtime_files(options, runner=runner)
     _ensure_tmux_session(
@@ -91,6 +157,9 @@ def oob_status(
     container_name: str | None = None,
     *,
     oob_domain: str | None = None,
+    tenant_prefix: str = "legacy",
+    dns_remote_port: int = OOB_UDP_REMOTE_PORT,
+    reverse_remote_port: int = OOB_TCP_REMOTE_PORT,
     runner: docker.Runner = docker.run_command,
     deep: bool = True,
 ) -> dict[str, object]:
@@ -101,10 +170,11 @@ def oob_status(
     domain does not resolve (broken Route53 delegation). So with ``deep=True``
     (the default, used by ``vigil oob status``) this also checks, for each RUNNING
     client, whether it actually registered an interactsh payload, and whether the
-    OOB domain resolves from inside the runtime, then derives a ``health``
+    OOB domain resolves and its two-label public HTTP route reaches this tenant,
+    then derives a ``health``
     (`ok`/`degraded`/`down`) + human ``issues``.
 
-    ``deep=False`` skips those per-client log reads and the DNS probe for the
+    ``deep=False`` skips those per-client log reads and the DNS/HTTP probes for the
     lightweight aggregate callers (`vigil status`, `vigil up`): registration is
     reported as unknown (``None``) and health reflects only session liveness, so
     those hot paths keep their original cost. ``domain`` is always resolved to the
@@ -116,11 +186,28 @@ def oob_status(
         return {
             "state": "stopped", "health": "down", "server": False, "frpc": False,
             "clients": [], "running": [], "client_health": [], "domain": domain,
+            "tenant_prefix": tenant_prefix,
+            "port_range": [dns_remote_port, reverse_remote_port],
+            "runtime_route": None,
+            "route_matches": None,
             "domain_resolves": None,
+            "edge_route_healthy": None,
             "issues": ["Kali runtime container is not running — start it with `vigil runtime start`."],
         }
     server = _tmux_has_session(container_name, "oob-server", runner=runner)
     frpc = _tmux_has_session(container_name, "frpc", runner=runner)
+    runtime_route, route_issue = _runtime_tenant_route(container_name, runner=runner)
+    route_matches = None
+    if route_issue:
+        route_matches = False
+    elif runtime_route:
+        route_matches = _route_matches_values(
+            runtime_route,
+            tenant_prefix=tenant_prefix,
+            oob_domain=domain,
+            dns_remote_port=dns_remote_port,
+            reverse_remote_port=reverse_remote_port,
+        )
     running = list_running_oob_clients(container_name, runner=runner)
     # Reuse the already-fetched running set instead of re-querying tmux inside list_oob_clients.
     clients = sorted(set(running) | _configured_oob_clients(container_name, runner=runner))
@@ -130,9 +217,13 @@ def oob_status(
             for name in running
         ]
         domain_resolves = _oob_domain_resolves(container_name, domain, runner=runner)
+        edge_route_healthy = _oob_http_route_healthy(
+            container_name, domain, runner=runner
+        )
     else:
         client_health = [{"name": name, "registered": None} for name in running]
         domain_resolves = None
+        edge_route_healthy = None
     if server and frpc:
         state = "running"
     elif server or frpc or clients:
@@ -142,7 +233,29 @@ def oob_status(
     health, issues = _assess_oob_health(
         server=server, frpc=frpc, state=state, running=running,
         client_health=client_health, domain=domain, domain_resolves=domain_resolves,
+        edge_route_healthy=edge_route_healthy,
     )
+    active = server or frpc
+    if active and route_matches is False:
+        if route_issue:
+            issues.append(route_issue)
+        issues.append(
+            "Active OOB sessions belong to another tenant route; callbacks and FRP ports would be routed "
+            "to the wrong install. Run `vigil oob restart` intentionally before switching tenants."
+        )
+        if health == "ok":
+            health = "degraded"
+    elif active and route_matches is None and tenant_prefix != "legacy":
+        issues.append(
+            "Active OOB sessions have no valid tenant-routing marker, so this install cannot safely claim them. "
+            "Run `vigil oob restart` to bind the sessions to the persisted tenant route."
+        )
+        if health == "ok":
+            health = "degraded"
+    elif route_issue:
+        issues.append(route_issue)
+        if health == "ok":
+            health = "degraded"
     return {
         "state": state,
         "health": health,
@@ -152,7 +265,12 @@ def oob_status(
         "running": running,
         "client_health": client_health,
         "domain": domain,
+        "tenant_prefix": tenant_prefix,
+        "port_range": [dns_remote_port, reverse_remote_port],
+        "runtime_route": runtime_route,
+        "route_matches": route_matches,
         "domain_resolves": domain_resolves,
+        "edge_route_healthy": edge_route_healthy,
         "issues": issues,
     }
 
@@ -166,6 +284,7 @@ def _assess_oob_health(
     client_health: list[dict[str, object]],
     domain: str | None,
     domain_resolves: bool | None,
+    edge_route_healthy: bool | None = None,
 ) -> tuple[str, list[str]]:
     """Derive an OOB health verdict + human issues from gathered signals (PURE).
 
@@ -181,6 +300,12 @@ def _assess_oob_health(
         issues.append(
             f"OOB domain '{domain}' does not resolve from the runtime — callbacks cannot land. "
             f"Check the Route53 NS delegation of '{domain}' to the frp host (must be the host NAME, not a raw IP)."
+        )
+    if domain and edge_route_healthy is False:
+        issues.append(
+            f"OOB HTTP edge route for '{domain}' did not return a direct tenant response — "
+            "callbacks may be redirecting or reaching another tenant. Check the Caddy "
+            "apex/client/nonce-client host routes and the tenant FRP registration."
         )
     # Only flag registration when it was actually checked (deep=True); a None
     # entry means "not probed" (deep=False) and must not read as unregistered.
@@ -202,12 +327,13 @@ def _assess_oob_health(
 def _oob_domain_resolves(container_name: str, domain: str, *, runner: docker.Runner) -> bool:
     """True if a wildcard subdomain of ``domain`` resolves from inside the runtime.
 
-    Queries a ``healthcheck.<domain>`` label so it exercises the wildcard
+    Queries a two-label ``healthcheck.client-probe.<domain>`` name so it
+    exercises the same wildcard depth as a real nonce/client callback and the
     delegation path real callbacks use (delegation → frp host → interactsh),
     not just an apex A record. Failure is the exact signal the broken-NS outage
     produced. Capped at one ~3s try so a dead delegation cannot hang status.
     """
-    marker = f"healthcheck.{domain}"
+    marker = f"healthcheck.client-probe.{domain}"
     result = _run_exec(
         container_name,
         f"dig +short +time=3 +tries=1 {shlex.quote(marker)} A 2>/dev/null",
@@ -215,6 +341,38 @@ def _oob_domain_resolves(container_name: str, domain: str, *, runner: docker.Run
         check=False,
     )
     return any(_looks_like_ip(line.strip()) for line in result.stdout.splitlines())
+
+
+def _oob_http_route_healthy(
+    container_name: str, domain: str, *, runner: docker.Runner
+) -> bool:
+    """Confirm the public HTTP edge reaches this tenant, without accepting redirects."""
+    marker = f"healthcheck.client-probe.{domain}"
+    result = _run_exec(
+        container_name,
+        (
+            "curl -sS -D - -o /dev/null --max-time 5 "
+            f"{shlex.quote(f'http://{marker}/')}"
+        ),
+        runner=runner,
+        check=False,
+    )
+    if result.returncode != 0:
+        return False
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not lines:
+        return False
+    status_parts = lines[0].split()
+    status = int(status_parts[1]) if len(status_parts) > 1 and status_parts[1].isdigit() else 0
+    server = next(
+        (
+            line.split(":", 1)[1].strip().rstrip(".").lower()
+            for line in lines[1:]
+            if line.lower().startswith("server:")
+        ),
+        "",
+    )
+    return 200 <= status < 300 and server == domain.strip().rstrip(".").lower()
 
 
 def _looks_like_ip(value: str) -> bool:
@@ -233,8 +391,64 @@ def start_oob_client(
     _require_runtime(options.container_name, runner=runner)
     client_name = sanitize_name(name)
     session = f"oob-client-{client_name}"
+    runtime_route, route_issue = _runtime_tenant_route(
+        options.container_name, runner=runner
+    )
+    if route_issue:
+        raise SystemExit(
+            "OOB client start refused because the active runtime route marker "
+            f"cannot be verified: {route_issue}. Run `vigil oob restart` before starting clients."
+        )
+    if runtime_route is None:
+        raise SystemExit(
+            "OOB client start refused because the active runtime route marker is missing. "
+            "Run `vigil oob start` before starting clients."
+        )
+    if not _route_matches_options(runtime_route, options):
+        raise SystemExit(
+            "OOB client start refused because the active runtime route does not match "
+            "this install's persisted tenant route. Stop clients for the old route explicitly, "
+            "then run `vigil oob restart`."
+        )
+    metadata = {
+        "name": client_name,
+        "engagement": engagement,
+        "agent": agent,
+        "server": options.oob_domain,
+        "tenant_prefix": options.tenant_prefix,
+        "dns_remote_port": options.dns_remote_port,
+        "reverse_remote_port": options.reverse_remote_port,
+    }
+    if _tmux_has_session(options.container_name, session, runner=runner):
+        existing, client_issue = _read_oob_client_metadata(
+            options.container_name, client_name, runner=runner
+        )
+        if client_issue or existing is None:
+            detail = client_issue or "client metadata is missing"
+            raise SystemExit(
+                f"The running OOB client {client_name!r} metadata cannot be verified: {detail}. "
+                f"Stop it explicitly with `vigil oob client stop {client_name}` before reusing this name."
+            )
+        if not _client_metadata_matches_options(existing, options):
+            raise SystemExit(
+                f"The running OOB client {client_name!r} belongs to another tenant route. "
+                f"Stop it explicitly with `vigil oob client stop {client_name}` before reusing this name."
+            )
+        ownership_keys = ("name", "engagement", "agent")
+        if any(existing.get(key) != metadata[key] for key in ownership_keys):
+            raise SystemExit(
+                f"The running OOB client {client_name!r} metadata does not match the requested "
+                "engagement or agent. Stop it explicitly before reusing this name."
+            )
+        if not _is_pre_wave2_client_metadata(existing) and any(
+            existing.get(key) != value for key, value in metadata.items()
+        ):
+            raise SystemExit(
+                f"The running OOB client {client_name!r} metadata does not match the requested "
+                "route. Stop it explicitly before reusing this name."
+            )
+        return
     _run_exec(options.container_name, f"mkdir -p {OOB_ROOT}/clients", runner=runner)
-    metadata = {"name": client_name, "engagement": engagement, "agent": agent, "server": options.oob_domain}
     _write_runtime_file(options.container_name, f"{OOB_ROOT}/clients/{client_name}.json", json.dumps(metadata, indent=2) + "\n", runner=runner)
     log_path = f"{OOB_ROOT}/clients/{client_name}.log"
     session_file = f"{OOB_ROOT}/clients/{client_name}.session"
@@ -278,6 +492,75 @@ def _configured_oob_clients(container_name: str, *, runner: docker.Runner) -> se
     return {line.strip() for line in cfg_result.stdout.splitlines() if line.strip()}
 
 
+def _read_oob_client_metadata(
+    container_name: str,
+    client_name: str,
+    *,
+    runner: docker.Runner,
+) -> tuple[dict[str, object] | None, str | None]:
+    result = _run_exec(
+        container_name,
+        f"cat {shlex.quote(f'{OOB_ROOT}/clients/{client_name}.json')} 2>/dev/null",
+        runner=runner,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return None, "client route metadata is missing"
+    try:
+        payload = json.loads(result.stdout)
+        if not isinstance(payload, dict):
+            raise ValueError("expected a JSON object")
+        if payload.get("name") != client_name:
+            raise ValueError("client name does not match the live session")
+        server = payload["server"]
+        if not isinstance(server, str) or not server:
+            raise ValueError("missing or malformed route fields")
+        route_fields = ("tenant_prefix", "dns_remote_port", "reverse_remote_port")
+        present_route_fields = [field in payload for field in route_fields]
+        if any(present_route_fields) and not all(present_route_fields):
+            raise ValueError("partially populated client route metadata")
+        if not _is_pre_wave2_client_metadata(payload):
+            tenant_prefix = payload["tenant_prefix"]
+            dns_port = payload["dns_remote_port"]
+            reverse_port = payload["reverse_remote_port"]
+            if (
+                not isinstance(tenant_prefix, str)
+                or not tenant_prefix
+                or isinstance(dns_port, bool)
+                or not isinstance(dns_port, int)
+                or isinstance(reverse_port, bool)
+                or not isinstance(reverse_port, int)
+            ):
+                raise ValueError("missing or malformed route fields")
+    except (json.JSONDecodeError, KeyError, ValueError) as exc:
+        return None, f"client route metadata is invalid: {exc}"
+    return payload, None
+
+
+def _client_metadata_matches_options(
+    metadata: dict[str, object], options: OobOptions
+) -> bool:
+    if _is_pre_wave2_client_metadata(metadata):
+        return (
+            options.tenant_prefix == "legacy"
+            and metadata.get("server")
+            == options.oob_domain.strip().rstrip(".").lower()
+            and options.dns_remote_port == OOB_UDP_REMOTE_PORT
+            and options.reverse_remote_port == OOB_TCP_REMOTE_PORT
+        )
+    return (
+        metadata.get("tenant_prefix") == options.tenant_prefix
+        and metadata.get("server") == options.oob_domain.strip().rstrip(".").lower()
+        and metadata.get("dns_remote_port") == options.dns_remote_port
+        and metadata.get("reverse_remote_port") == options.reverse_remote_port
+    )
+
+
+def _is_pre_wave2_client_metadata(metadata: dict[str, object]) -> bool:
+    route_fields = ("tenant_prefix", "dns_remote_port", "reverse_remote_port")
+    return not any(field in metadata for field in route_fields)
+
+
 def list_oob_clients(container_name: str | None = None, *, runner: docker.Runner = docker.run_command) -> list[str]:
     container_name = container_name or default_runtime_container()
     live = set(list_running_oob_clients(container_name, runner=runner))
@@ -285,14 +568,94 @@ def list_oob_clients(container_name: str | None = None, *, runner: docker.Runner
 
 
 def test_oob(options: OobOptions, *, runner: docker.Runner = docker.run_command) -> None:
-    marker = "vigil-test"
-    command = (
-        f"dig +short {marker}.{shlex.quote(options.oob_domain)} @8.8.8.8 >/dev/null 2>&1 || true; "
-        f"curl -fsS --max-time 5 http://{marker}.{shlex.quote(options.oob_domain)}/ >/dev/null 2>&1 || true; "
-        f"tail -n 40 {OOB_ROOT}/server.log {OOB_ROOT}/clients/*.log 2>/dev/null || true"
+    """Prove the public DNS and HTTP routes reach this tenant's OOB server."""
+    _require_runtime(options.container_name, runner=runner)
+    selected_client = ""
+    payload_host = ""
+    for candidate in list_running_oob_clients(options.container_name, runner=runner):
+        candidate_host = client_payload_host(
+            candidate,
+            options.container_name,
+            runner=runner,
+            oob_domain=options.oob_domain,
+        )
+        if candidate_host:
+            selected_client = candidate
+            payload_host = candidate_host
+            break
+    if not payload_host:
+        raise SystemExit(
+            "oob test: no registered OOB client is running; start one with "
+            "`vigil oob client start <name> --engagement <key> --agent <role>`"
+        )
+
+    marker = mint_nonce(prefix="vigil-test", length=8)
+    host = f"{marker}.{payload_host}"
+    dns_result = _run_exec(
+        options.container_name,
+        f"dig +short +time=5 +tries=1 {shlex.quote(host)} @8.8.8.8 A",
+        runner=runner,
+        check=False,
     )
-    result = _run_exec(options.container_name, command, runner=runner, check=False)
-    print(result.stdout, end="")
+    dns_address = next(
+        (
+            line.strip()
+            for line in dns_result.stdout.splitlines()
+            if _looks_like_ip(line.strip())
+        ),
+        "",
+    )
+    if dns_result.returncode != 0 or not dns_address:
+        detail = (dns_result.stderr or dns_result.stdout).strip() or "no A record returned"
+        raise SystemExit(
+            f"oob test: public DNS probe failed for {host}: {detail}"
+        )
+
+    http_result = _run_exec(
+        options.container_name,
+        (
+            "curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "
+            f"{shlex.quote(f'http://{host}/')}"
+        ),
+        runner=runner,
+        check=False,
+    )
+    status_text = http_result.stdout.strip()
+    status = int(status_text) if status_text.isdigit() else 0
+    if http_result.returncode != 0 or not 200 <= status < 300:
+        detail = (http_result.stderr or status_text).strip() or "no HTTP status returned"
+        raise SystemExit(
+            f"oob test: public HTTP probe failed for {host}: {detail}"
+        )
+
+    client_log = shlex.quote(
+        f"{OOB_ROOT}/clients/{sanitize_name(selected_client)}.log"
+    )
+    deadline = time.monotonic() + 10.0
+    callback_seen = False
+    while True:
+        callback_result = _run_exec(
+            options.container_name,
+            f"grep -aiF -- {shlex.quote(marker)} {client_log}",
+            runner=runner,
+            check=False,
+        )
+        if marker.lower() in callback_result.stdout.lower():
+            callback_seen = True
+            break
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
+    if not callback_seen:
+        raise SystemExit(
+            f"oob test: callback was not observed by client {selected_client!r} "
+            f"within 10s for {host}"
+        )
+
+    print(
+        f"oob test\tok\tdomain={options.oob_domain}\tmarker={marker}"
+        f"\tdns={dns_address}\thttp={status}"
+    )
 
 
 def sanitize_name(value: str) -> str:
@@ -576,6 +939,42 @@ def match_interactions_to_nonces(
     return matched, unmatched
 
 
+def interactions_for_domain(
+    interactions: list[OobInteraction],
+    oob_domain: str,
+    *,
+    client_payload_host: str = "",
+) -> list[OobInteraction]:
+    """Admit interactions emitted by one tenant client's dedicated log.
+
+    Interactsh's verbose client output uses either a complete callback FQDN or
+    a compact ``<probe>.<correlation-id>`` bracket with the configured server
+    domain omitted. The caller reads exactly one tenant-bound client log, so a
+    compact one- or two-label identifier carries no tenant suffix, so it is
+    admitted only when its rightmost label matches this client's current
+    registered correlation ID. Complete hostnames must still match the
+    persisted tenant domain.
+    """
+    domain = oob_domain.strip().rstrip(".").lower()
+    if not domain:
+        return []
+    suffix = f".{domain}"
+    registered = client_payload_host.strip().rstrip(".").lower()
+    correlation_id = registered[: -len(suffix)] if registered.endswith(suffix) else ""
+    if not correlation_id or "." in correlation_id:
+        correlation_id = ""
+
+    def belongs_to_client(interaction: OobInteraction) -> bool:
+        host = interaction.full_host.strip().rstrip(".").lower()
+        if host.endswith(suffix):
+            return True
+        if not correlation_id or host.count(".") > 1:
+            return False
+        return host == correlation_id or host.endswith(f".{correlation_id}")
+
+    return [interaction for interaction in interactions if belongs_to_client(interaction)]
+
+
 def _with_nonce(interaction: OobInteraction, nonce: str) -> OobInteraction:
     return OobInteraction(
         protocol=interaction.protocol,
@@ -596,16 +995,35 @@ def read_client_log(
     runner: docker.Runner = docker.run_command,
     lines: int = 2000,
 ) -> str:
-    """Read the interactsh-client interaction log — the SAME source
+    """Read recent parser-candidate interactions from the client log.
+
+    This uses the SAME source
     ``vigil oob client logs`` reads (``/data/oob/clients/<name>.log``).
 
-    Returns the tail (default 2000 lines) as text for
-    :func:`parse_interactsh_log`. Best-effort: a missing log yields ``""``.
+    A verbose interactsh callback expands to dozens of raw request/response
+    lines. A physical-line tail therefore lets a DNS burst evict a nearby HTTP
+    interaction and creates a false negative. Reverse-scan the file and retain
+    only the newest bounded parser candidates: verbose ``Received ...
+    interaction`` summaries and JSONL protocol records. The parser and tenant
+    admission remain authoritative; this grep is only a compact prefilter.
+
+    Best-effort: a missing log yields ``""``.
     """
     container_name = container_name or default_runtime_container()
     client = sanitize_name(name)
+    count = int(lines)
+    if not 1 <= count <= MAX_OOB_POLL_RECORDS:
+        raise ValueError(f"OOB poll records must be between 1 and {MAX_OOB_POLL_RECORDS}")
     log_path = f"{OOB_ROOT}/clients/{shlex.quote(client)}.log"
-    command = f"tail -n {int(lines)} {log_path} 2>/dev/null || true"
+    candidate_pattern = (
+        r'^\[[^]]+\][[:space:]]+Received[[:space:]]+'
+        r'[[:alnum:]_-]+[[:space:]]+interaction|'
+        r'^\{.*"protocol"[[:space:]]*:'
+    )
+    command = (
+        f"tac {log_path} 2>/dev/null | "
+        f"grep -aE -m {count} -- {shlex.quote(candidate_pattern)} | tac || true"
+    )
     result = _run_exec(container_name, command, runner=runner, check=False)
     return result.stdout or ""
 
@@ -661,6 +1079,47 @@ def client_payload_host(
     """
     log_text = read_client_registration_log(name, container_name, runner=runner, oob_domain=oob_domain)
     return parse_client_payload_host(log_text, oob_domain)
+
+
+def poll_client_payload_host(
+    options: OobOptions,
+    name: str,
+    *,
+    engagement: str,
+    runner: docker.Runner = docker.run_command,
+) -> str:
+    """Return a poll client's registration only when its ownership is current."""
+    client_name = sanitize_name(name)
+    metadata, issue = _read_oob_client_metadata(
+        options.container_name,
+        client_name,
+        runner=runner,
+    )
+    if issue or metadata is None:
+        raise SystemExit(
+            f"OOB poll refused for client {client_name!r}: "
+            f"{issue or 'client metadata is missing'}."
+        )
+    if not _client_metadata_matches_options(metadata, options):
+        raise SystemExit(
+            f"OOB poll refused because client {client_name!r} belongs to another tenant route."
+        )
+    if metadata.get("engagement") != engagement:
+        raise SystemExit(
+            f"OOB poll refused because client {client_name!r} belongs to engagement "
+            f"{metadata.get('engagement')!r}, not {engagement!r}."
+        )
+    payload_host = client_payload_host(
+        client_name,
+        options.container_name,
+        runner=runner,
+        oob_domain=options.oob_domain,
+    )
+    if not payload_host:
+        raise SystemExit(
+            f"OOB poll refused because client {client_name!r} has no current registration."
+        )
+    return payload_host
 
 
 # ── OOB client artifact cleanup (manual retention) ───────────────────────
@@ -815,7 +1274,10 @@ def _require_runtime(container_name: str, *, runner: docker.Runner) -> None:
 
 
 def _require_runtime_tools(container_name: str, *, runner: docker.Runner) -> None:
-    for tool in ("tmux", "frpc", "interactsh-server", "interactsh-client", "dig", "curl", "python3"):
+    for tool in (
+        "tmux", "frpc", "interactsh-server", "interactsh-client", "dig",
+        "curl", "grep", "tac", "python3",
+    ):
         result = _run_exec(container_name, f"command -v {shlex.quote(tool)} >/dev/null", runner=runner, check=False)
         if result.returncode != 0:
             raise SystemExit(f"OOB runtime tool missing: {tool}")
@@ -847,9 +1309,8 @@ def _check_frpc_for_conflicts(
 ) -> None:
     """Post-flight: confirm frpc registered our proxies, surface conflicts loudly.
 
-    The OOB profile is single-tenant — `remotePort = 53/8443` and
-    `customDomains = oob.example.com` are globally unique on frps. If
-    another client holds them when we register, frps rejects our registration
+    Tenant routes own a persisted domain and two-port FRP block. If another
+    client holds either resource when we register, frps rejects our registration
     and frpc retries silently every ~30s (`loginFailExit = false`). Polling
     `/data/oob/frpc.log` for the success/conflict lines lets us turn that
     silent loop into a clear SystemExit without needing any extra channel
@@ -875,11 +1336,11 @@ def _check_frpc_for_conflicts(
             raise SystemExit(
                 "OOB resources are already held by another frpc client. frps reported:\n"
                 + "\n".join(f"  {line}" for line in conflicts[:10])
-                + f"\n\nThe OOB profile is single-tenant: remotePort {OOB_UDP_REMOTE_PORT}/{OOB_TCP_REMOTE_PORT} and "
-                + f"customDomains {options.oob_domain!r} can only be served by one client at a time.\n"
-                "Stop the other `vigil oob start` instance, then retry. To inspect:\n"
+                + f"\n\nTenant route {options.tenant_prefix!r} owns remotePort "
+                + f"{options.dns_remote_port}/{options.reverse_remote_port} and customDomains {options.oob_domain!r}.\n"
+                "Resolve the duplicate allocation in the shared OOB registry, stop the conflicting instance, then retry. To inspect:\n"
                 f"  docker exec {options.container_name} tail -n 200 {OOB_ROOT}/frpc.log\n"
-                "(See README §Callback, Listener & Tunnel Handling — TODO: per-tenant OOB.)"
+                "(See README §Callback, Listener & Tunnel Handling.)"
             )
         registered = _frpc_registered_proxy_labels(last_log)
         if registered >= _FRPC_EXPECTED_PROXY_LABELS:
@@ -922,6 +1383,10 @@ def _kill_oob_sessions(container_name: str, *, runner: docker.Runner) -> None:
 
 def _render_runtime_files(options: OobOptions, *, runner: docker.Runner) -> None:
     _run_exec(options.container_name, f"mkdir -p {OOB_ROOT}/clients", runner=runner)
+    proxy_prefix = (
+        "vigil-"
+        + hashlib.sha256(options.tenant_prefix.encode("utf-8")).hexdigest()[:16]
+    )
     render = f"""python3 - <<'PY'
 from pathlib import Path
 import socket
@@ -929,7 +1394,6 @@ import socket
 root = Path({OOB_ROOT!r})
 root.mkdir(parents=True, exist_ok=True)
 container_ip = socket.gethostbyname(socket.gethostname())
-prefix = socket.gethostname().split(".")[0].lower()[:8]
 Path({f"{OOB_ROOT}/frpc.toml"!r}).write_text(f'''serverAddr = {options.frp_host!r}
 serverPort = {options.frp_port}
 auth.token = {options.frp_token!r}
@@ -938,29 +1402,108 @@ transport.heartbeatInterval = 10
 transport.heartbeatTimeout = 30
 
 [[proxies]]
-name = "{{prefix}}-oob-dns"
+name = "{proxy_prefix}-oob-dns"
 type = "udp"
 localIP = "{{container_ip}}"
 localPort = 53
-remotePort = 53
+remotePort = {options.dns_remote_port}
 
 [[proxies]]
-name = "{{prefix}}-oob"
+name = "{proxy_prefix}-oob"
 type = "http"
 localIP = "{{container_ip}}"
 localPort = 80
 customDomains = [{options.oob_domain!r}, "*.{options.oob_domain}"]
 
 [[proxies]]
-name = "{{prefix}}-oob-rev"
+name = "{proxy_prefix}-oob-rev"
 type = "tcp"
 localIP = "{{container_ip}}"
 localPort = 4444
-remotePort = 8443
+remotePort = {options.reverse_remote_port}
 ''', encoding='utf-8')
 PY"""
     _run_exec(options.container_name, render, runner=runner)
+    runtime_route = {
+        "version": 1,
+        "tenant_prefix": options.tenant_prefix,
+        "oob_domain": options.oob_domain,
+        "dns_remote_port": options.dns_remote_port,
+        "reverse_remote_port": options.reverse_remote_port,
+    }
+    _write_runtime_file(
+        options.container_name,
+        OOB_TENANT_ROUTE_FILE,
+        json.dumps(runtime_route, indent=2, sort_keys=True) + "\n",
+        runner=runner,
+    )
     _write_runtime_file(options.container_name, f"{OOB_ROOT}/oob_server_watch.py", _server_watch_source(options), runner=runner)
+
+
+def _runtime_tenant_route(
+    container_name: str, *, runner: docker.Runner
+) -> tuple[dict[str, object] | None, str | None]:
+    result = _run_exec(
+        container_name,
+        f"cat {shlex.quote(OOB_TENANT_ROUTE_FILE)} 2>/dev/null",
+        runner=runner,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return None, None
+    try:
+        payload = json.loads(result.stdout)
+        if not isinstance(payload, dict):
+            raise ValueError("expected a JSON object")
+        tenant_prefix = payload["tenant_prefix"]
+        oob_domain = payload["oob_domain"]
+        dns_port = payload["dns_remote_port"]
+        reverse_port = payload["reverse_remote_port"]
+        if (
+            not isinstance(tenant_prefix, str)
+            or not tenant_prefix
+            or not isinstance(oob_domain, str)
+            or not oob_domain
+            or isinstance(dns_port, bool)
+            or not isinstance(dns_port, int)
+            or isinstance(reverse_port, bool)
+            or not isinstance(reverse_port, int)
+        ):
+            raise ValueError("missing or malformed route fields")
+    except (json.JSONDecodeError, KeyError, ValueError) as exc:
+        return None, f"Active OOB tenant-routing marker is invalid: {exc}"
+    return {
+        "tenant_prefix": tenant_prefix,
+        "oob_domain": oob_domain.strip().rstrip(".").lower(),
+        "dns_remote_port": dns_port,
+        "reverse_remote_port": reverse_port,
+    }, None
+
+
+def _route_matches_values(
+    runtime_route: dict[str, object],
+    *,
+    tenant_prefix: str,
+    oob_domain: str,
+    dns_remote_port: int,
+    reverse_remote_port: int,
+) -> bool:
+    return runtime_route == {
+        "tenant_prefix": tenant_prefix,
+        "oob_domain": oob_domain.strip().rstrip(".").lower(),
+        "dns_remote_port": dns_remote_port,
+        "reverse_remote_port": reverse_remote_port,
+    }
+
+
+def _route_matches_options(runtime_route: dict[str, object], options: OobOptions) -> bool:
+    return _route_matches_values(
+        runtime_route,
+        tenant_prefix=options.tenant_prefix,
+        oob_domain=options.oob_domain,
+        dns_remote_port=options.dns_remote_port,
+        reverse_remote_port=options.reverse_remote_port,
+    )
 
 
 def _server_watch_source(options: OobOptions) -> str:

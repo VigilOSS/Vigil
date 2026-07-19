@@ -20,6 +20,7 @@ These tests pin:
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import os
 import signal
 import subprocess
@@ -141,6 +142,11 @@ def test_start_job_wrapper_and_started_at(monkeypatch, tmp_path):
         engagement_dir=tmp_path,
         container_name="vigil",
         config=_cfg(tmp_path),
+        execution_policy={
+            "scope_enforcement": "enforce",
+            "scope_bypassed": False,
+            "checked_targets": ["example.com"],
+        },
     )
 
     wrapped_shell = captured["argv"][-1]
@@ -160,6 +166,112 @@ def test_start_job_wrapper_and_started_at(monkeypatch, tmp_path):
     running_patches = [p for _, p in fake.patches if p.get("status") == "running"]
     assert running_patches, "expected a running PATCH"
     assert running_patches[-1].get("started_at"), "running PATCH must stamp started_at"
+
+
+def test_start_job_acquires_rate_lease_before_dtach_and_persists_token(
+    monkeypatch, tmp_path
+):
+    fake = FakeClient(post_value={"id": 17})
+    events: list[str] = []
+    monkeypatch.setattr(kali_jobs, "_container_running", lambda *a, **k: True)
+    monkeypatch.setattr(kali_jobs, "_check_dtach_in_container", lambda *a, **k: None)
+    monkeypatch.setattr(kali_jobs, "_ensure_dtach_dir", lambda *a, **k: None)
+    monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(
+        kali_jobs,
+        "acquire_target_rate_lease",
+        lambda **kwargs: events.append("lease") or {"lease_token": "rate-17"},
+    )
+    monkeypatch.setattr(
+        kali_jobs.subprocess,
+        "run",
+        lambda *a, **k: events.append("spawn") or SimpleNamespace(returncode=0),
+    )
+
+    kali_jobs.start_job(
+        ["httpx", "-u", "https://example.com", "-rate-limit", "5"],
+        audit_meta={
+            "technique": "RECON",
+            "agent_name": "recon-specialist",
+            "timeout_seconds_requested": 120,
+            "effective_rate_rps": 5,
+            "rate_override_reason": "",
+        },
+        engagement_dir=tmp_path,
+        container_name="vigil",
+        config=_cfg(tmp_path),
+        execution_policy={
+            "scope_enforcement": "enforce",
+            "scope_bypassed": False,
+            "checked_targets": ["example.com"],
+        },
+    )
+
+    assert events.index("lease") < events.index("spawn")
+    metadata_patches = [
+        payload for _, payload in fake.patches if "audit_metadata" in payload
+    ]
+    assert metadata_patches[-1]["audit_metadata"]["rate_lease_token"] == "rate-17"
+
+
+def test_start_job_creates_command_audit_before_linked_job_and_spawn(
+    monkeypatch, tmp_path
+):
+    events: list[str] = []
+
+    class LifecycleClient(FakeClient):
+        def post(self, endpoint, payload):
+            events.append(f"post:{endpoint}")
+            self.posts.append((endpoint, payload))
+            if endpoint == "command-runs":
+                return {"id": 41, "status": "running"}
+            return {"id": 17, "status": "queued"}
+
+    fake = LifecycleClient()
+    monkeypatch.setattr(kali_jobs, "_container_running", lambda *a, **k: True)
+    monkeypatch.setattr(kali_jobs, "_check_dtach_in_container", lambda *a, **k: None)
+    monkeypatch.setattr(kali_jobs, "_ensure_dtach_dir", lambda *a, **k: None)
+    monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(
+        kali_jobs.subprocess,
+        "run",
+        lambda *a, **k: events.append("spawn") or SimpleNamespace(returncode=0),
+    )
+
+    kali_jobs.start_job(
+        ["nuclei", "-u", "https://example.com"],
+        audit_meta={
+            "technique": "RECON",
+            "intent": "background scan",
+            "probe_kind": "fingerprint",
+            "phase": "recon",
+            "agent_name": "recon-specialist",
+            "timeout_seconds_requested": 60,
+            "scope_version": "scope-v1",
+            "auth_context": "anonymous",
+            "scope_enforcement": "enforce",
+            "scope_bypassed": False,
+            "checked_targets": ["example.com"],
+        },
+        engagement_dir=tmp_path,
+        container_name="vigil",
+        config=_cfg(tmp_path),
+        execution_policy={
+            "scope_enforcement": "enforce",
+            "scope_bypassed": False,
+            "checked_targets": ["example.com"],
+        },
+    )
+
+    assert events[:3] == ["post:command-runs", "post:jobs", "spawn"]
+    job_payload = next(payload for endpoint, payload in fake.posts if endpoint == "jobs")
+    assert job_payload["parent_command_run_id"] == 41
+    command_payload = next(
+        payload for endpoint, payload in fake.posts if endpoint == "command-runs"
+    )
+    assert command_payload["status"] == "running"
+    assert command_payload["stdout_path"].endswith(".out")
+    assert command_payload["notes"]
 
 
 def test_wrapper_records_tool_pid_not_supervisor(tmp_path):
@@ -363,6 +475,24 @@ def test_wrapper_deadline_kills_hung_tool_and_finalizes(tmp_path):
     assert out["ended_at"]
 
 
+def test_marker_finalization_also_finalizes_parent_command_run(tmp_path):
+    _write_marker(tmp_path, "parented", 0)
+    record = _running_record(tmp_path, job_id=51, uuid="parented")
+    record["parent_command_run_id"] = 91
+    client = FakeClient()
+
+    out = kali_jobs._finalize_if_marker_present(client, record)
+
+    assert out["status"] == "completed"
+    parent_patches = [
+        payload for endpoint, payload in client.patches
+        if endpoint == "command-runs/91"
+    ]
+    assert parent_patches
+    assert parent_patches[-1]["status"] == "completed"
+    assert parent_patches[-1]["return_code"] == 0
+
+
 def test_wrapper_natural_exit_is_prompt_under_deadline(tmp_path):
     """A tool that finishes well within its budget is NOT delayed by the watchdog:
     the poll-loop watchdog exits the instant the tool is gone (no long sleep
@@ -446,6 +576,35 @@ def test_finalize_skips_terminal_rows(tmp_path):
     assert client.patches == []  # already terminal — never re-PATCH
 
 
+def test_finalize_reconciles_stop_failed_when_marker_arrives(tmp_path):
+    rec = _running_record(tmp_path, job_id=14, uuid="attention")
+    rec["status"] = "stop_failed"
+    _write_marker(tmp_path, "attention", 0)
+    client = FakeClient()
+
+    out = kali_jobs._finalize_if_marker_present(client, rec)
+
+    assert out["status"] == "completed"
+    assert client.patches[-1][1]["exit_code"] == 0
+
+
+def test_finalize_releases_persisted_rate_lease(monkeypatch, tmp_path):
+    rec = _running_record(tmp_path, job_id=15, uuid="leased")
+    rec["audit_metadata"] = {"rate_lease_token": "rate-15"}
+    _write_marker(tmp_path, "leased", 0)
+    client = FakeClient()
+    released: list[str] = []
+    monkeypatch.setattr(
+        kali_jobs,
+        "release_target_rate_lease",
+        lambda token, **kwargs: released.append(token),
+    )
+
+    kali_jobs._finalize_if_marker_present(client, rec)
+
+    assert released == ["rate-15"]
+
+
 # --------------------------------------------------------------------------- #
 # 3. job_status / job_list lazy-finalize on read
 # --------------------------------------------------------------------------- #
@@ -501,6 +660,7 @@ def test_job_stop_completed_via_marker(monkeypatch, tmp_path):
 
 def test_job_stop_killed_when_pid_gone_no_marker(monkeypatch, tmp_path):
     rec = _running_record(tmp_path, job_id=21, uuid="9abc")  # no marker
+    rec["parent_command_run_id"] = 121
     fake = FakeClient(get_value=rec)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake)
     monkeypatch.setattr(kali_jobs, "_container_running", lambda *a, **k: True)
@@ -512,6 +672,8 @@ def test_job_stop_killed_when_pid_gone_no_marker(monkeypatch, tmp_path):
     assert out["status"] == "killed"
     killed = [p for _, p in fake.patches if p.get("status") == "killed"]
     assert killed and killed[-1].get("ended_at"), "killed PATCH must stamp ended_at"
+    parent = [p for endpoint, p in fake.patches if endpoint == "command-runs/121"]
+    assert parent and parent[-1]["status"] == "killed"
 
 
 def test_job_stop_stop_failed_when_docker_unreachable(monkeypatch, tmp_path):
@@ -531,6 +693,21 @@ def test_job_stop_stop_failed_when_docker_unreachable(monkeypatch, tmp_path):
     assert sf, "expected a stop_failed PATCH"
     # stop_failed must NOT stamp ended_at — the process may still be alive.
     assert "ended_at" not in sf[-1]
+
+
+def test_job_stop_retries_attention_required_stop_failed(monkeypatch, tmp_path):
+    rec = _running_record(tmp_path, job_id=23, uuid="retry-stop")
+    rec["status"] = "stop_failed"
+    fake = FakeClient(get_value=rec)
+    monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(kali_jobs, "_container_running", lambda *a, **k: True)
+    monkeypatch.setattr(kali_jobs, "_read_job_pid", lambda *a, **k: 9001)
+    monkeypatch.setattr(kali_jobs, "_signal_job_pid", lambda *a, **k: None)
+    monkeypatch.setattr(kali_jobs, "_wait_for_pid_exit", lambda *a, **k: True)
+
+    out = kali_jobs.job_stop(23, container_name="vigil", config=_cfg(tmp_path))
+
+    assert out["status"] == "killed"
 
 
 # --------------------------------------------------------------------------- #
@@ -559,6 +736,28 @@ def test_reap_jobs_stops_all_inflight(monkeypatch, tmp_path):
     assert sorted(stopped) == [1, 2, 3]
     assert {r["id"] for r in out["stopped"]} == {1, 2, 3}
     assert out["already_terminal"] == []
+
+
+def test_reap_jobs_includes_stop_failed_attention_rows(monkeypatch, tmp_path):
+    queried: list[str] = []
+
+    def fake_list(*, status_value, parent_run_id=None, config=None):
+        queried.append(status_value)
+        if status_value == "stop_failed":
+            return [{"id": 8, "status": "stop_failed"}]
+        return []
+
+    monkeypatch.setattr(kali_jobs, "job_list", fake_list)
+    monkeypatch.setattr(
+        kali_jobs,
+        "job_stop",
+        lambda job_id, **kwargs: {"id": job_id, "status": "killed"},
+    )
+
+    out = kali_jobs.reap_jobs(container_name="vigil", config=_cfg(tmp_path))
+
+    assert "stop_failed" in queried
+    assert out["stopped"] == [{"id": 8, "status": "killed"}]
     assert out["failed"] == []
 
 
@@ -592,9 +791,10 @@ class FakeJobsSweepClient:
     """get() routes by the ?status= filter so a sweep can fetch running and
     queued rows separately; patch() records finalize calls."""
 
-    def __init__(self, *, running=None, queued=None):
+    def __init__(self, *, running=None, queued=None, stop_failed=None):
         self._running = list(running or [])
         self._queued = list(queued or [])
+        self._stop_failed = list(stop_failed or [])
         self.gets: list[str] = []
         self.patches: list[tuple[str, dict]] = []
 
@@ -604,6 +804,8 @@ class FakeJobsSweepClient:
             return list(self._running)
         if "status=queued" in endpoint:
             return list(self._queued)
+        if "status=stop_failed" in endpoint:
+            return list(self._stop_failed)
         return []
 
     def patch(self, endpoint, payload, *, accept_409: bool = False):
@@ -620,16 +822,47 @@ class FakeJobsSweepClient:
         return False
 
 
+def test_sweep_lists_every_job_page_beyond_one_thousand() -> None:
+    class PagedClient:
+        def __init__(self):
+            self.gets: list[str] = []
+
+        def get(self, endpoint):
+            self.gets.append(endpoint)
+            offset = int(endpoint.split("offset=")[1].split("&")[0])
+            status = endpoint.split("status=")[1].split("&")[0]
+            if status != "running":
+                return []
+            if offset == 0:
+                return [{"id": index} for index in range(1000)]
+            if offset == 1000:
+                return [{"id": index} for index in range(1000, 1005)]
+            return []
+
+    client = PagedClient()
+
+    rows = kso._list_running_jobs(client)
+
+    assert len(rows) == 1005
+    running_gets = [value for value in client.gets if "status=running" in value]
+    assert any("offset=0" in value for value in running_gets)
+    assert any("offset=1000" in value for value in running_gets)
+
+
 def _job_row(tmp_path, *, job_id, uuid, status="running", age_seconds=7200, started=True):
     stdout = _jobs_dir(tmp_path) / f"{uuid}.out"
     started_at = None
     if started:
         ts = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=age_seconds)
         started_at = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+    created_at = (
+        _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=age_seconds)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
     return {
         "id": job_id,
         "status": status,
         "started_at": started_at,
+        "created_at": created_at,
         "stdout_path": str(stdout),
         "dtach_socket_path": f"/tmp/vigil-jobs/{uuid}.sock",
     }
@@ -650,13 +883,29 @@ def _run_jobs_sweep(monkeypatch, tmp_path, fake, *, dry_run=False):
 
 
 def test_jobs_sweep_marker_finalizes_completed(monkeypatch, tmp_path):
-    fake = FakeJobsSweepClient(running=[_job_row(tmp_path, job_id=1, uuid="m000")])
+    row = _job_row(tmp_path, job_id=1, uuid="m000")
+    row["parent_command_run_id"] = 101
+    row["audit_metadata"] = {"rate_lease_token": "rate-sweep"}
+    fake = FakeJobsSweepClient(running=[row])
+    released: list[str] = []
+    monkeypatch.setattr(
+        kso,
+        "release_target_rate_lease",
+        lambda token, **kwargs: released.append(token),
+    )
     _write_marker(tmp_path, "m000", 0)
     _run_jobs_sweep(monkeypatch, tmp_path, fake)
-    assert fake.patches == [("jobs/1", fake.patches[0][1])]
-    assert fake.patches[0][1]["status"] == "completed"
-    assert fake.patches[0][1]["exit_code"] == 0
-    assert fake.patches[0][1]["ended_at"]
+    job_patch = next(payload for endpoint, payload in fake.patches if endpoint == "jobs/1")
+    assert job_patch["status"] == "completed"
+    assert job_patch["exit_code"] == 0
+    assert job_patch["ended_at"]
+    parent_patch = next(
+        payload for endpoint, payload in fake.patches
+        if endpoint == "command-runs/101"
+    )
+    assert parent_patch["status"] == "completed"
+    assert parent_patch["return_code"] == 0
+    assert released == ["rate-sweep"]
 
 
 def test_jobs_sweep_marker_finalizes_failed(monkeypatch, tmp_path):
@@ -665,6 +914,20 @@ def test_jobs_sweep_marker_finalizes_failed(monkeypatch, tmp_path):
     _run_jobs_sweep(monkeypatch, tmp_path, fake)
     assert fake.patches[0][1]["status"] == "failed"
     assert fake.patches[0][1]["exit_code"] == 7
+
+
+def test_jobs_sweep_reconciles_stop_failed_marker(monkeypatch, tmp_path):
+    fake = FakeJobsSweepClient(
+        stop_failed=[
+            _job_row(tmp_path, job_id=12, uuid="attention", status="stop_failed")
+        ]
+    )
+    _write_marker(tmp_path, "attention", 0)
+
+    _run_jobs_sweep(monkeypatch, tmp_path, fake)
+
+    assert any("status=stop_failed" in endpoint for endpoint in fake.gets)
+    assert fake.patches[0][1]["status"] == "completed"
 
 
 def test_jobs_sweep_pid_dead_no_marker_is_lost(monkeypatch, tmp_path):
@@ -693,13 +956,42 @@ def test_jobs_sweep_docker_unreachable_is_skipped(monkeypatch, tmp_path):
     assert fake.patches == []  # liveness unknown → never falsely finalized
 
 
-def test_jobs_sweep_queued_without_started_at_is_skipped(monkeypatch, tmp_path):
-    # A queued row never spawned a process → null started_at → age None → skip.
+def test_sweep_all_includes_precise_host_process_registry(monkeypatch, tmp_path, capsys):
+    fake = FakeJobsSweepClient()
+    monkeypatch.setattr(kso, "load_config", lambda _flag: _cfg(tmp_path))
+    monkeypatch.setattr(kso, "AssessmentClient", lambda *a, **k: fake)
+    called: list[tuple[str, int, bool]] = []
+    monkeypatch.setattr(
+        kso,
+        "reap_registered_processes",
+        lambda engagement_dir, *, max_age_seconds, dry_run: (
+            called.append((str(engagement_dir), max_age_seconds, dry_run))
+            or {"checked": 1, "reaped": 1}
+        ),
+    )
+
+    kso.run(
+        SimpleNamespace(
+            scope="all",
+            engagement_dir=str(tmp_path),
+            max_age_seconds=60,
+            container_name="vigil",
+            dry_run=False,
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert called == [(str(tmp_path), 60, False)]
+    assert payload["host_processes_summary"]["reaped"] == 1
+
+
+def test_jobs_sweep_queued_without_started_at_ages_from_created_at(monkeypatch, tmp_path):
     fake = FakeJobsSweepClient(
         queued=[_job_row(tmp_path, job_id=6, uuid="m005", status="queued", started=False)]
     )
     _run_jobs_sweep(monkeypatch, tmp_path, fake)
-    assert fake.patches == []
+    assert fake.patches[0][0] == "jobs/6"
+    assert fake.patches[0][1]["status"] == "lost"
 
 
 def test_jobs_sweep_dry_run_does_not_patch(monkeypatch, tmp_path, capsys):

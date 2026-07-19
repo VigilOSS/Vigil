@@ -6,7 +6,7 @@ from __future__ import annotations
 # ``orchestrator/backend/app/services/state_manager/coverage.py``). The CLI
 # cannot import the backend, so these are kept in sync by a drift-guard test
 # (test_coverage_probe_cli_sync in the backend suite) rather than shared code —
-# same pattern as resolve_coverage_item.py for coverage statuses.
+# same pattern as resolve.py for coverage statuses.
 #
 # Mutable statuses for by-id resolution. ``discovered`` is the seed state
 # only; agents resolve to ``covered``, ``not_applicable``, ``deferred``, or

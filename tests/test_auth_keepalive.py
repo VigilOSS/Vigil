@@ -12,7 +12,7 @@ live target are factored into pure helpers, exercised here:
     (`<anchor>=deleted`) and rows lacking any declared anchor cookie.
   * `_parse_probe_blob` / `_classify_probe` — the lenient regex parse of the raw
     `kali exec` output blob (status / userId / `<anchor>=deleted`), and the
-    LIVE/DEAD decision (deleted-override → material.liveness → reference default).
+    LIVE/DEAD/UNKNOWN decision (deleted-override → material.liveness → unknown).
 
 Plus a guard that the probe argv routes through `vigil assess kali exec` with
 `--identity` and NEVER `bash -c`, that keepalive ERRORS clearly when no
@@ -21,6 +21,9 @@ LIVE/DEAD to the log — all with the subprocess/network boundary stubbed.
 """
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -201,30 +204,36 @@ def test_parse_never_calls_json_loads(monkeypatch):
 # --------------------------------------------------------------------------- #
 def test_classify_deleted_is_hard_dead_override_even_on_200():
     parsed = {"status": 200, "status_line": "HTTP/2 200", "user_id": "u", "deleted": True}
-    live, reason = auth._classify_probe(parsed, "HTTP/2 200 ...", None)
-    assert live is False
+    verdict, reason = auth._classify_probe(parsed, "HTTP/2 200 ...", None)
+    assert verdict == "dead"
     assert "deleted" in reason
 
 
-def test_classify_default_live_and_dead():
+def test_classify_without_typed_signature_is_unknown():
     live_parsed = {"status": 200, "status_line": "HTTP/2 200", "user_id": "u", "deleted": False}
-    assert auth._classify_probe(live_parsed, "HTTP/2 200 body", None)[0] is True
-    # 200 but with a sessionExpired marker -> dead.
-    assert auth._classify_probe(live_parsed, "HTTP/2 200 sessionExpired", None)[0] is False
-    # Non-200 (e.g. a 302 to login) -> dead.
+    assert auth._classify_probe(live_parsed, "HTTP/2 200 body", None)[0] == "unknown"
     dead_parsed = {"status": 302, "status_line": "HTTP/1.1 302", "user_id": "-", "deleted": False}
-    assert auth._classify_probe(dead_parsed, "HTTP/1.1 302 Found", None)[0] is False
+    assert auth._classify_probe(dead_parsed, "HTTP/1.1 302 Found", None)[0] == "unknown"
+
+
+def test_classify_transport_failure_is_unknown_not_dead():
+    parsed = {"status": None, "status_line": "?", "user_id": "-", "deleted": False}
+    verdict, reason = auth._classify_probe(
+        parsed, "__keepalive_probe_error__ timeout", {"expect_status": 200}
+    )
+    assert verdict == "unknown"
+    assert "transport" in reason
 
 
 def test_classify_defers_to_material_liveness_when_present():
     parsed = {"status": 200, "status_line": "HTTP/2 200", "user_id": "u", "deleted": False}
     raw_live = 'HTTP/2 200\n{"userId":"u"}'
     cfg = {"expect_status": 200, "authed_marker": "userId", "dead_marker": "sessionExpired"}
-    live, reason = auth._classify_probe(parsed, raw_live, cfg)
-    assert live is True and reason.startswith("live:")
+    verdict, reason = auth._classify_probe(parsed, raw_live, cfg)
+    assert verdict == "live" and reason.startswith("live:")
     # dead_marker present -> dead, even at HTTP 200.
-    live2, reason2 = auth._classify_probe(parsed, "HTTP/2 200 sessionExpired", cfg)
-    assert live2 is False and reason2.startswith("dead:")
+    verdict2, reason2 = auth._classify_probe(parsed, "HTTP/2 200 sessionExpired", cfg)
+    assert verdict2 == "dead" and reason2.startswith("dead:")
 
 
 # --------------------------------------------------------------------------- #
@@ -292,7 +301,10 @@ def test_keepalive_foreground_loop_tees_verdict_to_log(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         auth, "read_auth",
-        lambda _eng: {"identities": {"cap-x": {"cookies": {"MRHSession": "V"}}}},
+        lambda _eng: {"identities": {"cap-x": {
+            "cookies": {"MRHSession": "V"},
+            "liveness": {"expect_status": 200, "authed_marker": "userId"},
+        }}},
     )
     monkeypatch.setattr(
         auth, "_keepalive_probe",
@@ -309,3 +321,86 @@ def test_keepalive_foreground_loop_tees_verdict_to_log(tmp_path, monkeypatch):
     assert "KEEPALIVE EXITED" in text
     assert "cap-x  LIVE" in text
     assert "userId=u-9" in text
+
+
+def test_keepalive_cycle_persists_typed_scoped_liveness(tmp_path, monkeypatch):
+    eng = tmp_path / "agent" / "engagements" / "eng"
+    eng.mkdir(parents=True)
+    monkeypatch.setattr(
+        auth,
+        "read_auth",
+        lambda _eng: {"identities": {"cap-x": {
+            "cookies": {"MRHSession": "V"},
+            "liveness": {"expect_status": 200, "authed_marker": "userId"},
+        }}},
+    )
+    monkeypatch.setattr(
+        auth, "_keepalive_probe",
+        lambda *_: 'HTTP/2 200 OK\r\n\r\n{"userId":"u-9"}',
+    )
+    persisted = []
+    monkeypatch.setattr(
+        auth,
+        "persist_liveness",
+        lambda engagement_dir, identity, verdict, **kwargs: persisted.append(
+            (identity, verdict, kwargs)
+        ) or {},
+    )
+    monkeypatch.setattr(auth.time, "sleep", lambda _s: None)
+    auth._keepalive_cycle(
+        eng, ["cap-x"], 1, ("MRHSession",),
+        "https://portal.example/account", lambda _line: None, 1,
+        scope_key="portal-account", ttl_seconds=600,
+    )
+    assert persisted == [(
+        "cap-x",
+        "live",
+        {
+            "scope_key": "portal-account",
+            "ttl_seconds": 600,
+            "source": "auth-keepalive",
+            "reason": "live: authed_marker present, status 200",
+        },
+    )]
+def test_env_preflight_reports_presence_and_source_never_values(monkeypatch):
+    monkeypatch.setenv("VIGIL_USER", "super-secret-user")
+    rows = auth.env_preflight(["VIGIL_USER", "VIGIL_PASS"])
+    assert rows == [
+        {"name": "VIGIL_USER", "present": True, "source": "environment"},
+        {"name": "VIGIL_PASS", "present": False, "source": "missing"},
+    ]
+    assert "super-secret-user" not in str(rows)
+
+
+def test_packaged_cli_loads_single_classifier_from_install_root(tmp_path):
+    package_root = tmp_path / "package"
+    shutil.copytree(Path(auth.__file__).resolve().parent, package_root / "vigil_cli")
+    install_root = tmp_path / "install"
+    classifier = install_root / "agent" / "scripts" / "assess" / "lib" / "auth_liveness.py"
+    classifier.parent.mkdir(parents=True)
+    shutil.copy2(
+        REPO_ROOT / "agent" / "scripts" / "assess" / "lib" / "auth_liveness.py",
+        classifier,
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from vigil_cli.auth import _classify_liveness; "
+                "print(_classify_liveness(200, 'member-home', "
+                "{'expect_status': 200, 'authed_marker': 'member-home'})[0])"
+            ),
+        ],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PYTHONPATH": str(package_root),
+            "VIGIL_INSTALL_DIR": str(install_root),
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "live"

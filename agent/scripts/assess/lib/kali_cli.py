@@ -148,6 +148,15 @@ def add_required_kali_flags(parser) -> None:
         ),
     )
     parser.add_argument(
+        "--rate-override-reason",
+        dest="rate_override_reason",
+        default="",
+        help=(
+            "Recorded justification for exceeding scope.rate_limit_aggregate_rps. "
+            "Without it, aggregate-cap conflicts are refused before execution."
+        ),
+    )
+    parser.add_argument(
         "--agent-name",
         dest="kali_agent_name",
         default=None,
@@ -178,6 +187,16 @@ def add_required_kali_flags(parser) -> None:
             "it as the probe's auth_context so cross-identity access-control "
             "(IDOR/BOLA/BFLA) depth is measurable. Omit for anonymous/no "
             "credential injection."
+        ),
+    )
+    parser.add_argument(
+        "--identity-scope",
+        dest="identity_scope",
+        default="",
+        help=(
+            "Logical liveness scope used when --identity names a scoped alias. "
+            "This is never inferred from the target URL because engagement scopes "
+            "may be application- or workflow-specific."
         ),
     )
     # Resolve VIGIL_RUNTIME_CONTAINER once at parse time (not bound to a frozen
@@ -278,6 +297,8 @@ def kali_args_to_kwargs(args) -> dict[str, Any]:
         "force": bool(getattr(args, "force", False)),
         "container_name": getattr(args, "container_name", None),
         "identity": getattr(args, "identity", None),
+        "identity_scope": getattr(args, "identity_scope", "") or "",
+        "rate_override_reason": getattr(args, "rate_override_reason", "") or "",
     }
     if explicit_dir:
         kwargs["engagement_dir"] = Path(explicit_dir).expanduser().resolve()

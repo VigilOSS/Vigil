@@ -1,4 +1,4 @@
-"""vigil assess supersede-intel — replace an intel row with a new one.
+"""vigil assess intel supersede — replace an intel row with a new one.
 
 The old row stays in the table for audit but gets ``superseded_by_id``
 populated so report-writer's filter excludes it from output. Use this
@@ -10,8 +10,8 @@ correct and only metadata changed.
 
 Usage::
 
-    vigil assess supersede-intel <type> <id> <new-payload-json-file> --rationale "..."
-    vigil assess supersede-intel <type> <id> --inline '{...}' --rationale "..."
+    vigil assess intel supersede <type> <id> <new-payload-json-file> --rationale "..."
+    vigil assess intel supersede <type> <id> --inline '{...}' --rationale "..."
 """
 from __future__ import annotations
 
@@ -87,13 +87,13 @@ _INTEL_NATURAL_KEY_FIELDS: dict[str, tuple[str, ...]] = {
 def register(subparsers) -> None:
     types_list = ", ".join(sorted(INTEL_TYPES.keys()))
     p = subparsers.add_parser(
-        "supersede-intel",
+        "supersede",
         help="Replace an intel row with a new payload; old row marked superseded",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  vigil assess supersede-intel tech-component 42 new.json --rationale \"banner re-fingerprinted\"\n"
-            "  vigil assess supersede-intel cve 17 --inline '{\"cve_id\":\"CVE-2025-1\",\"affected_component\":\"x\"}' --rationale \"prior CVE was a false match\"\n"
+            "  vigil assess intel supersede tech-component 42 new.json --rationale \"banner re-fingerprinted\"\n"
+            "  vigil assess intel supersede cve 17 --inline '{\"cve_id\":\"CVE-2025-1\",\"affected_component\":\"x\"}' --rationale \"prior CVE was a false match\"\n"
             f"\nValid types: {types_list}"
         ),
     )
@@ -205,7 +205,7 @@ def _maybe_explain_409(exc: AssessError) -> None:
         return
     print(
         "supersede-intel: backend rejected with HTTP 409 (natural-key collision).\n"
-        "  Hint: use `vigil assess update-intel <type> <id> ...` for in-place edits "
+        "  Hint: use `vigil assess intel update <type> <id> ...` for in-place edits "
         "when the new payload's natural key matches the existing row.",
         file=sys.stderr,
     )

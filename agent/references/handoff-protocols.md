@@ -50,7 +50,7 @@ Output: endpoint lists, technologies, JS file URLs, parameters, surface candidat
 
 1. **Read `#### Coverage Gaps` first** — this drives the Recon Coverage Gate. If material gaps exist, re-dispatch recon-specialist with a targeted objective and specific skill before proceeding. See Phase 1 gate checklist in operator-core.
 2. Pass JS file URLs → dispatch source-analyzer (if not already running in parallel) — **bring `agent/skills/source-analysis/SKILL.md`**
-3. Record technology stack → durable state update via `vigil assess record-intel tech-component <json-file>` (intel_tech_components table)
+3. Record technology stack → durable state update via `vigil assess intel record tech-component <json-file>` (intel_tech_components table)
 4. Turn auth boundaries, framework clues, and proxy hints into hypotheses for Phase 4-6
 
 ### SOURCE-ANALYZER
@@ -58,8 +58,8 @@ Output: endpoint lists, technologies, JS file URLs, parameters, surface candidat
 Output: new API endpoints, routes, secrets/tokens, config objects, coverage gaps
 
 1. **Read `#### Coverage Gaps` first** — if JS analysis was incomplete (files behind auth, opaque minification), re-dispatch with additional context before proceeding.
-2. New requestable endpoints → `vigil assess ingest-endpoints source-analysis`
-3. Secrets/tokens → durable findings immediately via `vigil assess record-finding` + credential backend record via `vigil assess post credentials <credential-json-file>` (assessment_credentials table)
+2. New requestable endpoints → `vigil assess ingest endpoints source-analysis`
+3. Secrets/tokens → durable findings immediately via `vigil assess finding record` + credential backend record via `vigil assess post credentials <credential-json-file>` (assessment_credentials table)
 4. API routes, object references, mutation paths, parameter names → queued for Phase 4 dispatch (these enter the work buffer via endpoint ingestion, not via immediate agent dispatch)
 
 ### Phase 1 → Phase 2 Transition
@@ -74,7 +74,7 @@ After both recon-specialist and source-analyzer return:
 
 Output: priority manifest, work-buffer stats, intelligence, coverage gaps, recorded surfaces and findings
 
-1. Translate each `#### Intelligence` row into a JSON payload and record it via `vigil assess record-intel <type> <json-file>` (one call per row). Verify with `vigil assess list-intel`.
+1. Translate each `#### Intelligence` row into a JSON payload and record it via `vigil assess intel record <type> <json-file>` (one call per row). Verify with `vigil assess intel list`.
 2. Review `#### Priority Attack Surfaces` for Phase 4 dispatch ordering
 3. Inspect work-buffer stats: `vigil assess work-buffer stats`
 4. Update scope.json phase to `consume-test`
@@ -85,9 +85,9 @@ Output: priority manifest, work-buffer stats, intelligence, coverage gaps, recor
 
 Output: prioritized findings (HIGH/MEDIUM/LOW), test commands, FUZZER_NEEDED signals
 
-1. Record all findings durably via `vigil assess record-finding` — this is the immediate obligation
+1. Record all findings durably via `vigil assess finding record` — this is the immediate obligation
 2. Queue live findings for Phase 5 Verify, not exploitation. Verification decides which findings become confirmed, downgraded, killed, or chain-required before exploit work is spent.
-3. When a finding is real only as part of a chain, keep it in the normal finding table and set `details.chain_required`, `details.chain_rationale`, and `details.required_followup` via `record-finding`'s JSON payload or `vigil assess update-finding <slug> --details-inline '{"chain_required": true, "chain_rationale": "...", "required_followup": ["..."]}'`
+3. When a finding is real only as part of a chain, keep it in the normal finding table and set `details.chain_required`, `details.chain_rationale`, and `details.required_followup` via `finding record`'s JSON payload or `vigil assess finding update <slug> --details-inline '{"chain_required": true, "chain_rationale": "...", "required_followup": ["..."]}'`
 4. FUZZER_NEEDED → dispatch fuzzer within Phase 4 — **bring `agent/skills/parameter-fuzzing/SKILL.md` or `agent/skills/directory-fuzzing/SKILL.md`**, feed results back through vuln-analyst
 5. Mark work-buffer batch done: `vigil assess work-buffer "$DB" done "id1,id2,..."`
 6. Continue the Phase 4 consumption loop (steps b–f in `agent/phases/phase-4-consume-test.md`)
@@ -96,9 +96,9 @@ Output: prioritized findings (HIGH/MEDIUM/LOW), test commands, FUZZER_NEEDED sig
 
 Output: discovered paths, valid parameters, anomalous responses, confirmed findings
 
-1. New paths/endpoints → ingest into backend coverage state via `vigil assess ingest-endpoints`
+1. New paths/endpoints → ingest into backend coverage state via `vigil assess ingest endpoints`
 2. Anomalous responses → dispatch vuln-analyst for analysis within Phase 4
-3. Confirmed findings (e.g., valid credentials) → durable findings directly via `vigil assess record-finding`
+3. Confirmed findings (e.g., valid credentials) → durable findings directly via `vigil assess finding record`
 
 ## Phase 5 Returns (VERIFY)
 
@@ -133,27 +133,27 @@ Output: CONFIRMED/PARTIAL/FAILED status, extracted data, PoC, chains, credential
 
 ### OSINT-ANALYST
 
-Output: backend intel-table updates via `record-intel` (technology, CVE, breach, credential intel, people, domains, social, org facts, notes)
+Output: backend intel-table updates via `intel record` (technology, CVE, breach, credential intel, people, domains, social, org facts, notes)
 
 1. Read Intelligence Assessment section
-2. HIGH-value CVE + PoC match → record via `vigil assess record-intel cve <json-file>` and dispatch exploit-developer to **validate** against the live target — **name the matching skill (discoverable via `vigil assess list-skills`) so the operator includes it in the dispatch**. Promote to a finding only after exploit-developer confirms exploitability — version-only CVE matches are intel, not findings, because backported patches and disabled modules routinely invalidate version-only matches.
+2. HIGH-value CVE + PoC match → record via `vigil assess intel record cve <json-file>` and dispatch exploit-developer to **validate** against the live target — **name the matching skill (discoverable via `vigil assess list-skills`) so the operator includes it in the dispatch**. Promote to a finding only after exploit-developer confirms exploitability — version-only CVE matches are intel, not findings, because backported patches and disabled modules routinely invalidate version-only matches.
 3. Breached credentials with target-specific proof → record finding + credential via `vigil assess post credentials` + dispatch exploit-developer to test access
-4. Historical endpoints → ingest into backend coverage state via `vigil assess ingest-endpoints`
-5. MEDIUM/LOW intel without target proof → keep in backend intel tables via `record-intel` only — do not promote to findings
+4. Historical endpoints → ingest into backend coverage state via `vigil assess ingest endpoints`
+5. MEDIUM/LOW intel without target proof → keep in backend intel tables via `intel record` only — do not promote to findings
 
 ## Phase 8 (REPORT)
 
 ### REPORT-WRITER ← backend API (self-service)
 
 For final reports, run `vigil assess check-phase-readiness --phase report` first. Report-writer queries the backend
-directly via `vigil assess list-report-findings --mode final --json` for final output or
-`vigil assess list-report-findings --mode draft --json` for interim output, plus `attack-chains`,
+directly via `vigil assess finding report --mode final --json` for final output or
+`vigil assess finding report --mode draft --json` for interim output, plus `attack-chains`,
 `surfaces`, and `summary`. The operator does not pre-assemble findings context.
 
-Before dispatching a final report, resolve readiness blockers so `vigil assess list-report-findings --mode final --json` succeeds:
+Before dispatching a final report, resolve readiness blockers so `vigil assess finding report --mode final --json` succeeds:
 - Check for overlapping `root_cause_key` or `canonical_location` + `defect_family` across agent findings
-- Use `vigil assess link-finding <sibling-slug> --root-cause <root-slug>` for intentional root/sibling groups
-- Use `vigil assess merge-finding <source-slug> <target-slug> "<reason>"` only for true duplicates
+- Use `vigil assess finding link <sibling-slug> --root-cause <root-slug>` for intentional root/sibling groups
+- Use `vigil assess finding merge <source-slug> <target-slug> "<reason>"` only for true duplicates
 - The source finding's status becomes `merged` and is excluded from final report output
 
 After draft generation, dispatch a fresh `report-writer` in review-and-fix QA mode. The QA writer
@@ -163,6 +163,6 @@ report, mark findings `reported`, and complete the engagement after `QA PASS`.
 
 ## Wildcard Mode Specifics
 
-- BACKEND-ONLY FINDING WRITE: every finding lands in the backend via `vigil assess record-finding`. No local file sync required.
+- BACKEND-ONLY FINDING WRITE: every finding lands in the backend via `vigil assess finding record`. No local file sync required.
 - Parent prefix: `## [sub.domain.com / XX-NNN] Title`
 - Set ENGAGEMENT_DIR to specific child directory before each operation

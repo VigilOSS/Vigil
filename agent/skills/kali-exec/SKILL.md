@@ -17,7 +17,7 @@ The CLI surface is intentionally large. Four discovery layers keep per-turn cont
 1. **This skill (methodology layer)** — sync-vs-async decision, the required-attribution-header three-way split, out-of-scope carve-out semantics, common invocation patterns, and troubleshooting. Load for the judgment calls the mechanical layers below cannot give you.
 2. **`vigil assess list-commands [--phase <N>] [--kali-only] [--grep <s>]`** — grouped-by-phase catalog of every command (typed verbs, fallbacks, batch, maintenance) with a one-line summary and a pointer to its contract. Use to find the right verb for a phase or keyword — this replaces the inline verb table this skill used to carry.
 3. **`vigil assess kali --help` and `vigil assess kali <verb> --help`** — live argparse output. Use when you are composing an invocation and need the exact flag spelling or default for a verb you have already chosen.
-4. **`vigil assess contract kali <verb>`** — canonical schema introspection: preferred invocations, helper-supplied defaults, common mistakes, and a JSON example payload. Use when you are authoring a complex invocation and want the canonical field list — same purpose `contract record-intel <type>` serves for intel writes. The schema is derived from `agent/scripts/assess/lib/contracts.py`, so it stays current with the implementation.
+4. **`vigil assess contract kali <verb>`** — canonical schema introspection: preferred invocations, helper-supplied defaults, common mistakes, and a JSON example payload. Use when you are authoring a complex invocation and want the canonical field list — same purpose `contract intel record <type>` serves for intel writes. The schema is derived from `agent/scripts/assess/lib/contracts.py`, so it stays current with the implementation.
 
 Skills should point you at `vigil assess list-commands` for the verb catalog and `vigil assess contract kali <verb>` for field tables instead of duplicating them, because both are generated from the same source as the CLI's argparse. When this skill omits a verb or flag detail, that is intentional — go to layer 2, 3, or 4.
 
@@ -33,7 +33,7 @@ Full catalog (every verb, its use, and its paired reference doc): `vigil assess 
 
 ## Long-tail flags via `--extra-args`
 
-Every typed verb accepts an optional `--extra-args "<shell-quoted string>"` to bridge the typed-flag gap without dropping to `kali exec`. The string is shlex-split and appended to the underlying tool argv after the typed-flag-derived arguments — verb identity is preserved in the audit trail (`list-command-runs --tool-bin httpx` still finds these calls), so reach for raw `kali exec` only when no typed verb fits at all. Audit truth is preserved because the audit row records the full final argv, including the splatted extra args.
+Every typed verb accepts an optional `--extra-args "<shell-quoted string>"` to bridge the typed-flag gap without dropping to `kali exec`. The string is shlex-split and appended to the underlying tool argv after the typed-flag-derived arguments — verb identity is preserved in the audit trail (`command-run list --tool-bin httpx` still finds these calls), so reach for raw `kali exec` only when no typed verb fits at all. Audit truth is preserved because the audit row records the full final argv, including the splatted extra args.
 
 Critical: `--destructive` still applies. If the extra args include a write/delete (`--os-shell` for sqlmap, `--script vuln` for nmap, etc.), you must also pass `--destructive` so the audit row reflects the actual blast radius.
 
@@ -91,7 +91,7 @@ Full flag-by-flag purpose, the `--technique` enum, and the `--probe-kind` vocabu
 
 When `scope.json` carries a `required_headers` map (set at create time with `vigil engagement create … --program bugcrowd --researcher <handle>` or `--header "Name: Value"`, or after the fact with `vigil engagement set-header <key> "Name: Value"`), `kali_exec` injects those headers into every in-scope HTTP probe automatically. You do **not** add them by hand. The injection is three-way by tool:
 
-- **Injected** (`curl`, `httpx`, `nuclei`, `ffuf`, `sqlmap`, `katana`, `arjun`): the `-H "Name: Value"` is appended and lands in the recorded audit argv, so `list-command-runs` proves the program got tagged traffic.
+- **Injected** (`curl`, `httpx`, `nuclei`, `ffuf`, `sqlmap`, `katana`, `arjun`): the `-H "Name: Value"` is appended and lands in the recorded audit argv, so `command-run list` proves the program got tagged traffic.
 - **Silently skipped** (`gau`, `waybackurls`, `subfinder`, `amass`, `dnsx`, `nmap`, `naabu`, `masscan`, …): these query third-party archives / DNS / L3-L4, not the in-scope target — injecting would leak the researcher handle to web.archive.org/CommonCrawl, so it is intentionally NOT added.
 - **Warned, runs untagged** (`nikto`, `whatweb`, `wafw00f`, any tool with no known `-H` flag): a stderr warning fires; if that tool reaches the in-scope target you must carry the header another way.
 
@@ -99,7 +99,7 @@ A non-HTTP raw tool that the program still requires tagging on is the operator's
 
 ## Out-of-scope carve-outs (`out_of_scope` denylist)
 
-`scope.json` `hosts` wildcards (`*.example.com`) match the apex and **every** subdomain, which over-includes a program's specific OOS carve-outs. The `out_of_scope` list expresses exceptions: a host is admitted IFF it matches an in-scope entry AND matches **no** `out_of_scope` entry (the denylist wins). It is enforced at `filter-scope`, the dispatch scope_host gate, spec ingestion, and proxy routing/capture. Add carve-outs at create (`--out-of-scope appointments.acme-regional.example --out-of-scope "*.mobile.acme-net.example"`) or later (`vigil engagement add-oos <key> <host…>` / `remove-oos`). A dispatch whose `scope_host` matches a carve-out is rejected with a distinct "out_of_scope carve-out" error — reframe as recon or remove the carve-out, never probe it.
+`scope.json` `hosts` wildcards (`*.example.com`) match the apex and **every** subdomain, which over-includes a program's specific OOS carve-outs. The `out_of_scope` list expresses exceptions: a host is admitted IFF it matches an in-scope entry AND matches **no** `out_of_scope` entry (the denylist wins). It is enforced at `scope filter`, the dispatch scope_host gate, spec ingestion, and proxy routing/capture. Add carve-outs at create (`--out-of-scope appointments.acme-regional.example --out-of-scope "*.mobile.acme-net.example"`) or later (`vigil engagement add-oos <key> <host…>` / `remove-oos`). A dispatch whose `scope_host` matches a carve-out is rejected with a distinct "out_of_scope carve-out" error — reframe as recon or remove the carve-out, never probe it.
 
 ## Phase tags (including half-phase tags)
 
@@ -118,7 +118,7 @@ Per-verb worked examples — the full audit-flag set, typed-flag shapes, and cop
 Two cross-verb pointers worth restating because a single verb's contract doesn't carry them:
 
 - **Subdomain enumeration (Phase 0/1/2/3 staged workflow)** is owned by [`agent/skills/subdomain-enumeration/SKILL.md`](../subdomain-enumeration/SKILL.md) — load that skill rather than composing `subfinder`/`cero`/`alterx`/`puredns`/`dnsx` calls from first principles. It carries the tool-tier rationale, the quantified bound rules (>5000 subs skip Phase 2, >30% wildcard ratio switch to TLS SAN, >500k permutation estimate abort), and the host-CPU gate on the bruteforce profile. Pair it with `agent/references/tools/recon/subdomain-enumeration-tools.md` for the full tool-tier table.
-- **Historical-URL collection:** prefer `vigil assess gau-endpoints` over the raw `kali gau` typed verb — it wraps `kali gau` with cache reuse and inline work-buffer ingestion in one call. Reach for raw `kali gau` only for a one-off archive sweep that does not need to feed the work buffer.
+- **Historical-URL collection:** prefer `vigil assess gau endpoints` over the raw `kali gau` typed verb — it wraps `kali gau` with cache reuse and inline work-buffer ingestion in one call. Reach for raw `kali gau` only for a one-off archive sweep that does not need to feed the work buffer.
 
 ## Common Patterns
 
@@ -190,7 +190,7 @@ vigil assess kali sweep \
 ```
 
 Recover the whole fan-out afterward with
-`vigil assess list-command-runs --intent-q "sweep"`; add `--json` to the sweep
+`vigil assess command-run list --intent-q "sweep"`; add `--json` to the sweep
 to get cluster objects that carry each value's `run_id` for audit linkage.
 
 ### Wrap a long-running custom command as a job (operator-only)
@@ -217,7 +217,7 @@ when the agent that started the job has long since exited.
 
 ## Coverage check before probing
 
-Every typed verb and `kali exec` writes an audit row with `command`, `argv`, `tool`, `agent`, `phase`, `technique`, `intent`, `probe_kind`, `destructive`, exit code, timings, and an output preview. Treat that history as a coverage map — search for prior work on this surface before dispatching, with `vigil assess list-command-runs --q <keyword> --show-matches`. The full coverage-vs-duplicate decision table lives in `agent/references/runtime-guides/command-history-auditing.md`. The shared `agent/shared-constraints.md §2b` has the agent-side rule.
+Every typed verb and `kali exec` writes an audit row with `command`, `argv`, `tool`, `agent`, `phase`, `technique`, `intent`, `probe_kind`, `destructive`, exit code, timings, and an output preview. Treat that history as a coverage map — search for prior work on this surface before dispatching, with `vigil assess command-run list --q <keyword> --show-matches`. The full coverage-vs-duplicate decision table lives in `agent/references/runtime-guides/command-history-auditing.md`. The shared `agent/shared-constraints.md §2b` has the agent-side rule.
 
 ## Process cleanup discipline
 
@@ -237,7 +237,7 @@ curl https://TARGET/api/endpoint -H "Content-Type: application/json"
 
 Before treating a 406 (or a content-negotiation-driven "handler not reached" result) as target behavior:
 
-1. **Inspect the recorded argv.** The audit row's `resolved_argv` field shows what ACTUALLY ran inside the container. Read it with `vigil assess get-command-run <id>` and confirm every `-H` value is quoted and complete.
+1. **Inspect the recorded argv.** The audit row's `resolved_argv` field shows what ACTUALLY ran inside the container. Read it with `vigil assess command-run get <id>` and confirm every `-H` value is quoted and complete.
 2. **Capture the raw wire bytes.** Re-run with `-v` (curl) or `-debug` (httpx) to see the literal request headers sent. A missing or truncated header explains the 406 without any target-side enforcement.
 3. **Send a canonical request.** Construct the request with explicit, fully-quoted headers and confirm the 406 persists before recording "content-negotiation blocked" as a verdict.
 

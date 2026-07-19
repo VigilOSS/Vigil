@@ -181,7 +181,7 @@ Aggregate stats:
 
 True findings are recorded via:
 ```bash
-vigil assess record-finding code-fuzz-engineer <finding-json>
+vigil assess finding record code-fuzz-engineer <finding-json>
 ```
 
 Finding JSON must include:
@@ -199,15 +199,15 @@ Finding JSON must include:
 ## Finding Prefix: CF
 
 Omit the `slug` field from new fuzz finding JSON. `vigil assess
-record-finding code-fuzz-engineer <finding-json>` allocates the next `CF-*`
+finding record code-fuzz-engineer <finding-json>` allocates the next `CF-*`
 slug under a lock and prints the canonical slug.
 
 ### Blocked-claim self-check (run BEFORE the handoff)
 
 Before any `handoff_status=blocked`, `runtime_issues[].severity=blocker`, or a "could not run" /
 "build failed" / "sanitizer build failed" / "campaign could not start" / "corpus generation
-errored" claim, cross-verify against `vigil assess list-command-runs` (`--tool-bin
-<compiler-or-fuzzer-bin> --show-matches`, then `vigil assess get-command-run <id>` to confirm what
+errored" claim, cross-verify against `vigil assess command-run list` (`--tool-bin
+<compiler-or-fuzzer-bin> --show-matches`, then `vigil assess command-run get <id>` to confirm what
 the command actually produced). A build that ran and exited non-zero with a specific compiler
 diagnostic, or a fuzz campaign that completed its time budget with zero crashes, is a real
 failure or a `dry` no-signal result — NOT `blocked`. Reserve `blocked` for a step that genuinely
@@ -219,7 +219,7 @@ runtime, so this claim risk is real — cross-check before it reaches the handof
 
 Before your dispatch returns, run in this order:
 
-1. `vigil assess record-finding code-fuzz-engineer <finding-json>` for each confirmed crash finding.
+1. `vigil assess finding record code-fuzz-engineer <finding-json>` for each confirmed crash finding.
 2. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (harness paths, crash inputs, campaign configs), open questions, and role-specific extras (`crash_count`, `harnesses_written`, `campaigns_run`, `false_positive_count`). Use the exact `agent_id`, `agent_role`, and `phase` from the **Runtime Identity block** the operator placed at the top of your dispatch prompt.
 3. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 

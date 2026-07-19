@@ -79,7 +79,75 @@ def test_kali_only_filter_returns_only_kali_rows(capsys):
     rows = _run_json(capsys, ["list-commands", "--kali-only", "--json"])
     assert rows
     assert all(row["kali"] for row in rows)
+    # --kali-only EXPANDS the collapsed dispatcher into per-tool `kali <verb>`
+    # rows: every name is a two-token `kali <verb>`, and the collapsed root row
+    # (bare "kali") is NOT part of the expansion.
     assert all(row["name"].startswith("kali ") for row in rows)
+    assert "kali" not in {row["name"] for row in rows}
+    # One row per registered kali verb — no tool is dropped from the drill-down.
+    assert len(rows) == len(contracts.KALI_VERBS)
+    names = {row["name"] for row in rows}
+    for verb in ("kali sqlmap", "kali exec", "kali nuclei", "kali browser"):
+        assert verb in names, f"{verb!r} missing from --kali-only expansion"
+
+
+def test_default_catalog_collapses_kali_to_a_single_row(capsys):
+    # Tier 0: the default catalog must render `kali` as ONE dispatcher row, not
+    # one row per tool. This is the measurement-artifact fix — the per-verb
+    # `kali <verb>` rows only surface under --kali-only.
+    rows = _run_json(capsys, ["list-commands", "--json"])
+    kali_rows = [r for r in rows if r["kali"]]
+    assert [r["name"] for r in kali_rows] == ["kali"], (
+        "the default catalog must contain exactly one kali row (the collapsed "
+        "dispatcher), never the flattened per-tool wrappers"
+    )
+    assert not any(r["name"].startswith("kali ") for r in rows), (
+        "no per-tool `kali <verb>` row should appear in the default catalog"
+    )
+    # The single row carries a drill-down hint (count + both expansion paths) so
+    # the tool wrappers stay discoverable without inflating the default view.
+    (kali_row,) = kali_rows
+    assert str(len(contracts.KALI_VERBS)) in kali_row["summary"]
+    assert "--kali-only" in kali_row["summary"]
+    assert "contract kali" in kali_row["summary"]
+
+
+def test_kali_root_carries_union_of_verb_phases(capsys):
+    # The collapsed kali row must be tagged with the union of every kali verb's
+    # phase, so `list-commands --phase <p>` still surfaces the dispatcher for the
+    # phases ONLY kali covers (recon-pivot / exploit-recon). Otherwise those
+    # phase filters would go empty when the per-verb rows are collapsed.
+    rows = _run_json(capsys, ["list-commands", "--json"])
+    (kali_row,) = [r for r in rows if r["name"] == "kali"]
+    for phase in ("recon", "collect", "consume-test", "recon-pivot", "exploit-recon"):
+        assert phase in kali_row["phases"], f"kali row missing phase {phase!r}"
+    for phase in ("recon-pivot", "exploit-recon"):
+        filtered = _run_json(capsys, ["list-commands", "--phase", phase, "--json"])
+        assert "kali" in {r["name"] for r in filtered}
+
+
+@pytest.mark.parametrize("verb", ["kali sqlmap", "kali exec", "kali nuclei", "kali browser"])
+def test_collapsed_kali_verbs_still_resolve_as_contracts(verb):
+    # Collapsing the catalog must NOT drop any kali contract data — every
+    # `kali <verb>` stays fully resolvable via `contract kali <verb>`.
+    contract = contracts.get_contract(verb)
+    assert contract is not None, f"contract lookup for {verb!r} returned None"
+    assert contract.name == verb
+    rendered = contracts.render_contract(verb)
+    assert rendered.startswith(f"Command: {verb}")
+
+
+@pytest.mark.parametrize("name", ["auth status", "auth list"])
+def test_auth_two_token_resolves_to_auth_contract(name):
+    # `auth` is one contract documenting the `list`/`status` subcommands, so the
+    # two-token form `contract auth status` / `contract auth list` must resolve to
+    # it (mirroring `contract resolve <target>`) instead of returning None ->
+    # "Unknown contract".
+    contract = contracts.get_contract(name)
+    assert contract is not None, f"contract lookup for {name!r} returned None"
+    assert contract.name == "auth"
+    rendered = contracts.render_contract(name)
+    assert rendered.startswith("Command: auth")
 
 
 def test_grep_filter_matches_name_or_summary(capsys):
@@ -110,10 +178,11 @@ def test_grouped_text_output_has_phase_headers(capsys):
 
 def test_catalog_lists_every_registered_contract_command(capsys):
     # Completeness: the unfiltered catalog must surface EVERY command in the
-    # contract registry (the `_CONTRACTS` registry + the kali verb table via
-    # `all_command_contracts`). A command that has a contract but never reaches
-    # `list-commands` is a discovery hole; a name in the output with no backing
-    # contract is drift. The two name sets must be identical.
+    # contract registry (the `_CONTRACTS` registry + the SINGLE collapsed `kali`
+    # dispatcher row via `all_command_contracts`; the per-tool `kali <verb>`
+    # rows live behind --kali-only). A command that has a contract but never
+    # reaches `list-commands` is a discovery hole; a name in the output with no
+    # backing contract is drift. The two name sets must be identical.
     rows = _run_json(capsys, ["list-commands", "--json"])
     catalog_names = {row["name"] for row in rows}
     registry_names = {c.name for c in contracts.all_command_contracts()}
@@ -127,7 +196,7 @@ def test_catalog_lists_every_registered_contract_command(capsys):
 _PREVIOUSLY_UNLISTED_CODE_VERBS = (
     "code-coverage",
     "code-ingest",
-    "code-index-sync",
+    "code-index sync",
     "code-size-summary",
 )
 
@@ -174,19 +243,21 @@ _MUST_BE_DISCOVERABLE = (
     "transition-phase",
     # core read/query primitives
     "coverage",
-    "list-findings",
-    "list-intel",
-    "list-command-runs",
-    "get-command-run",
     "resume-brief",
     "artifact",
+    # Tier-3 subcommand groups render as ONE collapsed catalog row each (like
+    # `kali`); their per-action verbs resolve via `contract <parent> <action>`.
+    "finding",
+    "intel",
+    "export",
+    "command-run",
     # representative write/probe verbs across phases
-    "record-finding",
-    "verify-finding",
-    "record-attempt",
+    "record-probe",
+    "resolve",
     "block-technique",
-    "kali sqlmap",
-    "kali exec",
+    # the kali dispatcher is ONE collapsed catalog row; its per-tool wrappers
+    # are asserted discoverable under --kali-only elsewhere in this module.
+    "kali",
 )
 
 

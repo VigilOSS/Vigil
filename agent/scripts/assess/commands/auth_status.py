@@ -1,4 +1,4 @@
-"""vigil assess auth-status — one-shot view of the engagement's auth state.
+"""vigil assess auth status — one-shot view of the engagement's auth state.
 
 Reads the active identity from the centralized credential store (orchestrator
 backend) and surfaces:
@@ -9,7 +9,7 @@ backend) and surfaces:
 - ``expires_at`` (with a flag when it has passed or is within 5 minutes)
 - Token shapes present (Bearer header, session cookies, OAuth refresh_token)
 - Timestamp of the most recent live-credential probe via
-  ``list-command-runs --technique AUTH``
+  ``command-run list --technique AUTH``
 - Recommended refresh path per the C42 Auth-expiry recovery loop
 
 Pairs with the recovery loop in ``agent/operator-core.md`` Credential
@@ -22,6 +22,8 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+from assess.lib.auth_liveness import classify_liveness as _classify_liveness
+
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 from assess.lib.creds_client import (
@@ -31,9 +33,9 @@ from assess.lib.creds_client import (
 )
 
 
-def register(subparsers) -> None:
+def register_status(subparsers) -> None:
     p = subparsers.add_parser(
-        "auth-status",
+        "status",
         help="One-shot view of the engagement's auth state + refresh recommendation",
     )
     p.add_argument(
@@ -85,70 +87,12 @@ def register(subparsers) -> None:
             "authed_marker, dead_marker}; redirects are NOT followed."
         ),
     )
+    p.add_argument(
+        "--scope",
+        default="",
+        help="Logical application scope for alias resolution and liveness persistence.",
+    )
     p.set_defaults(func=run)
-
-
-def _classify_liveness(
-    status: int | None,
-    haystack: str | None,
-    liveness: dict[str, Any] | None,
-) -> tuple[str, str]:
-    """Deterministic, operator-configured session-liveness classifier.
-
-    There is exactly ONE way to decide liveness: an operator-declared signature in
-    ``material['liveness'] = {expect_status, authed_marker, dead_marker}`` (each key
-    optional), matched against ``haystack`` — the probe response's status line +
-    headers (INCLUDING ``Location``) + body text. This mirrors how a DAST scanner
-    (InsightAppSec / Burp) validates a session with logged-in / logged-out markers;
-    NO auth/login location is auto-detected. Precedence (first match wins):
-
-      1. no response captured (transport error)         -> unknown
-      2. no liveness signature configured               -> unknown (names the shape to set)
-      3. dead_marker set AND present in haystack         -> dead
-      4. authed_marker set AND absent from haystack      -> dead
-      5. expect_status set AND status != expect_status   -> dead
-      6. otherwise                                       -> live
-
-    Marker matching is case-sensitive substring against the combined haystack.
-    Returns ``(verdict, reason)`` where ``reason`` names the rule that fired. Pure
-    function: unit-tested without a network, and kept in lockstep with its mirror
-    (``vigil_cli.auth`` <-> ``assess.commands.auth_status``) — the two must classify
-    identical inputs identically.
-    """
-    if status is None:
-        return "unknown", "no response captured (transport error)"
-
-    cfg = liveness if isinstance(liveness, dict) else {}
-    raw_expect = cfg.get("expect_status")
-    expect_status = raw_expect if isinstance(raw_expect, int) and not isinstance(raw_expect, bool) else None
-    raw_authed = cfg.get("authed_marker")
-    authed_marker = raw_authed if isinstance(raw_authed, str) and raw_authed else None
-    raw_dead = cfg.get("dead_marker")
-    dead_marker = raw_dead if isinstance(raw_dead, str) and raw_dead else None
-
-    if expect_status is None and authed_marker is None and dead_marker is None:
-        return (
-            "unknown",
-            "no liveness signature configured; set "
-            "material.liveness = {expect_status, authed_marker, dead_marker}",
-        )
-
-    hay = haystack or ""
-    if dead_marker is not None and dead_marker in hay:
-        return "dead", f"dead_marker {dead_marker!r} present"
-    if authed_marker is not None and authed_marker not in hay:
-        return "dead", f"authed_marker {authed_marker!r} absent"
-    if expect_status is not None and status != expect_status:
-        return "dead", f"status {status} != expect {expect_status}"
-
-    confirmations: list[str] = []
-    if authed_marker is not None:
-        confirmations.append("authed_marker present")
-    if dead_marker is not None:
-        confirmations.append("dead_marker absent")
-    if expect_status is not None:
-        confirmations.append(f"status {status}")
-    return "live", ", ".join(confirmations)
 
 
 def _build_liveness_haystack(
@@ -170,6 +114,7 @@ def _run_identity_probe(
     url: str,
     *,
     liveness_cfg: dict[str, Any] | None,
+    scope_key: str = "",
     timeout: int = 15,
 ) -> dict[str, Any]:
     """GET ``url`` as ``identity`` through the kali-exec path and classify liveness.
@@ -198,12 +143,13 @@ def _run_identity_probe(
         result = kali_exec(
             cmd,
             technique="AUTH",
-            intent="auth liveness probe (auth-status --probe)",
+            intent="auth liveness probe (auth status --probe)",
             probe_kind="fingerprint",
             phase="recon",
             timeout=timeout + 10,
             engagement_dir=Path(engagement_dir),
             identity=identity,
+            identity_scope=scope_key,
             tool_name="curl",
         )
     except Exception as exc:  # noqa: BLE001 — a live probe must never crash auth-status
@@ -366,8 +312,17 @@ def run(args) -> None:
     # --identity targets a SPECIFIC stored session (multi-identity store); without
     # it we view/probe the active identity exactly as before.
     requested_identity = getattr(args, "identity", None)
+    scope_key = str(getattr(args, "scope", "") or "")
+    resolved_identity: str | None = None
     if requested_identity:
-        _resolved_name, auth = resolve_identity(cfg.engagement_dir, requested_identity)
+        if scope_key:
+            resolved_identity, auth = resolve_identity(
+                cfg.engagement_dir, requested_identity, scope_key=scope_key
+            )
+        else:
+            resolved_identity, auth = resolve_identity(
+                cfg.engagement_dir, requested_identity
+            )
     else:
         auth = active_material(cfg.engagement_dir)
     shapes = _token_shapes(auth) if auth else []
@@ -418,12 +373,16 @@ def run(args) -> None:
             liveness_detail = {"liveness": "unknown", "reason": "no identity",
                                "http_status": None, "error": miss}
         else:
-            probe_identity = requested_identity or (
+            probe_identity = resolved_identity or requested_identity or (
                 auth.get("identity_name") if isinstance(auth, dict) else None
             )
             liveness_cfg = auth.get("liveness") if isinstance(auth, dict) else None
             liveness_detail = _run_identity_probe(
-                cfg.engagement_dir, probe_identity, probe_url, liveness_cfg=liveness_cfg
+                cfg.engagement_dir,
+                probe_identity,
+                probe_url,
+                liveness_cfg=liveness_cfg,
+                scope_key=scope_key,
             )
             # WS4 opt-in persistence: only when a SPECIFIC identity was targeted
             # does auth-status write — it persists the classified verdict so a
@@ -435,11 +394,19 @@ def run(args) -> None:
             if requested_identity and probe_identity:
                 probed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                 try:
+                    kwargs = {}
+                    if scope_key:
+                        kwargs = {
+                            "scope_key": scope_key,
+                            "source": "auth-status",
+                            "reason": str(liveness_detail.get("reason") or ""),
+                        }
                     persist_liveness(
                         cfg.engagement_dir,
                         str(probe_identity),
                         liveness_detail["liveness"],
                         probed_at,
+                        **kwargs,
                     )
                     liveness_detail["persisted"] = True
                 except Exception as exc:  # noqa: BLE001 — status view must not crash

@@ -2303,9 +2303,10 @@ def test_findings_patch_rejects_records_merged_after_validation(client, isolate_
             connection.execute(
                 """
                 UPDATE assessment_findings
-                SET status = 'merged',
-                    merged_into_finding_id = id,
-                    updated_at = '2099-01-01 00:00:00'
+                    SET status = 'merged',
+                        merged_into_finding_id = id,
+                        row_version = row_version + 1,
+                        updated_at = '2099-01-01 00:00:00'
                 WHERE slug = 'CH-012'
                 """
             )
@@ -2914,9 +2915,10 @@ def test_findings_verify_rejects_records_merged_after_validation(client, isolate
             connection.execute(
                 """
                 UPDATE assessment_findings
-                SET status = 'merged',
-                    merged_into_finding_id = id,
-                    updated_at = '2099-01-01 00:00:00'
+                    SET status = 'merged',
+                        merged_into_finding_id = id,
+                        row_version = row_version + 1,
+                        updated_at = '2099-01-01 00:00:00'
                 WHERE slug = 'CH-042'
                 """
             )
@@ -3005,6 +3007,8 @@ def test_findings_verify_rejects_merged_records(client, isolate_settings):
             "target_slug": "CH-051",
             "reason": "Merged duplicate.",
             "source_name": "operator",
+            "expected_source_row_version": source.json()["finding"]["row_version"],
+            "expected_target_row_version": target.json()["finding"]["row_version"],
         },
     )
     assert merge.status_code == 200
@@ -3087,8 +3091,9 @@ def test_merge_findings_rejects_target_changed_after_snapshot(client, isolate_se
                 connection.execute(
                     """
                     UPDATE assessment_findings
-                    SET notes = notes || '\nConcurrent merge writer',
-                        updated_at = '2099-01-01 00:00:00'
+                        SET notes = notes || '\nConcurrent merge writer',
+                            row_version = row_version + 1,
+                            updated_at = '2099-01-01 00:00:00'
                     WHERE slug = 'CH-053'
                     """
                 )
@@ -3599,3 +3604,44 @@ def test_reset_finding_clears_disputed_to_unreviewed(client, isolate_settings):
     assert transitions.status_code == 200
     actions = [item["action"] for item in transitions.json()]
     assert "verification_recleared" in actions, actions
+def test_finding_row_version_increments_on_each_same_second_patch(client, isolate_settings):
+    engagement_key = "2026-07-14-finding-row-version"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    response = client.post(
+        f"/engagements/{engagement_key}/assessment/findings",
+        json={
+            "slug": "VA-910",
+            "title": "Versioned finding",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "canonical_location": "https://example.com/versioned",
+            "summary": "initial",
+            "evidence_ref": "findings.md",
+            "source_name": "vulnerability-analyst",
+        },
+    )
+    assert response.status_code == 201, response.text
+    created = response.json()["finding"]
+    assert created["row_version"] == 1
+
+    first = client.patch(
+        f"/engagements/{engagement_key}/assessment/findings/VA-910",
+        json={"summary": "first mutation"},
+    )
+    second = client.patch(
+        f"/engagements/{engagement_key}/assessment/findings/VA-910",
+        json={"summary": "second mutation"},
+    )
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert first.json()["finding"]["row_version"] == 2
+    assert second.json()["finding"]["row_version"] == 3
+
+    stale = client.patch(
+        f"/engagements/{engagement_key}/assessment/findings/VA-910",
+        json={"summary": "stale mutation", "expected_row_version": 1},
+    )
+    assert stale.status_code == 409
+    assert "changed since it was loaded" in stale.json()["detail"]

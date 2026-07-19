@@ -1,4 +1,4 @@
-"""vigil assess ingest-spec — parse OpenAPI 3.x / Swagger 2.0 specs and generate coverage records."""
+"""vigil assess ingest spec — parse OpenAPI 3.x / Swagger 2.0 specs and generate coverage records."""
 from __future__ import annotations
 
 import json
@@ -20,7 +20,7 @@ _HTTP_METHODS = ("get", "post", "put", "delete", "patch", "head", "options", "tr
 
 
 def register(subparsers) -> None:
-    p = subparsers.add_parser("ingest-spec", help="Ingest OpenAPI/Swagger spec into assessment state")
+    p = subparsers.add_parser("spec", help="Ingest OpenAPI/Swagger spec into assessment state")
     p.add_argument("spec_file", help="Path to local spec file (no URLs)")
     p.set_defaults(func=run)
 
@@ -310,7 +310,8 @@ def run(args) -> None:
     # scope (shared-constraints §1): refuse the whole spec. Composes with the
     # relative/empty-base refusal below — spec_host is "" for a relative base, so
     # this check is skipped and that case falls through to the existing handler.
-    # Inactive when scope.json has no allowlist (see scope.ingest_scope_filter).
+    # Inactive when scope.json has no allowlist or enables the global bypass
+    # (see scope.ingest_scope_filter).
     scope_allow, scope_deny, scope_filter_active = ingest_scope_filter(eng_dir)
     spec_host = (urlparse(base_url).hostname or "").rstrip(".").lower()
     if (
@@ -336,7 +337,7 @@ def run(args) -> None:
             "resolved from scope — the backend requires ABSOLUTE request URLs, so none "
             f"of this spec's {len(paths)} path(s) can be ingested. Add a host to "
             "scope.json (or fetch the spec from a server with an absolute URL) and "
-            "re-run `vigil assess ingest-spec`."
+            "re-run `vigil assess ingest spec`."
         )
         print(
             f"[ingest] Ingested 0 endpoints from spec (version {spec_version}); "

@@ -73,14 +73,6 @@ def _load_update_finding_module():
     return _load_assess_module("update_finding.py", "test_update_finding_command")
 
 
-def _load_reset_finding_module():
-    return _load_assess_module("reset_finding.py", "test_reset_finding_command")
-
-
-def _load_kill_finding_module():
-    return _load_assess_module("kill_finding.py", "test_kill_finding_command")
-
-
 def _load_list_findings_module():
     return _load_assess_module("list_findings.py", "test_list_findings_command")
 
@@ -381,12 +373,15 @@ def test_code_ingest_skips_named_pipes(monkeypatch, tmp_path):
             self.engagement_key = engagement_key
 
         def post(self, endpoint: str, payload: dict):
-            if endpoint == "code/repos":
+            if endpoint == "code/repos/refresh/start":
                 captured["repo_payload"] = payload
-                return {"id": 7}
-            if endpoint == "code/files":
+                return {"repo_id": 7, "refresh_token": "refresh-7"}
+            if endpoint == "code/repos/7/refresh/files":
                 captured["files_payload"] = payload
-                return {"inserted": len(payload["files"])}
+                return {"staged": len(payload["files"])}
+            if endpoint == "code/repos/7/refresh/commit":
+                assert payload == {"refresh_token": "refresh-7", "manifest_complete": True}
+                return {"inserted": 1, "changed": 0, "deleted": 0, "renamed": 0}
             raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
         def close(self) -> None:
@@ -414,8 +409,93 @@ def test_code_ingest_skips_named_pipes(monkeypatch, tmp_path):
     assert repo_payload["analyzable_files"] == 1
 
     files_payload = captured["files_payload"]
-    assert files_payload["repo_id"] == 7
+    assert files_payload["refresh_token"] == "refresh-7"
     assert [entry["file_path"] for entry in files_payload["files"]] == ["app.py"]
+
+
+def test_code_ingest_dry_run_reports_refresh_delta_without_staging(monkeypatch, tmp_path, capsys):
+    module = _load_code_ingest_module()
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / "app.py").write_text("print('changed')\n", encoding="utf-8")
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test", engagement_key="eng", engagement_dir=str(tmp_path / "engagement")
+        ),
+    )
+    monkeypatch.setattr(module, "_setup_ctags", lambda repo_path: {"available": False})
+    posted: list[str] = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+        def post(self, endpoint, payload):
+            posted.append(endpoint)
+            assert endpoint == "code/repos/refresh/preview"
+            return {"added": ["app.py"], "changed": [], "renamed": [], "removed": ["old.py"]}
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+    module.run(
+        SimpleNamespace(
+            repo_path=str(repo_path), name="demo", language=None, repo_key=None,
+            engagement_dir=tmp_path / "engagement", dry_run=True,
+        )
+    )
+    assert posted == ["code/repos/refresh/preview"]
+    output = capsys.readouterr().out
+    assert '"added"' in output
+    assert '"removed"' in output
+
+
+def test_code_ingest_commits_complete_empty_manifest(monkeypatch, tmp_path):
+    module = _load_code_ingest_module()
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test", engagement_key="eng", engagement_dir=str(tmp_path / "engagement")
+        ),
+    )
+    monkeypatch.setattr(module, "_setup_ctags", lambda repo_path: {"available": False})
+    posted: list[tuple[str, dict]] = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+        def post(self, endpoint, payload):
+            posted.append((endpoint, payload))
+            if endpoint == "code/repos/refresh/start":
+                assert payload["total_files"] == 0
+                assert payload["analyzable_files"] == 0
+                return {"repo_id": 7, "refresh_token": "refresh-7"}
+            if endpoint == "code/repos/7/refresh/commit":
+                assert payload == {"refresh_token": "refresh-7", "manifest_complete": True}
+                return {"inserted": 0, "changed": 0, "deleted": 2, "renamed": 0}
+            raise AssertionError(f"Unexpected endpoint: {endpoint}")
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+    module.run(
+        SimpleNamespace(
+            repo_path=str(repo_path), name="demo", language=None, repo_key=None,
+            engagement_dir=tmp_path / "engagement", dry_run=False,
+        )
+    )
+    assert [endpoint for endpoint, _ in posted] == [
+        "code/repos/refresh/start",
+        "code/repos/7/refresh/commit",
+    ]
 
 
 def test_code_index_walk_repo_skips_named_pipes(tmp_path):
@@ -597,10 +677,12 @@ def test_code_ingest_limits_security_scan_for_large_histories(monkeypatch, capsy
             self.engagement_key = engagement_key
 
         def post(self, endpoint: str, payload: dict):
-            if endpoint == "code/repos":
-                return {"id": 7}
-            if endpoint == "code/files":
-                return {"inserted": len(payload["files"])}
+            if endpoint == "code/repos/refresh/start":
+                return {"repo_id": 7, "refresh_token": "refresh-7"}
+            if endpoint == "code/repos/7/refresh/files":
+                return {"staged": len(payload["files"])}
+            if endpoint == "code/repos/7/refresh/commit":
+                return {"inserted": 1, "changed": 0, "deleted": 0, "renamed": 0}
             raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
         def close(self) -> None:
@@ -1271,7 +1353,7 @@ def test_code_dispatch_done_requires_single_item_and_posts_cwe_coverage(monkeypa
     module.run(
         SimpleNamespace(
             action="done",
-            extra=["42", "clean", str(coverage_path), "Reviewed"],
+            extra=["42", "code-vuln-hunter", "lease-42", "clean", str(coverage_path), "Reviewed"],
             engagement_dir=tmp_path,
         )
     )
@@ -1279,6 +1361,8 @@ def test_code_dispatch_done_requires_single_item_and_posts_cwe_coverage(monkeypa
     assert captured["endpoint"] == "code/analysis-queue/done"
     assert captured["payload"] == {
         "item_ids": [42],
+        "agent_name": "code-vuln-hunter",
+        "lease_token": "lease-42",
         "disposition": "clean",
         "notes": "Reviewed",
         "cwe_coverage": [{"family": "web-app-injection", "effort": 85}],
@@ -1288,11 +1372,79 @@ def test_code_dispatch_done_requires_single_item_and_posts_cwe_coverage(monkeypa
         module.run(
             SimpleNamespace(
                 action="done",
-                extra=["42,43", "clean", str(coverage_path)],
+                extra=["42,43", "code-vuln-hunter", "lease-42", "clean", str(coverage_path)],
                 engagement_dir=tmp_path,
             )
         )
     assert excinfo.value.code == 1
+
+
+def test_code_dispatch_fetch_posts_atomic_lane_filters(monkeypatch, tmp_path):
+    module = _load_code_dispatch_module()
+    ids_path = tmp_path / "queue-ids.json"
+    ids_path.write_text(json.dumps([9, 4, 9]), encoding="utf-8")
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "write_json_snapshot",
+        lambda *args, **kwargs: tmp_path / "fetch.json",
+    )
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            pass
+
+        def post(self, endpoint: str, payload: dict):
+            captured["endpoint"] = endpoint
+            captured["payload"] = payload
+            return []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+    module.run(
+        SimpleNamespace(
+            action="fetch",
+            extra=[
+                "5",
+                "lane-agent",
+                "--repo-id",
+                "12",
+                "--classification",
+                "high",
+                "--batch-theme",
+                "auth-boundary",
+                "--ids-file",
+                str(ids_path),
+            ],
+            engagement_dir=tmp_path,
+        )
+    )
+
+    assert captured == {
+        "endpoint": "code/analysis-queue/fetch",
+        "payload": {
+            "limit": 5,
+            "agent_name": "lane-agent",
+            "repo_id": 12,
+            "classification": "high",
+            "batch_theme": "auth-boundary",
+            "item_ids": [4, 9],
+        },
+    }
 
 
 def test_code_dispatch_resolve_triggers_posts_terminal_resolution(monkeypatch, tmp_path):
@@ -1388,6 +1540,8 @@ def test_code_record_analysis_rejects_bad_nested_payloads_before_post(tmp_path, 
             [
                 {
                     "queue_item_id": 101,
+                    "agent_name": "code-vuln-hunter",
+                    "lease_token": "lease-101",
                     "file_id": 1,
                     "disposition": "clean",
                     "cwe_coverage": {"cwe_coverage": [{"family": "ssrf", "effort": 80}]},
@@ -1411,9 +1565,11 @@ def test_code_record_analysis_validates_whole_batch_before_any_post(monkeypatch,
     analysis_path.write_text(
         json.dumps(
             [
-                {"queue_item_id": 201, "file_id": 1, "disposition": "clean"},
+                {"queue_item_id": 201, "file_id": 1, "agent_name": "hunter", "lease_token": "lease-201", "disposition": "clean"},
                 {
                     "queue_item_id": 202,
+                    "agent_name": "hunter",
+                    "lease_token": "lease-202",
                     "file_id": 2,
                     "disposition": "clean",
                     "cross_file_triggers": [{"file_path": "src/missing.py", "vuln_class": "ssrf"}],
@@ -1548,8 +1704,8 @@ def test_post_rejects_raw_finding_creation_and_points_to_helper(capsys):
 
     assert excinfo.value.code == 1
     err = capsys.readouterr().err
-    assert "record-finding" in err
-    assert "vigil assess contract record-finding" in err
+    assert "finding record" in err
+    assert "vigil assess contract finding record" in err
 
 
 def test_post_rejects_raw_verify_endpoint_and_points_to_helper(capsys):
@@ -1567,14 +1723,15 @@ def test_post_rejects_raw_verify_endpoint_and_points_to_helper(capsys):
 
     assert excinfo.value.code == 1
     err = capsys.readouterr().err
-    assert "verify-finding" in err
+    assert "finding verify" in err
     assert "kill-finding" in err
-    assert "vigil assess contract verify-finding" in err
+    assert "vigil assess contract finding verify" in err
 
 
 def test_raw_finding_patch_is_rejected_and_points_to_helper():
     """A raw PATCH to findings/{slug} is rejected and points operators at the
-    typed update-finding / reset-finding verbs.
+    typed update-finding verb (reset-finding folded into
+    ``update-finding --status draft`` in the 2026-07 CLI consolidation).
 
     The generic ``patch`` verb was removed in WS5, but the ``_RAW_ENDPOINT_RULES``
     redirect survives as the client-layer guard, so this asserts the guard
@@ -1585,19 +1742,18 @@ def test_raw_finding_patch_is_rejected_and_points_to_helper():
         "PATCH", "findings/VA-001", {"workflow_status": "draft"}
     )
     assert error is not None
-    assert "update-finding" in error
-    assert "reset-finding" in error
-    assert "vigil assess contract update-finding" in error
-    assert "vigil assess contract reset-finding" in error
+    assert "finding update" in error
+    assert "finding update <slug> --status draft" in error
+    assert "vigil assess contract finding update" in error
 
 
 def test_contract_prints_record_finding_contract(capsys):
     module = _load_contract_module()
 
-    module.run(SimpleNamespace(name="record-finding"))
+    module.run(SimpleNamespace(name="finding", variant=["record"]))
 
     out = capsys.readouterr().out
-    assert "Command: record-finding" in out
+    assert "Command: finding record" in out
     assert "Schema: finding-record.schema.json" in out
     assert "Helper defaults:" in out
     assert "workflow_status = active" in out
@@ -1606,24 +1762,27 @@ def test_contract_prints_record_finding_contract(capsys):
     assert "Examples:" in out
 
 
-def test_contract_prints_reset_finding_contract(capsys):
+def test_contract_update_finding_documents_reopen_fold(capsys):
+    # reset-finding folded into update-finding --status draft (2026-07 CLI
+    # consolidation); the update-finding contract documents the reopen flow.
     module = _load_contract_module()
 
-    module.run(SimpleNamespace(name="reset-finding"))
+    module.run(SimpleNamespace(name="finding", variant=["update"]))
 
     out = capsys.readouterr().out
-    assert "Command: reset-finding" in out
+    assert "Command: finding update" in out
+    assert "--status draft" in out
     assert "reopen" in out.lower()
-    assert "vigil assess reset-finding <slug>" in out
 
 
 def test_contract_prints_code_record_analysis_contract(capsys):
+    # code-record-analysis folded into `code-record analysis` (two-token verb).
     module = _load_contract_module()
 
-    module.run(SimpleNamespace(name="code-record-analysis"))
+    module.run(SimpleNamespace(name="code-record", variant="analysis"))
 
     out = capsys.readouterr().out
-    assert "Command: code-record-analysis" in out
+    assert "Command: code-record analysis" in out
     assert "Schema: code-analysis-result.schema.json" in out
     assert "queue_item_id" in out
     assert "file_id = derived by the backend from queue_item_id" in out
@@ -1633,10 +1792,10 @@ def test_contract_prints_code_record_analysis_contract(capsys):
 def test_contract_prints_record_intel_variant_contract(capsys):
     module = _load_contract_module()
 
-    module.run(SimpleNamespace(name="record-intel", variant="tech-component"))
+    module.run(SimpleNamespace(name="intel", variant=["record", "tech-component"]))
 
     out = capsys.readouterr().out
-    assert "Command: record-intel tech-component" in out
+    assert "Command: intel record tech-component" in out
     assert "Schema: intel-tech-component.schema.json" in out
     assert "Required top-level fields:" in out
     assert "component" in out
@@ -1647,12 +1806,12 @@ def test_verify_finding_help_is_rendered_from_contract_registry(capsys):
     cli = _load_cli_module()
 
     with pytest.raises(SystemExit) as excinfo:
-        cli.main(["verify-finding", "--help"])
+        cli.main(["finding", "verify", "--help"])
 
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
-    assert "vigil assess verify-finding <slug> --disposition confirmed --reason" in out
-    assert "vigil assess contract verify-finding" in out
+    assert "vigil assess finding verify <slug> --disposition confirmed --reason" in out
+    assert "vigil assess contract finding verify" in out
     assert "Contract:" not in out
 
 
@@ -1660,16 +1819,18 @@ def test_update_finding_help_drops_patch_finding_alias(capsys):
     cli = _load_cli_module()
 
     with pytest.raises(SystemExit) as excinfo:
-        cli.main(["update-finding", "--help"])
+        cli.main(["finding", "update", "--help"])
 
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
-    assert "vigil assess update-finding <slug> --inline" in out
+    assert "vigil assess finding update <slug> --inline" in out
     assert "patch-finding" not in out
 
 
-def test_kill_finding_builds_false_positive_payload_from_flags(monkeypatch, tmp_path, capsys):
-    module = _load_kill_finding_module()
+def test_verify_finding_builds_false_positive_payload_from_flags(monkeypatch, tmp_path, capsys):
+    # kill-finding folded into `verify-finding --disposition false_positive`
+    # (2026-07 CLI consolidation): the FP kill fields ride the verify verb.
+    module = _load_verify_finding_module()
 
     monkeypatch.setattr(
         module,
@@ -1707,10 +1868,13 @@ def test_kill_finding_builds_false_positive_payload_from_flags(monkeypatch, tmp_
         SimpleNamespace(
             engagement_dir=tmp_path,
             finding_slug="VA-001",
-            payload=None,
+            payload_file=None,
             inline_payload=None,
+            disposition="false_positive",
             reason_text="Guard blocks the path",
             reason_code="manual-kill",
+            new_severity=None,
+            narrative="",
             kill_reason="validate_length() enforces an 8KB cap",
             kill_check=2,
             evidence_ref="findings.md",
@@ -1790,7 +1954,7 @@ def test_record_finding_reports_normalized_contract_errors_before_backend(monkey
     assert "payload.details.evidence is required" in err
     assert "payload.details.impact is required" in err
     assert "workflow_status = active" in err
-    assert "vigil assess contract record-finding" in err
+    assert "vigil assess contract finding record" in err
 
 
 def test_update_finding_patches_by_slug_from_flags(monkeypatch, tmp_path):
@@ -1859,8 +2023,10 @@ def test_update_finding_patches_by_slug_from_flags(monkeypatch, tmp_path):
     assert captured["payload"]["details"] == {"impact": "limited"}
 
 
-def test_reset_finding_reopens_to_draft(monkeypatch, tmp_path):
-    module = _load_reset_finding_module()
+def test_update_finding_reopens_to_draft(monkeypatch, tmp_path):
+    # reset-finding folded into `update-finding --status draft` (2026-07 CLI
+    # consolidation): reopening for re-triage is a workflow_status patch.
+    module = _load_update_finding_module()
 
     monkeypatch.setattr(
         module,
@@ -1898,14 +2064,29 @@ def test_reset_finding_reopens_to_draft(monkeypatch, tmp_path):
         SimpleNamespace(
             engagement_dir=tmp_path,
             finding_slug="VA-003",
-            workflow_status="draft",
+            inline_payload=None,
+            payload_file=None,
+            title=None,
             severity=None,
-            reason_text="Needs another review pass",
-            reason_code="retriage",
-            artifact_ref="review.json",
+            workflow_status="draft",
+            submission_status=None,
+            defect_family=None,
+            root_cause_key=None,
+            auth_context=None,
+            canonical_location=None,
+            summary=None,
+            evidence_ref=None,
             notes="Undoing prior false positive",
             source_name="operator",
+            reason_code="retriage",
+            reason_text="Needs another review pass",
+            artifact_ref="review.json",
+            expected_row_version=None,
+            details_inline=None,
             provenance_inline='{"reviewed_by":"operator"}',
+            notes_replace=False,
+            details_replace=False,
+            evidence_type=None,
         )
     )
 
@@ -2020,7 +2201,7 @@ def test_code_dispatch_done_supports_dry_run(monkeypatch, tmp_path, capsys):
         SimpleNamespace(
             engagement_dir=tmp_path,
             action="done",
-            extra=["42", "clean", str(coverage_path), "--dry-run"],
+            extra=["42", "code-vuln-hunter", "lease-42", "clean", str(coverage_path), "--dry-run"],
         )
     )
 
@@ -2049,7 +2230,7 @@ def test_code_dispatch_done_rejects_invalid_disposition(monkeypatch, tmp_path, c
             SimpleNamespace(
                 engagement_dir=tmp_path,
                 action="done",
-                extra=["42", "done", str(coverage_path)],
+                extra=["42", "code-vuln-hunter", "lease-42", "done", str(coverage_path)],
             )
         )
 

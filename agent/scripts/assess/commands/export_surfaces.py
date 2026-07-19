@@ -1,4 +1,4 @@
-"""vigil assess export-surfaces — generate surfaces.jsonl from backend state on demand."""
+"""vigil assess export surfaces — generate surfaces.jsonl from backend state on demand."""
 from __future__ import annotations
 
 import json
@@ -11,7 +11,7 @@ from assess.lib.config import load_config
 
 
 def register(subparsers) -> None:
-    p = subparsers.add_parser("export-surfaces", help="Generate surfaces.jsonl from backend state")
+    p = subparsers.add_parser("surfaces", help="Generate surfaces.jsonl from backend state")
     p.set_defaults(func=run)
 
 

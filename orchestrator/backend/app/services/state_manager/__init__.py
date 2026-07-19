@@ -101,6 +101,7 @@ from .work_buffer import (
     list_work_items,
     fetch_work_items,
     fetch_work_items_by_priority,
+    fetch_work_items_by_unit,
     mark_work_items_done,
     mark_work_items_error,
     defer_work_items,
@@ -173,6 +174,11 @@ from .command_runs import (
     get_command_run,
     upsert_host_liveness,
     host_liveness,
+)
+from .rate_leases import (
+    acquire_rate_lease,
+    update_rate_lease,
+    list_rate_leases,
 )
 from .oob import (
     record_oob_probe,
@@ -281,6 +287,7 @@ __all__ = [
     "list_work_items",
     "fetch_work_items",
     "fetch_work_items_by_priority",
+    "fetch_work_items_by_unit",
     "mark_work_items_done",
     "mark_work_items_error",
     "defer_work_items",
@@ -288,6 +295,7 @@ __all__ = [
     "mark_work_items_manual",
     "reset_stale_work_items",
     "retry_error_work_items",
+    "apply_work_item_updates",
     "insert_http_flow",
     "list_http_flows",
     "get_http_flow",
@@ -338,6 +346,9 @@ __all__ = [
     "get_command_run",
     "upsert_host_liveness",
     "host_liveness",
+    "acquire_rate_lease",
+    "update_rate_lease",
+    "list_rate_leases",
     "record_oob_probe",
     "list_oob_probes",
     "get_oob_probe_by_nonce",

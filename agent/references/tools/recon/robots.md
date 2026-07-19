@@ -32,7 +32,7 @@ Because the engine is httpx, the verb inherits httpx's required-header injection
 ## Workflow
 
 1. Run `kali robots -l <live_hosts>` right after `web-discovery`/liveness, before the deep crawl.
-2. Feed the discovered sitemap URLs + `Disallow` paths into the work buffer (`ingest-endpoints`) and/or as katana crawl roots.
+2. Feed the discovered sitemap URLs + `Disallow` paths into the work buffer (`ingest endpoints`) and/or as katana crawl roots.
 3. Crawl with katana (keep `-kf` on) — the pre-seeded paths make the crawl converge faster and the `-kf` pass catches anything the single-fetch missed.
 
 Canonical annotated invocations: `vigil assess contract kali robots`.

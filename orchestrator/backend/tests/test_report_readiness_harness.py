@@ -1,7 +1,7 @@
 """Harness-doctrine tests for report_readiness softening (Wave 2).
 
-These exercise the harness pivot recorded in ``docs/adr/0001`` / ``docs/plans/
-harness-master-plan.md`` §0: administrative-hygiene checks at the report
+These exercise the harness pivot recorded in ``docs/adr/0001``:
+administrative-hygiene checks at the report
 boundary are softened from HARD blockers to ADVISORIES (``ready`` does not flip
 to False on them alone), while a real finding parked in ``draft`` is surfaced
 loudly as an advisory requiring disposition (S21 — never silent-drop). A
@@ -166,7 +166,7 @@ def test_s21_draft_finding_surfaced_as_advisory_with_slug(client, isolate_settin
         a for a in body["advisories"]
         if a["kind"] == "draft_finding_needs_disposition" and a["slug"] == "HR-002"
     )
-    assert "update-finding HR-002 --workflow-status active" in advisory["detail"]
+    assert "finding update HR-002 --workflow-status active" in advisory["detail"]
     assert "kill-finding HR-002" in advisory["detail"]
     assert any(a["slug"] == "HR-002" for a in body["advisories"]), body
 

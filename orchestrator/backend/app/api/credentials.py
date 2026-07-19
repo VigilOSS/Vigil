@@ -48,6 +48,8 @@ class CredentialUpsertRequest(BaseModel):
     host_cookies: list[Any] = Field(default_factory=list)
     notes: str = Field(default="", max_length=8192)
     expires_at: str | None = None
+    principal_id: str = Field(default="", max_length=256)
+    mfa_factor: str = Field(default="", max_length=64)
     make_active: bool = False
 
 
@@ -59,6 +61,15 @@ class LivenessPersistRequest(BaseModel):
     # clearing a stale flag, unknown->state untouched — never a false verdict).
     verdict: str = Field(..., min_length=1, max_length=32)
     probed_at: str | None = Field(default=None, max_length=64)
+    scope_key: str = Field(default="", max_length=512)
+    ttl_seconds: int = Field(default=900, ge=1, le=86400)
+    source: str = Field(default="probe", max_length=64)
+    reason: str = Field(default="", max_length=1024)
+
+
+class CredentialAliasRequest(BaseModel):
+    principal_id: str = Field(..., min_length=1, max_length=256)
+    scope_key: str = Field(default="", max_length=512)
 
 
 class CredentialCaptureRequest(BaseModel):
@@ -92,15 +103,36 @@ async def list_identities(
 
 @router.get("/resolve")
 async def resolve_identity(
-    engagement_key: str, identity: str | None = Query(default=None)
+    engagement_key: str,
+    identity: str | None = Query(default=None),
+    scope: str = Query(default=""),
 ) -> dict[str, Any]:
     engagement = await anyio.to_thread.run_sync(
         lambda: get_engagement_or_404(engagement_key)
     )
     name, material = await anyio.to_thread.run_sync(
-        creds_service.resolve_identity, engagement.id, identity
+        lambda: creds_service.resolve_identity(engagement.id, identity, scope_key=scope)
     )
     return {"identity_name": name, "material": material}
+
+
+@router.put("/aliases/{alias}")
+async def put_alias(
+    engagement_key: str, alias: str, request: CredentialAliasRequest
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(
+        lambda: get_engagement_or_404(engagement_key)
+    )
+    await anyio.to_thread.run_sync(
+        lambda: db.set_credential_alias(
+            engagement.id, alias, request.principal_id, request.scope_key
+        )
+    )
+    return {
+        "alias": alias,
+        "principal_id": request.principal_id,
+        "scope_key": request.scope_key,
+    }
 
 
 @router.post("/capture")
@@ -197,10 +229,37 @@ async def persist_liveness(
         lambda: get_engagement_or_404(engagement_key)
     )
     material = await anyio.to_thread.run_sync(
-        lambda: db.set_liveness(
-            engagement.id, identity_name, verdict, request.probed_at
+        lambda: db.record_credential_liveness(
+            engagement.id,
+            identity_name,
+            scope_key=request.scope_key,
+            verdict=verdict,
+            observed_at=request.probed_at or "",
+            ttl_seconds=request.ttl_seconds,
+            source=request.source,
+            reason=request.reason,
         )
     )
+    # The singleton columns are a legacy unscoped projection. A dead verdict for
+    # one app scope must not kill the same principal's capability everywhere.
+    if material is not None and not request.scope_key:
+        authoritative = next(
+            (
+                row
+                for row in material.get("liveness_observations", [])
+                if row.get("scope_key") == ""
+            ),
+            None,
+        )
+        if authoritative is not None:
+            material = await anyio.to_thread.run_sync(
+                lambda: db.set_liveness(
+                    engagement.id,
+                    identity_name,
+                    str(authoritative["verdict"]),
+                    str(authoritative["observed_at"]),
+                )
+            )
     if material is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

@@ -156,7 +156,7 @@ carry the skill context") is what lets the model judge novel situations, rather 
 pattern-matching on the prohibition. More examples from this prompt set:
 
 - "Use `vigil assess record-surface` for all surface writes — calling the library directly bypasses backend sync"
-- "Finding IDs are allocated by `vigil assess record-finding` under a lock — hand-allocating risks collisions"
+- "Finding IDs are allocated by `vigil assess finding record` under a lock — hand-allocating risks collisions"
 - "Route all in-scope target work through the `vigil assess kali` CLI — host-side probes bypass the runtime's network isolation"
 
 ### Division of labor over prohibition

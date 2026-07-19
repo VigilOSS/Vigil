@@ -1,4 +1,4 @@
-"""vigil assess gau-secrets — gau → uro dedup → httpx body capture → trufflehog.
+"""vigil assess gau secrets — gau → uro dedup → httpx body capture → trufflehog.
 
 Body-fetch pipeline for secret extraction. Reuses cached gau output and
 cached `bodies/` when present, then runs trufflehog filesystem mode against
@@ -64,7 +64,7 @@ _INERT_DROP_EXTENSIONS: frozenset[str] = frozenset({
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
-        "gau-secrets",
+        "secrets",
         help=(
             "Body-fetch pipeline: gau (cached) → uro dedup → httpx "
             "-store-response → trufflehog filesystem scan."

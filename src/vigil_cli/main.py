@@ -35,6 +35,7 @@ from .engagements import (
     resolve_engagement_path,
     resolve_out_of_scope,
     resolve_rate_limit,
+    resolve_aggregate_rate_limit,
     resolve_required_headers,
     set_active_engagement,
     set_engagement_header,
@@ -52,11 +53,13 @@ from .mitmproxy import (
     stop_proxy,
 )
 from .oob import (
+    MAX_OOB_POLL_RECORDS,
     OOB_ROOT,
     OobOptions,
     callback_urls,
     clean_oob_clients,
     client_payload_host,
+    interactions_for_domain,
     list_oob_clients,
     list_running_oob_clients,
     match_interactions_to_nonces,
@@ -64,6 +67,7 @@ from .oob import (
     oob_options as _oob_options,
     oob_status,
     parse_interactsh_log,
+    poll_client_payload_host,
     read_client_log,
     sanitize_name,
     start_oob,
@@ -72,6 +76,7 @@ from .oob import (
     stop_oob_client,
     test_oob,
 )
+from .oob_tenants import legacy_tenant_route, render_edge_routing
 from .orchestrator import (
     OrchestratorOptions,
     build_frontend,
@@ -121,6 +126,18 @@ def _print_post_install(result: InstallResult) -> None:
         "binary. `vigil status` warns when the working root falls behind its source."
     )
     print()
+
+
+def _oob_poll_record_limit(raw: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("OOB poll records must be an integer") from exc
+    if not 1 <= value <= MAX_OOB_POLL_RECORDS:
+        raise argparse.ArgumentTypeError(
+            f"OOB poll records must be between 1 and {MAX_OOB_POLL_RECORDS}"
+        )
+    return value
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -342,6 +359,15 @@ def main(argv: list[str] | None = None) -> None:
              "e.g. --rate-limit 5",
     )
     create_p.add_argument(
+        "--aggregate-rate-limit",
+        dest="aggregate_rate_limit",
+        type=float,
+        default=None,
+        metavar="REQ_PER_SEC",
+        help="Engagement-wide ceiling across concurrent target-facing commands. "
+             "Excess requires each command to record --rate-override-reason.",
+    )
+    create_p.add_argument(
         "--no-prompt",
         action="store_true",
         help="Never prompt interactively; fail when required fields are missing",
@@ -379,12 +405,6 @@ def main(argv: list[str] | None = None) -> None:
     path_p = engagement_sub.add_parser("path")
     path_p.add_argument("key", nargs="?")
     path_p.add_argument("--select", action="store_true")
-    eng_use_p = engagement_sub.add_parser(
-        "use", help="Alias for `vigil use`: set the active-engagement pointer."
-    )
-    eng_use_p.add_argument("key", nargs="?")
-    eng_use_p.add_argument("--select", action="store_true")
-    eng_use_p.add_argument("--clear", action="store_true")
     engagement_sub.add_parser(
         "current",
         help="Print the resolved active engagement and which tier won (flag/cwd/pointer/env).",
@@ -413,7 +433,7 @@ def main(argv: list[str] | None = None) -> None:
             "tar.gz; --format markdown-tree writes a diffable per-finding tree "
             "(one dir per finding: draft.md / debate.md / report.md) sourced "
             "from the backend. For a single consolidated findings.md report doc "
-            "instead, use `vigil assess export-findings`."
+            "instead, use `vigil assess export findings`."
         ),
     )
     export_p.add_argument("key", nargs="?")
@@ -425,7 +445,7 @@ def main(argv: list[str] | None = None) -> None:
         default="tar.gz",
         help=(
             "Export format (default: tar.gz archive). markdown-tree = diffable "
-            "per-finding tree (vs `vigil assess export-findings` = single "
+            "per-finding tree (vs `vigil assess export findings` = single "
             "findings.md report doc)."
         ),
     )
@@ -434,24 +454,6 @@ def main(argv: list[str] | None = None) -> None:
     export_pdf_p.add_argument("key", nargs="?")
     export_pdf_p.add_argument("--select", action="store_true")
     export_pdf_p.add_argument("--output", help="Output PDF path (default: <engagement>/report.pdf)")
-    migrate_p = engagement_sub.add_parser(
-        "migrate-scope",
-        help=(
-            "One-shot migration: set code_phase=ingest on legacy "
-            "engagement_type=both engagements created before dual-track "
-            "phase tracking landed. Idempotent."
-        ),
-    )
-    migrate_p.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Report what would change without writing scope.json.",
-    )
-    migrate_p.add_argument(
-        "--json",
-        action="store_true",
-        help="Emit migrated entries as JSON.",
-    )
 
     blue_module.register_blue_parser(sub)
     bench_module.register_bench_parser(sub)
@@ -531,8 +533,6 @@ def main(argv: list[str] | None = None) -> None:
     mitm_routes = mitm_sub.add_parser("routes", help="Print the proxy's loaded engagement→scope mapping.")
     mitm_routes.add_argument("--json", action="store_true")
 
-    # `vigil mcp` retired in the typed-CLI cutover. Keep the parser so calls fail with a clear message
-    # instead of argparse's generic "unknown command" error; downstream handler prints the deprecation note.
     email_p = sub.add_parser(
         "email",
         help="Read recent messages from a local Mail.app mailbox (e.g. fetch a verification code)",
@@ -594,9 +594,6 @@ def main(argv: list[str] | None = None) -> None:
         help="emit results as JSON for programmatic parsing",
     )
 
-    mcp_p = sub.add_parser("mcp", help="(removed) Kali MCP support retired; use `vigil assess kali ...`")
-    mcp_p.add_argument("mcp_args", nargs=argparse.REMAINDER)
-
     auth_p = sub.add_parser("auth")
     auth_sub = auth_p.add_subparsers(dest="auth_command", required=True)
     for auth_name in ("status", "show", "edit", "clear", "export"):
@@ -612,6 +609,11 @@ def main(argv: list[str] | None = None) -> None:
                 help="Clear ALL identities (default: only the active identity)",
             )
         if auth_name == "status":
+            auth_cmd.add_argument(
+                "--scope",
+                default="",
+                help="Logical application scope for the persisted liveness observation.",
+            )
             auth_cmd.add_argument(
                 "--probe",
                 action="store_true",
@@ -675,6 +677,19 @@ def main(argv: list[str] | None = None) -> None:
     auth_import.add_argument(
         "--identity", default="default", help="Identity to import into (default: default)"
     )
+    auth_import.add_argument(
+        "--factor", default="", help="MFA factor type to store (for example totp or webauthn)."
+    )
+    auth_alias = auth_sub.add_parser("alias")
+    auth_alias.add_argument("engagement", nargs="?")
+    auth_alias.add_argument("--select", action="store_true")
+    auth_alias.add_argument("--name", required=True)
+    auth_alias.add_argument("--principal", required=True)
+    auth_alias.add_argument("--scope", default="")
+    auth_env = auth_sub.add_parser("env-check")
+    auth_env.add_argument("engagement", nargs="?")
+    auth_env.add_argument("--select", action="store_true")
+    auth_env.add_argument("--keys", nargs="+", required=True)
     auth_activate = auth_sub.add_parser("set-active")
     auth_activate.add_argument("engagement", nargs="?")
     auth_activate.add_argument("--select", action="store_true")
@@ -738,9 +753,23 @@ def main(argv: list[str] | None = None) -> None:
         dest="probe_url",
         help=(
             "REQUIRED. Authed URL to GET each cycle (an endpoint that returns logged-"
-            "in content). Matched against material.liveness when present, else the "
-            "default HTTP-200/no-sessionExpired check."
+            "in content). Matched against material.liveness when present; without "
+            "an explicit liveness signature the verdict is unknown."
         ),
+    )
+    auth_keepalive.add_argument(
+        "--scope",
+        default="",
+        help=(
+            "Durable liveness scope key. Defaults to the probe URL origin; use a "
+            "stable explicit key when several capabilities share one origin."
+        ),
+    )
+    auth_keepalive.add_argument(
+        "--liveness-ttl",
+        type=int,
+        default=900,
+        help="Seconds each persisted keepalive verdict remains fresh (default: 900).",
     )
     auth_keepalive.add_argument(
         "--interval",
@@ -820,9 +849,20 @@ def main(argv: list[str] | None = None) -> None:
         help="Report OOB server + client health and the effective callback domain.",
     )
     oob_status_p.add_argument("--json", action="store_true")
+    oob_routing_p = oob_sub.add_parser(
+        "routing",
+        help="Render tenant DNS/Caddy/JSON deployment inputs without applying external changes.",
+    )
+    oob_routing_p.add_argument(
+        "--format", choices=("all", "json", "caddy", "dns"), default="all",
+        help="Output format (default: all as a JSON object).",
+    )
     oob_sub.add_parser(
         "test",
-        help="Fire a self-test callback to confirm the OOB server is reachable end-to-end.",
+        help=(
+            "Use a running registered client to prove the real nonce/client DNS and "
+            "HTTP callback route end-to-end."
+        ),
     )
     oob_clean_p = oob_sub.add_parser(
         "clean",
@@ -874,7 +914,15 @@ def main(argv: list[str] | None = None) -> None:
         required=True,
         help="OOB client name whose interaction log to read (see `vigil oob client list`).",
     )
-    oob_poll.add_argument("--lines", type=int, default=2000, help="Tail this many log lines (default 2000).")
+    oob_poll.add_argument(
+        "--lines",
+        type=_oob_poll_record_limit,
+        default=2000,
+        help=(
+            "Read this many newest interaction records, not verbose raw lines "
+            f"(default 2000; max {MAX_OOB_POLL_RECORDS})."
+        ),
+    )
     oob_poll.add_argument("--json", action="store_true", help="Emit matched/unmatched correlation result as JSON.")
     oob_client = oob_sub.add_parser(
         "client",
@@ -993,8 +1041,6 @@ def main(argv: list[str] | None = None) -> None:
         _mitmproxy(args, install_root)
     elif args.command == "email":
         _email(args)
-    elif args.command == "mcp":
-        _mcp(args)
     elif args.command == "auth":
         _auth(args, install_root)
     elif args.command == "backup":
@@ -1003,7 +1049,11 @@ def main(argv: list[str] | None = None) -> None:
         _oob(args, install_root)
     elif args.command == "assess":
         assess = install_root / "agent" / "scripts" / "assess.py"
-        os.execv(str(assess), [str(assess), *args.assess_args])
+        os.execvpe(
+            str(assess),
+            [str(assess), *args.assess_args],
+            _assess_exec_environment(install_root),
+        )
 
 
 def _top_level_command_index(raw_argv: list[str]) -> int | None:
@@ -1047,7 +1097,22 @@ def _exec_assess_passthrough(raw_argv: list[str], idx: int) -> None:
     if not assess.exists():
         source_root = resolve_source_root(source_value, install_root=install_root)
         assess = source_root / "agent" / "scripts" / "assess.py"
-    os.execv(str(assess), [str(assess), *raw_argv[idx + 1 :]])
+    os.execvpe(
+        str(assess),
+        [str(assess), *raw_argv[idx + 1 :]],
+        _assess_exec_environment(install_root),
+    )
+
+
+def _assess_exec_environment(install_root: Path) -> dict[str, str]:
+    """Export CLI-owned runtime configuration across the assess exec boundary."""
+    env = dict(os.environ)
+    options = _oob_options(install_root)
+    env["VIGIL_OOB_DOMAIN"] = options.oob_domain.strip().rstrip(".")
+    env["VIGIL_OOB_TENANT"] = getattr(options, "tenant_prefix", "legacy")
+    env["VIGIL_OOB_DNS_PORT"] = str(getattr(options, "dns_remote_port", 53))
+    env["VIGIL_OOB_REVERSE_PORT"] = str(getattr(options, "reverse_remote_port", 8443))
+    return env
 
 
 def _config(args: argparse.Namespace) -> None:
@@ -1175,8 +1240,6 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         print(f"[vigil] {args.key} out_of_scope: {json.dumps(entries)}", file=sys.stderr)
     elif command == "path":
         print(_resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select))
-    elif command == "use":
-        _use(args, install_root)
     elif command == "current":
         _engagement_current(install_root)
     elif command == "cd-init":
@@ -1222,22 +1285,6 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
         pdf_output = Path(args.output).expanduser() if args.output else None
         print(export_pdf(path, pdf_output))
-    elif command == "migrate-scope":
-        from .engagements import migrate_legacy_both_engagements
-
-        migrated = migrate_legacy_both_engagements(install_root, dry_run=args.dry_run)
-        if args.json:
-            print(json.dumps(migrated, indent=2))
-        else:
-            prefix = "[dry-run] would migrate" if args.dry_run else "migrated"
-            if not migrated:
-                print(
-                    "No legacy `engagement_type=both` engagements need migration."
-                    + ("" if not args.dry_run else " (dry-run)")
-                )
-            else:
-                for entry in migrated:
-                    print(f"[vigil] {prefix}: {entry['key']} code_phase -> {entry['to']}")
 
 
 def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
@@ -1330,6 +1377,7 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
     required_headers = resolve_required_headers(args.program, args.researcher, args.header)
     out_of_scope = resolve_out_of_scope(args.out_of_scope)
     rate_limit = resolve_rate_limit(args.rate_limit)
+    aggregate_rate_limit = resolve_aggregate_rate_limit(args.aggregate_rate_limit)
 
     # Dry runs skip the summary + confirmation: nothing will be created either
     # way, and the dry-run path prints its own plan summary.
@@ -1345,6 +1393,7 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
             required_headers=required_headers,
             out_of_scope=out_of_scope,
             rate_limit=rate_limit,
+            aggregate_rate_limit=aggregate_rate_limit,
         )
         if not _confirm("Create engagement? [Y/n]"):
             raise SystemExit("aborted: engagement not created")
@@ -1363,6 +1412,7 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
         required_headers=required_headers,
         out_of_scope=out_of_scope,
         rate_limit=rate_limit,
+        rate_limit_aggregate_rps=aggregate_rate_limit,
     )
 
     if args.dry_run:
@@ -1512,6 +1562,7 @@ def _print_create_summary(
     required_headers: dict[str, str] | None = None,
     out_of_scope: list[str] | None = None,
     rate_limit: float | None = None,
+    aggregate_rate_limit: float | None = None,
 ) -> None:
     print("[vigil] engagement summary:", file=sys.stderr)
     print(f"[vigil]   type:      {engagement_type}", file=sys.stderr)
@@ -1536,6 +1587,11 @@ def _print_create_summary(
         print(
             f"[vigil]   rate-limit: {rate_limit:g} req/s "
             "(global per-invocation; bounds per-host as a side effect)",
+            file=sys.stderr,
+        )
+    if aggregate_rate_limit is not None:
+        print(
+            f"[vigil]   aggregate-rate-limit: {aggregate_rate_limit:g} req/s",
             file=sys.stderr,
         )
 
@@ -1768,20 +1824,6 @@ def _email(args: argparse.Namespace) -> None:
         print(line)
 
 
-def _mcp(args: argparse.Namespace) -> None:
-    """Stub: Kali MCP support was removed in the typed-CLI cutover."""
-    print(
-        "vigil mcp install/status/uninstall/remove/repair were removed in the typed-CLI cutover.",
-        file=sys.stderr,
-    )
-    print(
-        "Use `vigil assess kali ...` for target-facing tool execution and `vigil runtime status` "
-        "or `vigil runtime resources` for runtime visibility.",
-        file=sys.stderr,
-    )
-    raise SystemExit(2)
-
-
 def _auth(args: argparse.Namespace, install_root: Path) -> None:
     engagement = _resolve_command_engagement(install_root, args)
     identity = getattr(args, "identity", None)
@@ -1791,7 +1833,12 @@ def _auth(args: argparse.Namespace, install_root: Path) -> None:
             probe_url = getattr(args, "probe_url", None)
             if not probe_url:
                 raise SystemExit("--probe requires --probe-url <url>")
-            result = auth_module.probe_liveness(engagement, probe_url, identity)
+            result = auth_module.probe_liveness(
+                engagement,
+                probe_url,
+                identity,
+                scope_key=getattr(args, "scope", ""),
+            )
             detail = f"reason={result.get('reason')}"
             if result.get("http_status") is not None:
                 detail += f"\thttp_status={result['http_status']}"
@@ -1801,11 +1848,18 @@ def _auth(args: argparse.Namespace, install_root: Path) -> None:
             # the classified verdict (live->available, dead->dead, unknown leaves
             # state untouched — never a false verdict). The active-identity probe
             # (no --identity) stays read-only.
-            if identity:
+            resolved_identity = result.get("identity_name")
+            if identity and resolved_identity:
                 persisted = auth_module.persist_liveness(
-                    engagement, identity, result["liveness"]
+                    engagement,
+                    str(resolved_identity),
+                    result["liveness"],
+                    scope_key=getattr(args, "scope", ""),
+                    reason=str(result.get("reason") or ""),
                 )
                 detail += f"\tpersisted={bool(persisted)}"
+            elif identity:
+                detail += "\tpersisted=False"
             print(f"liveness={result['liveness']}\t{detail}")
     elif args.auth_command == "show":
         print(json.dumps(auth_module.read_auth(engagement), indent=2, sort_keys=True))
@@ -1828,8 +1882,20 @@ def _auth(args: argparse.Namespace, install_root: Path) -> None:
         auth_module.set_active(engagement, identity)
         print(f"active identity for {engagement.name}: {identity}")
     elif args.auth_command == "import":
-        auth_module.import_auth(engagement, args.source, identity or auth_module.DEFAULT_IDENTITY)
+        auth_module.import_auth(
+            engagement,
+            args.source,
+            identity or auth_module.DEFAULT_IDENTITY,
+            mfa_factor=getattr(args, "factor", ""),
+        )
         print(f"imported credentials into {engagement.name} (identity={identity or auth_module.DEFAULT_IDENTITY})")
+    elif args.auth_command == "alias":
+        result = auth_module.set_alias(
+            engagement, args.name, args.principal, getattr(args, "scope", "")
+        )
+        print(json.dumps(result, sort_keys=True))
+    elif args.auth_command == "env-check":
+        print(json.dumps(auth_module.env_preflight(args.keys), sort_keys=True))
     elif args.auth_command == "keepalive":
         # ``--identity`` is action="append" here, so ``args.identity`` is a list
         # (or None) — the per-login anchor auto-resolution kicks in when it's empty.
@@ -1843,6 +1909,8 @@ def _auth(args: argparse.Namespace, install_root: Path) -> None:
             probe_url=getattr(args, "probe_url", None),
             log_path=getattr(args, "log", None),
             detach=bool(getattr(args, "detach", False)),
+            scope_key=getattr(args, "scope", ""),
+            liveness_ttl=getattr(args, "liveness_ttl", 900),
         )
 
 
@@ -1893,7 +1961,8 @@ def _print_oob_status(payload: dict[str, object], *, as_json: bool) -> None:
         print(
             f"{payload.get('state')}\thealth={health}\tserver={payload.get('server')}\tfrpc={payload.get('frpc')}"
             f"\tclients={client_count}\trunning={len(running)}\tregistered={registered}/{len(running)}"
-            f"\tdomain_resolves={resolves_str}\tdomain={payload.get('domain')}"
+            f"\tdomain_resolves={resolves_str}\ttenant={payload.get('tenant_prefix')}"
+            f"\tports={payload.get('port_range')}\tdomain={payload.get('domain')}"
         )
     issues = payload.get("issues") or []
     if isinstance(issues, list):
@@ -1934,10 +2003,27 @@ def _oob(args: argparse.Namespace, install_root: Path) -> None:
         stop_oob(runner=docker_run_command)
         start_oob(options, runner=docker_run_command)
     elif args.oob_command == "status":
-        payload = oob_status(oob_domain=options.oob_domain, runner=docker_run_command)
+        payload = oob_status(
+            oob_domain=options.oob_domain,
+            tenant_prefix=options.tenant_prefix,
+            dns_remote_port=options.dns_remote_port,
+            reverse_remote_port=options.reverse_remote_port,
+            runner=docker_run_command,
+        )
         _print_oob_status(payload, as_json=args.json)
     elif args.oob_command == "test":
         test_oob(options, runner=docker_run_command)
+    elif args.oob_command == "routing":
+        route = options.tenant_route or legacy_tenant_route(
+            install_root, base_domain=options.oob_domain
+        )
+        rendered = render_edge_routing(route)
+        if args.format == "all":
+            print(json.dumps(rendered, indent=2))
+        elif args.format == "json":
+            print(rendered["routing_json"], end="")
+        else:
+            print(rendered[args.format], end="")
     elif args.oob_command == "clean":
         payload = clean_oob_clients(max_age_days=args.days, dry_run=args.dry_run, runner=docker_run_command)
         _print_oob_clean(payload, as_json=args.json)
@@ -2079,9 +2165,11 @@ def _oob_mint(args: argparse.Namespace, install_root: Path, options: OobOptions)
                 "param": args.param,
                 "technique": args.technique,
                 "probe_kind": args.probe_kind,
-                "request_hash": args.request_hash,
-                "oob_domain": options.oob_domain,
-                "notes": args.notes,
+            "request_hash": args.request_hash,
+            "oob_domain": options.oob_domain,
+            "client_name": client_name,
+            "client_payload_host": payload_host,
+            "notes": args.notes,
             },
         )
     if args.json:
@@ -2103,9 +2191,30 @@ def _oob_poll(args: argparse.Namespace, install_root: Path, options: OobOptions)
     engagement_key = engagement_path.name
     log_text = read_client_log(args.client, runner=docker_run_command, lines=args.lines)
     interactions = parse_interactsh_log(log_text)
+    payload_host = poll_client_payload_host(
+        options,
+        args.client,
+        engagement=engagement_key,
+        runner=docker_run_command,
+    )
+    interactions = interactions_for_domain(
+        interactions,
+        options.oob_domain,
+        client_payload_host=payload_host,
+    )
     with _build_assessment_client(install_root, engagement_key) as client:
         probes = client.get("oob-probes")
-        nonces = [str(p.get("nonce", "")) for p in probes if p.get("nonce")]
+        owned_probes = [
+            probe
+            for probe in probes
+            if probe.get("client_name") == sanitize_name(args.client)
+            and probe.get("client_payload_host") == payload_host
+        ]
+        nonces = [
+            str(probe.get("nonce", ""))
+            for probe in owned_probes
+            if probe.get("nonce")
+        ]
         matched_interactions, unmatched_interactions = match_interactions_to_nonces(interactions, nonces)
         matched_pairs: list[dict] = []
         for interaction in matched_interactions:
@@ -2118,6 +2227,8 @@ def _oob_poll(args: argparse.Namespace, install_root: Path, options: OobOptions)
                     "query_type": interaction.query_type,
                     "raw_request": interaction.raw_line,
                     "observed_at": interaction.observed_at,
+                    "client_name": sanitize_name(args.client),
+                    "client_payload_host": payload_host,
                 },
             )
             matched_pairs.append({"interaction": interaction, "result": result})

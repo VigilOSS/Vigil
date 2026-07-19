@@ -17,18 +17,28 @@ Operator-mechanical. No agent dispatch.
 git clone <repo-url> $DIR/source/<repo-name>
 # Or: cp -r /path/to/source $DIR/source/<repo-name>
 
-# 2. Ingest into backend
+# 2. For recovered browser source maps, extract first and review the manifest.
+# Run the separate code-ingest command printed by this command.
+vigil assess code-sourcemap-extract "$DIR/source-maps/<name>"
+
+# 3. Ingest into backend (use the printed source-map handoff when applicable)
 vigil assess code-ingest "$DIR/source/<repo-name>" --name <repo-name> --language <primary-lang>
 
-# 3. Generate structural index
+# 4. Generate structural index
 vigil assess code-index "$DIR/source/<repo-name>"
 
-# 4. Sync structural metadata to backend
-vigil assess code-index-sync
+# 5. Sync structural metadata to backend
+vigil assess code-index sync
 
-# 5. Verify ingestion and index
+# 6. Verify ingestion and index
 vigil assess code-coverage
 ```
+
+`code-sourcemap-extract` writes a traversal-safe, content-addressed source tree and manifest.
+The manifest accounts for rejected paths, malformed maps, missing content, and deterministic
+duplicate names. Unchanged input reuses its snapshot; changed maps require `--refresh` and create
+a new snapshot. Publication remains the normal atomic `code-ingest` refresh, and the extracted
+tree is the covering representation instead of a second copy of its mapped minified bundle.
 
 The `code-ingest` command:
 - Walks the repo tree

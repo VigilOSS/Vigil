@@ -124,10 +124,10 @@ instructions: |2
   - "Already saw this last week" — a prior dispatch on this engagement does NOT
     auto-close a new alert; it informs L2's evidence ladder
 
-  Auto-close payload shape (passed to `vigil assess kill-finding`):
+  Auto-close payload shape (passed to `vigil assess finding verify --disposition false_positive`):
 
   ```bash
-  vigil assess kill-finding <slug> \
+  vigil assess finding verify <slug> --disposition false_positive \
     --reason "Mechanical noise — known-benign pattern" \
     --kill-reason "Tenant ref <path>#<section>: '<verbatim pattern text>'. Alert matches on actor=<x>, ip_range=<y>, action=<z>." \
     --kill-check 0
@@ -199,10 +199,10 @@ instructions: |2
   3. **Mark transient working notes as scratch.** `vigil assess artifact mark-scratch --under notes/scratch/`.
 
   4. **Record the finding.**
-     - Auto-close path: `vigil assess record-finding alert-triage-specialist
-       <finding-json>` followed by `vigil assess kill-finding <slug> ...` with
+     - Auto-close path: `vigil assess finding record alert-triage-specialist
+       <finding-json>` followed by `vigil assess finding verify <slug> --disposition false_positive ...` with
        the verbatim tenant-ref citation in `--kill-reason`.
-     - Dispatch-to-L2 path: `vigil assess record-finding alert-triage-specialist
+     - Dispatch-to-L2 path: `vigil assess finding record alert-triage-specialist
        <finding-json>` with `status=draft`, `verification_state=unreviewed`.
 
   5. **Record the activity entry.** `vigil assess log` with `--actor-kind agent`,

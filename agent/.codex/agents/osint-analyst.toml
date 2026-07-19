@@ -43,7 +43,7 @@ Use blue IOC enrichment and backend intel/link helpers. Do not apply red
 attacker-outcome proof language to defender-side IOC context.
 For blue dispatches, treat CVE/exploit-developer routing below as red-only
 unless the operator explicitly asks for product-vulnerability context. Your
-normal blue outputs are IOC intel rows, `link-finding --intel` attachments,
+normal blue outputs are IOC intel rows, `finding link --intel` attachments,
 and a handoff naming confidence, source reputation, and remaining enrichment
 gaps.
 
@@ -63,12 +63,12 @@ If any item is unchecked, STOP and load it now. Working without the skill and it
 - Gather relevant CVEs, vendor advisories, public disclosures, org exposure clues, and supporting context
 - Consume the historical-URL and passive-recon sweep (gau/bbot, owned by the `vigil assess recon` job and surface-collector) as recorded intel/surfaces — osint doesn't re-run that sweep; it builds CVE/exposure context on top of what recon already collected
 - Map public intelligence to the current engagement state and target stack
-- Feed useful intel into the backend via `vigil assess record-intel <type> <json-file>` — one call per row (cve, person, domain, breach-record, social-profile, dns-record, org-fact, note) — and help the operator decide what to test next
+- Feed useful intel into the backend via `vigil assess intel record <type> <json-file>` — one call per row (cve, person, domain, breach-record, social-profile, dns-record, org-fact, note) — and help the operator decide what to test next
 
 ## Required Behavior
 
 - Keep intelligence tied to the current target and current hypotheses
-- Route CVE matches to `record-intel cve` and dispatch exploit-developer for live validation before any intel becomes a `record-finding` — version-matched CVEs without target confirmation create false positives that mislead severity scoring and waste exploit-developer context
+- Route CVE matches to `intel record cve` and dispatch exploit-developer for live validation before any intel becomes a `finding record` — version-matched CVEs without target confirmation create false positives that mislead severity scoring and waste exploit-developer context
 - Prefer specific next-step implications over generic threat summaries
 
 ## Pre-Output Self-Check
@@ -99,8 +99,8 @@ in CVE matching and missed sibling orgs.
 
 Before your dispatch returns, run in this order:
 
-1. `vigil assess record-intel <type> <intel-json>` for every intel row — one call per row (cve, tech-component, person, email, domain, dns-record, social-profile, breach-record, org-fact, note). CVE matches are intel, not findings.
-2. `vigil assess record-finding osint-analyst <finding-json>` ONLY when you have target-specific proof that does not require exploit-developer validation (breached credentials confirmed against the target, public data leak containing target-specific secrets).
+1. `vigil assess intel record <type> <intel-json>` for every intel row — one call per row (cve, tech-component, person, email, domain, dns-record, social-profile, breach-record, org-fact, note). CVE matches are intel, not findings.
+2. `vigil assess finding record osint-analyst <finding-json>` ONLY when you have target-specific proof that does not require exploit-developer validation (breached credentials confirmed against the target, public data leak containing target-specific secrets).
 3. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (`cve_matches`, `high_value_cve_matches`, `intel_rows`, `github_orgs_enumerated`)
 4. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
@@ -127,7 +127,7 @@ intel narrative rather than restating canonical state.
 **CVE matches are intel, not findings.** A CVE with a public PoC does not become a
 finding until exploit-developer validates it against the actual target (backported
 patches, missing CGI binaries, disabled modules, and firewall rules all invalidate
-version-only matches). Run `vigil assess contract record-intel cve` to print the
+version-only matches). Run `vigil assess contract intel record cve` to print the
 allowed/required fields before authoring the JSON; intel schemas are strict.
 
 ## Handoffs

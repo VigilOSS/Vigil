@@ -1,4 +1,4 @@
-"""Scope-filter tests for `vigil assess ingest-candidates` + the shared resolver.
+"""Scope-filter tests for `vigil assess ingest candidates` + the shared resolver.
 
 ingest-candidates ingests curated, metadata-rich candidate JSONL. Each record
 carries an arbitrary per-record URL, so — exactly like ingest-endpoints — a
@@ -104,6 +104,55 @@ def test_ingest_scope_filter_active_and_fail_open(tmp_path):
     # An allowlist of only un-admittable entries still yields active=False is NOT
     # asserted here (bool(allow) is True for any parsed entry); the fail-open path
     # is specifically the no-scope / unloadable case above.
+
+
+def test_ingest_scope_filter_global_bypass_disables_allow_and_deny_gate(tmp_path):
+    (tmp_path / "scope.json").write_text(
+        json.dumps(
+            {
+                "hosts": ["target.example"],
+                "out_of_scope": ["blocked.example"],
+                "scope_enforcement": "bypass",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    allow, deny, active = ingest_scope_filter(str(tmp_path))
+
+    assert active is False
+    assert allow and deny
+
+
+def test_ingest_candidates_global_bypass_admits_outside_and_denied_hosts(
+    tmp_path, monkeypatch, capsys
+):
+    (tmp_path / "scope.json").write_text(
+        json.dumps(
+            {
+                "hosts": ["target.example"],
+                "out_of_scope": ["blocked.example"],
+                "scope_enforcement": "bypass",
+            }
+        ),
+        encoding="utf-8",
+    )
+    records_file = tmp_path / "candidates.jsonl"
+    urls = ["https://outside.example/a", "https://blocked.example/b"]
+    records_file.write_text(
+        "\n".join(json.dumps({"method": "GET", "url": url}) for url in urls) + "\n",
+        encoding="utf-8",
+    )
+    fake_client = FakeAssessmentClient()
+    monkeypatch.setattr(ingest_candidates, "load_config", lambda *a, **k: _Cfg(str(tmp_path)))
+    monkeypatch.setattr(ingest_candidates, "auth_active_context", lambda *a, **k: "anonymous")
+    monkeypatch.setattr(ingest_candidates, "AssessmentClient", lambda *a, **k: fake_client)
+
+    ingest_candidates.run(_ns(str(records_file), str(tmp_path)))
+    capsys.readouterr()
+
+    assert {row["url"] for row in fake_client.observations} == set(urls)
+    assert all(fake_client.row_for_url(url)[0]["status"] == "pending" for url in urls)
 
 
 def _single_record_setup(tmp_path, monkeypatch, record: dict) -> tuple[str, FakeAssessmentClient]:

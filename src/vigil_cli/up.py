@@ -125,7 +125,7 @@ def _confirm_runtime_restart(options: UpOptions) -> bool:
 
 def _start_mitmproxy_if_needed(install_root: Path, options: UpOptions, *, runner: docker.Runner) -> None:
     if docker.container_running("vigil-proxy", runner=runner):
-        if _proxy_image_drift(runner=runner):
+        if proxy_image_drift(runner=runner):
             print("mitmproxy\trunning old image; restart to pick up rebuilt image")
             print("Run `vigil mitmproxy start` to recreate the container on the current image.")
         else:
@@ -142,12 +142,27 @@ def _start_mitmproxy_if_needed(install_root: Path, options: UpOptions, *, runner
 
 
 def _start_oob_if_needed(install_root: Path, *, runner: docker.Runner) -> None:
-    status = oob_status(runner=runner, deep=False)  # only needs server/frpc liveness
+    options = _oob_options(install_root)
+    status = oob_status(
+        oob_domain=options.oob_domain,
+        tenant_prefix=options.tenant_prefix,
+        dns_remote_port=options.dns_remote_port,
+        reverse_remote_port=options.reverse_remote_port,
+        runner=runner,
+        deep=False,
+    )  # only needs server/frpc liveness
     if status.get("server") or status.get("frpc"):
+        route_matches = status.get("route_matches")
+        if route_matches is False or (
+            route_matches is None and options.tenant_prefix != "legacy"
+        ):
+            raise SystemExit(
+                "OOB sessions are already active for another tenant, or their tenant route cannot be verified. "
+                "Run `vigil oob restart` intentionally before switching tenant routes."
+            )
         print("oob\talready active; existing FRP/interactsh sessions left untouched")
         return
 
-    options = _oob_options(install_root)
     if not options.frp_token:
         token = _prompt_frp_token()
         if token:
@@ -158,6 +173,10 @@ def _start_oob_if_needed(install_root: Path, *, runner: docker.Runner) -> None:
                 frp_port=options.frp_port,
                 frp_token=token,
                 oob_domain=options.oob_domain,
+                tenant_prefix=options.tenant_prefix,
+                dns_remote_port=options.dns_remote_port,
+                reverse_remote_port=options.reverse_remote_port,
+                tenant_route=options.tenant_route,
             )
         else:
             print("oob\tskipped; missing FRP token")
@@ -190,15 +209,6 @@ def _runtime_image_drift(options: RuntimeOptions, *, runner: docker.Runner) -> b
     container_id = docker.container_image_id(options.container_name, runner=runner)
     configured_id = docker.image_id(options.image, runner=runner)
     return bool(container_id and configured_id and container_id != configured_id)
-
-
-def _proxy_image_drift(*, runner: docker.Runner) -> bool:
-    """True when the running proxy container predates the current proxy image.
-
-    Mirrors ``_runtime_image_drift`` for the mitmproxy container. Single-sourced
-    in ``image_freshness`` so ``vigil status`` reports the same verdict.
-    """
-    return proxy_image_drift(runner=runner)
 
 
 def _build_mitmproxy_image(install_root: Path, *, runner: docker.Runner = docker.run_command_streaming) -> None:

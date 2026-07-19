@@ -24,7 +24,7 @@ origin: Vigil
 Reactive sweeps run in-phase against URL deltas each phase produces — they are additive to the
 phase they belong to, not a reason to jump ahead. Every time new live URLs land during Phase 1
 or Phase 2, fire a focused CVE/misconfig/exposure scan on that delta so template hits become
-intel (`record-intel tech-component`, `record-intel note`, `record-intel cve`) and finding
+intel (`intel record tech-component`, `intel record note`, `intel record cve`) and finding
 candidates *before* Phase 4 specialists dispatch — that way specialists inherit the signal
 rather than rediscovering it from the buffer. Phase 4a below is a coverage audit that re-runs
 nuclei **only against gaps** left by the reactive passes — when reactive coverage was thorough,
@@ -37,7 +37,7 @@ priority_score on fresh work-buffer entries before specialists pull them. Trigge
 
 - After `recon-specialist` returns with an endpoint list (`endpoints.txt` or surfaces)
 - After `source-analyzer` harvests JS/HTML URLs (scans/js_urls.txt, extracted endpoint arrays)
-- After `surface-collector` ingests Katana / gau output (`vigil assess ingest-endpoints` just ran)
+- After `surface-collector` ingests Katana / gau output (`vigil assess ingest endpoints` just ran)
 - After `subdomain-enumeration` produces live hosts (`subdomains_live.txt` entries land)
 - After wildcard expansion adds apex siblings that passed the httpx liveness check
 
@@ -62,7 +62,7 @@ jq -r '.. | .url? // empty' "$DIR/scans/_summary_$RID.json" | sort -u \
 # katana output — so the reactive pass scans only the newly-added URLs.)
 
 # 2. Gather already-scanned URLs from prior reactive runs with the same template bucket.
-vigil assess list-command-runs --q nuclei --tool-bin nuclei --json > \
+vigil assess command-run list --q nuclei --tool-bin nuclei --json > \
   "$DIR/scans/_nuclei_runs_$RID.json"
 # Every prior reactive run wrote its input list at /engagements/$KEY/scans/nuclei_reactive_<RID>.txt
 # and its output JSONL alongside. Extract URLs already covered — use the JSONL artifacts as the
@@ -72,16 +72,16 @@ find "$DIR/scans" -name 'nuclei_reactive_*.jsonl' -print0 | \
   sort -u > "$DIR/scans/_already_scanned_$RID.txt"
 
 # 3. Subtract already-scanned from all-live, then filter the result to scope via vigil assess
-#    filter-scope. filter-scope does exact-host and wildcard-aware matching against scope.json,
+#    scope filter. scope filter does exact-host and wildcard-aware matching against scope.json,
 #    so it correctly handles `*.example.com` entries that naive `grep -Ff` treats as literals.
 comm -23 \
   "$DIR/scans/_all_live_$RID.txt" \
   "$DIR/scans/_already_scanned_$RID.txt" | \
-  vigil assess filter-scope - \
+  vigil assess scope filter - \
   > "$DIR/scans/nuclei_reactive_$RID.txt"
 ```
 
-The `filter-scope` step is the scope boundary — reactive nuclei only scans URLs that are both
+The `scope filter` step is the scope boundary — reactive nuclei only scans URLs that are both
 new this pass AND attached to a scope.json host (including wildcard expansions). Skipping this
 guard risks sweeping an out-of-scope host that was pulled in from a passive source, which would
 break the engagement's authorization envelope.
@@ -105,7 +105,7 @@ Flags explained — each flag earns its place because removing it breaks an assu
 
 - `-l <delta file>` reads targets from the computed delta rather than an inline URL, because the
   delta is the whole point of reactive mode — scanning the universe each time bills the same
-  templates repeatedly and inflates `list-command-runs`.
+  templates repeatedly and inflates `command-run list`.
 - `-t http/cves/,http/misconfiguration/,http/exposures/,http/default-logins/,http/technologies/,http/exposed-panels/` scopes template
   directories to the discovery-phase classes, because fuzzing/ and payload-heavy templates belong
   to Phase 4 targeted work and would drown early signal in noise.
@@ -167,11 +167,11 @@ Hosts where `-as` is known to suppress:
 - **Cloudflare with aggressive bot rules** — fingerprint requests get challenged before wappalyzer can score them. Same workaround.
 - **WAF-fronted enterprise edges in general** — when `wafw00f` already flagged a WAF on the host, expect `-as` to underperform.
 
-When you see `Templates loaded for current scan: NNNN` in stderr but zero result rows in stdout, do NOT report nuclei as broken. Re-run with explicit `-t` paths against the same target. Confirm with `vigil assess get-command-run <id>` — the stderr preview is the source of truth for "did the run actually execute templates."
+When you see `Templates loaded for current scan: NNNN` in stderr but zero result rows in stdout, do NOT report nuclei as broken. Re-run with explicit `-t` paths against the same target. Confirm with `vigil assess command-run get <id>` — the stderr preview is the source of truth for "did the run actually execute templates."
 
 ### Dedup across runs (Option A — no schema change)
 
-Use `vigil assess list-command-runs --q nuclei --tool-bin nuclei --json` to compute the "already-scanned" set from prior
+Use `vigil assess command-run list --q nuclei --tool-bin nuclei --json` to compute the "already-scanned" set from prior
 reactive runs, then subtract it from the current delta before invoking nuclei. The artifact
 filenames and JSONL outputs are durable engagement state — no new column on
 `assessment_command_runs` is needed because the inputs (delta file) and outputs (JSONL) live
@@ -179,7 +179,7 @@ under `/engagements/$ENGAGEMENT_KEY/scans/` and survive container recreate.
 
 ```bash
 # jq exclusion-set pattern (runs before nuclei invocation)
-vigil assess list-command-runs --q nuclei --tool-bin nuclei --json | \
+vigil assess command-run list --q nuclei --tool-bin nuclei --json | \
   jq -r '.[].command
          | capture("(?<path>/engagements/[^ ]+/scans/nuclei_reactive_[^ ]+\\.txt)")?.path
          // empty' | \
@@ -205,20 +205,20 @@ revalidation catches template false positives (SSRF probes against patched endpo
 version-string collisions, etc.) before they reach the finding lifecycle.
 
 - **Critical / high hits** — draft a finding JSON (see `vigil assess contract
-  record-finding` for the schema), re-validate the template's PoC manually via `vigil assess kali exec` (or the matching typed verb), then
-  record with `vigil assess record-finding vulnerability-analyst <finding-json-file>`
+  finding record` for the schema), re-validate the template's PoC manually via `vigil assess kali exec` (or the matching typed verb), then
+  record with `vigil assess finding record vulnerability-analyst <finding-json-file>`
   only if the re-test reproduces the hit.
-- **Medium hits** — record as intel with `vigil assess record-intel note <json-file>`,
+- **Medium hits** — record as intel with `vigil assess intel record note <json-file>`,
   noting the template-id and matched URL. Medium hits often seed Phase 4 targeted testing
   rather than standalone findings.
 - **Tech fingerprints** (from `-as` template matches like `http/technologies/`) — record via
-  `vigil assess record-intel tech-component <json-file>` so downstream tooling can match them
+  `vigil assess intel record tech-component <json-file>` so downstream tooling can match them
   against CVE intel.
 
 ### Safety and scope boundary
 
 Reactive nuclei runs only against URLs present in the scope.json host list (enforced by the
-`vigil assess filter-scope` step above, which handles wildcards correctly). Never sweep a host
+`vigil assess scope filter` step above, which handles wildcards correctly). Never sweep a host
 whose presence in the delta came from passive sources alone — an out-of-scope sweep breaks
 the authorization envelope even if the finding would be accurate.
 
@@ -228,7 +228,7 @@ Phase 4a is not a second broad sweep — it is an audit that confirms every in-s
 received a reactive pass with the expected template set, and fills any gaps. When Phase 1 and
 Phase 2 reactive sweeps were thorough, Phase 4a prints a coverage summary and advances without
 running nuclei again. The audit replaces the old "broad nuclei sweep before the work-buffer
-loop" pattern because a blind rerun wastes rate budget and inflates `list-command-runs`
+loop" pattern because a blind rerun wastes rate budget and inflates `command-run list`
 without finding new signal.
 
 ### Audit procedure
@@ -238,12 +238,12 @@ DIR="${ENGAGEMENT_DIR:?set by the engagement launcher}"
 KEY=$(basename "$DIR")
 RID=$(date -u +%Y%m%dT%H%M%SZ)
 
-# 1. Universe: every in-scope live URL the engagement has observed. vigil assess filter-scope
+# 1. Universe: every in-scope live URL the engagement has observed. vigil assess scope filter
 #    handles wildcard entries in scope.json correctly; the raw grep -Ff pattern misses
 #    `*.example.com` expansions and must not be reintroduced.
 vigil assess fetch summary > "$DIR/scans/_summary_audit_$RID.json"
 jq -r '.. | .url? // empty' "$DIR/scans/_summary_audit_$RID.json" | sort -u \
-  | vigil assess filter-scope - \
+  | vigil assess scope filter - \
   > "$DIR/scans/_in_scope_live_audit_$RID.txt"
 
 # 2. Already-covered: every URL that appeared in a prior reactive run's input list.
@@ -292,7 +292,7 @@ re-ingested) — the audit picks it up.
 ### Triage and ingestion
 
 Results triage identically to reactive mode: critical/high → finding candidates after manual
-revalidation; medium → intel; `-as` tech fingerprints → `record-intel tech-component`. Record
+revalidation; medium → intel; `-as` tech fingerprints → `intel record tech-component`. Record
 the audit result in the engagement activity log even when the gap list is empty — the absence
 of a run is itself coverage evidence, which matters for the report.
 
@@ -337,7 +337,7 @@ asnmap→cero origin-IP axis and the Cloud-fronted-vs-Origin trait rows in
 against the request budget: `templates × hosts ≈ total requests`.
 
 > **Corollary — prefer OSINT CVE matching at host-scale.** OSINT version→CVE
-> matching (`record-intel cve` via osint-analyst) often delivers most of nuclei's
+> matching (`intel record cve` via osint-analyst) often delivers most of nuclei's
 > CVE-detection value *without* the per-host request volume. On high-friction /
 > large-host-count surfaces, prefer OSINT CVE matching + targeted exploit-developer
 > validation over a broad CVE-template host-scale sweep.
@@ -395,12 +395,13 @@ testing.
   before the first sweep, or give the first sweep a generous `--timeout`. This is a
   one-time, per-runtime cost.
 - **OOB infra must be up before blind-class testing.** Templates that rely on
-  out-of-band callbacks (blind-class probes via `-interactsh-url`) produce false
-  negatives if the shared interactsh infrastructure is not ready. Confirm
-  `vigil oob status --json` shows `server=true` and `frpc=true` **before** running
-  any blind/OOB nuclei templates — see `nuclei.md` "OOB Callbacks". When OOB is
-  unavailable, pass `-no-interactsh` and defer blind-class testing rather than
-  recording a clean OOB template as a true negative.
+  out-of-band callbacks produce false negatives if the shared interactsh
+  infrastructure or persisted tenant route is not ready. Confirm `vigil oob status
+  --json` shows `server=true`, `frpc=true`, and `route_matches=true` **before** running
+  blind/OOB templates, then use the typed wrapper's `--oob-mode vigil` — see
+  `nuclei.md` "OOB Callbacks". When OOB is unavailable, keep the default
+  `--oob-mode none` and defer blind-class testing rather than recording a clean OOB
+  template as a true negative.
 - **gf candidate tags are leads, not verdicts.** gf buckets (and any `gf:<bucket>`
   priority signal) are **high false-positive** — treat a gf hit as a *lead* that
   points a template/probe at a candidate, never as a confirmed match. Downstream

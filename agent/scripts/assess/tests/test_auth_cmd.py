@@ -148,13 +148,45 @@ def test_list_include_dead_maps_to_query_param(tmp_path, monkeypatch, capsys):
     assert _query_of(fake.gets[0])["include_dead"] == ["true"]
 
 
-def test_list_json_emits_raw_listing(tmp_path, monkeypatch, capsys):
+def test_list_json_emits_redacted_listing(tmp_path, monkeypatch, capsys):
     fake = _FakeClient(listing=_LISTING)
     _install(monkeypatch, tmp_path, fake)
     args = _parse(["auth", "list", "--json"], str(tmp_path))
     args.func(args)
-    parsed = json.loads(capsys.readouterr().out)
+    out = capsys.readouterr().out
+    parsed = json.loads(out)
+    # Every identity is still enumerated with its metadata + cookie NAMES.
     assert set(parsed["identities"]) == {"cap-aaaa", "cap-bbbb"}
+    assert parsed["identities"]["cap-aaaa"]["cookie_names"] == ["MRHSession"]
+    assert sorted(parsed["identities"]["cap-bbbb"]["cookie_names"]) == ["MRHSession", "csrf"]
+    assert parsed["identities"]["cap-aaaa"]["host_cookies"][0]["cookie_names"] == ["MRHSession"]
+    # But no live cookie VALUE anywhere in the JSON — the safe list view must not
+    # leak session material into stdout/logs/LLM context.
+    assert "SECRET-VALUE-AAA" not in out
+    assert "SECRET-VALUE-BBB" not in out
+
+
+def test_list_json_redacts_header_and_token_values(tmp_path, monkeypatch, capsys):
+    listing = {
+        "active_identity": "cap-jwt",
+        "identities": {
+            "cap-jwt": {
+                "identity_name": "cap-jwt",
+                "headers": {"Authorization": "Bearer SECRET-BEARER-XYZ"},
+                "tokens": {"access_token": "SECRET-BEARER-XYZ"},
+                "cookies": {},
+            }
+        },
+    }
+    fake = _FakeClient(listing=listing)
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["auth", "list", "--json"], str(tmp_path))
+    args.func(args)
+    out = capsys.readouterr().out
+    parsed = json.loads(out)
+    assert parsed["identities"]["cap-jwt"]["header_names"] == ["Authorization"]
+    assert parsed["identities"]["cap-jwt"]["token_names"] == ["access_token"]
+    assert "SECRET-BEARER-XYZ" not in out
 
 
 def test_list_empty_store_renders_placeholder(tmp_path, monkeypatch, capsys):
@@ -184,9 +216,11 @@ class _StatusCfg:
 
 
 def _status_parser():
+    # auth-status folded into `auth status` (2026-07 CLI consolidation); the
+    # module now registers a `status` subparser via register_status.
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers()
-    auth_status.register(sub)
+    auth_status.register_status(sub)
     return parser
 
 
@@ -217,8 +251,11 @@ def _install_status(monkeypatch, tmp_path, *, verdict, material=None):
         calls["active_used"] = True
         return dict(resolved_material)
 
-    def fake_probe(_dir, identity, url, *, liveness_cfg, timeout=15):
+    def fake_probe(
+        _dir, identity, url, *, liveness_cfg, scope_key="", timeout=15
+    ):
         calls["probed_identity"] = identity
+        calls["probed_scope"] = scope_key
         return {"liveness": verdict, "reason": "stubbed", "http_status": 200, "error": None}
 
     def fake_persist(_dir, identity, v, probed_at):
@@ -235,7 +272,7 @@ def _install_status(monkeypatch, tmp_path, *, verdict, material=None):
 def test_probe_identity_persists_live_verdict(tmp_path, monkeypatch, capsys):
     calls = _install_status(monkeypatch, tmp_path, verdict="live")
     args = _parse_status(
-        ["auth-status", "--json", "--probe", "--identity", "cap-target", "--probe-url", "https://x/y"],
+        ["status", "--json", "--probe", "--identity", "cap-target", "--probe-url", "https://x/y"],
         str(tmp_path),
     )
     args.func(args)
@@ -251,7 +288,7 @@ def test_probe_identity_persists_live_verdict(tmp_path, monkeypatch, capsys):
 def test_probe_identity_persists_dead_verdict(tmp_path, monkeypatch, capsys):
     calls = _install_status(monkeypatch, tmp_path, verdict="dead")
     args = _parse_status(
-        ["auth-status", "--probe", "--identity", "cap-target", "--probe-url", "https://x/y"],
+        ["status", "--probe", "--identity", "cap-target", "--probe-url", "https://x/y"],
         str(tmp_path),
     )
     args.func(args)
@@ -265,7 +302,7 @@ def test_probe_no_signature_persists_unknown_not_dead(tmp_path, monkeypatch, cap
     # persisted as dead. Assert the verdict sent is `unknown`, never `dead`.
     calls = _install_status(monkeypatch, tmp_path, verdict="unknown")
     args = _parse_status(
-        ["auth-status", "--probe", "--identity", "cap-target", "--probe-url", "https://x/y"],
+        ["status", "--probe", "--identity", "cap-target", "--probe-url", "https://x/y"],
         str(tmp_path),
     )
     args.func(args)
@@ -278,7 +315,7 @@ def test_active_identity_probe_does_not_persist(tmp_path, monkeypatch, capsys):
     # No --identity: the active-identity probe stays READ-ONLY (no persistence).
     calls = _install_status(monkeypatch, tmp_path, verdict="live")
     args = _parse_status(
-        ["auth-status", "--probe", "--probe-url", "https://x/y"],
+        ["status", "--probe", "--probe-url", "https://x/y"],
         str(tmp_path),
     )
     args.func(args)
@@ -291,7 +328,7 @@ def test_probe_missing_identity_reports_and_does_not_persist(tmp_path, monkeypat
     # A requested identity that resolves to empty material must not probe/persist.
     calls = _install_status(monkeypatch, tmp_path, verdict="live", material={})
     args = _parse_status(
-        ["auth-status", "--json", "--probe", "--identity", "ghost", "--probe-url", "https://x/y"],
+        ["status", "--json", "--probe", "--identity", "ghost", "--probe-url", "https://x/y"],
         str(tmp_path),
     )
     args.func(args)
@@ -299,3 +336,76 @@ def test_probe_missing_identity_reports_and_does_not_persist(tmp_path, monkeypat
     assert "persisted" not in calls
     assert out["liveness"] == "unknown"
     assert "ghost" in out["liveness_probe"]["error"]
+
+
+def test_scoped_alias_probes_and_persists_resolved_identity(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(
+        auth_status, "load_config", lambda *a, **k: _StatusCfg(str(tmp_path))
+    )
+    monkeypatch.setattr(auth_status, "_last_auth_probe", lambda *_a, **_k: None)
+    monkeypatch.setattr(auth_status, "AssessmentClient", lambda *a, **k: None)
+    calls: dict[str, object] = {}
+
+    def resolve(_dir, requested, *, scope_key=""):
+        calls["resolved"] = (requested, scope_key)
+        return "cap-billing-42", {
+            "identity_name": "cap-billing-42",
+            "auth_context": "member",
+            "state": "available",
+            "use_for_requests": True,
+            "headers": {"Authorization": "Bearer scoped"},
+            "liveness": {"authed_marker": "Sign out"},
+        }
+
+    def probe(_dir, identity, url, *, liveness_cfg, scope_key="", timeout=15):
+        calls["probed"] = (identity, scope_key, url)
+        return {
+            "liveness": "live",
+            "reason": "stubbed",
+            "http_status": 200,
+            "error": None,
+        }
+
+    def persist(_dir, identity, verdict, probed_at, **kwargs):
+        calls["persisted"] = (identity, verdict, kwargs)
+        return {"identity_name": identity, "liveness_verdict": verdict}
+
+    monkeypatch.setattr(auth_status, "resolve_identity", resolve)
+    monkeypatch.setattr(auth_status, "_run_identity_probe", probe)
+    monkeypatch.setattr(auth_status, "persist_liveness", persist)
+
+    args = _parse_status(
+        [
+            "status",
+            "--json",
+            "--probe",
+            "--identity",
+            "member",
+            "--scope",
+            "billing",
+            "--probe-url",
+            "https://app.example.com/account",
+        ],
+        str(tmp_path),
+    )
+    args.func(args)
+    out = json.loads(capsys.readouterr().out)
+
+    assert calls["resolved"] == ("member", "billing")
+    assert calls["probed"] == (
+        "cap-billing-42",
+        "billing",
+        "https://app.example.com/account",
+    )
+    assert calls["persisted"] == (
+        "cap-billing-42",
+        "live",
+        {
+            "scope_key": "billing",
+            "source": "auth-status",
+            "reason": "stubbed",
+        },
+    )
+    assert out["liveness_probe"]["persisted"] is True

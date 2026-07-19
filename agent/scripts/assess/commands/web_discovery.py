@@ -27,8 +27,11 @@ import json
 import os
 import shlex
 import sys
+import time
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 from assess.commands import host_exec, ingest_endpoints
 from assess.commands.ingest_httpx import ingest_httpx_results
@@ -37,7 +40,8 @@ from assess.lib.config import anchor_engagement_relative, load_config
 from assess.lib.discovery import denoise_hosts
 from assess.lib.kali import kali_exec, resolve_crawl_rate_limit
 from assess.lib.kali_output import _apply_required_headers, _required_headers
-from assess.lib import runtime_route, scope
+from assess.lib.locking import network_heavy_lock
+from assess.lib import no_fire, runtime_route, scope
 
 # CR-5 — bulk httpx concurrency ceiling on macOS Docker Desktop. Every distinct
 # destination IP is NAT-tracked by the host userspace proxy (com.docker.backend),
@@ -147,6 +151,14 @@ def _paths(cfg, name: str) -> tuple[Path, str]:
     host = Path(cfg.engagement_dir) / "scans" / "web-discovery" / name
     container = f"/engagements/{cfg.engagement_key}/scans/web-discovery/{name}"
     return host, container
+
+
+def _run_paths(cfg, run_uuid: str, name: str) -> tuple[Path, str]:
+    relative = f"scans/web-discovery/runs/{run_uuid}/{name}"
+    return (
+        Path(cfg.engagement_dir) / relative,
+        f"/engagements/{cfg.engagement_key}/{relative}",
+    )
 
 
 def _warn(message: str) -> None:
@@ -283,6 +295,124 @@ def _extract_live_urls(httpx_jsonl: Path) -> list[str]:
             if url:
                 urls.append(str(url))
     return sorted(set(urls))
+
+
+_ASSET_SUFFIXES = frozenset(
+    {".js", ".mjs", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".woff", ".woff2"}
+)
+
+
+def _crawl_health(
+    seed_urls: list[str],
+    katana_jsonl: Path,
+    *,
+    elapsed_seconds: float,
+    budget_seconds: int,
+    run_uuid: str,
+) -> dict:
+    records = _katana_records(katana_jsonl) if katana_jsonl.is_file() else []
+    per_host: dict[str, int] = {}
+    assets = 0
+    for record in records:
+        url = str(record.get("url") or "")
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            continue
+        host = (parsed.hostname or "").lower()
+        if host:
+            per_host[host] = per_host.get(host, 0) + 1
+        if Path(parsed.path).suffix.lower() in _ASSET_SUFFIXES:
+            assets += 1
+    unique_count = len(records)
+    warnings: list[str] = []
+    ratio = elapsed_seconds / budget_seconds if budget_seconds > 0 else 0.0
+    if seed_urls and unique_count == 0 and ratio <= 0.1:
+        warnings.extend(["fast-empty", "possible-spa-undercoverage"])
+    return {
+        "run_uuid": run_uuid,
+        "seed_count": len(seed_urls),
+        "unique_url_count": unique_count,
+        "per_host_yield": dict(sorted(per_host.items())),
+        "elapsed_seconds": round(float(elapsed_seconds), 3),
+        "budget_seconds": int(budget_seconds),
+        "elapsed_budget_ratio": ratio,
+        "asset_count": assets,
+        "asset_ratio": assets / unique_count if unique_count else 0.0,
+        "warnings": warnings,
+    }
+
+
+def _write_crawl_health(cfg, payload: dict) -> None:
+    path, _ = _paths(cfg, "crawl-health.json")
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _write_httpx_health(cfg, run_uuid: str, payload: dict) -> None:
+    """Publish lineage only for a fully accepted liveness generation."""
+    run_path, _ = _run_paths(cfg, run_uuid, "httpx-health.json")
+    canonical_path, _ = _paths(cfg, "httpx-health.json")
+    run_path.parent.mkdir(parents=True, exist_ok=True)
+    run_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    run_path.replace(canonical_path)
+
+
+def _answered_record_count(path: Path) -> int:
+    """Count accepted httpx JSONL rows without treating malformed output as live."""
+    count = 0
+    if not path.is_file():
+        return count
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict) and not row.get("failed"):
+                count += 1
+    return count
+
+
+def _promote_empty_generation(cfg, run_uuid: str, *, stage_timeout: int) -> None:
+    for name in (
+        "denoised_hosts.txt",
+        "revalidate_hosts.txt",
+        "httpx_live.jsonl",
+        "live_urls.txt",
+        "katana.jsonl",
+    ):
+        run_path, _ = _run_paths(cfg, run_uuid, name)
+        canonical_path, _ = _paths(cfg, name)
+        run_path.parent.mkdir(parents=True, exist_ok=True)
+        run_path.write_text("", encoding="utf-8")
+        run_path.replace(canonical_path)
+    run_scope_meta, _ = _run_paths(cfg, run_uuid, "scope-filter.meta.json")
+    if run_scope_meta.is_file():
+        run_scope_meta.replace(_paths(cfg, "scope-filter.meta.json")[0])
+    _write_httpx_health(
+        cfg,
+        run_uuid,
+        {
+            "run_uuid": run_uuid,
+            "state": "accepted-empty",
+            "input_count": 0,
+            "live_record_count": 0,
+            "revalidation_target_count": 0,
+            "recovered_count": 0,
+            "exit_code": 0,
+        },
+    )
+    health = _crawl_health(
+        [],
+        _paths(cfg, "katana.jsonl")[0],
+        elapsed_seconds=0,
+        budget_seconds=stage_timeout,
+        run_uuid=run_uuid,
+    )
+    health.update({"state": "accepted-empty", "exit_code": 0})
+    _write_crawl_health(cfg, health)
 
 
 # Default HTTP(S) ports — a URL on any OTHER explicit port is treated as a
@@ -430,6 +560,7 @@ _ARG_DEFAULTS = {
     "no_thread_clamp": False,
     # Fix 2 — tri-state; None resolves to ON only when --db is set (see run()).
     "seat_liveness": None,
+    "run_uuid": None,
 }
 
 
@@ -455,10 +586,11 @@ def _run_httpx_liveness(args, *, in_arg, out_arg, ports, threads, rate_limit, ro
     if args.tech_detect:
         httpx_cmd.append("-tech-detect")
     if route == "host":
-        return _host_dispatch(
-            httpx_cmd, intent=intent, tool_name="httpx",
-            timeout=int(timeout), engagement_dir=args.engagement_dir,
-        )
+        with network_heavy_lock(args.engagement_dir, label="httpx host liveness"):
+            return _host_dispatch(
+                httpx_cmd, intent=intent, tool_name="httpx",
+                timeout=int(timeout), engagement_dir=args.engagement_dir,
+            )
     return kali_exec(
         httpx_cmd, technique="DISCOVERY", intent=intent,
         probe_kind="fingerprint", phase="recon", timeout=int(timeout),
@@ -523,15 +655,34 @@ def run(args) -> None:
 
     out_dir = Path(cfg.engagement_dir) / "scans" / "web-discovery"
     out_dir.mkdir(parents=True, exist_ok=True)
+    run_uuid = str(getattr(args, "run_uuid", None) or uuid.uuid4().hex)
 
     # --- Stage 0: de-noise -------------------------------------------------
     raw_lines = hosts_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    try:
+        scope_doc = scope.load_scope(args.engagement_dir)
+        raw_lines, scope_metadata = scope.filter_recon_targets(scope_doc, raw_lines)
+    except SystemExit:
+        scope_metadata = None
+    if scope_metadata is not None:
+        run_scope_meta, _ = _run_paths(cfg, run_uuid, "scope-filter.meta.json")
+        run_scope_meta.parent.mkdir(parents=True, exist_ok=True)
+        run_scope_meta.write_text(
+            json.dumps(scope_metadata, indent=2), encoding="utf-8"
+        )
     clean, dropped = denoise_hosts(raw_lines)
     if not clean:
+        _promote_empty_generation(
+            cfg, run_uuid, stage_timeout=int(args.stage_timeout)
+        )
         print("web-discovery: no hosts left after de-noise; nothing to probe.", file=sys.stderr)
         sys.exit(0)
-    denoised_host, denoised_container = _paths(cfg, "denoised_hosts.txt")
-    denoised_host.write_text("\n".join(clean) + "\n", encoding="utf-8")
+    denoised_host, _ = _paths(cfg, "denoised_hosts.txt")
+    run_denoised_host, run_denoised_container = _run_paths(
+        cfg, run_uuid, "denoised_hosts.txt"
+    )
+    run_denoised_host.parent.mkdir(parents=True, exist_ok=True)
+    run_denoised_host.write_text("\n".join(clean) + "\n", encoding="utf-8")
     print(f"web-discovery: {len(clean)} hosts after de-noise ({dropped} dropped as noise)", file=sys.stderr)
 
     # --- Stage 1: httpx liveness (lean, status-only) -----------------------
@@ -556,18 +707,34 @@ def run(args) -> None:
     httpx_route = _route_for(args, "httpx")
     threads = _clamp_httpx_threads(args, route=httpx_route)
     live_host, live_container = _paths(cfg, "httpx_live.jsonl")
+    run_live_host, run_live_container = _run_paths(cfg, run_uuid, "httpx_live.jsonl")
+    run_live_host.parent.mkdir(parents=True, exist_ok=True)
     # Both routes write to the same host file (the container path is the bind-
     # mounted same inode), so Stage 2 ingest is identical regardless of route.
-    in_arg = str(denoised_host) if httpx_route == "host" else denoised_container
-    out_arg = str(live_host) if httpx_route == "host" else live_container
+    in_arg = (
+        str(run_denoised_host)
+        if httpx_route == "host"
+        else run_denoised_container
+    )
+    out_arg = str(run_live_host) if httpx_route == "host" else run_live_container
     res = _run_httpx_liveness(
         args, in_arg=in_arg, out_arg=out_arg, ports=str(args.ports),
         threads=threads, rate_limit=rate_limit, route=httpx_route,
         timeout=int(args.stage_timeout),
         intent="web-discovery: httpx liveness (status-only)",
     )
-    if getattr(res, "return_code", 0) not in (0, None):
-        print(f"web-discovery: httpx exited {res.return_code}; continuing with whatever it wrote.", file=sys.stderr)
+    httpx_rc = getattr(res, "return_code", 0)
+    if httpx_rc not in (0, None):
+        print(
+            f"web-discovery: httpx exited {httpx_rc}; rejected run-scoped output "
+            f"for generation {run_uuid}.",
+            file=sys.stderr,
+        )
+        sys.exit(int(httpx_rc))
+    # Some successful tools omit the output file when the result set is empty.
+    # Materialize that accepted empty result, then atomically replace the
+    # canonical artifact. A failed generation never reaches this promotion.
+    run_live_host.touch(exist_ok=True)
 
     # --- Stage 1b: I-6 liveness revalidation on non-standard ports ---------
     # The fast default pass only probes 80,443; a service answering on
@@ -575,14 +742,28 @@ def run(args) -> None:
     # dead-on-default subset across the non-standard ports with a longer
     # timeout, then APPEND the recovered rows into the same liveness file so
     # Stage 2 ingest sees them as ordinary live hosts.
+    reval_in_host, _ = _paths(cfg, "revalidate_hosts.txt")
+    run_reval_in_host, run_reval_in_container = _run_paths(
+        cfg, run_uuid, "revalidate_hosts.txt"
+    )
+    run_reval_in_host.parent.mkdir(parents=True, exist_ok=True)
+    run_reval_in_host.write_text("", encoding="utf-8")
+    dead: list[str] = []
+    recovered = 0
     if not args.no_revalidate_ports:
-        dead = _dead_default_hosts(clean, live_host)
+        dead = _dead_default_hosts(clean, run_live_host)
         revalidate_ports = str(args.revalidate_ports or _REVALIDATE_PORTS)
         if dead and revalidate_ports:
-            reval_in_host, reval_in_container = _paths(cfg, "revalidate_hosts.txt")
-            reval_in_host.write_text("\n".join(dead) + "\n", encoding="utf-8")
-            reval_out_host, reval_out_container = _paths(cfg, "httpx_revalidate.jsonl")
-            r_in = str(reval_in_host) if httpx_route == "host" else reval_in_container
+            run_reval_in_host.write_text("\n".join(dead) + "\n", encoding="utf-8")
+            reval_out_host, reval_out_container = _run_paths(
+                cfg, run_uuid, "httpx_revalidate.jsonl"
+            )
+            reval_out_host.parent.mkdir(parents=True, exist_ok=True)
+            r_in = (
+                str(run_reval_in_host)
+                if httpx_route == "host"
+                else run_reval_in_container
+            )
             r_out = str(reval_out_host) if httpx_route == "host" else reval_out_container
             # A longer timeout for the second pass: non-standard ports are more
             # likely to be slow/filtered, and the dead subset is small (1.5x).
@@ -594,12 +775,39 @@ def run(args) -> None:
                 intent=f"web-discovery: I-6 liveness revalidation of {len(dead)} "
                        f"dead-on-default hosts across {revalidate_ports}",
             )
-            if getattr(rres, "return_code", 0) not in (0, None):
-                print(f"web-discovery: revalidation httpx exited {rres.return_code}; "
-                      "merging whatever it wrote.", file=sys.stderr)
-            recovered = _merge_liveness(live_host, reval_out_host)
+            reval_rc = getattr(rres, "return_code", 0)
+            if reval_rc not in (0, None):
+                print(
+                    f"web-discovery: revalidation httpx exited {reval_rc}; "
+                    f"generation {run_uuid} is partial and was not ingested.",
+                    file=sys.stderr,
+                )
+                sys.exit(int(reval_rc))
+            recovered = _merge_liveness(run_live_host, reval_out_host)
             print(f"web-discovery: revalidation re-probed {len(dead)} dead hosts on "
                   f"{revalidate_ports}; recovered {recovered} live.", file=sys.stderr)
+
+    # The entire default+revalidation generation is now accepted. Promote once
+    # so a failed optional pass can never expose a mixed/partial canonical file.
+    run_live_host.replace(live_host)
+    run_denoised_host.replace(denoised_host)
+    run_reval_in_host.replace(reval_in_host)
+    run_scope_meta, _ = _run_paths(cfg, run_uuid, "scope-filter.meta.json")
+    if run_scope_meta.is_file():
+        run_scope_meta.replace(_paths(cfg, "scope-filter.meta.json")[0])
+    _write_httpx_health(
+        cfg,
+        run_uuid,
+        {
+            "run_uuid": run_uuid,
+            "state": "accepted",
+            "input_count": len(clean),
+            "live_record_count": _answered_record_count(live_host),
+            "revalidation_target_count": len(dead),
+            "recovered_count": recovered,
+            "exit_code": 0,
+        },
+    )
 
     # --- Stage 2: ingest the liveness verdicts into the backend ledger -----
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
@@ -630,12 +838,17 @@ def run(args) -> None:
                   "(revalidation/non-standard-port hits first)", file=sys.stderr)
 
     # --- Stage 3: katana crawl of the live subset --------------------------
-    katana_host, katana_container = _paths(cfg, "katana.jsonl")
+    katana_host, _ = _paths(cfg, "katana.jsonl")
+    run_katana_host, run_katana_container = _run_paths(cfg, run_uuid, "katana.jsonl")
     if not args.no_crawl:
         live_urls = _extract_live_urls(live_host)
         if live_urls:
-            seed_host, seed_container = _paths(cfg, "live_urls.txt")
-            seed_host.write_text("\n".join(live_urls) + "\n", encoding="utf-8")
+            seed_host, _ = _paths(cfg, "live_urls.txt")
+            run_seed_host, run_seed_container = _run_paths(
+                cfg, run_uuid, "live_urls.txt"
+            )
+            run_seed_host.parent.mkdir(parents=True, exist_ok=True)
+            run_seed_host.write_text("\n".join(live_urls) + "\n", encoding="utf-8")
             # I-4 — `-or -ob` omit the stored response + body so a deep crawl does
             # not blow up the engagement disk with every fetched page (the crawl
             # only needs the discovered URL graph here; bodies are fetched
@@ -645,10 +858,10 @@ def run(args) -> None:
             # in-scope hosts (it never probes an out-of-scope sibling subdomain it
             # finds in a link). `-or -ob` already omit body/raw to bound disk.
             katana_cmd = [
-                "katana", "-list", seed_container, "-jc", "-jsl",
+                "katana", "-list", run_seed_container, "-jc", "-jsl",
                 "-d", str(args.katana_depth), "-fs", "fqdn",
                 "-or", "-ob",
-                "-jsonl", "-silent", "-o", katana_container,
+                "-jsonl", "-silent", "-o", run_katana_container,
             ]
             # Safe-by-default crawl rate (stage 3): resolve_crawl_rate_limit
             # defaults to 10 req/s, hard-caps at 20, and clamps DOWN to the
@@ -659,28 +872,96 @@ def run(args) -> None:
                 args.katana_rate, rate_cap=rate_cap, warn=_warn,
             )
             katana_cmd.extend(["-rl", str(katana_rl), "-rlm", str(katana_rl * 60)])
+            try:
+                scope_doc = scope.load_scope(args.engagement_dir)
+                no_fire_regex = no_fire.crawl_exclusion_regex(scope_doc)
+            except SystemExit:
+                # In-process compatibility callers may provide a synthetic cfg
+                # without a scope file; real CLI resolution already requires it.
+                no_fire_regex = ""
+            except no_fire.NoFirePolicyError as exc:
+                print(f"web-discovery: invalid no-fire policy: {exc}", file=sys.stderr)
+                sys.exit(1)
+            if no_fire_regex:
+                katana_cmd.extend(["-cos", no_fire_regex])
             if args.katana_extra_args:
                 katana_cmd.extend(shlex.split(args.katana_extra_args))
+            crawl_started = time.monotonic()
             kres = kali_exec(
                 katana_cmd, technique="DISCOVERY", intent="web-discovery: katana crawl of live subset",
                 probe_kind="fingerprint", phase="recon", timeout=int(args.stage_timeout),
                 engagement_dir=args.engagement_dir, tool_name="katana",
             )
-            if getattr(kres, "return_code", 0) not in (0, None):
-                print(f"web-discovery: katana exited {kres.return_code}; crawl output may be partial.", file=sys.stderr)
+            elapsed = time.monotonic() - crawl_started
+            health = _crawl_health(
+                live_urls,
+                run_katana_host,
+                elapsed_seconds=elapsed,
+                budget_seconds=int(args.stage_timeout),
+                run_uuid=run_uuid,
+            )
+            katana_rc = getattr(kres, "return_code", 0)
+            health["state"] = "accepted" if katana_rc in (0, None) else "failed"
+            health["exit_code"] = katana_rc
+            _write_crawl_health(cfg, health)
+            if katana_rc not in (0, None):
+                print(
+                    f"web-discovery: katana exited {katana_rc}; rejected partial "
+                    f"generation {run_uuid}.",
+                    file=sys.stderr,
+                )
+                sys.exit(int(katana_rc))
+            run_katana_host.touch(exist_ok=True)
+            run_katana_host.replace(katana_host)
+            run_seed_host.replace(seed_host)
             print(f"web-discovery: crawled {len(live_urls)} live URLs with katana", file=sys.stderr)
             _rargv = getattr(kres, "resolved_argv", None)
             if _rargv:
                 print(f"web-discovery: katana argv: {' '.join(_rargv)}", file=sys.stderr)
         else:
             print("web-discovery: no live URLs to crawl; skipping katana.", file=sys.stderr)
+            run_katana_host.parent.mkdir(parents=True, exist_ok=True)
+            run_katana_host.touch()
+            run_katana_host.replace(katana_host)
+            seed_host, _ = _paths(cfg, "live_urls.txt")
+            run_seed_host, _ = _run_paths(cfg, run_uuid, "live_urls.txt")
+            run_seed_host.parent.mkdir(parents=True, exist_ok=True)
+            run_seed_host.write_text("", encoding="utf-8")
+            run_seed_host.replace(seed_host)
+            health = _crawl_health(
+                [],
+                katana_host,
+                elapsed_seconds=0,
+                budget_seconds=int(args.stage_timeout),
+                run_uuid=run_uuid,
+            )
+            health.update({"state": "accepted-empty", "exit_code": 0})
+            _write_crawl_health(cfg, health)
+    else:
+        run_katana_host.parent.mkdir(parents=True, exist_ok=True)
+        run_katana_host.touch()
+        run_katana_host.replace(katana_host)
+        seed_host, _ = _paths(cfg, "live_urls.txt")
+        run_seed_host, _ = _run_paths(cfg, run_uuid, "live_urls.txt")
+        run_seed_host.parent.mkdir(parents=True, exist_ok=True)
+        run_seed_host.write_text("", encoding="utf-8")
+        run_seed_host.replace(seed_host)
+        health = _crawl_health(
+            [],
+            katana_host,
+            elapsed_seconds=0,
+            budget_seconds=int(args.stage_timeout),
+            run_uuid=run_uuid,
+        )
+        health.update({"state": "skipped", "exit_code": None})
+        _write_crawl_health(cfg, health)
 
     # --- Stage 4: (optional) ingest crawled URLs into the work buffer ------
     # Fix 3 (Issue 6): emit {url, content_type, ...} JSON lines (not a bare URL
     # list) so ingest-endpoints can thread the crawled response's Content-Type
     # into classify_type. Bare-URL lines still parse downstream, so this stays
     # backward-compatible.
-    if args.db_path and katana_host.is_file():
+    if not args.no_crawl and args.db_path and katana_host.is_file():
         records = _katana_records(katana_host)
         if records:
             urls_host, _ = _paths(cfg, "katana_urls.jsonl")
@@ -695,8 +976,7 @@ def run(args) -> None:
 
 
 def _katana_records(katana_jsonl: Path) -> list[dict]:
-    """Crawled work-item rows from a katana -jsonl file (Fix 3, resolves the old
-    TODO(typing P1)).
+    """Crawled, typed work-item rows from a katana JSONL file.
 
     Emits ``{url, content_type}`` JSON rows (plus ``response_status``/``tech``
     when the crawl stored the response) so ingest-endpoints can thread the

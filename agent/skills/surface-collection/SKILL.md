@@ -31,13 +31,13 @@ Recon-specialist and source-analyzer produce endpoint lists during Phase 1. Inge
 as the baseline work-buffer seed:
 
 ```bash
-cat "$DIR/scans/endpoints.txt" | vigil assess ingest-endpoints recon
+cat "$DIR/scans/endpoints.txt" | vigil assess ingest endpoints recon
 ```
 
 If source-analyzer produced a separate endpoint file, ingest it with a distinct source tag:
 
 ```bash
-cat "$DIR/scans/source-endpoints.txt" | vigil assess ingest-endpoints source-analysis
+cat "$DIR/scans/source-endpoints.txt" | vigil assess ingest endpoints source-analysis
 ```
 
 ### Step 2: Live Crawl via Katana
@@ -91,7 +91,7 @@ output files or ingest each separately with the same source tag.
 
 Ingest:
 ```bash
-cat "$DIR/scans/katana_output.txt" | vigil assess ingest-endpoints katana
+cat "$DIR/scans/katana_output.txt" | vigil assess ingest endpoints katana
 ```
 
 If triage produced metadata-rich candidate JSONL (for example `candidate_records.jsonl`
@@ -99,7 +99,7 @@ with curated score, signals, rationale, selected signal, bucket, or live status)
 that file through the metadata-preserving path instead of flattening it to URLs:
 
 ```bash
-vigil assess ingest-candidates surface-collector-curated \
+vigil assess ingest candidates surface-collector-curated \
   "$DIR/scans/surface-collector/candidate_records.jsonl"
 ```
 
@@ -110,27 +110,27 @@ ingests the URLs into the work buffer (`assessment_work_items`) with inline clas
 JSON summary with `cache_reused: true|false` so the dispatch decision is auditable.
 
 ```bash
-vigil assess gau-endpoints TARGET_DOMAIN --subs \
+vigil assess gau endpoints TARGET_DOMAIN --subs \
   --providers wayback,otx,commoncrawl,urlscan
 ```
 
 That single verb runs `kali gau` (or reuses
 `<engagement>/scans/gau-pipeline/<target_slug>/<cache_key_slug>/gau_output.txt` when a
 fresh run is cached for this exact target + flag combination), then pipes the output
-through `ingest-endpoints` so inline classification scores every URL at insert time
+through `ingest endpoints` so inline classification scores every URL at insert time
 and inert types (images, fonts) are filtered downstream. The `--max-cache-age-hours`
 flag (default 24) tunes reuse aggressiveness; pass `--refresh` to force a fresh gau
 run. Different targets — or the same target with different `--subs`/`--providers` —
 land in disjoint directories, so caches never cross-contaminate.
 
-**Multi-domain:** Run `gau-endpoints` for each in-scope domain. Each run writes its own
+**Multi-domain:** Run `gau endpoints` for each in-scope domain. Each run writes its own
 sidecar meta keyed by target so reuse decisions stay per-host.
 
 **Follow-on verbs that share the same cached corpus:**
 
-- `vigil assess gau-secrets TARGET_DOMAIN` — body capture + trufflehog secret scan.
+- `vigil assess gau secrets TARGET_DOMAIN` — body capture + trufflehog secret scan.
   Defaults to `--no-verification`; pass `--verify` to enable trufflehog's verification.
-- `vigil assess gau-js-endpoints TARGET_DOMAIN --fetch-if-missing` — extract endpoints
+- `vigil assess gau js-endpoints TARGET_DOMAIN --fetch-if-missing` — extract endpoints
   hidden in minified JS bundles (LinkFinder-derived regex) and ingest them as
   `source='js-extract'`. Catches admin/internal routes that exist only in JS code
   paths — a class of endpoint live crawls and HTML-only inspection consistently miss.
@@ -138,7 +138,7 @@ sidecar meta keyed by target so reuse decisions stay per-host.
 **Why gau matters:** Katana only discovers what is currently linked. gau finds endpoints
 that existed historically — deprecated routes, old API versions, test endpoints, admin
 paths that were once public. These are often still functional but hidden from the live
-sitemap. Pairing gau with `gau-js-endpoints` closes the additional gap of routes that
+sitemap. Pairing gau with `gau js-endpoints` closes the additional gap of routes that
 were never linked anywhere except inside compiled JS.
 
 ### Step 4: OpenAPI/Swagger Spec Ingestion
@@ -146,7 +146,7 @@ were never linked anywhere except inside compiled JS.
 If Phase 1 discovered API specifications (source-analyzer may have saved them to `scans/`):
 
 ```bash
-vigil assess ingest-spec "$DIR/scans/openapi.json"
+vigil assess ingest spec "$DIR/scans/openapi.json"
 ```
 
 This creates `api-spec` work items with full endpoint/parameter schemas and generates
@@ -173,7 +173,7 @@ There is no per-host URL cap. Volume control happens at ingest:
   `archive`, `sourcemap`, and `manifest` types are stamped `status='skipped'` in
   `db_insert_work_item()` so they never enter the priority-mode dispatch.
 - **Classification runs inline at ingestion** so every URL gets a `cluster_key` and
-  `priority_score` immediately. Run `vigil assess list-clusters` to review the
+  `priority_score` immediately. Run `vigil assess work-buffer clusters` to review the
   resulting cluster set and `vigil assess work-buffer defer-cluster <key> --reason "…"`
   to drop low-signal clusters before Phase 4.
 - **Egress-blocked hosts still defer** (see "Egress-blocked hosts" below) — that is a
@@ -205,7 +205,7 @@ immediately, and any low-signal cluster gets explicit operator control via
 
 When historical gau discovers admin / internal / config paths on a host that is
 currently egress-blocked, save those URLs as intel-notes via
-`vigil assess record-intel note` even though the live work item lands in the
+`vigil assess intel record note` even though the live work item lands in the
 deferred bucket. The path patterns themselves reveal target-environment exposure
 (staging hostnames, internal-tooling routes, config endpoints) and feed the report
 narrative even when live testing is blocked.
@@ -312,7 +312,7 @@ for M in GET POST JSON XML; do
 done
 
 # Fold discovered params back in — they re-route the endpoint to its real bucket:
-vigil assess ingest-arjun /engagements/$ENGAGEMENT_KEY/scans/arjun/<target>/<hash>.json
+vigil assess ingest arjun /engagements/$ENGAGEMENT_KEY/scans/arjun/<target>/<hash>.json
 ```
 
 For more depth on a high-value endpoint, drop `-w` (full default list) and/or add `--passive`
@@ -335,7 +335,7 @@ vigil assess record-surface <type> <target> <source> \
 **Record findings** when triage produces decisive evidence (e.g., an API key with a
 non-empty value visible in a URL parameter):
 ```bash
-vigil assess record-finding surface-collector <finding-json-file>
+vigil assess finding record surface-collector <finding-json-file>
 ```
 
 ### Step 8: Stats and Priority Manifest
@@ -350,12 +350,12 @@ with triage signals, recommended dispatch order, and suggested vuln-class skills
 
 ## Key Rules
 
-- Keep all URL crawling and enrichment in `vigil assess kali katana` / `vigil assess gau-endpoints` (or `gau-secrets` / `gau-js-endpoints`) — host-side crawling bypasses the audit pipeline that downstream specialists rely on
+- Keep all URL crawling and enrichment in `vigil assess kali katana` / `vigil assess gau endpoints` (or `gau secrets` / `gau js-endpoints`) — host-side crawling bypasses the audit pipeline that downstream specialists rely on
 - Use the `gau-*` wrappers for gau collection — they pair gau with ingest in one shot and emit a structured JSON summary with cache-decision metadata
-- Use `vigil assess ingest-candidates` whenever a triage step produced rich candidate JSONL — flattening those records to URLs discards the priority metadata specialists rely on
-- Use `vigil assess ingest-endpoints` directly only for non-gau sources (katana output, OpenAPI specs, mitmproxy captures) — gau callers should use `gau-endpoints` unless they have a curated candidate JSONL output
+- Use `vigil assess ingest candidates` whenever a triage step produced rich candidate JSONL — flattening those records to URLs discards the priority metadata specialists rely on
+- Use `vigil assess ingest endpoints` directly only for non-gau sources (katana output, OpenAPI specs, mitmproxy captures) — gau callers should use `gau endpoints` unless they have a curated candidate JSONL output
 - Use `vigil assess record-surface` for all surface writes — bypassing loses backend sync
-- Use `vigil assess record-finding` for any findings — unrecorded findings are lost data
+- Use `vigil assess finding record` for any findings — unrecorded findings are lost data
 - Triage is classification and pattern matching — analyze URLs without sending target-facing probes during triage
 - Tag each ingestion source correctly (recon, katana, gau, source-analysis, spec) — source provenance matters for coverage tracking
 

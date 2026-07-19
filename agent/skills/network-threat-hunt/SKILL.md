@@ -80,7 +80,7 @@ IOCs do not enter this engagement's evidence tree.
 
 - `vigil assess resume-brief` — hydrate engagement state first on
   continuation.
-- `vigil assess record-finding <agent-name> <finding-json>` — draft or
+- `vigil assess finding record <agent-name> <finding-json>` — draft or
   update findings.
 - `vigil assess host-exec` — wrap every host command (tshark, dig,
   whois, python entropy, RITA, Zeek).
@@ -494,7 +494,7 @@ silent gap.
   "agent_role": "network-threat-hunt-specialist",
   "phase": "investigation",
   "handoff_status": "ready",
-  "finding_slug": "<from record-finding>",
+  "finding_slug": "<from finding record>",
   "skill_completed": "network-threat-hunt",
   "platform": "network",
   "sub_platform": "siem|fw|proxy|dns|tls|mixed",

@@ -52,7 +52,7 @@ phase's full dispatch transcripts:
 2. **The lanes' handoffs:** enumerate the phase's dispatches with `vigil assess agent
    list` (filter by phase / role), then `vigil assess agent render-handoff <agent-id>`
    for each — the bounded blob (summary, coverage gaps, next steps), NOT the transcript.
-3. **The findings list:** `vigil assess list-findings` / `vigil assess fetch findings`
+3. **The findings list:** `vigil assess finding list` / `vigil assess fetch findings`
    — slug, severity, status, `canonical_location`, and the `details` story (evidence /
    impact / cvss_vector).
 

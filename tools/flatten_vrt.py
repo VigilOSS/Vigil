@@ -25,7 +25,10 @@ Usage:
 To upgrade the taxonomy: bump the single VRT_TAG constant below to a newer tag
 (see https://github.com/bugcrowd/vulnerability-rating-taxonomy/tags) and re-run.
 """
-import json, os, sys, urllib.request
+import json
+import os
+import sys
+import urllib.request
 
 # --- Pin upstream to a tagged release (NOT `master`) so the lookup is reproducible. ---
 # --- Bump this one constant + re-run to upgrade. ---

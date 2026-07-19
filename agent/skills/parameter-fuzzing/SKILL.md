@@ -120,7 +120,7 @@ vigil assess kali arjun -u "https://TARGET/high-value" --passive --stable --rate
 
 # (d) FOLD findings back in — discovered params re-route the endpoint (file=->gf:lfi, url=->gf:ssrf,
 #     id=->gf:sqli/idor) and stamp a triage_rationale that names `kali sqlmap` for DB-class params:
-vigil assess ingest-arjun "$DB" /engagements/$ENGAGEMENT_KEY/scans/arjun/<target>/<hash>.json
+vigil assess ingest arjun "$DB" /engagements/$ENGAGEMENT_KEY/scans/arjun/<target>/<hash>.json
 ```
 
 Use raw `arjun -u …` only for a one-off manual check; the verb path is what feeds Phase 4. Full reference: `agent/references/tools/recon/arjun.md`.

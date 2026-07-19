@@ -14,7 +14,7 @@ last_probed_at) and the cookie NAME set + hosts, but NEVER raw cookie VALUES —
 values are sensitive live session material and stay out of the enumeration view.
 
 Read-only. Per-session liveness is verified/persisted by
-``vigil assess auth-status --probe --identity <name>``, not here.
+``vigil assess auth status --probe --identity <name>``, not here.
 """
 from __future__ import annotations
 
@@ -38,6 +38,10 @@ def register(subparsers) -> None:
     action_sub = p.add_subparsers(dest="auth_action")
     action_sub.required = True
 
+    # auth-status folded in as `auth status` (2026-07 CLI consolidation).
+    from assess.commands import auth_status
+    auth_status.register_status(action_sub)
+
     sp_list = action_sub.add_parser(
         "list",
         help="List every stored identity (metadata + cookie names/hosts; no raw values).",
@@ -56,14 +60,14 @@ def register(subparsers) -> None:
         action="store_true",
         help=(
             "Also show probe-proven-dead sessions (state=dead), hidden by default. "
-            "`stale` sessions are always shown — re-probe them with auth-status."
+            "`stale` sessions are always shown — re-probe them with `auth status`."
         ),
     )
     sp_list.add_argument(
         "--json",
         dest="as_json",
         action="store_true",
-        help="Emit the raw identities map as JSON (LLM ingestion form).",
+        help="Emit the identities map as JSON (LLM ingestion form; cookie/header/token VALUES redacted, names only).",
     )
     sp_list.set_defaults(func=_run_list)
 
@@ -186,6 +190,60 @@ def _render_identities(listing: dict) -> str:
     return "\n".join(lines)
 
 
+def _redact_material(material: dict) -> dict:
+    """Project one identity's material to the SAME value-free view the table shows.
+
+    ``auth list`` is advertised as the safe inspection view — the human renderer
+    reduces cookies to names. The ``--json`` form must not undo that by dumping the
+    raw ``/credentials`` response, which carries live cookie/header/token VALUES
+    (and any custom ``raw_json`` extras) into stdout/logs/LLM context. Keep only
+    the non-secret metadata plus cookie/header/token NAMES; every value is dropped.
+    """
+    material = material if isinstance(material, dict) else {}
+
+    def _names(value) -> list[str]:
+        return sorted(str(k) for k in value) if isinstance(value, dict) else []
+
+    host_cookies = [
+        {"host": bucket.get("host"), "cookie_names": _names(bucket.get("cookies"))}
+        for bucket in (material.get("host_cookies") or [])
+        if isinstance(bucket, dict)
+    ]
+    return {
+        "identity_name": material.get("identity_name"),
+        "principal_id": material.get("principal_id"),
+        "mfa_factor": material.get("mfa_factor"),
+        "mode": material.get("mode"),
+        "state": material.get("state"),
+        "use_for_requests": material.get("use_for_requests"),
+        "auth_context": material.get("auth_context"),
+        "is_active": material.get("is_active"),
+        "liveness_verdict": material.get("liveness_verdict"),
+        "last_probed_at": material.get("last_probed_at"),
+        "last_seen_at": material.get("last_seen_at"),
+        "created_at": material.get("created_at"),
+        "updated_at": material.get("updated_at"),
+        "expires_at": material.get("expires_at"),
+        "notes": material.get("notes"),
+        "cookie_names": _names(material.get("cookies")),
+        "header_names": _names(material.get("headers")),
+        "token_names": _names(material.get("tokens")),
+        "host_cookies": host_cookies,
+    }
+
+
+def _redact_listing(listing: dict) -> dict:
+    identities = listing.get("identities") if isinstance(listing, dict) else None
+    identities = identities if isinstance(identities, dict) else {}
+    return {
+        "active_identity": listing.get("active_identity") if isinstance(listing, dict) else "",
+        "identities": {
+            str(name): _redact_material(material)
+            for name, material in identities.items()
+        },
+    }
+
+
 def _run_list(args) -> None:
     client = _client(args)
     try:
@@ -197,6 +255,6 @@ def _run_list(args) -> None:
     if not isinstance(listing, dict):
         listing = {"identities": {}, "active_identity": ""}
     if getattr(args, "as_json", False):
-        print(json.dumps(listing, indent=2, ensure_ascii=False))
+        print(json.dumps(_redact_listing(listing), indent=2, ensure_ascii=False))
     else:
         print(_render_identities(listing))

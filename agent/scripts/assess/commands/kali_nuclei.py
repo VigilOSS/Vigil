@@ -48,6 +48,9 @@ _NUCLEI_DEFAULT_RATE_LIMIT = 150.0
 # templates against production-like in-scope targets (CR-27).
 _DEFAULT_EXCLUDE_TAGS = "dos,fuzz,intrusive,brute-force"
 _EXCLUDE_TAGS_FLAGS = ("-exclude-tags", "-etags")
+_OOB_FLAGS = frozenset(
+    {"ni", "no-interactsh", "interactsh-url", "interactsh-server", "iserver"}
+)
 
 
 def _operator_passed_exclude_tags(args) -> bool:
@@ -65,6 +68,28 @@ def _operator_passed_exclude_tags(args) -> bool:
     except ValueError:
         return False
     return any(tok in _EXCLUDE_TAGS_FLAGS for tok in tokens)
+
+
+def _reject_passthrough_oob_flags(args) -> None:
+    extra = getattr(args, "extra_args", "") or ""
+    if not extra:
+        return
+    try:
+        tokens = shlex.split(extra)
+    except ValueError:
+        return
+    supplied = next(
+        (
+            token
+            for token in tokens
+            if token.split("=", 1)[0].lstrip("-") in _OOB_FLAGS
+        ),
+        None,
+    )
+    if supplied:
+        raise AssessError(
+            f"nuclei OOB flag {supplied!r} is wrapper-owned; use --oob-mode none|public|vigil"
+        )
 
 
 def _lock_holder_is_stale(fd: int) -> bool:
@@ -296,6 +321,15 @@ def register(subparsers) -> None:
     p.add_argument("-stream", dest="stream", action="store_true", help="-stream output mode.")
     p.add_argument("-jsonl", dest="jsonl", action="store_true", help="-jsonl output.")
     p.add_argument("-o", dest="output", default="", help="-o output file (engagement-relative).")
+    p.add_argument(
+        "--oob-mode",
+        choices=("none", "public", "vigil"),
+        default="none",
+        help=(
+            "Blind-callback policy: none (default, inject -ni), public (allow "
+            "nuclei's public interactsh), or vigil (route to VIGIL_OOB_DOMAIN)."
+        ),
+    )
     p.set_defaults(func=run)
 
 
@@ -303,6 +337,7 @@ def run(args) -> None:
     if not args.target_url and not args.target_list:
         print("nuclei: pass -u <url> or -l <list>", file=sys.stderr)
         raise AssessError("missing -u or -l")
+    _reject_passthrough_oob_flags(args)
     cmd: list[str] = ["nuclei"]
     if args.target_url:
         cmd.extend(["-u", args.target_url])
@@ -356,6 +391,24 @@ def run(args) -> None:
         cmd.append("-jsonl")
     if args.output:
         cmd.extend(["-o", args.output])
+    oob_mode = getattr(args, "oob_mode", "none") or "none"
+    if oob_mode == "none":
+        cmd.append("-ni")
+    elif oob_mode == "vigil":
+        domain = os.environ.get("VIGIL_OOB_DOMAIN", "").strip().rstrip(".")
+        if not domain:
+            raise AssessError(
+                "--oob-mode vigil requires the resolved VIGIL_OOB_DOMAIN; "
+                "invoke this command through `vigil assess` so the CLI can "
+                "export the configured OOB domain"
+            )
+        cmd.extend(["-interactsh-url", domain])
+    else:
+        print(
+            "WARN nuclei: --oob-mode public permits callbacks to nuclei's public "
+            "interactsh service; target data may leave Vigil-controlled infrastructure.",
+            file=sys.stderr,
+        )
     extend_cmd_with_extra_args(cmd, args)
 
     engagement_dir: Path | None = None
@@ -400,9 +453,19 @@ def run(args) -> None:
     lock_path = _nuclei_lock_path_for(getattr(args, "output", ""), engagement_dir)
     if lock_path is not None:
         with _nuclei_output_lock(lock_path):
-            result = kali_exec(cmd, tool_name="nuclei", **kali_args_to_kwargs(args))
+            result = kali_exec(
+                cmd,
+                tool_name="nuclei",
+                nuclei_oob_explicit=oob_mode in {"public", "vigil"},
+                **kali_args_to_kwargs(args),
+            )
     else:
-        result = kali_exec(cmd, tool_name="nuclei", **kali_args_to_kwargs(args))
+        result = kali_exec(
+            cmd,
+            tool_name="nuclei",
+            nuclei_oob_explicit=oob_mode in {"public", "vigil"},
+            **kali_args_to_kwargs(args),
+        )
     _zero_byte_post_check(args, result, engagement_dir)
 
     # Incomplete-run guard: a timed-out nuclei sweep over a host LIST scanned only

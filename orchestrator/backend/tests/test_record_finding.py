@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -119,6 +120,56 @@ def test_net_new_collision_against_active_is_refused(client, isolate_settings):
         json=_finding("VA-002", workflow_status="active", summary="rediscovered"),
     )
     assert resp.status_code == 409, resp.text
+
+
+def test_evidence_artifact_backfill_does_not_attach_to_concurrently_replaced_evidence(
+    client, isolate_settings, monkeypatch
+):
+    _seed(client, isolate_settings)
+    payload = _finding("VA-099")
+    payload["evidence_ref"] = ""
+    created = client.post(f"{_base()}/findings", json=payload)
+    assert created.status_code == 201, created.text
+    initial_version = created.json()["finding"]["row_version"]
+
+    from app.services.state_manager import _common
+
+    original_register = _common._register_artifact_reference
+    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+    raced = False
+
+    def register_then_replace(*args, **kwargs):
+        nonlocal raced
+        artifact_id = original_register(*args, **kwargs)
+        if not raced:
+            raced = True
+            with sqlite3.connect(str(db_path)) as connection:
+                connection.execute(
+                    """
+                    UPDATE assessment_findings
+                    SET evidence_ref = 'evidence/newer-proof.txt',
+                        evidence_artifact_id = NULL,
+                        row_version = row_version + 1
+                    WHERE slug = 'VA-099'
+                    """
+                )
+                connection.commit()
+        return artifact_id
+
+    monkeypatch.setattr(_common, "_register_artifact_reference", register_then_replace)
+    updated = client.patch(
+        f"{_base()}/findings/VA-099",
+        json={
+            "evidence_ref": "evidence/stale-proof.txt",
+            "expected_row_version": initial_version,
+            "source_name": "vulnerability-analyst",
+        },
+    )
+    assert updated.status_code == 200, updated.text
+    finding = updated.json()["finding"]
+    assert finding["evidence_ref"] == "evidence/newer-proof.txt"
+    assert finding["evidence_artifact_id"] is None
+    assert finding["row_version"] == initial_version + 2
 
 
 def test_no_slug_collision_against_reported_is_refused(client, isolate_settings):
@@ -457,18 +508,18 @@ def test_cli_register_adds_update_flag():
     sub = parser.add_subparsers()
     rf.register(sub)
     args = parser.parse_args(
-        ["record-finding", "vulnerability-analyst", "finding.json", "--update", "VA-001"]
+        ["record", "vulnerability-analyst", "finding.json", "--update", "VA-001"]
     )
     assert args.update_slug == "VA-001"
     # Optional: defaults to no update target.
-    args_default = parser.parse_args(["record-finding", "vulnerability-analyst", "finding.json"])
+    args_default = parser.parse_args(["record", "vulnerability-analyst", "finding.json"])
     assert getattr(args_default, "update_slug", None) in (None, "")
 
 
 def test_contract_documents_update_flag():
     from assess.lib import contracts
 
-    text = contracts.render_contract("record-finding")
+    text = contracts.render_contract("finding record")
     assert "--update" in text
 
 
@@ -552,7 +603,7 @@ def test_cli_register_adds_allow_remint_flag():
     sub = parser.add_subparsers()
     rf.register(sub)
     for flag in ("--allow-remint", "--force"):
-        args = parser.parse_args(["record-finding", "vulnerability-analyst", "finding.json", flag])
+        args = parser.parse_args(["record", "vulnerability-analyst", "finding.json", flag])
         assert args.allow_remint is True
-    args_default = parser.parse_args(["record-finding", "vulnerability-analyst", "finding.json"])
+    args_default = parser.parse_args(["record", "vulnerability-analyst", "finding.json"])
     assert args_default.allow_remint is False

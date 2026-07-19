@@ -156,7 +156,7 @@ def test_record_finding_rejects_embedded_root_cause_link(client, isolate_setting
         },
     )
     assert response.status_code == 422, response.text
-    assert "root_cause links must be created with link-finding" in response.text
+    assert "root_cause links must be created with `finding link`" in response.text
 
 
 # ---------------------------------------------------------------------------

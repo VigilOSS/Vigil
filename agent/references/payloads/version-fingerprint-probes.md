@@ -228,7 +228,7 @@ CVEs in scope after patch-line check:
   - CVE-XXXX-ZZZZZ (NOT applicable, patched in <version>)
 ```
 
-This payload feeds `vigil assess record-intel cve <json>` (one call per
+This payload feeds `vigil assess intel record cve <json>` (one call per
 applicable CVE) and a follow-up exploit-developer dispatch for live
 validation before any CVE becomes a durable finding.
 

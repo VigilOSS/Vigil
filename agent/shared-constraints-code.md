@@ -50,12 +50,12 @@ and runs land in `assessment_command_runs`. Treat that history as a coverage
 map — a record of what harnesses/corpora/sanitizer configs have already been
 run so your next campaign picks a variant that hasn't been tried. Search with
 an unscoped query first so you see every agent's and every phase's prior work
-— `vigil assess list-command-runs --q <keyword> --show-matches` — and narrow
+— `vigil assess command-run list --q <keyword> --show-matches` — and narrow
 with `--agent-name` or `--phase` only if the broad result is overwhelming.
 The only campaign to skip is the identical binary + corpus + flags combination
 already run to completion; any variant (new sanitizer, new dictionary, new
 seed corpus, harness change) is new coverage. Before citing a prior run,
-fetch its preview with `vigil assess get-command-run <id>` —
+fetch its preview with `vigil assess command-run get <id>` —
 `success=true` only means `return_code=0`, and a campaign that exited cleanly
 under its time budget but produced no crashes is not the same as one that
 exhausted the search space. Full coverage-vs-duplicate decision table:
@@ -93,8 +93,8 @@ reading the file, and continuing your analysis. You have full filesystem access 
 ## 4. Findings Use the Existing Backend
 
 Code analysis findings record in the **same** `assessment_findings` table as web findings.
-Use `vigil assess record-finding <agent-name> <finding-json-file>` to record.
-For new findings, omit `slug` from the JSON payload — `record-finding` allocates the next
+Use `vigil assess finding record <agent-name> <finding-json-file>` to record.
+For new findings, omit `slug` from the JSON payload — `finding record` allocates the next
 canonical slug under a lock and prints it on stdout. Use that returned slug in handoffs,
 analysis rows, and follow-up commands. Hand-authoring `CH-001` / `CV-001` style slugs in
 parallel dispatches risks collisions.
@@ -112,7 +112,7 @@ parallel dispatches risks collisions.
 **Title formula:** `[Bug Class] in [file:line or component] allows [attacker role] to [impact]`
 
 CVSS↔severity ranges and the matching-adjustment rule are in `agent/shared-specialist-core.md`
-("Finding IDs and the `record-finding` Contract"). A memory corruption primitive with
+("Finding IDs and the `finding record` Contract"). A memory corruption primitive with
 attacker-controlled reachability needs the same severity discipline as a web auth bug because the
 report pipeline consumes one shared finding table.
 
@@ -161,7 +161,7 @@ input file generation, sanitizer invocation, unit-test repro command, or debugge
 to confirm the bug. The goal is reproduction without rediscovery: another analyst should be able to
 rerun the proof from `notes` plus the referenced source files alone.
 
-Coverage finding counts (`vigil assess list-findings` with a count flag or equivalent)
+Coverage finding counts (`vigil assess finding list` with a count flag or equivalent)
 intentionally include only findings whose `canonical_location` starts with `file:` — web
 findings with URL-based locations are excluded from code-analysis queue accounting.
 
@@ -169,7 +169,7 @@ findings with URL-based locations are excluded from code-analysis queue accounti
 found in source that has live-target reach against the in-scope web app — a session cookie value,
 an API key, a JWT signing secret, or a DB/service credential usable against the deployed app —
 should ALSO be recorded via `vigil assess post credentials <credential-json-file> --status
-discovered`, alongside the normal `record-finding` call for the code finding itself. Recording a
+discovered`, alongside the normal `finding record` call for the code finding itself. Recording a
 discovered credential automatically flags a candidate finding and, when the secret is a session
 artifact (a session-hint cookie or a bearer/JWT), mints a usable identity from it and cross-links
 the two — so on a mixed code+web engagement the secret auto-surfaces as a usable identity for the
@@ -215,9 +215,9 @@ Coverage must be explicit, but write-up depth can be proportional:
 - Obviously mechanical helpers can use concise `clean` dispositions once you have verified they
   do not hide sinks, trust-boundary assumptions, or material error behavior.
 
-Record dispositions via `vigil assess code-record-analysis`.
-`finding` dispositions record durable finding state through `record-finding`; `suspicious`,
-`clean`, and `needs-context` still record through `code-record-analysis` so backend coverage knows
+Record dispositions via `vigil assess code-record analysis`.
+`finding` dispositions record durable finding state through `finding record`; `suspicious`,
+`clean`, and `needs-context` still record through `code-record analysis` so backend coverage knows
 which functions were reviewed and why the queue can advance or re-dispatch.
 
 ---
@@ -296,27 +296,36 @@ rule applies in code mode wherever a kali wrapper is invoked from a code-analysi
 ## 10. Recording Format
 
 Use the helper contracts as the canonical shape source before authoring durable JSON. Run
-`vigil assess contract record-finding` for finding payloads and
-`vigil assess contract code-record-analysis` for analysis-result payloads; this keeps agent output
+`vigil assess contract finding record` for finding payloads and
+`vigil assess contract code-record analysis` for analysis-result payloads; this keeps agent output
 aligned with backend validation instead of relying on copied prompt snippets.
-`record-finding` fills the initial lifecycle defaults (`workflow_status=active`, `verification_state=unreviewed`, `verification_disposition=none`) when omitted — use those rather than setting lifecycle fields manually.
+`finding record` fills the initial lifecycle defaults (`workflow_status=active`, `verification_state=unreviewed`, `verification_disposition=none`) when omitted — use those rather than setting lifecycle fields manually.
 For later finding lifecycle changes, use the dedicated helpers instead of raw `post` or `patch`:
-`verify-finding` for confirm/downgrade/dispute decisions, `kill-finding` for false-positive
-verification with kill metadata, `reset-finding` to reopen a previously verified or false-positive
-finding, and `update-finding` for non-verification metadata or workflow updates.
+`finding verify` for confirm/downgrade/dispute decisions (`--disposition false_positive` with kill
+metadata for a false-positive verification), `finding update --status draft` to reopen a
+previously verified or false-positive finding, and `finding update` for non-verification metadata
+or workflow updates.
 
 For code findings, put code-specific proof fields under finding `details`: `cwe_id`, `impact`,
 `evidence`, `taint_path`, `guards_evaluated`, `remediation`, `slot_type`,
 `steps_to_reproduce`, `cvss_vector`, and `cvss_score` are all covered by the
-`record-finding` contract examples. For analysis rows, include the fetched `queue_item_id`;
+`finding record` contract examples. For analysis rows, include the fetched `queue_item_id`,
+`agent_name`, and `lease_token`;
 the backend derives `file_id` from that queue item and rejects mismatches when `file_id` is
-supplied as an optional consistency check.
+supplied as an optional consistency check. Renew long-running claims with
+`vigil assess code-dispatch heartbeat <item-id> <agent-name> <lease-token>` at least twice inside
+the operator's stale-reset window (the standard 10-minute window means heartbeat every 5 minutes
+or less); results and closeouts using a reclaimed lease are rejected.
+For `finding` and `suspicious`, record inline `evidence` or an engagement-owned `evidence_ref` on
+the current same-disposition result before closeout. A `clean` closeout carries non-empty family
+coverage and review notes. These disposition-specific gates preserve evidence-backed queue state
+while allowing proof to live inline or in a durable artifact.
 
 **Report-readiness mandate:** `check-phase-readiness --phase report` blocks the final report if any
 verified finding is missing `cvss_score`, `cvss_vector`, `steps_to_reproduce`,
 `remediation`, `impact`, or `evidence`. Include all six fields at recording time so
 findings pass readiness without a remediation loop. CVSS must align with severity per
-the ranges in `agent/shared-specialist-core.md` ("Finding IDs and the `record-finding`
+the ranges in `agent/shared-specialist-core.md` ("Finding IDs and the `finding record`
 Contract").
 
 ---
@@ -330,9 +339,9 @@ code-family closing verb order below.
 
 Before your dispatch returns, run in this order:
 
-1. `vigil assess record-finding <agent-name> <finding-json>` for each confirmed finding.
-2. `vigil assess code-record-analysis <analysis-json>` for each queue item disposition, with
-   `queue_item_id` from the fetched dispatch item.
+1. `vigil assess finding record <agent-name> <finding-json>` for each confirmed finding.
+2. `vigil assess code-record analysis <analysis-json>` for each queue item disposition, with
+   `queue_item_id`, `agent_name`, and `lease_token` from the fetched dispatch item.
 3. `vigil assess agent handoff --from-json <path>` — use the exact
    `agent_id`, `agent_role`, and `phase` from the **Runtime Identity block** the
    operator placed at the top of your dispatch prompt. The handoff row is keyed on
@@ -348,7 +357,9 @@ Before your dispatch returns, run in this order:
 
 CWE coverage claims are cross-referenced against analysis-result rows at queue completion.
 
-1. Record analysis results BEFORE `code-dispatch done`. Result rows must exist when
+1. Record analysis results BEFORE
+   `code-dispatch done <item-id> <agent-name> <lease-token> <disposition> <coverage-json> [notes]`.
+   Result rows must exist when
    the backend validates coverage claims.
 2. `functions_analyzed` in each coverage entry must be backed by result rows: at least
    30% of claimed functions must have a distinct `function_name` in analysis results for
@@ -358,3 +369,6 @@ CWE coverage claims are cross-referenced against analysis-result rows at queue c
    analysis.
 4. Not-applicable entries (`disposition: "not_applicable"`) are exempt from backing
    requirements.
+5. Use `analysis_effort` in per-file coverage detail as the trustworthy effort projection: it is
+   derived from current nonsuperseded result rows, evidenced rows, distinct function names, and
+   the structural-index function total rather than the submitted effort number alone.

@@ -1,14 +1,54 @@
 """vigil assess resume-brief — compact backend operating picture."""
 from __future__ import annotations
 
+import io
 import json
+import sys
+from contextlib import redirect_stdout
+from types import SimpleNamespace
 from urllib.parse import quote, urlencode
 
-from assess.lib.client import AssessmentClient
+from assess.commands import kali_sweep_orphans
+from assess.lib.client import AssessError, AssessmentClient, default_runtime_container
 from assess.lib.config import load_config
 from assess.lib.finding_render import blocked_reason_summary
 
 _COVERING_STATUSES = {"tested", "signal"}
+
+
+def _orphan_attention(output: str) -> str:
+    payload = None
+    for line in reversed(output.splitlines()):
+        try:
+            candidate = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict):
+            payload = candidate
+            break
+    if payload is None:
+        return ""
+    sections = (
+        ("command_runs", payload.get("summary"), ("still_running", "skipped")),
+        ("jobs", payload.get("jobs_summary"), ("still_running", "skipped")),
+        (
+            "host_processes",
+            payload.get("host_processes_summary"),
+            ("unverifiable", "failed"),
+        ),
+    )
+    rendered: list[str] = []
+    for name, summary, fields in sections:
+        if not isinstance(summary, dict):
+            continue
+        counts = [
+            f"{field}={int(summary.get(field) or 0)}"
+            for field in fields
+            if int(summary.get(field) or 0) > 0
+        ]
+        if counts:
+            rendered.append(f"{name}:{','.join(counts)}")
+    return "; ".join(rendered)
 
 
 def register(subparsers) -> None:
@@ -62,6 +102,34 @@ def register(subparsers) -> None:
 
 def run(args) -> None:
     cfg = load_config(args.engagement_dir)
+    # Resume hydration is a state-truth boundary: reconcile abandoned command
+    # runs, jobs, and precisely-owned host children before projecting the
+    # operating picture. The one-hour cutoff keeps this bounded and avoids
+    # touching legitimate recent work; sweep output is internal plumbing, not
+    # part of the resume-brief response contract.
+    try:
+        sweep_output = io.StringIO()
+        with redirect_stdout(sweep_output):
+            kali_sweep_orphans.run(
+                SimpleNamespace(
+                    engagement_dir=getattr(cfg, "engagement_dir", args.engagement_dir),
+                    scope="all",
+                    max_age_seconds=3600,
+                    container_name=default_runtime_container(),
+                    dry_run=False,
+                )
+            )
+        attention = _orphan_attention(sweep_output.getvalue())
+        if attention:
+            print(
+                f"WARN: resume-brief orphan reconciliation needs attention: {attention}",
+                file=sys.stderr,
+            )
+    except (AssessError, OSError, SystemExit) as exc:
+        print(
+            f"WARN: resume-brief orphan reconciliation failed: {exc}",
+            file=sys.stderr,
+        )
     params = []
     if args.q:
         params.append(("q", args.q))

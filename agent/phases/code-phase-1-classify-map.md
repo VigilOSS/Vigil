@@ -20,7 +20,7 @@ Provide:
 
 Phase 1 produces six deliverables. The call graph and attack hypotheses provide navigational guidance for hunters. The file analysis queue ensures every critical/high file is analyzed regardless of hypothesis coverage.
 
-Use the helper contracts as the durable shape source before authoring or reviewing Phase 1 machine artifacts: `vigil assess contract code-classify`, `vigil assess contract code-record-modules`, `vigil assess contract code-record-threat-model`, and `vigil assess contract code-dispatch`. Point dispatches at those contracts instead of embedding copied JSON templates, because the CLI contract stays aligned with backend validation and catches field-name drift.
+Use the helper contracts as the durable shape source before authoring or reviewing Phase 1 machine artifacts: `vigil assess contract code-record classify`, `vigil assess contract code-record modules`, `vigil assess contract code-record threat-model`, and `vigil assess contract code-dispatch`. Point dispatches at those contracts instead of embedding copied JSON templates, because the CLI contract stays aligned with backend validation and catches field-name drift.
 
 **Deliverables from code-architect:**
 
@@ -68,11 +68,11 @@ the operator already knows which files are outsized outliers before dispatch beg
 On return:
 ```bash
 # Record classifications
-vigil assess code-classify <classifications-json>
+vigil assess code-record classify <classifications-json>
 # Record threat model
-vigil assess code-record-threat-model <repo-id> <threat-model-json>
+vigil assess code-record threat-model <repo-id> <threat-model-json>
 # Record modules
-vigil assess code-record-modules <repo-id> <modules-json>
+vigil assess code-record modules <repo-id> <modules-json>
 # Ensure analysis-state exists for Phase 2 handoff artifacts
 mkdir -p "$DIR/tools/analysis-state"
 # Store call graph in analysis-state/

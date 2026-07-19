@@ -24,7 +24,7 @@ _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
-        "export-findings",
+        "findings",
         help=(
             "Generate the single findings.md report doc from backend state "
             "(one section per finding). For a diffable per-finding tree use "

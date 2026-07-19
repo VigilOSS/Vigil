@@ -179,7 +179,7 @@ Convention:
 - `evidence` (object) — the load-bearing facts (status codes, response markers,
   timing deltas, callback nonce) that justify the verdict.
 
-When `finding` is `true`, that JSON is exactly what seeds a `record-finding`: the
+When `finding` is `true`, that JSON is exactly what seeds a `finding record`: the
 `summary` becomes the finding title/notes line, and the evidence file under
 `scans/` (plus the registered probe script itself) becomes the `evidence_ref`.
 Keeping the verdict structured means the run is decidable from the audit preview

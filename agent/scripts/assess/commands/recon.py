@@ -35,14 +35,17 @@ from __future__ import annotations
 import datetime as _dt
 import hashlib
 import json
+import os
+import signal
 import subprocess
 import sys
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
 from assess.commands import dns_discovery, gau_endpoints, js_mining, web_discovery
-from assess.lib import runtime_route, scope
+from assess.lib import host_processes, runtime_route, scope
 from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import load_config
 
@@ -224,6 +227,7 @@ def _count_lines(p: Path) -> int:
 
 def _init_status(cfg, apexes, args, job_id, stages) -> dict:
     return {
+        "run_uuid": uuid.uuid4().hex,
         "apexes": apexes,
         "job_id": job_id,
         "fingerprint": _fingerprint(apexes, args),
@@ -296,28 +300,14 @@ def _apply_scope_filter(cfg, resolved: Path) -> Path:
         return resolved
     try:
         scope_doc = scope.load_scope(str(cfg.engagement_dir))
-        allow = scope.scope_entries(scope_doc)
-        deny = scope.out_of_scope_entries(scope_doc)
     except SystemExit:
         # load_scope/scope_entries raise SystemExit on a missing/malformed scope;
         # in the recon job that must not abort the stage — fall through unfiltered.
         return resolved
-    if not allow:
-        # No host allowlist authored (e.g. internal engagement) — admitting on an
-        # empty allowlist would drop everything; leave the set unfiltered.
-        return resolved
-    kept: list[str] = []
-    dropped = 0
     raw_lines = resolved.read_text(encoding="utf-8", errors="replace").splitlines()
-    for line in raw_lines:
-        token = line.strip()
-        if not token:
-            continue
-        host = scope.host_from_token(token)
-        if host and scope.host_admitted(host, allow, deny):
-            kept.append(token)
-        else:
-            dropped += 1
+    kept, metadata = scope.filter_recon_targets(scope_doc, raw_lines)
+    _write_json_atomic(_recon_dir(cfg) / "scope-filter.meta.json", metadata)
+    dropped = int(metadata["dropped_count"])
     if dropped == 0:
         # Everything already in scope — no need to fork a separate file.
         return resolved
@@ -338,6 +328,7 @@ def _run_web(args, cfg) -> int:
         no_crawl=bool(args.no_crawl),
         stage_timeout=int(args.stage_timeout),
         db_path="",
+        run_uuid=getattr(args, "run_uuid", None),
     )
     try:
         web_discovery.run(ns)
@@ -491,12 +482,14 @@ def _child_argv(args, job_id: int, runtime_value: str) -> list[str]:
     return argv
 
 
+def _job_log_path(cfg, job_id: int) -> Path:
+    return _recon_dir(cfg) / f"recon-job-{int(job_id)}.log"
+
+
 def _launch_background(args) -> None:
     cfg = load_config(args.engagement_dir)
     effective = _effective_runtime(args)
     _enforce_host_routing(args, effective)  # fail before spawning a doomed detached child
-    out_dir = _recon_dir(cfg)
-    log_path = out_dir / "recon-job.log"
     audit_meta = {
         "tool": "recon",
         "apexes": list(args.apexes),
@@ -509,13 +502,14 @@ def _launch_background(args) -> None:
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         created = client.post("jobs", {"status": "queued", "audit_metadata": audit_meta})
         job_id = int(created["id"])
+        log_path = _job_log_path(cfg, job_id)
         # stdout_path drives the Phase-0 exit-marker derivation
         # (<stdout>.with_suffix('.exit')) the sweeper/recon-status reconcile from.
         client.patch(f"jobs/{job_id}", {"stdout_path": str(log_path), "stderr_path": str(log_path)})
         child_argv = _child_argv(args, job_id, effective)
         logf = open(log_path, "ab")  # noqa: SIM115 — handed to the detached child
         try:
-            subprocess.Popen(  # noqa: S603 — argv list, no shell
+            process = subprocess.Popen(  # noqa: S603 — argv list, no shell
                 child_argv,
                 stdin=subprocess.DEVNULL,
                 stdout=logf,
@@ -525,6 +519,22 @@ def _launch_background(args) -> None:
             )
         finally:
             logf.close()
+        try:
+            host_processes.register_process(
+                cfg.engagement_dir,
+                run_uuid=f"recon-job-{job_id}",
+                pid=process.pid,
+            )
+        except Exception as exc:
+            _terminate_background_process(process)
+            client.patch(
+                f"jobs/{job_id}",
+                {"status": "failed", "ended_at": _utcnow_iso()},
+                accept_409=True,
+            )
+            raise AssessError(
+                f"recon --background could not register child ownership: {exc}"
+            ) from exc
         client.patch(f"jobs/{job_id}", {"status": "running", "started_at": _utcnow_iso()})
     print(json.dumps(
         {
@@ -536,6 +546,20 @@ def _launch_background(args) -> None:
         indent=2,
         ensure_ascii=False,
     ))
+
+
+def _terminate_background_process(process) -> None:
+    """Boundedly reap the newly-created session when ownership registration fails."""
+    for sig, grace in ((signal.SIGTERM, 5), (signal.SIGKILL, 2)):
+        try:
+            os.killpg(process.pid, sig)
+        except ProcessLookupError:
+            return
+        try:
+            process.wait(timeout=grace)
+            return
+        except subprocess.TimeoutExpired:
+            continue
 
 
 def _finalize_job(cfg, job_id: int, exit_code: int, log_path: Path) -> None:
@@ -559,6 +583,10 @@ def _finalize_job(cfg, job_id: int, exit_code: int, log_path: Path) -> None:
             )
     except AssessError:
         pass  # marker is the durable fallback
+    finally:
+        host_processes.unregister_process(
+            cfg.engagement_dir, run_uuid=f"recon-job-{int(job_id)}"
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -596,6 +624,7 @@ def run(args) -> None:
     fingerprint = _fingerprint(apexes, args)
     stages = _build_stages(args)
     status = _init_status(cfg, apexes, args, args.job_id, stages)
+    args.run_uuid = status["run_uuid"]
     _write_json_atomic(status_path(cfg), status)
 
     overall_rc = 0
@@ -611,8 +640,9 @@ def run(args) -> None:
         print(f"recon: stage {stage.label} starting.", file=sys.stderr)
 
         rc = _STAGE_RUNNERS[stage.key](args, cfg)
-        counts = _stage_counts(cfg, stage)
+        counts = _stage_counts(cfg, stage) if rc == 0 else {}
         meta = {
+            "run_uuid": status["run_uuid"],
             "done": rc == 0,
             "exit_code": rc,
             "ran_at_epoch": _now_epoch(),
@@ -637,7 +667,7 @@ def run(args) -> None:
 
     # When invoked as a detached job child, finalize the row + publish the marker.
     if args.job_id is not None:
-        log_path = _recon_dir(cfg) / "recon-job.log"
+        log_path = _job_log_path(cfg, int(args.job_id))
         _finalize_job(cfg, int(args.job_id), overall_rc, log_path)
 
     print(f"recon: pipeline {status['overall_state']}. "

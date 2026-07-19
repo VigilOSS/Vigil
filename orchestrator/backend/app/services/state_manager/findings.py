@@ -123,7 +123,7 @@ def _raise_finding_clobber_conflict(
             f"it under a different slug, and merging would silently overwrite a {existing_status} "
             f"finding. If this is a distinct sibling on the same root cause, give it a DISTINCT "
             f"root_cause_key/defect_family and attach it with "
-            f"`vigil assess link-finding <new-slug> --root-cause {existing_slug}`; to "
+            f"`vigil assess finding link <new-slug> --root-cause {existing_slug}`; to "
             f"intentionally modify '{existing_slug}', re-record with --update {existing_slug} "
             f"(or POST with slug={existing_slug!r})."
         ),
@@ -244,7 +244,7 @@ def _raise_killed_remint_conflict(
 
 
 # CR-31 (slug atomicity): the (engagement_id, slug) UNIQUE index in db.py is the
-# hard DB-level backstop against two concurrent record-finding lanes minting the
+# hard DB-level backstop against two concurrent finding record lanes minting the
 # same auto-assigned slug (e.g. both VA-012). ``BEGIN IMMEDIATE`` serializes the
 # MAX-scan + INSERT so the second lane normally sees the first's committed slug,
 # but we still treat the constraint as authoritative: an auto-generated slug that
@@ -535,7 +535,7 @@ def create_finding(
     transition_reason_text: str = "",
     transition_artifact_ref: str = "",
     transition_metadata: dict[str, Any] | None = None,
-    expected_updated_at: str | None = None,
+    expected_row_version: int | None = None,
     notes_mode: str = "append",
     details_mode: str = "merge",
 ) -> dict[str, Any]:
@@ -681,7 +681,7 @@ def create_finding(
             assert cursor is not None
             row = connection.execute("SELECT * FROM assessment_findings WHERE id = ?", (cursor.lastrowid,)).fetchone()
         else:
-            if expected_updated_at is not None and str(existing["updated_at"]) != expected_updated_at:
+            if expected_row_version is not None and int(existing["row_version"]) != expected_row_version:
                 _raise_stale_finding_conflict()
             existing_workflow = _row_workflow_status(existing)
             existing_verification_state = _row_verification_state(existing)
@@ -707,8 +707,9 @@ def create_finding(
                     evidence_type = COALESCE(?, evidence_type),
                     submission_status = COALESCE(?, submission_status),
                     last_seen_at = CURRENT_TIMESTAMP,
+                    row_version = row_version + 1,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                WHERE id = ? AND (? IS NULL OR row_version = ?)
                 """,
                 (
                     title,
@@ -736,7 +737,7 @@ def create_finding(
                     summary,
                     summary,
                     evidence_ref,
-                    # Default appends (record-finding/verify-finding checkpoints);
+                    # Default appends (finding record/finding verify checkpoints);
                     # notes_mode="replace" overwrites so stale text can be scrubbed.
                     notes if notes_mode == "replace" else _common._append_notes(existing["notes"], notes),
                     # CR-31: details default-merge (so checkpoints accrete keys);
@@ -752,8 +753,12 @@ def create_finding(
                     # value => an explicit operator override of the submission axis.
                     incoming_submission_status if explicit_submission_override else None,
                     existing["id"],
+                    expected_row_version,
+                    expected_row_version,
                 ),
             )
+            if connection.execute("SELECT changes()").fetchone()[0] != 1:
+                _raise_stale_finding_conflict()
             row = connection.execute("SELECT * FROM assessment_findings WHERE id = ?", (existing["id"],)).fetchone()
         assert row is not None
         finding = dict(row)
@@ -824,8 +829,17 @@ def create_finding(
         )
         with _common.get_connection() as connection:
             connection.execute(
-                "UPDATE assessment_findings SET evidence_artifact_id = ? WHERE id = ?",
-                (artifact_id, int(finding["id"])),
+                """
+                UPDATE assessment_findings
+                SET evidence_artifact_id = ?
+                WHERE id = ? AND row_version = ? AND evidence_ref = ?
+                """,
+                (
+                    artifact_id,
+                    int(finding["id"]),
+                    int(finding["row_version"]),
+                    str(finding["evidence_ref"]),
+                ),
             )
             finding = connection.execute(
                 "SELECT * FROM assessment_findings WHERE id = ?",
@@ -939,7 +953,7 @@ def patch_finding(
     transition_artifact_ref: str = "",
     transition_metadata: dict[str, Any] | None = None,
     allow_verification_mutation: bool = False,
-    expected_updated_at: str | None = None,
+    expected_row_version: int | None = None,
     notes_mode: str = "append",
     details_mode: str = "merge",
 ) -> dict[str, Any]:
@@ -967,7 +981,7 @@ def patch_finding(
 
     existing_workflow = _row_workflow_status(existing)
     existing_verification = _row_verification_state(existing)
-    current_updated_at = str(existing["updated_at"])
+    current_row_version = int(existing["row_version"])
 
     if not allow_verification_mutation:
         if verification_state is not None or verification_disposition is not None:
@@ -992,7 +1006,7 @@ def patch_finding(
             verification_disposition = "none"
         elif existing_verification == "disputed" and workflow_status is not None:
             # CR-31 (clear-disputed): a `disputed` verdict previously could only
-            # be cleared by the verifier re-issuing verify-finding (which lands
+            # be cleared by the verifier re-issuing finding verify (which lands
             # `verified`, not a re-queue). Let a specialist reopen via reset-finding
             # return it to `unreviewed`/`none` — re-queues for verification without
             # forcing a verdict. Only on an explicit workflow reopen, and only out
@@ -1037,7 +1051,9 @@ def patch_finding(
         transition_reason_text=transition_reason_text,
         transition_artifact_ref=transition_artifact_ref,
         transition_metadata=transition_metadata,
-        expected_updated_at=expected_updated_at or current_updated_at,
+        expected_row_version=(
+            current_row_version if expected_row_version is None else expected_row_version
+        ),
         notes_mode=notes_mode,
         details_mode=details_mode,
     )
@@ -1132,7 +1148,7 @@ def verify_finding(
             (engagement.id, slug),
         ).fetchone()
 
-    expected_updated_at = str(existing["updated_at"])
+    expected_row_version = int(existing["row_version"])
     existing_workflow = _row_workflow_status(existing)
     if existing_workflow == "merged":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="merged findings cannot be re-verified")
@@ -1205,7 +1221,7 @@ def verify_finding(
         transition_artifact_ref=artifact_ref or evidence_ref,
         transition_metadata=transition_metadata or None,
         allow_verification_mutation=True,
-        expected_updated_at=expected_updated_at,
+        expected_row_version=expected_row_version,
     )
     if artifact_ref:
         _common._register_artifact_reference(
@@ -1224,6 +1240,8 @@ def merge_findings(
     target_slug: str,
     reason: str,
     source_name: str,
+    expected_source_row_version: int | None = None,
+    expected_target_row_version: int | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
@@ -1238,6 +1256,14 @@ def merge_findings(
         if source is None or target is None:
             missing = source_slug if source is None else target_slug
             raise _finding_not_found(connection, engagement.id, missing)
+        if (
+            expected_source_row_version is not None
+            and int(source["row_version"]) != expected_source_row_version
+        ) or (
+            expected_target_row_version is not None
+            and int(target["row_version"]) != expected_target_row_version
+        ):
+            _raise_stale_finding_conflict()
         if source["id"] == target["id"]:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="cannot merge a finding into itself")
         if _row_workflow_status(target) == "false_positive" and _row_workflow_status(source) != "false_positive":
@@ -1286,8 +1312,8 @@ def merge_findings(
             )
         source_confidence = _finding_confidence_tuple(source)
         target_confidence = _finding_confidence_tuple(target)
-        source_updated_at = str(source["updated_at"])
-        target_updated_at = str(target["updated_at"])
+        source_row_version = int(source["row_version"])
+        target_row_version = int(target["row_version"])
         source_stronger = source_confidence > target_confidence
         source_workflow = _row_workflow_status(source)
         target_workflow = _row_workflow_status(target)
@@ -1322,10 +1348,11 @@ def merge_findings(
                 verification_disposition = 'none',
                 merged_into_finding_id = ?,
                 notes = ?,
+                row_version = row_version + 1,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE id = ? AND updated_at = ?
+            WHERE id = ? AND row_version = ?
             """,
-            (target["id"], _common._append_notes(source["notes"], reason), source["id"], source_updated_at),
+            (target["id"], _common._append_notes(source["notes"], reason), source["id"], source_row_version),
         )
         if source_cursor.rowcount != 1:
             _raise_stale_finding_conflict()
@@ -1354,9 +1381,10 @@ def merge_findings(
                 notes = ?,
                 details_json = ?,
                 provenance_json = ?,
+                row_version = row_version + 1,
                 updated_at = CURRENT_TIMESTAMP,
                 last_seen_at = CURRENT_TIMESTAMP
-            WHERE id = ? AND updated_at = ?
+            WHERE id = ? AND row_version = ?
             """,
             (
                 _stronger_severity(target["severity"], source["severity"]),
@@ -1394,7 +1422,7 @@ def merge_findings(
                 merged_details,
                 _json_text(merged_provenance_payload),
                 target["id"],
-                target_updated_at,
+                target_row_version,
             ),
         )
         if target_cursor.rowcount != 1:

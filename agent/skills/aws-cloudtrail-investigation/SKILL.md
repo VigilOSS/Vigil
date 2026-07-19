@@ -58,7 +58,7 @@ legacy-host exemptions into findings.
 | Identity context | `aws sts get-caller-identity`, `aws iam list-access-keys --user-name <u>`, `aws iam get-access-key-last-used --access-key-id <k>`, `aws iam get-account-summary`, `aws iam get-user --user-name <u>` | Resolve the alert's principal to a concrete identity; verify key age and last-use region before treating the key as live or stale |
 | Direct event lookup (≤90 days) | `aws cloudtrail lookup-events --lookup-attributes AttributeKey=Username,AttributeValue=<actor>` (also `AttributeKey=AccessKeyId`, `EventName`, `ResourceName`, `ResourceType`) | Fast for narrow actor/event slices; bounded to 90 days of management events, severe per-region rate cap — not a bulk tool |
 | Bulk Athena query | `aws athena start-query-execution` against partitioned `cloudtrail_logs` table; status via `aws athena get-query-execution`, results via `aws athena get-query-results` | Cross-link `agent/skills/athena-log-investigation/SKILL.md`. Required whenever the time window exceeds the lookup-events 90-day ceiling, when the alert needs grouping over millions of events, or when the L1 dispatch flagged a 30–60d look-back |
-| GuardDuty correlation | `aws guardduty list-detectors`, `aws guardduty list-findings --detector-id <id> --finding-criteria <json>`, `aws guardduty get-findings --detector-id <id> --finding-ids <ids>` | Pull every GuardDuty finding tied to the alerted principal and the time window; severity / confidence fields feed Check 2 corroboration |
+| GuardDuty correlation | `aws guardduty list-detectors`, `aws guardduty finding list --detector-id <id> --finding-criteria <json>`, `aws guardduty get-findings --detector-id <id> --finding-ids <ids>` | Pull every GuardDuty finding tied to the alerted principal and the time window; severity / confidence fields feed Check 2 corroboration |
 | Detective entity profile (where licensed) | `aws detective list-graphs`, then `aws detective list-members --graph-arn <arn>` and the graph-scoped entity-profile APIs | Pre-baked timeline view of the principal across CloudTrail + VPC Flow + GuardDuty; only available where the customer has paid for Detective and the engagement scope includes the graph account |
 | Auth-message decode | `aws sts decode-authorization-message --encoded-message <m>` | Decodes the encoded `AccessDenied` payload that surfaces in policy-simulator runs and some SDK exception traces; produces the exact evaluated context that explains why a call was allowed or denied |
 | VPC Flow Logs | Athena against `vpc_flow_logs` (cross-link `agent/skills/athena-log-investigation/SKILL.md`) | Confirms egress/ingress for compromised instances when CloudTrail data events are off; load-bearing on Step 6 |
@@ -471,7 +471,7 @@ principal, over the same window as Step 2:
 vigil assess host-exec --tool aws --intent "guardduty correlation" \
   --technique T1078.004 --phase investigate \
   --scope-host <aws-account-id> \
-  -- aws guardduty list-findings --detector-id <detector-id> \
+  -- aws guardduty finding list --detector-id <detector-id> \
        --finding-criteria '{
          "Criterion": {
            "resource.accessKeyDetails.principalId": {"Eq": ["<principal-id>"]},

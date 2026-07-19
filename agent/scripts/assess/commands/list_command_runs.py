@@ -1,4 +1,4 @@
-"""vigil assess list-command-runs — search the backend command-run audit log.
+"""vigil assess command-run list — search the backend command-run audit log.
 
 Use before re-running a `vigil assess kali` command to check whether an
 equivalent command already ran in the current engagement. Filter by agent,
@@ -17,7 +17,7 @@ from assess.lib.config import load_config
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
-        "list-command-runs",
+        "list",
         help="List `vigil assess kali` command-run audit records for this engagement",
     )
     p.add_argument("--q", default="", help="Fuzzy keyword search over command, tool, previews, metadata, and finding aliases")

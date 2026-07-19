@@ -20,8 +20,6 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-import pytest
-
 from assess.commands import check_phase_readiness as cpr
 
 

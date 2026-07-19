@@ -91,7 +91,7 @@ ls tools/fuzz-state/harnesses/*/harness.c
 ls tools/fuzz-state/campaigns/*.json
 
 # Record any findings from quick validation runs or pre-fuzz audit
-vigil assess record-finding code-fuzz-engineer <finding-json>
+vigil assess finding record code-fuzz-engineer <finding-json>
 ```
 
 #### Phase 4B: Campaign Execution
@@ -142,7 +142,7 @@ minimize -> reproduce -> trace -> validate -> classify
 **On return from crash triage:**
 ```bash
 # Record true findings
-vigil assess record-finding code-fuzz-engineer <finding-json>
+vigil assess finding record code-fuzz-engineer <finding-json>
 
 # Triage reports written to tools/fuzz-state/reports/
 ls tools/fuzz-state/reports/*-triage.json
@@ -159,14 +159,14 @@ ls tools/fuzz-state/reports/*-triage.json
 The code track has no separate `report.md` deliverable — its terminal output is a per-finding
 submission, the same as web/runtime engagements. Before dispatching `report-writer`, run a
 proactive severity↔CVSS alignment audit, modeled on `agent/operator-core.md` "Mandatory Phase-Exit
-Passes" ("Exploit → Report: severity-CVSS alignment audit"): query `vigil assess list-findings` and
+Passes" ("Exploit → Report: severity-CVSS alignment audit"): query `vigil assess finding list` and
 verify each finding's `severity` matches its `details.cvss_score` band (`high` requires
 `cvss_score >= 7.0`, `medium` requires `4.0 <= cvss_score <= 6.9`, `low` requires `cvss_score <
-4.0`); fix any mismatch via `vigil assess update-finding <slug> --inline '{"details":
+4.0`); fix any mismatch via `vigil assess finding update <slug> --inline '{"details":
 {"cvss_score": <n>, "cvss_vector": "..."}}'` (the JSON field is `details`, not `details_json`) —
 this catches the most common cleanup-time defect before the transition bounces on it, not after.
 Then run `vigil assess check-phase-readiness --phase report` (the shared readiness gate: coverage,
-root-cause consolidation, severity/CVSS alignment) and `vigil assess list-report-findings --mode
+root-cause consolidation, severity/CVSS alignment) and `vigil assess finding report --mode
 final --json` (or `--mode draft --json` for interim) to confirm the finding set — this includes
 code and web findings from the shared backend with root-cause grouping applied. Fuzz findings
 (CF-xxx) carry crash inputs and ASAN reports as evidence.
@@ -176,7 +176,7 @@ For each finding to close out, `report-writer` follows the "Submission-First Clo
 is a render of it, so each section is authored once, written back to the finding, and re-rendered.
 See `agent/references/examples/submission-direct-buffer-overflow-fuzz.md` for a worked
 `--platform direct` example (FUZZ-CONFIRMED buffer overflow, crash input + ASAN report proof):
-1. **Scaffold:** `vigil assess export-submission <slug> --draft --platform direct` — code findings
+1. **Scaffold:** `vigil assess export submission <slug> --draft --platform direct` — code findings
    default to `--platform direct` (source review, no external bug-bounty program) unless the code
    work runs under an active bounty engagement (see "Integration with Web Engagement" above), in
    which case use `--platform bugcrowd`/`--platform hackerone` to match the live program. Draft mode
@@ -186,16 +186,16 @@ See `agent/references/examples/submission-direct-buffer-overflow-fuzz.md` for a 
    the second `---` (present in both draft and final; never pasted), and marks anything missing with
    `[NEEDS: ...]`.
 2. **Author + write back to the finding:** author the stable sections and write each back so the
-   finding holds exactly what would be sent — `vigil assess update-finding <slug> --summary "..."
+   finding holds exactly what would be sent — `vigil assess finding update <slug> --summary "..."
    --details-inline '{"steps_to_reproduce":[...],"evidence":"...","impact":"...","remediation":"..."}'`.
    Author Evidence from the OPERATOR DETAILS section's structured proof and linked runs plus a
-   *targeted* `vigil assess list-command-runs --q <finding's file/function/parameter>` (keyed tightly
+   *targeted* `vigil assess command-run list --q <finding's file/function/parameter>` (keyed tightly
    to this finding, not a broad sweep) to
    catch reproducing runs the linked set missed, then mask any sensitive values and annotate the
    proof lines; store it in `details.evidence`. Fuzz findings (CF-xxx) carry the crash input and
    ASAN report as the gate-satisfying proof (`evidence_ref`/`poc_code`), which the authored Evidence
    references — the raw crash artifact stays under `tools/fuzz-state/` and is not rendered.
-3. **Checklist/QA + blind triage:** re-render from the finding (`export-submission <slug>
+3. **Checklist/QA + blind triage:** re-render from the finding (`export submission <slug>
    --platform <same> --draft --overwrite`), run the same review-and-fix QA pass runtime engagements
    use (the consolidated self-review checklist) against the re-rendered `submission.md`, fixing at the source (the
    finding), then blind triage — mandatory for every Medium-or-above finding
@@ -207,7 +207,7 @@ See `agent/references/examples/submission-direct-buffer-overflow-fuzz.md` for a 
    Only an `Accept*` verdict clears a finding for submission; anything else routes back to
    `report-writer` or the specialist that owns the finding — an un-recorded verdict reads as no
    triage at all, so record it even for a clean `Accept`.
-4. **Publish:** re-run `export-submission <slug> --platform <same platform> --overwrite` (non-draft)
+4. **Publish:** re-run `export submission <slug> --platform <same platform> --overwrite` (non-draft)
    once the strict final gate is satisfiable (title; severity + CVSS vector; platform taxonomy where
    applicable; an attacker-impact statement; and ≥1 concrete proof); it reproduces the authored
    content from the finding, registers `submission.md` as a finding-linked artifact
@@ -228,7 +228,7 @@ judgment no command can check, modeled on `agent/phases/phase-8-report.md` "Defi
   cross-finding pass in `agent/rules/reporting.md` §18 "Cross-finding dedup pass": cluster the
   submittable set by root cause, designate the lead (highest-impact) finding, and for each
   dup-risk sibling record either a consolidation or a distinct-primitive framing plus
-  `vigil assess link-finding <sibling-slug> --root-cause <lead-slug>`. `code-variant-hunter`
+  `vigil assess finding link <sibling-slug> --root-cause <lead-slug>`. `code-variant-hunter`
   output is the textbook case for this here — a confirmed buffer-overflow or taint-path pattern
   found across multiple files/call sites by the variant pass is exactly the multi-file
   same-root-cause cluster §18 exists for; do not file each variant hit as an independent
@@ -237,7 +237,7 @@ judgment no command can check, modeled on `agent/phases/phase-8-report.md` "Defi
   `summary` and `details` text and strip phrases that contradict current state ("severity adjusted
   from X to Y" when it's no longer Y, "originally rated as Z", "merged from W" after W was split
   off, "previously low"/"downgraded to medium" mismatched against the current `severity`). The
-  `vigil assess list-findings --status active --json | jq -r '.[].slug'` scan loop in
+  `vigil assess finding list --status active --json | jq -r '.[].slug'` scan loop in
   `agent/skills/report-generation/SKILL.md` "Stale-text scrub" is the executable recipe.
 - [ ] **Backend reflects submissions (external reality).** Findings actually delivered (or marked
   accepted/duplicate) have a `submission_status`/`workflow_status` that matches reality — nothing

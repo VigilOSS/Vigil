@@ -158,7 +158,7 @@ Hosts that the assertion flags as gaps fall into two categories:
      "category": "infrastructure"
    }
    EOF
-   vigil assess record-intel note /tmp/intel-upstream-filter.json
+   vigil assess intel record note /tmp/intel-upstream-filter.json
    ```
 
 Do NOT declare a batch complete until every flagged host either passes the assertion on
@@ -340,7 +340,7 @@ grep "open" /engagements/$ENGAGEMENT_KEY/scans/nmap_targeted.txt | grep -v "filt
 ## Output Contract
 
 The skill produces these structured sections in the recon-specialist's return payload.
-Backend writes (`record-finding`, `record-intel`, `record-surface`) are the durable
+Backend writes (`finding record`, `intel record`, `record-surface`) are the durable
 record; this contract names what each markdown section should hold so downstream
 specialists can parse the output consistently.
 
@@ -348,9 +348,9 @@ specialists can parse the output consistently.
 |---|---|
 | `#### Summary` | One-paragraph headline: hosts scanned, profile chosen, open-port total, port-data-assertion pass/fail count. |
 | `#### Open Services` | Per-host table of `host : port/proto : service : version : NSE notes`. The canonical port-and-service inventory feeding `record-surface` for non-web services and dispatch decisions for follow-on testing. |
-| `#### Findings` | Decisive findings already proved by the scan (default-creds via NSE, anonymous FTP, well-known-vuln NSE hit). Each must also be recorded via `vigil assess record-finding`. |
+| `#### Findings` | Decisive findings already proved by the scan (default-creds via NSE, anonymous FTP, well-known-vuln NSE hit). Each must also be recorded via `vigil assess finding record`. |
 | `#### Surface Candidates` | Non-web services that warrant deeper triage (Redis, Elasticsearch, Docker API, MongoDB, exposed RDP, etc.) — each surfaced via `vigil assess record-surface`. |
-| `#### Intelligence` | TLS SAN hosts surfaced from `ssl-cert` NSE, rDNS vendor identification for shared / CDN-fronted IPs, OS detection output, banner anomalies. Each row landed via `vigil assess record-intel <type>`. |
+| `#### Intelligence` | TLS SAN hosts surfaced from `ssl-cert` NSE, rDNS vendor identification for shared / CDN-fronted IPs, OS detection output, banner anomalies. Each row landed via `vigil assess intel record <type>`. |
 | `#### Coverage Gaps` | Every host the per-host port-data assertion flagged as a gap and the disposition (re-queued at slower retry profile, recorded as upstream-filtering kill-evidence, deferred). UDP coverage gaps. Hosts that hit the host-timeout. The operator uses this section to decide whether to re-dispatch a slower retry pass. |
 
 ## Extended Resources

@@ -1,18 +1,13 @@
-# ADR 0011 — Engagement-lessons consolidation: deferred scope decisions
+# ADR 0011 — Coverage, path no-fire, and mass-scanner decisions
 
 - Status: Accepted
 - Date: 2026-06-30
 
 ## Context
 
-The engagement-lessons consolidation (`workflow specification.md`) triaged 93 candidate
-items into a phased build. Most were built or promoted. A handful were
-deliberately **declined or deferred** — not forgotten — because building them now
-would either re-litigate a settled posture, add speculative enforcement code with
-no observed trigger, or carry disproportionate IDS/legal risk. This ADR records
-those NOT-doing decisions (from `workflow specification.md` Appendix C #3, #6, #7) so a
-future reader does not mistake the absence of the code for an oversight, and so
-each has an explicit revisit-trigger.
+This ADR records three related decisions that originated in engagement review:
+keep route-count coverage advisory, enforce authored path-level no-fire rules,
+and keep high-rate mass scanners out of the default runtime.
 
 The common thread is the project's standing bias, set in ADR 0001: **harness over
 gate, and do not build enforcement on a signal you cannot yet trust or a violation
@@ -22,7 +17,7 @@ helping it hunt.
 
 ## Decision
 
-### 1. Coverage stays an advisory harness, not a gate (workflow specification §7 L1/L3 declined)
+### 1. Coverage stays an advisory harness, not a route-count gate
 
 > **Superseded-in-part by [ADR 0012](0012-coverage-grain-selective-load-bearing-depth.md):** the
 > route-count ≥N-uncovered-routes gate declined below stays declined — ADR 0012 is a different, narrower
@@ -46,31 +41,17 @@ pressure the LLM marks routes covered, mass-defers, or `--force`s past it.
 The per-host-verdict / unreviewed-unauth WARNs remain as advisory signal the
 operator reads, not as a block.
 
-### 2. Path-level no-fire enforcement is deferred (PT §4c / §5 / I-4)
+### 2. Authored path-level no-fire policy is enforced fail-closed
 
-`scope.py` is **host/wildcard-granular**: it admits or denies whole hosts (with
-wildcard semantics and `out_of_scope` carve-outs). The §5/I-4 proposal was to add
-`off_limits_paths` to `scope.py` plus a `scope-check.sh` path-level block so the
-machinery could refuse a request to a specific *path* on an in-scope host.
+`scope.json.off_limits_paths` is now a durable, explicitly authored ROE input.
+`agent/scripts/assess/lib/scope.py` rejects matching direct tool requests, and
+`agent/scripts/proxy_addon.py` returns a recorded synthetic 451 before an
+intercepted request is sent upstream. Malformed authored policy fails closed for
+the affected engagement. Host and wildcard allow/deny rules still apply first,
+with deny-wins semantics.
 
-**Decision: do not build it speculatively.** We have observed no real path-level
-scope violation; adding an `off_limits_paths` model + a path-check block now is
-enforcement code with no trigger, and it widens the scope surface (and its failure
-modes) for a case that has not occurred. Per PT §4c, this is recorded as
-**settled, not pending**.
-
-**Interim mitigation (already in place):**
-- katana's `-cos` (crawl-out-scope) flag gives a crawler-level path carve-out, so
-  the highest-volume traffic source can already be steered away from a sensitive
-  path prefix during the crawl.
-- Dispatch discipline: per-engagement path ROE lives in `ENGAGEMENT.md` /
-  `scope.json`, and the operator constrains specialists on hard ROE at dispatch
-  (ADR 0009 division of labor), not via a global path block.
-
-**Revisit-trigger:** a real, observed path-level target violation (a probe that
-reached an off-limits path on an in-scope host). At that point — and only then —
-add `off_limits_paths` to `lib/scope.py` and a `scope-check.sh` path-level block,
-driven by the concrete case rather than a hypothetical.
+This is deliberately narrower than inferring path restrictions from findings or
+content. Only operator-authored scope policy can create the path block.
 
 ### 3. masscan / naabu stay deferred (high IDS/legal risk)
 
@@ -90,15 +71,9 @@ default — the same posture the plan records for any high-risk capability.
 
 ## Consequences
 
-- **No new enforcement code lands for #1 and #2.** The coverage harness and
-  `scope.py` keep their current shape; nothing half-lands. The system continues to
-  steer rather than block on soft coverage signal, consistent with ADR 0001.
-- **Each deferral has an explicit revisit-trigger**, so re-opening any of these is
-  a recorded decision driven by an observed need, not a silent re-litigation. A
-  future engagement that hits a path-level violation, or a need `nmap-scan` cannot
-  meet, points straight back here.
-- **No prompt/generated-file or schema changes** follow from this ADR — it records
-  decisions to NOT build, so there is nothing to render or migrate.
+- Route-count coverage remains advisory, while explicit path ROE is load-bearing.
+- A future need that `nmap-scan` cannot meet is the only trigger for revisiting the
+  mass-scanner decision.
 - The masscan/naabu deferral keeps the runtime's default scanning posture
   conservative (IDS/legal risk minimized), with `nmap-scan` as the sanctioned path.
 
@@ -107,10 +82,8 @@ default — the same posture the plan records for any high-risk capability.
 - **Wire the coverage join to block now (the §7-L1/L3 proposal).** Rejected:
   duplicates the strict-gate mistake ADR 0001 already analyzed and reversed —
   gameable on route-count, skippable via defer/force, and it fights the swarm.
-- **Build `off_limits_paths` pre-emptively "to be safe."** Rejected: speculative
-  enforcement on a never-observed violation; the katana `-cos` carve-out +
-  ENGAGEMENT.md/scope.json dispatch discipline cover the realistic cases until a
-  real path-level violation justifies the model.
+- **Infer path blocks from observations or findings.** Rejected: evidence is not
+  authorization. Path enforcement comes only from authored scope policy.
 - **Install masscan/naabu behind a flag now.** Rejected: even flag-gated, shipping
   a mass scanner invites use that `nmap-scan` already covers more safely; defer the
   install itself until a concrete need plus `--consent`/scope gating is designed.
@@ -118,10 +91,6 @@ default — the same posture the plan records for any high-risk capability.
 ## Relationship to other items
 
 - Reaffirms **ADR 0001** (coverage/depth as a harness, not a gate) for decision #1.
-- Decision #2's dispatch-discipline framing rides **ADR 0009** (operator/specialist
-  division of labor) and the `ENGAGEMENT.md` ROE home (`workflow specification.md` §3.10).
-- These are the `workflow specification.md` Appendix C items #3 (harness-vs-gate), #6
-  (path-level no-fire), and #7 (masscan/naabu). Appendix C #1/#2 (required-header
-  attribution) were *built* and are recorded in **ADR 0010**; the remaining
-  Appendix C entries (#4 deconfliction-marker placement, #5 takeover-under-pause)
-  are per-engagement operator choices with no global code decision to record here.
+- Decision #2 follows **ADR 0009** (operator/specialist division of labor) and
+  **ADR 0010** (fail-closed attribution) in making explicit, durable ROE
+  load-bearing without inventing authorization from observations.

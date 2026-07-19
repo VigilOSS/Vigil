@@ -8,10 +8,10 @@ the wall per-dispatch. Wires the previously CLI-less
 
 This is a POINTER, not a finding: a blocked technique stays out of the report,
 and — unlike a finding — it has NO slug, so it can never be the SUBJECT of a
-``link-finding`` call (that resolver is findings-only and hard-404s a non-slug).
+``finding link`` call (that resolver is findings-only and hard-404s a non-slug).
 Record the unblock relationship on the FINDING side instead: when a finding/chain
 later satisfies the wall, link it with
-``vigil assess link-finding <unblocking-finding-slug> --link-kind unblocks
+``vigil assess finding link <unblocking-finding-slug> --link-kind unblocks
 --target-kind blocked_technique --target-ref <technique_key>`` so the unblock
 path is first-class (the finding points AT the blocked-technique key this verb
 emits/derives).

@@ -1,9 +1,8 @@
 """Submission-first scaffold: no red/code/android report.md, blue preserved,
 ISSUES-AND-ENHANCEMENTS.md seeded, and export_pdf repointed to submissions.
 
-Covers the `engagements.py` half of the "Submission-First Reporting" plan
-(docs/plans/submission-first-reporting-2026-07.md, locked decision #2). Blue
-incident scaffolding must remain byte-for-byte unchanged.
+Covers the `engagements.py` submission-first scaffold contract. Blue incident
+scaffolding must remain byte-for-byte unchanged.
 """
 
 from __future__ import annotations
@@ -101,7 +100,6 @@ def _create(tmp_path, monkeypatch, etype, **extra):
 
     for name in (
         "_snapshot_orchestrator_database",
-        "_init_cases_db",
         "_write_prompt_wrappers",
         "_write_codex_config",
         "_write_claude_config",
@@ -163,8 +161,19 @@ def _stub_render_tools(engagements_mod, tmp_path, monkeypatch):
         lambda name: "/usr/bin/pandoc" if name == "pandoc" else None,
     )
     calls: list[list] = []
-    monkeypatch.setattr(engagements_mod.subprocess, "run", lambda args, **k: calls.append(args))
-    return calls
+    rendered_markdown: list[str] = []
+
+    def _run(args, **_kwargs):
+        calls.append(args)
+        if args and str(args[0]).endswith("pandoc"):
+            rendered_markdown.extend(
+                Path(arg).read_text(encoding="utf-8")
+                for arg in args[1:]
+                if str(arg).endswith(".md")
+            )
+
+    monkeypatch.setattr(engagements_mod.subprocess, "run", _run)
+    return calls, rendered_markdown
 
 
 def test_export_pdf_errors_when_nothing_to_render(tmp_path):
@@ -175,7 +184,7 @@ def test_export_pdf_errors_when_nothing_to_render(tmp_path):
     with pytest.raises(SystemExit) as exc:
         engagements.export_pdf(eng)
     message = str(exc.value)
-    assert "export-submission" in message
+    assert "export submission" in message
     # Fails before touching the toolchain (no report.md AND no submissions).
     assert "no report.md" in message
 
@@ -187,14 +196,20 @@ def test_export_pdf_renders_submissions_when_no_report(tmp_path, monkeypatch):
     sub = eng / "submissions" / "va-001-idor"
     sub.mkdir(parents=True)
     submission = sub / "submission.md"
-    submission.write_text("# Finding\n", encoding="utf-8")
+    submission.write_text(
+        "# Finding\n\n---\n\n## OPERATOR DETAILS — NOT FOR SUBMISSION\n\nsecret\n",
+        encoding="utf-8",
+    )
 
-    calls = _stub_render_tools(engagements, tmp_path, monkeypatch)
+    calls, rendered_markdown = _stub_render_tools(engagements, tmp_path, monkeypatch)
     out = engagements.export_pdf(eng)
 
     assert out == eng / "report.pdf"
     pandoc_argv = [str(a) for a in calls[0]]
-    assert str(submission) in pandoc_argv
+    assert str(submission) not in pandoc_argv
+    assert any("/.submission_tmp/" in arg for arg in pandoc_argv)
+    assert rendered_markdown == ["# Finding\n"]
+    assert not (eng / ".submission_tmp").exists()
 
 
 def test_export_pdf_prefers_report_md_and_ignores_submissions(tmp_path, monkeypatch):
@@ -211,9 +226,11 @@ def test_export_pdf_prefers_report_md_and_ignores_submissions(tmp_path, monkeypa
     sub.mkdir(parents=True)
     (sub / "submission.md").write_text("# Finding\n", encoding="utf-8")
 
-    calls = _stub_render_tools(engagements, tmp_path, monkeypatch)
+    calls, rendered_markdown = _stub_render_tools(engagements, tmp_path, monkeypatch)
     engagements.export_pdf(eng)
 
     pandoc_argv = [str(a) for a in calls[0]]
-    assert str(report) in pandoc_argv
+    assert str(report) not in pandoc_argv
     assert str(sub / "submission.md") not in pandoc_argv
+    assert rendered_markdown == ["# Engagement Report\n"]
+    assert not (eng / ".submission_tmp").exists()

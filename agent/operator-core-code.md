@@ -61,7 +61,7 @@ report-bound text (`code-vuln-hunter`, `code-vuln-verifier`) still load it
 directly via their own Load-First lists.
 
 The code track's terminal deliverable is a **submission-first closeout**, not a
-`report.md` monolith: per-finding submissions via `export-submission`, defaulting to
+`report.md` monolith: per-finding submissions via `export submission`, defaulting to
 `--platform direct` for a source review with no external bug-bounty program. See the
 "Submission closeout" step in `agent/phases/code-phase-4-fuzz.md` and the shared
 "Submission-First Closeout" procedure in `agent/skills/report-generation/SKILL.md`.
@@ -118,10 +118,10 @@ returning clean with declining effort scores across successive batches.
    - **Phase 2 (Hunt):** `code-vuln-hunter` -> `agent/skills/code-vulnerability-analysis/SKILL.md` + CWE-specific refs
    - **Phase 3 (Verify + Variant):** `code-vuln-verifier` -> `agent/skills/code-finding-verification/SKILL.md` AND `code-variant-hunter` -> `agent/skills/code-variant-analysis/SKILL.md` (parallel)
    - **Phase 4 (Fuzz):** `code-fuzz-engineer` -> `agent/skills/code-fuzz-campaign/SKILL.md` + memory-safety CWE refs (conditional, C/C++ only)
-6. **HOST BASH FOR SOURCE READING** -- Source code is local. Read via host Bash, Claude Code Read tool, or grep/rg. This is NOT target-facing network work -- `vigil assess kali` is not needed for reading source files. When code analysis does reach for `vigil assess kali ...` (for example, a fuzz campaign or binary-triage pass that runs a tool through the runtime), the same audit-and-reuse rules from `operator-core.md` apply: calls carry `engagement_key`/`agent_name`/`phase` and runs land in `assessment_command_runs`. Default to an unscoped fuzzy search — `vigil assess list-command-runs --q <keyword> --show-matches` — so you see every agent's and every phase's prior work on the target; narrow with `--agent-name` or `--phase` only after the broad result is overwhelming. Before telling a specialist to reuse a prior run, fetch its preview with `vigil assess get-command-run <id>` — `success=true` only means `return_code=0`, so open the preview to confirm the stored evidence actually answers the current question. See `agent/references/runtime-guides/command-history-auditing.md`. `vigil assess kali` calls made from code-analysis workflows (fuzz campaigns, binary triage) must also set the audit-metadata flags — `--technique`, `--intent`, `--probe-kind`, `--phase`, `--timeout`, plus `--destructive` when applicable — so the command row is filterable alongside web engagement calls; see the `Command Metadata` sub-section in `agent/shared-constraints.md` for the value tables, the half-phase tag rationale, and the companion ban on echo-as-commentary breadcrumbs.
+6. **HOST BASH FOR SOURCE READING** -- Source code is local. Read via host Bash, Claude Code Read tool, or grep/rg. This is NOT target-facing network work -- `vigil assess kali` is not needed for reading source files. When code analysis does reach for `vigil assess kali ...` (for example, a fuzz campaign or binary-triage pass that runs a tool through the runtime), the same audit-and-reuse rules from `operator-core.md` apply: calls carry `engagement_key`/`agent_name`/`phase` and runs land in `assessment_command_runs`. Default to an unscoped fuzzy search — `vigil assess command-run list --q <keyword> --show-matches` — so you see every agent's and every phase's prior work on the target; narrow with `--agent-name` or `--phase` only after the broad result is overwhelming. Before telling a specialist to reuse a prior run, fetch its preview with `vigil assess command-run get <id>` — `success=true` only means `return_code=0`, so open the preview to confirm the stored evidence actually answers the current question. See `agent/references/runtime-guides/command-history-auditing.md`. `vigil assess kali` calls made from code-analysis workflows (fuzz campaigns, binary triage) must also set the audit-metadata flags — `--technique`, `--intent`, `--probe-kind`, `--phase`, `--timeout`, plus `--destructive` when applicable — so the command row is filterable alongside web engagement calls; see the `Command Metadata` sub-section in `agent/shared-constraints.md` for the value tables, the half-phase tag rationale, and the companion ban on echo-as-commentary breadcrumbs.
 7. **DISPATCH** -- Dispatch to the appropriate subagent for all analysis work. The operator's job is orchestration: fetching metadata, providing paths, recording outputs, gating quality, and managing the analysis queue. Subagents read source files directly and produce structured outputs. Source reading, file-level analysis, and vulnerability judgment belong to subagents -- the operator provides paths, structural index, and metadata, not content.
 8. **PATH-FIRST HANDOFFS** -- Pass repo-relative file paths and artifact paths instead of pasting large JSON blobs or long source excerpts, because specialist agents can read the artifacts directly and operator tokens are better spent on scope control and quality gates.
-9. **RECORD FINDINGS IMMEDIATELY** -- Code findings use the same `vigil assess record-finding` as web findings. Canonical location format: `file:<path>:<line>`.
+9. **RECORD FINDINGS IMMEDIATELY** -- Code findings use the same `vigil assess finding record` as web findings. Canonical location format: `file:<path>:<line>`.
 10. **RECORD SURFACES** -- `record-surface` uses the shared engagement surface taxonomy, not ad hoc code-only labels. Only use supported types: `account_recovery`, `api_documentation`, `auth_entry`, `dynamic_render`, `file_handling`, `object_reference`, `privileged_write`, `workflow_token`. If none apply, do not invent a new surface type.
 11. **TRACK COVERAGE** -- After each batch, run `vigil assess code-coverage`. During Phase 2B, use `vigil assess code-coverage --cwe-matrix` to check per-file CWE effort scores against thresholds. Before entering Phase 3 verification, verify the coverage gate passes with `vigil assess code-coverage --require-gate-pass` (all critical files analyzed, no unresolved needs-context, no unprocessed triggers, CWE effort thresholds met).
 12. **LOOP** -- Back to step 1.
@@ -207,11 +207,11 @@ do not duplicate.
 | `code-variant-hunter` | Systematic variant scanning for confirmed bug patterns | Phase 3 (parallel with verifier) |
 | `code-vuln-verifier` | FP elimination with devil's advocate verification + clean-file spot-check | Phase 3 (parallel with variant) |
 | `code-fuzz-engineer` | AI-driven fuzz campaigns: target selection, harness construction, crash triage | Phase 4 (conditional, C/C++ only) |
-| `report-writer` | Per-finding submission closeout — `export-submission --platform direct` by default (reused from web engagement) | After Phase 3 or 4 completes |
+| `report-writer` | Per-finding submission closeout — `export submission --platform direct` by default (reused from web engagement) | After Phase 3 or 4 completes |
 
 **Finding prefixes** per agent (CA / CH / CV / VF / CF) are canonical in
 `agent/shared-constraints-code.md` §4 ("Findings Use the Existing Backend") — the
-same table every code specialist loads first. `vigil assess record-finding`
+same table every code specialist loads first. `vigil assess finding record`
 allocates the next canonical slug under a lock and prints it; omit `slug` from new
 finding JSON so parallel dispatches never collide on a hand-authored slug.
 
@@ -327,7 +327,9 @@ vigil assess code-coverage --cwe-matrix      # CWE effort state when Phase 2B or
 
 Resume from the current phase. If `code-dispatch stats` shows `processing` items, they were
 interrupted -- reset stale items with `vigil assess code-dispatch reset-stale 10` and
-re-dispatch. If `needs-context` items exist, provide additional context and re-queue them.
+re-dispatch. Active specialists heartbeat their fetched `agent_name` + `lease_token`; every result
+and closeout reuses that ownership pair. If `needs-context` items exist, provide the requested
+context and return them to pending with `code-dispatch retry-needs-context <ids> <reason>`.
 
 Phase-specific resume actions:
 - **Phase 1 (classify-map)**: Check if call graph, attack hypotheses, and file analysis queue
@@ -428,4 +430,4 @@ Phase 4 (Fuzz) when a CWE class is fuzz-suited -- `code-fuzz-engineer` does its 
 target selection in Phase 4A rather than receiving a direct handoff from the hunter
 (bring code-fuzz-campaign skill, C/C++ only), `code-vuln-verifier`/`code-variant-hunter`
 -> `report-writer` (bring report-generation skill; per-finding
-`export-submission --platform direct` closeout).
+`export submission --platform direct` closeout).

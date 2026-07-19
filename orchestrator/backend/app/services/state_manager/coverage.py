@@ -248,12 +248,20 @@ def _upsert_request_variant(
     notes: str,
 ) -> dict[str, Any]:
     scheme, host, port, normalized_path = _parse_url(url)
+    # Backend enforcement keeps the durable schema name-only even when a caller
+    # accidentally submits captured values. Values (tokens, tenant ids, CSRF
+    # secrets) never participate in deduplication or persistence.
+    normalized_header_schema = (
+        {str(name).strip(): "" for name in header_schema if str(name).strip()}
+        if isinstance(header_schema, dict)
+        else {}
+    )
     params_schema_hash = _hash_json(
         {
             "query": query_schema or {},
             "path": path_schema or {},
             "cookie": cookie_schema or {},
-            "headers": header_schema or {},
+            "headers": normalized_header_schema,
         }
     )
     body_schema_hash = _hash_json(body_schema or {})
@@ -298,7 +306,7 @@ def _upsert_request_variant(
             _json_text(body_schema),
             _json_text(path_schema),
             _json_text(cookie_schema),
-            _json_text(header_schema),
+            _json_text(normalized_header_schema),
             params_schema_hash,
             body_schema_hash,
             discovery_source,
@@ -359,6 +367,20 @@ def _upsert_coverage_item(
     refresh_service_status: bool = True,
 ) -> dict[str, Any]:
     normalized_status = _normalize_coverage_status(status_value)
+    if (
+        normalized_status == CoverageStatus.COVERED
+        and input_slot.startswith("header:")
+        and attack_family == "identity-header-review"
+    ):
+        _require_identity_header_write_coverage(
+            connection,
+            engagement_id,
+            {
+                "request_variant_id": request_variant_id,
+                "input_slot": input_slot,
+                "attack_family": attack_family,
+            },
+        )
     cursor = connection.execute(
         """
         INSERT OR IGNORE INTO assessment_coverage_items (
@@ -642,9 +664,56 @@ def _auto_request_coverage_candidates(
         candidates.append({"input_slot": "path", "attack_family": "parameter-review", "status": "pending", "notes": "Auto-generated from request observation"})
     if cookie_schema:
         candidates.append({"input_slot": "cookie", "attack_family": "session-review", "status": "pending", "notes": "Auto-generated from request observation"})
-    if header_schema:
-        candidates.append({"input_slot": "header", "attack_family": "header-review", "status": "pending", "notes": "Auto-generated from request observation"})
+    for header_name in _security_relevant_header_names(header_schema):
+        candidates.append(
+            {
+                "input_slot": f"header:{header_name}",
+                "attack_family": "identity-header-review",
+                "status": "pending",
+                "notes": "Auto-generated name-only trust-header obligation from request observation",
+            }
+        )
     return candidates
+
+
+_IDENTITY_HEADER_TOKENS = (
+    "api-key", "apikey", "auth", "token", "csrf", "xsrf", "tenant",
+    "user", "account", "principal", "role", "group", "org", "permission",
+    "privilege", "forwarded", "original", "rewrite", "method-override",
+    "admin", "internal", "client-id", "impersonat", "acting",
+)
+_HEADER_NOISE_TOKENS = ("trace", "request-id", "correlation", "b3", "sentry")
+_COMMODITY_TRUST_HEADERS = frozenset(
+    {
+        "host",
+        "x-forwarded-for",
+        "x-forwarded-proto",
+    }
+)
+
+
+def _security_relevant_header_names(header_schema: Any) -> list[str]:
+    """Return canonical names for app-specific identity/trust header inputs.
+
+    The request-schema owner has already removed transport/browser noise. This
+    second, intentionally conservative filter materializes only identity,
+    authorization, routing-trust, or method-override names as obligations; it
+    avoids turning observability ids into fake security work.
+    """
+    if not isinstance(header_schema, dict):
+        return []
+    names: set[str] = set()
+    for raw_name in header_schema:
+        name = str(raw_name).strip().lower()
+        if (
+            not name
+            or name in _COMMODITY_TRUST_HEADERS
+            or any(token in name for token in _HEADER_NOISE_TOKENS)
+        ):
+            continue
+        if any(token in name for token in _IDENTITY_HEADER_TOKENS):
+            names.add(name)
+    return sorted(names)
 
 
 def _slot_class(input_slot: str | None) -> str:
@@ -1170,6 +1239,78 @@ def list_coverage_items(
         ).fetchall()
     return [dict(row) for row in rows]
 
+def _pending_work_item_ids_for_coverage_item(
+    connection, engagement_id: int, coverage_item_id: int
+) -> list[int]:
+    """Ids of still-actionable work-items FK-linked to a coverage-item (1b drain).
+
+    The default FK-derived drain target. An ingested observation links its work
+    item to the deterministic endpoint-slot coverage item
+    (``work_buffer._pick_coverage_item_id``), so a covering probe carrying that
+    ``coverage_item_id`` drains exactly the buffered work it satisfies. Only
+    ``pending``/``processing`` rows are returned — a ``done``/``skipped``/``error``
+    row is already terminal and re-draining it would inflate ``affected`` with no
+    state change.
+    """
+    rows = connection.execute(
+        "SELECT id FROM assessment_work_items "
+        "WHERE engagement_id = ? AND coverage_item_id = ? "
+        "AND status IN ('pending', 'processing')",
+        (engagement_id, coverage_item_id),
+    ).fetchall()
+    return [int(r["id"]) for r in rows]
+
+
+def _advance_surfaces_for_request_variant(
+    connection,
+    engagement_id: int,
+    request_variant_id: int,
+    *,
+    attack_family: str,
+    result_status: str,
+    notes: str,
+) -> list[dict[str, Any]]:
+    """Advance every DISCOVERED surface FK-linked to a request variant to
+    ``partially-covered`` (1b default surface advance).
+
+    Surfaces are linked to request variants through
+    ``surface_request_variant_links`` (``work-buffer link-surface`` / ingest
+    auto-linking). A covering probe carrying the variant id advances each surface
+    still in the seed ``discovered`` state — a single probe partially covers, so
+    ``partially-covered`` + a synthesized followup. A surface already resolved by
+    a HUMAN verdict (``covered`` / ``not_applicable`` / ``deferred``) or already
+    ``partially-covered`` is LEFT UNTOUCHED, so the default cascade can never
+    regress a deliberate verdict (surface→``covered`` stays a rationale-bearing
+    human decision, ADR 0001 d3).
+    """
+    link_rows = connection.execute(
+        "SELECT DISTINCT link.surface_id AS surface_id, surfaces.status AS status "
+        "FROM surface_request_variant_links AS link "
+        "JOIN assessment_surfaces AS surfaces ON surfaces.id = link.surface_id "
+        "WHERE link.engagement_id = ? AND link.request_variant_id = ?",
+        (engagement_id, request_variant_id),
+    ).fetchall()
+    rationale = notes.strip() or f"probe recorded: {attack_family} {result_status}"
+    followup = (
+        f"partially covered by a {attack_family} probe ({result_status}); "
+        "remaining vuln families for this surface still need coverage"
+    )
+    advanced: list[dict[str, Any]] = []
+    for row in link_rows:
+        if str(row["status"] or "") != "discovered":
+            continue
+        advanced.append(
+            update_surface(
+                engagement_id,
+                int(row["surface_id"]),
+                status_value="partially-covered",
+                rationale=rationale,
+                followup_condition=followup,
+            )
+        )
+    return advanced
+
+
 def record_probe_run(
     engagement_id: int,
     *,
@@ -1195,6 +1336,7 @@ def record_probe_run(
     finding_id: int | None = None,
     work_item_ids: list[int] | None = None,
     resolve_surface_id: int | None = None,
+    no_drain: bool = False,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
@@ -1222,19 +1364,46 @@ def record_probe_run(
             lens=lens,
             finding_id=finding_id,
         )
-        # A3: drain the work buffer in the SAME transaction as the probe insert.
-        # ``get_connection`` is re-entrant and commits only at the outermost
-        # depth, so the nested ``mark_work_items_done`` reuses this connection and
-        # its writes commit atomically with the probe. Unknown ids are silently
-        # skipped (mirrors POST /work-items/done), so a stale id never rolls back
-        # the probe write; the ``affected`` count surfaces a short drain.
+        # 1b — DEFAULT-ON FK-derived cascade (the coverage-state write-unification
+        # fix). A covering probe (normalized ``result_status`` in
+        # PROBE_RESULT_STATUSES_COVERING) that carries a coverage-item / request-
+        # variant link BY DEFAULT (a) drains the work-items linked to that
+        # coverage-item and (b) advances the mapped surface(s) to
+        # ``partially-covered`` — the SAME writes the former opt-in path did, made
+        # the default so the write-side ledgers (work_items.status, surfaces.status)
+        # stop disagreeing with the probe-derived truth the depth ledger already
+        # computes. ``get_connection`` is re-entrant and commits at the outermost
+        # depth, so the nested drains/advances commit atomically with the probe.
+        #
+        # Gate + valves (hard invariants):
+        #   * COVERING-GATED: a non-covering attempt (attempted/blocked/no-signal/
+        #     error) never auto-cascades — only whitelisted tested/signal counts;
+        #     ``status="completed"`` alone never counts.
+        #   * ``no_drain`` suppresses the whole default cascade.
+        #   * EXPLICIT ``work_item_ids`` / ``resolve_surface_id`` OVERRIDE the
+        #     derivation (narrow to those exact ids) and fire regardless of the
+        #     covering gate — an operator can always drain/advance explicitly.
+        #   * coverage_items.status is NEVER auto-promoted, and the surface advance
+        #     only touches ``discovered`` surfaces (no regression of a human
+        #     covered/not_applicable/deferred verdict).
+        #
+        # Unknown work-item ids are silently skipped (mirrors POST /work-items/done)
+        # so a stale id never rolls the probe write back; the ``affected`` count
+        # surfaces a short drain.
+        covering = str(record.get("result_status") or "") in PROBE_RESULT_STATUSES_COVERING
+
+        drain_ids: list[int] = []
         if work_item_ids:
-            record["work_items_done"] = mark_work_items_done(engagement.id, work_item_ids)
-        # A3 (opt-in): advance a mapped surface only on an explicit id — recording
-        # never auto-mutates surface state. A single probe partially covers, so the
-        # surface goes to ``partially-covered`` with a synthesized followup. A bad
-        # surface id 404s and rolls the whole txn back; the probe upsert is
-        # idempotent on its probe_key, so a corrected re-run is safe.
+            drain_ids = [int(x) for x in work_item_ids]
+        elif covering and not no_drain and coverage_item_id is not None:
+            drain_ids = _pending_work_item_ids_for_coverage_item(
+                connection, engagement.id, int(coverage_item_id)
+            )
+        if drain_ids:
+            record["work_items_done"] = mark_work_items_done(engagement.id, drain_ids)
+
+        # A bad explicit surface id 404s and rolls the whole txn back; the probe
+        # upsert is idempotent on its probe_key, so a corrected re-run is safe.
         if resolve_surface_id is not None:
             record["surface_resolved"] = update_surface(
                 engagement.id,
@@ -1246,6 +1415,17 @@ def record_probe_run(
                     "remaining vuln families for this surface still need coverage"
                 ),
             )
+        elif covering and not no_drain and request_variant_id is not None:
+            advanced = _advance_surfaces_for_request_variant(
+                connection,
+                engagement.id,
+                int(request_variant_id),
+                attack_family=attack_family,
+                result_status=str(record.get("result_status") or ""),
+                notes=notes,
+            )
+            if advanced:
+                record["surfaces_advanced"] = advanced
         return record
 
 def list_probe_runs(
@@ -2845,6 +3025,14 @@ def update_coverage_item_status(
         ).fetchone()
         if row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="coverage item not found")
+        if (
+            normalized_status == CoverageStatus.COVERED
+            and str(row["input_slot"]).startswith("header:")
+            and str(row["attack_family"]) == "identity-header-review"
+        ):
+            _require_identity_header_write_coverage(
+                connection, engagement.id, dict(row)
+            )
         connection.execute(
             "UPDATE assessment_coverage_items SET status = ?, notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND engagement_id = ?",
             (normalized_status, _common._append_notes(row["notes"], notes), coverage_item_id, engagement.id),
@@ -2856,6 +3044,81 @@ def update_coverage_item_status(
         ).fetchone()
     assert updated is not None
     return dict(updated)
+
+
+_STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _require_identity_header_write_coverage(
+    connection, engagement_id: int, coverage_item: dict[str, Any]
+) -> None:
+    """Refuse a false 'covered' verdict without cross-principal WRITE evidence."""
+    variant_id = coverage_item.get("request_variant_id")
+    variant = connection.execute(
+        "SELECT scheme, host, port, normalized_path, method FROM assessment_request_variants "
+        "WHERE id = ? AND engagement_id = ?",
+        (variant_id, engagement_id),
+    ).fetchone()
+    if variant is None or str(variant["method"]).upper() not in _STATE_CHANGING_METHODS:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "identity-header coverage requires a WRITE request variant "
+                "(POST/PUT/PATCH/DELETE) before it can be marked covered"
+            ),
+        )
+    placeholders = ",".join("?" for _ in PROBE_RESULT_STATUSES_COVERING)
+    # Count only DURABLE principals: distinct non-empty ``principal_id`` values.
+    # Cookie-only / legacy / manual identities carry an empty principal_id; falling
+    # back to identity_name would let two sessions (or re-logins) for the SAME
+    # account count as two principals and falsely satisfy the cross-principal WRITE
+    # gate. An unanchored identity contributes nothing until a durable principal is
+    # established (JWT capture or an operator-set principal_id).
+    principal_count = int(
+        connection.execute(
+            f"""
+            SELECT COUNT(DISTINCT NULLIF(trim(credentials.principal_id), ''))
+              FROM assessment_probe_runs pr
+              JOIN assessment_request_variants rv
+                ON rv.id = pr.request_variant_id
+               AND rv.engagement_id = pr.engagement_id
+              JOIN assessment_coverage_items ci
+                ON ci.engagement_id = pr.engagement_id
+               AND ci.request_variant_id = pr.request_variant_id
+               AND ci.input_slot = pr.input_slot
+               AND ci.attack_family = pr.attack_family
+              LEFT JOIN engagement_credentials credentials
+                ON credentials.engagement_id = pr.engagement_id
+               AND credentials.identity_name = pr.auth_context
+             WHERE pr.engagement_id = ?
+               AND rv.scheme = ? AND rv.host = ? AND rv.port = ?
+               AND rv.normalized_path = ? AND rv.method = ?
+               AND pr.input_slot = ?
+               AND pr.attack_family = 'identity-header-review'
+               AND pr.result_status IN ({placeholders})
+               AND pr.auth_context NOT IN ('', 'anonymous')
+               AND pr.evidence_ref != ''
+            """,
+            (
+                engagement_id,
+                variant["scheme"],
+                variant["host"],
+                variant["port"],
+                variant["normalized_path"],
+                variant["method"],
+                coverage_item["input_slot"],
+                *sorted(PROBE_RESULT_STATUSES_COVERING),
+            ),
+        ).fetchone()[0]
+    )
+    if principal_count < 2:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "identity-header coverage requires evidence-backed WRITE probes "
+                "from two distinct principals"
+            ),
+        )
 
 _VENDOR_SAAS_HOST_SUFFIXES: list[tuple[str, str]] = [
     # Mirror of agent/scripts/assess/lib/scope.py:_VENDOR_SAAS_SUFFIXES so the

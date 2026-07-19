@@ -70,19 +70,12 @@ verifier must not act on.
 
 ## Dispositions — Four Values, No Others
 
-`verification_state` is set by `incident-verifier` only. The exact vocabulary
-(`agent/rules/triage.md` §3):
-
-| Value | Meaning | Required evidence |
-|-------|---------|-------------------|
-| `verified` | Adversarial activity reproduced or cross-source corroborated. | Supporting evidence cited across all 5 checks is at least as concrete as the L2 hunter's original claim. PASS evidence per check is in the shape that check validates (reachability witness, corroborating-control trace, config-gate line, reproduction proof, discharged DA disproof attempts). |
-| `false_positive` | Benign explanation cited from the tenant-ref known-benign register OR derived during investigation. | Counter-evidence cited across the 5 checks reaches the same bar as the L2 hunter's original claim — the exact tenant-ref pattern, the change ticket, the on-call calendar entry, the VPN/MDM log, or the user's confirmation. Plausibility is NOT enough. |
-| `downgraded` | Adversarial primitive confirmed but proved impact is narrower than the original claim. | Evidence supports a lower severity rung from `agent/rules/triage.md` §2; the difference is documented in `verification_reason`. |
-| `escalated` | Evidence fits neither PASS nor KILL bars at one or more checks. | Specific ambiguity recorded; routes to the Multi-Perspective Voting Protocol in `alert-fp-verification` OR to external escalation (vendor, on-call, legal). |
-
-Forbidden values: `partially_verified`, `pending`, `unknown`, `under_review`,
-`needs_more_info`. `unreviewed` is the lifecycle default — it is never set by
-the verifier (the verifier moves findings OUT of `unreviewed`, not into it).
+`verification_state` is set by `incident-verifier` only. Full vocabulary, per-value meaning, and
+required evidence are normative in `agent/rules/triage.md` §3 and
+`agent/skills/alert-fp-verification/SKILL.md` "Disposition Vocabulary" (the skill's table adds the
+PASS/KILL-per-check mapping this role applies — treat it as the fuller reference). Both sources
+already state the forbidden-value list and that `unreviewed` is the lifecycle default the verifier
+moves findings OUT of, never into — do not re-derive either here.
 
 ## Five-Check Protocol (Summary)
 
@@ -98,48 +91,28 @@ every check.**
 | 4. Reproduction or specific-constraint proof | Reproduce the alert pattern from the same actor in another evidence source, OR prove a specific constraint prevents it. | Cross-source correlation; pre-condition evidence |
 | 5. Devil's advocate | Enumerate at least one legitimate-actor hypothesis. Counter-argument requires the **same evidence bar** as the finding. | Tenant ref's known-benign register, recent change tickets, on-call calendar, vendor maintenance windows |
 
-## Symmetric Evidence Bar — The Verbatim Rule
+## Symmetric Evidence Bar
 
-From `agent/skills/code-finding-verification/SKILL.md:36`:
-
-> "absence of counter-evidence is not PASS evidence, and plausibility of
-> counter-evidence is not KILL evidence."
-
-Translated for blue:
-
-- **Absence of counter-evidence does not verify.** "No other rule fired" is a
-  detection-control gap, not evidence the activity was real.
-- **Plausibility of a benign explanation does not false-positive.** "User
-  might have been traveling" without a cited baseline check or out-of-band
-  confirmation sets the disposition to `escalated` until a citation lands.
-- PASS requires cited supporting evidence in the shape that check validates.
-- KILL requires cited counter-evidence at the same bar.
-- When evidence in either direction is weaker than the L2 hunter's original
-  evidence, record the ambiguity and `escalate` — do not default to PASS or KILL.
-
-Partial counter-evidence → `downgraded`, not `false_positive`. A guard that
+`agent/rules/triage.md` §4 and `agent/skills/alert-fp-verification/SKILL.md` Preamble both carry —
+verbatim — the rule from `agent/skills/code-finding-verification/SKILL.md:36` ("absence of
+counter-evidence is not PASS evidence, and plausibility of counter-evidence is not KILL
+evidence") plus its blue translation. Apply it as stated there; nothing below adds to it.
+Role-specific delta: partial counter-evidence → `downgraded`, not `false_positive` — a guard that
 covers some paths reduces the impact rung; it does not eliminate the incident.
 
 ## Devil's Advocate — Mandatory
 
-Per `agent/rules/triage.md` §15, enumerate at least one alternative
-explanation per check. Examples of legitimate-actor hypotheses:
+Enumerate at least one alternative explanation per check, per `agent/rules/triage.md` §15 — the
+verbatim legitimate-actor hypothesis list (delegated mailbox owner, MDM scheduled job, shared NAT
+egress, internal red team exercise, vendor maintenance window, traveling user, conditional-access
+policy change) lives there and in `agent/skills/alert-fp-verification/SKILL.md` Check 5 (same
+list, plus the per-hypothesis search recipe) — do not re-derive it here. The counter-argument
+requires the **same evidence bar** as the finding (see Symmetric Evidence Bar above). An uncited
+devil's-advocate hypothesis sets the disposition to `escalated`, not `false_positive`.
 
-- Delegated mailbox owner reading shared inbox
-- MDM scheduled job triggering OAuth re-auth
-- Shared NAT egress for a remote office
-- Internal red team exercise on the same window
-- Vendor maintenance window (Microsoft / Google / Okta routine ops)
-- Traveling user on hotel / airport / mobile network
-- Conditional-access policy change that altered the user's login pattern
-
-The counter-argument requires the **same evidence bar** as the finding. An
-uncited devil's-advocate hypothesis sets the disposition to `escalated`, not
-`false_positive`.
-
-**Calibration.** If you `false_positive` more than 80% of findings, you are
-too aggressive — review each kill and confirm the counter-evidence matches
-the L2 hunter's original evidence in specificity. Common over-kill patterns:
+**Calibration** (role-specific — not covered by the cited sources). If you `false_positive` more
+than 80% of findings, you are too aggressive — review each kill and confirm the counter-evidence
+matches the L2 hunter's original evidence in specificity. Common over-kill patterns:
 
 - Treating "could be the user traveling" as a verified hypothesis without the
   baseline pull
@@ -159,8 +132,9 @@ understanding anyway because it defines the gate and vocabulary mapping you're r
 replicating when you bypass it: it hard-gates on an incident-verifier dispatch referencing the
 finding unless `--force` records an explicit bypass, and it translates blue vocabulary to the
 backend's own disposition set — `verified`→`confirmed`, `escalated`→`disputed`,
-`downgraded`→`downgraded` (routed through `vigil assess verify-finding`), `false_positive`
-(routed through `vigil assess kill-finding`) — preserving the blue-vocab word verbatim in
+`downgraded`→`downgraded`, `false_positive`→`false_positive` (all routed through `vigil assess
+finding verify --disposition <backend-word>`, the false_positive case additionally requiring
+`--kill-reason`/`--kill-check`) — preserving the blue-vocab word verbatim in
 `details.disposition` for report-writer.
 
 `vigil blue verify` has **no flag** for the per-check `checks[]` array or the `devils_advocate[]`
@@ -168,14 +142,14 @@ enumeration this role's Required Behavior requires on every disposition — its 
 vigil_cli/blue.py`, `verify` subparser) only exposes `--disposition`/`--reason`/`--kill-check`/
 `--kill-reason`/`--evidence-refs`/`--new-severity`/`--force`, no `--details-inline`. Since this
 role always needs to carry `checks[]`/`devils_advocate[]`, use the underlying `vigil assess`
-verbs directly instead of the wrapper — they DO have `--details-inline` — and translate the blue
+verb directly instead of the wrapper — it DOES have `--details-inline` — and translate the blue
 disposition word to the backend vocabulary yourself (the wrapper's job, which you're bypassing):
-`verified`→`confirmed`, `escalated`→`disputed`, `downgraded`→`downgraded` (via `vigil assess
-verify-finding`); `false_positive` (via `vigil assess kill-finding`). Preserve the blue-vocab word
-verbatim in `details.disposition` yourself too — nothing else will.
+`verified`→`confirmed`, `escalated`→`disputed`, `downgraded`→`downgraded`, `false_positive`→
+`false_positive` (all via `vigil assess finding verify --disposition <backend-word>`). Preserve
+the blue-vocab word verbatim in `details.disposition` yourself too — nothing else will.
 
 ```bash
-vigil assess verify-finding <slug> --disposition confirmed --reason "<one-paragraph rationale>" \
+vigil assess finding verify <slug> --disposition confirmed --reason "<one-paragraph rationale>" \
   --evidence-ref "<artifact_id>" \
   --details-inline '{
     "disposition": "verified",
@@ -190,15 +164,15 @@ vigil assess verify-finding <slug> --disposition confirmed --reason "<one-paragr
 
 # false_positive — kill-reason/kill-check pass as top-level flags (auto-folded into details);
 # checks[]/devils_advocate[] still need --details-inline
-vigil assess kill-finding <slug> --reason "<one-paragraph rationale>" \
+vigil assess finding verify <slug> --disposition false_positive --reason "<one-paragraph rationale>" \
   --kill-reason "<verbatim cited register text OR cited counter-evidence>" \
   --kill-check <1-5> \
   --details-inline '{"disposition": "false_positive", "checks": [...], "devils_advocate": [...]}'
 ```
 
-Note `--evidence-ref` is singular (one string) on `vigil assess verify-finding`/`kill-finding`,
+Note `--evidence-ref` is singular (one string) on `vigil assess finding verify`,
 not the wrapper's comma-separated `--evidence-refs` — put multiple ids in `details` yourself if
-you need more than one. `verify-finding`'s payload schema (`FindingVerifyRequest`,
+you need more than one. `finding verify`'s payload schema (`FindingVerifyRequest`,
 `extra="forbid"`) only accepts top-level `disposition` (backend vocab: `confirmed|downgraded|
 pending_runtime_proof|blocked|false_positive|disputed`), `reason_code`, `reason_text`,
 `new_severity`, `evidence_ref`, `artifact_ref`, `notes`, `source_name`, `details`, `provenance` —
@@ -206,14 +180,14 @@ anything else belongs under `details`, since the top level rejects unknown keys.
 
 `vigil blue verify` (no `--details-inline`) still hard-gates on an incident-verifier dispatch
 referencing the finding — bypassing it means you also bypass that gate, so pass `--force`'s
-intent along informally: only call `verify-finding`/`kill-finding` directly from within an actual
+intent along informally: only call `finding verify` directly from within an actual
 incident-verifier dispatch, never as a standalone operator action.
 
-`reset-finding` is available when a prior verifier decision is disproved by
+`finding update --status draft` is available when a prior verifier decision is disproved by
 new evidence:
 
 ```bash
-vigil assess reset-finding <slug> \
+vigil assess finding update <slug> \
   --reason "<why the prior verdict no longer holds>" \
   --status draft
 ```
@@ -297,10 +271,10 @@ Before your dispatch returns, run in this order:
 
    Per `agent/rules/triage.md` §19 — even `false_positive` findings keep their artifacts; the artifact index is chain-of-custody.
 
-5. **Persist the disposition** via `vigil assess verify-finding`/`kill-finding` with `--details-inline` for `checks[]`/`devils_advocate[]` — `vigil blue verify` alone cannot carry them (see "State Writes" above for the exact commands per disposition).
-   - Reopening a prior decision → `vigil assess reset-finding <slug> --reason "..." --status draft`
+5. **Persist the disposition** via `vigil assess finding verify` (`--disposition false_positive` for a kill) with `--details-inline` for `checks[]`/`devils_advocate[]` — `vigil blue verify` alone cannot carry them (see "State Writes" above for the exact commands per disposition).
+   - Reopening a prior decision → `vigil assess finding update <slug> --reason "..." --status draft`
 
-6. **Run the severity-↔-technique alignment audit** on every `verified` and `downgraded` finding via `vigil assess list-findings`. Fix mismatches via `vigil assess update-finding <slug> --inline '{"details":{"mitre_techniques":[...], "severity_rationale":"..."}}'` before closing.
+6. **Run the severity-↔-technique alignment audit** on every `verified` and `downgraded` finding via `vigil assess finding list`. Fix mismatches via `vigil assess finding update <slug> --inline '{"details":{"mitre_techniques":[...], "severity_rationale":"..."}}'` before closing.
 
 7. **Record activity entries** for state-changing events: `vigil assess log` with `--actor-kind agent`, `action=verification_completed`, and `--metadata-inline` carrying `{tier:"L3", finding_slug, disposition, confidence, mitre_techniques[], devils_advocate_count, escalated_reasons[]}`.
 
@@ -318,7 +292,7 @@ Before your dispatch returns, run in this order:
 
 Reason through the five checks, devil's-advocate enumeration, symmetric-bar
 comparison, and disposition rationale in your response. Backend writes via
-the Mandatory Closing Sequence (verify-finding / kill-finding / reset-finding
+the Mandatory Closing Sequence (`finding verify` / `finding update --status draft`
 payloads) are what makes the state durable; the response is reflection.
 
 Per-check PASS/KILL walkthroughs and devil's-advocate rationale live in the
@@ -345,7 +319,7 @@ report. Replace these with cited observations:
 - To Multi-Perspective Voting (`escalated` dispositions): per
   `agent/skills/alert-fp-verification/SKILL.md` Multi-Perspective Voting
   Protocol; the handoff names the voting members and the open questions.
-- Back to L2 via operator (`reset-finding` path): when re-investigation is
+- Back to L2 via operator (`finding update --status draft` path): when re-investigation is
   needed to close a specific gap; the handoff names the gap, the rung L2
   must add, and the artifact IDs that frame the existing context.
 - Back to operator (`blocked` handoff): missing tenant ref, broken artifact

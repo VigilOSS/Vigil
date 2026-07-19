@@ -142,7 +142,7 @@ vigil assess kali exec --technique OSINT --intent "Filter commit-author emails t
 The dominant pattern (e.g. `FirstName.LastName@<corp>.com`,
 `flastname@<corp>.com`, `firstname_lastname@<corp>.com`) is the corporate
 email convention. Confirming it gives osint-analyst a high-confidence input
-for `vigil assess record-intel email` and feeds password-spray candidate
+for `vigil assess intel record email` and feeds password-spray candidate
 lists in later phases.
 
 ## 4. Cross-search Public Code for Discovered Org Names
@@ -192,13 +192,13 @@ references back to the target's infrastructure before recording findings.
 Translate the discovered orgs, emails, and developer names into structured
 intel writes:
 
-- Each org → `vigil assess record-intel org-fact <json-file>`
-- Each confirmed email → `vigil assess record-intel email <json-file>`
-- Each named developer → `vigil assess record-intel person <json-file>`
+- Each org → `vigil assess intel record org-fact <json-file>`
+- Each confirmed email → `vigil assess intel record email <json-file>`
+- Each named developer → `vigil assess intel record person <json-file>`
 - Free-form prose context (e.g. "contractor X manages target Y's deployment
-  pipeline based on repo Z") → `vigil assess record-intel note <json-file>`
+  pipeline based on repo Z") → `vigil assess intel record note <json-file>`
 
-Run `vigil assess contract record-intel <type>` first to confirm field names
+Run `vigil assess contract intel record <type>` first to confirm field names
 before authoring the JSON; intel schemas reject guessed aliases.
 
 ## Rate-limit Etiquette

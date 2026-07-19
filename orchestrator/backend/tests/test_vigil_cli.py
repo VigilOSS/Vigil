@@ -784,6 +784,35 @@ def test_engagement_create_persists_header_and_rate_limit(
     assert scope["rate_limit"] == 5.0
 
 
+def test_engagement_create_persists_aggregate_rate_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import main as main_module
+
+    _isolate_orchestrator_url(monkeypatch)
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+
+    main_module.main(
+        [
+            "--root",
+            str(install_root),
+            "engagement",
+            "create",
+            "https://app.example.com",
+            "--hosts",
+            "app.example.com",
+            "--no-prompt",
+            "--aggregate-rate-limit",
+            "12.5",
+        ]
+    )
+
+    created_path = _created_path_from_stdout(capsys.readouterr().out)
+    scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
+    assert scope["rate_limit_aggregate_rps"] == 12.5
+
+
 def test_engagement_create_omits_rate_limit_when_unset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1891,10 +1920,49 @@ def test_orchestrator_health_wait_fails_closed(monkeypatch: pytest.MonkeyPatch) 
         raise OSError("down")
 
     monkeypatch.setattr(orchestrator_module.urllib.request, "urlopen", fail_urlopen)
+    ticks = iter([0.0, *map(float, range(1, 31))])
+    monkeypatch.setattr(orchestrator_module.time, "monotonic", lambda: next(ticks))
     monkeypatch.setattr(orchestrator_module.time, "sleep", lambda _: None)
 
     assert orchestrator_module._wait_for_health("127.0.0.1", 18000) is False
     assert attempts == ["http://127.0.0.1:18000/healthz"] * 30
+
+
+def test_orchestrator_health_wait_allows_cold_uv_environment_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vigil_cli import orchestrator as orchestrator_module
+
+    attempts = 0
+    now = 0.0
+
+    class HealthyResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    def delayed_urlopen(_url: str, timeout: int):
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 31:
+            raise OSError("backend environment is still building")
+        return HealthyResponse()
+
+    def monotonic() -> float:
+        nonlocal now
+        now += 0.1
+        return now
+
+    monkeypatch.setattr(orchestrator_module.urllib.request, "urlopen", delayed_urlopen)
+    monkeypatch.setattr(orchestrator_module.time, "monotonic", monotonic)
+    monkeypatch.setattr(orchestrator_module.time, "sleep", lambda _: None)
+
+    assert orchestrator_module._wait_for_health("127.0.0.1", 18000) is True
+    assert attempts == 32
 
 
 def test_orchestrator_start_terminates_child_when_health_times_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2196,12 +2264,18 @@ def test_main_assess_passthrough_execs_assess_script(tmp_path: Path, monkeypatch
     _copy_agent_fixture(repo_root / "agent", install_root)
     captured: dict[str, object] = {}
 
-    def fake_execv(path: str, argv: list[str]) -> None:
+    def fake_execvpe(path: str, argv: list[str], env: dict[str, str]) -> None:
         captured["path"] = path
         captured["argv"] = argv
+        captured["env"] = env
         raise SystemExit(0)
 
-    monkeypatch.setattr(main_module.os, "execv", fake_execv)
+    monkeypatch.setattr(
+        main_module,
+        "_oob_options",
+        lambda root: SimpleNamespace(oob_domain="configured.oob.test"),
+    )
+    monkeypatch.setattr(main_module.os, "execvpe", fake_execvpe)
 
     with pytest.raises(SystemExit) as excinfo:
         main_module.main(["--root", str(install_root), "assess", "--help"])
@@ -2209,18 +2283,7 @@ def test_main_assess_passthrough_execs_assess_script(tmp_path: Path, monkeypatch
     assert excinfo.value.code == 0
     assert captured["path"] == str(install_root / "agent" / "scripts" / "assess.py")
     assert captured["argv"] == [str(install_root / "agent" / "scripts" / "assess.py"), "--help"]
-
-
-def test_aith_mcp_subcommand_prints_deprecation_and_exits_two(capsys: pytest.CaptureFixture[str]) -> None:
-    from vigil_cli import main as main_module
-
-    with pytest.raises(SystemExit) as excinfo:
-        main_module.main(["mcp", "install", "both"])
-
-    assert excinfo.value.code == 2
-    err = capsys.readouterr().err
-    assert "removed in the typed-CLI cutover" in err
-    assert "vigil assess kali" in err
+    assert captured["env"]["VIGIL_OOB_DOMAIN"] == "configured.oob.test"
 
 
 def test_runtime_start_applies_resource_limits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2676,7 +2739,9 @@ def test_oob_status_json_reports_effective_domain(
     # (so scripts/agents gate on OOB readiness). The JSON payload is still printed
     # before the exit, which is what this test verifies.
     with pytest.raises(SystemExit):
-        main_module.main(["oob", "status", "--json"])
+        main_module.main(
+            ["--root", str(tmp_path / "install"), "oob", "status", "--json"]
+        )
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["state"] == "stopped"
@@ -3229,6 +3294,214 @@ def test_oob_start_renders_config_and_starts_idempotent_sessions(tmp_path: Path)
     assert "tmux new-session -d -s frpc" in rendered
 
 
+def test_oob_test_fails_when_public_dns_probe_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.oob import OobOptions, test_oob
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "vigil\n", "")
+        command = argv[-1]
+        if command.startswith("dig "):
+            return DockerResult(9, "", "connection timed out")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(
+        "vigil_cli.oob.mint_nonce", lambda **_: "vigil-test-deadbeef"
+    )
+    monkeypatch.setattr(
+        "vigil_cli.oob.list_running_oob_clients", lambda *_args, **_kwargs: ["probe"]
+    )
+    monkeypatch.setattr(
+        "vigil_cli.oob.client_payload_host",
+        lambda *_args, **_kwargs: "client-id.tenant.oob.example.test",
+    )
+    with pytest.raises(SystemExit, match="public DNS probe failed"):
+        test_oob(
+            OobOptions(
+                install_root=tmp_path,
+                oob_domain="tenant.oob.example.test",
+            ),
+            runner=runner,
+        )
+
+
+def test_oob_test_reports_bounded_dns_and_http_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.oob import OobOptions, test_oob
+
+    commands: list[str] = []
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "vigil\n", "")
+        command = argv[-1]
+        commands.append(command)
+        if command.startswith("dig "):
+            return DockerResult(0, "203.0.113.10\n", "")
+        if command.startswith("curl "):
+            return DockerResult(0, "200", "")
+        if command.startswith("grep "):
+            return DockerResult(
+                0,
+                "[vigil-test-cafebabe.client-id.tenant.oob.example.test] "
+                "Received HTTP interaction\n",
+                "",
+            )
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(
+        "vigil_cli.oob.mint_nonce", lambda **_: "vigil-test-cafebabe"
+    )
+    monkeypatch.setattr(
+        "vigil_cli.oob.list_running_oob_clients", lambda *_args, **_kwargs: ["probe"]
+    )
+    monkeypatch.setattr(
+        "vigil_cli.oob.client_payload_host",
+        lambda *_args, **_kwargs: "client-id.tenant.oob.example.test",
+    )
+    test_oob(
+        OobOptions(
+            install_root=tmp_path,
+            oob_domain="tenant.oob.example.test",
+        ),
+        runner=runner,
+    )
+
+    assert capsys.readouterr().out == (
+        "oob test\tok\tdomain=tenant.oob.example.test"
+        "\tmarker=vigil-test-cafebabe\tdns=203.0.113.10\thttp=200\n"
+    )
+    assert len(commands) == 3
+    assert all(
+        "vigil-test-cafebabe.client-id.tenant.oob.example.test" in command
+        for command in commands[:2]
+    )
+    assert "vigil-test-cafebabe" in commands[2]
+    assert all("tail " not in command for command in commands)
+
+
+def test_oob_test_fails_when_public_http_probe_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.oob import OobOptions, test_oob
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "vigil\n", "")
+        command = argv[-1]
+        if command.startswith("dig "):
+            return DockerResult(0, "203.0.113.10\n", "")
+        if command.startswith("curl "):
+            return DockerResult(28, "000", "operation timed out")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(
+        "vigil_cli.oob.mint_nonce", lambda **_: "vigil-test-bad0cafe"
+    )
+    monkeypatch.setattr(
+        "vigil_cli.oob.list_running_oob_clients", lambda *_args, **_kwargs: ["probe"]
+    )
+    monkeypatch.setattr(
+        "vigil_cli.oob.client_payload_host",
+        lambda *_args, **_kwargs: "client-id.tenant.oob.example.test",
+    )
+    with pytest.raises(SystemExit, match="public HTTP probe failed"):
+        test_oob(
+            OobOptions(
+                install_root=tmp_path,
+                oob_domain="tenant.oob.example.test",
+            ),
+            runner=runner,
+        )
+
+
+def test_oob_test_fails_when_callback_does_not_reach_client_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.oob import OobOptions, test_oob
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "vigil\n", "")
+        command = argv[-1]
+        if command.startswith("dig "):
+            return DockerResult(0, "203.0.113.10\n", "")
+        if command.startswith("curl "):
+            return DockerResult(0, "200", "")
+        if command.startswith("grep "):
+            return DockerResult(1, "", "")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monotonic = iter((0.0, 0.0, 11.0))
+    monkeypatch.setattr("vigil_cli.oob.time.monotonic", lambda: next(monotonic))
+    monkeypatch.setattr("vigil_cli.oob.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "vigil_cli.oob.mint_nonce", lambda **_: "vigil-test-nointeraction"
+    )
+    monkeypatch.setattr(
+        "vigil_cli.oob.list_running_oob_clients", lambda *_args, **_kwargs: ["probe"]
+    )
+    monkeypatch.setattr(
+        "vigil_cli.oob.client_payload_host",
+        lambda *_args, **_kwargs: "client-id.tenant.oob.example.test",
+    )
+
+    with pytest.raises(SystemExit, match="callback was not observed"):
+        test_oob(
+            OobOptions(
+                install_root=tmp_path,
+                oob_domain="tenant.oob.example.test",
+            ),
+            runner=runner,
+        )
+
+
+def test_oob_test_rejects_http_redirects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.oob import OobOptions, test_oob
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "vigil\n", "")
+        command = argv[-1]
+        if command.startswith("dig "):
+            return DockerResult(0, "203.0.113.10\n", "")
+        if command.startswith("curl "):
+            return DockerResult(0, "308", "")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(
+        "vigil_cli.oob.mint_nonce", lambda **_: "vigil-test-redirect"
+    )
+    monkeypatch.setattr(
+        "vigil_cli.oob.list_running_oob_clients", lambda *_args, **_kwargs: ["probe"]
+    )
+    monkeypatch.setattr(
+        "vigil_cli.oob.client_payload_host",
+        lambda *_args, **_kwargs: "client-id.tenant.oob.example.test",
+    )
+
+    with pytest.raises(SystemExit, match="public HTTP probe failed"):
+        test_oob(
+            OobOptions(
+                install_root=tmp_path,
+                oob_domain="tenant.oob.example.test",
+            ),
+            runner=runner,
+        )
+
+
 def test_oob_start_post_flight_detects_frpc_conflict(tmp_path: Path) -> None:
     from vigil_cli.docker import DockerResult
     from vigil_cli.oob import OobOptions, start_oob
@@ -3411,11 +3684,22 @@ def test_oob_client_start_uses_session_file_for_domain_resume(tmp_path: Path) ->
     from vigil_cli.oob import OobOptions, start_oob_client
 
     commands: list[list[str]] = []
+    runtime_route = json.dumps(
+        {
+            "version": 1,
+            "tenant_prefix": "legacy",
+            "oob_domain": "oob.example.test",
+            "dns_remote_port": 53,
+            "reverse_remote_port": 8443,
+        }
+    )
 
     def runner(argv: list[str], **_: object) -> DockerResult:
         commands.append(argv)
         if argv[:3] == ["docker", "ps", "--format"]:
             return DockerResult(0, "vigil\n", "")
+        if argv[-1].startswith("cat ") and "active-tenant-routing.json" in argv[-1]:
+            return DockerResult(0, runtime_route, "")
         if argv[:3] == ["docker", "exec", "vigil"] and "tmux has-session -t oob-client-demo" in argv[-1] and "tmux new-session" not in argv[-1]:
             return DockerResult(1, "", "")
         return DockerResult(0, "", "")
@@ -3442,14 +3726,20 @@ def test_up_skips_oob_when_existing_sessions_are_active(tmp_path: Path, monkeypa
 
     monkeypatch.setattr(up_module, "image_outdated", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module, "_runtime_image_drift", lambda *args, **kwargs: False)
-    monkeypatch.setattr(up_module, "_proxy_image_drift", lambda *args, **kwargs: False)
+    monkeypatch.setattr(up_module, "proxy_image_drift", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: True)
     monkeypatch.setattr(up_module, "start_runtime", lambda *args, **kwargs: calls.append("runtime"))
     monkeypatch.setattr(up_module, "start_proxy", lambda *args, **kwargs: calls.append("mitmproxy"))
     monkeypatch.setattr(
         up_module,
         "oob_status",
-        lambda *a, **k: {"state": "partial", "server": False, "frpc": True, "clients": ["demo"]},
+        lambda *a, **k: {
+            "state": "partial",
+            "server": False,
+            "frpc": True,
+            "clients": ["demo"],
+            "route_matches": True,
+        },
     )
     monkeypatch.setattr(up_module, "start_oob", lambda *args, **kwargs: calls.append("oob"))
     monkeypatch.setattr(up_module, "start_orchestrator", lambda *args, **kwargs: calls.append("orchestrator"))
@@ -3466,7 +3756,7 @@ def test_up_starts_oob_when_only_client_sessions_exist(tmp_path: Path, monkeypat
 
     monkeypatch.setattr(up_module, "image_outdated", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module, "_runtime_image_drift", lambda *args, **kwargs: False)
-    monkeypatch.setattr(up_module, "_proxy_image_drift", lambda *args, **kwargs: False)
+    monkeypatch.setattr(up_module, "proxy_image_drift", lambda *args, **kwargs: False)
     monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: True)
     monkeypatch.setattr(up_module, "start_runtime", lambda *args, **kwargs: calls.append("runtime"))
     monkeypatch.setattr(up_module, "start_orchestrator", lambda *args, **kwargs: calls.append("orchestrator"))
@@ -3673,8 +3963,8 @@ def test_proxy_image_drift_true_when_container_predates_image() -> None:
         return DockerResult(0, "", "")
 
     assert image_freshness.proxy_image_drift(runner=runner) is True
-    # up.py's thin wrapper single-sources the same verdict.
-    assert up_module._proxy_image_drift(runner=runner) is True
+    # up.py imports and calls the shared function directly (no thin wrapper).
+    assert up_module.proxy_image_drift(runner=runner) is True
 
 
 def test_proxy_image_drift_false_when_ids_match() -> None:
@@ -3715,7 +4005,7 @@ def test_up_warns_when_proxy_container_predates_image(
     monkeypatch.setattr(up_module, "install_from_source", lambda *a, **k: None)
     monkeypatch.setattr(up_module, "image_outdated", lambda *a, **k: False)
     monkeypatch.setattr(up_module, "_runtime_image_drift", lambda *a, **k: False)
-    monkeypatch.setattr(up_module, "_proxy_image_drift", lambda **k: True)
+    monkeypatch.setattr(up_module, "proxy_image_drift", lambda **k: True)
     monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: True)
     monkeypatch.setattr(up_module, "start_runtime", lambda *a, **k: calls.append("runtime"))
     monkeypatch.setattr(up_module, "start_proxy", lambda *a, **k: calls.append("mitmproxy"))
@@ -3888,10 +4178,10 @@ class _FakeWorkBufferClient:
 
 
 def test_resolve_surface_requires_rationale(capsys: pytest.CaptureFixture[str]) -> None:
-    """P1 #2: --rationale is required so the audit trail is never empty."""
+    """P1 #2: --rationale is required so the audit trail is never empty (merged `resolve`)."""
     assess_main = _load_assess_main()
     with pytest.raises(SystemExit):
-        assess_main(["resolve-surface", "1", "--status", "covered"])
+        assess_main(["resolve", "surface", "1", "--status", "covered"])
     err = capsys.readouterr().err
     assert "--rationale" in err
 
@@ -3899,19 +4189,19 @@ def test_resolve_surface_requires_rationale(capsys: pytest.CaptureFixture[str]) 
 def test_resolve_surface_rejects_empty_rationale(capsys: pytest.CaptureFixture[str]) -> None:
     """P1 #2: --rationale='' surfaces an early error before HTTP."""
     assess_main = _load_assess_main()
-    with pytest.raises(SystemExit) as exc:
-        assess_main(["resolve-surface", "1", "--status", "covered", "--rationale", "   "])
-    assert "--rationale must be non-empty" in (str(exc.value) or "")
-
-
-def test_resolve_surface_lowercases_status(capsys: pytest.CaptureFixture[str]) -> None:
-    """P3 #1: --status is case-insensitive and rejected by argparse choices when invalid."""
-    assess_main = _load_assess_main()
-    # Mixed-case input parses to lowercase via type=lambda.
     with pytest.raises(SystemExit):
-        assess_main(["resolve-surface", "1", "--status", "BOGUS", "--rationale", "x"])
+        assess_main(["resolve", "surface", "1", "--status", "covered", "--rationale", "   "])
+    assert "--rationale must be non-empty" in capsys.readouterr().err
+
+
+def test_resolve_surface_rejects_invalid_status(capsys: pytest.CaptureFixture[str]) -> None:
+    """P3 #1: an out-of-vocab --status is rejected in run() with a scoped error + pointer."""
+    assess_main = _load_assess_main()
+    with pytest.raises(SystemExit):
+        assess_main(["resolve", "surface", "1", "--status", "BOGUS", "--rationale", "x"])
     err = capsys.readouterr().err
-    assert "invalid choice" in err.lower() or "invalid choice" in str(err)
+    assert "invalid status" in err
+    assert "See: vigil assess contract resolve" in err
 
 
 def test_resolve_surface_partially_covered_requires_followup_condition(
@@ -3919,10 +4209,11 @@ def test_resolve_surface_partially_covered_requires_followup_condition(
 ) -> None:
     """N7 — `--status partially-covered` without `--followup-condition` exits with a clear error."""
     assess_main = _load_assess_main()
-    with pytest.raises(SystemExit) as exc:
+    with pytest.raises(SystemExit):
         assess_main(
             [
-                "resolve-surface",
+                "resolve",
+                "surface",
                 "1",
                 "--status",
                 "partially-covered",
@@ -3930,7 +4221,7 @@ def test_resolve_surface_partially_covered_requires_followup_condition(
                 "unauth path tested",
             ]
         )
-    message = str(exc.value) or ""
+    message = capsys.readouterr().err
     assert "--followup-condition" in message
     assert "partially-covered" in message
 
@@ -3938,11 +4229,11 @@ def test_resolve_surface_partially_covered_requires_followup_condition(
 def test_resolve_surface_accepts_partially_covered_with_followup_condition(
     monkeypatch, tmp_path: Path
 ) -> None:
-    """N7 — argparse round-trip: `partially-covered` with a follow-up condition parses
-    cleanly and the payload reaches the backend client with `followup_condition`."""
+    """N7 — round-trip: `resolve surface ... partially-covered` with a follow-up
+    condition reaches the backend client with `followup_condition`."""
     module = _load_assess_module(
-        "round3_resolve_surface_module",
-        "agent/scripts/assess/commands/resolve_surface.py",
+        "round3_resolve_module",
+        "agent/scripts/assess/commands/resolve.py",
     )
 
     captured: dict[str, dict] = {}
@@ -3978,7 +4269,8 @@ def test_resolve_surface_accepts_partially_covered_with_followup_condition(
 
     module.run(
         SimpleNamespace(
-            surface_id=42,
+            target_kind="surface",
+            ids=["42"],
             status="partially-covered",
             rationale="unauth path tested",
             source_name="",
@@ -5251,7 +5543,7 @@ def test_blue_verify_force_bypasses_missing_verifier_dispatch(
         tmp_path,
     )
 
-    assert calls[0][:4] == ["verify-finding", "FIND-001", "--disposition", "confirmed"]
+    assert calls[0][:5] == ["finding", "verify", "FIND-001", "--disposition", "confirmed"]
 
 
 @pytest.mark.parametrize(
@@ -5977,16 +6269,263 @@ def test_blue_engage_guides_operator_to_start_session_and_paste_alert(
             severity="high",
             source=None,
             skip_permissions=True,
+            start=None,
         ),
         tmp_path,
     )
 
     captured = capsys.readouterr()
+    # stdout stays the bare engagement path (the eng=$(vigil blue engage …) contract).
     assert captured.out.strip() == str(created_path)
+    # Single blue footer on stderr — no red-infra noise, no duplicate paste hint.
     assert "vigil blue alert paste" not in captured.err
-    assert f"cd {created_path}" in captured.err
+    assert "[vigil blue] engagement: eng-1" in captured.err
     assert "vigil engagement start eng-1 --client codex" in captured.err
+    assert "Then paste the alert into the operator chat" in captured.err
+    assert "vigil blue alert record" in captured.err
+    assert (
+        "Shortcut next time: vigil blue engage --customer acme-corp "
+        "--platform gws --start codex" in captured.err
+    )
+    # The red footer (mitmproxy/oob plumbing) must never leak into a blue engage.
+    assert "mitmproxy" not in captured.err
+    assert "oob" not in captured.err
+
+
+def test_blue_engage_start_chains_into_operator_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from vigil_cli import blue as blue_module
+
+    tenant_root = tmp_path / "agent" / "references" / "tenants"
+    tenant_root.mkdir(parents=True)
+    (tenant_root / "acme-corp-workspace.md").write_text("tenant\n", encoding="utf-8")
+    created_path = tmp_path / "agent" / "engagements" / "eng-1"
+
+    monkeypatch.setattr(
+        blue_module,
+        "create_engagement",
+        lambda _options: SimpleNamespace(path=created_path, key="eng-1"),
+    )
+    start_calls: list[tuple] = []
+    monkeypatch.setattr(
+        blue_module,
+        "start_engagement",
+        lambda *args: start_calls.append(args),
+    )
+
+    blue_module._cmd_engage(
+        SimpleNamespace(
+            customer="acme-corp",
+            platform="gws",
+            severity="high",
+            source=None,
+            skip_permissions=True,
+            start="codex",
+        ),
+        tmp_path,
+    )
+
+    captured = capsys.readouterr()
+    # stdout is still just the path — flushed before the (mocked) execv launcher.
+    assert captured.out.strip() == str(created_path)
+    # start_engagement is the final statement: (install_root, path, client, []).
+    assert start_calls == [(tmp_path, created_path, "codex", [])]
+    assert "[vigil blue] launching operator session (codex)" in captured.err
     assert "Paste the alert into the operator chat" in captured.err
+    assert "mitmproxy" not in captured.err
+    assert "oob" not in captured.err
+
+
+def test_blue_engage_non_tty_without_flags_lists_combos(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vigil_cli import blue as blue_module
+
+    tenant_root = tmp_path / "agent" / "references" / "tenants"
+    tenant_root.mkdir(parents=True)
+    (tenant_root / "acme-corp-workspace.md").write_text("tenant\n", encoding="utf-8")
+
+    # pytest's captured stdin isn't a TTY; make that explicit and deterministic.
+    monkeypatch.setattr(blue_module.sys, "stdin", SimpleNamespace(isatty=lambda: False))
+
+    with pytest.raises(SystemExit, match="Available customer/platform combinations"):
+        blue_module._cmd_engage(
+            SimpleNamespace(
+                customer=None,
+                platform=None,
+                severity=None,
+                source=None,
+                skip_permissions=False,
+                start=None,
+            ),
+            tmp_path,
+        )
+
+
+def test_blue_engage_interactive_picker_numbered_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vigil_cli import blue as blue_module
+
+    tenant_root = tmp_path / "agent" / "references" / "tenants"
+    tenant_root.mkdir(parents=True)
+    (tenant_root / "acme-corp-workspace.md").write_text("tenant\n", encoding="utf-8")
+    (tenant_root / "acme-corp-m365.md").write_text("tenant\n", encoding="utf-8")
+    created_path = tmp_path / "agent" / "engagements" / "eng-1"
+
+    seen: dict[str, object] = {}
+
+    def fake_create(options: object) -> SimpleNamespace:
+        seen["customer"] = options.customer
+        seen["platforms"] = options.platforms
+        seen["severity"] = options.severity_hint
+        return SimpleNamespace(path=created_path, key="eng-1")
+
+    monkeypatch.setattr(blue_module, "create_engagement", fake_create)
+    # Force the numbered-menu fallback (no fzf) and a TTY so the picker runs.
+    monkeypatch.setattr(blue_module.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(blue_module.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    responses = iter(["1", "2", "high"])  # customer=acme-corp, platform=m365, severity=high
+    monkeypatch.setattr("builtins.input", lambda *_args, **_kwargs: next(responses))
+
+    blue_module._cmd_engage(
+        SimpleNamespace(
+            customer=None,
+            platform=None,
+            severity=None,
+            source=None,
+            skip_permissions=True,
+            start=None,
+        ),
+        tmp_path,
+    )
+
+    assert seen["customer"] == "acme-corp"
+    assert seen["platforms"] == ["m365"]
+    assert seen["severity"] == "high"
+
+
+def test_engagement_create_blue_skips_red_footer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from vigil_cli import docker as docker_mod
+    from vigil_cli import engagements as engagements_module
+    from vigil_cli import oob as oob_mod
+    from vigil_cli.engagements import CreateEngagementOptions, create_engagement
+
+    install_root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", install_root)
+    _isolate_orchestrator_url(monkeypatch)
+    # Deliberately do NOT patch _emit_post_create_footer — the type-gate itself
+    # must suppress the red footer for blue engagements.
+    monkeypatch.setattr(engagements_module, "_verify_backend_install_root", lambda *_a, **_k: None)
+    monkeypatch.setattr(docker_mod, "container_running", lambda *_a, **_k: False)
+    monkeypatch.setattr(oob_mod, "oob_status", lambda *_a, **_k: {"state": "stopped"})
+    monkeypatch.setattr(
+        engagements_module.subprocess,
+        "run",
+        lambda *_a, **_k: SimpleNamespace(returncode=0),
+    )
+
+    create_engagement(
+        CreateEngagementOptions(
+            install_root=install_root,
+            engagement_type="blue",
+            customer="acme-corp",
+            platforms=["gws"],
+            tenant_reference_paths=["agent/references/tenants/acme-corp-workspace.md"],
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert "mitmproxy" not in captured.err
+    assert "oob" not in captured.err
+    assert "vigil engagement start" not in captured.err
+
+
+def test_blue_alert_record_body_file_stdin_reads_piped_alert(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from vigil_cli import blue as blue_module
+
+    eng_dir = tmp_path / "engagement"
+    _write_blue_scope(eng_dir)
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
+    monkeypatch.setattr(
+        blue_module,
+        "_run_assess",
+        lambda _install_root, _eng_dir, assess_args, **_kwargs: calls.append(assess_args) or 0,
+    )
+    body = '{"alert_id":"AL-9","actor":"sam@example.com"}\n'
+    monkeypatch.setattr(
+        blue_module.sys,
+        "stdin",
+        SimpleNamespace(read=lambda: body, isatty=lambda: False),
+    )
+
+    blue_module._cmd_alert_record(
+        SimpleNamespace(
+            body_file="-",
+            external_id="AL-9",
+            severity=None,
+            source=None,
+            engagement_key=None,
+            select=False,
+        ),
+        tmp_path,
+    )
+
+    scope = json.loads((eng_dir / "scope.json").read_text(encoding="utf-8"))
+    alert_md = scope["alert_metadata"]
+    assert alert_md["raw_body"] == body
+    assert alert_md["parsed"]["format"] == "json"
+
+    raw_path = eng_dir / "ir" / "alerts" / "AL-9.txt"
+    assert raw_path.read_text(encoding="utf-8") == body
+    assert ["artifact", "register", str(raw_path), "--kind", "alert_intake", "--sensitive"] in calls
+    assert capsys.readouterr().out.strip() == str(raw_path)
+
+
+def test_blue_alert_record_stdin_empty_body_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vigil_cli import blue as blue_module
+
+    eng_dir = tmp_path / "engagement"
+    _write_blue_scope(eng_dir)
+
+    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
+    monkeypatch.setattr(blue_module, "_run_assess", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(
+        blue_module.sys,
+        "stdin",
+        SimpleNamespace(read=lambda: "   \n", isatty=lambda: False),
+    )
+
+    with pytest.raises(SystemExit, match="stdin body was empty"):
+        blue_module._cmd_alert_record(
+            SimpleNamespace(
+                body_file="-",
+                external_id=None,
+                severity=None,
+                source=None,
+                engagement_key=None,
+                select=False,
+            ),
+            tmp_path,
+        )
 
 
 def test_blue_alert_record_body_file_updates_scope_and_registers_artifact(
@@ -6140,7 +6679,7 @@ def test_blue_closeout_dispatches_report_writer_for_closure_summary(
         tmp_path,
     )
 
-    assert calls[0] == ["list-report-findings", "--mode", "final"]
+    assert calls[0] == ["finding", "report", "--mode", "final"]
     dispatch = calls[1]
     assert dispatch[:2] == ["agent", "start"]
     assert dispatch[dispatch.index("--role") + 1] == "report-writer"
@@ -6163,14 +6702,14 @@ def test_blue_report_aborts_when_final_readiness_preflight_fails(
 
     def fake_run(_install_root: Path, _eng_dir: Path, assess_args: list[str], **_kwargs: object) -> int:
         calls.append(assess_args)
-        return 1 if assess_args[:2] == ["list-report-findings", "--mode"] else 0
+        return 1 if assess_args[:2] == ["finding", "report"] else 0
 
     monkeypatch.setattr(blue_module, "_run_assess", fake_run)
 
     with pytest.raises(SystemExit):
         blue_module._cmd_report(SimpleNamespace(engagement_key=None, select=False, template=None), tmp_path)
 
-    assert calls == [["list-report-findings", "--mode", "final"]]
+    assert calls == [["finding", "report", "--mode", "final"]]
 
 
 def test_blue_closeout_aborts_when_final_readiness_preflight_fails(
@@ -6187,14 +6726,14 @@ def test_blue_closeout_aborts_when_final_readiness_preflight_fails(
 
     def fake_run(_install_root: Path, _eng_dir: Path, assess_args: list[str], **_kwargs: object) -> int:
         calls.append(assess_args)
-        return 1 if assess_args[:2] == ["list-report-findings", "--mode"] else 0
+        return 1 if assess_args[:2] == ["finding", "report"] else 0
 
     monkeypatch.setattr(blue_module, "_run_assess", fake_run)
 
     with pytest.raises(SystemExit):
         blue_module._cmd_closeout(SimpleNamespace(engagement_key=None, select=False, agent_id=None), tmp_path)
 
-    assert calls == [["list-report-findings", "--mode", "final"]]
+    assert calls == [["finding", "report", "--mode", "final"]]
 
 
 def test_link_finding_intel_preserves_details_json_related_intel_ids(
@@ -6267,14 +6806,20 @@ def test_host_exec_uses_agent_name_env_for_audit_payload(
         "agent/scripts/assess/commands/host_exec.py",
     )
     posts: list[tuple[str, dict]] = []
+    events: list[str] = []
 
     class _Client:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
         def post(self, endpoint: str, payload: dict) -> dict:
+            events.append("audit")
             posts.append((endpoint, payload))
             return {"id": 42}
+
+        def patch(self, endpoint: str, payload: dict, **_kwargs: object) -> dict:
+            events.append("finalize")
+            return {"id": 42, **payload}
 
         def close(self) -> None:
             return None
@@ -6297,10 +6842,19 @@ def test_host_exec_uses_agent_name_env_for_audit_payload(
         ),
     )
     monkeypatch.setattr(
-        module.subprocess,
-        "run",
-        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="ok\n", stderr=""),
+        module,
+        "_run_host_process",
+        lambda *_args, **_kwargs: (events.append("process") or (0, "ok\n", "", False)),
     )
+    prepared: list[tuple[list[str], str | None]] = []
+    monkeypatch.setattr(
+        module,
+        "prepare_execution_command",
+        lambda argv, **kwargs: (
+            prepared.append((list(argv), kwargs.get("identity"))) or ("member", "")
+        ),
+    )
+    (tmp_path / "scope.json").write_text(json.dumps({"hosts": []}), encoding="utf-8")
 
     with pytest.raises(SystemExit) as exc_info:
         module.run(
@@ -6318,12 +6872,20 @@ def test_host_exec_uses_agent_name_env_for_audit_payload(
                 timeout=30,
                 audit_source="argv",
                 allow_destructive=False,
+                identity="member",
             )
         )
 
     assert exc_info.value.code == 0
     assert posts[0][0] == "command-runs/host-exec"
     assert posts[0][1]["agent_name"] == "investigator"
+    assert posts[0][1]["auth_context"] == "member"
+    assert prepared == [(["echo", "ok"], "member")]
+    assert posts[0][1]["status"] == "running"
+    assert posts[0][1]["stdout"] == ""
+    assert posts[0][1]["stdout_path"].endswith(".out")
+    assert posts[0][1]["stderr_path"].endswith(".err")
+    assert events == ["audit", "process", "finalize"]
 
 
 def test_host_exec_destructive_gate_allows_format_flags_but_blocks_format_command() -> None:
@@ -6342,6 +6904,437 @@ def test_host_exec_destructive_gate_allows_format_flags_but_blocks_format_comman
     assert module._contains_destructive_token([r"C:\Windows\System32\format.com", "E:"]) == "format"
     assert module._contains_destructive_token(["formatter", "raw"]) is None
     assert module._contains_destructive_token(["rm", "-rf", "/tmp/example"]) == "rm -r"
+
+
+def test_host_exec_registers_process_before_communicate_and_unregisters_after(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_process_registry",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    events: list[str] = []
+
+    class _Proc:
+        pid = 4321
+        returncode = 0
+
+        def communicate(self, timeout: int):
+            events.append("communicate")
+            return "ok\n", ""
+
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **k: _Proc())
+    monkeypatch.setattr(
+        module.host_processes,
+        "register_process",
+        lambda *a, **k: events.append("register"),
+    )
+    monkeypatch.setattr(
+        module.host_processes,
+        "unregister_process",
+        lambda *a, **k: events.append("unregister"),
+    )
+    monkeypatch.setattr(
+        module.host_processes,
+        "registered_group_alive",
+        lambda *a, **k: False,
+    )
+
+    result = module._run_host_process(
+        ["echo", "ok"],
+        cwd=str(tmp_path),
+        timeout_seconds=30,
+        engagement_dir=str(tmp_path),
+        run_uuid="run-1",
+    )
+
+    assert result == (0, "ok\n", "", False)
+    assert events == ["register", "communicate", "unregister"]
+
+
+def test_host_exec_keeps_registry_for_background_child_after_leader_exits(
+    tmp_path: Path,
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_residual_group",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    child_pid_path = tmp_path / "child.pid"
+    run_uuid = "run-residual-group"
+    child_pid = 0
+    try:
+        result = module._run_host_process(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import subprocess, sys; "
+                    "child = subprocess.Popen([sys.executable, '-c', "
+                    "'import time; time.sleep(30)'], stdin=subprocess.DEVNULL, "
+                    "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+                    "open(sys.argv[1], 'w', encoding='ascii').write(str(child.pid))"
+                ),
+                str(child_pid_path),
+            ],
+            cwd=str(tmp_path),
+            timeout_seconds=10,
+            engagement_dir=str(tmp_path),
+            run_uuid=run_uuid,
+        )
+        child_pid = int(child_pid_path.read_text(encoding="ascii"))
+
+        assert result[0] == 0
+        registry = (
+            tmp_path / ".runtime" / "host-processes" / f"{run_uuid}.json"
+        )
+        assert registry.is_file()
+        summary = module.host_processes.reap_registered_processes(
+            tmp_path, max_age_seconds=0
+        )
+        assert summary["reaped"] == 1
+        assert not registry.exists()
+    finally:
+        if child_pid:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_host_exec_spills_stdout_and_stderr_from_process_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_spill",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    stdout_path = tmp_path / "run.out"
+    stderr_path = tmp_path / "run.err"
+
+    class _Proc:
+        pid = 4321
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def communicate(self, timeout: int):
+            return None, None
+
+    def fake_popen(*_args, stdout, stderr, **_kwargs):
+        stdout.write(b"first stdout line\n")
+        stdout.flush()
+        stderr.write(b"first stderr line\n")
+        stderr.flush()
+        return _Proc()
+
+    monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(module.host_processes, "register_process", lambda *a, **k: None)
+    monkeypatch.setattr(module.host_processes, "unregister_process", lambda *a, **k: None)
+
+    result = module._run_host_process(
+        ["example"],
+        cwd=str(tmp_path),
+        timeout_seconds=30,
+        engagement_dir=str(tmp_path),
+        run_uuid="run-spill",
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+    )
+
+    assert result == (0, "first stdout line\n", "first stderr line\n", False)
+    assert stdout_path.read_text() == "first stdout line\n"
+    assert stderr_path.read_text() == "first stderr line\n"
+
+
+def test_host_exec_large_output_returns_bounded_head_tail_preview(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_bounded_preview",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    stdout_path = tmp_path / "large.out"
+    stderr_path = tmp_path / "large.err"
+
+    class _Proc:
+        pid = 4321
+        returncode = 0
+
+        def communicate(self, timeout: int):
+            return None, None
+
+    def fake_popen(*_args, stdout, stderr, **_kwargs):
+        stdout.write(b"HEAD\n" + b"x" * (2 * 1024 * 1024) + b"\nTAIL\n")
+        stderr.write(b"ERRHEAD\n" + b"y" * (2 * 1024 * 1024) + b"\nERRTAIL\n")
+        return _Proc()
+
+    monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(module.host_processes, "register_process", lambda *a, **k: None)
+    monkeypatch.setattr(module.host_processes, "unregister_process", lambda *a, **k: None)
+
+    _, stdout_preview, stderr_preview, _ = module._run_host_process(
+        ["example"],
+        cwd=str(tmp_path),
+        timeout_seconds=30,
+        engagement_dir=str(tmp_path),
+        run_uuid="run-large",
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+    )
+
+    assert len(stdout_preview.encode()) <= module._OUTPUT_PREVIEW_BYTES
+    assert len(stderr_preview.encode()) <= module._OUTPUT_PREVIEW_BYTES
+    assert stdout_preview.startswith("HEAD\n")
+    assert stdout_preview.endswith("\nTAIL\n")
+    assert "omitted; full output:" in stdout_preview
+    assert stderr_preview.startswith("ERRHEAD\n")
+    assert stderr_preview.endswith("\nERRTAIL\n")
+    assert stdout_path.stat().st_size > 2 * 1024 * 1024
+    assert stderr_path.stat().st_size > 2 * 1024 * 1024
+
+
+def test_host_exec_fast_exit_before_registry_is_treated_as_already_reaped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_fast_exit_registry",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    events: list[str] = []
+
+    class _Proc:
+        pid = 4321
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def communicate(self, timeout: int):
+            events.append(f"communicate:{timeout}")
+            return "done\n", ""
+
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **k: _Proc())
+    monkeypatch.setattr(
+        module.host_processes,
+        "register_process",
+        lambda *a, **k: (_ for _ in ()).throw(module.AssessError("process already exited")),
+    )
+    monkeypatch.setattr(
+        module.host_processes,
+        "unregister_process",
+        lambda *a, **k: events.append("unregister"),
+    )
+
+    assert module._run_host_process(
+        ["true"],
+        cwd=str(tmp_path),
+        timeout_seconds=30,
+        engagement_dir=str(tmp_path),
+        run_uuid="run-fast",
+    ) == (0, "done\n", "", False)
+    assert events == ["communicate:1"]
+
+
+def test_host_exec_registry_failure_terminates_process_group_with_bounded_kill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_registry_failure",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    signals: list[int] = []
+
+    class _Proc:
+        pid = 4321
+        returncode = None
+
+        def poll(self):
+            return None
+
+        def communicate(self, timeout: int):
+            raise module.subprocess.TimeoutExpired("cmd", timeout)
+
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **k: _Proc())
+    monkeypatch.setattr(
+        module.host_processes,
+        "register_process",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("registry unavailable")),
+    )
+    monkeypatch.setattr(module.os, "getpgid", lambda _pid: 4321)
+    monkeypatch.setattr(module.os, "killpg", lambda _pgid, sig: signals.append(sig))
+
+    with pytest.raises(RuntimeError, match="registry unavailable"):
+        module._run_host_process(
+            ["sleep", "60"],
+            cwd=str(tmp_path),
+            timeout_seconds=30,
+            engagement_dir=str(tmp_path),
+            run_uuid="run-registry-fail",
+        )
+
+    assert signals == [module.signal.SIGTERM, module.signal.SIGKILL]
+
+
+def test_host_exec_process_failure_finalizes_pre_exec_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_process_failure_audit",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    patches: list[tuple[str, dict]] = []
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def post(self, _endpoint: str, _payload: dict) -> dict:
+            return {"id": 42}
+
+        def patch(self, endpoint: str, payload: dict, **_kwargs: object) -> dict:
+            patches.append((endpoint, payload))
+            return payload
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "_run_host_process",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("registry unavailable")),
+    )
+    (tmp_path / "scope.json").write_text(json.dumps({"hosts": []}), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(tmp_path),
+                from_json=None,
+                command=["echo", "ok"],
+                tool="echo",
+                intent="audit process setup failure",
+                technique="T0000",
+                phase="investigate",
+                target_host="",
+                agent_name=None,
+                scope_host="",
+                cwd=None,
+                timeout=30,
+                audit_source="argv",
+                allow_destructive=False,
+                require_audit=True,
+            )
+        )
+
+    assert exc_info.value.code == 1
+    assert patches[0][0] == "command-runs/42"
+    assert patches[0][1]["status"] == "failed"
+    assert "registry unavailable" in patches[0][1]["stderr_preview"]
+
+
+def test_host_exec_acquires_aggregate_rate_lease_after_pre_exec_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_rate_lease",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    events: list[str] = []
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def post(self, _endpoint: str, _payload: dict) -> dict:
+            events.append("audit")
+            return {"id": 42}
+
+        def patch(self, _endpoint: str, payload: dict, **_kwargs: object) -> dict:
+            events.append("finalize")
+            return payload
+
+        def close(self) -> None:
+            pass
+
+    class _Lease:
+        def __enter__(self):
+            events.append("lease-acquire")
+            return {"lease_token": "lease-1"}
+
+        def __exit__(self, *_exc):
+            events.append("lease-release")
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "aggregate_rate_reservation",
+        lambda *_args, **_kwargs: 7.0,
+    )
+    monkeypatch.setattr(
+        module,
+        "target_rate_lease",
+        lambda **_kwargs: _Lease(),
+    )
+    monkeypatch.setattr(
+        module,
+        "_run_host_process",
+        lambda *_args, **_kwargs: (events.append("process") or (0, "", "", False)),
+    )
+    (tmp_path / "scope.json").write_text(
+        json.dumps({"hosts": ["target.example"], "aggregate_rate_limit_rps": 10}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(tmp_path),
+                from_json=None,
+                command=["curl", "https://target.example/health"],
+                tool="curl",
+                intent="host liveness",
+                technique="RECON",
+                phase="recon",
+                target_host="target.example",
+                agent_name=None,
+                scope_host="",
+                cwd=None,
+                timeout=30,
+                audit_source="argv",
+                allow_destructive=False,
+                require_audit=True,
+                rate_override_reason="",
+            )
+        )
+
+    assert exc_info.value.code == 0
+    assert events == [
+        "audit",
+        "lease-acquire",
+        "process",
+        "lease-release",
+        "finalize",
+    ]
 
 
 def test_host_exec_require_audit_fails_when_audit_record_fails(
@@ -6379,10 +7372,11 @@ def test_host_exec_require_audit_fails_when_audit_record_fails(
         ),
     )
     monkeypatch.setattr(
-        module.subprocess,
-        "run",
-        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="ok\n", stderr=""),
+        module,
+        "_run_host_process",
+        lambda *_args, **_kwargs: pytest.fail("WRITE must not execute without its required pre-audit"),
     )
+    (tmp_path / "scope.json").write_text(json.dumps({"hosts": []}), encoding="utf-8")
 
     with pytest.raises(SystemExit) as exc_info:
         module.run(
@@ -7363,57 +8357,55 @@ def test_supersede_intel_requires_natural_key_before_request(
     assert "missing required supersede natural-key field: affected_component" in err
 
 
-def test_validate_dispatch_contract_accepts_minimal_payload(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """P3 #31: the validator returns OK for a contract with every required field set."""
-    assess_main = _load_assess_main()
-    payload = {
-        "role": "vulnerability-analyst",
-        "dispatch_mode": "item-iterating",
-        "skills": "auth-bypass",
-    }
-    contract_path = tmp_path / "dispatch.json"
-    contract_path.write_text(json.dumps(payload), encoding="utf-8")
+def _validate_dispatch_contract(payload: dict, *, engagement_dir=None):
+    """Call the dispatch-contract validator lib directly.
 
-    assess_main(["validate-dispatch-contract", str(contract_path)])
-    assert "OK" in capsys.readouterr().out
+    The former `vigil assess validate-dispatch-contract` CLI verb (a thin
+    wrapper over this lib) was retired in the 2026-07 CLI consolidation — its
+    validator still runs inside `agent start`. These tests exercise the lib
+    that both paths share.
+    """
+    _load_assess_main()  # ensures agent/scripts is on sys.path
+    from assess.lib.contracts import validate_specialist_dispatch_contract
+
+    return validate_specialist_dispatch_contract(payload, engagement_dir=engagement_dir)
 
 
-def test_validate_dispatch_contract_accepts_dispatch_register_payload(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_validate_dispatch_contract_accepts_minimal_payload() -> None:
+    """P3 #31: the validator returns no errors for a contract with every required field set."""
+    errors, _warnings = _validate_dispatch_contract(
+        {
+            "role": "vulnerability-analyst",
+            "dispatch_mode": "item-iterating",
+            "skills": "auth-bypass",
+        }
+    )
+    assert errors == []
+
+
+def test_validate_dispatch_contract_accepts_dispatch_register_payload() -> None:
     """The contract preflight accepts the same role field used by agent start."""
-    assess_main = _load_assess_main()
-    payload = {
-        "agent_id": "VA-1",
-        "agent_role": "vulnerability-analyst",
-        "dispatch_mode": "item-iterating",
-        "skills": "auth-bypass",
-    }
-    contract_path = tmp_path / "dispatch.json"
-    contract_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    assess_main(["validate-dispatch-contract", str(contract_path)])
-    assert "OK" in capsys.readouterr().out
+    errors, _warnings = _validate_dispatch_contract(
+        {
+            "agent_id": "VA-1",
+            "agent_role": "vulnerability-analyst",
+            "dispatch_mode": "item-iterating",
+            "skills": "auth-bypass",
+        }
+    )
+    assert errors == []
 
 
-def test_validate_dispatch_contract_rejects_role_mismatch(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    assess_main = _load_assess_main()
-    payload = {
-        "role": "recon-specialist",
-        "agent_role": "vulnerability-analyst",
-        "dispatch_mode": "item-iterating",
-        "skills": "auth-bypass",
-    }
-    contract_path = tmp_path / "dispatch.json"
-    contract_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(SystemExit):
-        assess_main(["validate-dispatch-contract", str(contract_path)])
-    assert "role and agent_role must match" in capsys.readouterr().err
+def test_validate_dispatch_contract_rejects_role_mismatch() -> None:
+    errors, _warnings = _validate_dispatch_contract(
+        {
+            "role": "recon-specialist",
+            "agent_role": "vulnerability-analyst",
+            "dispatch_mode": "item-iterating",
+            "skills": "auth-bypass",
+        }
+    )
+    assert any("role and agent_role must match" in e for e in errors)
 
 
 def test_list_skills_uses_directory_names_for_dispatch_audit(
@@ -7606,115 +8598,82 @@ def test_references_index_md_is_retired() -> None:
     assert not offenders, f"docs still point at the deleted references/INDEX.md: {offenders}"
 
 
-def test_validate_dispatch_contract_accepts_list_skills_canonical_name(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    assess_main = _load_assess_main()
-    payload = {
-        "agent_role": "vulnerability-analyst",
-        "dispatch_mode": "item-iterating",
-        "skills": "google-workspaces",
-    }
-    contract_path = tmp_path / "dispatch.json"
-    contract_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    assess_main(["validate-dispatch-contract", str(contract_path)])
-    captured = capsys.readouterr()
-    assert "OK" in captured.out
-    assert "WARN skill" not in captured.err
+def test_validate_dispatch_contract_accepts_list_skills_canonical_name() -> None:
+    errors, warnings = _validate_dispatch_contract(
+        {
+            "agent_role": "vulnerability-analyst",
+            "dispatch_mode": "item-iterating",
+            "skills": "google-workspaces",
+        }
+    )
+    assert errors == []
+    assert not any("skill" in w for w in warnings)
 
 
-def test_validate_dispatch_contract_warns_on_unknown_dispatch_mode(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_validate_dispatch_contract_warns_on_unknown_dispatch_mode() -> None:
     """L2-4: an unknown dispatch_mode is ADVISORY (warn + proceed), not a hard
-    error, so a newly-coined mode is not blocked at the CLI."""
-    assess_main = _load_assess_main()
-    payload = {
-        "role": "vulnerability-analyst",
-        "dispatch_mode": "turbo-mode",
-        "skills": "auth-bypass",
-    }
-    contract_path = tmp_path / "dispatch.json"
-    contract_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    assess_main(["validate-dispatch-contract", str(contract_path)])
-    captured = capsys.readouterr()
-    assert "OK" in captured.out
-    assert "turbo-mode" in captured.err
-    assert "newly-coined mode" in captured.err
+    error, so a newly-coined mode is not blocked."""
+    errors, warnings = _validate_dispatch_contract(
+        {
+            "role": "vulnerability-analyst",
+            "dispatch_mode": "turbo-mode",
+            "skills": "auth-bypass",
+        }
+    )
+    assert errors == []
+    blob = " ".join(warnings)
+    assert "turbo-mode" in blob
+    assert "newly-coined mode" in blob
 
 
-def test_validate_dispatch_contract_requires_skills_for_specialist(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_validate_dispatch_contract_requires_skills_for_specialist() -> None:
     """Specialist dispatches must declare which skills the agent loaded."""
-    assess_main = _load_assess_main()
-    payload = {
-        "role": "vulnerability-analyst",
-        "dispatch_mode": "item-iterating",
-    }
-    contract_path = tmp_path / "dispatch.json"
-    contract_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(SystemExit):
-        assess_main(["validate-dispatch-contract", str(contract_path)])
-    err = capsys.readouterr().err
-    assert "skills is required" in err
+    errors, _warnings = _validate_dispatch_contract(
+        {
+            "role": "vulnerability-analyst",
+            "dispatch_mode": "item-iterating",
+        }
+    )
+    assert any("skills is required" in e for e in errors)
 
 
-def test_validate_dispatch_contract_operator_skills_optional(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_validate_dispatch_contract_operator_skills_optional() -> None:
     """Operator role coordinates phases; skills are not required on operator dispatches."""
-    assess_main = _load_assess_main()
-    payload = {
-        "role": "operator",
-        "dispatch_mode": "deep-manual",
-    }
-    contract_path = tmp_path / "dispatch.json"
-    contract_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    assess_main(["validate-dispatch-contract", str(contract_path)])
-    assert "OK" in capsys.readouterr().out
+    errors, _warnings = _validate_dispatch_contract(
+        {
+            "role": "operator",
+            "dispatch_mode": "deep-manual",
+        }
+    )
+    assert errors == []
 
 
-def test_validate_dispatch_contract_operator_skills_optional_case_insensitive(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_validate_dispatch_contract_operator_skills_optional_case_insensitive() -> None:
     """Operator casing variants are exempt from specialist skill requirements."""
-    assess_main = _load_assess_main()
-    payload = {
-        "role": "Operator",
-        "agent_role": "operator",
-        "dispatch_mode": "deep-manual",
-    }
-    contract_path = tmp_path / "dispatch.json"
-    contract_path.write_text(json.dumps(payload), encoding="utf-8")
-
-    assess_main(["validate-dispatch-contract", str(contract_path)])
-    assert "OK" in capsys.readouterr().out
+    errors, _warnings = _validate_dispatch_contract(
+        {
+            "role": "Operator",
+            "agent_role": "operator",
+            "dispatch_mode": "deep-manual",
+        }
+    )
+    assert errors == []
 
 
 def test_actor_kind_warn_on_non_log_subcommand(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    capsys: pytest.CaptureFixture[str]
 ) -> None:
     """P3 #33: passing --actor-kind to a subcommand that doesn't consume it warns on stderr."""
     assess_main = _load_assess_main()
-    payload = {
-        "role": "vulnerability-analyst",
-        "dispatch_mode": "deep-manual",
-        "skills": "auth-bypass",
-    }
-    contract_path = tmp_path / "dispatch.json"
-    contract_path.write_text(json.dumps(payload), encoding="utf-8")
 
+    # `contract` is a non-log, no-network subcommand that ignores --actor-kind.
     assess_main(
         [
             "--actor-kind",
             "operator",
-            "validate-dispatch-contract",
-            str(contract_path),
+            "contract",
+            "finding",
+            "record",
         ]
     )
     err = capsys.readouterr().err
@@ -9739,14 +10698,14 @@ def test_detect_technique_cage_needs_named_bug_not_bare_recipe() -> None:
 
 
 def test_list_attempts_build_query_emits_route_param_names() -> None:
-    """Regression (blind triage): the `list-attempts` CLI must emit the EXACT
-    query-param names the GET /attempts route accepts (notably --surface ->
-    surface_id, --host -> target_host); a drift here silently returns unfiltered
-    results and no round-trip test would otherwise catch it."""
+    """Regression (blind triage): the `coverage --attempts` CLI (folded-in
+    list-attempts) must emit the EXACT query-param names the GET /attempts route
+    accepts (notably --surface -> surface_id, --host -> target_host); a drift here
+    silently returns unfiltered results and no round-trip test would catch it."""
     from types import SimpleNamespace
     from urllib.parse import parse_qs, urlparse
 
-    from assess.commands.list_attempts import _build_query
+    from assess.commands.coverage import _attempts_query as _build_query
 
     args = SimpleNamespace(
         finding="VA-1", surface="12", host="app.example.com",
@@ -10550,7 +11509,7 @@ def test_engagement_export_markdown_tree_writes_per_finding_dirs(
     # VA-002 has no narrative → placeholder debate.md (still git-diff-able).
     va002_debate = (out_root / "VA-002" / "debate.md").read_text(encoding="utf-8")
     assert "No verification-narrative artifact" in va002_debate
-    assert "vigil assess verify-finding VA-002" in va002_debate
+    assert "vigil assess finding verify VA-002" in va002_debate
 
 
 def test_engagement_export_markdown_tree_is_idempotent(

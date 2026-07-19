@@ -192,8 +192,8 @@ def render_intel_readiness(data: Any) -> tuple[bool, list[str]]:
             lines.append(f"  - id={row.get('id')} [{row.get('lead_status')}] {row.get('title')}")
     lines.append(
         "\nDisposition by id: "
-        "`vigil assess update-intel cve <id> --inline '{\"validation_status\": \"ruled_out\"}'` "
-        "or `update-intel note <id> --inline '{\"lead_status\": \"resolved\"}'`."
+        "`vigil assess intel update cve <id> --inline '{\"validation_status\": \"ruled_out\"}'` "
+        "or `intel update note <id> --inline '{\"lead_status\": \"resolved\"}'`."
     )
     return True, lines
 
@@ -1098,7 +1098,7 @@ def _load_work_items_by_host(client: AssessmentClient) -> dict[str, dict[str, in
     """Return a ``{host: {status: count, ...}}`` rollup from the backend work buffer.
 
     Tracks ``pending_without_terminal_reason`` so the consumption gate can
-    distinguish "really pending" from "deferred by classify-work". ``host_root``
+    distinguish "really pending" from "deferred by work-buffer reclassify". ``host_root``
     crawl seeds are excluded from that count. An empty buffer yields an empty map.
     """
     agg: dict[str, dict[str, int]] = {}
@@ -2065,7 +2065,7 @@ def render_dispatch_coverage_block(
     the measured coverage picture plus an OPEN objective instead of a
     prescriptive technique cage. Reuses the by-family payload; adds no backend
     call. NOTE: ``host``/``path_prefix`` scope by application-unit here — this is
-    deliberately NOT the surface-id sense of ``--surface`` on ``list-attempts``.
+    deliberately NOT the surface-id sense of ``--surface`` on ``coverage --attempts``.
     """
     host_l = (host or "").strip().lower()
     prefix = (path_prefix or "").strip()

@@ -36,6 +36,8 @@ from assess.lib.classify_buckets import (
 )
 from assess.lib.params import header_schema_from_headers
 from assess.lib.scope import required_headers as _scope_required_headers
+from assess.lib.scope import scope_enforcement as _scope_enforcement
+from assess.lib import no_fire as _no_fire
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -179,8 +181,9 @@ def _is_deletion_set_cookie(sc: str) -> bool:
 class EngagementEntry:
     """Per-engagement state the addon needs to route a single flow.
 
-    The addon keeps one ``EngagementEntry`` per active engagement and looks one
-    up by hostname on every captured response. The captured work item now rides
+    The addon keeps one ``EngagementEntry`` per active engagement and normally
+    looks one up by hostname on every captured response. An otherwise-unclaimed
+    host may bind to the active global-bypass engagement. The captured work item rides
     in the request-observation POST (the backend derives the
     ``assessment_work_items`` row server-side), so the entry holds no local
     SQLite handle.
@@ -190,12 +193,15 @@ class EngagementEntry:
     root: Path
     scope_patterns: list[str]
     out_of_scope_patterns: list[str] = field(default_factory=list)
+    scope_enforcement: str = "enforce"
     scope_priority: int = 0
     updated_at: str = ""
     capture_policy: dict = field(default_factory=dict)
     # Program-mandated attribution headers (e.g. BugCrowd ``X-Bug-Bounty``) the
     # ``request`` hook injects onto this engagement's outbound in-scope requests.
     required_headers: dict = field(default_factory=dict)
+    off_limits_paths: tuple[str, ...] = ()
+    no_fire_policy_invalid: bool = False
 
 
 def _normalize_scope_entry(raw: str) -> str:
@@ -274,12 +280,16 @@ def _coerce_ip(value):
 
 
 def _out_of_scope_covers(
-    patterns: list[str], hostname: str, resolved_ip: str | None = None
+    patterns: list[str],
+    hostname: str,
+    resolved_ip: str | None = None,
+    *,
+    defer_unresolved_cidr: bool = False,
 ) -> bool:
     """Return True when ANY out_of_scope entry could plausibly cover ``hostname``.
 
-    The out-of-scope denylist ALWAYS wins (operator priority #1: never
-    capture/route/persist an out-of-scope host). Beyond literal and ``*.``
+    The caller uses this as the fail-closed deny primitive under normal scope
+    enforcement; the explicit engagement-wide global bypass skips it. Beyond literal and ``*.``
     wildcard host patterns, this understands:
 
     * URL-form entries (``https://host/path``) — reduced to their bare host and
@@ -318,8 +328,15 @@ def _out_of_scope_covers(
             if network is not None:
                 # CIDR carve-out — match against the flow's resolved server IP.
                 if host_ip is None:
-                    # CIDR present but no IP to test THIS flow — uncertain, so
-                    # fail closed on this one flow (per-flow, not engagement-wide).
+                    # CIDR present but no IP to test THIS flow. At request time the
+                    # upstream is usually not connected yet, so failing closed here
+                    # would drop in-scope traffic (and suppress required-header
+                    # injection). ``defer_unresolved_cidr`` skips this one CIDR
+                    # entry so host/URL carve-outs still apply now and the CIDR
+                    # gate is re-evaluated on the response path where the resolved
+                    # IP is available. Otherwise fail closed (per-flow).
+                    if defer_unresolved_cidr:
+                        continue
                     return True
                 if host_ip in network:
                     return True
@@ -533,10 +550,13 @@ class CaseCollector:
                     existing.root = entry.root
                     existing.scope_patterns = entry.scope_patterns
                     existing.out_of_scope_patterns = entry.out_of_scope_patterns
+                    existing.scope_enforcement = entry.scope_enforcement
                     existing.scope_priority = entry.scope_priority
                     existing.updated_at = entry.updated_at
                     existing.capture_policy = entry.capture_policy
                     existing.required_headers = entry.required_headers
+                    existing.off_limits_paths = entry.off_limits_paths
+                    existing.no_fire_policy_invalid = entry.no_fire_policy_invalid
                     new_registry[entry.key] = existing
                 else:
                     new_registry[entry.key] = entry
@@ -622,17 +642,25 @@ class CaseCollector:
             # the backend path, so injection works whether or not the backend is
             # up — without this the marker would silently never inject in the
             # common case where the backend registry fetch succeeds.
-            required_headers = self._required_headers_from_root(root)
+            (
+                required_headers,
+                scope_enforcement,
+                off_limits_paths,
+                no_fire_policy_invalid,
+            ) = self._scope_request_policy_from_root(root)
             entries.append(
                 EngagementEntry(
                     key=key,
                     root=root,
                     scope_patterns=scope_patterns,
                     out_of_scope_patterns=out_of_scope_patterns,
+                    scope_enforcement=scope_enforcement,
                     scope_priority=scope_priority,
                     updated_at=updated_at,
                     capture_policy=capture_policy,
                     required_headers=required_headers,
+                    off_limits_paths=off_limits_paths,
+                    no_fire_policy_invalid=no_fire_policy_invalid,
                 )
             )
         return entries
@@ -668,6 +696,7 @@ class CaseCollector:
                 continue
             scope_patterns = self._scope_patterns_from_dict(scope_data)
             out_of_scope_patterns = self._out_of_scope_patterns_from_dict(scope_data)
+            scope_enforcement = _scope_enforcement(scope_data)
             scope_priority_raw = scope_data.get("scope_priority", 0)
             try:
                 scope_priority = int(scope_priority_raw) if scope_priority_raw is not None else 0
@@ -684,16 +713,29 @@ class CaseCollector:
             # scope_data is already parsed here; reuse it rather than re-reading
             # scope.json from disk like the backend path must.
             required_headers = _scope_required_headers(scope_data)
+            try:
+                off_limits_paths = _no_fire.patterns(scope_data)
+                no_fire_policy_invalid = False
+            except _no_fire.NoFirePolicyError as exc:
+                ctx.log.error(
+                    f"proxy_addon: invalid no-fire policy in {scope_path}: {exc}; "
+                    "blocking every matched request"
+                )
+                off_limits_paths = ()
+                no_fire_policy_invalid = True
             entries.append(
                 EngagementEntry(
                     key=engagement_dir.name,
                     root=engagement_dir,
                     scope_patterns=scope_patterns,
                     out_of_scope_patterns=out_of_scope_patterns,
+                    scope_enforcement=scope_enforcement,
                     scope_priority=scope_priority,
                     updated_at=updated_at,
                     capture_policy=capture_policy,
                     required_headers=required_headers,
+                    off_limits_paths=off_limits_paths,
+                    no_fire_policy_invalid=no_fire_policy_invalid,
                 )
             )
         return entries
@@ -712,24 +754,33 @@ class CaseCollector:
         return _normalize_capture_policy(raw)
 
     @staticmethod
-    def _required_headers_from_root(engagement_dir: Path) -> dict:
-        """Read program-mandated attribution ``required_headers`` from the
-        engagement's ``scope.json`` (the filesystem read the backend registry
-        path needs, since ``/engagements`` does not serialize the field).
+    def _scope_request_policy_from_root(
+        engagement_dir: Path,
+    ) -> tuple[dict, str, tuple[str, ...], bool]:
+        """Load the request/capture policy the backend registry omits.
 
-        An absent/unreadable/malformed scope yields ``{}`` so the no-header path
-        is the unchanged default. Shares ``assess.lib.scope.required_headers``
-        coercion (string→string pairs only, name stripped) so the proxy injects
-        exactly what the tool-exec attribution path (ADR 0010) does."""
+        One authoritative scope.json read supplies attribution, global bypass,
+        and no-fire state. Unreadable/malformed policy fails closed for no-fire
+        while retaining the safe defaults for headers and scope enforcement.
+        """
         scope_path = engagement_dir / "scope.json"
         try:
             with scope_path.open("r", encoding="utf-8") as fh:
                 data = json.load(fh)
         except (OSError, json.JSONDecodeError):
-            return {}
+            return {}, "enforce", (), True
         if not isinstance(data, dict):
-            return {}
-        return _scope_required_headers(data)
+            return {}, "enforce", (), True
+        required_headers = _scope_required_headers(data)
+        enforcement = _scope_enforcement(data)
+        try:
+            return required_headers, enforcement, _no_fire.patterns(data), False
+        except _no_fire.NoFirePolicyError as exc:
+            ctx.log.error(
+                f"proxy_addon: invalid no-fire policy in {scope_path}: {exc}; "
+                "blocking every matched request"
+            )
+            return required_headers, enforcement, (), True
 
     @staticmethod
     def _scope_patterns_from_dict(scope_data: dict) -> list[str]:
@@ -780,9 +831,12 @@ class CaseCollector:
                     "key": entry.key,
                     "scope_patterns": list(entry.scope_patterns),
                     "out_of_scope": list(entry.out_of_scope_patterns),
+                    "scope_enforcement": entry.scope_enforcement,
                     "scope_priority": entry.scope_priority,
                     "updated_at": entry.updated_at,
                     "required_headers": dict(entry.required_headers),
+                    "off_limits_paths": list(entry.off_limits_paths),
+                    "no_fire_policy_invalid": entry.no_fire_policy_invalid,
                 }
                 for entry in self.registry.values()
             ),
@@ -802,7 +856,11 @@ class CaseCollector:
     # -- matching -----------------------------------------------------------
 
     def _match_engagement(
-        self, hostname: str, resolved_ip: str | None = None
+        self,
+        hostname: str,
+        resolved_ip: str | None = None,
+        *,
+        defer_unresolved_cidr: bool = False,
     ) -> EngagementEntry | None:
         if not hostname:
             return None
@@ -829,17 +887,29 @@ class CaseCollector:
                 else:
                     runners_up.append(entry)
         if best is None:
-            return None
-        chosen = best[3]
+            chosen = self._active_global_bypass_entry()
+            if chosen is None:
+                return None
+        else:
+            chosen = best[3]
         # Out-of-scope carve-out: a host admitted by an in-scope wildcard but
         # covered by ANY of the engagement's out_of_scope entries must not be
-        # captured or routed. The denylist ALWAYS wins — drop the flow entirely.
+        # captured or routed under normal enforcement. The explicit global
+        # bypass overrides target allow/deny admission.
         # ``_out_of_scope_covers`` understands literal/``*.`` host patterns,
         # URL-form entries (reduced to their host) and CIDR entries (matched
         # against ``resolved_ip`` when the flow carries the server IP), and
         # FAILS CLOSED on any entry it cannot evaluate with certainty so an
         # unparseable carve-out never silently admits an out-of-scope host.
-        if _out_of_scope_covers(chosen.out_of_scope_patterns, hostname, resolved_ip):
+        if (
+            chosen.scope_enforcement != "bypass"
+            and _out_of_scope_covers(
+                chosen.out_of_scope_patterns,
+                hostname,
+                resolved_ip,
+                defer_unresolved_cidr=defer_unresolved_cidr,
+            )
+        ):
             suppress_key = (hostname, chosen.key)
             if suppress_key not in self._routed_log_seen:
                 self._routed_log_seen.add(suppress_key)
@@ -862,6 +932,28 @@ class CaseCollector:
                     f"(score={best[0]}, priority={best[1]})"
                 )
         return chosen
+
+    def _active_global_bypass_entry(self) -> EngagementEntry | None:
+        """Bind an otherwise-unclaimed proxy flow to the selected bypass engagement.
+
+        Normal hostname ownership always wins. The active pointer is consulted
+        only when no engagement scope pattern claims the host, which gives a
+        global-bypass engagement an unambiguous capture/attribution owner without
+        letting it steal traffic from another active engagement.
+        """
+        if self.engagements_root is None:
+            return None
+        try:
+            key = (self.engagements_root / ".active").read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        if not key:
+            return None
+        with self._registry_lock:
+            entry = self.registry.get(key)
+            if entry is None or entry.scope_enforcement != "bypass":
+                return None
+            return entry
 
     # -- noise --------------------------------------------------------------
 
@@ -1313,10 +1405,14 @@ class CaseCollector:
         if not hostname:
             return
 
-        # Defense in depth: NEVER harvest credentials for a host any out_of_scope
-        # entry could plausibly cover, even if a routing change ever let this run
-        # for such a host. Out-of-scope always wins (operator priority #1).
-        if _out_of_scope_covers(entry.out_of_scope_patterns, hostname, resolved_ip):
+        # Defense in depth: under normal enforcement, never harvest credentials
+        # for a host an out_of_scope entry could plausibly cover, even if a
+        # routing change ever let this run. The explicit global bypass overrides
+        # target allow/deny admission but does not override no-fire policy.
+        if (
+            entry.scope_enforcement != "bypass"
+            and _out_of_scope_covers(entry.out_of_scope_patterns, hostname, resolved_ip)
+        ):
             return
 
         # -- 1. Request cookies (mitmproxy parses them correctly) ------------
@@ -1404,6 +1500,15 @@ class CaseCollector:
         with self._registry_lock:
             return any(entry.required_headers for entry in self.registry.values())
 
+    def _any_request_policy(self) -> bool:
+        with self._registry_lock:
+            return any(
+                entry.required_headers
+                or entry.off_limits_paths
+                or entry.no_fire_policy_invalid
+                for entry in self.registry.values()
+            )
+
     def request(self, flow: http.HTTPFlow):
         """Inject a matched engagement's scope.json ``required_headers`` onto its
         outbound in-scope requests (ROE researcher-attribution markers, e.g.
@@ -1423,8 +1528,9 @@ class CaseCollector:
         hosts and header-less engagements untouched."""
         if self.engagements_root is None:
             return
-        # Fast path: nothing to inject unless some engagement mandates a header.
-        if not self._any_required_headers():
+        # Fast path: nothing to inject or block unless some engagement carries
+        # outbound request policy.
+        if not self._any_request_policy():
             return
         req = flow.request
         hostname = (urlparse(req.pretty_url).hostname or "").lower()
@@ -1432,10 +1538,41 @@ class CaseCollector:
             return
         # The upstream server IP may be unresolved at request time (pre-connect);
         # that is fine — _match_engagement keys on hostname and only uses the IP
-        # to tighten the out-of-scope CIDR carve-out.
+        # to tighten the out-of-scope CIDR carve-out. Defer that CIDR fail-closed
+        # to the response path (where the IP is resolved) so a required-header
+        # engagement that ALSO carries a CIDR out_of_scope entry still gets its
+        # attribution header injected on in-scope browser traffic.
         resolved_ip = self._resolved_server_ip(flow)
-        entry = self._match_engagement(hostname, resolved_ip=resolved_ip)
-        if entry is None or not entry.required_headers:
+        entry = self._match_engagement(
+            hostname, resolved_ip=resolved_ip, defer_unresolved_cidr=True
+        )
+        if entry is None:
+            return
+        blocked_pattern = None
+        if not entry.no_fire_policy_invalid:
+            try:
+                blocked_pattern = _no_fire.match_url(
+                    {"off_limits_paths": list(entry.off_limits_paths)}, req.pretty_url
+                )
+            except _no_fire.NoFirePolicyError:
+                blocked_pattern = "ambiguous-encoded-url-fail-closed"
+        if entry.no_fire_policy_invalid or blocked_pattern:
+            body = json.dumps(
+                {
+                    "blocked": True,
+                    "policy": "off_limits_paths",
+                    "pattern": blocked_pattern or "invalid-policy-fail-closed",
+                    "engagement": entry.key,
+                }
+            ).encode("utf-8")
+            flow.response = http.Response.make(
+                451,
+                body,
+                {
+                    "Content-Type": "application/json",
+                    "X-Vigil-No-Fire": "blocked",
+                },
+            )
             return
         for name, value in entry.required_headers.items():
             # mitmproxy Headers membership is case-insensitive — never overwrite

@@ -7,6 +7,10 @@ verbs served over HTTP.
 """
 import json
 
+from app import db as db_module
+from app.services import state_manager
+from app.services.state_manager import _common
+
 ENGAGEMENT_KEY = "2026-07-08-000000-workbuf"
 BASE = f"/engagements/{ENGAGEMENT_KEY}/assessment"
 
@@ -121,6 +125,194 @@ def test_fetch_by_priority_claims_top_k_and_routes(client, isolate_settings):
     by_url = {c["url"]: c for c in again}
     assert by_url["https://app.example/api/a"]["assigned_agent"] == "vulnerability-analyst"
     assert by_url["https://app.example/app.js"]["assigned_agent"] == "source-analyzer"
+
+
+def test_app_unit_scoring_links_work_items_and_fetch_claims_coherent_unit(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    for i in range(8):
+        _observe(
+            client,
+            url=f"https://app.example/shop/item{i}",
+            case_type="api",
+            priority_score=90 - i,
+            cluster_key="gf:idor",
+        )
+    for i in range(5):
+        _observe(
+            client,
+            url=f"https://app.example/assets/file{i}.js",
+            case_type="javascript",
+            priority_score=100,
+        )
+    engagement = client.get(f"/engagements/{ENGAGEMENT_KEY}").json()
+    state_manager.score_application_units(int(engagement["id"]))
+
+    rows = client.get(f"{BASE}/work-items?status=pending").json()
+    assert all(row["application_unit_id"] is not None for row in rows)
+    shop_unit = next(
+        unit
+        for unit in client.get(f"{BASE}/application-units").json()
+        if unit["path_prefix"] == "/shop"
+    )
+    response = client.post(
+        f"{BASE}/work-items/fetch-by-unit",
+        json={"unit_id": shop_unit["id"], "agent": "auto", "limit": 3},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["unit"]["id"] == shop_unit["id"]
+    assert body["effective_limit"] == 3
+    assert len(body["claimed"]) == 3
+    assert all(row["url_path"].startswith("/shop/") for row in body["claimed"])
+    assert all(row["assigned_agent"] == "vulnerability-analyst" for row in body["claimed"])
+
+
+def test_fetch_by_unit_skips_unit_with_only_unroutable_unknown_rows(
+    client, isolate_settings
+):
+    # A unit holding ONLY low-signal `unknown` rows (priority 0, no gf: signal) is
+    # unroutable: every candidate is dropped by _assigned_agent_for_row. Before the
+    # fix, EV selection still chose such a unit and returned an empty claim, then
+    # re-selected it on the next call — starving routable work in other units.
+    # fetch-by-unit must now apply the same high-signal predicate as
+    # fetch-by-priority and exclude the unit from selection entirely.
+    _seed(client, isolate_settings)
+    for i in range(4):
+        _observe(
+            client,
+            url=f"https://app.example/junk/blob{i}",
+            case_type="unknown",
+            priority_score=0,
+            cluster_key="",
+        )
+    engagement = client.get(f"/engagements/{ENGAGEMENT_KEY}").json()
+    state_manager.score_application_units(int(engagement["id"]))
+
+    # The rows DID form an application unit (otherwise the test is vacuous).
+    pending = client.get(f"{BASE}/work-items?status=pending").json()
+    assert pending and all(row["application_unit_id"] is not None for row in pending)
+
+    body = client.post(
+        f"{BASE}/work-items/fetch-by-unit", json={"agent": "auto"}
+    ).json()
+    assert body["claimed"] == []
+    assert body["unit"] is None
+    assert body["error"] == "no-unsatisfied-unit"
+
+
+def test_bare_ev_fetch_selects_highest_unsatisfied_unit_and_derives_limit(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    for i in range(14):
+        _observe(
+            client,
+            url=f"https://app.example/api/order{i}",
+            method="POST" if i == 0 else "GET",
+            case_type="api",
+            priority_score=20,
+            cluster_key="gf:trust_surface",
+        )
+    for i in range(6):
+        _observe(
+            client,
+            url=f"https://app.example/static/f{i}.css",
+            case_type="stylesheet",
+            priority_score=99,
+        )
+    engagement = client.get(f"/engagements/{ENGAGEMENT_KEY}").json()
+    state_manager.score_application_units(int(engagement["id"]))
+
+    response = client.post(
+        f"{BASE}/work-items/fetch-by-unit",
+        json={"agent": "auto", "path": "/api", "work_class": "api"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["selection"] == "highest-ev-unsatisfied"
+    assert body["unit"]["path_prefix"] == "/api"
+    assert body["effective_limit"] > 0
+    assert body["effective_limit_source"] == "depth-tier-and-saturation"
+    assert body["claimed"]
+    assert all(row["type"] == "api" for row in body["claimed"])
+
+
+def test_fetch_by_unit_path_treats_sql_wildcards_as_literal(client, isolate_settings):
+    _seed(client, isolate_settings)
+    for suffix in ("one", "two"):
+        _observe(
+            client,
+            url=f"https://app.example/shop/{suffix}",
+            case_type="api",
+            priority_score=20,
+        )
+    engagement = client.get(f"/engagements/{ENGAGEMENT_KEY}").json()
+    state_manager.score_application_units(int(engagement["id"]))
+
+    response = client.post(
+        f"{BASE}/work-items/fetch-by-unit",
+        json={"agent": "auto", "path": "/shop%", "work_class": "api"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["claimed"] == []
+    assert response.json()["error"] == "no-unsatisfied-unit"
+
+
+def test_fetch_by_unit_serializes_selection_and_claim(client, isolate_settings):
+    _seed(client, isolate_settings)
+    _observe(client, url="https://app.example/api/one", case_type="api", priority_score=20)
+    engagement = client.get(f"/engagements/{ENGAGEMENT_KEY}").json()
+    state_manager.score_application_units(int(engagement["id"]))
+    statements: list[str] = []
+    with _common.get_connection() as connection:
+        connection.set_trace_callback(statements.append)
+
+    state_manager.fetch_work_items_by_unit(
+        int(engagement["id"]),
+        unit_id=None,
+        path="",
+        work_class="api",
+        limit=1,
+        agent="auto",
+    )
+
+    assert any(statement.strip().upper() == "BEGIN IMMEDIATE" for statement in statements)
+
+
+def test_legacy_work_item_unit_column_migration_keeps_foreign_key(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    with _common.get_connection() as connection:
+        connection.execute("DROP TABLE assessment_work_items")
+        connection.execute(
+            """
+            CREATE TABLE assessment_work_items (
+                id INTEGER PRIMARY KEY,
+                engagement_id INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                type TEXT NOT NULL DEFAULT 'unknown',
+                priority_score INTEGER NOT NULL DEFAULT 0,
+                cluster_key TEXT,
+                consumed_at TEXT,
+                host TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        db_module._create_assessment_work_items_table(connection)
+        foreign_keys = connection.execute(
+            "PRAGMA foreign_key_list(assessment_work_items)"
+        ).fetchall()
+
+    assert any(
+        row["from"] == "application_unit_id"
+        and row["table"] == "assessment_application_units"
+        and row["on_delete"] == "SET NULL"
+        for row in foreign_keys
+    )
 
 
 def test_fetch_by_type_and_done(client, isolate_settings):
