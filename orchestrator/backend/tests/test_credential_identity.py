@@ -1,4 +1,4 @@
-"""Tests for the credential->identity link (depth-gate Wave 4 / identity).
+"""Tests for the credential-to-identity link.
 
 A credential can be associated to a named auth.json identity (user_a/user_b/
 admin) via an additive ``identity`` column so "which identity ran which probe"

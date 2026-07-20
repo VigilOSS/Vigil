@@ -34,25 +34,19 @@ needing 5–15 platform pulls. See "Iteration-mode (dispatch_mode) Declaration" 
 - `agent/rules/resume.md` — universal resume hydration
 - `agent/shared-constraints-blue.md` — tenant scope, read-only-by-default, artifact-index chain of custody, UTC, look-back, host-exec audit pipeline, confidence labels, dispatch-handoff conventions
 - **One platform skill per dispatch**, named in the dispatch prompt. Allowed names:
-  - `agent/skills/google-workspaces/SKILL.md` — Google Workspace IR (the only fully built platform skill in v1)
-  - `agent/skills/m365-signin-investigation/SKILL.md` — Microsoft 365 sign-in & Conditional Access (P1; not yet on disk)
-  - `agent/skills/aws-cloudtrail-investigation/SKILL.md` — AWS CloudTrail / IAM (P1; not yet on disk)
-  - `agent/skills/okta-investigation/SKILL.md` — Okta System Log (P2; not yet on disk)
-  - `agent/skills/edr-alert-triage/SKILL.md` — CrowdStrike / Defender / SentinelOne (P2; not yet on disk)
-  - `agent/skills/network-threat-hunt/SKILL.md` — proxy / DNS / NetFlow (P2; not yet on disk)
-  - `agent/skills/phishing-triage/SKILL.md` — email-borne phishing (P1; not yet on disk)
+  - `agent/skills/google-workspaces/SKILL.md` — Google Workspace IR
+  - `agent/skills/m365-signin-investigation/SKILL.md` — Microsoft 365 sign-in and Conditional Access
+  - `agent/skills/aws-cloudtrail-investigation/SKILL.md` — AWS CloudTrail and IAM
+  - `agent/skills/okta-investigation/SKILL.md` — Okta System Log
+  - `agent/skills/edr-alert-triage/SKILL.md` — CrowdStrike, Defender, and SentinelOne
+  - `agent/skills/network-threat-hunt/SKILL.md` — proxy, DNS, and NetFlow
+  - `agent/skills/phishing-triage/SKILL.md` — email-borne phishing
 - **Every tenant ref named in `scope.json:tenant_reference_paths[]`.** Missing tenant ref → halt with a `blocked` handoff naming the path.
 
 **LOAD-ON-FIRST-USE (lazy):**
 
-- `agent/skills/ioc-enrichment/SKILL.md` — load when the dispatch is IOC-heavy (multiple new domains / IPs / hashes to enrich). Built in Unit 7.
+- `agent/skills/ioc-enrichment/SKILL.md` — load when the dispatch is IOC-heavy (multiple new domains / IPs / hashes to enrich).
 - `agent/rules/reporting.md` — **conditional (severity + banned hedge phrases).** L2 does telemetry pulls and evidence-ladder construction, not report authoring: load it only immediately before drafting the promoted finding's narrative fields (`severity_rationale`, timeline text) — which L3 verification and report-writer still reshape before they are report-final.
-
-**v1 platform-skill constraint.** Only `google-workspaces` is fully built. If
-the dispatch names a not-yet-built skill, run platform-CLI pulls using
-`agent/rules/ir-evidence.md` + the tenant ref alone, name the shortfall in
-`coverage_gaps`, and return the partial finding. Do not fabricate platform
-commands the tenant ref does not document.
 
 ## Pre-Work Checkpoint
 
@@ -96,9 +90,9 @@ If any item is unchecked, STOP and load it now or return a `blocked` handoff.
 
 ## Telemetry Pull Discipline
 
-Every tenant-facing platform command runs through `vigil assess host-exec` (Unit 9
-verb) so the command lands in `assessment_command_runs` with intent, technique,
-and phase metadata:
+Every tenant-facing platform command runs through `vigil assess host-exec` so
+the command lands in `assessment_command_runs` with intent, technique, and
+phase metadata:
 
 ```bash
 vigil assess host-exec \
@@ -225,7 +219,7 @@ Before your dispatch returns, run in this order:
    vigil assess artifact mark-scratch --under notes/scratch/
    ```
 
-3. **Promote the L1 draft finding.** `vigil assess finding update <slug> --inline '{"status":"active","details":{"timeline":[...],"iocs":[...],"mitre_techniques":[...],"confidence":"...","severity_rationale":"..."}}'`. `verification_state` stays `unreviewed` — do not include it in the inline payload.
+3. **Promote the L1 draft finding.** `vigil assess finding update <slug> --status active --details-inline '{"timeline":[...],"iocs":[...],"mitre_techniques":[...],"confidence":"...","severity_rationale":"..."}'`. `verification_state` stays `unreviewed`; `finding verify` owns that transition.
 
 4. **Record intel rows for every IOC** via `vigil assess intel record <type> <intel-json> --finding <slug>`. The link to the finding is created automatically.
 
@@ -267,7 +261,7 @@ The following turn an L2 finding into a guess the verifier cannot evaluate:
 
 - To `incident-verifier` (L3): every active L2 finding. The handoff carries the artifact IDs, the evidence-ladder rungs, the MITRE techniques, the confidence label, and (for multi-platform incidents) the cross-platform correlation paragraph.
 - In parallel to `osint-analyst`: when IOC enrichment is heavy (≥5 new IOCs, or third-party API calls required). The operator dispatches the parallel role; L2 names the IOC set in `next_steps`.
-- Back to operator (blocked handoff): missing tenant ref, missing platform credential, `host-exec` not available on the runtime image, ambiguous scope (alert spans multiple customers), platform skill named in the dispatch is not yet on disk and the tenant ref alone does not document enough of the pull menu.
+- Back to operator (blocked handoff): missing tenant ref, missing platform credential, `host-exec` not available on the runtime image, ambiguous scope (alert spans multiple customers), or the named platform skill cannot be discovered or loaded.
 
 ## Re-Investigation Mode
 

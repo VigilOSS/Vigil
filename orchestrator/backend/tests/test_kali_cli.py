@@ -765,6 +765,120 @@ def test_extra_args_not_exposed_on_kali_exec():
     assert exc.value.code != 0
 
 
+def test_kali_exec_has_no_second_engagement_key_selector():
+    """API/audit attribution derives from the resolved engagement config."""
+    import inspect
+
+    kali = _import("assess.lib.kali")
+    assert "engagement_key" not in inspect.signature(kali.kali_exec).parameters
+
+
+def test_kali_exec_rejects_explicit_dir_that_conflicts_with_injected_config(
+    monkeypatch, fake_engagement
+):
+    kali = _import("assess.lib.kali")
+    other = fake_engagement.parent / "other-engagement"
+    other.mkdir()
+    (other / "scope.json").write_text(json.dumps({"hosts": ["example.com"]}))
+    cfg = SimpleNamespace(
+        base_url="http://127.0.0.1:18000",
+        engagement_dir=str(other),
+        engagement_key=other.name,
+        agent_root=str(other.parent.parent),
+    )
+    monkeypatch.setattr(kali, "_check_container_running", pytest.fail)
+
+    with pytest.raises(kali.AssessError, match="conflicts with resolved config"):
+        kali.kali_exec(
+            ["echo", "ok"],
+            technique="RECON",
+            intent="binding mismatch regression",
+            probe_kind="baseline",
+            phase="recon",
+            timeout=30,
+            engagement_dir=fake_engagement,
+            config=cfg,
+        )
+
+
+def test_kali_job_rejects_explicit_dir_that_conflicts_with_injected_config(
+    monkeypatch, fake_engagement
+):
+    kali_jobs = _import("assess.lib.kali_jobs")
+    other = fake_engagement.parent / "other-job-engagement"
+    other.mkdir()
+    (other / "scope.json").write_text(json.dumps({"hosts": ["example.com"]}))
+    cfg = SimpleNamespace(
+        base_url="http://127.0.0.1:18000",
+        engagement_dir=str(other),
+        engagement_key=other.name,
+        agent_root=str(other.parent.parent),
+    )
+    monkeypatch.setattr(kali_jobs, "_container_running", pytest.fail)
+
+    with pytest.raises(kali_jobs.AssessError, match="conflicts with resolved config"):
+        kali_jobs.start_job(
+            ["echo", "ok"],
+            audit_meta={
+                "technique": "RECON",
+                "intent": "binding mismatch regression",
+                "probe_kind": "baseline",
+                "phase": "recon",
+            },
+            engagement_dir=fake_engagement,
+            config=cfg,
+        )
+
+
+def test_kali_exec_rejects_config_key_that_conflicts_with_configured_dir(
+    monkeypatch, fake_engagement
+):
+    kali = _import("assess.lib.kali")
+    cfg = SimpleNamespace(
+        base_url="http://127.0.0.1:18000",
+        engagement_dir=str(fake_engagement),
+        engagement_key="different-engagement",
+        agent_root=str(fake_engagement.parent.parent),
+    )
+    monkeypatch.setattr(kali, "_check_container_running", pytest.fail)
+
+    with pytest.raises(kali.AssessError, match="engagement key.*conflicts"):
+        kali.kali_exec(
+            ["echo", "ok"],
+            technique="RECON",
+            intent="binding key mismatch regression",
+            probe_kind="baseline",
+            phase="recon",
+            timeout=30,
+            config=cfg,
+        )
+
+
+def test_kali_job_rejects_config_key_that_conflicts_with_configured_dir(
+    monkeypatch, fake_engagement
+):
+    kali_jobs = _import("assess.lib.kali_jobs")
+    cfg = SimpleNamespace(
+        base_url="http://127.0.0.1:18000",
+        engagement_dir=str(fake_engagement),
+        engagement_key="different-engagement",
+        agent_root=str(fake_engagement.parent.parent),
+    )
+    monkeypatch.setattr(kali_jobs, "_container_running", pytest.fail)
+
+    with pytest.raises(kali_jobs.AssessError, match="engagement key.*conflicts"):
+        kali_jobs.start_job(
+            ["echo", "ok"],
+            audit_meta={
+                "technique": "RECON",
+                "intent": "binding key mismatch regression",
+                "probe_kind": "baseline",
+                "phase": "recon",
+            },
+            config=cfg,
+        )
+
+
 def test_kali_exec_passthrough_carries_full_command(monkeypatch):
     cli = _import("assess.cli")
     kali = _import("assess.lib.kali")
@@ -934,7 +1048,6 @@ def test_kali_exec_writes_pre_exec_row_then_finalizes(monkeypatch, fake_engageme
         timeout=60,
         agent_name="recon-specialist",
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="nmap",
     )
     assert result.status == "completed"
@@ -997,7 +1110,6 @@ def test_kali_exec_rejects_out_of_scope_target_before_container_and_audits_refus
             phase="recon",
             timeout=60,
             engagement_dir=fake_engagement,
-            engagement_key=fake_engagement.name,
             tool_name="curl",
         )
 
@@ -1032,7 +1144,6 @@ def test_kali_exec_global_scope_bypass_is_recorded_in_pre_exec_audit(
         phase="recon",
         timeout=60,
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="curl",
     )
 
@@ -1095,7 +1206,6 @@ def test_kali_exec_acquires_aggregate_rate_lease_after_audit_before_process(
         phase="recon",
         timeout=60,
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="nmap",
     )
 
@@ -1122,26 +1232,7 @@ def test_kali_exec_denied_tool_is_rejected_before_execution(monkeypatch, fake_en
             phase="recon",
             timeout=60,
             engagement_dir=fake_engagement,
-            engagement_key=fake_engagement.name,
             tool_name="nuclei",
-        )
-
-
-def test_kali_exec_rejects_explicit_empty_engagement_key(monkeypatch, fake_engagement):
-    kali = _setup_fake_config(monkeypatch, fake_engagement)
-    monkeypatch.setattr(kali, "_check_container_running", pytest.fail)
-
-    with pytest.raises(kali.AssessError, match="engagement key is empty"):
-        kali.kali_exec(
-            ["echo", "ok"],
-            technique="RECON",
-            intent="invalid routing key",
-            probe_kind="fingerprint",
-            phase="recon",
-            timeout=60,
-            engagement_dir=fake_engagement,
-            engagement_key="",
-            tool_name="echo",
         )
 
 
@@ -1161,7 +1252,6 @@ def test_kali_exec_normalizes_technique_and_probe_kind_case(monkeypatch, fake_en
         timeout=60,
         agent_name="vulnerability-analyst",
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="curl",
     )
     _endpoint, payload = fake_client.posts[0]
@@ -1187,7 +1277,6 @@ def test_kali_exec_accepts_previously_missing_vuln_class(monkeypatch, fake_engag
         timeout=60,
         agent_name="vulnerability-analyst",
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="curl",
     )
     _endpoint, payload = fake_client.posts[0]
@@ -1244,7 +1333,6 @@ def test_kali_exec_timeout_kills_process_group_and_marks_timed_out(
         timeout=1,
         agent_name="recon-specialist",
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="nuclei",
     )
     assert result.timed_out is True
@@ -1352,7 +1440,6 @@ def test_filenotfound_finalizes_running_audit_row_to_failed(monkeypatch, fake_en
             timeout=30,
             agent_name="recon-specialist",
             engagement_dir=fake_engagement,
-            engagement_key=fake_engagement.name,
             tool_name="nmap",
         )
 
@@ -1396,7 +1483,6 @@ def test_b1_docker_exec_wrapper_captures_in_container_pid(monkeypatch, fake_enga
         timeout=30,
         agent_name="recon-specialist",
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="nmap",
     )
     argv = captured["argv"]
@@ -1488,7 +1574,6 @@ def test_b1_timeout_cascade_kills_in_container_pid_then_host_pgid(
         timeout=1,
         agent_name="vulnerability-analyst",
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="sqlmap",
     )
 
@@ -1556,7 +1641,6 @@ def test_b1_timeout_without_pid_file_uses_host_kill_only(
         timeout=1,
         agent_name="recon-specialist",
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="nuclei",
     )
 
@@ -1769,7 +1853,6 @@ def test_kali_exec_dedup_warns_and_returns_early_without_force(
         timeout=30,
         agent_name="recon-specialist",
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="nmap",
     )
     err = capsys.readouterr().err
@@ -1826,7 +1909,6 @@ def test_dedup_warns_and_continues_by_default(
         timeout=30,
         agent_name="recon-specialist",
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="nmap",
     )
 
@@ -1899,7 +1981,6 @@ def test_dedup_force_does_not_set_superseded_by_id(monkeypatch, fake_engagement,
         timeout=30,
         agent_name="recon-specialist",
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         force=True,
         tool_name="nmap",
     )
@@ -1949,7 +2030,6 @@ def test_kali_exec_dedup_force_bypasses_check(monkeypatch, fake_engagement):
         timeout=30,
         agent_name="recon-specialist",
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         force=True,
         tool_name="nmap",
     )
@@ -1978,7 +2058,6 @@ def _kali_exec_with_technique(monkeypatch, fake_engagement, technique: str):
         timeout=30,
         agent_name="operator",
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="echo",
     )
     return result, fake_client
@@ -2028,7 +2107,6 @@ def test_kali_exec_rejects_unknown_technique(monkeypatch, fake_engagement):
             timeout=60,
             agent_name=None,
             engagement_dir=fake_engagement,
-            engagement_key=fake_engagement.name,
         )
     assert "TECHNIQUE_ENUM" in str(exc.value) or "technique" in str(exc.value).lower()
 
@@ -2051,7 +2129,6 @@ def test_kali_exec_defaults_missing_agent_name_to_operator(monkeypatch, fake_eng
         timeout=60,
         agent_name=None,
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
     )
 
     assert result.status == "completed"
@@ -2070,7 +2147,6 @@ def test_kali_exec_rejects_missing_phase(monkeypatch, fake_engagement):
             timeout=60,
             agent_name="recon-specialist",
             engagement_dir=fake_engagement,
-            engagement_key=fake_engagement.name,
         )
     assert "phase" in str(exc.value).lower()
 
@@ -2087,7 +2163,6 @@ def test_kali_exec_rejects_intent_too_long(monkeypatch, fake_engagement):
             timeout=60,
             agent_name="recon-specialist",
             engagement_dir=fake_engagement,
-            engagement_key=fake_engagement.name,
         )
     assert "intent" in str(exc.value).lower()
 
@@ -2125,7 +2200,6 @@ def test_kali_exec_audit_post_failure_writes_marker_and_continues(
         timeout=30,
         agent_name="recon-specialist",
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="nmap",
     )
     # Result should still come back even though audit POST failed.
@@ -2772,14 +2846,13 @@ def test_kali_exec_noop_short_circuit_keeps_argparse_smoke_test_offline(
         timeout=60,
         agent_name="recon-specialist",
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
     )
     assert result.status == "completed"
     assert result.return_code == 0
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Wave-1 corrections — extra-args quoting, hoist edge cases, pipe attribution,
+# Corrections for extra-args quoting, hoist edge cases, pipe attribution,
 # kali-job audit parity, kali-job stop kill cascade, finalize 409 swallow.
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -2893,6 +2966,24 @@ def test_hoist_root_flags_rejects_empty_equals_form():
     with pytest.raises(SystemExit) as exc:
         cli._hoist_root_flags(["kali", "subfinder", "--engagement-dir="])
     assert "empty" in str(exc.value)
+
+
+def test_hoist_root_flags_rejects_empty_separate_value():
+    """An expanded empty shell variable must not fall through to CWD/session."""
+    cli = _import("assess.cli")
+    with pytest.raises(SystemExit) as exc:
+        cli._hoist_root_flags(
+            ["kali", "subfinder", "--engagement-dir", "", "-d", "example.com"]
+        )
+    assert "empty" in str(exc.value)
+
+
+def test_bbot_default_output_is_resolved_under_kali_engagement_cwd(monkeypatch):
+    """An explicit engagement selector cannot disagree with BBOT's output path."""
+    bbot = _import("assess.commands.kali_bbot")
+    monkeypatch.setattr(bbot.time, "strftime", lambda *_args: "20260720T120000Z")
+
+    assert bbot._default_output_dir() == "scans/bbot_20260720T120000Z"
 
 
 def test_kali_job_start_validates_audit_metadata_and_resolves_agent(
@@ -3682,7 +3773,6 @@ def test_finalize_409_swallowed_as_success(monkeypatch, fake_engagement):
         timeout=60,
         agent_name="recon-specialist",
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="nmap",
     )
     assert result.status == "completed"
@@ -3766,7 +3856,6 @@ def test_pre_exec_wrapper_handles_pid_write_failure(monkeypatch, fake_engagement
         timeout=30,
         agent_name="recon-specialist",
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="nmap",
     )
     argv = captured["argv"]
@@ -3779,7 +3868,7 @@ def test_pre_exec_wrapper_handles_pid_write_failure(monkeypatch, fake_engagement
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Wave 2 — methodology + wrapper alignment
+# Methodology and wrapper alignment
 # ──────────────────────────────────────────────────────────────────────────
 
 
@@ -5235,7 +5324,6 @@ def _run_emit_case(
         timeout=60,
         agent_name="vulnerability-analyst",
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name=tool_name,
     )
     return result, fake_client
@@ -5348,7 +5436,6 @@ def test_probe_emit_best_effort_never_raises(monkeypatch, fake_engagement):
         timeout=60,
         agent_name="vulnerability-analyst",
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="sqlmap",
     )
     assert result.status == "completed"
@@ -5408,7 +5495,6 @@ def test_kali_identity_stamps_auth_context_on_command_and_probe(monkeypatch, fak
         timeout=60,
         agent_name="vulnerability-analyst",
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="sqlmap",
         identity="user_a",
     )
@@ -5451,7 +5537,6 @@ def test_kali_without_identity_uses_anonymous_context_without_credential_lookup(
         timeout=60,
         agent_name="vulnerability-analyst",
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="sqlmap",
         identity=None,
     )
@@ -5489,7 +5574,6 @@ def test_kali_unknown_identity_refuses_anonymous_execution(
             timeout=60,
             agent_name="vulnerability-analyst",
             engagement_dir=fake_engagement,
-            engagement_key=fake_engagement.name,
             tool_name="sqlmap",
             identity="ghost",
         )
@@ -5517,7 +5601,7 @@ def test_kali_identity_injects_credentials_into_http_command(monkeypatch, fake_e
         ["curl", "-s", "https://shop.example.com/api/orders/1"],
         technique="IDOR", intent="idor as user_b", probe_kind="payload",
         phase="consume-test", timeout=60, agent_name="vulnerability-analyst",
-        engagement_dir=fake_engagement, engagement_key=fake_engagement.name,
+        engagement_dir=fake_engagement,
         tool_name="curl", identity="user_b",
     )
     argv_str = " ".join(captured["argv"])
@@ -5554,7 +5638,7 @@ def test_kali_identity_injects_backend_access_token(monkeypatch, fake_engagement
         ["curl", "-s", "https://shop.example.com/api/orders/1"],
         technique="IDOR", intent="idor as bearer user", probe_kind="payload",
         phase="consume-test", timeout=60, agent_name="vulnerability-analyst",
-        engagement_dir=fake_engagement, engagement_key=fake_engagement.name,
+        engagement_dir=fake_engagement,
         tool_name="curl", identity="api_user",
     )
     argv_str = " ".join(captured["argv"])
@@ -5587,7 +5671,7 @@ def test_kali_identity_non_http_tool_refuses_anonymous_execution(
             ["nmap", "-sV", "shop.example.com"],
             technique="RECON", intent="scan as user_a", probe_kind="baseline",
             phase="recon", timeout=60, agent_name="recon-specialist",
-            engagement_dir=fake_engagement, engagement_key=fake_engagement.name,
+            engagement_dir=fake_engagement,
             tool_name="nmap", identity="user_a",
         )
     assert _probe_posts(fake_client) == []
@@ -5625,7 +5709,7 @@ def test_kali_identity_shell_wrapper_injects_and_stamps(monkeypatch, fake_engage
         ["sh", "-c", "curl https://shop.example.com/api/orders/1"],
         technique="IDOR", intent="idor as user_a via shell", probe_kind="payload",
         phase="consume-test", timeout=60, agent_name="vulnerability-analyst",
-        engagement_dir=fake_engagement, engagement_key=fake_engagement.name,
+        engagement_dir=fake_engagement,
         tool_name="curl", identity="user_a",
     )
     assert _command_posts(fake_client)[0]["auth_context"] == "user_a"

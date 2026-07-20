@@ -96,7 +96,7 @@ def run(args) -> None:
 
     The work buffer lives in the orchestrator ledger (ADR 0013); every verb is
     an ``AssessmentClient`` call. The engagement is resolved from the standard
-    precedence (``--engagement-dir`` → cwd → active pointer → ``$ENGAGEMENT_DIR``)
+    binding (explicit ``--engagement-dir`` or matching cwd/launcher session)
     via ``load_config`` — there is no cases.db path to pass.
     """
     action = args.action

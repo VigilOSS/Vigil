@@ -306,10 +306,10 @@ instructions: |2
        `--summary` writes the top-level Summary; `--details-inline` MERGES the rest into the finding's
        `details` (`steps_to_reproduce`, `evidence`, `attack_scenario`, `impact`, `remediation`)
        without touching `cvss_vector`, `vrt_category`, or `poc_*`. The authored `details.evidence` is
-       what renders as the Evidence section; it does NOT by itself satisfy the strict gate's proof
-       requirement — the finding must ALSO carry `evidence_ref` (pointing at the raw file under
-       `scans/`, set with `--evidence-ref scans/<file>` if absent) OR `poc_request`+`poc_response` OR
-       `poc_code`. If nothing resolves a marker, the finding is not ready — do not submit around it;
+       what renders as the Evidence section; it does not itself satisfy the executable gate's durable
+       proof requirement. Read `vigil assess contract export submission`, register the finding's raw
+       evidence artifact, and set `--evidence-ref scans/<file>` when absent. Inline request/response
+       or PoC code remains authoring material. If nothing resolves a marker, the finding is not ready — do not submit around it;
        hand back instead of fabricating.
   4. **Checklist/QA (Pass 1 — in-context).** Re-render from the finding — `vigil assess
      export submission <slug> --platform <same> --draft --overwrite` — then run the one consolidated
@@ -331,10 +331,8 @@ instructions: |2
   6. **Publish:** for Medium-or-above findings, only after the blind verdict is recorded as `Accept`;
      for Low/Informational findings (no blind-triage gate), once `QA PASS`. Re-run `vigil assess
      export submission <slug> --platform <same platform> --overwrite` **without** `--draft` — this
-     reproduces the authored content from the finding, applies the strict final gate (title; severity
-     + CVSS vector; platform taxonomy; an attacker-impact statement; ≥1 concrete proof) and, on
-     success, registers the rendered `submission.md` as a finding-linked artifact
-     (`kind="submission"`). It exits non-zero if any required field is missing and it never sets
+     reproduces the authored content from the finding and applies the executable final gate documented
+     by `vigil assess contract export submission`. It exits non-zero on any failure and never sets
      `submission_status` — resolve any gap it reports (at the finding) rather than bypassing it. Then
      mark the finding lifecycle: `vigil assess finding update <slug> --status reported --reason
      "Submission cleared for delivery" --source-name report-writer`. Once the operator has actually

@@ -86,6 +86,7 @@ def _finding(slug: str = "VA-047", *, replies=None, submission_status: str = "ne
         "slug": slug,
         "title": "IDOR",
         "severity": "high",
+        "row_version": 7,
         "submission_status": submission_status,
         "details_json": json.dumps(details),
     }
@@ -140,6 +141,36 @@ def test_append_preserves_prior_replies(tmp_path, monkeypatch, capsys):
     assert replies[2]["created_at"] == _NOW
     assert replies[2]["sent_status"] == "draft" and replies[2]["sent_at"] is None
     assert replies[2]["author"] == "report-writer"
+
+
+def test_patch_carries_fetched_row_version(tmp_path, monkeypatch, capsys):
+    fake = _FakeClient(_finding(replies=[_reply(1)]))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        ["record-reply", "VA-047", "--in-response-to", "q2", "--body", "second"],
+        str(tmp_path),
+    )
+
+    record_reply.run(args)
+    capsys.readouterr()
+
+    _endpoint, payload = fake.patches[0]
+    assert payload["expected_row_version"] == 7
+
+
+def test_missing_row_version_fails_closed_before_patch(tmp_path, monkeypatch):
+    finding = _finding(replies=[_reply(1)])
+    finding.pop("row_version")
+    fake = _FakeClient(finding)
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        ["record-reply", "VA-047", "--in-response-to", "q2", "--body", "second"],
+        str(tmp_path),
+    )
+
+    with pytest.raises(AssessError, match="positive row_version"):
+        record_reply.run(args)
+    assert fake.patches == []
 
 
 def test_auto_seq_appends_at_max_plus_one(tmp_path, monkeypatch, capsys):

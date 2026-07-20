@@ -262,21 +262,23 @@ The proxy runs `mitmdump` with `proxy_addon.py`, which:
 - Posts request observations to the orchestrator backend (when available), which derives the
   work-buffer row (`assessment_work_items`) server-side in the same transaction — no local
   database write (ADR 0013)
-- When an engagement's capture policy is enabled, additionally persists the
-  **full request/response flow** — body sidecars + a JSONL flow index under the
-  engagement root — and posts a compact flow record to the backend (see below)
+- When an engagement's capture policy is enabled, additionally persists a
+  **full-flow metadata record** in the JSONL index and backend; request and
+  response body sidecars are stored only when their individual flags are enabled
 
 ## Full-Flow Capture Policy
 
 Beyond the compact request-observation + derived work-item the addon always
-records, each engagement has an opt-in **full-flow capture policy**. When
-enabled, the addon writes the raw request/response bodies as engagement-local
-sidecars and a JSONL flow index, and posts a compact per-flow record (sha256s,
-byte counts, truncation flags, timing, auth context, and host-mismatch
-telemetry) to the backend `POST .../assessment/http-flows` ingest route.
+records, each engagement has an opt-in **full-flow capture policy** with three
+states:
 
-**Raw-body capture is OFF by default.** Restarting the shared proxy never
-silently changes capture behavior; you must turn it on per engagement.
+1. `--no-enabled`: compact observation only; no full-flow index/backend row and no body sidecars.
+2. `--enabled` with both body flags false: full-flow metadata in the JSONL index and backend, with no bodies stored.
+3. `--enabled` plus `--capture-request-bodies` and/or `--capture-response-bodies`: the same metadata plus only the selected body sidecars (subject to size/content-type policy).
+
+**Full-flow recording and raw-body storage are OFF by default.** Restarting the
+shared proxy never silently changes capture behavior; opt in per engagement and
+select body sides explicitly when their contents are needed.
 
 For the full `vigil assess http policy` command reference (inspecting,
 enabling/scoping, and disabling raw-body capture), run `vigil assess contract
@@ -286,7 +288,7 @@ The policy is authoritative in the backend and mirrored to
 `capture-policy.json` next to `scope.json` in the engagement root, so the shared
 proxy honors it even when the orchestrator registry fetch is unavailable.
 
-On-disk layout (engagement-root-relative), written only while capture is enabled:
+On-disk layout (engagement-root-relative), written only while full-flow recording is enabled:
 
 ```
 traffic/mitmproxy/bodies/<sha256>.bin   # one file per distinct stored body

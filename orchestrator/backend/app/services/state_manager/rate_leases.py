@@ -119,9 +119,13 @@ def update_rate_lease(
     release: bool = False,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
-    now = _utcnow()
-    now_iso = _iso(now)
     with _common.get_connection() as connection:
+        # Serialize renewal/release against acquisition's sum-and-insert lock.
+        # Otherwise a lease can expire, its capacity can be reallocated, and a
+        # concurrent stale renewal can revive it after the aggregate check.
+        connection.execute("BEGIN IMMEDIATE")
+        now = _utcnow()
+        now_iso = _iso(now)
         existing = connection.execute(
             """
             SELECT * FROM assessment_rate_leases
@@ -145,6 +149,12 @@ def update_rate_lease(
                 (now_iso, now_iso, engagement.id, lease_token),
             )
         elif ttl_seconds is not None:
+            current_expiry = existing["expires_at"]
+            if not isinstance(current_expiry, str) or current_expiry <= now_iso:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="rate lease already expired; acquire a new lease",
+                )
             expires_at = _iso(now + dt.timedelta(seconds=int(ttl_seconds)))
             connection.execute(
                 """

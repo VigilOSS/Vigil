@@ -324,13 +324,11 @@ dispatch (if a follow-on finding lands).
 
    ```bash
    vigil assess finding update <finding-slug> \
-     --inline '{
-       "workflow_status": "contained",
-       "details": {
-         "containment_actions": [
-           {"proposal_id": <id>, "action": "revoke_session", "target": "...", "executed_utc": "...", "proof_artifact_id": <id>}
-         ]
-       }
+     --workflow-status contained \
+     --details-inline '{
+       "containment_actions": [
+         {"proposal_id": <id>, "action": "revoke_session", "target": "...", "executed_utc": "...", "proof_artifact_id": <id>}
+       ]
      }'
    ```
 

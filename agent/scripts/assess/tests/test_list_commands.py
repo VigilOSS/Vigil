@@ -245,7 +245,7 @@ _MUST_BE_DISCOVERABLE = (
     "coverage",
     "resume-brief",
     "artifact",
-    # Tier-3 subcommand groups render as ONE collapsed catalog row each (like
+    # Grouped subcommands render as ONE collapsed catalog row each (like
     # `kali`); their per-action verbs resolve via `contract <parent> <action>`.
     "finding",
     "intel",

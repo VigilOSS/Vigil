@@ -1,4 +1,4 @@
-"""Harness-doctrine tests for report_readiness softening (Wave 2).
+"""Harness-doctrine tests for report-readiness advisory behavior.
 
 These exercise the harness pivot recorded in ``docs/adr/0001``:
 administrative-hygiene checks at the report
@@ -167,7 +167,7 @@ def test_s21_draft_finding_surfaced_as_advisory_with_slug(client, isolate_settin
         if a["kind"] == "draft_finding_needs_disposition" and a["slug"] == "HR-002"
     )
     assert "finding update HR-002 --workflow-status active" in advisory["detail"]
-    assert "kill-finding HR-002" in advisory["detail"]
+    assert "finding verify HR-002 --disposition false_positive" in advisory["detail"]
     assert any(a["slug"] == "HR-002" for a in body["advisories"]), body
 
 

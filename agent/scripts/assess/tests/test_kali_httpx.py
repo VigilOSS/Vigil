@@ -1,7 +1,7 @@
 """Offline tests for the `kali httpx` typed wrapper's flag -> argv construction.
 No docker, no backend, no billed calls.
 
-Covers the Wave-1 "httpx ergonomics" promotions: -ports/-p (I-6 alt-port
+Covers the typed httpx ergonomics: -ports/-p (I-6 alt-port
 liveness undercount), -content-length/-cl, -path, -store-response/-sr, and
 -store-response-dir/-srd. Mirrors the captured_cmd pattern in test_arjun.py /
 test_kali_arjun.py."""

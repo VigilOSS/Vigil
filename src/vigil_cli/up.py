@@ -10,7 +10,7 @@ from . import config as config_module
 from . import docker
 from .image_freshness import image_outdated, proxy_image_drift
 from .install import InstallOptions, install_from_source
-from .mitmproxy import MitmproxyOptions, start_proxy
+from .mitmproxy import MitmproxyOptions, mitmproxy_image_inputs, start_proxy
 from .oob import OobOptions, oob_options as _oob_options, oob_status, start_oob
 from .orchestrator import OrchestratorOptions, start_orchestrator
 from .paths import default_runtime_container, resolve_source_root
@@ -59,7 +59,7 @@ def run_up(options: UpOptions, *, runner: docker.Runner = docker.run_command) ->
 
     if options.no_build:
         print("mitmproxy image\tbuild skipped")
-    elif image_outdated("vigil-proxy:latest", _mitmproxy_image_inputs(install_root), runner=runner):
+    elif image_outdated("vigil-proxy:latest", mitmproxy_image_inputs(install_root), runner=runner):
         print("mitmproxy image\tbuilding")
         _build_mitmproxy_image(install_root, runner=runner)
     else:
@@ -196,13 +196,6 @@ def _prompt_frp_token() -> str:
 
 def _runtime_image_inputs(install_root: Path) -> list[Path]:
     return runtime_image_inputs(install_root)
-
-
-def _mitmproxy_image_inputs(install_root: Path) -> list[Path]:
-    return [
-        install_root / "agent" / "docker" / "mitmproxy" / "Dockerfile",
-        install_root / "agent" / "scripts" / "proxy_addon.py",
-    ]
 
 
 def _runtime_image_drift(options: RuntimeOptions, *, runner: docker.Runner) -> bool:

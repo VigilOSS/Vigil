@@ -1,4 +1,4 @@
-"""Wave 6c — the depth ledger (depth-gate §5.3).
+"""The depth-ledger regression suite.
 
 These tests seed a deep_required app unit and assert the executable §5.3
 predicate table, the Covered definition, the STRUCTURED dedicated-dispatch

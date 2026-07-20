@@ -125,6 +125,51 @@ def test_derive_jwt_same_sub_same_issuer_coalesces_across_refresh():
     assert a is not None and a == b
 
 
+def test_derive_jwt_same_sub_and_issuer_different_audience_stays_distinct():
+    a = creds.derive_capture_identity(
+        {},
+        {
+            "Authorization": f"Bearer {_jwt({'sub': 'user-1', 'iss': 'https://idp', 'aud': 'app-a'})}"
+        },
+        {},
+    )
+    b = creds.derive_capture_identity(
+        {},
+        {
+            "Authorization": f"Bearer {_jwt({'sub': 'user-1', 'iss': 'https://idp', 'aud': 'app-b'})}"
+        },
+        {},
+    )
+    assert a is not None and b is not None and a != b
+
+
+def test_derive_jwt_audience_list_order_does_not_split_refresh():
+    t1 = _jwt(
+        {"sub": "user-1", "iss": "https://idp", "aud": ["api", "account"], "iat": 1}
+    )
+    t2 = _jwt(
+        {"sub": "user-1", "iss": "https://idp", "aud": ["account", "api"], "iat": 2}
+    )
+    a = creds.derive_capture_identity({}, {"Authorization": f"Bearer {t1}"}, {})
+    b = creds.derive_capture_identity({}, {"Authorization": f"Bearer {t2}"}, {})
+    assert a is not None and a == b
+
+
+def test_derive_contextless_jwt_scopes_by_normalized_capture_host():
+    token = _jwt({"sub": "user-1"})
+    first = creds.derive_capture_identity(
+        {}, {"Authorization": f"Bearer {token}"}, {}, host="APP-A.Example."
+    )
+    same_host = creds.derive_capture_identity(
+        {}, {"Authorization": f"Bearer {token}"}, {}, host="app-a.example"
+    )
+    other_host = creds.derive_capture_identity(
+        {}, {"Authorization": f"Bearer {token}"}, {}, host="app-b.example"
+    )
+
+    assert first is not None and first == same_host and first != other_host
+
+
 def test_derive_bearer_from_tokens_bag():
     got = creds.derive_capture_identity(
         {}, {}, {"access_token": _jwt({"sub": "tok-user"})}
@@ -329,6 +374,58 @@ def test_jwt_same_sub_two_raw_tokens_one_row(client, isolate_settings):
     assert len(db.list_credentials(eng)) == 1
 
 
+def test_jwt_different_audiences_keep_separate_bearer_rows(client, isolate_settings):
+    eng = _seed(client, isolate_settings)
+    token_a = _jwt({"sub": "u1", "iss": "https://idp", "aud": "app-a"})
+    token_b = _jwt({"sub": "u1", "iss": "https://idp", "aud": "app-b"})
+
+    first = _capture(
+        eng,
+        "app-a.example.com",
+        {},
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    second = _capture(
+        eng,
+        "app-b.example.com",
+        {},
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+
+    assert first["identity_name"] != second["identity_name"]
+    rows = {row["identity_name"]: row for row in db.list_credentials(eng)}
+    assert len(rows) == 2
+    assert rows[first["identity_name"]]["headers"]["Authorization"] == f"Bearer {token_a}"
+    assert rows[second["identity_name"]]["headers"]["Authorization"] == f"Bearer {token_b}"
+
+
+def test_contextless_jwt_keeps_separate_bearers_per_capture_host(
+    client, isolate_settings
+):
+    eng = _seed(client, isolate_settings)
+    token_a = _jwt({"sub": "u1", "iat": 1})
+    token_b = _jwt({"sub": "u1", "iat": 2})
+
+    first = _capture(
+        eng,
+        "app-a.example.com",
+        {},
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    second = _capture(
+        eng,
+        "app-b.example.com",
+        {},
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+
+    assert first["identity_name"] != second["identity_name"]
+    rows = {row["identity_name"]: row for row in db.list_credentials(eng)}
+    assert len(rows) == 2
+    assert rows[first["identity_name"]]["headers"]["Authorization"] == f"Bearer {token_a}"
+    assert rows[second["identity_name"]]["headers"]["Authorization"] == f"Bearer {token_b}"
+
+
 def test_capture_names_row_after_principal_and_refresh_coalesces(client, isolate_settings):
     # A JWT-principal capture names the stored row readably; a refreshed token
     # for the same principal REFRESHES that one row (append-in-place dedup).
@@ -337,25 +434,37 @@ def test_capture_names_row_after_principal_and_refresh_coalesces(client, isolate
         eng, "api.example.com", {},
         headers={"Authorization": f"Bearer {_jwt({'sub': 'acme-user', 'iat': 1})}"},
     )
-    assert first["identity_name"] == "cap-acme-user"
+    assert first["identity_name"].startswith("cap-acme-user-host")
     second = _capture(
         eng, "api.example.com", {},
         headers={"Authorization": f"Bearer {_jwt({'sub': 'acme-user', 'iat': 2})}"},
     )
-    assert second["identity_name"] == "cap-acme-user"
+    assert second["identity_name"] == first["identity_name"]
     rows = db.list_credentials(eng, include_dead=True)
     assert len(rows) == 1
-    assert rows[0]["identity_name"] == "cap-acme-user"
+    assert rows[0]["identity_name"] == first["identity_name"]
 
 
 def test_capture_distinct_principals_make_two_named_rows(client, isolate_settings):
     # Two different principals append as two distinct, readably-named rows —
     # this is the account-A vs account-B distinction for IDOR/BOLA testing.
     eng = _seed(client, isolate_settings)
-    _capture(eng, "api.example.com", {}, headers={"Authorization": f"Bearer {_jwt({'sub': 'alice'})}"})
-    _capture(eng, "api.example.com", {}, headers={"Authorization": f"Bearer {_jwt({'sub': 'bob'})}"})
+    alice = _capture(
+        eng,
+        "api.example.com",
+        {},
+        headers={"Authorization": f"Bearer {_jwt({'sub': 'alice'})}"},
+    )
+    bob = _capture(
+        eng,
+        "api.example.com",
+        {},
+        headers={"Authorization": f"Bearer {_jwt({'sub': 'bob'})}"},
+    )
     names = {r["identity_name"] for r in db.list_credentials(eng)}
-    assert names == {"cap-alice", "cap-bob"}
+    assert names == {alice["identity_name"], bob["identity_name"]}
+    assert alice["identity_name"].startswith("cap-alice-host")
+    assert bob["identity_name"].startswith("cap-bob-host")
 
 
 # ---------------------------------------------------------------------------

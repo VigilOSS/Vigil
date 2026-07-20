@@ -22,9 +22,9 @@ Same gate as Bugcrowd (the strict-gate rule in `export submission` is platform-a
 |---|---|
 | Title | finding `title` |
 | Severity + CVSS vector | finding `severity`, `details.cvss_vector` |
-| Weakness (CWE) | `--weakness` flag, else `details.cwe_id` |
-| Attacker-impact statement | finding `impact` / `summary` |
-| Proof (≥1 of) | `poc_request` **and** `poc_response`, OR `poc_code`, OR non-empty `evidence_ref` |
+| Weakness (CWE) | `--weakness` flag, else `details.weakness`, else `details.cwe_id` |
+| Attacker-impact statement | finding `impact` or `details.impact` |
+| Durable proof | Per `vigil assess contract export submission`; inline PoC is supporting content |
 | Remediation | finding `remediation` |
 
 `--draft` marks whatever is missing with `[NEEDS: ...]`; final export refuses to write with any

@@ -26,8 +26,8 @@ Shares every writing rule with the platform templates
 |---|---|
 | Title | finding `title` |
 | Severity + CVSS vector | finding `severity`, `details.cvss_vector` |
-| Attacker-impact statement | finding `impact` / `summary` |
-| Proof (≥1 of) | `poc_request` **and** `poc_response`, OR `poc_code`, OR non-empty `evidence_ref` |
+| Attacker-impact statement | finding `impact` or `details.impact` |
+| Durable proof | Per `vigil assess contract export submission`; inline PoC is supporting content |
 | Remediation | finding `remediation` |
 
 No platform-taxonomy row — `direct` is the one platform where the strict gate doesn't require one.

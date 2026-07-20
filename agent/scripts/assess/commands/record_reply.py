@@ -166,6 +166,16 @@ def run(args) -> None:
         finding = client.get(f"findings/{slug}")
         if not isinstance(finding, dict):
             raise AssessError(f"record-reply: unexpected response fetching finding {slug!r}")
+        row_version = finding.get("row_version")
+        if (
+            not isinstance(row_version, int)
+            or isinstance(row_version, bool)
+            or row_version < 1
+        ):
+            raise AssessError(
+                f"record-reply: finding {slug!r} did not return a positive row_version; "
+                "refusing an unguarded reply write."
+            )
 
         replies = _replies(finding)
         max_seq = max((_seq_of(entry) for entry in replies), default=0)
@@ -233,7 +243,10 @@ def run(args) -> None:
         # Read-modify-write: PATCH the FULL array so the shallow details merge swaps the
         # whole ``replies`` key (a partial array would drop prior replies). submission_status
         # is included ONLY on the explicit --set-submission-status opt-in.
-        payload: dict = {"details": {"replies": replies}}
+        payload: dict = {
+            "details": {"replies": replies},
+            "expected_row_version": row_version,
+        }
         if nonempty(args.reason_text):
             payload["reason_text"] = args.reason_text
         if args.set_submission_status is not None:

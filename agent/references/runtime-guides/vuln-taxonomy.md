@@ -22,7 +22,7 @@ origin: Vigil
 > or framework is a one-line edit to `VULN_CLASSES` plus (for skills) a
 > `vuln_class:` frontmatter line. `last_reviewed:` above tracks the last audit.
 
-`vuln_class` is the **one canonical cross-track term** (master plan R-M5). It
+`vuln_class` is the **one canonical cross-track term**. It
 replaces four taxonomies that drifted independently — gf-buckets, the
 hand-maintained `BUCKET_SKILLS` dict, `surface_type`, and the code track's
 family lists. The canonical set is the **union** of the web attack classes and

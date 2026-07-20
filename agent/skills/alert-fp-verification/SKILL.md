@@ -76,7 +76,7 @@ investigator's annotations are inputs, never trusted on their own.
   `--disposition` flag uses `confirmed | downgraded | false_positive |
   disputed`; the blue vocabulary maps `verified` → `confirmed` and
   `escalated` → `disputed` at the storage layer. Use the
-  `--inline` payload's `details.disposition` field to record the blue
+  `--details-inline` object's `disposition` field to record the blue
   vocabulary verbatim for the report-writer.)
 - `vigil assess finding verify <slug> --disposition false_positive` — record `false_positive` disposition
   with cited counter-evidence. Enforces required fields
@@ -510,11 +510,11 @@ The CLI's `finding verify --disposition` flag uses the legacy
 red-mode vocabulary (`confirmed | downgraded | false_positive |
 disputed`). The blue mapping is:
 
-- `verified` → `--disposition confirmed` + `--inline '{"details": {"disposition": "verified", ...}}'`
+- `verified` → `--disposition confirmed` + `--details-inline '{"disposition": "verified", ...}'`
 - `false_positive` → `vigil assess finding verify --disposition false_positive` (preferred — enforces
   required fields)
 - `downgraded` → `--disposition downgraded` + `--new-severity <new>`
-- `escalated` → `--disposition disputed` + `--inline '{"details": {"disposition": "escalated", "voting_summary": "..."}}'`
+- `escalated` → `--disposition disputed` + `--details-inline '{"disposition": "escalated", "voting_summary": "..."}'`
 
 The report-writer reads `details.disposition` (blue vocabulary) for
 narrative, not the CLI's storage field. Keep both in sync.
@@ -528,20 +528,18 @@ vigil assess finding verify <slug> \
   --disposition confirmed \
   --reason "Five-check complete: Checks 1-4 PASS, Check 5 survives" \
   --evidence-ref <artifact-id-1>,<artifact-id-2>,<artifact-id-3> \
-  --inline '{
-    "details": {
-      "disposition": "verified",
-      "five_check": {
-        "check_1": "PASS",
-        "check_2": "PASS",
-        "check_3": "PASS",
-        "check_4": "PASS",
-        "check_5": "PASS"
-      },
-      "evidence_refs": [<id-1>, <id-2>, <id-3>],
-      "confidence": "high",
-      "confidence_rationale": "Three independent telemetry streams corroborate; legitimate-actor hypotheses ruled out per artifact <id-3>"
-    }
+  --details-inline '{
+    "disposition": "verified",
+    "five_check": {
+      "check_1": "PASS",
+      "check_2": "PASS",
+      "check_3": "PASS",
+      "check_4": "PASS",
+      "check_5": "PASS"
+    },
+    "evidence_refs": [<id-1>, <id-2>, <id-3>],
+    "confidence": "high",
+    "confidence_rationale": "Three independent telemetry streams corroborate; legitimate-actor hypotheses ruled out per artifact <id-3>"
   }'
 ```
 
@@ -553,14 +551,12 @@ vigil assess finding verify <slug> --disposition false_positive \
   --kill-check 5 \
   --reason "DA hypothesis confirmed: delegated mailbox owner" \
   --evidence-ref <artifact-id-delegate-list>,<artifact-id-tenant-ref> \
-  --inline '{
-    "details": {
-      "disposition": "false_positive",
-      "kill_check": 5,
-      "kill_reason": "Mailbox rule add was the delegate user@acme.example; delegate-list artifact <id> attests; tenant ref §4.1 documents this delegation pattern as benign",
-      "evidence_refs": [<id-delegate-list>, <id-tenant-ref>],
-      "da_hypothesis_confirmed": "delegated_mailbox_owner"
-    }
+  --details-inline '{
+    "disposition": "false_positive",
+    "kill_check": 5,
+    "kill_reason": "Mailbox rule add was the delegate user@acme.example; delegate-list artifact <id> attests; tenant ref §4.1 documents this delegation pattern as benign",
+    "evidence_refs": [<id-delegate-list>, <id-tenant-ref>],
+    "da_hypothesis_confirmed": "delegated_mailbox_owner"
   }'
 ```
 
@@ -572,14 +568,12 @@ vigil assess finding verify <slug> \
   --new-severity medium \
   --reason "Check 4 DOWNGRADE: reproduction confirms sign-in anomaly but not exfil action" \
   --evidence-ref <artifact-id-1>,<artifact-id-2> \
-  --inline '{
-    "details": {
-      "disposition": "downgraded",
-      "original_severity": "high",
-      "new_severity": "medium",
-      "severity_rationale": "Sign-in from unfamiliar IP confirmed (Check 1 PASS) but no subsequent OAuth grant or mailbox-rule activity in session (Check 4 DOWNGRADE)",
-      "five_check": { ... }
-    }
+  --details-inline '{
+    "disposition": "downgraded",
+    "original_severity": "high",
+    "new_severity": "medium",
+    "severity_rationale": "Sign-in from unfamiliar IP confirmed (Check 1 PASS) but no subsequent OAuth grant or mailbox-rule activity in session (Check 4 DOWNGRADE)",
+    "five_check": { ... }
   }'
 ```
 
@@ -589,16 +583,14 @@ vigil assess finding verify <slug> \
 vigil assess finding verify <slug> \
   --disposition disputed \
   --reason "Check 5 ESCALATE: travel-approval ticket exists but covers different window" \
-  --inline '{
-    "details": {
-      "disposition": "escalated",
-      "voting_summary": {
-        "FOR": "Sign-in IP outside ASN baseline; post-signin mailbox-rule unexplained",
-        "AGAINST": "Travel-approval ticket #4521 covers 2026-05-15 to 2026-05-22; sign-in IP geo-resolves to listed destination city",
-        "BLOCKER": "Travel-approval window ends 2026-05-22T17:00Z; alert sign-in at 2026-05-22T22:14Z — 5h after ticket end. Need user confirmation of late return."
-      },
-      "next_action": "Out-of-band user confirmation of travel return time"
-    }
+  --details-inline '{
+    "disposition": "escalated",
+    "voting_summary": {
+      "FOR": "Sign-in IP outside ASN baseline; post-signin mailbox-rule unexplained",
+      "AGAINST": "Travel-approval ticket #4521 covers 2026-05-15 to 2026-05-22; sign-in IP geo-resolves to listed destination city",
+      "BLOCKER": "Travel-approval window ends 2026-05-22T17:00Z; alert sign-in at 2026-05-22T22:14Z — 5h after ticket end. Need user confirmation of late return."
+    },
+    "next_action": "Out-of-band user confirmation of travel return time"
   }'
 ```
 
@@ -693,7 +685,7 @@ any step breaks resume-brief, the artifact chain of custody, or the
 handoff schema.
 
 1. **Record the disposition** via `finding verify` — `--disposition confirmed|downgraded|disputed`
-   (verified, downgraded, escalated) or `--disposition false_positive` (false_positive). The `--inline` payload
+   (verified, downgraded, escalated) or `--disposition false_positive` (false_positive). The `--details-inline` object
    carries the blue vocabulary in `details.disposition` even when the
    CLI's `--disposition` flag uses the legacy red vocabulary.
 2. **Register devil's-advocate research notes** if Check 5 produced
@@ -706,8 +698,8 @@ handoff schema.
    `severity` no longer aligns with `details.mitre_techniques` (e.g.,
    downgraded from `critical` to `medium` but the technique list still
    reads `T1486` ransomware), update the finding via
-   `finding update --inline '{"details": {"mitre_techniques": [...],
-   "severity_rationale": "..."}}'`.
+   `finding update <slug> --details-inline '{"mitre_techniques": [...],
+   "severity_rationale": "..."}'`.
 5. **Record the closing activity entry:**
 
    ```bash

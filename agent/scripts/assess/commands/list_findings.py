@@ -55,7 +55,7 @@ def register(subparsers) -> None:
 
 
 def _finding_row(item: dict) -> str:
-    """Render one finding as a pipe-delimited list-findings row.
+    """Render one finding as a pipe-delimited finding-list row.
 
     A blocked-for-provisioning finding (verification_disposition='blocked') gets
     a trailing ``BLOCKED[(kind)]: <reason>`` cell so the operator reads WHY it is
@@ -90,7 +90,7 @@ def _print_root_cause_group(group: dict, root_slug: str) -> None:
 
     Ported from the retired ``list-finding-group`` verb: the root header, the
     sibling count, and per-sibling ``sibling_order`` / ``root_cause_effect`` /
-    ``root_cause_note`` columns that the plain ``list-findings`` row does not
+    ``root_cause_note`` columns that the plain ``finding list`` row does not
     surface.
     """
     root = group.get("root", {})

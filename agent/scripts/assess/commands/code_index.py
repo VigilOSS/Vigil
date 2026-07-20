@@ -253,7 +253,7 @@ def run(args) -> None:
         except SystemExit:
             print(
                 "Cannot resolve engagement directory for default code-index output. "
-                "Pass --engagement-dir or set ENGAGEMENT_DIR so the structural index "
+                "Pass --engagement-dir or start from a Vigil launcher session so the structural index "
                 "is written to tools/analysis-state, or pass --output-dir explicitly.",
                 file=sys.stderr,
             )

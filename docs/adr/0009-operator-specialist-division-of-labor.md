@@ -113,7 +113,7 @@ supplies the how-and-which-weakness.*
 - **Leave the philosophy quarantined to `exploit-developer`.** Rejected: that is the status quo that
   produced the reported pattern for the other roles.
 
-## Follow-ups
+## Code-track closure
 
 - **Code track (done, surgically).** A review found the code roster is already largely ADR-0009-correct:
   `code-vuln-hunter` originates hypotheses from the code, and guidance hypotheses are explicitly
@@ -125,7 +125,27 @@ supplies the how-and-which-weakness.*
   table in `operator-core-code.md` was replaced with a pointer to the backend-computed
   `applicable_vuln_classes` / canonical `vuln_taxonomy.py` (it had already drifted — missing the
   `EXEC-POLICY` slot type), and the architect prompt's stale "8 slot types" summary was corrected to 9.
-- Remaining code-track prompt-economy trims (duplicated kali command-history paragraph, the dispatch-
-  context-template/checklist overlap, structural-index path-resolution prose repeated across the
-  operator + specialists, the effort-threshold constant repeated 7+ places) are catalogued but deferred —
-  consolidation work, not behavior changes.
+
+The prompt-economy catalog was re-audited against the shipped prompt graph on 2026-07-20 and is
+closed:
+
+- **Kali command history:** the duplication was real. `operator-core-code.md` now states only the
+  code-operator decision and points to the shared audit/history owners; the specialist-facing
+  mechanics remain in `shared-constraints-code.md` because operators and specialists do not share
+  one prompt context.
+- **Dispatch template versus checklist:** phase-specific fields were duplicated in the always-loaded
+  checklist even though each lazy phase doc already owns its complete dispatch shape. The checklist
+  now validates the phase doc as a unit and retains only cross-phase identity, skill, mindset,
+  context-size, and dedup checks. The small common-field overlap between the template (payload shape)
+  and checklist (preflight gate) is deliberate because they serve different actions.
+- **Structural-index lookup:** consumer instructions now have one owner in
+  `shared-constraints-code.md`; roles and skills point there. Phase 0 still documents the generated
+  layout, while phase-entry docs still name the artifacts they must provide. Producer layout and
+  consumer lookup are distinct boundaries, not remaining duplication.
+- **Effort thresholds:** the old “7+ copies” claim no longer matched current sources. Exact values now
+  appear once in the Phase 2 dispatch guidance; the hunter consumes the dispatched tier threshold,
+  and later gates/spot-checks follow the live `code-coverage --cwe-matrix` markers. This preserves
+  calibration without making every downstream prompt another source of truth.
+
+No prompt-economy work remains deferred by this ADR. Further reductions require evidence of a new
+duplication or context-pressure failure, not a standing cleanup item.

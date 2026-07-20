@@ -15,22 +15,25 @@ from assess.lib.json_inputs import parse_json_argument, parse_optional_inline_js
 def register(subparsers) -> None:
     p = subparsers.add_parser(
         "update",
-        help="PATCH a finding by slug using a payload file, inline JSON, or common flags",
+        help="PATCH findings with explicit flags or one finding with a payload file",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=render_contract_epilog("finding update"),
     )
     p.add_argument(
         "finding_slug",
         nargs="+",
-        help="One or more canonical finding slugs. Batch: every listed slug receives the SAME "
-             "patch payload/flags (resilient loop with a per-slug failure tally).",
+        help="One or more canonical finding slugs. Batch updates use explicit flags and a "
+             "resilient per-slug loop; --payload-file accepts exactly one slug.",
     )
-    p.add_argument("--inline", dest="inline_payload", help="Raw JSON patch payload")
+    p.add_argument(
+        "--inline",
+        dest="legacy_inline_payload",
+        help=argparse.SUPPRESS,
+    )
     p.add_argument(
         "--payload-file",
         dest="payload_file",
-        help="Path to a JSON patch payload file (replaces the removed trailing positional payload "
-             "arg; use --inline for raw JSON).",
+        help="Path to a single-finding JSON patch document",
     )
     p.add_argument("--title")
     p.add_argument("--severity")
@@ -54,9 +57,9 @@ def register(subparsers) -> None:
     p.add_argument("--evidence-ref")
     p.add_argument("--notes")
     p.add_argument("--source-name")
-    p.add_argument("--reason-code", default="")
-    p.add_argument("--reason", dest="reason_text", default="")
-    p.add_argument("--artifact-ref", default="")
+    p.add_argument("--reason-code")
+    p.add_argument("--reason", dest="reason_text")
+    p.add_argument("--artifact-ref")
     p.add_argument(
         "--expected-row-version",
         type=int,
@@ -102,35 +105,154 @@ def _looks_like_payload(token: str) -> bool:
     return bool(t) and (t.startswith(("{", "[")) or t.endswith(".json") or Path(t).is_file())
 
 
+_CONTENT_FLAGS = (
+    ("title", "--title"),
+    ("severity", "--severity"),
+    ("workflow_status", "--workflow-status"),
+    ("submission_status", "--submission-status"),
+    ("defect_family", "--defect-family"),
+    ("root_cause_key", "--root-cause-key"),
+    ("auth_context", "--auth-context"),
+    ("canonical_location", "--canonical-location"),
+    ("summary", "--summary"),
+    ("evidence_ref", "--evidence-ref"),
+    ("notes", "--notes"),
+    ("source_name", "--source-name"),
+    ("reason_code", "--reason-code"),
+    ("reason_text", "--reason"),
+    ("artifact_ref", "--artifact-ref"),
+    ("expected_row_version", "--expected-row-version"),
+    ("details_inline", "--details-inline"),
+    ("provenance_inline", "--provenance-inline"),
+    ("notes_replace", "--notes-replace"),
+    ("details_replace", "--details-replace"),
+    ("evidence_type", "--evidence-type"),
+)
+
+_PATCH_CONTROL_FIELDS = frozenset(
+    {
+        "expected_row_version",
+        "notes_mode",
+        "details_mode",
+        "reason_code",
+        "reason_text",
+        "artifact_ref",
+    }
+)
+
+
+def _has_patch_content(payload: dict[str, object]) -> bool:
+    """Return whether a payload contains a field that can mutate a finding."""
+    notes = payload.get("notes")
+    if notes is not None and (notes != "" or payload.get("notes_mode") == "replace"):
+        return True
+    details = payload.get("details")
+    if details is not None and (details != {} or payload.get("details_mode") == "replace"):
+        return True
+    provenance = payload.get("provenance")
+    if provenance not in (None, {}):
+        return True
+    return any(
+        key not in _PATCH_CONTROL_FIELDS
+        and key not in {"notes", "details", "provenance"}
+        and value not in ("", None)
+        for key, value in payload.items()
+    )
+
+
+def _provided_content_flags(args) -> list[str]:
+    provided = []
+    for attr, flag in _CONTENT_FLAGS:
+        value = getattr(args, attr, None)
+        if value is not None and value is not False:
+            provided.append(flag)
+    return provided
+
+
 def run(args) -> None:
+    legacy_inline = getattr(args, "legacy_inline_payload", None)
+    # Direct callers from before the parser rename can still construct this
+    # attribute; keep the retirement fail-closed at the command boundary.
+    if legacy_inline is None:
+        legacy_inline = getattr(args, "inline_payload", None)
+    if legacy_inline is not None:
+        print(
+            "finding update: --inline was removed; use explicit patch flags for small changes "
+            "or --payload-file <path> for a structured single-finding patch.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    finding_slug = getattr(args, "finding_slug", [])
+    slugs = finding_slug if isinstance(finding_slug, list) else [finding_slug]
+    # The trailing positional payload arg was removed (it collided with a variadic
+    # slug list). Catch a legacy JSON blob passed positionally.
+    for token in slugs:
+        if _looks_like_payload(str(token)):
+            print(
+                f"'{str(token).strip()}' looks like a JSON payload, not a finding slug. The "
+                "positional payload arg was removed — use --payload-file <path>, and list only "
+                "finding slugs positionally.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    payload_file = getattr(args, "payload_file", None)
+    if payload_file is not None:
+        if not str(payload_file).strip():
+            print("finding update: --payload-file must not be empty", file=sys.stderr)
+            sys.exit(1)
+        provided_flags = _provided_content_flags(args)
+        if provided_flags:
+            print(
+                "finding update: --payload-file cannot be combined with request-content flags "
+                f"({', '.join(provided_flags)}); put the complete patch in the file or use "
+                "explicit patch flags.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if len(slugs) != 1:
+            print(
+                "finding update: --payload-file requires exactly one finding slug; use explicit "
+                "flags for batch updates.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
     # --notes-replace overwrites the notes column; without --notes it would write
     # an empty string over the existing notes (silent data loss). Reject that.
     # (Runs first, before touching finding_slug, so a guard-only invocation exits here.)
     if getattr(args, "notes_replace", False) and args.notes is None:
-        print("update-finding: --notes-replace requires --notes <text> (it overwrites the "
+        print("finding update: --notes-replace requires --notes <text> (it overwrites the "
               "notes column; running it without --notes would wipe existing notes).", file=sys.stderr)
         sys.exit(1)
-    inline_payload = getattr(args, "inline_payload", None)
-    payload_file = getattr(args, "payload_file", None)
-    if inline_payload is not None:
-        raw_payload, raw_inline = inline_payload, True
-    elif payload_file:
-        raw_payload, raw_inline = payload_file, False
-    else:
-        raw_payload, raw_inline = None, False
-    # --details-replace overwrites the whole details object; without a details
-    # payload (--details-inline, or "details" in a file/--inline payload) it would
-    # null the column. Reject that, mirroring the --notes-replace guard.
+    raw_payload = payload_file
+    # --details-replace overwrites the whole details object; without
+    # --details-inline it would null the column. Payload files carry their own
+    # details_mode and cannot be combined with this flag.
     if getattr(args, "details_replace", False) and args.details_inline is None and raw_payload is None:
-        print("update-finding: --details-replace requires --details-inline <json> (it overwrites "
+        print("finding update: --details-replace requires --details-inline <json> (it overwrites "
               "the details object; running it without details would wipe existing details).",
               file=sys.stderr)
         sys.exit(1)
+    if (
+        getattr(args, "notes_replace", False)
+        or getattr(args, "details_replace", False)
+    ) and getattr(args, "expected_row_version", None) is None:
+        print(
+            "finding update: --notes-replace and --details-replace require "
+            "--expected-row-version so a concurrent writer cannot be erased.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     if raw_payload is not None:
+        if not Path(raw_payload).is_file():
+            print(f"finding patch payload file not found: {raw_payload}", file=sys.stderr)
+            sys.exit(1)
         try:
             payload, _ = parse_json_argument(
                 raw_payload,
-                inline=raw_inline,
+                inline=False,
                 description="finding patch payload",
             )
         except ValueError as exc:
@@ -185,40 +307,47 @@ def run(args) -> None:
             "expected_row_version": getattr(args, "expected_row_version", None),
         }
         payload = {key: value for key, value in payload.items() if value is not None}
-        if not any(value not in ("", None) for value in payload.values()):
+    if not isinstance(payload, dict):
+        print("finding patch payload must be a JSON object", file=sys.stderr)
+        sys.exit(1)
+    if not _has_patch_content(payload):
+        print(
+            "finding update requires at least one field that updates the finding; "
+            "concurrency, mode, and transition-metadata controls do not update a finding "
+            "by themselves, and empty merge values are no-ops.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if payload_file:
+        row_version = payload.get("expected_row_version")
+        if (
+            not isinstance(row_version, int)
+            or isinstance(row_version, bool)
+            or row_version < 1
+        ):
             print(
-                "update-finding requires a payload file, --inline JSON, or at least one patch flag",
+                "finding update: a payload file must contain expected_row_version as a positive "
+                "integer; refresh it from the successful response before the next update.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if "notes" in payload and payload.get("notes_mode") not in {"append", "replace"}:
+            print(
+                "finding update: a payload file containing notes must set notes_mode to "
+                "'replace' (cumulative working document) or 'append' (deliberate checkpoint).",
                 file=sys.stderr,
             )
             sys.exit(1)
 
-    if not isinstance(payload, dict):
-        print("finding patch payload must be a JSON object", file=sys.stderr)
-        sys.exit(1)
-
-    # --details-replace also applies when the patch came from a file/--inline
-    # payload: set the mode so the backend overwrites rather than merges. The
-    # backend rejects replace without a details payload, so require one here too.
+    # Set the explicit-flag mode so the backend overwrites rather than merges.
     if getattr(args, "details_replace", False):
         if payload.get("details") is None:
-            print("update-finding: --details-replace requires a 'details' object in the payload "
+            print("finding update: --details-replace requires a 'details' object in the payload "
                   "(it overwrites the details object; without details it would wipe existing details).",
                   file=sys.stderr)
             sys.exit(1)
         payload["details_mode"] = "replace"
-
-    slugs = args.finding_slug if isinstance(args.finding_slug, list) else [args.finding_slug]
-    # The trailing positional payload arg was removed (it collided with a variadic
-    # slug list). Catch a legacy JSON blob passed positionally.
-    for token in slugs:
-        if _looks_like_payload(str(token)):
-            print(
-                f"'{str(token).strip()}' looks like a JSON payload, not a finding slug. The "
-                f"positional payload arg was removed — pass the JSON via --inline '<json>' or "
-                f"--payload-file <path>, and list only finding slugs positionally.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
 
     cfg = load_config(args.engagement_dir)
     results: list = []
@@ -229,7 +358,7 @@ def run(args) -> None:
                 results.append(client.patch(f"findings/{slug}", payload))
             except Exception as exc:  # noqa: BLE001 - one bad slug must not drop the rest
                 failed += 1
-                print(f"update-finding: {slug} failed: {exc}", file=sys.stderr)
+                print(f"finding update: {slug} failed: {exc}", file=sys.stderr)
 
     if len(slugs) == 1 and results:
         print(json.dumps(results[0], indent=2, ensure_ascii=False))
@@ -237,7 +366,7 @@ def run(args) -> None:
         for result in results:
             print(json.dumps(result, ensure_ascii=False))
         print(
-            f"[update-finding] updated {len(results)} finding(s); {failed} failed.",
+            f"[finding update] updated {len(results)} finding(s); {failed} failed.",
             file=sys.stderr,
         )
     if failed:

@@ -1724,7 +1724,8 @@ def test_post_rejects_raw_verify_endpoint_and_points_to_helper(capsys):
     assert excinfo.value.code == 1
     err = capsys.readouterr().err
     assert "finding verify" in err
-    assert "kill-finding" in err
+    assert "finding verify --disposition false_positive" in err
+    assert "kill-finding" not in err
     assert "vigil assess contract finding verify" in err
 
 
@@ -1823,7 +1824,8 @@ def test_update_finding_help_drops_patch_finding_alias(capsys):
 
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
-    assert "vigil assess finding update <slug> --inline" in out
+    assert "vigil assess finding update <slug> --payload-file" in out
+    assert "--inline INLINE" not in out
     assert "patch-finding" not in out
 
 
@@ -2399,7 +2401,7 @@ def test_code_audit_manifest_ignores_legacy_noncanonical_files(tmp_path):
     state_dir = engagement_dir / "tools" / "analysis-state"
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "module15_contexts.json").write_text('{"contexts": []}\n', encoding="utf-8")
-    (state_dir / "finding-verification-wave-1.md").write_text("# verification\n", encoding="utf-8")
+    (state_dir / "finding-verification-pass-1.md").write_text("# verification\n", encoding="utf-8")
 
     module.write_json_snapshot(
         str(engagement_dir),

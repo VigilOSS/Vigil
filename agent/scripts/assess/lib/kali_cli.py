@@ -270,9 +270,9 @@ def kali_args_to_kwargs(args) -> dict[str, Any]:
     Returned dict can be splatted into kali_exec(**kwargs) directly. Includes
     `engagement_dir` so a per-call `--engagement-dir <path>` (root-parser
     flag, hoisted by `assess.cli._hoist_root_flags`) reaches kali_exec.
-    Without this thread-through, --engagement-dir on a kali verb silently
-    falls back to `$ENGAGEMENT_DIR` / cwd scope.json and the operator hits
-    "Cannot resolve engagement directory" even when they passed it.
+    Without this thread-through, --engagement-dir on a kali verb is lost before
+    the shared assessment-binding resolver sees it and the operator gets a
+    misleading "Cannot resolve engagement directory" failure.
     """
     explicit_dir = getattr(args, "engagement_dir", None)
     # Resolve the audit attribution here (where --phase is in scope) so the
@@ -300,7 +300,9 @@ def kali_args_to_kwargs(args) -> dict[str, Any]:
         "identity_scope": getattr(args, "identity_scope", "") or "",
         "rate_override_reason": getattr(args, "rate_override_reason", "") or "",
     }
-    if explicit_dir:
+    if explicit_dir is not None:
+        if not str(explicit_dir).strip():
+            raise AssessError("--engagement-dir must not be empty")
         kwargs["engagement_dir"] = Path(explicit_dir).expanduser().resolve()
     return kwargs
 

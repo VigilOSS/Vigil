@@ -129,7 +129,7 @@ inventory), and pass `--phase` for the phase the **dispatch was authorized for**
 `scope.json.current_phase` — engagements routinely operate between phases.
 
 Full flag-by-flag purpose, the enum values for `--technique`/`--probe-kind`/`--phase`, and the
-`--engagement-key`/`--agent-name` resolution order live in
+assessment-binding/`--agent-name` attribution rules live in
 `agent/skills/kali-exec/SKILL.md` ("Audit-flag mapping", "Phase tags") and are generated per-verb
 by `vigil assess contract kali <verb>` / `vigil assess list-commands`. Dispatch wrappers must
 export `AGENT_NAME=<role>` or pass `--agent-name <role>` — a silent `operator` attribution breaks
@@ -556,22 +556,8 @@ mapping a finding to a category). API-specific checklists: `agent/references/api
 ## 9. Script Path Convention
 
 Canonical in `agent/shared-specialist-core.md` "Script Path Convention" — `vigil assess
-<subcommand>` from any directory, JSON payloads always in files. Read it there, do not
+<subcommand>` from any directory, with full-record versus bounded nested JSON input rules. Read it there, do not
 re-derive it here.
-
-**Engagement resolution (no per-command `export ENGAGEMENT_DIR`).** `vigil assess`
-resolves the target engagement in one shared resolver with this precedence
-(highest → lowest): (1) `--engagement-dir <path>` flag; (2) **CWD walk-up** to the
-nearest ancestor holding `scope.json` ("the tree I'm in" — concurrency-safe);
-(3) the **persisted active pointer** set by `vigil use <key>` (mirrored at
-`<engagements_root>/.active`); (4) `$ENGAGEMENT_DIR` (legacy / launcher-seeded
-fallback); (5) hard error — never a silent most-recent auto-pick. Set the active
-engagement **once** with `vigil use <key>` (or just work from inside the engagement
-dir); every later `vigil assess` command targets it, from any cwd, across fresh
-shells. `vigil engagement current` reports the resolved engagement and the winning
-tier. A stale inherited `$ENGAGEMENT_DIR` can no longer silently beat your working
-directory: cwd walk-up and the active pointer both out-rank it, and the resolver
-warns on stderr when `$ENGAGEMENT_DIR` disagrees with the resolved engagement.
 
 ---
 
@@ -585,7 +571,7 @@ Record state immediately using `vigil assess` with JSON files:
 - **Access records:** `vigil assess post access-records <json-file>`
 - **Coverage updates:** `vigil assess resolve coverage-item <id> --status <covered|not_applicable|deferred|blocked|queued|pending> --rationale "..."` — advance a class-typed coverage item (one per implied vuln-class on a surface; resolve EVERY implied class, not just the cluster winner). `covered`/`not_applicable` require a non-empty rationale. Raw `patch coverage-items/<id>` is redirected here. This is the deliberate, rationale-bearing human verdict — `covered` is never self-attested, so recording a covering probe (below) does not by itself mark a coverage item `covered`; call this verb explicitly when you're making that call.
 - **Blocked techniques:** `vigil assess block-technique --technique <TECHNIQUE> --target-kind <kind> --target-ref <ref> --reason <why>` (the technique-key auto-derives; override with `--technique-key`. Review with `vigil assess list-blocked-techniques`). Prefer this first-class verb over the raw `vigil assess post blocked-techniques <json-file>`.
-- **Captured HTTP traffic:** `vigil assess http list --host <host> --method <verb> --content-type <family>` queries the canonical full-flow store (`vigil assess http show <flow_uid>` for one flow, `vigil assess http search <text>` for a LIKE query, `vigil assess http export-har -o <file>` / `vigil assess http import-har <file>` for HAR round-trips). Capture is a per-engagement policy, not a proxy selector — review it with `vigil assess http policy` and toggle raw-body capture with `vigil assess http policy set --enabled --capture-request-bodies` (raw-body capture is OFF by default).
+- **Captured HTTP traffic:** `vigil assess http list --host <host> --method <verb> --content-type <family>` queries the canonical full-flow store (`vigil assess http show <flow_uid>` for one flow, `vigil assess http search <text>` for a LIKE query, `vigil assess http export-har -o <file>` / `vigil assess http import-har <file>` for HAR round-trips). Capture is a per-engagement policy, not a proxy selector — review it with `vigil assess http policy`. The three states are deliberate: disabled records only the always-on compact observation; `policy set --enabled` adds full-flow metadata/index rows without bodies; adding `--capture-request-bodies` and/or `--capture-response-bodies` stores only those selected body sidecars. Full-flow and raw-body capture are OFF by default.
 - **Probe runs (covering and non-covering):** `vigil assess record-probe --result-status <tested|signal|attempted|blocked|no-signal|error> --attack-family <class> --target-host <host> --target-path <path> --input-slot <slot:name> --auth-context <identity> [--evidence-ref <path>] [--coverage-item-id <id>] [--finding <slug>]` — one verb for every probe verdict. `tested`/`signal` are the covering verdicts and REQUIRE `--evidence-ref` (a covering verdict without evidence is not coverage); `attempted`/`blocked`/`no-signal`/`error` record a touched-but-inconclusive target (a lead, not a verdict) and don't need it. `--input-slot` and `--auth-context` are required on every call regardless of verdict — pass both, never a silent default. Name the specific input as `slot:name` (`header:X-Forwarded-Host`, `query:uid`) so it surfaces as its own cell in the resume-brief's `## Per-Input Coverage` grid; a non-covering verdict lands there too (distinguished by verdict word), not in `## Attempts` (which carries only blocked techniques and roe_blocked findings), and does not count as coverage. **`--auth-context` is a grid axis, not paperwork:** the grid keys per-input coverage on (host × path × attack_family × input_slot × auth_context), so omitting it — or letting it silently default to `anonymous` — collapses every identity you actually tested into one anonymous cell, hiding the exact cross-identity IDOR/BOLA gap the grid exists to surface. Pass the real identity name (`anonymous`, `member`, `admin`, a credential slug from `vigil assess auth list --host <host>`). Raw `post probe-runs` is redirected here.
 - **Work-buffer id passing and the auto-cascade.** When a probe traces back to a `vigil assess work-buffer fetch` batch, carry its `coverage_item_id`, `request_variant_id`, and `service_id` in your working notes and pass them into `record-probe` (`--coverage-item-id`, `--request-variant-id`, `--service-id`) so the probe attaches to the exact coverage item and request it satisfies. Recording that one covering probe is now the whole write: the work-items linked to the coverage item drain and the mapped surface advances toward `partially-covered` automatically off the FK link — do not also make a separate drain or surface-advance call for the same probe. `--work-item-ids`/`--resolve-surface` still exist to override or narrow that default (point the drain at a different set of items, or suppress the automatic surface advance) when the default cascade isn't the right target. If a batch omitted `coverage_item_id`, look up the matching row via `vigil assess fetch coverage-items` before you resolve coverage state. Reach for `vigil assess resolve coverage-item` separately only for the deliberate manual verdict (`covered`/`not_applicable`/`deferred`/`blocked`) a probe doesn't already imply — never to double-record a probe you just recorded.
 
@@ -601,7 +587,7 @@ canonical backend state and avoids writing duplicate rows.
 
 Engagement artifacts live at one physical location on disk but have two names depending on where the command runs.
 
-- **Host side** — `$DIR = $ROOT_DIR/engagements/<engagement_key>`. Launchers export this as `ENGAGEMENT_DIR`, but it is only the lowest-priority resolver fallback: `vigil assess` prefers a cwd walk-up to `scope.json` and the `vigil use` active pointer over `$ENGAGEMENT_DIR` (see "Script Path Convention" above). Use `$DIR/...` (or `$ENGAGEMENT_DIR/...`) for local file work and any script running on the host. The Kali runtime remains engagement-agnostic (per-command working dir). The shared mitmproxy normally routes by target host; only an otherwise-unclaimed flow uses the active pointer, and only when that selected engagement declares `scope_enforcement: bypass`, so attribution and capture still have one owner. Neither service reads `ENGAGEMENT_DIR`, and switching needs no restart.
+- **Host side** — `$DIR = $ROOT_DIR/engagements/<engagement_key>`. Launchers export this as `ENGAGEMENT_DIR` for local file work; assessment-state selection follows the short binding rule in `agent/shared-specialist-core.md`, not this path variable. Use `$DIR/...` (or `$ENGAGEMENT_DIR/...`) for local files and host-side scripts. The Kali runtime remains engagement-agnostic (per-command working dir). The shared mitmproxy normally routes by target host; only an otherwise-unclaimed flow uses the global active pointer, and only when that selected engagement declares `scope_enforcement: bypass`, so attribution and capture still have one owner. Neither service reads `ENGAGEMENT_DIR`, and switching needs no restart.
 - **Kali side** — `/engagements/$ENGAGEMENT_KEY` is the same directory via the bind mount managed by `vigil runtime start`. Launchers also export `ENGAGEMENT_KEY` (the basename of `$DIR`) so commands inside the runtime can resolve it.
 - **`vigil assess kali ...` invocations MUST reference paths as `/engagements/$ENGAGEMENT_KEY/...`** in their command argv — the host path `$DIR` is not valid inside the container, and writing to `/tmp` or `/data` for engagement-scoped artifacts loses them outside the shared-infra conventions.
 

@@ -203,7 +203,8 @@ If all five hold, auto-close as `false_positive`:
 vigil assess finding verify <draft-slug> --disposition false_positive \
   --kill-reason "Mechanical FP — matches tenant-ref pattern <pattern-id>" \
   --kill-check 0 \
-  --inline '{"evidence_refs": [<alert-intake-artifact-id>], "tenant_ref_path": "<path>", "tenant_ref_section": "Known benign patterns / <pattern-id>", "matched_fields": {"actor": "...", "action_verb": "...", "time_pattern": "...", "source_signal": "..."}}'
+  --reason "All five mechanical-FP checks matched the tenant reference" \
+  --details-inline '{"evidence_refs": [<alert-intake-artifact-id>], "tenant_ref_path": "<path>", "tenant_ref_section": "Known benign patterns / <pattern-id>", "matched_fields": {"actor": "...", "action_verb": "...", "time_pattern": "...", "source_signal": "..."}}'
 ```
 
 `kill_check=0` is reserved for L1 mechanical FPs (five-check uses 1-5).
@@ -311,11 +312,12 @@ Run all four in order:
      "Triaged alert <alert_external_id> as <platform>/<severity>" \
      "Read alert body; normalized fields; classified platform=<x> severity=<y> mitre=<list>; mechanical-FP screen: <hit|miss>" \
      "Dispatched to <downstream-skill>" \
-     --actor-kind agent
+     --actor-kind agent \
+     --metadata-file /tmp/alert-triage-metadata.json
    ```
 
-   `metadata_json` on the activity row (set via the backend client wrapper
-   or the next iteration of `log`) carries:
+   The JSON object passed through `--metadata-file` and stored in
+   `metadata_json` carries:
 
    - `tier: L1`
    - `alert_external_id: <id>`
@@ -491,7 +493,7 @@ already at the top of the dispatch prompt; re-emitting it wastes context.
   expects to see in the L2 handoff that the L1 handoff hands forward.
 - `agent/skills/case-dispatching/SKILL.md` — coordination patterns this
   skill mirrors (signal → skill trigger, batch routing, completion).
-- `agent/skills/google-workspaces/SKILL.md` — the P0 downstream skill in
-  v1; the L2 specialist's playbook for `platform=gws` dispatches.
+- `agent/skills/google-workspaces/SKILL.md` — the L2 specialist's playbook
+  for `platform=gws` dispatches.
 - `agent/references/tenants/<customer>-<platform>.md` — the tenant ref
   whose "Known benign patterns" register the mechanical-FP screen reads.

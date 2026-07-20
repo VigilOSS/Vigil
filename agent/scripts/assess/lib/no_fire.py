@@ -114,24 +114,90 @@ def _glob_regex(value: str) -> str:
     return re.escape(value).replace(r"\*", ".*")
 
 
+def _encoded_byte_regex(value: int) -> str:
+    octet = "".join(
+        f"[{char.lower()}{char.upper()}]" if char.isalpha() else char
+        for char in f"{value:02x}"
+    )
+    return rf"%(?:25){{0,{_MAX_DECODE_PASSES - 1}}}{octet}"
+
+
+def _path_character_regex(value: str) -> str:
+    alternatives = [re.escape(value)]
+    alternatives.append("".join(_encoded_byte_regex(octet) for octet in value.encode("utf-8")))
+    if value == "/":
+        # Backslashes become slashes in the canonical path.
+        alternatives.extend((r"\\", _encoded_byte_regex(ord("\\"))))
+    return "(?:" + "|".join(alternatives) + ")"
+
+
+def _path_glob_regex(value: str, *, raw_leading_slash: bool = False) -> str:
+    expressions: list[str] = []
+    for index, char in enumerate(value):
+        if char == "*":
+            expressions.append(r"[^?#]*")
+        elif raw_leading_slash and index == 0 and char == "/":
+            # A valid absolute URL has a literal slash between authority and path.
+            expressions.append("/")
+        else:
+            expressions.append(_path_character_regex(char))
+    return "".join(expressions)
+
+
+def _crawl_path_expressions(
+    host_prefix: str, path: str, query: str | None
+) -> list[str]:
+    query_suffix = (
+        r"(?:[?#].*)?$"
+        if query is None
+        else r"\?" + _glob_regex(query) + r"(?:#.*)?$"
+    )
+    direct = host_prefix + _glob_regex(path)
+    encoded = host_prefix + _path_glob_regex(path, raw_leading_slash=True)
+
+    # A transport-encoded `..` prefix can normalize onto the authored path.
+    # Keep this conservative case scoped to that exact authored suffix instead
+    # of excluding every encoded URL on the host.
+    separator = _path_character_regex("/")
+    dot = _path_character_regex(".")
+    tail = path[1:] if path.startswith("/") else path
+    traversal = (
+        host_prefix
+        + r"/[^?#]*"
+        + dot
+        + dot
+        + separator
+        + _path_glob_regex(tail)
+    )
+    return [
+        direct + query_suffix,
+        encoded + query_suffix,
+        traversal + query_suffix,
+    ]
+
+
 def crawl_exclusion_regex(scope_doc: dict[str, Any]) -> str:
     """Compile no-fire URL globs into one Katana ``-cos`` regular expression."""
     expressions: list[str] = []
-    encoded_reserved = r"[^?#]*%(?:25)*(?:2f|2e|5c)[^?#]*"
     for pattern in patterns(scope_doc):
         if pattern.startswith("/"):
             host_prefix = r"https?://[^/]+"
-            expressions.append(host_prefix + _glob_regex(pattern))
-            expressions.append(host_prefix + r"/" + encoded_reserved)
+            path, has_query, query = pattern.partition("?")
+            expressions.extend(
+                _crawl_path_expressions(
+                    host_prefix, path, query if has_query else None
+                )
+            )
         else:
             parsed = urlsplit(pattern)
-            host_prefix = _glob_regex(
-                f"{parsed.scheme}://{parsed.netloc}"
+            host_prefix = _glob_regex(f"{parsed.scheme}://{parsed.netloc}")
+            expressions.extend(
+                _crawl_path_expressions(
+                    host_prefix,
+                    parsed.path or "/",
+                    parsed.query if parsed.query else None,
+                )
             )
-            expressions.append(_glob_regex(pattern))
-            expressions.append(host_prefix + r"/" + encoded_reserved)
     if not expressions:
         return ""
-    # Katana applies -cos to full URLs. Match query/fragment variants too; an
-    # exact authored endpoint remains exact with respect to the path itself.
-    return "(?:" + "|".join(expressions) + r")(?:[?#].*)?$"
+    return "(?:" + "|".join(expressions) + ")"

@@ -258,8 +258,8 @@ proved impact:
   `details_json.kill_reason` with the tenant-ref citation; severity is no longer
   the load-bearing field once disposition lands
 
-Fix mismatches via `vigil assess finding update --inline '{"details":
-{"mitre_techniques": [...], "severity_rationale": "..."}}'`. A finding whose
+Fix mismatches via `vigil assess finding update <slug> --details-inline
+'{"mitre_techniques": [...], "severity_rationale": "..."}'`. A finding whose
 severity contradicts its technique makes the report look unverified to the
 client.
 

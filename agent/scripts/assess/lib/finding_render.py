@@ -456,9 +456,9 @@ def hygiene_warnings(
         warnings.append(
             "reference to the internal cases.db work database appears — remove before external submission"
         )
-    # Title length is a submission-QUALITY warning (advisory, never a hard gate):
-    # a title over 12 words reads as a run-on and weakens triage. Surfaced through
-    # the same hygiene mechanism (context JSON, stderr, OPERATOR DETAILS block).
+    # Title length is a submission-quality hygiene warning: a title over 12
+    # words reads as a run-on and weakens triage. Drafts surface it in context,
+    # stderr, and OPERATOR DETAILS; final submission export fails closed on it.
     title = nonempty(title)
     if title:
         word_count = len(title.split())

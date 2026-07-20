@@ -29,9 +29,9 @@ from .paths import (
     resolve_orchestrator_data_dir,
 )
 
-# Persisted active-engagement pointer key in ~/.config/vigil/config.json. Kept
-# in lock-step with assess.lib.config.ACTIVE_ENGAGEMENT_CONFIG_KEY so the
-# top-level `vigil` verbs and `vigil assess` read the SAME pointer.
+# Persisted active-engagement pointer key in ~/.config/vigil/config.json. This
+# serves top-level `vigil` verbs and shared services; `vigil assess` deliberately
+# ignores it so concurrent assessment sessions cannot retarget each other.
 ACTIVE_ENGAGEMENT_CONFIG_KEY = "active_engagement_dir"
 
 ENGAGEMENT_TYPES = {"web", "code", "both", "android", "blue"}
@@ -939,15 +939,15 @@ def _warn_env_mismatch(resolved_dir: Path, tier: str) -> None:
 
 
 def resolve_current_engagement() -> tuple[Path, str] | None:
-    """Unified "current engagement" resolver for the top-level ``vigil`` verbs.
+    """Resolve context for top-level, non-assessment ``vigil`` verbs.
 
-    Mirrors the assess resolver's lower tiers (the ``--engagement-dir`` flag
-    tier is handled by callers via :func:`resolve_engagement_path`):
+    The ``--engagement-dir`` flag tier is handled by callers via
+    :func:`resolve_engagement_path`:
 
         CWD walk-up  ->  active pointer  ->  ``$ENGAGEMENT_DIR``
 
     Returns ``(path, tier)`` with tier in ``{"cwd", "pointer", "env"}`` or None.
-    Keeps ``vigil`` verbs and ``vigil assess`` agreeing on "current".
+    Assessment commands use their independent fail-closed session binding.
     """
     cwd = Path.cwd()
     for candidate in (cwd, *cwd.parents):
@@ -1517,9 +1517,8 @@ def _write_report(eng_dir: Path, engagement_type: str, *, name: str | None, targ
     # scaffolded `report.md` for the report-writer to render into.
     if engagement_type != "blue":
         return
-    # Blue report variant lives behind plan unit 16. Until then we seed a
-    # minimal scaffold so report-writer dispatch always has a report.md to
-    # render into.
+    # Blue incident engagements retain a minimal scaffold so report-writer
+    # dispatch always has a report.md to render into.
     lines = ["# Engagement Report", ""]
     lines.append(f"- **Customer**: {name or '-'}")
     lines.append(f"- **Scope**: {target}")
@@ -1757,7 +1756,7 @@ def _write_prompt_wrappers(agent_root: Path, eng_dir: Path, client_kind: str, *,
 Artifacts:
 - Use `vigil assess artifact register <path>` to index engagement files explicitly
 - Use `vigil assess ...` for assessment operations from any directory
-- Start clients through this engagement directory's launcher so ENGAGEMENT_DIR is exported automatically
+- Start clients through this engagement directory's launcher so ENGAGEMENT_DIR is exported for artifact paths and VIGIL_SESSION_ENGAGEMENT_DIR binds assessment state
 - The local .orchestrator.env provides this engagement's orchestrator base URL; install-root env files are only fallbacks
 """
     # AGENTS.md is the canonical operator prompt (point engagement wrappers at
@@ -2144,6 +2143,7 @@ set -euo pipefail
 
 ENGAGEMENT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 export ENGAGEMENT_DIR
+export VIGIL_SESSION_ENGAGEMENT_DIR="$ENGAGEMENT_DIR"
 ENGAGEMENT_KEY="$(basename "$ENGAGEMENT_DIR")"
 export ENGAGEMENT_KEY
 VIGIL_AGENT_ROOT="{agent_root}"

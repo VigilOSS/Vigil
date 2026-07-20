@@ -623,9 +623,10 @@ The activity entries themselves run through:
 ```bash
 vigil assess log <agent-name> \
   "<short title — Step N for <finding-slug>>" \
-  "<one-line action summary>" \
+  investigation_step \
+  "<one-line result summary>" \
   --actor-kind agent \
-  --metadata-json "$(cat metadata.json)"
+  --metadata-file metadata.json
 ```
 
 The CLI verb is `vigil assess log`. The legacy shorthand (`log` with
@@ -710,9 +711,10 @@ a malformed dispatch the verifier rejects.
 
    ```bash
    vigil assess log <agent-name> "aws-cloudtrail-handoff" \
+     handoff \
      "L2 AWS CloudTrail investigation closed: <one-line summary>" \
      --actor-kind agent \
-     --metadata-json "$(cat metadata.json)"
+     --metadata-file metadata.json
    ```
 
 5. **Emit the handoff JSON.**
@@ -775,9 +777,9 @@ does not address it.
   Steps 2 / 4 / 5 / 6 use its query shape and result-bucket
   discipline.
 - `agent/skills/m365-signin-investigation/SKILL.md` — federated
-  handoff when the IdP is Entra (P1, parallel build).
+  handoff when the IdP is Entra.
 - `agent/skills/okta-investigation/SKILL.md` — federated handoff
-  when the IdP is Okta (P2, parallel build).
+  when the IdP is Okta.
 - `agent/skills/ioc-enrichment/SKILL.md` — ASN / GeoIP /
   threat-intel enrichment for `sourceipaddress`.
 - `agent/skills/incident-containment/SKILL.md` — owns key rotation,

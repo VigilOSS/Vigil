@@ -18,9 +18,8 @@ vuln_class: source-disclosure, secrets-exposure
 
 ## Tools
 
-- `LinkFinder` — automated endpoint extraction from JavaScript files; prefer
-  `vigil assess gau js-endpoints` for corpus-scale extraction from saved JS bodies
-- `SecretFinder` — scan JS files for API keys, tokens, and secrets
+- `vigil assess gau js-endpoints` — supported endpoint extraction over saved JavaScript bodies
+- `vigil assess gau secrets` — supported body-fetch and secret-discovery pipeline
 - `trufflehog` — scan saved JS/source-map artifacts through `vigil assess kali exec --` (host-side installs
   aren't required; the runtime image ships trufflehog)
 - `curl`, `grep`/`sed`/`awk`, `jq` — manual extraction and verification
@@ -68,44 +67,15 @@ vigil assess kali exec --technique DISCOVERY \
 #### Automated JS Endpoint Extraction
 
 ```bash
-# LinkFinder — extract endpoints from JS when a direct runtime install exists
-vigil assess kali exec --technique DISCOVERY \
-  --intent "LinkFinder endpoint extraction from app.js" \
-  --probe-kind fingerprint --phase recon --timeout 300 -- \
-  LinkFinder -i https://TARGET/static/js/app.js -o cli
-
-# Batch all JS files discovered in step 1
-vigil assess kali exec --technique DISCOVERY \
-  --intent "LinkFinder batch endpoint extraction from all JS files" \
-  --probe-kind fingerprint --phase recon --timeout 600 -- bash -c '
-for js_url in $(cat /engagements/$ENGAGEMENT_KEY/scans/js_files.txt); do
-  LinkFinder -i "$js_url" -o cli
-done | sort -u > /engagements/$ENGAGEMENT_KEY/scans/js_endpoints.txt
-'
-
-# SecretFinder — scan for API keys, tokens, credentials in JS
-vigil assess kali exec --technique INFO-DISCLOSURE \
-  --intent "SecretFinder secret scan on app.js" \
-  --probe-kind fingerprint --phase recon --timeout 300 -- \
-  python3 SecretFinder.py -i https://TARGET/static/js/app.js -o cli
-
-# Batch scan
-vigil assess kali exec --technique INFO-DISCLOSURE \
-  --intent "SecretFinder batch secret scan across all JS files" \
-  --probe-kind fingerprint --phase recon --timeout 600 -- bash -c '
-for js_url in $(cat /engagements/$ENGAGEMENT_KEY/scans/js_files.txt); do
-  python3 SecretFinder.py -i "$js_url" -o cli
-done | sort -u > /engagements/$ENGAGEMENT_KEY/scans/js_secrets.txt
-'
+# Build/reuse the historical corpus and fetch bodies, then extract JS routes.
+vigil assess gau secrets TARGET
+vigil assess gau js-endpoints TARGET --fetch-if-missing
 ```
 
-Use LinkFinder and SecretFinder as the primary narrow extraction pass. If
-`LinkFinder` is not installed as a command, check for the older
-`python3 linkfinder.py` form in the runtime before declaring the tool missing.
-For large historical corpora, prefer `vigil assess gau js-endpoints` because it
-pairs body capture, LinkFinder-style extraction, URL resolution, and ingestion.
-Fall back to manual grep for edge cases they miss (inline scripts, dynamically
-loaded chunks, non-standard patterns).
+Use the supported wrapper verbs as the primary extraction pass: they pair body
+capture, route extraction, URL resolution, secret scanning, and ingestion without
+depending on optional runtime scripts. Fall back to manual grep for edge cases
+they miss (inline scripts, dynamically loaded chunks, non-standard patterns).
 When scanning saved artifacts for secrets, invoke `trufflehog filesystem` via
 `vigil assess kali exec --technique INFO-DISCLOSURE --intent "secret scan on saved JS/source-map artifacts" --probe-kind fingerprint --phase recon --timeout 600 -- trufflehog filesystem ...`
 against `/engagements/$ENGAGEMENT_KEY/...` paths so the runtime-owned install is used consistently

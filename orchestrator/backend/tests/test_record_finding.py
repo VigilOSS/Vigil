@@ -312,7 +312,7 @@ def test_d4_remint_of_killed_at_shared_endpoint_is_refused(client, isolate_setti
     detail = resp.json()["detail"]
     assert "Refusing to re-mint" in detail
     assert "VA-050" in detail
-    assert "reset-finding VA-050" in detail
+    assert 'finding update VA-050 --status draft --reason "..."' in detail
     assert "--allow-remint" in detail
     # The killed finding is untouched and the re-mint was NOT created.
     assert {r["slug"] for r in client.get(f"{_base()}/findings").json()} == {"VA-050"}

@@ -83,6 +83,20 @@ def test_crawl_exclusion_regex_conservatively_blocks_encoded_paths(url: str) -> 
 
 
 @pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.test/files%2Fpublic",
+        "https://example.test/assets/profile%2Ejson",
+        "https://example.test/docs%5Cguide",
+    ],
+)
+def test_crawl_exclusion_regex_keeps_unrelated_encoded_paths(url: str) -> None:
+    regex = no_fire.crawl_exclusion_regex({"off_limits_paths": ["/logout"]})
+
+    assert not re.search(regex, url, flags=re.IGNORECASE)
+
+
+@pytest.mark.parametrize(
     "value",
     ["/not-a-list", ["/ok", 7], ["relative-without-leading-slash"]],
 )

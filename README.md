@@ -267,7 +267,11 @@ This section covers how to drive an engagement once the stack is up: starting re
 
 ### Starting an engagement
 
-Use the CLI verb — it changes into the engagement directory and execs the launcher (which exports `ENGAGEMENT_DIR`, mounts the `.codex/agents` / `.claude/agents` symlinks to the canonical prompts, and starts the client):
+Use the CLI verb — it changes into the engagement directory and execs the launcher
+(which exports `ENGAGEMENT_DIR` for artifact paths and
+`VIGIL_SESSION_ENGAGEMENT_DIR` for session-local `vigil assess` binding, mounts
+the `.codex/agents` / `.claude/agents` symlinks to the canonical prompts, and
+starts the client):
 
 ```bash
 vigil engagement list --json                              # find the key
@@ -877,10 +881,3 @@ use the built-in diagnostics:
 vigil doctor    # local prerequisites and host recon tools
 vigil status    # live service state
 ```
-
-## Implementation Plan
-
-The verified remaining work is consolidated in
-[IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md). Historical handoffs and plan
-trees are intentionally not retained; durable decisions live in ADRs and current
-behavior lives in executable contracts and tests.

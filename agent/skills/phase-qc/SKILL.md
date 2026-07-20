@@ -109,6 +109,11 @@ Emit it as a markdown table or as a JSON array of those objects. Keep `expected`
   surface. *Signal:* the handoff's own coverage-gaps / next-steps naming untested
   variants or surfaces; a thin probe footprint against a high `route_count`; a
   `covered` host whose lane touched far fewer routes than the ledger counts.
+  Two concrete depth misses belong here rather than becoming new taxonomy:
+  a route marked covered after probing only the wrong HTTP method (for example,
+  GET against a state-changing POST/PUT handler), and an ambient cookie/session-authenticated
+  browser action closed without testing the applicable CSRF defense (token or
+  Origin/Referer enforcement). Bearer-header APIs do not inherit this obligation.
   *Redispatch:* re-open with a real campaign — the matching vuln-class skill at
   `item-iterating` / `hypothesis-driven` depth, not another quick tick.
 - **`grading`** — *this P4 is, impact-if-true, a P2* and *account-gated but the gate

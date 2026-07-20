@@ -1,4 +1,4 @@
-"""Wave 6a — app-unit prefix discovery + depth scorer (depth-gate §5.2).
+"""App-unit prefix discovery and depth-scorer regressions.
 
 These tests seed SYNTHETIC backends matching the §5.2.3 worked examples and
 assert the resulting depth tier / deep_required, plus the load-bearing

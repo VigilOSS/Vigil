@@ -219,8 +219,7 @@ inherits its mechanisms (the single declaration-ordered `_BUCKETS` pass, boundar
 no regression). **Tests:** `orchestrator/backend/tests/test_classify_context_scoring.py`,
 `test_classify_dotnet_handler.py`, `test_classify_high_value_buckets.py`,
 `test_classify_remaining_buckets.py`, `test_classify_part6_enrichment.py`,
-`test_classify_archive_demotion.py`, plus the typer-side
-`agent/scripts/assess/tests/test_classify_type.py`.
+plus the typer-side `agent/scripts/assess/tests/test_classify_type.py`.
 
 **The binding constraint, restated.** Every decision below is **additive / boost-only**: it can
 only RAISE a `priority_score`, add a `+`-joined entry to a reason chain, or add a `gf:*` route —
@@ -260,11 +259,10 @@ product/host/path literal anywhere in the regex or port set.
 > content gets +15/+5. Tolerated because the bonus only orders triage (never gates), and a nonprod/admin
 > host is exactly the recon signal we want surfaced even when the path looks dull.
 
-A symmetric **dead-archive demotion** (Fix 6, Issue H) also shipped but is **default-OFF** behind the
-`demote_dead_archive` flag: when set, a row that reaches the bucket-less/floor-less `path:*` fallback AND is
-`gau-archive`-sourced AND not-live (`_is_dead_archive_noise`) is parked at score 0 with the existing
-`low-signal-cluster` skip tag (no new terminal vocabulary). It only ever touches the no-bucket/no-floor
-branch, so it cannot lower a bucket- or floor-driven score; with the flag off, scoring is byte-identical.
+Dead/archive provenance has **no demotion or terminal-skip path**. The prior default-off experiment had no
+production caller and was removed with its helper and tables. A `gau-archive` row with no bucket, floor, or
+weak-token match follows the same deterministic `path:*` fallback as any other row. Source/liveness context
+is strictly non-negative: `live`/`200` can boost a row, while dead/unknown liveness is neutral.
 
 ### The 10 net-new buckets (9 path/param + 1 regex) and their canonical classes
 
@@ -353,9 +351,11 @@ instead of open-redirect. So the goal is delivered through THREE layers instead,
 Regression-pinned in `test_classify_compound_key_fix4.py`; the `gf:lfi+gf:upload_fields` chain and the
 `priority_score==40` arithmetic are untouched (whole-key `file` has no `_`/`-`/camelCase split).
 
-**Future refinement (optional):** a `secondary_buckets` row currently bridges to coverage but does not
-yet appear in the human-facing `priority_reason` chain; surfacing weak/secondary signals in the reason
-string (clearly marked) would make cross-routing visible in `work-buffer stats` without re-clustering.
+**Intentional presentation boundary:** `secondary_buckets` bridge to coverage but do not appear in the
+human-facing `priority_reason` chain. `priority_reason` names score-driving primary evidence; secondary
+buckets are weaker guesses, and `ingest endpoints` already records each as a coverage obligation with a
+`weak inner-token signal at ingest` note. Copying them into the reason string would duplicate the signal,
+overstate its confidence, and lengthen operator/LLM output without adding coverage.
 
 ### Part 6 — param/extension enrichment of EXISTING buckets, with FP guards
 

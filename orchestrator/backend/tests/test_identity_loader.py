@@ -1,4 +1,4 @@
-"""Tests for the named-identity adapter (depth-gate Wave 4 / identity).
+"""Tests for the named-identity adapter.
 
 Identities now live in the centralized credential store; ``identity.py`` is a
 thin adapter over ``creds_client``. These tests cover:

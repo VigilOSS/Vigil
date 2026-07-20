@@ -416,7 +416,6 @@ def test_kali_exec_pins_resolve_on_docker_desktop(monkeypatch, fake_engagement):
         phase="recon",
         timeout=30,
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="curl",
     )
     # --resolve was injected into the argv that actually ran in-container.
@@ -447,7 +446,6 @@ def test_kali_exec_no_pin_on_native_linux(monkeypatch, fake_engagement):
         phase="recon",
         timeout=30,
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="httpx",
     )
     assert "--resolve" not in seen["argv"]
@@ -493,7 +491,6 @@ def test_kali_exec_http000_retries_then_succeeds(monkeypatch, fake_engagement):
         phase="recon",
         timeout=30,
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="curl",
     )
     assert attempts["n"] == 2, "guard must auto-retry exactly once"
@@ -529,7 +526,6 @@ def test_kali_exec_http000_persists_flags_transport_error(monkeypatch, fake_enga
         phase="recon",
         timeout=30,
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="curl",
     )
     # Pre-flight already pinned, so the guard does NOT retry (same pin would fail).
@@ -568,7 +564,6 @@ def test_kali_exec_http000_native_linux_not_overflagged(monkeypatch, fake_engage
         phase="recon",
         timeout=30,
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="curl",
     )
     assert attempts["n"] == 1, "no retry on native Linux"
@@ -598,7 +593,6 @@ def test_kali_exec_pin_opt_out_env_disables_pin(monkeypatch, fake_engagement):
         phase="recon",
         timeout=30,
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="curl",
     )
     assert "--resolve" not in seen["argv"]

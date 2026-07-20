@@ -1,4 +1,4 @@
-"""Depth-ledger scaling regression (Wave 1, D2).
+"""Depth-ledger scaling regression.
 
 The ledger used to be O(units x dispatches x probes): `_unit_ledger` re-scanned
 the full `probes` list several times per unit, and `_dedicated_dispatch_satisfied`

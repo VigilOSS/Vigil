@@ -49,8 +49,9 @@ Consume Phase 1-3 artifacts and rank functions for fuzzing value.
   with `NETWORK-INPUT`, `FILE-CONTENT`, `PROTOCOL-FIELD`, or `SERIALIZED-DATA` slot types.
 
 **Inputs (filesystem — read directly):**
-- Structural index: `tools/analysis-state/structural-index-manifest.json` (manifest) and
-  `tools/analysis-state/structural-index/<hash>.json` (per-file function maps, sinks, entry points)
+- Structural indexes for candidate targets, resolved via
+  `agent/shared-constraints-code.md` ("Structural-index resolution"; per-file function
+  maps, sinks, entry points)
 - Threat model: `tools/analysis-state/threat-model.json` (trust boundaries, entry points)
 - Call graph: `tools/analysis-state/call-graph.json` (entry-point chains, untrusted data annotations)
 - Source code: Read target files directly via Read/grep/ctags from `source/<repo-name>/`

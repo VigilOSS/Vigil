@@ -277,7 +277,8 @@ This displays:
 - Structural index cross-check: if the structural index is available, compare self-reported
   `functions_analyzed` against the structural index function count -- discrepancies indicate the
   hunter may have skipped functions that need a disposition
-- Effort thresholds: critical >= 70, high >= 50, medium >= 30 (medium is best-effort, not blocking)
+- The current tier thresholds through the per-cell below-threshold markers; those CLI markers
+  are the runtime authority if the configured thresholds change
 
 If all critical/high files meet their effort thresholds AND no cross-file triggers are pending,
 proceed directly to Phase 3.
@@ -351,9 +352,8 @@ If gaps remain on critical files:
   proceed.
 
 **Phase 2B exit gate -- ALL of the following must be true:**
-- [ ] All critical files: effort >= 70 on all applicable vulnerability classes (or excluded with documented rationale)
-- [ ] All high files: effort >= 50 on all applicable vulnerability classes (or excluded)
-- [ ] Medium files: best-effort (no blocking gate)
+- [ ] All critical/high files meet the tier thresholds shown by `code-coverage --cwe-matrix` on every applicable vulnerability class, or carry a documented exclusion
+- [ ] Medium files received best-effort review (no blocking gate)
 - [ ] No pending cross-file triggers
 - [ ] Entry chain coverage: >= 80% of entry chains traced on critical files (from `cwe_coverage` `entry_chains_traced` / `total_entry_chains`)
 

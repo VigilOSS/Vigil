@@ -44,7 +44,7 @@ def register(subparsers) -> None:
              "auth_context + canonical_location) collides with a reported/active finding under a "
              "different slug is otherwise REFUSED, to avoid silently overwriting it. Pass --update "
              "<slug> only when you mean to change that exact finding; for a distinct sibling on the "
-             "same root cause, give it a distinct root_cause_key/defect_family and use link-finding.",
+             "same root cause, give it a distinct root_cause_key/defect_family and use finding link.",
     )
     p.add_argument(
         "--allow-remint",
@@ -55,7 +55,8 @@ def register(subparsers) -> None:
              "finding previously KILLED as false_positive. Without this flag such a re-mint is "
              "REFUSED so a disproven finding cannot silently resurrect at a different "
              "canonical_location. Use only for a genuinely NEW finding that merely coincides on "
-             "endpoint + technique; if the prior kill was wrong, run `reset-finding <slug>` instead.",
+             "endpoint + technique; if the prior kill was wrong, run "
+             "`finding update <slug> --status draft --reason \"...\"` instead.",
     )
     p.set_defaults(func=run)
 
@@ -111,7 +112,7 @@ def _evidence_file_exists(ref: str, eng_dir: str, engagement_key: str) -> bool:
 def _normalize_evidence_ref(payload: dict, *, eng_dir: str, engagement_key: str, allow_unindexed: bool) -> None:
     """Normalize evidence_ref at record time WITHOUT blocking the record.
 
-    Doctrine (master plan §0 / L4-2): recording a real finding mid-hunt must
+    Recording a real finding mid-hunt must
     always work, even before proof is a registered artifact — check-report-
     readiness is the terminal backstop for missing evidence, not record time.
     So this warns and, for URLs, reroutes — it never exits.
@@ -139,7 +140,7 @@ def _normalize_evidence_ref(payload: dict, *, eng_dir: str, engagement_key: str,
         payload["evidence_ref"] = ""
         if not allow_unindexed:
             print(
-                f"record-finding: evidence_ref '{ref}' is a URL, not a registered artifact path "
+                f"finding record: evidence_ref '{ref}' is a URL, not a registered artifact path "
                 "— rerouted into details.references and cleared evidence_ref. Attach a captured "
                 "artifact later so report-readiness can index replayable proof.",
                 file=sys.stderr,
@@ -151,7 +152,7 @@ def _normalize_evidence_ref(payload: dict, *, eng_dir: str, engagement_key: str,
 
     if not ref:
         print(
-            "record-finding: warning — no evidence_ref set; check-phase-readiness --phase report will flag "
+            "finding record: warning — no evidence_ref set; check-phase-readiness --phase report will flag "
             "this finding as missing evidence. Set evidence_ref to a captured artifact path or "
             "pass --allow-unindexed-evidence to silence.",
             file=sys.stderr,
@@ -164,14 +165,14 @@ def _normalize_evidence_ref(payload: dict, *, eng_dir: str, engagement_key: str,
     looks_like_path = ("/" in ref or "." in ref) and "  " not in ref
     if looks_like_path:
         print(
-            f"record-finding: warning — evidence_ref '{ref}' looks like a path but no file exists "
+            f"finding record: warning — evidence_ref '{ref}' looks like a path but no file exists "
             "there; recording anyway. check-phase-readiness --phase report will flag it until a real artifact is "
             "attached. Pass --allow-unindexed-evidence to silence.",
             file=sys.stderr,
         )
     else:
         print(
-            f"record-finding: warning — evidence_ref '{ref}' is free-text prose, not an artifact "
+            f"finding record: warning — evidence_ref '{ref}' is free-text prose, not an artifact "
             "path or URL; recording anyway. Put external links in details.references and attach a "
             "captured artifact for report-readiness. Pass --allow-unindexed-evidence to silence.",
             file=sys.stderr,
@@ -236,7 +237,7 @@ def _refuse_clobber(existing: dict) -> None:
     existing_slug = str(existing.get("slug", ""))
     existing_status = str(existing.get("workflow_status", ""))
     print(
-        f"record-finding: REFUSED — this finding's dedup tuple (defect_family + root_cause_key "
+        f"finding record: REFUSED — this finding's dedup tuple (defect_family + root_cause_key "
         f"+ auth_context + canonical_location) collides with existing finding {existing_slug} "
         f"(workflow_status={existing_status}); recording it would silently overwrite that "
         f"{existing_status} finding.\n"
@@ -259,7 +260,7 @@ def _resolve_update_target(update_slug: str, json_slug: str, *, base_url: str, e
     """
     if json_slug and json_slug != update_slug:
         print(
-            f"record-finding: --update {update_slug} conflicts with slug '{json_slug}' in the "
+            f"finding record: --update {update_slug} conflicts with slug '{json_slug}' in the "
             f"JSON payload. Drop the JSON slug or set it to {update_slug}.",
             file=sys.stderr,
         )
@@ -274,7 +275,7 @@ def _resolve_update_target(update_slug: str, json_slug: str, *, base_url: str, e
                 raise
     if not isinstance(existing, dict) or not existing.get("slug"):
         print(
-            f"record-finding: --update {update_slug} names a finding that does not exist. Record "
+            f"finding record: --update {update_slug} names a finding that does not exist. Record "
             f"it without --update to create a new finding, or pass the correct existing slug.",
             file=sys.stderr,
         )
@@ -319,7 +320,7 @@ def _print_backend_clobber_refusal(exc: AssessError) -> bool:
         parsed = None
     if isinstance(parsed, dict) and isinstance(parsed.get("detail"), str):
         detail = parsed["detail"]
-    print(f"record-finding: REFUSED — {detail}", file=sys.stderr)
+    print(f"finding record: REFUSED — {detail}", file=sys.stderr)
     return True
 
 
@@ -412,7 +413,7 @@ def run(args) -> None:
 
         finding = response.get("finding", {})
         if not finding.get("slug") or not finding.get("title"):
-            print("record-finding: orchestrator backend did not return a canonical finding record", file=sys.stderr)
+            print("finding record: orchestrator backend did not return a canonical finding record", file=sys.stderr)
             sys.exit(1)
 
         finding_slug = finding["slug"]

@@ -695,12 +695,12 @@ Run these four steps in order before returning the handoff JSON:
      "phishing-triage-handoff for <finding-slug>" \
      handoff \
      "<one-line disposition + key signals + blast radius>" \
-     --actor-kind agent
+     --actor-kind agent \
+     --metadata-inline '{"finding_slug":"<finding-slug>","disposition":"<recommended-disposition>"}'
    ```
 
-   The `metadata_json` shape under Activity Log Convention rides
-   alongside this row (via the backend client wrapper or the next CLI
-   iteration's `--metadata-json` flag).
+   Use `--metadata-file <path>` instead when the metadata is already in a
+   JSON object file.
 
 4. **Link IOCs to the finding** for the intel rows that
    `ioc-enrichment` created during Step 4:
@@ -710,18 +710,14 @@ Run these four steps in order before returning the handoff JSON:
      --note "URL <url> recorded as adversarial via urlscan + VT"
    ```
 
-   The `--intel` flag is being added to `finding link` in parallel
-   with this skill's v1; if the flag is not yet wired, fall back to
-   `vigil assess finding update <slug> --inline
-   '{"details": {"related_intel_ids": [<id-1>, <id-2>]}}'` per the
-   pattern in `ioc-enrichment/SKILL.md` §6.
+   Repeat `--intel <intel-id>` in one invocation to attach several rows.
 
 5. **Emit the handoff JSON** via `vigil assess agent handoff
    --from-json /tmp/phishing-triage-handoff.json`. Shape per Output
    Contract above. `next_specialist` routes to:
    - `verifier` for any disposition recommendation with met
      evidence rigor
-   - `m365-signin-investigation` (P1, parallel build) when AiTM
+   - `m365-signin-investigation` when AiTM
      signals need a credential-entry pivot before the verifier
    - `google-workspaces` for GWS-tenant phish that surfaced a
      sign-in / token event needing the GWS audit pivot
@@ -776,8 +772,8 @@ Run these four steps in order before returning the handoff JSON:
   via L3); consumes `containment_hints`.
 - `agent/skills/google-workspaces/SKILL.md` §Gmail content — GWS-side
   sister investigation.
-- `agent/skills/m365-signin-investigation/SKILL.md` (P1, parallel
-  build) — M365 sign-in side of an AiTM compromise.
+- `agent/skills/m365-signin-investigation/SKILL.md` — M365 sign-in
+  side of an AiTM compromise.
 - `agent/skills/osint-recon/SKILL.md` — cross-channel context for
   T1566.003 multi-channel lures.
 - MITRE T1566 tree: <https://attack.mitre.org/techniques/T1566/>

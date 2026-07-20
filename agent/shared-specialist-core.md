@@ -71,10 +71,15 @@ live in `agent/shared-constraints.md` §4.
 
 ## Script Path Convention
 
-All assessment operations use `vigil assess <subcommand>` from any directory. JSON payloads are
-always in files, never inline shell arguments.
+All assessment operations use `vigil assess <subcommand>` from any directory. Put full-record
+JSON payloads in files; use the bounded `--details-inline` / `--provenance-inline` flags only for
+small nested-object patches. The finding update/verify commands do not accept a generic inline
+full payload, which keeps shell quoting from corrupting an incrementally maintained record.
 
-Use `ENGAGEMENT_DIR` or `--engagement-dir` for path resolution — hardcoded absolute paths break across environments.
+Use `ENGAGEMENT_DIR` for artifact paths. Assessment state binds through a valid
+`--engagement-dir`, then the engagement containing CWD, then the launcher's
+`VIGIL_SESSION_ENGAGEMENT_DIR`; a CWD/session disagreement fails closed, and
+neither `vigil use` nor `ENGAGEMENT_DIR` selects `vigil assess` state.
 
 ---
 

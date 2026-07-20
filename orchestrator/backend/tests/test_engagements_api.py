@@ -1058,7 +1058,7 @@ def test_assessment_summary_singleflights_concurrent_cache_miss(client, isolate_
 
 
 def test_probe_run_endpoint_records_target_anchor(client, isolate_settings):
-    """Wave 5 / S6: probe-runs accept and persist target_host/path/port, and two
+    """Probe runs accept and persist target_host/path/port, and two
     probes against DISTINCT hosts no longer collide on probe_key."""
     write_engagement(isolate_settings["engagements_dir"])
     base = "/engagements/2026-03-30-120000-example/assessment"
@@ -3497,7 +3497,11 @@ def test_patch_finding_details_replace_overwrites_stale_keys(client, isolate_set
     # never delete it).
     replaced = client.patch(
         f"/engagements/2026-03-30-120000-example/assessment/findings/{slug}",
-        json={"details": {"clean": "rewritten"}, "details_mode": "replace"},
+        json={
+            "details": {"clean": "rewritten"},
+            "details_mode": "replace",
+            "expected_row_version": 2,
+        },
     )
     assert replaced.status_code == 200, replaced.text
 

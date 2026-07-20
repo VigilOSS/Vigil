@@ -154,8 +154,9 @@ def _warn_multiworker_caveats(workers: int) -> None:
       * The 15-minute backup scheduler (app/services/backup.py) arms a per-process
         timer in each worker's lifespan, so N workers run N concurrent backups
         unless VIGIL_BACKUP_DISABLED is set on all but one.
-    Cross-process WS fan-out + a single-leader backup are the integrator follow-up
-    that makes workers>1 fully safe (see E1).
+    Workers greater than one therefore remain an explicitly caveated opt-in
+    until cross-process WebSocket fan-out and single-leader backup scheduling
+    are implemented.
     """
     print(
         f"orchestrator\twarn\tworkers={workers}: live-UI WebSocket broadcast is per-worker "

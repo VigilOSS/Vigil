@@ -7,6 +7,7 @@ from fastapi import HTTPException, status
 
 from ..events import _engagement_or_404
 from ..artifact_index import _normalize_relative_path
+from ...finding_merge import strict_finding_id
 
 from . import _common
 from ._common import ROOT_CAUSE_LINK_KIND, SEVERITY_RANK, _json_object, _serialize_finding_record
@@ -48,6 +49,129 @@ def _report_candidate_records(engagement_id: int) -> list[dict[str, Any]]:
         if record.get("verification_disposition") != "blocked"
     ]
 
+
+def _finding_merge_integrity_blockers(engagement_id: int) -> list[dict[str, Any]]:
+    with _common.get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, engagement_id, slug, status, merged_into_finding_id
+            FROM assessment_findings
+            WHERE engagement_id = ?
+            ORDER BY id
+            """,
+            (engagement_id,),
+        ).fetchall()
+        by_id = {int(row["id"]): dict(row) for row in rows}
+        referenced_ids = {
+            target_id
+            for row in rows
+            if (target_id := strict_finding_id(row["merged_into_finding_id"]))
+            is not None
+            and target_id not in by_id
+        }
+        if referenced_ids:
+            placeholders = ",".join("?" for _ in referenced_ids)
+            referenced_rows = connection.execute(
+                f"""
+                SELECT id, engagement_id, '' AS slug, status, merged_into_finding_id
+                FROM assessment_findings
+                WHERE id IN ({placeholders})
+                """,
+                tuple(sorted(referenced_ids)),
+            ).fetchall()
+            by_id.update({int(row["id"]): dict(row) for row in referenced_rows})
+    blockers: list[dict[str, Any]] = []
+
+    for source in rows:
+        source_id = int(source["id"])
+        slug = str(source["slug"] or "")
+        workflow_status = str(source["status"] or "")
+        pointer = source["merged_into_finding_id"]
+        if workflow_status == "merged" and pointer is None:
+            blockers.append(
+                {
+                    "kind": "finding_merge_integrity",
+                    "slug": slug,
+                    "detail": f"merged finding {slug} has no merge target",
+                }
+            )
+            continue
+        if workflow_status != "merged" and pointer is not None:
+            blockers.append(
+                {
+                    "kind": "finding_merge_integrity",
+                    "slug": slug,
+                    "detail": f"non-merged finding {slug} carries a merge target pointer",
+                }
+            )
+            continue
+        if pointer is None:
+            continue
+
+        seen = {source_id}
+        path = [slug]
+        target_id = strict_finding_id(pointer)
+        if target_id is None:
+            blockers.append(
+                {
+                    "kind": "finding_merge_integrity",
+                    "slug": slug,
+                    "detail": f"merge target pointer {pointer!r} is not a valid finding id",
+                }
+            )
+            continue
+        depth = 0
+        detail = ""
+        while True:
+            target = by_id.get(target_id)
+            if target is None:
+                detail = f"merge target id {target_id} does not exist"
+                break
+            if int(target["engagement_id"]) != engagement_id:
+                detail = "merge target belongs to another engagement"
+                break
+            target_slug = str(target["slug"] or target_id)
+            path.append(target_slug)
+            depth += 1
+            if target_id == source_id and depth == 1:
+                detail = f"finding {slug} is merged into itself"
+                break
+            if target_id in seen:
+                detail = f"merge cycle detected: {' -> '.join(path)}"
+                break
+            seen.add(target_id)
+            next_pointer = target["merged_into_finding_id"]
+            target_status = str(target["status"] or "")
+            if target_status != "merged":
+                if next_pointer is not None:
+                    detail = (
+                        f"merge path enters non-merged finding {target_slug} "
+                        "that carries a merge target pointer"
+                    )
+                elif depth > 1:
+                    detail = f"merge depth {depth} exceeds one hop: {' -> '.join(path)}"
+                break
+            if next_pointer is None:
+                detail = f"merge path ends at merged finding {target_slug} with no merge target"
+                break
+            target_id = strict_finding_id(next_pointer)
+            if target_id is None:
+                detail = (
+                    f"merged finding {target_slug} has merge target pointer "
+                    f"{next_pointer!r}, which is not a valid finding id"
+                )
+                break
+
+        if detail:
+            blockers.append(
+                {
+                    "kind": "finding_merge_integrity",
+                    "slug": slug,
+                    "detail": detail,
+                }
+            )
+    return blockers
+
 def report_readiness(engagement_id: int) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     engagement_type = str(getattr(engagement, "engagement_type", "") or "").lower()
@@ -62,6 +186,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
     coverage = coverage_readiness(engagement_id)
     blockers: list[dict[str, Any]] = []
     advisories: list[dict[str, Any]] = []
+    blockers.extend(_finding_merge_integrity_blockers(engagement_id))
     if not coverage["ready"]:
         blockers.append(
             {
@@ -92,7 +217,9 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                     f"finding {slug} is parked in workflow_status='draft' and will NOT appear in "
                     f"the report or export. Disposition it: promote to active with "
                     f"`vigil assess finding update {slug} --workflow-status active` so it reports, "
-                    f"or kill it with `vigil assess kill-finding {slug}` if it is not real."
+                    f"or verify it false positive with `vigil assess finding verify {slug} "
+                    f"--disposition false_positive --reason \"...\" --kill-reason \"...\" "
+                    f"--kill-check <index>` after documenting the failed check."
                 ),
             }
         )

@@ -269,7 +269,6 @@ def test_kali_exec_refuses_unattributed_in_scope_run(tmp_path, monkeypatch, caps
         timeout=30,
         agent_name="recon-specialist",
         engagement_dir=eng_dir,
-        engagement_key=eng_dir.name,
         tool_name="whatweb",
     )
 
@@ -334,7 +333,6 @@ def test_kali_exec_runs_when_marker_present(tmp_path, monkeypatch):
         timeout=30,
         agent_name="recon-specialist",
         engagement_dir=eng_dir,
-        engagement_key=eng_dir.name,
         tool_name="curl",
     )
 

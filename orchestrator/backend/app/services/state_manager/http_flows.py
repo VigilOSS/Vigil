@@ -36,10 +36,9 @@ from ._common import _engagement_or_404, _fetch_all, _json_text
 DEFAULT_HTTP_FLOW_LIMIT = 250
 MAX_HTTP_FLOW_LIST_LIMIT = 5000
 
-# Default per-engagement capture policy. Raw-body capture is OFF by default
-# (``enabled = False``) per plan item 1 so restarting the shared proxy never
-# silently changes capture behavior. ``max_body_bytes`` mirrors the addon's
-# BODY_TRUNCATE (100 KB).
+# Default per-engagement capture policy. Full-flow metadata recording and both
+# body sides are OFF, so restarting the shared proxy never silently expands
+# capture. ``max_body_bytes`` mirrors the addon's BODY_TRUNCATE (100 KB).
 DEFAULT_MAX_BODY_BYTES = 102400
 DEFAULT_CAPTURE_POLICY: dict[str, Any] = {
     "enabled": False,
