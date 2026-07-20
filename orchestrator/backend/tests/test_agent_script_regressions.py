@@ -2891,7 +2891,7 @@ def test_resume_brief_renders_read_first_intel_notes(monkeypatch, tmp_path, caps
 
 # ---------------------------------------------------------------------------
 # Engagement-dir / key resolution hardening + relative cases.db anchoring.
-# Regression for: `cd scans/ ; ENGAGEMENT_DIR=$(pwd)` deriving key="scans", and
+# Regression for: a scope-less explicit selector deriving key="scans", and
 # a bare relative cases.db opening the wrong (empty) DB from a drifted cwd.
 # ---------------------------------------------------------------------------
 
@@ -2908,7 +2908,7 @@ def test_resolve_engagement_dir_rejects_scopeless_subdir(monkeypatch, tmp_path):
     eng = tmp_path / "2026-05-29-eng"
     (eng / "scans").mkdir(parents=True)
     (eng / "scope.json").write_text("{}", encoding="utf-8")
-    monkeypatch.delenv("ENGAGEMENT_DIR", raising=False)
+    monkeypatch.delenv("VIGIL_SESSION_ENGAGEMENT_DIR", raising=False)
 
     # The engagement root (has scope.json) resolves and the key is its basename.
     assert config.resolve_engagement_dir(str(eng)) == str(eng.resolve())
@@ -2917,18 +2917,18 @@ def test_resolve_engagement_dir_rejects_scopeless_subdir(monkeypatch, tmp_path):
     with pytest.raises(SystemExit):
         config.resolve_engagement_dir(str(eng / "scans"))
 
-    # Same trap via $ENGAGEMENT_DIR=$(pwd)-from-scans.
-    monkeypatch.setenv("ENGAGEMENT_DIR", str(eng / "scans"))
+    # Same trap via a malformed launcher-session binding.
+    monkeypatch.setenv("VIGIL_SESSION_ENGAGEMENT_DIR", str(eng / "scans"))
     with pytest.raises(SystemExit):
         config.resolve_engagement_dir(None)
 
 
-def test_anchor_engagement_relative_uses_engagement_dir(monkeypatch, tmp_path):
+def test_anchor_engagement_relative_uses_session_engagement(monkeypatch, tmp_path):
     config = _import_assess_config()
     eng = tmp_path / "2026-05-29-eng2"
     eng.mkdir()
     (eng / "scope.json").write_text("{}", encoding="utf-8")
-    monkeypatch.setenv("ENGAGEMENT_DIR", str(eng))
+    monkeypatch.setenv("VIGIL_SESSION_ENGAGEMENT_DIR", str(eng))
 
     # Relative cases.db anchors to the engagement dir even when cwd is elsewhere.
     other = tmp_path / "elsewhere"

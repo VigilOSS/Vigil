@@ -360,8 +360,8 @@ def _out_of_scope_covers(
 def _normalize_capture_policy(raw) -> dict:
     """Coerce a registry/​filesystem capture-policy blob into the addon's shape.
 
-    Matches the backend ``DEFAULT_CAPTURE_POLICY`` contract: raw-body capture is
-    OFF unless ``enabled`` is explicitly true.
+    Matches the backend ``DEFAULT_CAPTURE_POLICY`` contract: full-flow metadata
+    recording is OFF unless ``enabled`` is true; each body side remains opt-in.
     """
     data = raw if isinstance(raw, dict) else {}
 
@@ -1705,7 +1705,7 @@ class CaseCollector:
         # Phase 5 full-flow capture. Runs regardless of the observation POST
         # (which needs the backend) so raw sidecars + the JSONL index are still
         # written locally when the backend is unreachable — no silent data loss.
-        # A no-op when the engagement's capture policy leaves raw-body capture
+        # A no-op when the engagement's capture policy leaves full-flow metadata
         # OFF (the default). Never raises up through the flow hook.
         self._maybe_capture_full_flow(
             entry,
@@ -1863,10 +1863,11 @@ class CaseCollector:
         raw_req_body: bytes,
         resp_body: bytes,
     ) -> None:
-        """Write raw body sidecars + JSONL index and POST the full-flow record.
+        """Write the full-flow index/backend row and any selected body sidecars.
 
-        No-op unless the engagement's capture policy enables raw-body capture.
-        Wrapped so a capture failure NEVER crashes the flow hook.
+        No-op unless full-flow metadata recording is enabled. Request and response
+        bodies remain independently opt-in. Wrapped so a capture failure NEVER
+        crashes the flow hook.
         """
         try:
             policy = _normalize_capture_policy(entry.capture_policy)

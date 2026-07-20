@@ -45,6 +45,10 @@ def _hoist_root_flags(argv: list[str]) -> list[str]:
         if not found_double_dash and token in _ROOT_FLAGS_WITH_VALUE and i + 1 < len(argv):
             value = argv[i + 1]
             if token == "--engagement-dir":
+                if not value:
+                    sys.exit(
+                        "--engagement-dir: value is empty; pass an absolute or relative path"
+                    )
                 if value.startswith("-"):
                     sys.exit(
                         f"--engagement-dir: value '{value}' looks like a flag; "
@@ -92,7 +96,7 @@ def _root_command_index(argv: list[str]) -> int | None:
 
 
 def _register_subcommand_group(sub, *, name, help_text, dest, leaf_modules) -> None:
-    """Register a Tier-3 subcommand group (`vigil assess <name> <action> ...`).
+    """Register a grouped subcommand (`vigil assess <name> <action> ...`).
 
     Creates the parent parser + its action subparser, then lets each leaf module
     register its short action name onto that subparser (each keeps its exact
@@ -114,6 +118,7 @@ def _register_subcommand_group(sub, *, name, help_text, dest, leaf_modules) -> N
 
 def main(argv: list[str] | None = None) -> None:
     from assess.lib.client import AssessError
+    from assess.lib.config import ENGAGEMENT_BINDING_CONTRACT
 
     parser = argparse.ArgumentParser(
         prog="vigil assess",
@@ -124,7 +129,8 @@ def main(argv: list[str] | None = None) -> None:
             "  vigil assess list-commands            # every verb, grouped by phase\n"
             "  vigil assess list-commands --phase consume-test\n"
             "  vigil assess contract <verb>          # the full contract for one verb "
-            "(examples, required fields, common mistakes)\n"
+            "(examples, required fields, common mistakes)\n\n"
+            f"Engagement binding:\n  {ENGAGEMENT_BINDING_CONTRACT}\n"
         ),
     )
     parser.add_argument(
@@ -132,9 +138,10 @@ def main(argv: list[str] | None = None) -> None:
         dest="engagement_dir",
         default=None,
         help=(
-            "Engagement directory (default: $ENGAGEMENT_DIR or cwd if it contains "
-            "scope.json). Accepted in either position: before or after the "
-            "subcommand name."
+            "Explicit assessment engagement override. Without it, resolve from the "
+            "engagement tree containing CWD or $VIGIL_SESSION_ENGAGEMENT_DIR; "
+            "conflicting implicit selectors fail closed. Accepted before or after "
+            "the subcommand name."
         ),
     )
     parser.add_argument(
@@ -296,7 +303,7 @@ def main(argv: list[str] | None = None) -> None:
     ):
         mod.register(sub)
 
-    # Tier-3 cosmetic namespacing: re-shelve finding / intel / export / command-run
+    # Grouped namespacing: re-shelve finding / intel / export / command-run
     # verbs under a subcommand parent (mirrors the `kali` / `work-buffer` pattern).
     # Each leaf module registers its short action name (`record`, `verify`, …)
     # onto the parent's action subparser; behavior is unchanged (pure re-parent).

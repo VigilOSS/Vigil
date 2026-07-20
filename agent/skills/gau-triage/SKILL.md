@@ -14,7 +14,7 @@ The gau pipeline is now three composable verbs that all share one cached gau cor
 |---|---|---|
 | `vigil assess gau endpoints <target>` | Cache-aware gau, then ingest into work_items with inline classification | `work_items` rows + cluster assignments |
 | `vigil assess gau secrets <target>` | Cache-aware gau → uro dedup → httpx body capture → trufflehog scan | bodies, trufflehog JSON, secrets manifest |
-| `vigil assess gau js-endpoints <target>` | LinkFinder regex over JS bodies → resolve to absolute URLs → ingest as `source=js-extract` | new `work_items` rows hidden in JS bundles |
+| `vigil assess gau js-endpoints <target>` | route-pattern extraction over JS bodies → resolve to absolute URLs → ingest as `source=js-extract` | new `work_items` rows hidden in JS bundles |
 
 Artifacts for each `(target, gau-flag-set)` pair live under `<engagement>/scans/gau-pipeline/<target_slug>/<cache_key_slug>/`, including `gau_output.txt`, the sidecar `gau_output.meta.json`, intermediate filtered/dedup files, `bodies/`, and `trufflehog.json`. Two targets — or the same target run with different `--subs`/`--providers` — never share `bodies/` or trufflehog input. The wrapper announces cache reuse on stderr and includes `cache_reused: true|false` in the JSON summary so the dispatch-time decision is auditable.
 
@@ -36,7 +36,7 @@ Skip the pipeline entirely when the corpus is small (<500 URLs), no JS bundles a
 gau endpoints <target>
   └─ work_items grew by N rows? Inspect clusters via `work-buffer clusters`.
      ├─ many `gf:trust_surface` / `gf:upload_fields` → dispatch vulnerability-analyst
-     └─ many `gf:interestingext` (e.g., `.bak`, `.env`, `.sql`) → consider `gau-exposures` follow-up (planned) or nuclei -t exposures/ targeted run
+     └─ many `gf:interestingext` (e.g., `.bak`, `.env`, `.sql`) → run a targeted `nuclei -t exposures/` check and manually reproduce any hit
 
 gau js-endpoints <target>  (after gau secrets, or with --fetch-if-missing)
   └─ "ingested_count" > 0 → JS-hidden routes added; classification scored them
@@ -105,7 +105,7 @@ vigil assess finding record gau-triage <path-to-finding-json>
 
 ## Extended Resources
 
-- `agent/scripts/assess/lib/gau_pipeline.py` — shared cache logic, sidecar meta, LinkFinder regex
+- `agent/scripts/assess/lib/gau_pipeline.py` — shared cache logic, sidecar metadata, and JS route patterns
 - `agent/scripts/assess/commands/gau_endpoints.py` — Stream A wrapper source
 - `agent/scripts/assess/commands/gau_secrets.py` — Stream B wrapper source
 - `agent/scripts/assess/commands/gau_js_endpoints.py` — Stream C wrapper source

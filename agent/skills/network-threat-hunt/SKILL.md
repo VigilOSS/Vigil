@@ -588,8 +588,8 @@ silent gap.
 ## Reference Block
 
 - `agent/skills/alert-triage/SKILL.md` — L1 dispatch producer.
-- `agent/skills/edr-alert-triage/SKILL.md` — origin-host pivot
-  (parallel build); use when Step 5 needs endpoint corroboration.
+- `agent/skills/edr-alert-triage/SKILL.md` — origin-host pivot; use when
+  Step 5 needs endpoint corroboration.
 - `agent/skills/dns-tunneling-detection/SKILL.md` — deeper DNS-tunnel
   analysis (slow-drip, short-label, charset chi-squared) for Step 3
   candidates.

@@ -10,7 +10,7 @@ that drifted independently:
   * the code track's family lists (``code_analysis.SLOT_VULN_CLASSES`` /
     ``ROLE_CONTEXT_VULN_CLASSES``)                     — CWE / memory-safety
 
-Design (master plan R-M5): ``vuln_class`` is the single canonical term. The
+``vuln_class`` is the single canonical term. The
 canonical class set below is the UNION of the web attack classes and the code
 families, so the code track aligns BY INCLUSION — every string the code track
 already validates against (``buffer-overflow``, ``web-app-auth``, …) is a
@@ -21,11 +21,11 @@ code track never has to fork the term and never false-fails.
 Everything downstream DERIVES from this module:
   * ``classify_buckets.BUCKET_SKILLS`` is computed from skill frontmatter +
     ``GF_BUCKET_TO_CLASS`` (no more hand-edited dict).
-  * the depth gate (later waves) translates surfaces / techniques / gf signals
+  * the depth gate translates surfaces / techniques / gf signals
     into expected canonical classes via the maps below.
   * skills declare ``vuln_class:`` frontmatter drawn from ``VULN_CLASSES``.
 
-Anti-staleness (master plan §5.4): this list is DATA, additive without touching
+Anti-staleness: this list is DATA, additive without touching
 control flow — adding a framework/class is a one-line edit here. Drift tests in
 ``test_vuln_taxonomy.py`` fail CI when a skill, gf-bucket, surface_type, code
 family, or technique references a class that is not declared here, so the rubric

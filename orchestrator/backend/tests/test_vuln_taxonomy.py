@@ -1,4 +1,4 @@
-"""Drift tests for the canonical vuln-class taxonomy (master plan §4.4 + §5.4).
+"""Drift tests for the canonical vulnerability-class taxonomy.
 
 `agent/scripts/assess/lib/vuln_taxonomy.py` is the ONE source of truth for the
 cross-track vuln vocabulary. Everything else — skill `vuln_class:` frontmatter,

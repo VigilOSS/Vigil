@@ -249,6 +249,24 @@ def test_path_fallback_score_is_boosted():
     assert boosted["priority_reason"] == base["priority_reason"]
 
 
+def test_dead_archive_context_is_neutral_not_terminal():
+    """Archive provenance and a dead verdict never become a hidden skip gate."""
+    cb = _classify_buckets()
+    base = cb.classify_from_fields(
+        case_type="unknown",
+        url_path="/static/brochure",
+    )
+    dead_archive = cb.classify_from_fields(
+        case_type="unknown",
+        url_path="/static/brochure",
+        url="https://www.example.com/static/brochure",
+        source="gau-archive",
+        live_status="dead",
+    )
+    assert dead_archive == base
+    assert dead_archive["terminal_reason"] is None
+
+
 def test_inert_and_sourcemap_never_boosted():
     """Inert + sourcemap branches stay fixed even on a nonprod host."""
     cb = _classify_buckets()

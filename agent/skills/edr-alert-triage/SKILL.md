@@ -583,8 +583,8 @@ schema. Required fields, EDR-specific:
   isolation per vendor (MDE `/machines/{id}/isolate`, Falcon
   `PerformActionV2 action_name=contain`, S1 `agents/actions/disconnect`).
   DO NOT call from this skill.
-- `agent/skills/network-threat-hunt/SKILL.md` — parallel P2 skill;
-  consumes this skill's process tree as origin context.
+- `agent/skills/network-threat-hunt/SKILL.md` — consumes this skill's
+  process tree as origin context.
 - `agent/skills/cobalt-strike-analysis/SKILL.md` — chain when Step 2
   flags Cobalt Strike infrastructure or Step 3 surfaces a beacon binary.
 - `agent/skills/container-escape-detection/SKILL.md` — adjacent EDR-class

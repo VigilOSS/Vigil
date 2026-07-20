@@ -689,8 +689,8 @@ def _blind_triage_blockers(client: AssessmentClient) -> list[dict[str, str]]:
 
 
 def _depth_backstop_blockers(client: AssessmentClient) -> list[dict[str, str]]:
-    """The ONE hard block (Wave 7 / S17 resolution; master plan §1A, depth-gate
-    §5.3; coverage-grain unbundle / ADR 0012): the terminal report/complete edge
+    """The terminal depth backstop (coverage-grain unbundle / ADR 0012):
+    the report/complete edge
     cannot pass with a high-value app unit that is left deep-untested.
 
     Calls the read-only ``application-units/terminal-block`` endpoint (mirroring

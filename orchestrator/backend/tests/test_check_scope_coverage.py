@@ -1,4 +1,4 @@
-"""Tests for the per-scope-entry coverage gate (Wave 6d).
+"""Tests for the per-scope-entry coverage gate.
 
 Originally ``vigil assess check-scope-coverage``; that standalone command was
 folded into ``vigil assess check-phase-readiness --phase recon|collect|consume``
@@ -2375,7 +2375,7 @@ def test_auto_redispatch_drops_non_resolving_skill(monkeypatch, tmp_path: Path, 
 def test_auto_redispatch_no_op_without_require_stage(monkeypatch, tmp_path: Path, capsys) -> None:
     """--auto-redispatch on a phase with NO stage gate produces no recommendations.
 
-    Wave 6d: the consolidated command always relays a --phase. On a stage-gated
+    The consolidated command always relays a --phase. On a stage-gated
     phase (recon/collect/consume) --auto-redispatch recommends against failing
     entries; on a phase with no stage gate (verify/exploit/report, exercised here
     via the None→verify mapping) there is no scope gate at all, so there is
@@ -2463,7 +2463,7 @@ def test_bucket_skills_mapping_resolves_on_disk():
     real agent/skills/<name>/SKILL.md. Catches a typo'd or stale skill name in
     the (now taxonomy-derived) mapping before it reaches an operator.
 
-    Strengthened (Wave 4): BUCKET_SKILLS is no longer a hand-maintained literal
+    BUCKET_SKILLS is no longer a hand-maintained literal
     — it is derived from the canonical taxonomy + skill `vuln_class:`
     frontmatter at import time. So we also assert the derivation is not
     trivially empty (a broken skills-dir read or empty frontmatter would yield

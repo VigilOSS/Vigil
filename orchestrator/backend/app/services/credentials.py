@@ -163,6 +163,8 @@ def derive_capture_identity(
     cookies: dict[str, str],
     headers: dict[str, str],
     tokens: dict[str, str],
+    *,
+    host: str = "",
 ) -> str | None:
     """Derive a deterministic, stateless capture ``identity_name`` from a
     capture's session-anchor material — or ``None`` when there is none.
@@ -178,10 +180,13 @@ def derive_capture_identity(
     so ``vigil auth list``/``show`` can tell account A from account B for
     IDOR/BOLA cross-account testing. The label derives from the DURABLE claim
     (stable across a token refresh), NEVER from a rotating cookie value, so
-    refreshes of the same login still coalesce to one row; a short hash suffix is
-    appended only when sanitization is lossy, so two distinct principals whose
-    claims sanitize to the same label never wrongly share a row. A capture with
-    no identifiable principal (cookie-only, opaque bearer) keeps ``cap-<sha1>``.
+    refreshes of the same login still coalesce to one row. Stable JWT issuer and
+    audience context scopes that principal across tenants/apps; when both claims
+    are absent, the normalized capture host is the fail-distinct fallback. A
+    short hash suffix is appended only when sanitization is lossy, so two distinct
+    principals whose claims sanitize to the same label never wrongly share a row.
+    A capture with no identifiable principal (cookie-only, opaque bearer) keeps
+    ``cap-<sha1>``.
     Anchor material, in order:
 
     * **anchor cookies** — cookies whose NAME is in the generic session-hint set
@@ -236,21 +241,18 @@ def derive_capture_identity(
     if not anchor_pairs:
         return None
 
-    # Prefer a human-readable name derived from a durable principal claim; this
-    # only ever COALESCES more (by principal) than the hash — it never splits a
-    # single login — so the append-in-place dedup the store relies on is
-    # preserved. No identifiable principal -> the opaque per-anchor fingerprint.
+    # Prefer a human-readable name derived from a durable principal claim. Scope
+    # it by stable JWT context so the same subject in two apps cannot share a
+    # globally replayed Authorization header. No identifiable principal -> the
+    # opaque per-anchor fingerprint.
     principal = _principal_identity(jwt_anchor)
     if principal is not None:
-        # Same anchor claim (sub/email/...) across DIFFERENT issuers/tenants is
-        # NOT the same principal: coalescing them would share one identity row and
-        # let the globally-stored Authorization header from the second host replay
-        # against the first. Fold the issuer into the key so cross-tenant
-        # collisions separate; a real token refresh keeps its issuer so it still
-        # refreshes one row. Issuer-less JWTs keep the bare readable label.
-        issuer_scope = _bearer_issuer_scope(headers, tokens)
-        if issuer_scope:
-            return f"{principal}-iss{issuer_scope}"
+        principal_scope = _bearer_principal_scope(headers, tokens)
+        if principal_scope:
+            return f"{principal}-{principal_scope}"
+        host_scope = _capture_host_scope(host)
+        if host_scope:
+            return f"{principal}-{host_scope}"
         return principal
 
     key_material = "\n".join(sorted(f"{name}={value}" for name, value in anchor_pairs))
@@ -371,13 +373,8 @@ def _extract_bearer(headers: dict[str, str], tokens: dict[str, str]) -> str | No
     return None
 
 
-def _jwt_payload_claim(bearer: str) -> tuple[str, Any] | None:
-    """Decode a JWT payload (middle segment, no signature check) and return the
-    first present anchor claim as ``(name, value)``, or ``None``.
-
-    Stdlib base64 + json only; tolerates missing base64url padding. A malformed
-    or non-JWT bearer yields ``None`` (caller falls back to the raw bearer).
-    """
+def _jwt_payload(bearer: str) -> dict[str, Any] | None:
+    """Decode a JWT payload without verifying its signature."""
     parts = bearer.split(".")
     if len(parts) != 3:
         return None
@@ -388,7 +385,13 @@ def _jwt_payload_claim(bearer: str) -> tuple[str, Any] | None:
         claims = json.loads(decoded.decode("utf-8"))
     except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
         return None
-    if not isinstance(claims, dict):
+    return claims if isinstance(claims, dict) else None
+
+
+def _jwt_payload_claim(bearer: str) -> tuple[str, Any] | None:
+    """Return the first stable principal claim from a bearer JWT, if present."""
+    claims = _jwt_payload(bearer)
+    if claims is None:
         return None
     for name in _JWT_ANCHOR_CLAIMS:
         value = claims.get(name)
@@ -397,34 +400,55 @@ def _jwt_payload_claim(bearer: str) -> tuple[str, Any] | None:
     return None
 
 
-def _bearer_issuer_scope(
+def _bearer_principal_scope(
     headers: dict[str, str], tokens: dict[str, str]
 ) -> str | None:
-    """Return a short, stable hash of a bearer JWT's ``iss`` claim, or ``None``.
+    """Return a stable issuer/audience suffix for a principal-derived identity.
 
-    Used to separate two sessions whose anchor claim collides but that were minted
-    by different issuers/tenants. Only the ``iss`` claim participates — it is the
-    canonical "who minted this token" value and is stable across a token refresh,
-    so folding it in never splits a real refresh of the same login. An issuer-less
-    or non-JWT bearer returns ``None`` (no disambiguation, no regression).
+    ``iss`` separates tenants; ``aud`` separates apps that share an issuer and
+    subject namespace. Audience arrays are set-like, so sorting and deduplication
+    prevents a harmless order change across refreshes from creating a new row.
+    Issuer-only tokens retain the historical ``iss<hash>`` form.
     """
     bearer = _extract_bearer(headers or {}, tokens or {})
     if not bearer:
         return None
-    parts = bearer.split(".")
-    if len(parts) != 3:
+    claims = _jwt_payload(bearer)
+    if claims is None:
         return None
-    try:
-        padded = parts[1] + "=" * (-len(parts[1]) % 4)
-        claims = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
-    except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
-        return None
-    if not isinstance(claims, dict):
-        return None
+
+    scope_terms: list[str] = []
     issuer = claims.get("iss")
-    if issuer in (None, ""):
+    if isinstance(issuer, str) and issuer:
+        scope_terms.append(f"iss={issuer}")
+
+    raw_audience = claims.get("aud")
+    if isinstance(raw_audience, str):
+        audiences = [raw_audience] if raw_audience else []
+    elif isinstance(raw_audience, list):
+        audiences = sorted(
+            {item for item in raw_audience if isinstance(item, str) and item}
+        )
+    else:
+        audiences = []
+    if audiences:
+        scope_terms.append(
+            "aud=" + json.dumps(audiences, ensure_ascii=False, separators=(",", ":"))
+        )
+
+    if not scope_terms:
         return None
-    return hashlib.sha1(f"iss={issuer}".encode("utf-8")).hexdigest()[:6]
+    digest = hashlib.sha1("\n".join(scope_terms).encode("utf-8")).hexdigest()[:6]
+    return f"{'ctx' if audiences else 'iss'}{digest}"
+
+
+def _capture_host_scope(host: str) -> str | None:
+    """Return a stable fallback suffix for a context-less principal JWT."""
+    normalized = str(host or "").strip().lower().rstrip(".")
+    if not normalized:
+        return None
+    digest = hashlib.sha1(f"host={normalized}".encode("utf-8")).hexdigest()[:6]
+    return f"host{digest}"
 
 
 def capture_material(
@@ -457,7 +481,9 @@ def capture_material(
     source of truth. Any extracted bearer/Authorization headers + tokens are
     merged in. Marks the identity proxy_capture / available / authenticated.
     """
-    derived = derive_capture_identity(cookies or {}, headers or {}, tokens or {})
+    derived = derive_capture_identity(
+        cookies or {}, headers or {}, tokens or {}, host=host
+    )
     if derived is None:
         # No session-anchor material — anonymous/pre-login/pure-logout traffic.
         # Never mint a spurious row and never evict an existing session.

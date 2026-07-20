@@ -38,7 +38,7 @@ and severity discipline it carries applies to every dispatch, not a trigger-gate
 - `agent/rules/resume.md` — universal resume hydration
 - `agent/rules/reporting.md` — banned hedge phrases; the verifier's kill_reason / verification_reason text lands in the report verbatim
 - `agent/shared-constraints-blue.md` — tenant scope, artifact-index chain of custody, UTC, host-exec audit pipeline, confidence labels, dispatch-handoff conventions
-- `agent/skills/alert-fp-verification/SKILL.md` — the five-check protocol, the Multi-Perspective Voting Protocol for `escalated`, the kill_reason / verification_reason format (built in Unit 7)
+- `agent/skills/alert-fp-verification/SKILL.md` — the five-check protocol, the Multi-Perspective Voting Protocol for `escalated`, the kill_reason / verification_reason format
 - **Every tenant ref named in `scope.json:tenant_reference_paths[]`.** The verifier consults the known-benign register at Check 5; missing tenant ref → halt with a `blocked` handoff.
 
 **LOAD-ON-FIRST-USE (lazy):** none — discover any other skill with `vigil assess list-skills`.
@@ -273,7 +273,7 @@ Before your dispatch returns, run in this order:
 5. **Persist the disposition** via `vigil assess finding verify` (`--disposition false_positive` for a kill) with `--details-inline` for `checks[]`/`devils_advocate[]` — `vigil blue verify` alone cannot carry them (see "State Writes" above for the exact commands per disposition).
    - Reopening a prior decision → `vigil assess finding update <slug> --reason "..." --status draft`
 
-6. **Run the severity-↔-technique alignment audit** on every `verified` and `downgraded` finding via `vigil assess finding list`. Fix mismatches via `vigil assess finding update <slug> --inline '{"details":{"mitre_techniques":[...], "severity_rationale":"..."}}'` before closing.
+6. **Run the severity-↔-technique alignment audit** on every `verified` and `downgraded` finding via `vigil assess finding list`. Fix mismatches via `vigil assess finding update <slug> --details-inline '{"mitre_techniques":[...], "severity_rationale":"..."}'` before closing.
 
 7. **Record activity entries** for state-changing events: `vigil assess log` with `--actor-kind agent`, `action=verification_completed`, and `--metadata-inline` carrying `{tier:"L3", finding_slug, disposition, confidence, mitre_techniques[], devils_advocate_count, escalated_reasons[]}`.
 

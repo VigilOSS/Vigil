@@ -162,8 +162,8 @@ proactive severity↔CVSS alignment audit, modeled on `agent/operator-core.md` "
 Passes" ("Exploit → Report: severity-CVSS alignment audit"): query `vigil assess finding list` and
 verify each finding's `severity` matches its `details.cvss_score` band (`high` requires
 `cvss_score >= 7.0`, `medium` requires `4.0 <= cvss_score <= 6.9`, `low` requires `cvss_score <
-4.0`); fix any mismatch via `vigil assess finding update <slug> --inline '{"details":
-{"cvss_score": <n>, "cvss_vector": "..."}}'` (the JSON field is `details`, not `details_json`) —
+4.0`); fix any mismatch via `vigil assess finding update <slug> --severity <band>
+--details-inline '{"cvss_score": <n>, "cvss_vector": "..."}'` —
 this catches the most common cleanup-time defect before the transition bounces on it, not after.
 Then run `vigil assess check-phase-readiness --phase report` (the shared readiness gate: coverage,
 root-cause consolidation, severity/CVSS alignment) and `vigil assess finding report --mode
@@ -207,9 +207,9 @@ See `agent/references/examples/submission-direct-buffer-overflow-fuzz.md` for a 
    Only an `Accept*` verdict clears a finding for submission; anything else routes back to
    `report-writer` or the specialist that owns the finding — an un-recorded verdict reads as no
    triage at all, so record it even for a clean `Accept`.
-4. **Publish:** re-run `export submission <slug> --platform <same platform> --overwrite` (non-draft)
-   once the strict final gate is satisfiable (title; severity + CVSS vector; platform taxonomy where
-   applicable; an attacker-impact statement; and ≥1 concrete proof); it reproduces the authored
+4. **Publish:** read `vigil assess contract export submission`, then re-run `export submission
+   <slug> --platform <same platform> --overwrite` (non-draft) once its executable final gate is
+   satisfiable; it reproduces the authored
    content from the finding, registers `submission.md` as a finding-linked artifact
    (`kind="submission"`), and never sets `submission_status` — set that explicitly, per "Submission
    Status Lifecycle" in `agent/skills/report-generation/SKILL.md`, only once the finding is actually

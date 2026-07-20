@@ -87,7 +87,7 @@ class FakeClient:
 def _cfg(tmp_path: Path) -> SimpleNamespace:
     return SimpleNamespace(
         base_url="http://127.0.0.1:18000",
-        engagement_key="eng",
+        engagement_key=tmp_path.name,
         engagement_dir=str(tmp_path),
     )
 
@@ -158,7 +158,7 @@ def test_start_job_wrapper_and_started_at(monkeypatch, tmp_path):
     assert "__rc=$?" in wrapped_shell
     assert ".exit.tmp" in wrapped_shell
     assert "mv -f" in wrapped_shell
-    assert "/engagements/eng/scans/kali/jobs/" in wrapped_shell
+    assert f"/engagements/{tmp_path.name}/scans/kali/jobs/" in wrapped_shell
     # The tool is exec'd inside the backgrounded inner sh so $! IS the tool PID
     # (B1): the recorded PID must be the tool, not an idle supervisor sh.
     assert "exec echo hi" in wrapped_shell

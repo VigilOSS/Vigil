@@ -111,11 +111,8 @@ You receive from the operator:
 - Code coverage: `vigil assess code-coverage` — confirms Phase 3 gate passed.
 
 **Filesystem artifacts (under `tools/analysis-state/`):**
-- Structural index aggregate: `tools/analysis-state/structural-index-manifest.json` —
-  schema `structural-index-aggregate/v1`. Top-level `repos.<repo_key>` lists each repo's
-  `manifest_path` (per-repo manifest) and `index_dir`. To resolve a file's index: open the
-  aggregate, pick your repo, read its per-repo manifest, look up the rel_path in
-  `path_to_index`. Index files live under `tools/analysis-state/structural-index/<repo_key>/<fid>.json`.
+- Structural indexes for candidate targets — resolve each file through the canonical
+  manifest lookup in `agent/shared-constraints-code.md` ("Structural-index resolution").
 - Threat model: `tools/analysis-state/threat-model.json` — trust boundaries, entry points,
   attacker goals. Use to validate that fuzz targets are reachable from attacker-controlled input.
 - Call graph: `tools/analysis-state/call-graph.json` — entry-point chains with untrusted data

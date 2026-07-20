@@ -372,6 +372,47 @@ def test_direct_bulk_out_of_scope_skip(client, isolate_settings):
     assert rows[0]["host"] == "evil.example"
 
 
+def test_in_scope_observation_supersedes_stale_out_of_scope_skip(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    url = "https://app.example/api/reconsidered?q=1"
+    skipped = client.post(
+        f"{BASE}/work-items/bulk",
+        json={"items": [{
+            "queue_key": f"skipped:out-of-scope:app.example:{url}",
+            "url": url,
+            "url_path": "/api/reconsidered",
+            "method": "GET",
+            "type": "api",
+            "source": "ingest-endpoints",
+            "status": "skipped",
+            "cluster_key": "skipped:out-of-scope",
+            "terminal_reason": "skipped:out-of-scope | app.example",
+        }]},
+    )
+    assert skipped.status_code == 201, skipped.text
+
+    admitted = _observe(
+        client,
+        url=url,
+        case_type="api",
+        priority_score=42,
+        cluster_key="gf:trust_surface",
+    )
+
+    assert admitted.status_code == 201, admitted.text
+    work_item = admitted.json()["work_item"]
+    assert work_item["status"] == "pending"
+    assert work_item["queue_key"].startswith("variant:")
+    stats = client.get(f"{BASE}/work-items/stats?by=status").json()
+    counts = {row["status"]: row["count"] for row in stats["status"]}
+    assert counts == {"pending": 1}
+    assert stats["total"] == 1
+    reasons = client.get(f"{BASE}/work-items/stats?by=reason").json()
+    assert reasons["rows"] == []
+
+
 def test_apply_updates_force_writes_status_and_type(client, isolate_settings):
     """The classify-work update path force-writes status/type/queue_key by id,
     bypassing the ingest UPSERT's manual-protection and lifecycle preservation."""

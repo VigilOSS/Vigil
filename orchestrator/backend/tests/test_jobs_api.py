@@ -1,6 +1,6 @@
 """Tests for the assessment_jobs lifecycle API.
 
-Backed by the new `assessment_jobs` table introduced in the Wave-1 cutover.
+Backed by the `assessment_jobs` table introduced with audited async execution.
 The endpoints under test live in `app/api/assessment.py` and the service
 helpers in `app/services/state_manager.py`.
 """

@@ -14,7 +14,7 @@ origin: Vigil
 
 ## Tools
 
-`ffuf` (primary), `curl` (verification), `arjun` (dedicated param discovery), `ParamSpider` (mine params from web archives)
+`ffuf` (primary), `curl` (verification), `arjun` (dedicated param discovery), `vigil assess gau endpoints` (historical parameter mining)
 
 ## Methodology
 
@@ -125,17 +125,21 @@ vigil assess ingest arjun "$DB" /engagements/$ENGAGEMENT_KEY/scans/arjun/<target
 
 Use raw `arjun -u …` only for a one-off manual check; the verb path is what feeds Phase 4. Full reference: `agent/references/tools/recon/arjun.md`.
 
-### 9. ParamSpider (Historical Parameter Mining)
+### 9. Historical Parameter Mining
 ```bash
-# Mine parameters from web archives for the target domain
-paramspider -d TARGET_DOMAIN -o /engagements/$ENGAGEMENT_KEY/scans/paramspider_output.txt
+# Mine parameterized URLs from the supported historical corpus and ingest them.
+vigil assess gau endpoints TARGET_DOMAIN
 
-# Feed discovered parameterized URLs into ffuf or manual testing
-cat /engagements/$ENGAGEMENT_KEY/scans/paramspider_output.txt | \
-  grep "?" | sort -u > /engagements/$ENGAGEMENT_KEY/scans/params_to_test.txt
+# Review the resulting classified clusters for this host.
+vigil assess work-buffer clusters --host TARGET_DOMAIN
 ```
-ParamSpider pulls historically-known parameters from Wayback Machine and other archives.
-Use it to discover parameters that active fuzzing would miss.
+The gau corpus includes archive sources that expose historically known parameters
+active fuzzing can miss; keeping them in the work buffer preserves classification,
+deduplication, and downstream coverage accounting. The host-filtered view is
+read-only: claim only the application unit assigned by the operator with
+`work-buffer fetch-by-unit --unit-id <id> --agent vulnerability-analyst`. The global
+`fetch-by-priority` claim can select another host and does not belong in this
+target-specific recipe.
 
 ### 10. Triage and Verification
 

@@ -1,7 +1,6 @@
 """vigil assess check-phase-readiness — ONE phase-aware readiness command.
 
-Wave 6d (command consolidation, depth-gate §6 / master plan Wave 6) folds the
-following five standalone commands into this one phase-keyed command (no
+This command folds five former standalone commands into one phase-keyed surface (no
 aliases, no back-compat shims):
 
   * ``check-coverage``         → the surface-resolution gate, relayed every phase
@@ -23,7 +22,7 @@ Per-phase composition (depth-gate §6):
     the EXPLOIT PROJECTION (``{exploit_policy, approved_targets}``)
   * ``report``  → report-readiness blockers + intel advisory
 
-Flag semantics (master plan §6 "Consolidated-command flag semantics"):
+Flag semantics:
   * ``--depth``           — show the depth ledger detail (consume/verify).
   * ``--by-app-unit``     — render the depth ledger broken out per app unit.
   * ``--by-host``         — C40 per-host outcome table (recon/collect/consume).

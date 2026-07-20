@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vigil.local/schemas/intel-cve.schema.json",
-  "$comment": "Mirrors app.api.intel_schemas.CveRecordRequest. CVE intel is not a confirmed finding — record-finding stays gated on exploit-developer validation.",
-  "title": "Intel CVE Record — version-matched or disclosed vulnerability on a target component. NOT a finding; use record-finding only after exploit-developer confirms exploitability.",
+  "$comment": "Mirrors app.api.intel_schemas.CveRecordRequest. CVE intel is not a confirmed finding — finding record stays gated on exploit-developer validation.",
+  "title": "Intel CVE Record — version-matched or disclosed vulnerability on a target component. NOT a finding; use finding record only after exploit-developer confirms exploitability.",
   "type": "object",
   "additionalProperties": false,
   "required": [

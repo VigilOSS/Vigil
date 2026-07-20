@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .config import ENGAGEMENT_BINDING_CONTRACT
 from .intel_types import INTEL_TYPES
 from .kali_audit import ALLOWED_PHASES, _enum_reject_message
 from .schema_validation import load_schema
@@ -544,7 +545,7 @@ _KALI_COMMON_MISTAKES: tuple[tuple[str, str], ...] = (
     ("missing --phase", "always pass --phase explicitly; no env-var fallback exists"),
     ("technique=recon", "uppercase the audit technique tag (RECON, SSRF, SQLI, ...)"),
     ("intent>200 chars", "intent is trimmed to 200 chars; keep it as a one-line purpose"),
-    ("--via-mcp", "MCP path is removed in Wave 1 — `vigil assess kali` is the only path"),
+    ("--via-mcp", "the MCP path was removed — `vigil assess kali` is the only path"),
 )
 
 
@@ -661,7 +662,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Do not put `link_kind=root_cause` in the `links` array. Record the finding first, then `vigil assess finding link` after verification — root/sibling grouping is an explicit lifecycle action.",
             "evidence_ref must point at an existing engagement file (auto-registered and linked on record). URL refs, prose refs, and path-shaped refs with no file are REJECTED — they cannot satisfy report-readiness artifact indexing. Put external URLs in details.references; pass --allow-unindexed-evidence only for a theoretical/code-inferred finding with no file.",
             "Dedup keys on (defect_family + root_cause_key + auth_context + canonical_location). A net-new record whose tuple collides with an EXISTING reported/active finding under a different slug is REFUSED, not silently merged. For a genuinely-distinct sibling on the same root cause, give it its OWN root_cause_key/defect_family and attach it with finding link; pass --update <slug> ONLY to intentionally modify that exact existing finding.",
-            "Kill re-mint guard (D4): a net-new record that shares the same defect_family (technique) AND a normalized endpoint/canonical-location signal with a finding previously KILLED as false_positive is REFUSED — this catches a source-line vs runtime rediscovery that would otherwise resurrect a disproven finding at a different canonical_location. If the earlier kill was wrong, reopen it with `reset-finding <slug>`; if this is a genuinely NEW finding that only coincides on endpoint + technique, re-record with --allow-remint (a.k.a. --force).",
+            "Kill re-mint guard (D4): a net-new record that shares the same defect_family (technique) AND a normalized endpoint/canonical-location signal with a finding previously KILLED as false_positive is REFUSED — this catches a source-line vs runtime rediscovery that would otherwise resurrect a disproven finding at a different canonical_location. If the earlier kill was wrong, reopen it with `finding update <slug> --status draft --reason \"...\"`; if this is a genuinely NEW finding that only coincides on endpoint + technique, re-record with --allow-remint (a.k.a. --force).",
         ),
         common_mistakes=(
             ("status", "use workflow_status for lifecycle overrides, or omit it and keep the helper default"),
@@ -885,17 +886,25 @@ _CONTRACTS: dict[str, CommandContract] = {
             "policy set: --enabled/--no-enabled, --capture-request-bodies, --capture-response-bodies, --max-body-bytes, --content-type-allow, --content-type-deny, --redaction-profile",
         ),
         helper_defaults=(
-            ("capture policy", "raw-body capture is OFF by default; `policy set` is a partial update (unset fields retain their stored value)"),
+            (
+                "capture policy",
+                "full-flow recording is OFF by default; `policy set` is a partial update "
+                "(unset fields retain their stored value)",
+            ),
             ("query filters", "only non-empty filters are sent; the backend caps list/search at 5000 rows"),
         ),
         notes=(
             "Capture is a per-engagement POLICY (backend state + a `capture-policy.json` filesystem mirror the addon reads offline), NOT a proxy start selector — the shared selector-less proxy routes by hostname and honours this policy per host.",
+            "The policy has three useful states: disabled records only the always-on compact request observation; enabled with both body flags false records full-flow metadata/index rows without bodies; enabled with either body flag records that selected body side as an engagement-local sidecar.",
             "`show` and `export-har` expose only engagement-local metadata + body sidecars; raw bodies stay engagement-local by default.",
             "`export-har` writes HAR 1.2 with Vigil routing/auth/truncation metadata on each entry's `_vigil` field; `import-har` reads `_vigil` for a lossless round-trip.",
             "Prefer these verbs over raw `vigil assess fetch \"http-flows?...\"` — they keep query-string details out of operator instructions.",
         ),
         common_mistakes=(
-            ("--enabled to disable capture", "use --no-enabled; --enabled turns raw-body capture ON"),
+            (
+                "assuming --enabled stores bodies",
+                "--enabled turns full-flow metadata recording on; select request and/or response body sidecars explicitly with the body flags",
+            ),
             ("policy set with no fields", "pass at least one field — an empty update is rejected"),
         ),
     ),
@@ -1035,7 +1044,6 @@ _CONTRACTS: dict[str, CommandContract] = {
             'vigil assess finding verify <slug> --disposition confirmed --reason "..."',
             'vigil assess finding verify <slug> --disposition downgraded --reason "..." --new-severity low',
             'vigil assess finding verify <slug> --disposition false_positive --reason "..." --kill-reason "..." --kill-check 2',
-            "vigil assess finding verify <slug> --inline '{\"disposition\":\"confirmed\",\"reason_text\":\"...\"}'",
             "vigil assess finding verify <slug> --payload-file verify.json",
             'vigil assess finding verify VA-001 VA-002 VA-003 --disposition confirmed --reason "batch: all reproduced"',
         ),
@@ -1045,9 +1053,10 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         notes=(
             "Use for confirmed, downgraded, and disputed verification outcomes.",
-            "For false_positive, pass --disposition false_positive with details.kill_reason/details.kill_check (via --kill-reason/--kill-check). This is the fold-in of the retired kill-finding verb.",
-            "The JSON payload is passed via --inline '<json>' or --payload-file <path>; the trailing positional payload arg was REMOVED, so a JSON blob passed positionally is rejected with a pointer to the flags.",
-            "Batch: list several slugs positionally to apply the SAME disposition/payload/flags to each (resilient loop with a per-slug failure tally).",
+            "For false_positive, pass --disposition false_positive with details.kill_reason/details.kill_check (via --kill-reason/--kill-check).",
+            "Use explicit flags for ordinary transitions. --payload-file is for a final, complete verification-transition document; it is mutually exclusive with request-content flags, while --narrative may accompany it.",
+            "The generic --inline and trailing positional JSON forms were REMOVED. Use explicit flags or --payload-file <path>.",
+            "Batch: list several slugs positionally to apply the SAME disposition or payload file to each (resilient loop with a per-slug failure tally).",
         ),
         common_mistakes=(
             ("rationale", "use reason_text"),
@@ -1073,29 +1082,33 @@ _CONTRACTS: dict[str, CommandContract] = {
         preferred_invocations=(
             "vigil assess finding update <slug> --payload-file patch.json",
             'vigil assess finding update <slug> --status reported --reason "Published in report"',
-            'vigil assess finding update <slug> --inline \'{"workflow_status":"draft","reason_text":"Needs more evidence"}\'',
+            'vigil assess finding update <slug> --status draft --reason "Needs more evidence"',
             'vigil assess finding update <slug> --expected-row-version <version> --summary "..."',
             'vigil assess finding update <slug> --details-inline \'{"chain_required":true,"chain_rationale":"...","required_followup":["..."]}\'',
-            'vigil assess finding update <slug> --details-inline \'{"cvss_score":9.1}\' --details-replace',
+            'vigil assess finding update <slug> --expected-row-version <version> --details-inline \'{"cvss_score":9.1}\' --details-replace',
             'vigil assess finding update VA-006 VA-007 --status reported --reason "batch: published"',
         ),
         author_supplied_fields=(
             "at least one patch field",
         ),
         notes=(
-            "The patch payload goes via --inline '<json>' or --payload-file <path>; the trailing positional payload arg was REMOVED (a JSON blob passed positionally is rejected).",
-            "Batch: list several slugs positionally to apply the SAME patch payload/flags to each (resilient loop with a per-slug failure tally).",
+            "Use explicit flags for small patches. --payload-file accepts a partial writable patch for exactly one slug, is mutually exclusive with request-content flags, and must contain expected_row_version.",
+            "A successful update returns the next row_version. Refresh the staging file yourself before reusing it; Vigil reads but never rewrites that file.",
+            "When a payload file contains notes, it must set notes_mode to replace for a cumulative working document or append for a deliberate checkpoint.",
+            "details and provenance merge by default. Set details_mode='replace' in a versioned payload file, or pair --details-inline with --details-replace plus --expected-row-version, only when stale detail keys must be removed. --notes-replace has the same compare-and-swap requirement.",
+            "The generic --inline and trailing positional JSON forms were REMOVED. Use explicit flags or --payload-file <path>.",
+            "Batch: list several slugs positionally only with explicit flags (resilient loop with a per-slug failure tally).",
             "Use for workflow and metadata updates that are NOT verification lifecycle transitions.",
-            "Reopening a verified or false-positive finding for re-triage: finding update --status draft (this is the folded-in reset-finding flow).",
-            "Verification disposition changes, disputed reviews, and false_positive kills belong in finding verify (--disposition false_positive is the folded-in kill-finding flow).",
+            "Reopening a verified or false-positive finding for re-triage: finding update --status draft.",
+            "Verification disposition changes, disputed reviews, and false_positive kills belong in finding verify --disposition false_positive.",
             "--submission-status tracks EXTERNAL bug-bounty/program submission state and is ORTHOGONAL to "
             "--workflow-status (which is report-inclusion). Setting one never changes the other. Allowed values: "
             + ", ".join(SUBMISSION_STATUSES)
             + " (default 'none' = not submitted).",
             "--details-inline '<json object>' merges the given object into the finding's stored details "
-            "(the patch payload field is `details`, plain flags or --inline JSON both accept it). Pair with "
+            "(the patch payload field is `details`). Pair with "
             "--details-replace to overwrite the whole details object instead of merging — --details-replace "
-            "requires a details payload (via --details-inline or a `details` key in a file/--inline payload) "
+            "requires a details payload via --details-inline; payload files instead set details_mode='replace' "
             "because running it without one would wipe existing details.",
             "The patch payload field is `details` on write; the API returns it back as `details_json` on read "
             "(GET/list responses). They are the same data under two names — do not conclude a `details` write "
@@ -1113,14 +1126,23 @@ _CONTRACTS: dict[str, CommandContract] = {
             {
                 "workflow_status": "reported",
                 "reason_text": "Published in report.",
+                "expected_row_version": 17,
             },
             {
                 "severity": "low",
                 "summary": "Retest reduced the confirmed impact.",
+                "expected_row_version": 17,
             },
             {
                 "submission_status": "accepted",
                 "reason_text": "Program triaged the report as accepted.",
+                "expected_row_version": 17,
+            },
+            {
+                "notes": "Current cumulative verification notes.",
+                "notes_mode": "replace",
+                "details": {"cvss_score": 7.5},
+                "expected_row_version": 17,
             },
             {
                 "details": {
@@ -1132,6 +1154,7 @@ _CONTRACTS: dict[str, CommandContract] = {
                     ],
                 },
                 "reason_text": "Tagged chain-required after Phase 4 review.",
+                "expected_row_version": 17,
             },
         ),
     ),
@@ -1373,7 +1396,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         notes=(
             "The aggregate manifest is keyed by repo_key, so multiple source repos share one engagement analysis-state tree without relative-path collisions.",
             "The default output directory is the one code-index sync consumes, so indexing and sync stay in one engagement-owned tree.",
-            "Pass --engagement-dir or set ENGAGEMENT_DIR when running outside an engagement directory; the helper fails closed rather than write an unsynced .code-index tree into the source repo.",
+            "Run inside the launched engagement session or pass --engagement-dir when outside its tree; the helper fails closed rather than write an unsynced .code-index tree into the source repo.",
         ),
         common_mistakes=(
             ("running outside engagement context", "pass --engagement-dir or --output-dir explicitly"),
@@ -1706,8 +1729,8 @@ _CONTRACTS: dict[str, CommandContract] = {
         name="export submission",
         goals=("submission",),
         phase=("report",),
-        summary="Render one finding into a platform-shaped, submission-ready submission.md (+ context JSON); --draft always writes, final mode gates on proof completeness.",
-        schema_name="backend GET /findings/{slug} + finding_render.py (details_json poc_* / evidence_ref)",
+        summary="Render one finding into a platform-shaped submission.md (+ context JSON); --draft diagnoses gaps, final mode fails closed on durable proof, lifecycle, readiness, and hygiene.",
+        schema_name="backend finding + report-readiness + artifact-index projections, rendered by finding_render.py",
         preferred_invocations=(
             "vigil assess export submission <slug> --platform direct --draft",
             "vigil assess export submission <slug> --platform bugcrowd --vrt-category <c>",
@@ -1718,16 +1741,16 @@ _CONTRACTS: dict[str, CommandContract] = {
             "slug (finding slug to render, e.g. VA-047)",
             "--platform bugcrowd|hackerone|direct (required)",
             "--vrt-category <c> (Bugcrowd; else read from details.vrt_category)",
-            "--weakness <w> (HackerOne; else read from details.weakness)",
+            "--weakness <w> (HackerOne; else details.weakness, then details.cwe_id)",
         ),
         helper_defaults=(
-            ("--draft", "unset (final mode: strict proof gate; --draft always writes with [NEEDS: ...] markers)"),
+            ("--draft", "unset (strict final mode; --draft always writes with diagnostics and [NEEDS: ...] markers)"),
             ("--output", "$ENGAGEMENT_DIR/submissions/<slug>/"),
         ),
         notes=(
-            "The submission-first replacement for the retired red/code report.md path. --draft is the normal report-writer entrypoint; final (default) exits non-zero unless title, severity + CVSS vector, platform taxonomy, an attacker-impact statement, and >=1 concrete proof are all present.",
+            "The submission-first replacement for the retired red/code report.md path. Final requires a verified confirmed/downgraded report candidate; authored Summary, Steps to Reproduce, Evidence, Impact, and Remediation; complete platform fields; a contained evidence_ref artifact linked to that finding, indexed, and present on disk now; and no target-specific report-readiness blocker or hygiene warning. Inline PoC remains supporting content, not durable proof.",
             "Command evidence comes ONLY from explicit finding-links (target_kind=command_run) plus evidence_ref/poc_* — no fuzzy command search. Run a targeted `command-run list --q <url/param>` to find and link the reproducing command first.",
-            "Registers submission.md as a finding-linked artifact kind=submission; never sets submission_status. FAITHFUL render — it does not rewrite content; it FLAGS internal UUIDs / absolute engagement paths / cases.db references as hygiene_warnings (context JSON + stderr) for the report-writer to strip before external submission.",
+            "Final output must stay inside the engagement and artifact registration must succeed. The export never sets submission_status. Draft mode surfaces internal UUID / absolute-path / cases.db hygiene diagnostics; final mode blocks until clean.",
         ),
     ),
     "scope explain": CommandContract(
@@ -1891,7 +1914,7 @@ _RAW_ENDPOINT_RULES = (
         "finding verify",
         (
             "Raw POST to findings/{slug}/verify is disabled because finding verify owns the verification lifecycle.",
-            "For a false_positive, use finding verify --disposition false_positive --kill-reason ... --kill-check N (the folded-in kill-finding flow).",
+            "For a false_positive, use finding verify --disposition false_positive --kill-reason ... --kill-check N.",
         ),
     ),
     (
@@ -1923,7 +1946,7 @@ _RAW_ENDPOINT_RULES = (
 )
 
 
-# Tier-3 cosmetic namespacing: verbs re-shelved under a subcommand parent so the
+# Grouped namespacing: verbs re-shelved under a subcommand parent so the
 # top-level count drops without changing behavior. Each parent renders as ONE
 # catalog row (mirroring `kali`); the per-action contracts live in `_CONTRACTS`
 # under their two-token keys (`finding record`, `intel supersede`, …) and stay
@@ -1983,7 +2006,7 @@ _NAMESPACE_ROOT_META: dict[str, dict[str, Any]] = {
 
 
 def _namespace_child_contracts(parent: str) -> list[CommandContract]:
-    """The per-action contracts registered under a Tier-3 subcommand parent."""
+    """The per-action contracts registered under a grouped subcommand parent."""
     prefix = parent + " "
     return [c for key, c in _CONTRACTS.items() if key.startswith(prefix)]
 
@@ -2014,7 +2037,7 @@ def _namespace_root_goals(parent: str) -> tuple[str, ...]:
 
 
 def _namespace_root_contract(parent: str) -> CommandContract:
-    """Build the single collapsed catalog/contract row for a Tier-3 parent."""
+    """Build the single collapsed catalog/contract row for a grouped parent."""
     meta = _NAMESPACE_ROOT_META[parent]
     return CommandContract(
         name=parent,
@@ -2050,7 +2073,7 @@ def contract_names() -> list[str]:
     names.extend(f"agent {verb}" for verb in AGENT_VERBS)
     names.append("work-buffer")
     names.extend(f"work-buffer {verb}" for verb in _WORK_BUFFER_VERBS)
-    # Tier-3 subcommand groups render as ONE top-level row each (like `kali`);
+    # Grouped subcommands render as ONE top-level row each (like `kali`);
     # the per-action `finding <action>` / `intel <action>` / `export <kind>` /
     # `command-run <action>` contracts live in `_CONTRACTS` under their two-token
     # keys (already enumerated by `list(_CONTRACTS)` above), and the bare parent
@@ -2239,6 +2262,8 @@ def render_contract(name: str) -> str:
         for example in contract.examples:
             lines.append(json.dumps(example, indent=2, ensure_ascii=False))
 
+    lines.extend(["", "Assessment binding:", f"  {ENGAGEMENT_BINDING_CONTRACT}"])
+
     return "\n".join(lines)
 
 
@@ -2333,6 +2358,9 @@ def render_contract_epilog(name: str) -> str:
             "",
             "See also:",
             f"  vigil assess contract {contract.name}",
+            "",
+            "Assessment binding:",
+            f"  {ENGAGEMENT_BINDING_CONTRACT}",
         ]
     )
     return "\n".join(lines)
@@ -3188,7 +3216,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             helper_defaults=(
                 ("--max-lines", "40 (hard cap; findings list collapses with '... and N more')"),
                 ("--include-evidence", "off (one short evidence excerpt per finding when set)"),
-                ("--engagement-dir", "resolved from --engagement-dir / $ENGAGEMENT_DIR / cwd"),
+                ("--engagement-dir", "explicit flag, then engagement CWD, then launcher session"),
                 ("scope", "handoff payload's summary / coverage_gaps / next_steps / "
                           "runtime_issues / working_artifacts / open_questions / "
                           "recommended_next_agent / extras"),

@@ -92,7 +92,10 @@ reasoning in Phase 2 by showing how untrusted data flows across file and module 
 
 ### Structural Index Consumption
 
-If a structural index exists at `tools/analysis-state/structural-index/`, use it as the foundation for call graph construction. The structural index provides pre-computed function definitions, call sites, entry points, and imports via tree-sitter parsing. Use this data to construct the call graph more accurately — focus on security interpretation (trust boundaries, data flow direction, untrusted-data annotations) rather than manually extracting function signatures from source headers. When the structural index is available, cross-reference it with grep/ctags results to resolve ambiguities. The structural index provides the mechanical extraction; the architect provides the security semantics that tree-sitter cannot infer.
+Resolve per-file indexes with `agent/shared-constraints-code.md` ("Structural-index
+resolution"), then follow `code-architecture-mapping`'s call-graph procedure. The
+index supplies mechanical extraction; this role adds the trust-boundary and data-flow
+semantics.
 
 ### Methodology
 1. For each entry point identified during classification:

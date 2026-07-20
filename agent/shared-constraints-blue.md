@@ -43,8 +43,9 @@ cross-tenant log rows into `ir/reports/` or `ir/evidence/`.
 ## 1a. CLI path convention
 
 All assessment operations use `vigil assess <subcommand>` from any directory. Blue-specific verbs
-live under `vigil blue <subcommand>`. Use `ENGAGEMENT_DIR` or `--engagement-dir` for path
-resolution — hardcoded absolute paths break across environments.
+live under `vigil blue <subcommand>`. `vigil assess` binds state using the rule printed by
+`vigil assess contract <command>`; use `ENGAGEMENT_DIR` only for engagement-local artifact paths,
+or pass `--engagement-dir` explicitly. Hardcoded absolute paths break across environments.
 
 ---
 

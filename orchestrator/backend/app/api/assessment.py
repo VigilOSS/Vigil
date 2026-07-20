@@ -377,7 +377,7 @@ class ProbeRunRecordRequest(BaseModel):
 
 
 class CoverageItemRecordRequest(BaseModel):
-    """Create/upsert a class-typed coverage item (Wave 5 / 2b).
+    """Create or update a class-typed coverage item.
 
     Wires the previously-dead ``record_coverage_item``. The gf-bucket bridge
     (``ingest_endpoints``) POSTs one of these per matched gf bucket with the
@@ -410,7 +410,7 @@ class CommandRunRecordRequest(BaseModel):
     tool_name: str = Field(min_length=1, max_length=128)
     route: str = Field(default="", max_length=256)
     agent_name: str = Field(min_length=1, max_length=128)
-    # phase is required-from-input. Wave-1 cutover removes the env-var
+    # phase is required from input; the command-run contract has no env-var
     # fallback that the patched MCP server used; the dispatching agent must
     # pass --phase explicitly because scope.json.current_phase is operator
     # state that does not reflect what the dispatch was authorized for.
@@ -446,7 +446,7 @@ class CommandRunRecordRequest(BaseModel):
     intent: str | None = Field(default=None, max_length=4096)
     probe_kind: str | None = Field(default=None, max_length=64)
     destructive: bool | None = None
-    # Wave-1 cutover fields. New CLI pre-exec writes pass status=running
+    # Command-run lifecycle fields. CLI pre-exec writes pass status=running
     # explicitly. Legacy one-shot posts may omit status while carrying terminal
     # fields; the service layer infers the terminal status in that case.
     status: Literal["queued", "running", "completed", "failed", "timed_out", "killed", "lost"] | None = None
@@ -835,7 +835,7 @@ class FindingRecordRequest(BaseModel):
 
     slug: str | None = Field(default=None, max_length=256)
     title: str = Field(min_length=1, max_length=512)
-    # Default aligned to the CLI + record-finding contract (both `medium`): a
+    # Default aligned to the CLI + finding-record contract (both `medium`): a
     # not-yet-triaged finding is presumed real, not informational. `info` was the
     # lone outlier here and produced a schema default that contradicted the CLI;
     # since severity feeds report-inclusion, defaulting low risked silently
@@ -874,7 +874,7 @@ class FindingRecordRequest(BaseModel):
     # D4 (kill re-mint override): control flag, NOT a stored column. When true it
     # skips the killed-finding re-mint guard so an intentional distinct re-mint of
     # a finding that only coincidentally shares an endpoint + technique with a prior
-    # false_positive still lands. Plumbed from `record-finding --allow-remint/--force`.
+    # false_positive still lands. Plumbed from `finding record --allow-remint/--force`.
     allow_remint: bool = Field(default=False)
 
     @model_validator(mode="after")
@@ -912,7 +912,7 @@ class FindingPatchRequest(BaseModel):
     # fully removed (merge cannot delete keys). Requires details to be present.
     details_mode: Literal["merge", "replace"] = "merge"
     provenance: dict[str, Any] | None = None
-    # C44: allow retroactive labeling via vigil assess update-finding.
+    # Allow retroactive labeling via vigil assess finding update.
     evidence_type: Literal[
         "network-confirmed", "code-inferred", "theoretical", "informational"
     ] | None = None
@@ -942,6 +942,55 @@ class FindingPatchRequest(BaseModel):
         # it would silently null it. Reject (mirrors the notes_mode guard).
         if self.details_mode == "replace" and self.details is None:
             raise ValueError("details_mode='replace' requires details")
+        return self
+
+    @model_validator(mode="after")
+    def _require_cas_when_replacing(self) -> "FindingPatchRequest":
+        if (
+            self.notes_mode == "replace" or self.details_mode == "replace"
+        ) and self.expected_row_version is None:
+            raise ValueError(
+                "replacement modes require expected_row_version"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_mutation(self) -> "FindingPatchRequest":
+        scalar_values = (
+            self.title,
+            self.severity,
+            self.workflow_status,
+            self.defect_family,
+            self.root_cause_key,
+            self.auth_context,
+            self.canonical_location,
+            self.summary,
+            self.evidence_ref,
+            self.source_name,
+            self.evidence_type,
+            self.submission_status,
+        )
+        has_scalar_mutation = any(value not in (None, "") for value in scalar_values)
+        has_notes_mutation = self.notes is not None and (
+            self.notes != "" or self.notes_mode == "replace"
+        )
+        has_details_mutation = self.details is not None and (
+            self.details != {} or self.details_mode == "replace"
+        )
+        has_provenance_mutation = self.provenance not in (None, {})
+        if not any(
+            (
+                has_scalar_mutation,
+                has_notes_mutation,
+                has_details_mutation,
+                has_provenance_mutation,
+            )
+        ):
+            raise ValueError(
+                "finding patch requires at least one field that updates the finding; "
+                "concurrency, mode, and transition-metadata controls do not update a "
+                "finding by themselves, and empty merge values are no-ops"
+            )
         return self
 
 
@@ -1136,7 +1185,7 @@ def get_report_readiness(engagement_key: str) -> dict[str, Any]:
 
 @router.get("/phase-readiness")
 def get_phase_readiness(engagement_key: str, phase: str) -> dict[str, Any]:
-    """Wave 6d — consolidated phase-keyed readiness (depth-gate §6).
+    """Consolidated phase-keyed readiness.
 
     The backend half of ``vigil assess check-phase-readiness --phase <phase>``.
     ASSEMBLES the per-phase result by CALLING the existing, unchanged gates
@@ -2514,7 +2563,7 @@ def get_application_units(engagement_key: str) -> list[dict[str, Any]]:
 
 @router.get("/application-units/depth-ledger")
 def get_depth_ledger(engagement_key: str) -> dict[str, Any]:
-    """Read-only, ADVISORY depth ledger (depth-gate §5.3, Wave 6c).
+    """Read-only, advisory depth ledger.
 
     Per ``deep_required`` app unit: Expected vuln classes (each gated by an
     executable §5.3 predicate), Covered, missing block/warn classes, active
@@ -2522,8 +2571,8 @@ def get_depth_ledger(engagement_key: str) -> dict[str, Any]:
     ``depth_satisfied`` verdict, and an EV rank. EV-ranked, highest first.
 
     Mid-engagement this is ADVISORY ONLY — it never blocks a transition and the
-    endpoint never returns non-2xx for missing depth (the terminal block is a
-    later wave). WEB-ONLY: code/blue engagements get a skipped result.
+    endpoint never returns non-2xx for missing depth. The terminal backstop is a
+    separate projection. WEB-ONLY: code/blue engagements get a skipped result.
     """
     engagement = get_engagement_or_404(engagement_key)
     return state_manager.depth_ledger(engagement.id)
@@ -2531,7 +2580,7 @@ def get_depth_ledger(engagement_key: str) -> dict[str, Any]:
 
 @router.get("/application-units/terminal-block")
 def get_terminal_depth_block(engagement_key: str) -> dict[str, Any]:
-    """The ONE hard block (Wave 7, S17 resolution; master plan §1A).
+    """The one terminal depth blocker.
 
     Read-only. Returns the units that BLOCK the terminal ``report``/``complete``
     edge on the WEB track: the union of high-confidence ``deep_required`` units
@@ -2656,7 +2705,7 @@ async def create_finding(engagement_key: str, request: FindingRecordRequest) -> 
         functools.partial(
             _audit_assessment_mutation,
             engagement.id,
-            title="record-finding",
+            title="finding-record",
             action=f"finding={record.get('slug', request.slug)} severity={record.get('severity', request.severity)}",
             actor_name=request.source_name,
             result=record.get("workflow_status", request.workflow_status) or "",
@@ -2706,7 +2755,7 @@ async def patch_finding(
         functools.partial(
             _audit_assessment_mutation,
             engagement.id,
-            title="update-finding",
+            title="finding-update",
             action=f"finding={finding_slug}",
             actor_name=request.source_name,
             result=request.reason_code or request.reason_text or "",
@@ -2741,7 +2790,7 @@ async def set_finding_root_cause(
         functools.partial(
             _audit_assessment_mutation,
             engagement.id,
-            title="link-finding",
+            title="finding-link",
             action=f"finding={finding_slug} root_cause={request.root_cause_slug}",
             actor_name=request.source_name,
             result=request.root_cause_effect,
@@ -2841,7 +2890,7 @@ async def verify_finding(
         functools.partial(
             _audit_assessment_mutation,
             engagement.id,
-            title="verify-finding",
+            title="finding-verify",
             action=f"finding={finding_slug} disposition={request.disposition}",
             actor_name=request.source_name,
             result=request.reason_code or request.reason_text or request.disposition,

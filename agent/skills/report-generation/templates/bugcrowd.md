@@ -24,8 +24,8 @@ that's the normal report-writer entrypoint.
 | Title | finding `title` |
 | Severity + CVSS vector | finding `severity`, `details.cvss_vector` |
 | VRT category | `--vrt-category` flag, else `details.vrt_category` |
-| Attacker-impact statement | finding `impact` / `summary` |
-| Proof (≥1 of) | `poc_request` **and** `poc_response`, OR `poc_code`, OR non-empty `evidence_ref` |
+| Attacker-impact statement | finding `impact` or `details.impact` |
+| Durable proof | Per `vigil assess contract export submission`; inline PoC is supporting content |
 | Remediation | finding `remediation` |
 
 ## Scaffold

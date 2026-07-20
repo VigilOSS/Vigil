@@ -476,8 +476,8 @@ def main(argv: list[str] | None = None) -> None:
         python agent/scripts/assess/commands/eval_capture.py \\
           --engagement-dir <dir> --out tests/eval/fixtures/golden_<name>.json
 
-    ``--engagement-dir`` mirrors the root ``vigil assess`` flag (default:
-    ``$ENGAGEMENT_DIR`` or cwd if it contains ``scope.json``).
+    ``--engagement-dir`` mirrors the root ``vigil assess`` flag (default: the
+    engagement tree containing CWD or the Vigil launcher session binding).
     """
     parser = argparse.ArgumentParser(
         prog="eval_capture.py",
@@ -489,7 +489,7 @@ def main(argv: list[str] | None = None) -> None:
         "--engagement-dir",
         dest="engagement_dir",
         default=None,
-        help="Engagement directory (default: $ENGAGEMENT_DIR or cwd if it contains scope.json).",
+        help="Engagement directory (default: engagement CWD or launcher session binding).",
     )
     _add_capture_arguments(parser)
     run(parser.parse_args(argv))

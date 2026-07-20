@@ -35,9 +35,8 @@ def _isolate_vigil_config(tmp_path, monkeypatch):
     engagement resolver never reads the developer's real
     ~/.config/vigil/config.json.
 
-    The active-engagement pointer (resolver tier 3) lives in that file and now
-    out-ranks $ENGAGEMENT_DIR (tier 4); without this isolation a real pointer on
-    the developer's machine would silently win over an $ENGAGEMENT_DIR-based test
-    and flip its result. A test that needs a pointer writes to this same path.
+    Assessment state no longer resolves through the active pointer, but other
+    helpers still read this config and must not observe the developer's state.
     """
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "vigil-config.json"))
+    monkeypatch.delenv("VIGIL_SESSION_ENGAGEMENT_DIR", raising=False)

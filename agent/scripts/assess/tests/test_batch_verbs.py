@@ -1,10 +1,11 @@
-"""CLI tests for batch support + the verify/kill/update payload-via-flag migration.
+"""CLI tests for batch support + finding mutation input contracts.
 
 The canonical batch convention (Part 2): the entity slug/id positional is
 ``nargs="+"`` and shared disposition flags apply to every listed entity via a
 resilient loop with a per-entity failure tally. verify/kill/update additionally
-migrated the trailing positional payload arg to ``--inline`` / ``--payload-file``
-(a JSON blob passed positionally is now rejected with a pointer to the flags).
+migrated structured request documents to ``--payload-file`` (a JSON blob passed
+positionally or through the retired generic ``--inline`` flag is rejected with
+migration guidance).
 
 Backend + runtime are stubbed; these pin the loop fan-out, the partial-failure
 tally + non-zero exit, single-slug backward-compat output, and the payload-flag
@@ -247,7 +248,7 @@ def test_link_finding_batch_many_siblings_one_root(tmp_path, monkeypatch, capsys
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# verify/kill/update payload-via-flag migration (--inline / --payload-file)
+# verify/kill/update payload-file and explicit-flag contracts
 # ──────────────────────────────────────────────────────────────────────────
 
 
@@ -262,7 +263,7 @@ def test_verify_payload_file_flag(tmp_path, monkeypatch, capsys):
     assert payload["disposition"] == "confirmed" and payload["reason_text"] == "from file"
 
 
-def test_verify_inline_flag(tmp_path, monkeypatch, capsys):
+def test_verify_inline_tombstone_points_to_supported_inputs(tmp_path, monkeypatch, capsys):
     fake = _FakeClient()
     _install(monkeypatch, verify_finding, tmp_path, fake)
     args = _parse(
@@ -270,8 +271,13 @@ def test_verify_inline_flag(tmp_path, monkeypatch, capsys):
         ["verify", "VA-1", "--inline", '{"disposition":"confirmed","reason_text":"inline"}'],
         tmp_path,
     )
-    verify_finding.run(args)
-    assert fake.posts[0][1]["reason_text"] == "inline"
+    with pytest.raises(SystemExit) as exc:
+        verify_finding.run(args)
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "--inline was removed" in err
+    assert "--payload-file" in err and "--disposition" in err
+    assert fake.posts == []
 
 
 def test_verify_rejects_positional_json_blob(tmp_path, monkeypatch, capsys):
@@ -281,7 +287,9 @@ def test_verify_rejects_positional_json_blob(tmp_path, monkeypatch, capsys):
     with pytest.raises(SystemExit) as exc:
         verify_finding.run(args)
     assert exc.value.code == 1
-    assert "looks like a JSON payload" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "looks like a JSON payload" in err
+    assert "--payload-file" in err and "--inline" not in err
     assert fake.posts == []
 
 
@@ -330,7 +338,7 @@ def test_verify_false_positive_payload_file_flag(tmp_path, monkeypatch, capsys):
     assert fake.posts[0][1]["details"]["kill_reason"] == "validate_length caps input"
 
 
-def test_update_inline_flag(tmp_path, monkeypatch, capsys):
+def test_update_inline_tombstone_points_to_supported_inputs(tmp_path, monkeypatch, capsys):
     fake = _FakeClient()
     _install(monkeypatch, update_finding, tmp_path, fake)
     args = _parse(
@@ -338,9 +346,457 @@ def test_update_inline_flag(tmp_path, monkeypatch, capsys):
         ["update", "VA-1", "--inline", '{"workflow_status":"draft","reason_text":"needs evidence"}'],
         tmp_path,
     )
+    with pytest.raises(SystemExit) as exc:
+        update_finding.run(args)
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "--inline was removed" in err
+    assert "--payload-file" in err and "explicit patch flags" in err
+    assert fake.patches == []
+
+
+def test_inline_tombstones_are_hidden_from_help(tmp_path, capsys):
+    for module, verb in ((update_finding, "update"), (verify_finding, "verify")):
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers()
+        module.register(sub)
+        with pytest.raises(SystemExit) as exc:
+            parser.parse_args([verb, "--help"])
+        assert exc.value.code == 0
+        assert "--inline" not in capsys.readouterr().out
+
+
+def test_update_payload_file_is_single_slug_and_requires_row_version(
+    tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient()
+    _install(monkeypatch, update_finding, tmp_path, fake)
+    payload_path = tmp_path / "patch.json"
+    payload_path.write_text(json.dumps({"summary": "working copy"}), encoding="utf-8")
+
+    args = _parse(update_finding, ["update", "VA-1", "--payload-file", str(payload_path)], tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        update_finding.run(args)
+    assert exc.value.code == 1
+    assert "expected_row_version" in capsys.readouterr().err
+
+    payload_path.write_text(
+        json.dumps({"summary": "working copy", "expected_row_version": 4}),
+        encoding="utf-8",
+    )
+    args = _parse(
+        update_finding,
+        ["update", "VA-1", "VA-2", "--payload-file", str(payload_path)],
+        tmp_path,
+    )
+    with pytest.raises(SystemExit) as exc:
+        update_finding.run(args)
+    assert exc.value.code == 1
+    assert "exactly one finding slug" in capsys.readouterr().err
+    assert fake.patches == []
+
+
+def test_update_rejects_expected_row_version_without_a_mutation(
+    tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient()
+    _install(monkeypatch, update_finding, tmp_path, fake)
+    args = _parse(
+        update_finding,
+        ["update", "VA-1", "--expected-row-version", "4"],
+        tmp_path,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        update_finding.run(args)
+
+    assert exc.value.code == 1
+    assert "do not update a finding" in capsys.readouterr().err
+    assert fake.patches == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"expected_row_version": 4},
+        {
+            "expected_row_version": 4,
+            "notes_mode": "append",
+            "details_mode": "merge",
+        },
+    ],
+)
+def test_update_payload_file_rejects_only_concurrency_and_mode_controls(
+    payload, tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient()
+    _install(monkeypatch, update_finding, tmp_path, fake)
+    payload_path = tmp_path / "patch.json"
+    payload_path.write_text(json.dumps(payload), encoding="utf-8")
+    args = _parse(
+        update_finding,
+        ["update", "VA-1", "--payload-file", str(payload_path)],
+        tmp_path,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        update_finding.run(args)
+
+    assert exc.value.code == 1
+    assert "do not update a finding" in capsys.readouterr().err
+    assert fake.patches == []
+
+
+def test_update_rejects_transition_metadata_without_a_mutation(
+    tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient()
+    _install(monkeypatch, update_finding, tmp_path, fake)
+    args = _parse(
+        update_finding,
+        [
+            "update",
+            "VA-1",
+            "--reason-code",
+            "checkpoint",
+            "--reason",
+            "No finding field changed.",
+            "--artifact-ref",
+            "evidence/no-op.txt",
+        ],
+        tmp_path,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        update_finding.run(args)
+
+    assert exc.value.code == 1
+    assert "do not update a finding" in capsys.readouterr().err
+    assert fake.patches == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "summary": None,
+            "notes": None,
+            "details": None,
+            "provenance": None,
+            "expected_row_version": 4,
+        },
+        {
+            "summary": "",
+            "notes": "",
+            "notes_mode": "append",
+            "details": {},
+            "details_mode": "merge",
+            "provenance": {},
+            "expected_row_version": 4,
+        },
+    ],
+)
+def test_update_payload_file_rejects_null_and_empty_merge_noops(
+    payload, tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient()
+    _install(monkeypatch, update_finding, tmp_path, fake)
+    payload_path = tmp_path / "patch.json"
+    payload_path.write_text(json.dumps(payload), encoding="utf-8")
+    args = _parse(
+        update_finding,
+        ["update", "VA-1", "--payload-file", str(payload_path)],
+        tmp_path,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        update_finding.run(args)
+
+    assert exc.value.code == 1
+    assert "do not update a finding" in capsys.readouterr().err
+    assert fake.patches == []
+
+
+@pytest.mark.parametrize(
+    ("clear_args", "expected_payload"),
+    [
+        (
+            ["--notes", "", "--notes-replace"],
+            {"notes": "", "notes_mode": "replace", "expected_row_version": 4},
+        ),
+        (
+            ["--details-inline", "{}", "--details-replace"],
+            {"details": {}, "details_mode": "replace", "expected_row_version": 4},
+        ),
+    ],
+)
+def test_update_allows_intentional_empty_replacements_with_cas(
+    clear_args, expected_payload, tmp_path, monkeypatch
+):
+    fake = _FakeClient()
+    _install(monkeypatch, update_finding, tmp_path, fake)
+    args = _parse(
+        update_finding,
+        ["update", "VA-1", *clear_args, "--expected-row-version", "4"],
+        tmp_path,
+    )
+
     update_finding.run(args)
-    assert fake.patches[0][0] == "findings/VA-1"
-    assert fake.patches[0][1]["workflow_status"] == "draft"
+
+    assert fake.patches == [("findings/VA-1", expected_payload)]
+
+
+@pytest.mark.parametrize("notes_mode", [None, "invalid"])
+def test_update_payload_file_notes_require_explicit_valid_mode(
+    notes_mode, tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient()
+    _install(monkeypatch, update_finding, tmp_path, fake)
+    payload = {"notes": "cumulative notes", "expected_row_version": 4}
+    if notes_mode is not None:
+        payload["notes_mode"] = notes_mode
+    payload_path = tmp_path / "patch.json"
+    payload_path.write_text(json.dumps(payload), encoding="utf-8")
+    args = _parse(update_finding, ["update", "VA-1", "--payload-file", str(payload_path)], tmp_path)
+
+    with pytest.raises(SystemExit) as exc:
+        update_finding.run(args)
+
+    assert exc.value.code == 1
+    assert "notes_mode" in capsys.readouterr().err
+    assert fake.patches == []
+
+
+def test_update_payload_file_preserves_iterative_patch_and_does_not_rewrite_file(
+    tmp_path, monkeypatch
+):
+    fake = _FakeClient()
+    _install(monkeypatch, update_finding, tmp_path, fake)
+    payload_path = tmp_path / "patch.json"
+    raw = json.dumps(
+        {
+            "notes": "current working account",
+            "notes_mode": "replace",
+            "details": {"cvss_score": 7.5},
+            "details_mode": "replace",
+            "provenance": {"agent": "VA"},
+            "expected_row_version": 4,
+        },
+        indent=2,
+    )
+    payload_path.write_text(raw, encoding="utf-8")
+    args = _parse(update_finding, ["update", "VA-1", "--payload-file", str(payload_path)], tmp_path)
+
+    update_finding.run(args)
+
+    assert fake.patches == [("findings/VA-1", json.loads(raw))]
+    assert payload_path.read_text(encoding="utf-8") == raw
+
+
+@pytest.mark.parametrize(
+    "replace_args",
+    [
+        ["--notes", "replacement notes", "--notes-replace"],
+        ["--details-inline", '{"impact":"replacement"}', "--details-replace"],
+    ],
+)
+def test_destructive_replace_flags_require_expected_row_version(
+    replace_args, tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient()
+    _install(monkeypatch, update_finding, tmp_path, fake)
+    args = _parse(update_finding, ["update", "VA-1", *replace_args], tmp_path)
+
+    with pytest.raises(SystemExit) as exc:
+        update_finding.run(args)
+
+    assert exc.value.code == 1
+    assert "--expected-row-version" in capsys.readouterr().err
+    assert fake.patches == []
+
+
+def test_destructive_replace_flags_carry_expected_row_version(
+    tmp_path, monkeypatch
+):
+    fake = _FakeClient()
+    _install(monkeypatch, update_finding, tmp_path, fake)
+    args = _parse(
+        update_finding,
+        [
+            "update",
+            "VA-1",
+            "--details-inline",
+            '{"impact":"replacement"}',
+            "--details-replace",
+            "--expected-row-version",
+            "7",
+        ],
+        tmp_path,
+    )
+
+    update_finding.run(args)
+
+    assert fake.patches == [
+        (
+            "findings/VA-1",
+            {
+                "details": {"impact": "replacement"},
+                "details_mode": "replace",
+                "expected_row_version": 7,
+            },
+        )
+    ]
+
+
+def test_update_payload_file_rejects_request_content_flags(tmp_path, monkeypatch, capsys):
+    fake = _FakeClient()
+    _install(monkeypatch, update_finding, tmp_path, fake)
+    payload_path = tmp_path / "patch.json"
+    payload_path.write_text(json.dumps({"summary": "file", "expected_row_version": 4}), encoding="utf-8")
+    args = _parse(
+        update_finding,
+        ["update", "VA-1", "--payload-file", str(payload_path), "--summary", "flag"],
+        tmp_path,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        update_finding.run(args)
+
+    assert exc.value.code == 1
+    assert "cannot be combined" in capsys.readouterr().err
+    assert fake.patches == []
+
+
+@pytest.mark.parametrize(
+    ("module", "content_flag"),
+    [
+        (update_finding, ["--summary", ""]),
+        (verify_finding, ["--notes", ""]),
+    ],
+)
+def test_payload_file_rejects_explicit_empty_content_flags(
+    module, content_flag, tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient()
+    _install(monkeypatch, module, tmp_path, fake)
+    payload_path = tmp_path / "payload.json"
+    payload_path.write_text(
+        json.dumps(
+            {"summary": "file", "expected_row_version": 4}
+            if module is update_finding
+            else {"disposition": "confirmed", "reason_text": "final"}
+        ),
+        encoding="utf-8",
+    )
+    action = "update" if module is update_finding else "verify"
+    args = _parse(
+        module,
+        [action, "VA-1", "--payload-file", str(payload_path), *content_flag],
+        tmp_path,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        module.run(args)
+
+    assert exc.value.code == 1
+    assert "cannot be combined" in capsys.readouterr().err
+    assert fake.posts == [] and fake.patches == []
+
+
+@pytest.mark.parametrize(
+    ("module", "argv"),
+    [
+        (
+            update_finding,
+            ["update", "VA-1", "--payload-file", "", "--summary", "partial"],
+        ),
+        (
+            verify_finding,
+            [
+                "verify",
+                "VA-1",
+                "--payload-file",
+                "",
+                "--disposition",
+                "confirmed",
+                "--reason",
+                "partial",
+            ],
+        ),
+    ],
+)
+def test_empty_payload_file_never_falls_through_to_explicit_flags(
+    module, argv, tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient()
+    _install(monkeypatch, module, tmp_path, fake)
+    args = _parse(module, argv, tmp_path)
+
+    with pytest.raises(SystemExit) as exc:
+        module.run(args)
+
+    assert exc.value.code == 1
+    assert "--payload-file must not be empty" in capsys.readouterr().err
+    assert fake.posts == [] and fake.patches == []
+
+
+def test_verify_payload_file_rejects_content_flags_but_allows_narrative(
+    tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient()
+    _install(monkeypatch, verify_finding, tmp_path, fake)
+    payload_path = tmp_path / "verify.json"
+    payload_path.write_text(
+        json.dumps({"disposition": "confirmed", "reason_text": "final"}),
+        encoding="utf-8",
+    )
+    narrative = tmp_path / "debate.md"
+    narrative.write_text("final debate", encoding="utf-8")
+    args = _parse(
+        verify_finding,
+        [
+            "verify", "VA-1", "--payload-file", str(payload_path),
+            "--reason", "flag", "--narrative", str(narrative),
+        ],
+        tmp_path,
+    )
+    with pytest.raises(SystemExit) as exc:
+        verify_finding.run(args)
+    assert exc.value.code == 1
+    assert "cannot be combined" in capsys.readouterr().err
+    assert fake.posts == []
+
+    args = _parse(
+        verify_finding,
+        ["verify", "VA-1", "--payload-file", str(payload_path), "--narrative", str(narrative)],
+        tmp_path,
+    )
+    verify_finding.run(args)
+    assert [endpoint for endpoint, _ in fake.posts] == ["findings/VA-1/verify", "artifacts"]
+
+
+def test_verify_payload_file_treats_zero_kill_check_as_a_content_flag(
+    tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient()
+    _install(monkeypatch, verify_finding, tmp_path, fake)
+    payload_path = tmp_path / "verify.json"
+    payload_path.write_text(
+        json.dumps({"disposition": "confirmed", "reason_text": "final"}),
+        encoding="utf-8",
+    )
+    args = _parse(
+        verify_finding,
+        ["verify", "VA-1", "--payload-file", str(payload_path), "--kill-check", "0"],
+        tmp_path,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        verify_finding.run(args)
+
+    assert exc.value.code == 1
+    assert "--kill-check" in capsys.readouterr().err
+    assert fake.posts == []
 
 
 def test_update_rejects_positional_json_file(tmp_path, monkeypatch, capsys):

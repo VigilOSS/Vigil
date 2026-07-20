@@ -31,7 +31,7 @@ before normalization. See "Iteration-mode (dispatch_mode) Declaration" in `agent
 - `agent/rules/adversarial-mindset.md` — the lens through which alerts get re-read
 - `agent/rules/resume.md` — universal resume hydration; `vigil assess resume-brief --finding <slug>` before any continuation
 - `agent/shared-constraints-blue.md` — tenant scope, read-only-by-default, artifact-index chain of custody, UTC, look-back, host-exec audit pipeline, confidence labels, dispatch-handoff conventions
-- `agent/skills/alert-triage/SKILL.md` — the alert normalization schema, the platform-skill-routing table, the mechanical-noise FP register format, the L1→L2 handoff contract (built in Unit 7)
+- `agent/skills/alert-triage/SKILL.md` — the alert normalization schema, the platform-skill-routing table, the mechanical-noise FP register format, the L1→L2 handoff contract
 - **Every tenant ref named in `scope.json:tenant_reference_paths[]`.** The tenant ref carries the known-benign register that gates every auto-close decision. Missing tenant ref → halt with a `blocked` handoff naming the path.
 
 **LOAD-ON-FIRST-USE (lazy):**
@@ -83,19 +83,13 @@ emitted to L2.
 
 | Alert source platform | Downstream skill | Notes |
 |-----------------------|------------------|-------|
-| Google Workspace (Admin Reports API, Alert Center, GAM, Gmail filter/forwarding alerts) | `google-workspaces` | The only L2 platform skill fully built in v1; preferred routing target |
-| Microsoft 365 (sign-in logs, Conditional Access, mailbox audit) | `m365-signin-investigation` | P1 skill; emit the dispatch with a `coverage_gap` entry naming the skill if it is not yet on disk |
-| AWS (CloudTrail, IAM, KMS, S3 access logs) | `aws-cloudtrail-investigation` | P1; same v1 caveat |
-| Okta (System Log, OAuth grants, MFA events) | `okta-investigation` | P2 |
-| EDR (CrowdStrike, Defender, SentinelOne) | `edr-alert-triage` | P2 |
-| Network / proxy / DNS / NetFlow | `network-threat-hunt` | P2 |
-| Email-phishing-class alert (Proofpoint, Defender for O365, GWS Quarantine) | `phishing-triage` | P1; often pairs with a platform skill |
-
-**v1 constraint.** Only `google-workspaces` is fully built. For other platforms,
-emit the dispatch anyway, name the skill, and add a `coverage_gaps` entry:
-"platform skill `<name>` not yet built — investigator falls back to `agent/rules/
-ir-evidence.md` + tenant ref alone." The operator decides whether to defer or
-wire a stub skill before L2 fires.
+| Google Workspace (Admin Reports API, Alert Center, GAM, Gmail filter/forwarding alerts) | `google-workspaces` | Workspace audit, token, Drive, and Gmail investigation |
+| Microsoft 365 (sign-in logs, Conditional Access, mailbox audit) | `m365-signin-investigation` | Entra sign-in, Conditional Access, and mailbox investigation |
+| AWS (CloudTrail, IAM, KMS, S3 access logs) | `aws-cloudtrail-investigation` | CloudTrail event and IAM-principal investigation |
+| Okta (System Log, OAuth grants, MFA events) | `okta-investigation` | System Log, OAuth, and MFA investigation |
+| EDR (CrowdStrike, Defender, SentinelOne) | `edr-alert-triage` | Endpoint process-tree and sensor corroboration |
+| Network / proxy / DNS / NetFlow | `network-threat-hunt` | DNS, proxy, and flow correlation |
+| Email-phishing-class alert (Proofpoint, Defender for O365, GWS Quarantine) | `phishing-triage` | Message and URL triage; pair with the tenant platform skill when sign-in or token evidence is needed |
 
 ## Mechanical-Noise FP-Close Discipline
 
@@ -146,7 +140,7 @@ blue-specific fields:
 |-------|----------|
 | `disposition` | `null` (L1 leaves disposition empty so L3 can later set it) — exception: `"false_positive"` when the auto-close path fired |
 | `evidence_refs` | Artifact IDs from `assessment_artifacts.id` — typically the operator-registered alert-intake artifact ID and the registered tenant-ref-citation artifact ID (when one was produced). NEVER local filesystem paths. |
-| `coverage_gaps` | One-line strings naming the open questions L2 must close (e.g., "no IP geolocation pulled — L2 must enrich", "actor email lookup not run", "platform skill `<name>` not yet built") |
+| `coverage_gaps` | One-line strings naming the open questions L2 must close (e.g., "no IP geolocation pulled — L2 must enrich", "actor email lookup not run", "proxy retention does not cover the alert window") |
 | `mitre_techniques` | Array of MITRE ATT&CK technique IDs guessed from the alert payload; matches `details.mitre_techniques` on the draft finding |
 | `tenant_ref_paths_consulted` | Array of tenant-ref paths you actually loaded — distinct from `scope.json:tenant_reference_paths[]` (which is "available") |
 | `next_steps` | Names the downstream skill, the exact `vigil blue dispatch` command for L2, and the evidence-bar hint |

@@ -85,7 +85,11 @@ The CLI fails closed when `--technique`, `--intent`, `--probe-kind`, `--phase`, 
 
 Full flag-by-flag purpose, the `--technique` enum, and the `--probe-kind` vocabulary: `vigil assess contract kali <verb>` (per-verb) or `vigil assess kali <verb> --help` (live argparse). Phase values: see "Phase tags" below.
 
-`--engagement-key` is derived from `${ENGAGEMENT_DIR}/engagement.json`. `--agent-name` resolves from the explicit flag, `$AGENT_NAME`, `$VIGIL_AGENT_NAME`, then `operator`. Specialists should normally inherit `AGENT_NAME=<role>` from their dispatch wrapper; if that context is absent or suspicious, pass `--agent-name <role>` explicitly so the audit row is not misattributed to `operator`.
+The engagement key is derived from the single assessment binding documented by
+`vigil assess contract kali <verb>`; there is no second key override. `--agent-name` resolves from
+the explicit flag, `$AGENT_NAME`, `$VIGIL_AGENT_NAME`, then `operator`. Specialists should normally
+inherit `AGENT_NAME=<role>` from their dispatch wrapper; if that context is absent or suspicious,
+pass `--agent-name <role>` explicitly so the audit row is not misattributed to `operator`.
 
 ## Required attribution headers (program-mandated, e.g. BugCrowd)
 

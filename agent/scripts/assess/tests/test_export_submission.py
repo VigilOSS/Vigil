@@ -11,8 +11,9 @@ records every GET and POST. Pins the behaviour the plan locks down:
     `---` and the ONE "OPERATOR DETAILS — NOT FOR SUBMISSION" reference section the
     operator never pastes (present in BOTH draft and final);
   * draft always writes and inserts `[NEEDS: ...]` markers for missing proof;
-  * final mode strict-gates on title / severity+CVSS / platform taxonomy /
-    attacker-impact / >=1 proof, raising `AssessError` and writing nothing;
+  * final mode strict-gates on lifecycle, platform fields, attacker impact, a
+    finding-linked indexed artifact that is present on disk now, readiness, and
+    hygiene, raising `AssessError` and leaving no unregistered output;
   * `### Evidence` renders ONLY the authored `details.evidence` (`[NEEDS: evidence]`
     in a draft when absent) — the raw structured proof (poc_* / evidence_ref) and
     the linked command runs are NOT rendered into it; they, the finding metadata,
@@ -30,6 +31,8 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -54,10 +57,23 @@ class _Cfg:
 class _FakeClient:
     """Routes GETs to canned payloads and records every GET/POST endpoint."""
 
-    def __init__(self, finding: dict, *, links=None, command_runs=None) -> None:
+    def __init__(
+        self,
+        finding: dict,
+        *,
+        links=None,
+        command_runs=None,
+        artifacts=None,
+        readiness=None,
+        post_error: str = "",
+    ) -> None:
         self._finding = finding
         self._links = links or []
         self._command_runs = command_runs or {}
+        self._artifacts = artifacts
+        self._readiness = readiness or {"ready": True, "blockers": [], "advisories": []}
+        self._post_error = post_error
+        self.engagement_dir = ""
         self.gets: list[str] = []
         self.posts: list[tuple[str, dict]] = []
 
@@ -70,6 +86,46 @@ class _FakeClient:
             return self._finding
         if endpoint == "finding-links":
             return self._links
+        if endpoint == "report-readiness":
+            return self._readiness
+        if endpoint.startswith("artifacts/") and not endpoint.startswith("artifacts/search?"):
+            artifact_id = int(endpoint.split("/", 1)[1])
+            artifacts = self._artifacts or []
+            row = next(
+                (item for item in artifacts if item.get("id") == artifact_id),
+                None,
+            )
+            if row is None:
+                raise AssessError(f"HTTP 404: artifact {artifact_id} not found")
+            return row
+        if endpoint.startswith("artifacts/search?"):
+            if self._artifacts is not None:
+                params = parse_qs(urlsplit(endpoint).query)
+                offset = int(params.get("offset", ["0"])[0])
+                limit = int(params.get("limit", ["1000"])[0])
+                return self._artifacts[offset : offset + limit]
+            evidence_ref = str(self._finding.get("evidence_ref") or "").strip()
+            if not evidence_ref:
+                return []
+            if evidence_ref.startswith("/engagements/test-eng/"):
+                relative_path = evidence_ref.removeprefix("/engagements/test-eng/")
+            elif Path(evidence_ref).is_absolute() and self.engagement_dir:
+                try:
+                    relative_path = Path(evidence_ref).resolve().relative_to(
+                        Path(self.engagement_dir).resolve()
+                    ).as_posix()
+                except ValueError:
+                    return []
+            else:
+                relative_path = evidence_ref
+            return [
+                {
+                    "id": 7,
+                    "relative_path": relative_path,
+                    "present": True,
+                    "related_finding_slug": _nonempty_slug(self._finding),
+                }
+            ]
         if endpoint.startswith("command-runs/"):
             run_id = int(endpoint.split("/", 1)[1])
             if run_id not in self._command_runs:
@@ -78,6 +134,8 @@ class _FakeClient:
         raise AssessError(f"unexpected GET {endpoint}")
 
     def post(self, endpoint: str, payload: dict) -> dict:
+        if self._post_error:
+            raise AssessError(self._post_error)
         self.posts.append((endpoint, payload))
         return {"id": len(self.posts), **payload}
 
@@ -110,7 +168,13 @@ def _poc_response() -> dict:
     return {"status": 200, "headers": {"Content-Type": "application/json"}, "body_excerpt": '{"owner":"someone-else"}'}
 
 
-def _finding(slug: str = "VA-047", *, severity: str = "high", evidence_ref: str = "", details: dict | None = None) -> dict:
+def _finding(
+    slug: str = "VA-047",
+    *,
+    severity: str = "high",
+    evidence_ref: str = "scans/idor-orders.txt",
+    details: dict | None = None,
+) -> dict:
     """A finding as returned by GET /findings/{slug}: details_json is a RAW STRING."""
     return {
         "id": 91,
@@ -121,6 +185,9 @@ def _finding(slug: str = "VA-047", *, severity: str = "high", evidence_ref: str 
         "auth_context": "member",
         "canonical_location": "/orders/1001",
         "evidence_ref": evidence_ref,
+        "workflow_status": "active",
+        "verification_state": "verified",
+        "verification_disposition": "confirmed",
         "details_json": json.dumps(details or {}),
     }
 
@@ -133,6 +200,7 @@ def _complete_details(**overrides) -> dict:
         "vrt_category": "broken_access_control.idor",
         "weakness": "CWE-639 Authorization Bypass Through User-Controlled Key",
         "impact": "An authenticated member can read any other member's order records by id.",
+        "evidence": "The response returns member B's order fields while authenticated as member A.",
         "poc_request": _poc_request(),
         "poc_response": _poc_response(),
         "remediation": "Enforce an ownership check on the order id server-side.",
@@ -156,6 +224,20 @@ def _parse(argv: list[str], engagement_dir: str) -> argparse.Namespace:
 
 
 def _install(monkeypatch, tmp_path, fake: _FakeClient) -> None:
+    fake.engagement_dir = str(tmp_path)
+    # Normal successful fixtures model both sides of durable truth: the index row
+    # and the current file. Tests that pass an explicit artifact result own the
+    # on-disk setup themselves, which lets them model stale index state.
+    if fake._artifacts is None:
+        relative, reason = export_submission._normalize_evidence_path(
+            str(fake._finding.get("evidence_ref") or ""),
+            str(tmp_path),
+            "test-eng",
+        )
+        if relative and not reason:
+            evidence = tmp_path / relative
+            evidence.parent.mkdir(parents=True, exist_ok=True)
+            evidence.write_text("durable proof\n", encoding="utf-8")
     monkeypatch.setattr(export_submission, "load_config", lambda *a, **k: _Cfg(str(tmp_path)))
     monkeypatch.setattr(export_submission, "AssessmentClient", lambda *a, **k: fake)
 
@@ -168,7 +250,7 @@ def _submission_path(tmp_path, slug: str = "VA-047"):
 
 def test_draft_writes_with_needs_markers(tmp_path, monkeypatch, capsys):
     # A bare finding: no CVSS, no vrt, no impact/summary, no proof.
-    fake = _FakeClient(_finding(details={}))
+    fake = _FakeClient(_finding(details={}, evidence_ref=""))
     fake._finding["summary"] = ""  # remove the impact fallback too
     _install(monkeypatch, tmp_path, fake)
     args = _parse(["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path))
@@ -233,6 +315,7 @@ def test_final_passes_with_complete_finding(tmp_path, monkeypatch, capsys):
     details = body[body.index("## OPERATOR DETAILS"):]
     assert "**PoC Request:**" in details and "**PoC Response:**" in details
     evidence = body[body.index("### Evidence"):body.index("### Impact")]
+    assert "member B's order fields" in evidence
     assert "PoC Request" not in evidence and "PoC Response" not in evidence
     # The single OPERATOR DETAILS section is present; the retired blocks are gone.
     assert "## OPERATOR DETAILS — NOT FOR SUBMISSION" in body
@@ -240,7 +323,10 @@ def test_final_passes_with_complete_finding(tmp_path, monkeypatch, capsys):
     assert "## COMMAND REFERENCE" not in body
     # context companion written alongside.
     ctx = json.loads((tmp_path / "submissions" / "VA-047" / "submission-context.json").read_text())
-    assert ctx["mode"] == "final" and ctx["missing"] == [] and ctx["proof"]["has_proof"] is True
+    assert ctx["mode"] == "final" and ctx["missing"] == []
+    assert ctx["proof"]["has_content_proof"] is True
+    assert ctx["proof"]["has_durable_proof"] is True
+    assert "has_proof" not in ctx["proof"]
     assert ctx["linked_command_runs"] == []
 
 
@@ -307,8 +393,6 @@ def test_location_method_not_doubled(tmp_path, monkeypatch, capsys):
 def test_platform_blocker_gates_final_but_draft_writes(tmp_path, monkeypatch, capsys, platform, break_kwargs, marker):
     details = _complete_details(**break_kwargs)
     finding = _finding(details=details)
-    if "impact" in break_kwargs and not break_kwargs["impact"]:
-        finding["summary"] = ""  # kill the impact fallback so the gate really trips
 
     # final: blocks.
     fake_final = _FakeClient(finding)
@@ -328,6 +412,44 @@ def test_platform_blocker_gates_final_but_draft_writes(tmp_path, monkeypatch, ca
     assert f"[NEEDS: {marker}]" in _submission_path(tmp_path).read_text()
 
 
+@pytest.mark.parametrize(
+    ("field", "marker"),
+    [
+        ("summary", "summary"),
+        ("steps_to_reproduce", "steps to reproduce"),
+        ("evidence", "evidence"),
+        ("remediation", "remediation"),
+    ],
+)
+def test_final_requires_every_outward_facing_body_section(
+    tmp_path,
+    monkeypatch,
+    field,
+    marker,
+):
+    details = _complete_details()
+    finding = _finding(details=details)
+    if field == "summary":
+        finding["summary"] = ""
+    elif field == "remediation":
+        details[field] = ""
+        finding["remediation"] = ""
+        finding["details_json"] = json.dumps(details)
+    else:
+        details[field] = [] if field == "steps_to_reproduce" else ""
+        finding["details_json"] = json.dumps(details)
+
+    fake = _FakeClient(finding)
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+
+    with pytest.raises(AssessError) as exc:
+        export_submission.run(args)
+
+    assert marker in str(exc.value)
+    assert not _submission_path(tmp_path).exists()
+
+
 def test_missing_proof_gates_final(tmp_path, monkeypatch, capsys):
     # No poc pair, no poc_code, no evidence_ref -> no proof.
     details = _complete_details(poc_request={}, poc_response={})
@@ -337,10 +459,10 @@ def test_missing_proof_gates_final(tmp_path, monkeypatch, capsys):
     args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
     with pytest.raises(AssessError) as exc:
         export_submission.run(args)
-    assert "proof (poc_request+poc_response, poc_code, or evidence_ref)" in str(exc.value)
+    assert "indexed, present evidence artifact" in str(exc.value)
 
 
-def test_evidence_ref_alone_satisfies_proof(tmp_path, monkeypatch, capsys):
+def test_indexed_present_evidence_ref_satisfies_durable_proof(tmp_path, monkeypatch, capsys):
     details = _complete_details(poc_request={}, poc_response={})
     finding = _finding(details=details, evidence_ref="scans/idor-orders.txt")
     fake = _FakeClient(finding)
@@ -351,6 +473,251 @@ def test_evidence_ref_alone_satisfies_proof(tmp_path, monkeypatch, capsys):
     body = _submission_path(tmp_path).read_text()
     assert "scans/idor-orders.txt" in body
     assert "[NEEDS: proof" not in body
+
+
+def test_inline_poc_does_not_replace_durable_evidence(tmp_path, monkeypatch, capsys):
+    finding = _finding(details=_complete_details(), evidence_ref="")
+    fake = _FakeClient(finding)
+    _install(monkeypatch, tmp_path, fake)
+
+    final_args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+    with pytest.raises(AssessError) as exc:
+        export_submission.run(final_args)
+    assert "indexed, present evidence artifact" in str(exc.value)
+    assert not _submission_path(tmp_path).exists()
+
+    draft_args = _parse(
+        ["submission", "VA-047", "--platform", "bugcrowd", "--draft"],
+        str(tmp_path),
+    )
+    export_submission.run(draft_args)
+    capsys.readouterr()
+    context = _context(tmp_path)
+    assert context["proof"]["has_content_proof"] is True
+    assert context["proof"]["has_durable_proof"] is False
+
+
+@pytest.mark.parametrize(
+    "evidence_ref, artifacts",
+    [
+        ("scans/idor-orders.txt", []),
+        (
+            "scans/idor-orders.txt",
+            [{"relative_path": "scans/idor-orders.txt", "present": False, "related_finding_slug": "VA-047"}],
+        ),
+        (
+            "scans/idor-orders.txt",
+            [{"relative_path": "scans/idor-orders.txt", "present": True, "related_finding_slug": "VA-047"}],
+        ),
+        ("https://evidence.example/idor", []),
+        ("../outside.txt", []),
+        ("/tmp/outside.txt", []),
+    ],
+)
+def test_final_rejects_non_durable_evidence(tmp_path, monkeypatch, evidence_ref, artifacts):
+    fake = _FakeClient(_finding(details=_complete_details(), evidence_ref=evidence_ref), artifacts=artifacts)
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+    with pytest.raises(AssessError) as exc:
+        export_submission.run(args)
+    assert "indexed, present evidence artifact" in str(exc.value)
+    assert not _submission_path(tmp_path).exists()
+
+
+def test_final_rejects_evidence_indexed_to_another_finding(tmp_path, monkeypatch):
+    evidence = tmp_path / "scans" / "idor-orders.txt"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text("durable proof\n", encoding="utf-8")
+    fake = _FakeClient(
+        _finding(details=_complete_details()),
+        artifacts=[
+            {
+                "id": 7,
+                "relative_path": "scans/idor-orders.txt",
+                "present": True,
+                "related_finding_slug": "VA-999",
+            }
+        ],
+    )
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+
+    with pytest.raises(AssessError, match="indexed, present evidence artifact"):
+        export_submission.run(args)
+
+
+def test_final_finds_exact_evidence_beyond_first_search_page(tmp_path, monkeypatch, capsys):
+    evidence = tmp_path / "scans" / "idor-orders.txt"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text("durable proof\n", encoding="utf-8")
+    decoys = [
+        {
+            "id": index,
+            "relative_path": f"scans/decoy-{index}.txt",
+            "present": True,
+            "related_finding_slug": "VA-047",
+        }
+        for index in range(1000)
+    ]
+    decoys.append(
+        {
+            "id": 2001,
+            "relative_path": "scans/idor-orders.txt",
+            "present": True,
+            "related_finding_slug": "VA-047",
+        }
+    )
+    fake = _FakeClient(_finding(details=_complete_details()), artifacts=decoys)
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+
+    export_submission.run(args)
+    capsys.readouterr()
+
+    assert _submission_path(tmp_path).exists()
+    assert any("offset=1000" in endpoint for endpoint in fake.gets)
+
+
+def test_final_uses_evidence_artifact_id_as_the_exact_link(
+    tmp_path, monkeypatch, capsys
+):
+    evidence = tmp_path / "scans" / "idor-orders.txt"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text("durable proof\n", encoding="utf-8")
+    finding = _finding(details=_complete_details())
+    finding["evidence_artifact_id"] = 700
+    fake = _FakeClient(
+        finding,
+        artifacts=[
+            {
+                "id": 700,
+                "relative_path": "scans/idor-orders.txt",
+                "present": True,
+                "related_finding_slug": None,
+            }
+        ],
+    )
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+
+    export_submission.run(args)
+    capsys.readouterr()
+
+    assert "artifacts/700" in fake.gets
+    assert not any(endpoint.startswith("artifacts/search?") for endpoint in fake.gets)
+
+
+def test_final_rejects_evidence_artifact_id_path_mismatch(
+    tmp_path, monkeypatch
+):
+    evidence = tmp_path / "scans" / "idor-orders.txt"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text("durable proof\n", encoding="utf-8")
+    finding = _finding(details=_complete_details())
+    finding["evidence_artifact_id"] = 701
+    fake = _FakeClient(
+        finding,
+        artifacts=[
+            {
+                "id": 701,
+                "relative_path": "scans/other.txt",
+                "present": True,
+                "related_finding_slug": "VA-047",
+            },
+            {
+                "id": 702,
+                "relative_path": "scans/idor-orders.txt",
+                "present": True,
+                "related_finding_slug": "VA-047",
+            },
+        ],
+    )
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+
+    with pytest.raises(AssessError, match="indexed, present evidence artifact"):
+        export_submission.run(args)
+
+    assert "artifacts/701" in fake.gets
+    assert not _submission_path(tmp_path).exists()
+
+
+@pytest.mark.parametrize("reference", ["absolute", "mounted"])
+def test_final_normalizes_contained_evidence_paths(tmp_path, monkeypatch, capsys, reference):
+    evidence_ref = (
+        str(tmp_path / "scans" / "idor-orders.txt")
+        if reference == "absolute"
+        else "/engagements/test-eng/scans/idor-orders.txt"
+    )
+    fake = _FakeClient(_finding(details=_complete_details(), evidence_ref=evidence_ref))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+    export_submission.run(args)
+    capsys.readouterr()
+    proof = _context(tmp_path)["proof"]
+    assert proof["evidence_path"] == "scans/idor-orders.txt"
+    assert proof["has_durable_proof"] is True
+
+
+def test_hackerone_weakness_falls_back_to_cwe_id(tmp_path, monkeypatch, capsys):
+    details = _complete_details(weakness="", cwe_id="CWE-639")
+    fake = _FakeClient(_finding(details=details))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["submission", "VA-047", "--platform", "hackerone"], str(tmp_path))
+    export_submission.run(args)
+    capsys.readouterr()
+    assert "**Weakness:** CWE-639" in _submission_path(tmp_path).read_text()
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("workflow_status", "draft"),
+        ("workflow_status", "merged"),
+        ("workflow_status", "false_positive"),
+        ("verification_state", "unreviewed"),
+        ("verification_disposition", "pending_runtime_proof"),
+    ],
+)
+def test_final_requires_verified_report_candidate(tmp_path, monkeypatch, field, value):
+    finding = _finding(details=_complete_details())
+    finding[field] = value
+    fake = _FakeClient(finding)
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+    with pytest.raises(AssessError) as exc:
+        export_submission.run(args)
+    assert field in str(exc.value)
+    assert not _submission_path(tmp_path).exists()
+
+
+def test_final_blocks_only_target_specific_readiness_blockers(tmp_path, monkeypatch, capsys):
+    unrelated = {"kind": "finding_field_quality", "slug": "VA-999", "detail": "unrelated"}
+    fake = _FakeClient(
+        _finding(details=_complete_details()),
+        readiness={"ready": False, "blockers": [unrelated], "advisories": []},
+    )
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+    export_submission.run(args)
+    capsys.readouterr()
+    assert _submission_path(tmp_path).exists()
+
+    target_dir = tmp_path / "target-blocked"
+    target = {"kind": "duplicate_root_cause", "slugs": ["VA-047", "VA-048"], "detail": "duplicate"}
+    fake = _FakeClient(
+        _finding(details=_complete_details()),
+        readiness={"ready": False, "blockers": [unrelated, target], "advisories": []},
+    )
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        ["submission", "VA-047", "--platform", "bugcrowd", "--output", str(target_dir)],
+        str(tmp_path),
+    )
+    with pytest.raises(AssessError) as exc:
+        export_submission.run(args)
+    assert "duplicate_root_cause" in str(exc.value)
+    assert not (target_dir / "submission.md").exists()
 
 
 def test_flags_supply_taxonomy(tmp_path, monkeypatch, capsys):
@@ -554,7 +921,7 @@ def test_hygiene_flags_leaks_without_mutating_body(tmp_path, monkeypatch, capsys
     )
     fake = _FakeClient(_finding(details=details, evidence_ref=abs_evidence), links=links, command_runs=command_runs)
     _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+    args = _parse(["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path))
     export_submission.run(args)
     err = capsys.readouterr().err
 
@@ -572,7 +939,7 @@ def test_hygiene_flags_leaks_without_mutating_body(tmp_path, monkeypatch, capsys
     assert "engagement path" in warnings
     assert "cases.db" in warnings
     # And the warnings surface on stderr so the report-writer sees them in-line.
-    assert "WARN export-submission" in err
+    assert "WARN export submission" in err
 
 
 def test_target_uuid_in_poc_reaches_output_verbatim(tmp_path, monkeypatch, capsys):
@@ -624,7 +991,7 @@ def test_slug_in_pasteable_body_still_warns(tmp_path, monkeypatch, capsys):
     finding["summary"] = "Finding VA-047: an authenticated member can read another member's order."
     fake = _FakeClient(finding)
     _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+    args = _parse(["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path))
     export_submission.run(args)
     capsys.readouterr()
 
@@ -664,7 +1031,7 @@ def test_pre_numbered_steps_are_not_double_numbered(tmp_path, monkeypatch, capsy
     assert "3. Observe member B's data in the response" in steps
 
 
-# -- title word-count hygiene warning (advisory, not a hard gate) -------------
+# -- hygiene warnings: diagnostic in draft, strict in final -------------------
 
 @pytest.mark.parametrize(
     "title, expect_warn",
@@ -675,19 +1042,30 @@ def test_pre_numbered_steps_are_not_double_numbered(tmp_path, monkeypatch, capsy
         ("Short concise title that stays under the required word limit", False),
     ],
 )
-def test_title_word_count_warns_but_does_not_gate(tmp_path, monkeypatch, capsys, title, expect_warn):
+def test_title_word_count_warning_gates_only_final(tmp_path, monkeypatch, capsys, title, expect_warn):
     finding = _finding(details=_complete_details())
     finding["title"] = title
     fake = _FakeClient(finding)
     _install(monkeypatch, tmp_path, fake)
-    # A complete finding: final mode must still WRITE (the title warning never gates).
     args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
-    export_submission.run(args)
-    capsys.readouterr()
+    if expect_warn:
+        with pytest.raises(AssessError) as exc:
+            export_submission.run(args)
+        assert "hygiene" in str(exc.value)
+        assert not _submission_path(tmp_path).exists()
 
-    assert _submission_path(tmp_path).exists()  # never blocked by the title warning
-    warnings = _context(tmp_path)["hygiene_warnings"]
-    assert any("max 12" in w for w in warnings) is expect_warn
+        draft_args = _parse(
+            ["submission", "VA-047", "--platform", "bugcrowd", "--draft"],
+            str(tmp_path),
+        )
+        export_submission.run(draft_args)
+        capsys.readouterr()
+        assert any("max 12" in w for w in _context(tmp_path)["hygiene_warnings"])
+    else:
+        export_submission.run(args)
+        capsys.readouterr()
+        assert _submission_path(tmp_path).exists()
+        assert not any("max 12" in w for w in _context(tmp_path)["hygiene_warnings"])
 
 
 # -- overwrite guard ----------------------------------------------------------
@@ -733,6 +1111,89 @@ def test_json_summary_shape(tmp_path, monkeypatch, capsys):
     assert out["linked_command_runs"] == 0  # no linked runs on this finding
     assert out["artifact_registered"] is True
     assert out["hygiene_warnings"] == []  # clean finding: no internal-id leaks
+    assert out["has_content_proof"] is True
+    assert out["has_durable_proof"] is True
+    assert "has_proof" not in out
+
+
+def test_final_output_must_be_inside_engagement(tmp_path, monkeypatch):
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    fake = _FakeClient(_finding(details=_complete_details()))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        ["submission", "VA-047", "--platform", "bugcrowd", "--output", str(outside)],
+        str(tmp_path),
+    )
+    with pytest.raises(AssessError) as exc:
+        export_submission.run(args)
+    assert "inside the engagement" in str(exc.value)
+    assert not (outside / "submission.md").exists()
+
+
+def test_final_fails_when_submission_artifact_registration_fails(tmp_path, monkeypatch, capsys):
+    fake = _FakeClient(_finding(details=_complete_details()), post_error="backend unavailable")
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+    with pytest.raises(AssessError) as exc:
+        export_submission.run(args)
+    captured = capsys.readouterr()
+    assert "artifact registration failed" in str(exc.value)
+    assert "Wrote final" not in captured.out
+    assert not _submission_path(tmp_path).exists()
+    assert not (_submission_path(tmp_path).parent / "submission-context.json").exists()
+
+
+def test_failed_final_registration_restores_overwritten_outputs(tmp_path, monkeypatch):
+    submission = _submission_path(tmp_path)
+    context = submission.parent / "submission-context.json"
+    submission.parent.mkdir(parents=True)
+    submission.write_text("previous submission\n", encoding="utf-8")
+    context.write_text('{"previous": true}\n', encoding="utf-8")
+    fake = _FakeClient(_finding(details=_complete_details()), post_error="backend unavailable")
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        ["submission", "VA-047", "--platform", "bugcrowd", "--overwrite"],
+        str(tmp_path),
+    )
+
+    with pytest.raises(AssessError, match="artifact registration failed"):
+        export_submission.run(args)
+
+    assert submission.read_text(encoding="utf-8") == "previous submission\n"
+    assert context.read_text(encoding="utf-8") == '{"previous": true}\n'
+
+
+def test_final_context_write_failure_rolls_back_submission(tmp_path, monkeypatch):
+    fake = _FakeClient(_finding(details=_complete_details()))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+    original_write_text = Path.write_text
+
+    def fail_context_write(path: Path, data: str, *args, **kwargs):
+        if path.name == "submission-context.json":
+            raise OSError("synthetic context write failure")
+        return original_write_text(path, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_context_write)
+
+    with pytest.raises(AssessError, match="output write failed"):
+        export_submission.run(args)
+
+    assert not _submission_path(tmp_path).exists()
+    assert not (_submission_path(tmp_path).parent / "submission-context.json").exists()
+
+
+def test_draft_surfaces_target_readiness_blocker_without_gating(tmp_path, monkeypatch, capsys):
+    blocker = {"kind": "finding_field_quality", "slug": "VA-047", "detail": "missing evidence prose"}
+    fake = _FakeClient(
+        _finding(details=_complete_details()),
+        readiness={"ready": False, "blockers": [blocker], "advisories": []},
+    )
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path))
+    export_submission.run(args)
+    capsys.readouterr()
+    assert _context(tmp_path)["readiness_blockers"] == [blocker]
 
 
 # -- A2: operational-header overlay (rendered FROM finding fields) ------------

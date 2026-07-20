@@ -151,7 +151,7 @@ def _emit_probe_run(
     cmd: list[str],
     evidence_ref: str,
 ) -> None:
-    """Best-effort auto-emit one probe_run from a finished kali run (Wave 5 / 2a).
+    """Best-effort auto-emit one probe_run from a finished Kali run.
 
     This is the linchpin that makes depth observable: every typed kali call
     already carries a vuln-class ``--technique`` and a ``--probe-kind``, so a
@@ -726,7 +726,6 @@ def kali_exec(
     timeout: int,
     agent_name: str | None = None,
     engagement_dir: Path | None = None,
-    engagement_key: str | None = None,
     force: bool = False,
     container_name: str | None = None,
     config: Config | None = None,
@@ -754,14 +753,7 @@ def kali_exec(
     # SystemExit with "Cannot resolve engagement directory."
     cfg = config or load_config(str(engagement_dir) if engagement_dir else None)
     eng_dir = _resolve_engagement_dir(engagement_dir, cfg)
-    if engagement_key is not None:
-        eng_key = str(engagement_key).strip()
-        if not eng_key:
-            raise AssessError("engagement key is empty")
-    else:
-        eng_key = str(cfg.engagement_key or eng_dir.name).strip()
-        if not eng_key:
-            raise AssessError("engagement key is empty")
+    eng_key = eng_dir.name
     resolved_agent = _resolve_agent_name(agent_name)
     technique = normalize_technique(technique)
     probe_kind = normalize_probe_kind(probe_kind)

@@ -128,3 +128,35 @@ def test_expired_rate_lease_does_not_consume_capacity(client, isolate_settings):
     replacement = _acquire(client, owner="replacement", effective_rate_rps=10)
 
     assert replacement.status_code == 201, replacement.text
+
+
+def test_expired_rate_lease_cannot_revive_after_capacity_is_reallocated(
+    client, isolate_settings
+):
+    from app.db import get_connection
+
+    _write_engagement(isolate_settings["engagements_dir"], aggregate_rps=10)
+    expired = _acquire(client, effective_rate_rps=10).json()
+    with get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_rate_leases SET expires_at = ? WHERE lease_token = ?",
+            ("2000-01-01T00:00:00Z", expired["lease_token"]),
+        )
+    replacement = _acquire(client, owner="replacement", effective_rate_rps=10)
+    assert replacement.status_code == 201, replacement.text
+
+    renewed = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/rate-leases/{expired['lease_token']}",
+        json={"ttl_seconds": 600},
+    )
+
+    assert renewed.status_code == 409
+    assert "expired" in str(renewed.json()["detail"])
+    active = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/rate-leases",
+        params={"active_only": True},
+    )
+    assert active.status_code == 200, active.text
+    assert [lease["lease_token"] for lease in active.json()] == [
+        replacement.json()["lease_token"]
+    ]

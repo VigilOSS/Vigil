@@ -1051,8 +1051,6 @@ def test_classifier_version_inputs_cover_every_classification_constant() -> None
     assert inputs["nonprod_host_label_re"] == cb._NONPROD_HOST_LABEL_RE.pattern
     assert inputs["nondefault_ports"] is cb._NONDEFAULT_PORTS
     assert inputs["live_status_tokens"] is cb._LIVE_STATUS_TOKENS
-    assert inputs["gau_archive_source"] == cb._GAU_ARCHIVE_SOURCE
-    assert inputs["dead_live_status_tokens"] is cb._DEAD_LIVE_STATUS_TOKENS
     assert inputs["logic_revision"] == cb._CLASSIFIER_LOGIC_REVISION
 
 
@@ -1060,8 +1058,8 @@ def test_classifier_version_tracks_logic_revision_and_tables() -> None:
     """A bump to `_CLASSIFIER_LOGIC_REVISION` (the escape hatch for pure-logic
     edits) OR to any digested taxonomy table must change CLASSIFIER_VERSION. We
     recompute the digest over a mutated copy of the inputs and assert it moves,
-    proving both the logic-revision hatch and a representative context/demotion
-    table actually feed the stamp."""
+    proving both the logic-revision hatch and a representative context table
+    actually feed the stamp."""
     import hashlib
     import json
 
