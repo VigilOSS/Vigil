@@ -727,7 +727,7 @@ def _scope_version(engagement_dir: Path) -> str:
 def _engagement_type(engagement_dir: Path) -> str:
     """Read ``engagement_type`` from ``scope.json`` (web/code/blue/both).
 
-    Used by the Wave-5 (2a) probe-run emission WEB-ONLY guard so the depth
+    Used by the probe-run emission WEB-ONLY guard so the depth
     harness never fires on code/blue engagements. Mirrors the default used by
     ``transition_phase`` (absent/unreadable scope ⇒ ``"web"``), so a legacy
     web engagement without the field still emits probes; only an explicit

@@ -105,11 +105,11 @@ def _link_intel(client, finding_slug: str, raw_intel_ids: list[str], note: str) 
         except ValueError:
             cleaned.append(text)
     if not cleaned:
-        raise ValueError("link-finding --intel requires at least one non-empty id")
+        raise ValueError("finding link --intel requires at least one non-empty id")
 
     existing = client.get(f"findings/{finding_slug}")
     if not isinstance(existing, dict):
-        raise ValueError(f"link-finding --intel: finding {finding_slug} not found")
+        raise ValueError(f"finding link --intel: finding {finding_slug} not found")
     details = existing.get("details") if isinstance(existing.get("details"), dict) else None
     if details is None:
         details = existing.get("details_json")
@@ -151,21 +151,21 @@ def run(args) -> None:
     )
 
     if args.clear_root_cause and args.root_cause_slug:
-        print("link-finding: --clear-root-cause cannot be combined with --root-cause", file=sys.stderr)
+        print("finding link: --clear-root-cause cannot be combined with --root-cause", file=sys.stderr)
         sys.exit(1)
     if args.clear_root_cause and intel_ids:
-        print("link-finding: --clear-root-cause cannot be combined with --intel", file=sys.stderr)
+        print("finding link: --clear-root-cause cannot be combined with --intel", file=sys.stderr)
         sys.exit(1)
     if args.root_cause_slug and intel_ids:
         print(
-            "link-finding: --root-cause and --intel cannot be combined in a single call; "
+            "finding link: --root-cause and --intel cannot be combined in a single call; "
             "run them as two separate invocations",
             file=sys.stderr,
         )
         sys.exit(1)
     if generic_selected and (args.root_cause_slug or args.clear_root_cause or intel_ids):
         print(
-            "link-finding: generic link flags (--link-kind / --target-kind / --target-id / "
+            "finding link: generic link flags (--link-kind / --target-kind / --target-id / "
             "--target-ref) cannot be combined with --root-cause, --clear-root-cause, or --intel; "
             "run them as separate invocations",
             file=sys.stderr,
@@ -178,7 +178,7 @@ def run(args) -> None:
         and not generic_selected
     ):
         print(
-            "link-finding requires --root-cause <slug>, --intel <id> (one or more), "
+            "finding link requires --root-cause <slug>, --intel <id> (one or more), "
             "--clear-root-cause, or a generic link (--link-kind + --target-kind + "
             "--target-id/--target-ref)",
             file=sys.stderr,
@@ -192,20 +192,20 @@ def run(args) -> None:
         link_kind = (getattr(args, "link_kind", None) or "related").strip()
         if not target_kind:
             print(
-                "link-finding: a generic link requires --target-kind (e.g. finding | chain | "
+                "finding link: a generic link requires --target-kind (e.g. finding | chain | "
                 "surface | command_run | probe_run)",
                 file=sys.stderr,
             )
             sys.exit(1)
         if target_id is None and not target_ref:
             print(
-                "link-finding: a generic link requires --target-id <int> or --target-ref <ref>",
+                "finding link: a generic link requires --target-id <int> or --target-ref <ref>",
                 file=sys.stderr,
             )
             sys.exit(1)
         if link_kind == _ROOT_CAUSE_LINK_KIND:
             print(
-                "link-finding: --link-kind root_cause is not allowed on the generic route; "
+                "finding link: --link-kind root_cause is not allowed on the generic route; "
                 "use --root-cause <root-slug>",
                 file=sys.stderr,
             )
@@ -261,7 +261,7 @@ def run(args) -> None:
                     result = client.put(f"findings/{slug}/root-cause", root_cause_payload)
             except Exception as exc:  # noqa: BLE001 - one bad sibling must not drop the rest
                 failed += 1
-                print(f"link-finding: {slug} failed: {exc}", file=sys.stderr)
+                print(f"finding link: {slug} failed: {exc}", file=sys.stderr)
                 continue
             results.append(result)
 
@@ -271,7 +271,7 @@ def run(args) -> None:
         for result in results:
             print(json.dumps(result, ensure_ascii=False))
         print(
-            f"[link-finding] linked {len(results)} finding(s); {failed} failed.",
+            f"[finding link] linked {len(results)} finding(s); {failed} failed.",
             file=sys.stderr,
         )
     if failed:

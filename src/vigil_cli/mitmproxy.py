@@ -48,7 +48,9 @@ def build_image(
     if (
         not force
         and docker.image_exists(image, runner=runner)
-        and not image_freshness.image_outdated(image, _mitmproxy_inputs(install_root), runner=runner)
+        and not image_freshness.image_outdated(
+            image, mitmproxy_image_inputs(install_root), runner=runner
+        )
     ):
         print(f"mitmproxy\timage current (up to date with source)\t{image}")
         return
@@ -67,14 +69,11 @@ def build_image(
     print(f"mitmproxy\timage built\t{image}")
 
 
-def _mitmproxy_inputs(install_root: Path) -> list[Path]:
-    """Build inputs whose mtime determines image freshness.
-
-    Mirrors ``up.py:_mitmproxy_image_inputs`` — the Dockerfile plus the addon
-    source baked into the image.
-    """
+def mitmproxy_image_inputs(install_root: Path) -> list[Path]:
+    """Return every source path copied into the proxy image."""
     return [
         install_root / "agent" / "docker" / "mitmproxy" / "Dockerfile",
+        install_root / "agent" / "scripts" / "assess",
         install_root / "agent" / "scripts" / "proxy_addon.py",
     ]
 
@@ -94,7 +93,13 @@ def start_proxy(
     if not engagements_root.is_dir():
         raise SystemExit(f"Engagements root does not exist: {engagements_root}")
 
-    if force_rebuild or not docker.image_exists(options.image, runner=runner):
+    if (
+        force_rebuild
+        or not docker.image_exists(options.image, runner=runner)
+        or image_freshness.image_outdated(
+            options.image, mitmproxy_image_inputs(install_root), runner=runner
+        )
+    ):
         build_image(install_root, options.image, force=force_rebuild, runner=runner)
 
     if docker.container_running(options.container_name, runner=runner):

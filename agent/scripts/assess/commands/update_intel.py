@@ -1,6 +1,6 @@
 """vigil assess intel update — patch an intel row by id.
 
-Mirrors ``update-finding`` for intel rows. Use this when an existing intel
+Mirrors ``finding update`` for intel rows. Use this when an existing intel
 row needs an in-place metadata update (severity refinement, new
 ``evidence_ref`` after re-investigation, etc.) — the backend keeps a
 single canonical row and refreshes the FTS shadow so search reflects the

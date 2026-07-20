@@ -1,4 +1,4 @@
-"""vigil assess export-submission — per-finding, platform-shaped submission writeup.
+"""vigil assess export submission — per-finding, platform-shaped submission writeup.
 
 Renders ONE finding into a submission-ready ``submission.md`` (+ a machine-readable
 ``submission-context.json``) under ``$ENGAGEMENT_DIR/submissions/<slug>/``, shaped
@@ -10,13 +10,14 @@ path. Two modes:
   * ``--draft`` (the normal report-writer entrypoint) always writes, inserting
     ``[NEEDS: <field>]`` markers wherever a proof-critical field is missing.
   * final (default) applies the strict gate: it refuses to write and exits
-    non-zero unless title, severity + CVSS vector, the platform taxonomy
-    (Bugcrowd VRT / HackerOne weakness), an attacker-impact statement, and at
-    least one concrete proof are all present.
+    non-zero unless the finding is a verified confirmed/downgraded report
+    candidate with every outward-facing body section authored, complete platform
+    fields, a contained indexed/present evidence artifact, no target readiness
+    blockers, and no hygiene warnings.
 
 BACKEND FINDING IS THE SOURCE OF TRUTH. The submission is rendered FROM the
 finding's fields; the report-writer writes final content back to the finding
-(``update-finding``), so a re-render at publish time is reproducible and loses no
+(``finding update``), so a re-render at publish time is reproducible and loses no
 hand edits, and PII masking is safe — the MASKED evidence is stored in the finding
 and reaches the copy-paste body, while the raw tool output stays in ``scans/`` and
 is never rendered here.
@@ -44,35 +45,34 @@ command references them by path; it does not read their bytes):
 
 EVIDENCE IS AUTHORED, NOT SYNTHESIZED. The ``### Evidence`` section renders ONLY
 the finding's authored ``details.evidence`` prose (``[NEEDS: evidence]`` in a draft
-when absent; empty in final, since ``details.evidence`` is authored prose, not a
-strict-gate field). The raw structured proof and the linked command runs are
+when absent; final export rejects the finding until it is authored). The raw
+structured proof and the linked command runs are
 deliberately NOT rendered into Evidence: a real submission carries hand-annotated
 proof (genuine third-party PII partial-masked, self-owned/synthetic data in full),
 so the tool surfaces them ONCE, as reference under the single
 OPERATOR DETAILS section (mirrored by the ``linked_command_runs`` array in the
 context JSON), for the report-writer to author Evidence FROM. Linked runs are
 sourced ONLY from explicit ``finding-links`` (``target_kind="command_run"``) —
-never a fuzzy command search (plan decision 4).
+never a fuzzy command search.
 
 The generated ``submission.md`` is registered as a finding-linked artifact
 (``kind="submission"``); the finding's ``submission_status`` is never written
 (omitting the field preserves it).
 
-The generator is FAITHFUL: it never rewrites the finding's content — a
-target-application UUID, a filename, or a path reaches the report-writer
-verbatim, because silently mangling them (a blanket UUID scrub redacting the very
-identifier a PoC proves, a greedy ``cases.db`` regex clipping a real filename)
-confuses the editor more than it protects. Instead it FLAGS internal identifiers
+The generator is FAITHFUL: it preserves authored content while normalizing a
+valid evidence pointer to engagement-relative form. A target-application UUID or
+filename reaches the report-writer verbatim; blanket scrubbing would corrupt
+proof. It FLAGS internal identifiers
 — this finding's slug, engagement / finding / agent UUIDs, absolute engagement
-paths, and cases.db references — as non-destructive ``hygiene_warnings`` (in the
-context JSON and on stderr), so the report-writer and the blind-triage gate strip
-them deliberately before an EXTERNAL submission.
+paths, and cases.db references — in draft context/stderr, and final mode blocks
+until the source content is clean.
 """
 from __future__ import annotations
 
 import json
 import sys
 from pathlib import Path
+from urllib.parse import urlencode, urlparse
 
 from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import load_config
@@ -98,6 +98,15 @@ from assess.lib.scope import rate_caps_for_dir
 
 _PLATFORMS = ("bugcrowd", "hackerone", "direct")
 _PLATFORM_LABEL = {"bugcrowd": "Bugcrowd", "hackerone": "HackerOne", "direct": "Direct disclosure"}
+_REPORTABLE_STATUSES = {
+    "active",
+    "blocked",
+    "exploited",
+    "contained",
+    "eradicated",
+    "recovered",
+    "reported",
+}
 
 
 def register(subparsers) -> None:
@@ -106,7 +115,8 @@ def register(subparsers) -> None:
         help=(
             "Render one finding into a platform-shaped, submission-ready "
             "submission.md (+ context JSON). --draft always writes with "
-            "[NEEDS: ...] markers; final mode gates on proof completeness."
+            "[NEEDS: ...] diagnostics; final mode gates on durable evidence, "
+            "verified lifecycle, readiness, and hygiene."
         ),
     )
     p.add_argument("slug", help="Finding slug to render (e.g. VA-047)")
@@ -164,7 +174,183 @@ def _poc_pair_present(finding: dict) -> bool:
     return bool(isinstance(request, dict) and request and isinstance(response, dict) and response)
 
 
-def _evaluate(finding: dict, platform: str, vrt_category: str, weakness: str) -> dict:
+def _normalize_evidence_path(evidence_ref: str, engagement_dir: str, engagement_key: str) -> tuple[str, str]:
+    """Return an engagement-relative evidence path and a diagnostic reason.
+
+    Evidence references may be stored as engagement-relative paths, absolute
+    host paths inside the engagement, or Kali's ``/engagements/<key>/`` mount
+    form. URLs and paths that escape the engagement are content references, not
+    durable local evidence.
+    """
+    value = _nonempty(evidence_ref)
+    if not value:
+        return "", "finding has no evidence_ref"
+    parsed = urlparse(value)
+    if parsed.scheme and parsed.scheme != "file":
+        return "", "evidence_ref is a URL, not an engagement artifact"
+
+    mount_prefix = f"/engagements/{engagement_key}/"
+    if value.startswith(mount_prefix):
+        value = value.removeprefix(mount_prefix)
+    elif value.startswith("/engagements/"):
+        return "", "evidence_ref points at a different engagement mount"
+
+    root = Path(engagement_dir).expanduser().resolve()
+    raw = Path(value).expanduser()
+    candidate = raw if raw.is_absolute() else root / raw
+    resolved = candidate.resolve(strict=False)
+    try:
+        relative = resolved.relative_to(root)
+    except ValueError:
+        return "", "evidence_ref is outside the engagement directory"
+    if relative == Path("."):
+        return "", "evidence_ref names the engagement directory, not an artifact"
+    return relative.as_posix(), ""
+
+
+def _durable_evidence(
+    client,
+    finding: dict,
+    engagement_dir: str,
+    engagement_key: str,
+) -> dict:
+    raw_ref = _nonempty(detail_value(finding, "evidence_ref", ""))
+    relative_path, reason = _normalize_evidence_path(raw_ref, engagement_dir, engagement_key)
+    lookup_error = ""
+    artifact: dict | None = None
+    raw_artifact_id = finding.get("evidence_artifact_id")
+    evidence_artifact_id = (
+        raw_artifact_id
+        if type(raw_artifact_id) is int and raw_artifact_id > 0
+        else None
+    )
+    if relative_path and raw_artifact_id is not None:
+        if evidence_artifact_id is None:
+            lookup_error = "finding has an invalid evidence_artifact_id"
+        else:
+            try:
+                response = client.get(f"artifacts/{evidence_artifact_id}")
+            except AssessError as exc:
+                lookup_error = f"linked evidence artifact unavailable: {exc}"
+            else:
+                if not isinstance(response, dict):
+                    lookup_error = "linked evidence artifact returned an unexpected response"
+                elif _nonempty(response.get("relative_path")) != relative_path:
+                    lookup_error = (
+                        f"evidence_artifact_id {evidence_artifact_id} points to "
+                        f"{_nonempty(response.get('relative_path'))!r}, not {relative_path!r}"
+                    )
+                else:
+                    artifact = response
+    elif relative_path:
+        page_size = 1000
+        offset = 0
+        seen_pages: set[tuple[tuple[object, object], ...]] = set()
+        while True:
+            try:
+                query = urlencode(
+                    {
+                        "q": relative_path,
+                        "finding": _nonempty(finding.get("slug")),
+                        "limit": page_size,
+                        "offset": offset,
+                    }
+                )
+                response = client.get(f"artifacts/search?{query}")
+            except AssessError as exc:
+                lookup_error = f"artifact index unavailable: {exc}"
+                break
+            if not isinstance(response, list):
+                lookup_error = "artifact index returned an unexpected response"
+                break
+            page = [item for item in response if isinstance(item, dict)]
+            artifact = next(
+                (
+                    row
+                    for row in page
+                    if _nonempty(row.get("relative_path")) == relative_path
+                ),
+                None,
+            )
+            if artifact is not None or len(response) < page_size:
+                break
+            fingerprint = tuple(
+                (row.get("id"), row.get("relative_path")) for row in page
+            )
+            if fingerprint in seen_pages:
+                lookup_error = "artifact index pagination did not advance"
+                break
+            seen_pages.add(fingerprint)
+            offset += len(response)
+
+    indexed = artifact is not None
+    indexed_present = bool(artifact and artifact.get("present"))
+    live_present = bool(
+        relative_path
+        and (Path(engagement_dir).expanduser().resolve() / relative_path).is_file()
+    )
+    related_slug = _nonempty(artifact.get("related_finding_slug")) if artifact else ""
+    linked = bool(
+        artifact
+        and (
+            str(artifact.get("id")) == str(evidence_artifact_id)
+            if evidence_artifact_id is not None
+            else related_slug == _nonempty(finding.get("slug"))
+        )
+    )
+    if not reason and lookup_error:
+        reason = lookup_error
+    elif not reason and not indexed:
+        reason = f"evidence artifact {relative_path!r} is not indexed"
+    elif not reason and not linked:
+        reason = f"evidence artifact {relative_path!r} is not linked to this finding"
+    elif not reason and not indexed_present:
+        reason = f"evidence artifact {relative_path!r} is indexed as missing"
+    elif not reason and not live_present:
+        reason = f"evidence artifact {relative_path!r} is no longer present on disk"
+    return {
+        "raw_ref": raw_ref,
+        "path": relative_path,
+        "indexed": indexed,
+        "linked": linked,
+        "index_present": indexed_present,
+        "live_present": live_present,
+        "present": bool(indexed_present and live_present),
+        "has_durable_proof": bool(
+            relative_path and indexed and linked and indexed_present and live_present
+        ),
+        "reason": reason,
+    }
+
+
+def _target_readiness_blockers(client, slug: str) -> tuple[list[dict], str]:
+    try:
+        readiness = client.get("report-readiness")
+    except AssessError as exc:
+        return [], f"report-readiness unavailable: {exc}"
+    if not isinstance(readiness, dict):
+        return [], "report-readiness returned an unexpected response"
+    blockers = readiness.get("blockers", [])
+    if not isinstance(blockers, list):
+        return [], "report-readiness blockers have an unexpected shape"
+    target: list[dict] = []
+    for blocker in blockers:
+        if not isinstance(blocker, dict):
+            continue
+        slugs = blocker.get("slugs", [])
+        matches_many = isinstance(slugs, list) and slug in {str(item) for item in slugs}
+        if str(blocker.get("slug") or blocker.get("finding_slug") or "") == slug or matches_many:
+            target.append(blocker)
+    return target, ""
+
+
+def _evaluate(
+    finding: dict,
+    platform: str,
+    vrt_category: str,
+    weakness: str,
+    durable_evidence: dict,
+) -> dict:
     """Resolve the submission's proof-critical fields and the strict-gate misses.
 
     ``missing`` is the ordered list of proof-critical fields absent for this
@@ -173,27 +359,47 @@ def _evaluate(finding: dict, platform: str, vrt_category: str, weakness: str) ->
     """
     title = _nonempty(finding.get("title"))
     severity = _nonempty(finding.get("severity"))
+    summary = _nonempty(finding.get("summary"))
+    steps = string_list(detail_value(finding, "steps_to_reproduce", []))
+    evidence = _nonempty(detail_value(finding, "evidence", ""))
+    remediation = _nonempty(finding.get("remediation")) or _nonempty(
+        detail_value(finding, "remediation", "")
+    )
     cvss_vector = _nonempty(detail_value(finding, "cvss_vector", ""))
     cvss_score = finding.get("cvss_score")
     if cvss_score is None:
         cvss_score = detail_value(finding, "cvss_score", None)
-    # Attacker-impact statement: finding `impact` (top-level or details), else
-    # `summary` — matching the templates' "Populated from: impact / summary".
-    impact = _nonempty(detail_value(finding, "impact", "")) or _nonempty(finding.get("summary"))
+    # Summary and Impact are independently authored outward-facing sections.
+    # Reusing Summary here can make a final package appear complete while
+    # duplicating the same prose under both headings.
+    impact = _nonempty(detail_value(finding, "impact", ""))
 
     poc_pair = _poc_pair_present(finding)
     poc_code = _nonempty(detail_value(finding, "poc_code", ""))
-    evidence_ref = _nonempty(detail_value(finding, "evidence_ref", ""))
-    has_proof = poc_pair or bool(poc_code) or bool(evidence_ref)
+    raw_evidence_ref = _nonempty(detail_value(finding, "evidence_ref", ""))
+    evidence_ref = durable_evidence["path"] or raw_evidence_ref
+    has_content_proof = poc_pair or bool(poc_code)
 
     vrt = _nonempty(vrt_category) or _nonempty(detail_value(finding, "vrt_category", ""))
-    weak = _nonempty(weakness) or _nonempty(detail_value(finding, "weakness", ""))
+    weak = (
+        _nonempty(weakness)
+        or _nonempty(detail_value(finding, "weakness", ""))
+        or _nonempty(detail_value(finding, "cwe_id", ""))
+    )
 
     missing: list[str] = []
     if not title:
         missing.append("title")
     if not severity:
         missing.append("severity")
+    if not summary:
+        missing.append("summary")
+    if not steps:
+        missing.append("steps to reproduce")
+    if not evidence:
+        missing.append("evidence")
+    if not remediation:
+        missing.append("remediation")
     if not cvss_vector:
         missing.append("CVSS vector")
     if platform == "bugcrowd" and not vrt:
@@ -202,12 +408,29 @@ def _evaluate(finding: dict, platform: str, vrt_category: str, weakness: str) ->
         missing.append("weakness")
     if not impact:
         missing.append("attacker-impact statement")
-    if not has_proof:
-        missing.append("proof (poc_request+poc_response, poc_code, or evidence_ref)")
+    if not durable_evidence["has_durable_proof"]:
+        missing.append("indexed, present evidence artifact")
+
+    workflow_status = _nonempty(finding.get("workflow_status")).lower()
+    verification_state = _nonempty(finding.get("verification_state")).lower()
+    verification_disposition = _nonempty(finding.get("verification_disposition")).lower()
+    if workflow_status not in _REPORTABLE_STATUSES:
+        missing.append(f"workflow_status report candidate (got {workflow_status or 'unset'!r})")
+    if verification_state != "verified":
+        missing.append(f"verification_state=verified (got {verification_state or 'unset'!r})")
+    if verification_disposition not in {"confirmed", "downgraded"}:
+        missing.append(
+            "verification_disposition=confirmed|downgraded "
+            f"(got {verification_disposition or 'unset'!r})"
+        )
 
     return {
         "title": title,
         "severity": severity,
+        "summary": summary,
+        "steps": steps,
+        "evidence": evidence,
+        "remediation": remediation,
         "cvss_vector": cvss_vector,
         "cvss_score": cvss_score,
         "impact": impact,
@@ -216,7 +439,9 @@ def _evaluate(finding: dict, platform: str, vrt_category: str, weakness: str) ->
         "poc_pair": poc_pair,
         "poc_code": poc_code,
         "evidence_ref": evidence_ref,
-        "has_proof": has_proof,
+        "has_content_proof": has_content_proof,
+        "has_durable_proof": durable_evidence["has_durable_proof"],
+        "durable_evidence": durable_evidence,
         "missing": missing,
     }
 
@@ -227,7 +452,7 @@ def _linked_command_runs(client, slug: str) -> list[dict]:
     Sources command runs strictly from ``finding-links`` rows whose
     ``target_kind == "command_run"`` for this finding, then fetches each linked
     run for its command string. There is deliberately NO fuzzy
-    ``command-runs?q=`` search here (plan decision 4): the report-writer agent
+    ``command-runs?q=`` search here: the report-writer agent
     runs the targeted ``list-command-runs`` search itself and links the exact
     reproducing run; this command only surfaces what was explicitly linked.
 
@@ -239,7 +464,7 @@ def _linked_command_runs(client, slug: str) -> list[dict]:
     try:
         links = client.get("finding-links")
     except AssessError as exc:
-        print(f"WARN export-submission: could not load finding-links: {exc}", file=sys.stderr)
+        print(f"WARN export submission: could not load finding-links: {exc}", file=sys.stderr)
         return []
     if not isinstance(links, list):
         return []
@@ -271,7 +496,7 @@ def _linked_command_runs(client, slug: str) -> list[dict]:
         try:
             row = client.get(f"command-runs/{run_id}")
         except AssessError as exc:
-            print(f"WARN export-submission: command-run {run_id} unavailable: {exc}", file=sys.stderr)
+            print(f"WARN export submission: command-run {run_id} unavailable: {exc}", file=sys.stderr)
             continue
         if isinstance(row, dict) and _nonempty(row.get("command")):
             runs.append(row)
@@ -283,7 +508,7 @@ def _section(title: str, body: list[str]) -> list[str]:
     return [f"### {title}", "", *body, ""]
 
 
-def _evidence_body(finding: dict, draft: bool) -> list[str]:
+def _evidence_body(evidence_text: str, draft: bool) -> list[str]:
     """The Evidence section renders ONLY the finding's authored ``details.evidence``.
 
     The structured proof (``poc_*`` / ``evidence_ref``) and the linked command runs
@@ -291,10 +516,9 @@ def _evidence_body(finding: dict, draft: bool) -> list[str]:
     section below the second divider, which the report-writer masks and weaves into
     this authored prose. Draft mode marks an absent evidence body with
     ``[NEEDS: evidence]``; final mode leaves it empty, because ``details.evidence``
-    is authored prose, not a strict-gate proof field (the gate presence-checks the
-    structured proof instead).
+    is authored prose; the final export gate requires it, while the separate
+    durable-proof gate requires a current indexed artifact.
     """
-    evidence_text = _nonempty(detail_value(finding, "evidence", ""))
     if evidence_text:
         return [evidence_text]
     if draft:
@@ -434,7 +658,12 @@ def _operator_details_block(
         lines += proof_lines
     elif draft:
         lines += [
-            "[NEEDS: proof — a reproducing request/response, PoC code, or evidence reference]",
+            "[NEEDS: proof content — a reproducing request/response or PoC code]",
+            "",
+        ]
+    if draft and not resolved["has_durable_proof"]:
+        lines += [
+            "[NEEDS: indexed, present evidence artifact inside this engagement]",
             "",
         ]
 
@@ -572,16 +801,15 @@ def _render_markdown(
     lines += ["---", ""]
 
     # --- stable body sections (### headers) ---------------------------------
-    summary = _nonempty(finding.get("summary"))
-    lines += _section("Summary", [summary or "[NEEDS: summary]"])
+    lines += _section("Summary", [resolved["summary"] or "[NEEDS: summary]"])
 
-    steps = string_list(detail_value(finding, "steps_to_reproduce", []))
-    step_body = [f"{i}. {strip_step_enumerator(step)}" for i, step in enumerate(steps, 1)] or [
-        "[NEEDS: steps to reproduce]"
-    ]
+    step_body = [
+        f"{i}. {strip_step_enumerator(step)}"
+        for i, step in enumerate(resolved["steps"], 1)
+    ] or ["[NEEDS: steps to reproduce]"]
     lines += _section("Steps to Reproduce", step_body)
 
-    lines += _section("Evidence", _evidence_body(finding, draft))
+    lines += _section("Evidence", _evidence_body(resolved["evidence"], draft))
 
     attack_scenario = _nonempty(detail_value(finding, "attack_scenario", ""))
     if attack_scenario:
@@ -589,8 +817,7 @@ def _render_markdown(
 
     lines += _section("Impact", [_needs(resolved["impact"], "attacker-impact statement")])
 
-    remediation = _nonempty(finding.get("remediation")) or _nonempty(detail_value(finding, "remediation", ""))
-    lines += _section("Remediation", [remediation or "[NEEDS: remediation]"])
+    lines += _section("Remediation", [resolved["remediation"] or "[NEEDS: remediation]"])
 
     # --- single OPERATOR DETAILS reference section below the second divider --
     # (never pasted; the report-writer authors the body sections FROM it).
@@ -608,6 +835,8 @@ def _build_context(
     linked_runs: list[dict],
     submission_rel: str,
     hygiene_warnings: list[str],
+    readiness_blockers: list[dict],
+    readiness_error: str,
 ) -> dict:
     return {
         "slug": slug,
@@ -618,8 +847,16 @@ def _build_context(
         "proof": {
             "poc_request_and_response": resolved["poc_pair"],
             "poc_code": bool(resolved["poc_code"]),
-            "evidence_ref": bool(resolved["evidence_ref"]),
-            "has_proof": resolved["has_proof"],
+            "has_content_proof": resolved["has_content_proof"],
+            "evidence_ref": resolved["evidence_ref"],
+            "evidence_path": resolved["durable_evidence"]["path"],
+            "evidence_indexed": resolved["durable_evidence"]["indexed"],
+            "evidence_linked": resolved["durable_evidence"]["linked"],
+            "evidence_index_present": resolved["durable_evidence"]["index_present"],
+            "evidence_live_present": resolved["durable_evidence"]["live_present"],
+            "evidence_present": resolved["durable_evidence"]["present"],
+            "has_durable_proof": resolved["has_durable_proof"],
+            "durable_evidence_diagnostic": resolved["durable_evidence"]["reason"],
         },
         "taxonomy": {"vrt_category": resolved["vrt"], "weakness": resolved["weakness"]},
         # Clean REFERENCE for the report-writer to author Evidence from — surfaced
@@ -633,9 +870,36 @@ def _build_context(
             }
             for row in linked_runs
         ],
-        # Advisory only — the report-writer strips these before external submission.
         "hygiene_warnings": hygiene_warnings,
+        "readiness_blockers": readiness_blockers,
+        "readiness_error": readiness_error,
     }
+
+
+def _restore_output(path: Path, previous: bytes | None) -> None:
+    """Undo a final-mode file write after artifact registration fails."""
+    if previous is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.write_bytes(previous)
+
+
+def _restore_outputs(
+    outputs: tuple[tuple[Path, bytes | None], ...],
+) -> list[str]:
+    errors: list[str] = []
+    for path, previous in outputs:
+        try:
+            _restore_output(path, previous)
+        except OSError as exc:
+            errors.append(f"{path}: {exc}")
+    return errors
+
+
+def _rollback_message(errors: list[str]) -> str:
+    if errors:
+        return f"output rollback failed: {'; '.join(errors)}"
+    return "output files were restored"
 
 
 def run(args) -> None:
@@ -659,36 +923,55 @@ def run(args) -> None:
         out_dir = Path(engagement_dir) / "submissions" / slug
     submission_md = out_dir / "submission.md"
     context_json = out_dir / "submission-context.json"
+    submission_rel = _engagement_relative(submission_md.resolve(strict=False), engagement_dir)
+    if not draft and submission_rel is None:
+        raise AssessError(
+            "export submission: final output must be inside the engagement directory "
+            "so it can be registered as a durable artifact"
+        )
 
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         finding = client.get(f"findings/{slug}")
         if not isinstance(finding, dict):
-            raise AssessError(f"export-submission: unexpected response fetching finding {slug!r}")
+            raise AssessError(f"export submission: unexpected response fetching finding {slug!r}")
 
         linked_runs = _linked_command_runs(client, slug)
         internal_ids = _internal_ids(finding, linked_runs)
-        resolved = _evaluate(finding, platform, args.vrt_category, args.weakness)
+        durable_evidence = _durable_evidence(
+            client,
+            finding,
+            engagement_dir,
+            cfg.engagement_key,
+        )
+        readiness_blockers, readiness_error = _target_readiness_blockers(client, slug)
+        resolved = _evaluate(
+            finding,
+            platform,
+            args.vrt_category,
+            args.weakness,
+            durable_evidence,
+        )
+        render_finding = dict(finding)
+        render_finding["evidence_ref"] = resolved["evidence_ref"]
 
-        # Final mode: refuse to write an incomplete submission (plan decision 3).
+        # Final mode refuses to write an incomplete submission.
         # Raised BEFORE any file write or artifact POST — a gated finding leaves
         # no partial artifacts behind.
-        if not draft and resolved["missing"]:
+        if not draft and (resolved["missing"] or readiness_blockers or readiness_error):
+            blockers = [
+                f"{item.get('kind', 'readiness')}: {item.get('detail', '')}".rstrip(": ")
+                for item in readiness_blockers
+            ]
+            diagnostics = [*resolved["missing"], *blockers]
+            if readiness_error:
+                diagnostics.append(readiness_error)
             raise AssessError(
-                f"export-submission: cannot render a FINAL {platform} submission for "
-                f"{slug!r} — missing proof-critical fields: {', '.join(resolved['missing'])}. "
+                f"export submission: cannot render a FINAL {platform} submission for "
+                f"{slug!r} — missing proof-critical fields or readiness requirements: "
+                f"{'; '.join(diagnostics)}. "
                 "Complete the finding or re-run with --draft to write a work-in-progress "
                 "with [NEEDS: ...] markers."
             )
-
-        # Overwrite guard — checked before writing so a stale submission is never
-        # silently replaced.
-        if submission_md.exists() and not args.overwrite:
-            raise AssessError(
-                f"export-submission: {_engagement_relative(submission_md, engagement_dir) or submission_md} "
-                "already exists; pass --overwrite to replace it."
-            )
-
-        submission_rel = _engagement_relative(submission_md, engagement_dir)
 
         # FAITHFUL render — no content rewriting. Internal identifiers are flagged
         # (not stripped) so the report-writer removes them deliberately. Render
@@ -698,22 +981,66 @@ def run(args) -> None:
         # literal), so scanning a render that already contains them would flag the
         # advisory text as if it were a fresh leak.
         scan_markdown = _render_markdown(
-            finding, resolved, platform, linked_runs, draft, [], required_headers
+            render_finding, resolved, platform, linked_runs, draft, [], required_headers
         )
         hygiene_warnings = _hygiene_warnings(
             scan_markdown, slug, internal_ids, engagement_dir, resolved["title"]
         )
+        if not draft and hygiene_warnings:
+            raise AssessError(
+                f"export submission: cannot render a FINAL {platform} submission for {slug!r} "
+                f"while hygiene warnings remain: {'; '.join(hygiene_warnings)}. "
+                "Fix the finding content or use --draft for a diagnostic render."
+            )
+
+        # Check only after all final-mode gates so a blocked render never leaves
+        # a partial output or obscures its actionable diagnostics.
+        if submission_md.exists() and not args.overwrite:
+            raise AssessError(
+                f"export submission: {submission_rel or submission_md} "
+                "already exists; pass --overwrite to replace it."
+            )
+
         markdown = _render_markdown(
-            finding, resolved, platform, linked_runs, draft, hygiene_warnings, required_headers
+            render_finding,
+            resolved,
+            platform,
+            linked_runs,
+            draft,
+            hygiene_warnings,
+            required_headers,
         )
         context = _build_context(
-            slug, platform, draft, resolved, linked_runs, submission_rel or str(submission_md), hygiene_warnings
+            slug,
+            platform,
+            draft,
+            resolved,
+            linked_runs,
+            submission_rel or str(submission_md),
+            hygiene_warnings,
+            readiness_blockers,
+            readiness_error,
         )
         context_text = json.dumps(context, indent=2, ensure_ascii=False)
 
-        out_dir.mkdir(parents=True, exist_ok=True)
-        submission_md.write_text(markdown, encoding="utf-8")
-        context_json.write_text(context_text + "\n", encoding="utf-8")
+        previous_submission = submission_md.read_bytes() if submission_md.exists() else None
+        previous_context = context_json.read_bytes() if context_json.exists() else None
+        prior_outputs = (
+            (submission_md, previous_submission),
+            (context_json, previous_context),
+        )
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            submission_md.write_text(markdown, encoding="utf-8")
+            context_json.write_text(context_text + "\n", encoding="utf-8")
+        except OSError as exc:
+            if not draft:
+                rollback_errors = _restore_outputs(prior_outputs)
+                raise AssessError(
+                    "export submission: final output write failed; "
+                    f"{_rollback_message(rollback_errors)}: {exc}"
+                ) from exc
+            raise
 
         # Register the submission as a finding-linked artifact. NEVER include
         # submission_status: create lands 'none', and omitting the field on any
@@ -736,18 +1063,32 @@ def run(args) -> None:
                 )
                 artifact_registered = True
             except AssessError as exc:
-                print(f"WARN export-submission: artifact registration failed: {exc}", file=sys.stderr)
+                if not draft:
+                    rollback_errors = _restore_outputs(prior_outputs)
+                    raise AssessError(
+                        "export submission: final artifact registration failed; "
+                        f"{_rollback_message(rollback_errors)}: {exc}"
+                    ) from exc
+                print(f"WARN export submission: artifact registration failed: {exc}", file=sys.stderr)
         else:
             print(
-                "WARN export-submission: output is outside the engagement dir; "
+                "WARN export submission: output is outside the engagement dir; "
                 "skipping artifact registration.",
                 file=sys.stderr,
             )
 
-    # Internal-identifier hygiene is advisory, never fatal: it is the report-writer's
-    # job to strip these before the operator submits externally.
+    # Drafts surface unresolved hygiene/readiness work; finals have already
+    # failed closed above and therefore reach this point clean.
     for warning in hygiene_warnings:
-        print(f"WARN export-submission: {warning}", file=sys.stderr)
+        print(f"WARN export submission: {warning}", file=sys.stderr)
+    for blocker in readiness_blockers:
+        print(
+            "WARN export submission: target readiness blocker: "
+            f"{blocker.get('kind', 'readiness')}: {blocker.get('detail', '')}",
+            file=sys.stderr,
+        )
+    if readiness_error:
+        print(f"WARN export submission: {readiness_error}", file=sys.stderr)
 
     display_path = submission_rel or str(submission_md)
     if args.as_json:
@@ -757,10 +1098,13 @@ def run(args) -> None:
             "mode": "draft" if draft else "final",
             "path": display_path,
             "missing": resolved["missing"],
-            "has_proof": resolved["has_proof"],
+            "has_content_proof": resolved["has_content_proof"],
+            "has_durable_proof": resolved["has_durable_proof"],
             "linked_command_runs": len(linked_runs),
             "artifact_registered": artifact_registered,
             "hygiene_warnings": hygiene_warnings,
+            "readiness_blockers": readiness_blockers,
+            "readiness_error": readiness_error,
         }
         print(json.dumps(summary, indent=2, ensure_ascii=False))
     else:

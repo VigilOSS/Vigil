@@ -77,9 +77,9 @@ source.
 ### Suspicious universal 200s and soft errors
 
 Trigger when many unrelated paths return the same status, size, title, or body
-shape. Browser mode should capture title, visible text, body hash, redirect
-chain, and random-path baselines so the agent does not treat a soft error page
-as a valid endpoint.
+shape. Compare the browser's final URL, status, title, and DOM artifact with a
+random-path HTTP baseline (including its body hash) so the agent does not treat
+a soft error page as a valid endpoint.
 
 ### Client-side navigation and redirects
 
@@ -92,8 +92,10 @@ response.
 
 Trigger when useful attack surface is produced by `fetch`, XHR, WebSocket,
 Server-Sent Events, GraphQL clients, gRPC-web, service workers, or background
-workers. The evidence should identify initiator type, frame URL, request method,
-URL, status, content type, and response size/hash.
+workers. The typed runner records resource type, method, URL, and response
+status. When content type or response size/hash is material, add the
+metadata-only HAR or bounded body capture and derive those fields from the
+artifact.
 
 ### Browser-enforced security semantics
 
@@ -120,8 +122,8 @@ small and record it as part of the evidence.
 ### Default: audited headless Chromium path
 
 For repeatable LLM-driven evidence, prefer an audited headless Chromium path
-that emits bounded structured artifacts. In this repo today the available
-first-class path is Katana headless. The full crawl doctrine lives in
+that emits bounded structured artifacts. Use Katana headless for broad
+JS-aware crawling; its full crawl doctrine lives in
 `agent/references/tools/recon/katana.md`.
 
 ```bash
@@ -137,26 +139,37 @@ checking `vigil assess kali katana --help` and `katana -h` in the runtime. For
 example, newer Katana builds expose a system-Chrome option; only pass it when
 the installed version supports it.
 
-### Best LLM harness: Playwright plus system Chromium
+### Precise observation: typed Playwright runner
 
-The best target shape for future Vigil automation is a typed browser-observation
-verb backed by Playwright and system Chromium. Playwright is better for LLMs
-than an interactive browser because it can emit deterministic, bounded JSON:
+`vigil assess kali browser` is the typed Playwright/system-Chromium path for
+deterministic, bounded browser evidence. It can capture:
 
-- navigation chain and final URL;
-- request list filtered to same-site plus explicit third-party allowlist;
-- XHR/fetch/WebSocket/SSE classification;
-- response status, content type, content length, and body hash;
-- title, visible text sample, link/form/button inventory;
-- console errors and security-policy violations;
-- screenshot path and optional trace/HAR path;
-- service-worker/cache/storage metadata with secrets redacted.
+- final URL, HTTP status, title, and DOM length;
+- a bounded request/response event list with method, URL, resource type,
+  response status, and header names;
+- in-scope route candidates plus explicit records of blocked out-of-scope
+  requests and origins where required attribution was omitted;
+- bounded console and page-error events;
+- screenshot, DOM, and optional metadata-only HAR artifacts;
+- optional bounded document/XHR/fetch body artifacts.
 
-Until that typed verb exists, do not claim it ran. Use Katana headless for crawl
-coverage. For an authenticated/defended-login flow where you must drive a real
-browser to hold a session, use the headed stealth Playwright skeleton in
-`agent/skills/browser-automation/SKILL.md` (host node) or ask the operator for a
-scoped one-off audited Playwright script through `vigil assess kali exec`.
+```bash
+vigil assess kali browser https://target.example \
+  --wait-selector '#app' \
+  --screenshot scans/browser/target.png \
+  --dom-out scans/browser/target.html \
+  --har-out scans/browser/target.har \
+  --technique DISCOVERY --intent "capture SPA routes and browser-only requests" \
+  --probe-kind fingerprint --phase collect --timeout 180
+```
+
+Use `--steps-file` for at most 50 typed navigate/click/fill/wait/assert/eval
+steps. Use `--identity` with an engagement-relative `--storage-state` artifact
+for an approved authenticated flow; the command fails rather than silently
+running anonymously when the identity cannot be applied. Enable bounded
+document/XHR/fetch body capture only when needed with `--capture-bodies`,
+`--body-dir`, and `--max-body-bytes`. Check
+`vigil assess kali browser --help` before constructing a run.
 
 ### Adjacent tools
 
@@ -164,9 +177,8 @@ scoped one-off audited Playwright script through `vigil assess kali exec`.
   baseline. It does not execute JavaScript, maintain DOM state, or prove a
   browser-enforced outcome, so treat it as a baseline check rather than browser
   evidence.
-- `LinkFinder` belongs to static JavaScript route extraction and the
-  `gau js-endpoints` pipeline. It complements browser mode by finding route
-  strings before runtime execution.
+- `vigil assess gau js-endpoints` owns static JavaScript route extraction. It
+  complements browser mode by finding route strings before runtime execution.
 - `jwt_tool` and SAML toolkits belong to `jwt-testing` and `saml-sso-testing`.
   Browser mode may capture tokens or redirects, but protocol manipulation is
   owned by the auth skills.
@@ -223,8 +235,9 @@ Every browser-mode handoff should include:
 - `soft_error_baseline`: random-path status/title/body-hash comparison when
   universal 200s or soft 404s are suspected;
 - `coverage_gaps`: challenge pages, out-of-scope third-party loads, permissions,
-  headless/headed mismatch, or missing browser runner.
+  headless/headed mismatch, or an unavailable browser runtime.
 
 The useful output is the delta. A screenshot alone is not evidence; pair it with
-request/response metadata, body hashes, and the interaction sequence that caused
-the browser to reach the state.
+the runner's request/response metadata, relevant baseline or captured-body
+hashes, and the typed interaction sequence that caused the browser to reach the
+state.

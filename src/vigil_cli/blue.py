@@ -10,7 +10,7 @@ assessment_dispatches, activity_entries, assessment_artifacts).
 Operator prompt / lifecycle reference: ``agent/operator-core-blue.md`` (canonical
 blue operator core) and the blue section of the repo ``README.md``.
 
-Critical CLI-verb drift handled here (per Unit 7 audit):
+Critical CLI-verb drift handled here:
 
 * ``vigil assess log-entry`` does NOT exist — the real verb is ``vigil assess log``.
 * ``vigil assess finding verify --disposition`` accepts CLI vocab
@@ -424,8 +424,13 @@ def _run_engage_picker(args: argparse.Namespace, install_root: Path) -> None:
     args.customer = customer
 
     if not (args.platform or "").strip():
-        row = next((r for r in rows if r["customer"] == customer), None)
-        platforms = list(row["platforms"]) if row is not None else sorted(PLATFORM_TO_TENANT_SUFFIX)
+        matching = [r for r in rows if r["customer"] == customer]
+        raw_platforms = matching[0]["platforms"] if matching else None
+        platforms = (
+            list(raw_platforms)
+            if isinstance(raw_platforms, list)
+            else sorted(PLATFORM_TO_TENANT_SUFFIX)
+        )
         if len(platforms) == 1:
             platform = platforms[0]
             print(f"[vigil blue] platform: {platform} (only option)", file=sys.stderr)
@@ -1013,15 +1018,19 @@ def _cmd_verify(args: argparse.Namespace, install_root: Path) -> None:
         if not args.kill_reason or args.kill_check is None:
             raise SystemExit(
                 "verify --disposition false_positive requires both --kill-reason and --kill-check "
-                "(kill-finding contract). Example: --kill-check 5 --kill-reason 'documented benign pattern in tenant ref'"
+                "(finding verify contract). Example: --kill-check 5 "
+                "--kill-reason 'documented benign pattern in tenant ref'"
             )
         details = {
             "disposition": blue_disp,  # preserve blue vocab verbatim for report-writer
             "evidence_refs": evidence_refs,
         }
         assess_args = [
-            "kill-finding",
+            "finding",
+            "verify",
             args.finding_slug,
+            "--disposition",
+            cli_disp,
             "--reason",
             args.reason,
             "--kill-reason",
@@ -1544,8 +1553,8 @@ def _cmd_tenant_init(args: argparse.Namespace, install_root: Path) -> None:
     if not template.is_file():
         raise SystemExit(
             f"Tenant template not found at {template}. "
-            "Plan unit 12 owns the template content; create it (or copy from "
-            "agent/references/tenants/acme-corp-workspace.md as a starting point) before retrying."
+            "Restore the matching agent/references/tenants/_template-<platform>.md "
+            "file before retrying."
         )
     if dest.exists() and not args.force:
         raise SystemExit(f"Tenant ref already exists at {dest}. Pass --force to overwrite.")

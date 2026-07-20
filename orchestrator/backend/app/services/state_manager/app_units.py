@@ -1,4 +1,4 @@
-"""Wave 6a — app-unit prefix discovery + depth scorer (depth-gate §5.2).
+"""App-unit prefix discovery and depth scoring.
 
 An **app unit** is an APPLICATION boundary keyed ``(host, port-class,
 path-prefix)`` — a finer, orthogonal grain to a network service
@@ -9,10 +9,10 @@ campaign?* It produces a gated ``structure × risk − suppressors`` score, a
 ``deep_required`` boolean, a sample-size ``confidence``, and per-signal
 ``evidence_json`` source counts.
 
-DOCTRINE (master plan §0, depth-gate §5.2 "Calibration"):
+INVARIANTS:
   * **WARN-FIRST.** This is a stored, transparent, advisory signal. It does NOT
-    hard-block anything (the terminal block is a later wave). Nothing here
-    raises to refuse a transition.
+    hard-block anything. Terminal enforcement is owned by the separate depth
+    backstop; nothing here raises to refuse a transition.
   * **WEB-ONLY.** ``score_application_units`` no-ops for code/blue engagements
     (they carry no request_variants anyway, but we guard explicitly so an
     app unit is never persisted for a non-web track).
@@ -23,11 +23,9 @@ DOCTRINE (master plan §0, depth-gate §5.2 "Calibration"):
     ZERO request_variants scores as UNDER-OBSERVED (low confidence, WARN),
     never a ``thin`` auto-pass.
 
-CALIBRATION-PENDING: the §5.2 weights/thresholds encoded below are a starting
-rubric. They must be tuned against a real finished engagement's backend DB
-(master plan §6 "Scorer calibration data") before app-unit *detection* is ever
-allowed to hard-block. Treat every numeric constant here as calibrated, not
-sacred.
+The weights and thresholds below are a transparent heuristic rubric. Re-evaluate
+them against finished-engagement data before changing them; treat every numeric
+constant as calibrated, not sacred.
 """
 from __future__ import annotations
 

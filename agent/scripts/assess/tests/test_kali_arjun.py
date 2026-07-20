@@ -1,4 +1,4 @@
-"""Wave-0: ``kali arjun`` pre-creates the ``-oJ`` parent directory BEFORE the run.
+"""``kali arjun`` pre-creates the ``-oJ`` parent directory before the run.
 
 Arjun writes its ``-oJ`` output during the run but does not create parent
 directories itself, so a first run against a novel target (whose

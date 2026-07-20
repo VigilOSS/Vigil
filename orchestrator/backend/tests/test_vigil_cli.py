@@ -1670,6 +1670,37 @@ def test_mitmproxy_docker_start_builds_and_mounts_engagements_root(tmp_path: Pat
     assert "engagements_root=/engagements" in run_command
 
 
+def test_mitmproxy_start_rebuilds_existing_stale_image(tmp_path: Path) -> None:
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.mitmproxy import MitmproxyOptions, start_proxy
+
+    install_root = tmp_path / "install"
+    engagements_root = install_root / "agent" / "engagements"
+    engagements_root.mkdir(parents=True)
+    _make_mitmproxy_inputs(install_root)
+    commands: list[list[str]] = []
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        commands.append(argv)
+        if argv[:4] == ["docker", "image", "inspect", "-f"]:
+            return DockerResult(0, "2001-01-01T00:00:00Z\n", "")
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:existing\n", "")
+        return DockerResult(0, "", "")
+
+    start_proxy(
+        MitmproxyOptions(
+            install_root=install_root,
+            engagements_root=engagements_root,
+        ),
+        runner=runner,
+        verify_port=False,
+        verify_running=False,
+    )
+
+    assert any(command[:3] == ["docker", "build", "-t"] for command in commands)
+
+
 def test_mitmproxy_start_uses_install_orchestrator_url_not_engagement_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1698,6 +1729,8 @@ def test_mitmproxy_start_uses_install_orchestrator_url_not_engagement_override(
 
     def runner(argv: list[str], **_: object) -> DockerResult:
         commands.append(argv)
+        if argv[:4] == ["docker", "image", "inspect", "-f"]:
+            return DockerResult(0, "2030-01-01T00:00:00Z\n", "")
         if argv[:3] == ["docker", "image", "inspect"]:
             return DockerResult(0, "sha256:image\n", "")
         if argv[:3] == ["docker", "ps", "-q"]:
@@ -1731,6 +1764,8 @@ def test_mitmproxy_start_polls_port_until_ready(tmp_path: Path, monkeypatch: pyt
     )
 
     def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:4] == ["docker", "image", "inspect", "-f"]:
+            return DockerResult(0, "2030-01-01T00:00:00Z\n", "")
         if argv[:3] == ["docker", "image", "inspect"]:
             return DockerResult(0, "sha256:image\n", "")
         if argv[:3] == ["docker", "ps", "-q"]:
@@ -3921,6 +3956,36 @@ def test_mitmproxy_build_rebuilds_when_inputs_newer_than_image(
     assert "image built" in out
 
 
+def test_mitmproxy_build_rebuilds_when_assess_package_is_newer(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import mitmproxy as mitmproxy_module
+    from vigil_cli.docker import DockerResult
+
+    install_root = tmp_path / "install"
+    dockerfile, addon = _make_mitmproxy_inputs(install_root)
+    old = 1_000_000_000
+    os.utime(dockerfile, (old, old))
+    os.utime(addon, (old, old))
+    helper = install_root / "agent" / "scripts" / "assess" / "lib" / "scope.py"
+    helper.parent.mkdir(parents=True)
+    helper.write_text("# current helper\n", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        commands.append(argv)
+        if argv[:4] == ["docker", "image", "inspect", "-f"]:
+            return DockerResult(0, "2010-01-01T00:00:00Z\n", "")
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        return DockerResult(0, "", "")
+
+    mitmproxy_module.build_image(install_root, runner=runner)
+
+    assert any(command[:3] == ["docker", "build", "-t"] for command in commands)
+    assert "image built" in capsys.readouterr().out
+
+
 def test_mitmproxy_build_force_uses_no_cache_even_when_fresh(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -4090,7 +4155,7 @@ def test_doctor_reports_mitmproxy_container_drift(
 
 
 # ---------------------------------------------------------------------------
-# Wave 3 W3-B mutation-helper coverage
+# Mutation-helper coverage
 # ---------------------------------------------------------------------------
 
 
@@ -5544,6 +5609,52 @@ def test_blue_verify_force_bypasses_missing_verifier_dispatch(
     )
 
     assert calls[0][:5] == ["finding", "verify", "FIND-001", "--disposition", "confirmed"]
+
+
+def test_blue_verify_false_positive_uses_canonical_finding_verify(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli import blue as blue_module
+
+    eng_dir = tmp_path / "engagement"
+    _write_blue_scope(eng_dir)
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
+    monkeypatch.setattr(blue_module, "_has_verifier_dispatch_for", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        blue_module,
+        "_run_assess",
+        lambda _install_root, _eng_dir, assess_args, **_kwargs: calls.append(assess_args) or 0,
+    )
+
+    blue_module._cmd_verify(
+        SimpleNamespace(
+            finding_slug="FIND-001",
+            disposition="false_positive",
+            reason="tenant evidence proves the alert benign",
+            kill_check=5,
+            kill_reason="documented benign tenant pattern",
+            evidence_refs="artifact-1,artifact-2",
+            new_severity=None,
+            force=False,
+            engagement_key=None,
+            select=False,
+        ),
+        tmp_path,
+    )
+
+    assert calls[0][:7] == [
+        "finding",
+        "verify",
+        "FIND-001",
+        "--disposition",
+        "false_positive",
+        "--reason",
+        "tenant evidence proves the alert benign",
+    ]
+    assert calls[0][calls[0].index("--kill-reason") + 1] == "documented benign tenant pattern"
+    assert calls[0][calls[0].index("--kill-check") + 1] == "5"
 
 
 @pytest.mark.parametrize(
@@ -8037,7 +8148,7 @@ def _run_dispatch_action(
 ) -> "_FakeWorkBufferClient":
     """Drive ``dispatch.run`` (work-buffer verbs) against the backend fake."""
     module = _load_assess_module(
-        "wave3_dispatch_module",
+        "work_buffer_dispatch_module",
         "agent/scripts/assess/commands/dispatch/__init__.py",
     )
     fake = _FakeWorkBufferClient(rows, fetch_response=fetch_response)
@@ -8072,7 +8183,7 @@ def _run_list_clusters_action(
     host: str = "",
 ) -> "_FakeWorkBufferClient":
     module = _load_assess_module(
-        "wave3_list_clusters_module",
+        "work_buffer_list_clusters_module",
         "agent/scripts/assess/commands/list_clusters.py",
     )
     fake = _FakeWorkBufferClient(rows)
@@ -8300,7 +8411,7 @@ def test_supersede_intel_requires_natural_key_before_request(
     """Supersede inserts a replacement row; metadata-only edits must fail
     client-side and tell the operator to include the natural key."""
     supersede_module = _load_assess_module(
-        "wave3_supersede_intel_module",
+        "supersede_intel_module",
         "agent/scripts/assess/commands/supersede_intel.py",
     )
 

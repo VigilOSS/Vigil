@@ -872,8 +872,8 @@ def _create_assessment_entity_tables(connection: sqlite3.Connection) -> None:
                 normalized_path TEXT NOT NULL,
                 path_template TEXT NOT NULL DEFAULT '',
                 canonical_url TEXT NOT NULL DEFAULT '',
-                -- Wave 5 / 2c scorer-fact audit (CONCLUSION — no new column):
-                -- the Wave-6 app-unit scorer's "static-asset" suppressor is
+                -- Scorer-fact audit (CONCLUSION — no new column):
+                -- the app-unit scorer's "static-asset" suppressor is
                 -- DERIVABLE from existing columns and needs NO new
                 -- raw_payload/observation fact. A variant is static-asset when
                 -- content_type_family is an asset family (image/font/style/
@@ -971,7 +971,7 @@ def _create_assessment_entity_tables(connection: sqlite3.Connection) -> None:
                 probe_key TEXT NOT NULL,
                 tool_name TEXT NOT NULL,
                 agent_name TEXT NOT NULL DEFAULT '',
-                -- result_status vocabulary (Wave-2 foundation for Wave 5).
+                -- result_status vocabulary.
                 -- Column stays TEXT (forward-compatible: a new status can be
                 -- added to PROBE_RESULT_STATUSES without a destructive
                 -- migration). The 'tested' default is a well-formed outcome
@@ -985,7 +985,7 @@ def _create_assessment_entity_tables(connection: sqlite3.Connection) -> None:
                 signal_type TEXT NOT NULL DEFAULT '',
                 evidence_ref TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
-                -- Target anchor (Wave 5 / S6). A raw/list-mode probe with a
+                -- Target anchor. A raw/list-mode probe with a
                 -- null request_variant_id still carries the host it tested, so
                 -- it can be mapped to an app unit and its probe_key no longer
                 -- collides with other null-FK probes (these columns are part of
@@ -1026,7 +1026,7 @@ def _create_assessment_entity_tables(connection: sqlite3.Connection) -> None:
         connection.execute(
             "ALTER TABLE assessment_probe_runs ADD COLUMN target_port INTEGER"
         )
-    # lens (Wave 5 / S6): free-text mindset the probe ran under, part of
+    # lens: free-text mindset the probe ran under, part of
     # _probe_key so a different lens does not collide on UNIQUE(probe_key).
     # Additive, NOT NULL DEFAULT '' so legacy rows read back as the empty lens.
     if probe_columns and "lens" not in probe_columns:
@@ -1317,8 +1317,7 @@ def _create_assessment_finding_tables(connection: sqlite3.Connection) -> None:
                 status TEXT NOT NULL DEFAULT 'discovered',
                 notes TEXT NOT NULL DEFAULT '',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
-                -- Named identity this credential is replayable AS (depth-gate
-                -- Wave 4 / identity). Links a stored credential to the
+                -- Named identity this credential is replayable AS. Links a stored credential to the
                 -- credential-store identity (user_a/user_b/admin) so "which identity ran which
                 -- probe" is recordable and cross-identity access-control depth
                 -- is real. Additive + free-text; empty when no identity is set.
@@ -1555,7 +1554,7 @@ def _create_command_runs_table_and_fts(connection: sqlite3.Connection) -> None:
         connection.execute(
             "ALTER TABLE assessment_command_runs ADD COLUMN destructive INTEGER"
         )
-    # Wave-1 cutover migrations: pre-exec lifecycle, output spill paths,
+    # Command-run cutover migrations: pre-exec lifecycle, output spill paths,
     # resource snapshot, scope/auth context, dedup linkage, and the
     # agent-supplied timeout. All NULL/safe-default so legacy rows
     # continue to validate.
@@ -2131,8 +2130,8 @@ def _create_http_flow_tables(connection: sqlite3.Connection) -> None:
     # engagement_id) rather than a column on engagements, so the row survives
     # the filesystem→DB engagement identity re-sync that rewrites engagement
     # columns, and mirrors the engagement_credentials per-engagement typed-state
-    # pattern. Raw-body capture is OFF by default (enabled DEFAULT 0) per plan
-    # item 1 so restarting the shared proxy never silently starts capturing.
+    # pattern. Full-flow metadata recording and both body sides are OFF by
+    # default, so restarting the shared proxy never silently expands capture.
     connection.execute(
         """
             CREATE TABLE IF NOT EXISTS assessment_capture_policy (

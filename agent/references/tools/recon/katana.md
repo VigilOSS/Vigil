@@ -236,7 +236,7 @@ Do not apologize for an incomplete crawl. Make a deterministic decision:
   out-of-scope navigation, or headless runner missing.
 
 When escalating, name the next action: deeper Katana, headless Katana,
-browser-semantic analysis, source-analysis/LinkFinder, or a targeted fuzzer pass.
+browser-semantic analysis, the supported JS-source extraction pipeline, or a targeted fuzzer pass.
 
 ## Ingestion
 
@@ -259,9 +259,8 @@ vigil assess ingest candidates \
 
 ## Adjacent Tools
 
-- `LinkFinder` complements Katana by extracting routes from saved JavaScript
-  bundles. Prefer `vigil assess gau js-endpoints` for corpus-scale JS body
-  extraction; use direct LinkFinder only for a narrow source-analysis dispatch.
+- `vigil assess gau js-endpoints` complements Katana by extracting routes from
+  saved JavaScript bundles with the supported corpus-scale pipeline.
 - `curl_chrome116`, when present, is a browser-like HTTP baseline for edge/TLS/UA
   ambiguity. It does not execute JavaScript or prove browser-enforced behavior.
 - `aem-hacker` is conditional AEM tooling. Use it only after fingerprints point

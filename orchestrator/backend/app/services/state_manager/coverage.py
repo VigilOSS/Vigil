@@ -2075,8 +2075,8 @@ def coverage_readiness(engagement_id: int) -> dict[str, Any]:
     engagement_type-gated. The CODE track has no surfaces, so ``list_surfaces``
     returns ``[]`` and every bucket below is empty → ``ready=True`` trivially.
     The return SHAPE is load-bearing (``report_readiness`` relays ``ready`` /
-    ``blocker_count`` and the surface buckets); keys are preserved. Wave-2
-    softening (L1-2/L1-9/L1-10) only changes WHICH surfaces count toward
+    ``blocker_count`` and the surface buckets); keys are preserved. Advisory
+    handling only changes WHICH surfaces count toward
     ``blocker_count`` and adds advisory buckets — it never changes the shape.
     """
     surfaces = list_surfaces(engagement_id, limit=None)

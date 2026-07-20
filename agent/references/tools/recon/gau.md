@@ -7,7 +7,7 @@ skill: gau-triage
 
 **Purpose:** Fetch known URLs from multiple archive sources (Wayback Machine, AlienVault OTX, Common Crawl, URLScan).
 
-**Recommended verb:** `vigil assess gau endpoints` for the standard collection-and-ingest flow (cache-aware, runs gau and seats URLs into `work_items` in one shot). For body-fetch + secret extraction use `vigil assess gau secrets`. For LinkFinder-style extraction over JS bundles use `vigil assess gau js-endpoints`. Drop down to the typed `vigil assess kali gau` verb only for ad-hoc archive sweeps that do not need to feed the work buffer.
+**Recommended verb:** `vigil assess gau endpoints` for the standard collection-and-ingest flow (cache-aware, runs gau and seats URLs into `work_items` in one shot). For body-fetch + secret extraction use `vigil assess gau secrets`. For route extraction over JS bundles use `vigil assess gau js-endpoints`. Drop down to the typed `vigil assess kali gau` verb only for ad-hoc archive sweeps that do not need to feed the work buffer.
 
 ## Basic Usage
 

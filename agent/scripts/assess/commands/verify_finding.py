@@ -15,7 +15,7 @@ from assess.lib.json_inputs import parse_json_argument, parse_optional_inline_js
 def register(subparsers) -> None:
     p = subparsers.add_parser(
         "verify",
-        help="Verify a finding with a JSON payload file, inline JSON, or explicit flags",
+        help="Verify findings with explicit flags or a final transition payload file",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=render_contract_epilog("finding verify"),
     )
@@ -25,12 +25,15 @@ def register(subparsers) -> None:
         help="One or more canonical finding slugs to verify. Batch: every listed slug receives the "
              "SAME disposition/payload/flags (resilient loop with a per-slug failure tally).",
     )
-    p.add_argument("--inline", dest="inline_payload", help="Raw JSON verification payload")
+    p.add_argument(
+        "--inline",
+        dest="legacy_inline_payload",
+        help=argparse.SUPPRESS,
+    )
     p.add_argument(
         "--payload-file",
         dest="payload_file",
-        help="Path to a JSON verification payload file (replaces the removed trailing positional "
-             "payload arg; use --inline for raw JSON).",
+        help="Path to a final JSON verification-transition payload",
     )
     p.add_argument(
         "--disposition",
@@ -44,10 +47,10 @@ def register(subparsers) -> None:
         ),
     )
     p.add_argument("--reason", dest="reason_text", help="Required verification rationale when building payload from flags")
-    p.add_argument("--reason-code", default="", help="Optional machine-readable reason code")
+    p.add_argument("--reason-code", help="Optional machine-readable reason code")
     p.add_argument("--new-severity", help="Required for downgraded verification")
-    p.add_argument("--evidence-ref", default="", help="Optional evidence reference")
-    p.add_argument("--artifact-ref", default="", help="Optional artifact reference")
+    p.add_argument("--evidence-ref", help="Optional evidence reference")
+    p.add_argument("--artifact-ref", help="Optional artifact reference")
     p.add_argument(
         "--narrative",
         default="",
@@ -57,8 +60,8 @@ def register(subparsers) -> None:
             "kind=verification-narrative artifact linked to this finding."
         ),
     )
-    p.add_argument("--notes", default="", help="Optional verification notes")
-    p.add_argument("--source-name", default="", help="Optional source/agent name")
+    p.add_argument("--notes", help="Optional verification notes")
+    p.add_argument("--source-name", help="Optional source/agent name")
     p.add_argument("--details-inline", help="Inline JSON object merged into the details payload")
     p.add_argument("--provenance-inline", help="Inline JSON object for provenance metadata")
     p.add_argument("--kill-reason", help="False-positive kill reason; stored as details.kill_reason")
@@ -68,6 +71,21 @@ def register(subparsers) -> None:
 
 _KNOWN_DISPOSITIONS = frozenset({"confirmed", "downgraded", "pending_runtime_proof", "blocked", "false_positive", "disputed"})
 
+_CONTENT_FLAGS = (
+    ("disposition", "--disposition"),
+    ("reason_text", "--reason"),
+    ("reason_code", "--reason-code"),
+    ("new_severity", "--new-severity"),
+    ("evidence_ref", "--evidence-ref"),
+    ("artifact_ref", "--artifact-ref"),
+    ("notes", "--notes"),
+    ("source_name", "--source-name"),
+    ("details_inline", "--details-inline"),
+    ("provenance_inline", "--provenance-inline"),
+    ("kill_reason", "--kill-reason"),
+    ("kill_check", "--kill-check"),
+)
+
 
 def _looks_like_payload(token: str) -> bool:
     """True when a positional token looks like a JSON payload rather than a slug."""
@@ -75,7 +93,27 @@ def _looks_like_payload(token: str) -> bool:
     return bool(t) and (t.startswith(("{", "[")) or t.endswith(".json") or Path(t).is_file())
 
 
+def _provided_content_flags(args) -> list[str]:
+    provided = []
+    for attr, flag in _CONTENT_FLAGS:
+        value = getattr(args, attr, None)
+        if value is not None and value is not False:
+            provided.append(flag)
+    return provided
+
+
 def run(args) -> None:
+    legacy_inline = getattr(args, "legacy_inline_payload", None)
+    if legacy_inline is None:
+        legacy_inline = getattr(args, "inline_payload", None)
+    if legacy_inline is not None:
+        print(
+            "finding verify: --inline was removed; use --disposition/--reason and related "
+            "explicit flags, or --payload-file <path> for a final transition payload.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     slugs = args.finding_slug if isinstance(args.finding_slug, list) else [args.finding_slug]
     # The trailing positional payload arg was removed (it collided with a variadic
     # slug list). Catch a legacy JSON blob / disposition passed positionally and
@@ -93,25 +131,35 @@ def run(args) -> None:
         if _looks_like_payload(t):
             print(
                 f"'{t}' looks like a JSON payload, not a finding slug. The positional payload arg "
-                f"was removed — pass the JSON via --inline '<json>' or --payload-file <path>, and "
-                f"list only finding slugs positionally.",
+                "was removed — use --payload-file <path>, and list only finding slugs "
+                "positionally.",
                 file=sys.stderr,
             )
             sys.exit(1)
 
-    inline_payload = getattr(args, "inline_payload", None)
     payload_file = getattr(args, "payload_file", None)
-    if inline_payload is not None:
-        raw_payload, raw_inline = inline_payload, True
-    elif payload_file:
-        raw_payload, raw_inline = payload_file, False
-    else:
-        raw_payload, raw_inline = None, False
+    if payload_file is not None:
+        if not str(payload_file).strip():
+            print("finding verify: --payload-file must not be empty", file=sys.stderr)
+            sys.exit(1)
+        provided_flags = _provided_content_flags(args)
+        if provided_flags:
+            print(
+                "finding verify: --payload-file cannot be combined with request-content flags "
+                f"({', '.join(provided_flags)}); put the complete transition in the file or use "
+                "explicit verification flags. --narrative may be used with either form.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    raw_payload = payload_file
     if raw_payload is not None:
+        if not Path(raw_payload).is_file():
+            print(f"verification payload file not found: {raw_payload}", file=sys.stderr)
+            sys.exit(1)
         try:
             payload, _ = parse_json_argument(
                 raw_payload,
-                inline=raw_inline,
+                inline=False,
                 description="verification payload",
             )
         except ValueError as exc:
@@ -120,7 +168,7 @@ def run(args) -> None:
     else:
         if not args.disposition or not args.reason_text:
             print(
-                "finding verify requires a payload file, --inline JSON, or both --disposition and --reason",
+                "finding verify requires --payload-file or both --disposition and --reason",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -160,6 +208,7 @@ def run(args) -> None:
             "details": details,
             "provenance": provenance,
         }
+        payload = {key: value for key, value in payload.items() if value is not None}
 
     if not isinstance(payload, dict):
         print("verification payload must be a JSON object", file=sys.stderr)
@@ -217,7 +266,7 @@ def run(args) -> None:
                     result["narrative_artifact"] = client.post("artifacts", narrative_payload)
             except Exception as exc:  # noqa: BLE001 - one bad slug must not drop the rest
                 failed += 1
-                print(f"verify-finding: {slug} failed: {exc}", file=sys.stderr)
+                print(f"finding verify: {slug} failed: {exc}", file=sys.stderr)
                 continue
             results.append(result)
 

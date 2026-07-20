@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import docker
-from .backup import latest_backup
+from .backup import latest_backup, live_database
 from .image_freshness import proxy_image_drift
 from .config import get_config_value
 from .engagements import list_engagements
@@ -200,7 +200,12 @@ def install_staleness(
     return result
 
 
-def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_command) -> dict[str, object]:
+def collect_status(
+    install_root: Path,
+    *,
+    runner: docker.Runner = docker.run_command,
+    write_check: bool = False,
+) -> dict[str, object]:
     install_root = install_root.expanduser().resolve()
     rows = list_engagements(install_root)
     # C36: surface legacy engagement_type=both engagements that predate
@@ -258,6 +263,11 @@ def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_com
         # Install-staleness guard (I-5): warn when the working root has fallen
         # behind the source it was installed from. Resolution is offline/cheap.
         "install_staleness": install_staleness(install_root),
+        "database_write_check": (
+            database_write_check(install_root)
+            if write_check
+            else {"status": "not_requested", "database": None, "detail": ""}
+        ),
     }
 
 
@@ -307,6 +317,11 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
         f"\tdomain={oob.get('domain') or '-'}"
     )
     print(f"backup\t{backup['latest'] or '-'}")  # type: ignore[index]
+    write_check = status.get("database_write_check")
+    if isinstance(write_check, dict) and write_check.get("status") != "not_requested":
+        detail = str(write_check.get("detail") or "")
+        suffix = f"\t{detail}" if detail else ""
+        print(f"database-write\t{write_check.get('status', 'storage_error')}{suffix}")
     legacy_keys = status.get("legacy_both_missing_code_phase") or []
     if isinstance(legacy_keys, list) and legacy_keys:
         preview = ", ".join(legacy_keys[:3]) + (" ..." if len(legacy_keys) > 3 else "")
@@ -470,6 +485,84 @@ def _database_check(path: Path) -> Check:
     except sqlite3.Error as exc:
         return Check("orchestrator-db", "FAIL", str(exc))
     return Check("orchestrator-db", "OK", str(path))
+
+
+def database_write_check(
+    install_root: Path,
+    *,
+    timeout_seconds: float = 0.25,
+) -> dict[str, object]:
+    """Prove the existing main SQLite database is writable, then roll back.
+
+    ``mode=rw`` prevents a typo or missing installation from creating a new,
+    empty database. The schema write is deliberately stronger than a temporary
+    table or ``SELECT`` probe: it exercises the same main database that durable
+    assessment state uses. SQLite transactional DDL lets the table and its row
+    disappear in the same rollback.
+    """
+    path = live_database(install_root).expanduser().resolve()
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(
+            f"{path.as_uri()}?mode=rw",
+            uri=True,
+            timeout=timeout_seconds,
+            isolation_level=None,
+        )
+        connection.execute("BEGIN IMMEDIATE")
+        collision = connection.execute(
+            "SELECT 1 FROM main.sqlite_master WHERE type = 'table' "
+            "AND name = '_vigil_status_write_probe'"
+        ).fetchone()
+        if collision is not None:
+            connection.rollback()
+            return {
+                "status": "storage_error",
+                "database": str(path),
+                "detail": "reserved probe table already exists",
+            }
+        connection.execute(
+            "CREATE TABLE main._vigil_status_write_probe "
+            "(marker INTEGER NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO main._vigil_status_write_probe (marker) VALUES (1)"
+        )
+        connection.rollback()
+        leftover = connection.execute(
+            "SELECT 1 FROM main.sqlite_master WHERE type = 'table' "
+            "AND name = '_vigil_status_write_probe'"
+        ).fetchone()
+        if leftover is not None:
+            return {
+                "status": "storage_error",
+                "database": str(path),
+                "detail": "probe rollback left schema residue",
+            }
+        return {"status": "ok", "database": str(path), "detail": "write rolled back"}
+    except sqlite3.Error as exc:
+        if connection is not None and connection.in_transaction:
+            connection.rollback()
+        return {
+            "status": _database_write_error_status(exc),
+            "database": str(path),
+            "detail": str(exc),
+        }
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _database_write_error_status(exc: sqlite3.Error) -> str:
+    raw_code = getattr(exc, "sqlite_errorcode", None)
+    primary_code = raw_code & 0xFF if isinstance(raw_code, int) else None
+    if primary_code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+        return "busy"
+    if primary_code == sqlite3.SQLITE_READONLY:
+        return "read_only"
+    if primary_code == sqlite3.SQLITE_CANTOPEN:
+        return "missing_or_unopenable"
+    return "storage_error"
 
 
 def _orchestrator_readyz_snapshot(install_root: Path) -> tuple[bool, dict[str, object]]:

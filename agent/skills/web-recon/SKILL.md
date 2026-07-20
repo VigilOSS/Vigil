@@ -458,7 +458,7 @@ secret extraction — the source-analysis skill has the methodology depth for th
 The supervised `vigil assess recon` pipeline runs a bounded automated pass over the
 crawled `.js` assets after the crawl: `vigil assess js-mining` fetches the bundles
 (carrying the program attribution header + per-host rate cap), extracts endpoints
-with jsluice (AST) + the LinkFinder regex, runs a trufflehog secret scan, and
+with jsluice (AST) plus the shipped route patterns, runs a trufflehog secret scan, and
 ingests the recovered routes as `js-extract`. Assess its output (endpoint count,
 any leaked secrets) as part of the recon-completeness verdict; it complements — does
 not replace — the source-analyzer deep pass.

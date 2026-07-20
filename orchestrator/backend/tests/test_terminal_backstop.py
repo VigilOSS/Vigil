@@ -1,5 +1,4 @@
-"""Wave 7 — THE single terminal backstop (S17 resolution; master plan §1A,
-depth-gate §5.3).
+"""Tests for the single terminal depth backstop.
 
 This is the ONE hard block in the whole system. ``terminal_depth_block`` returns
 the units that BLOCK the terminal ``report``/``complete`` edge on the WEB track:

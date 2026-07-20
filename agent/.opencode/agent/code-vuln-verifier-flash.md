@@ -125,7 +125,7 @@ five-check protocol above establishes bug-**existence**; before recording `confi
 - **Author the result into the finding's `details`, not just assert it clears the bar:** the
   report-ready `evidence` (exact taint path + guard-failure proof), `impact` (the one-sentence
   attacker outcome), a justified `cvss_vector`/`cvss_score` recomputed against the C5 checks, and
-  `remediation`, via `vigil assess finding update <slug> --inline '{"details": {...}}'` — so the
+  `remediation`, via `vigil assess finding update <slug> --details-inline '{...}'` — so the
   report phase formats the story rather than re-authoring it.
 
 Do this before the closing verbs run — `finding verify` (including a `false_positive` kill via

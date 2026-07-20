@@ -1,4 +1,4 @@
-"""Wave-0 read-path fixes:
+"""Probe-run read-path regressions:
 
 - D1: ``GET /probe-runs`` gained optional exact-match filters
   (attack_family/target_host/target_path/auth_context/result_status). Previously

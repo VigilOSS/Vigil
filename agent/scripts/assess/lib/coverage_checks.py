@@ -1,8 +1,8 @@
 """Reusable coverage / readiness checks shared by ``check-phase-readiness``.
 
-Wave 6d (command consolidation, depth-gate §6) folded three standalone CLI
-commands into the one phase-aware ``check-phase-readiness`` command. To lose
-NOTHING in that consolidation, the reusable bodies of the deleted commands live
+Command consolidation folded three standalone CLI commands into the one
+phase-aware ``check-phase-readiness`` command. To preserve their behavior, the
+reusable bodies of the deleted commands live
 here as importable helpers:
 
   * ``check-coverage``        → :func:`render_surface_coverage` (surface-

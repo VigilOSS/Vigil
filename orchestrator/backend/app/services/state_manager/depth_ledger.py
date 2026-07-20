@@ -1,15 +1,15 @@
-"""Wave 6c — the depth ledger (depth-gate §5.3).
+"""Application-unit depth ledger.
 
-For every ``deep_required`` app unit (Wave 6a, ``app_units.py``) this module
+For every ``deep_required`` app unit from ``app_units.py``, this module
 computes the EXPECTED vuln-class set (each class gated by an EXECUTABLE
 applicability predicate over the unit's durable signals), the COVERED set, the
 DEDICATED-DISPATCH obligation, a per-unit ``depth_satisfied`` verdict, and an
 EV rank. It is the executable form of the depth-gate §5.3 predicate table.
 
-DOCTRINE (master plan §0, depth-gate §5.3):
+INVARIANTS:
   * **ADVISORY + EV-RANKED, NEVER A HARD BLOCK.** Mid-engagement this ledger
     only reports; it MUST NOT refuse a transition or exit non-zero. The single
-    terminal block is a LATER wave. Nothing here raises to gate.
+    terminal backstop is a separate projection. Nothing here raises to gate.
   * **NEVER count a self-attested-without-evidence signal.** A failed/blocked/
     empty probe, an evidence-free "covered" coverage_item, or a dispatch merely
     flagged ``status="completed"`` does NOT satisfy a class (S5/S7).
@@ -816,7 +816,7 @@ def _dispatch_classes(dispatch: dict[str, Any]) -> set[str]:
     """Resolve a dispatch to canonical FAMILIES via STRUCTURED metadata only.
 
     ``vuln_classes`` (comma-list) if present, ELSE the declared ``skills``
-    resolved to classes via the Wave 1 taxonomy skill->class index. NEVER the
+    resolved to classes via the canonical taxonomy skill-to-class index. NEVER the
     free-text ``task`` column (S7).
     """
     families: set[str] = set()

@@ -344,7 +344,7 @@ def test_dispatch_requested_actual_fields_post_get_list(client, isolate_settings
 
 
 def test_dispatch_structured_depth_metadata_round_trips(client, isolate_settings) -> None:
-    """Wave 6b — scope_path_prefix / vuln_classes / identity persist + read back.
+    """scope_path_prefix / vuln_classes / identity persist and read back.
 
     These are the structured signals the depth ledger matches dispatches on
     (depth-gate §5.3); they must round-trip through POST -> GET one -> list.

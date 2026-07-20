@@ -22,7 +22,7 @@ SOURCE_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 # Special cases:
 #   - `check` (or `render-check`) with NO --type runs BOTH red and blue
 #     checks. Blue is skipped (with stderr warning) if any of its required
-#     specialist source files are missing (e.g. Unit 6 not yet run).
+#     specialist source files are missing.
 #   - `repo --type blue` against the agent/ SOURCE_DIR refuses to overwrite
 #     agent/AGENTS.md (which is the canonical red rendering checked into the
 #     repo). Blue is rendered per-engagement only.
@@ -131,8 +131,7 @@ AGENT_NAMES=(
 
 # Blue specialist roster. Note that `operator`, `osint-analyst`, and
 # `report-writer` are shared with red and their source files live under
-# agent/agents/<name>.md exactly as before. The other four are blue-only and
-# are created by Unit 6 of the Blue Team Engagement plan.
+# agent/agents/<name>.md exactly as before. The other four are blue-only.
 BLUE_AGENT_NAMES=(
   operator
   alert-triage-specialist
@@ -699,7 +698,7 @@ render_all_wrappers() {
 }
 
 # Return 0 if all blue specialist sources exist on disk, 1 otherwise. Used by
-# render-check to skip the blue check gracefully before Unit 6 has run.
+# render-check to skip the blue check gracefully when a source is unavailable.
 # Note: `operator` is rendered from a hardcoded template inside
 # render_claude_wrapper/render_codex_wrapper, so it does not need a source
 # file under agent/agents/.
@@ -855,7 +854,7 @@ check_render() {
   if [[ "$TYPE_EXPLICIT" -eq 1 ]]; then
     if [[ "$TYPE" == "blue" ]]; then
       if ! blue_sources_ready; then
-        echo "render-check (blue): SKIPPED — blue specialist source files not yet present (Unit 6 not yet run)." >&2
+        echo "render-check (blue): SKIPPED — required blue specialist source files are missing." >&2
         return 0
       fi
       check_render_one blue || any_failed=1
@@ -869,7 +868,7 @@ check_render() {
     if blue_sources_ready; then
       check_render_one blue || any_failed=1
     else
-      echo "render-check (blue): SKIPPED — blue specialist source files not yet present (Unit 6 not yet run)." >&2
+      echo "render-check (blue): SKIPPED — required blue specialist source files are missing." >&2
     fi
   fi
   if [[ "$any_failed" -ne 0 ]]; then
@@ -895,7 +894,6 @@ case "$MODE" in
     fi
     if [[ "$TYPE" == "blue" ]] && ! blue_sources_ready; then
       echo "Cannot render blue: required source files missing under agent/." >&2
-      echo "Unit 6 of the Blue Team Engagement plan has not yet run." >&2
       exit 1
     fi
     if [[ "$SOURCE_TREE_BLUE" -eq 1 ]]; then

@@ -335,9 +335,22 @@ def _resolve_agent_name(
 
 
 def _resolve_engagement_dir(explicit: Path | None, cfg: Config) -> Path:
+    configured = Path(cfg.engagement_dir).resolve()
+    configured_key = str(cfg.engagement_key or "").strip()
+    if configured_key != configured.name:
+        raise AssessError(
+            f"config engagement key {configured_key!r} conflicts with configured "
+            f"directory basename {configured.name!r}"
+        )
     if explicit is not None:
-        return Path(explicit).resolve()
-    return Path(cfg.engagement_dir).resolve()
+        selected = Path(explicit).resolve()
+        if selected != configured:
+            raise AssessError(
+                f"explicit engagement directory {selected} conflicts with resolved "
+                f"config {configured}"
+            )
+        return selected
+    return configured
 
 
 def _post_pre_exec_row(

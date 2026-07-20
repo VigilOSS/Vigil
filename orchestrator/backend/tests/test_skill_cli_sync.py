@@ -50,7 +50,7 @@ Implementation notes:
   or a trailing ``-`` (e.g. the glob ``vigil assess record-*``) are prose,
   not literal invocations, and are skipped.
 - The corpus deliberately excludes historical/backlog/work-product files
-  (CHANGELOG, TODOv2, engagement analysis state): those name verbs that were
+  (the changelog, retired planning notes, engagement analysis state): those name verbs that were
   renamed or never shipped, and linting them would be drift in the wrong
   direction. See ``_doc_files``.
 """
@@ -305,7 +305,7 @@ def test_registries_are_non_trivial(assess_registries, oob_registries):
     oob_verbs = oob_registries["oob"]
     oob_client_verbs = oob_registries["oob_client"]
     # Anchor on a few stable verbs that must always exist. `finding` is the
-    # Tier-3 subcommand group parent (record/verify/... are its actions).
+    # Grouped subcommand parent (record/verify/... are its actions).
     assert {
         "finding",
         "kali",
@@ -414,7 +414,7 @@ def test_documented_oob_verbs_exist(oob_registries, doc_files):
 # deliberate one-line decision (document it, or allowlist it) for every future
 # verb. Removing a verb from the CLI without removing its allowlist entry is
 # caught by ``test_known_undocumented_allowlist_has_no_stale_entries``.
-# Tier-3 cosmetic namespacing folded the former top-level `export-surfaces` and
+# Grouped namespacing folded the former top-level `export-surfaces` and
 # `supersede-intel` verbs under subcommand-group parents (`export surfaces`,
 # `intel supersede`), so they are no longer top-level assess verbs and no longer
 # belong on this top-level allowlist. The subverb doc debt is carried by the
@@ -563,7 +563,7 @@ def test_known_undocumented_allowlist_has_no_stale_entries(assess_registries, oo
 #                           (advanced provenance knobs, undocumented by design).
 #   scaffold-probe       — omits --purpose/--no-register (advanced).
 _EXPECTED_FLAGS = {
-    # Tier-3: `verify-finding` is now the `verify` action under the `finding`
+    # `verify-finding` is now the `verify` action under the `finding`
     # subcommand group; the flag set is unchanged (pure re-parent).
     "finding verify": {
         "--disposition",
@@ -572,7 +572,7 @@ _EXPECTED_FLAGS = {
         "--evidence-ref",
         "--new-severity",
         "--kill-check",
-        "--inline",
+        "--payload-file",
     },
     "scaffold-probe": {
         "--finding",
@@ -596,7 +596,7 @@ def test_expected_flags_are_registered(assess_registries):
     top = assess_registries["_top_parsers"]
     missing: list[str] = []
     for verb, flags in _EXPECTED_FLAGS.items():
-        # A verb may be a Tier-3 two-token group action (e.g. `finding verify`);
+        # A verb may be a two-token group action (e.g. `finding verify`);
         # walk the parent subparser chain to reach the leaf action parser.
         parts = verb.split()
         parser = top.get(parts[0])

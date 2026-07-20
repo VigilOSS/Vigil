@@ -203,6 +203,11 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("doctor")
     status_p = sub.add_parser("status")
     status_p.add_argument("--json", action="store_true")
+    status_p.add_argument(
+        "--write-check",
+        action="store_true",
+        help="Attempt a short main-database write transaction and roll it back.",
+    )
     up_p = sub.add_parser("up", help="Build stale images and start the local runtime stack")
     # Legacy shims — the proxy now serves every active engagement, so the
     # selector is a no-op. Kept for back-compat with operator scripts that
@@ -233,7 +238,10 @@ def main(argv: list[str] | None = None) -> None:
 
     use_p = sub.add_parser(
         "use",
-        help="Set the active engagement (persisted; honoured by `vigil` verbs and `vigil assess`).",
+        help=(
+            "Set the persisted engagement for global services and non-assess `vigil` verbs; "
+            "`vigil assess` binds to its launched session, CWD, or explicit flag."
+        ),
     )
     use_p.add_argument("key", nargs="?", help="Engagement key to activate")
     use_p.add_argument("--select", action="store_true", help="Pick the engagement interactively")
@@ -987,7 +995,21 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "doctor":
         print_doctor(collect_doctor_checks(install_root, runner=docker_run_command))
     elif args.command == "status":
-        print_status(collect_status(install_root, runner=docker_run_command), json_output=args.json)
+        status = collect_status(
+            install_root,
+            runner=docker_run_command,
+            write_check=args.write_check,
+        )
+        print_status(status, json_output=args.json)
+        write_result = status.get("database_write_check")
+        if (
+            args.write_check
+            and (
+                not isinstance(write_result, dict)
+                or write_result.get("status") != "ok"
+            )
+        ):
+            raise SystemExit(1)
     elif args.command == "quickstart":
         exit_code = run_quickstart(
             QuickstartOptions(
@@ -1138,8 +1160,9 @@ def _use(args: argparse.Namespace, install_root: Path) -> None:
     """Set (or clear) the persisted active-engagement pointer.
 
     Writes both ~/.config/vigil/config.json:active_engagement_dir and the
-    <engagements_root>/.active mirror. Ranked BELOW cwd walk-up in the resolver,
-    so it is a durable default, never an override of where you actually are.
+    <engagements_root>/.active mirror. This is the durable selector for global
+    services and non-assess commands; assessment state has a session-local
+    resolver so concurrent clients cannot retarget each other.
     """
     if getattr(args, "clear", False):
         clear_active_engagement(install_root)

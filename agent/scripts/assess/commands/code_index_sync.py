@@ -191,7 +191,7 @@ def run(args) -> None:
     if not manifest_path:
         eng_dir = args.engagement_dir or cfg.engagement_dir
         if not eng_dir:
-            print("Cannot determine engagement directory. Use --engagement-dir or set ENGAGEMENT_DIR.",
+            print("Cannot determine engagement directory. Use --engagement-dir or a Vigil launcher session.",
                   file=sys.stderr)
             sys.exit(1)
         manifest_path = str(Path(eng_dir) / "tools" / "analysis-state" / "structural-index-manifest.json")

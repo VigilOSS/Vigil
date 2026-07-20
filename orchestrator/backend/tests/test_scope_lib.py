@@ -1,10 +1,9 @@
 """Regression tests for ``agent/scripts/assess/lib/scope.py`` admission rules.
 
-Wave 1 (unchoke the hot path) fixes three silent-drop bugs in scope parsing.
-The doctrine is "no silent drops": a scope entry the operator authored must
+These regressions cover three formerly silent-drop bugs in scope parsing. The
+doctrine is "no silent drops": a scope entry the operator authored must
 either be admitted or WARN — never vanish. Each test below feeds an input that
-was *previously dropped* and asserts it is now admitted (or warned), per the
-master plan's "verify a choke fix is real" guidance.
+was *previously dropped* and asserts it is now admitted (or warned).
 
 Loaded in-process via importlib so the suite stays hermetic (no FastAPI).
 """

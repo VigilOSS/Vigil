@@ -644,7 +644,7 @@ def run(args) -> None:
     _apply_arg_defaults(args)
     cfg = load_config(args.engagement_dir)
     # `--engagement-dir` defaults to None; load_config resolves the real dir (cwd
-    # scope.json or $ENGAGEMENT_DIR). Write it back so post-config reads/stages —
+    # scope.json or launcher session binding). Write it back so post-config reads/stages —
     # rate caps, host-route required-header injection, scope filtering — see the
     # resolved path instead of None (which would raise in rate_caps_for_dir).
     args.engagement_dir = cfg.engagement_dir

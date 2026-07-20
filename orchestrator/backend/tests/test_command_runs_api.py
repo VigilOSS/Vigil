@@ -1032,7 +1032,7 @@ def test_command_metadata_intent_is_trimmed_to_400_chars(client, isolate_setting
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Wave-1 cutover fields: status lifecycle, output spill paths, dedup,
+# Command-run cutover fields: status lifecycle, output spill paths, dedup,
 # resource snapshot, scope/auth context, finalize PATCH, phase requirement
 # ──────────────────────────────────────────────────────────────────────────
 

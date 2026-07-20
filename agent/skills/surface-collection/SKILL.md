@@ -131,7 +131,7 @@ sidecar meta keyed by target so reuse decisions stay per-host.
 - `vigil assess gau secrets TARGET_DOMAIN` — body capture + trufflehog secret scan.
   Defaults to `--no-verification`; pass `--verify` to enable trufflehog's verification.
 - `vigil assess gau js-endpoints TARGET_DOMAIN --fetch-if-missing` — extract endpoints
-  hidden in minified JS bundles (LinkFinder-derived regex) and ingest them as
+  hidden in minified JS bundles (shipped route patterns) and ingest them as
   `source='js-extract'`. Catches admin/internal routes that exist only in JS code
   paths — a class of endpoint live crawls and HTML-only inspection consistently miss.
 

@@ -36,6 +36,14 @@ If code beyond the provided file batch is needed, use ctags + grep + Read to fin
 Full filesystem access is always available. Never guess at the behavior of code you have
 not read. Never request operator-mediated expansion when you can resolve it with a file read.
 
+### Structural-index resolution
+
+Resolve a file index through `tools/analysis-state/structural-index-manifest.json`:
+select `repos.<repo_key>.manifest_path`, open that per-repo manifest, then resolve the
+repo-relative file path through `path_to_index`. Read that referenced JSON; do not guess
+hashed filenames or scan for a basename collision. Phase 0 owns the generated layout, while
+this is the canonical consumer lookup rule for every code specialist.
+
 ---
 
 ## 3. Full Filesystem Access
@@ -272,8 +280,8 @@ Only improvise after confirming the reference set is genuinely insufficient for 
 
 ## 9. Script Path Convention
 
-The base convention (`vigil assess <subcommand>` from any directory, JSON payloads in files not
-inline shell arguments, `ENGAGEMENT_DIR`/`--engagement-dir` for path resolution) is in
+The base convention (`vigil assess <subcommand>` from any directory, full-record versus bounded
+nested JSON input, artifact paths, and assessment binding) is in
 `agent/shared-specialist-core.md` "Script Path Convention". This section adds only the
 code-specific quoting and banner rules below.
 

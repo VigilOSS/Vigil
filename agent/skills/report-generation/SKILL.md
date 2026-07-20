@@ -54,7 +54,7 @@ The `finding report --json` helper returns grouped report findings. Root and sib
 - `remediation`, `steps_to_reproduce`, `cwe_id`, `owasp_category` — extracted from `details_json`
 - `impact`, `evidence_detail` — extracted from `details_json`
 
-> **Read vs write asymmetry.** The backend stores finding metadata in a column literally named `details_json` (a JSON string) — that's why the `finding report` projection above references `details_json` as a source. When you **write** via `vigil assess finding update --inline`, the accepted shape is `{"details": {...}}` (a dict under the `details` key). The asymmetry is intentional: the API decodes/encodes the JSON column behind the field name `details` on writes, leaving `details_json` as the raw storage name on reads. If a prompt or recipe says to pass `details_json` to `finding update`, that's drift — flag it.
+> **Read vs write asymmetry.** The backend stores finding metadata in a column literally named `details_json` (a JSON string) — that's why the `finding report` projection above references `details_json` as a source. When you **write** via `vigil assess finding update --details-inline`, pass the details object directly as `{...}`. A payload file instead uses `{"details": {...}}`. The asymmetry is intentional: the API decodes/encodes the JSON column behind the field name `details` on writes, leaving `details_json` as the raw storage name on reads. If a prompt or recipe says to pass `details_json` to `finding update`, that's drift — flag it.
 - top-level `groups` and `standalone`; each group has a `root` finding and `siblings`
 
 Sibling rows include
@@ -154,9 +154,11 @@ stays in `scans/` (or `tools/` for code/fuzz) and is referenced, never rendered.
    (`steps_to_reproduce`, `evidence`, `attack_scenario`, `impact`, `remediation`) — the field name
    is `details`, not `details_json` (see "Read vs write asymmetry" above) — without touching
    `cvss_vector`, `vrt_category`, or `poc_*`. The authored `details.evidence` is what renders as the
-   Evidence section; it does NOT by itself satisfy the strict gate's proof requirement (step 6) — the
-   finding must ALSO carry `evidence_ref` (raw file under `scans/`, set with `--evidence-ref
-   scans/<file>` if absent), `poc_request`+`poc_response`, or `poc_code`. If nothing resolves a
+   Evidence section; it does NOT by itself satisfy the strict gate's durable-proof requirement
+   (step 6). The finding must carry `evidence_ref` pointing inside the engagement to an indexed,
+   present artifact (normally a raw file under `scans/`, set with `--evidence-ref scans/<file>`
+   after registering it). `poc_request`+`poc_response` and `poc_code` remain useful content but do
+   not replace that durable artifact. If nothing resolves a
    marker, the finding is not ready — do not submit around it.
 4. **QA pass.** Re-render from the finding (`export submission <slug> --platform <same> --draft
    --overwrite`), then run the "Post-Generation Self-Review" checks below (Rule-based: banned
@@ -173,14 +175,12 @@ stays in `scans/` (or `tools/` for code/fuzz) and is referenced, never rendered.
    vigil assess agent decision --kind blind_triage_verdict --payload-json \
      '{"finding_slug":"<slug>","verdict":"<Accept@P1..P5|Need-More-Info|Not-Applicable|Out-of-Scope|Duplicate>","claimed_severity":"<sev>","weak_points":"..."}'
    ```
-6. **Publish.** Re-run `export submission <slug> --platform <same platform> --overwrite` without
-   `--draft` once the strict final gate is satisfiable: title; severity + CVSS vector; platform
-   taxonomy (VRT category for Bugcrowd / weakness for HackerOne — omitted for `direct`); an
-   attacker-impact statement; and ≥1 concrete proof (`poc_request` **and** `poc_response`, OR
-   `poc_code`, OR a non-empty `evidence_ref`). This reproduces the authored content from the finding
-   and exits non-zero if any of the gate fields is missing — resolve the gap at the finding, do not
-   bypass it. Final mode registers the rendered `submission.md` as a finding-linked artifact
-   (`kind="submission"`) and **never sets `submission_status`** — it omits the field entirely, so
+6. **Publish.** Read `vigil assess contract export submission`, then re-run `export submission
+   <slug> --platform <same platform> --overwrite` without `--draft` once its executable final gate
+   is satisfiable. This reproduces the authored content from the finding and exits non-zero before
+   writing if a gate fails — resolve the gap at the finding, do not bypass it. Final output must be
+   inside the engagement, and registering `submission.md` as a finding-linked `kind="submission"`
+   artifact must succeed. The export **never sets `submission_status`** — it omits the field, so
    `create` lands `none` and `upsert` preserves whatever is already there. Set `submission_status`
    explicitly, per "Submission Status Lifecycle" below, only once the finding is actually delivered
    to its audience.
@@ -188,15 +188,13 @@ stays in `scans/` (or `tools/` for code/fuzz) and is referenced, never rendered.
    `workflow_status=reported` for each finding once its submission is delivered. This lifecycle
    transition is independent of `submission_status` and independent of program response.
 
-**Internal-ID hygiene (advisory, not automatic).** `export submission` is FAITHFUL — it never
-rewrites the finding's content, so a target-application UUID, a filename, or a path in a PoC reaches
-you verbatim (a blanket scrub used to redact the very identifier a PoC proves). Instead it FLAGS any
+**Internal-ID hygiene (draft diagnostic; final gate).** `export submission` preserves authored
+finding content (while normalizing a valid evidence pointer to engagement-relative form), so a
+target-application UUID or filename in a PoC reaches you verbatim. Instead it FLAGS any
 internal identifier that leaked — engagement / finding / `producer_agent_id` UUIDs, absolute
 `$ENGAGEMENT_DIR` paths, `cases.db` references — as `hygiene_warnings` in `submission-context.json`
-and on stderr. The finding slug is kept out of the body by design. Strip every flagged identifier
-while editing `submission.md` (the pre-submission checklist's "internal identifiers" items enforce
-this) — a draft is an internal working copy, but the outward-facing copy the operator pastes must be
-clean.
+and on stderr in draft mode; final mode refuses to write while any remain. The finding slug is kept
+out of the body by design. Fix every warning at the finding source and re-render.
 
 ## Report Structure (Legacy Internal Report — On-Demand Only)
 
@@ -413,11 +411,11 @@ For each hit, fix the source-of-truth on the finding (NOT in `report.md`):
 ```bash
 vigil assess finding update <slug> \
   --summary "<rewritten summary without stale narrative>" \
-  --inline '{"details": { ... rewritten details ... }}' \
+  --details-inline '{ ... rewritten details ... }' \
   --reason "stale-text scrub before report QA"
 ```
 
-The field name on `finding update --inline` is `details` (dict), not `details_json`. Re-run the scan after the fix to confirm zero hits, then proceed with the consolidated checklist. `QA BLOCKED` if any finding still carries stale text after the fix attempt.
+The field name in a `finding update --payload-file` document is `details` (dict), not `details_json`; `--details-inline` takes that object directly. Re-run the scan after the fix to confirm zero hits, then proceed with the consolidated checklist. `QA BLOCKED` if any finding still carries stale text after the fix attempt.
 
 ## Publish After QA Pass (Legacy Internal Report)
 

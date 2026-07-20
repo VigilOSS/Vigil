@@ -20,12 +20,10 @@ which refreshes the request/response snapshot and FK links on re-ingest and
 preserves operator-tuned rows stamped ``classifier_version='manual'``.
 
 Scope note: when scope.json is loosened, a previously out-of-scope URL is
-re-admitted by ingesting it through the derivation path, which mints a NEW
-``variant:*`` work item — it does NOT flip the old ``skipped:out-of-scope:*``
-row (that row has a different, url-based queue_key). The re-admit CASE in the
-UPSERT below only fires if the SAME skip row is re-posted; the stale skip row is
-otherwise left in place (a known GC follow-up — it is inert, only inflating the
-``stats --by reason`` out-of-scope count).
+re-admitted through the derivation path with a NEW ``variant:*`` queue key. The
+UPSERT atomically removes the superseded URL-keyed ``skipped:out-of-scope:*``
+row before storing that canonical derived item, so work-buffer totals describe
+current work rather than retaining a stale scope decision.
 
 Classification (``type`` / ``priority_score`` / ``cluster_key`` / …) is computed
 CLIENT-SIDE (``assess.lib.classify_buckets``, which globs the agent skills tree
@@ -211,9 +209,10 @@ def _upsert_work_item(connection, engagement_id: int, *, fields: dict[str, Any])
       * always refresh the request/response snapshot + FK links (fixes the
         stale-empty-row hazard of the former ``INSERT OR IGNORE``);
       * refresh classifier scores UNLESS the existing row is ``manual``;
-      * re-admit a ``skipped:out-of-scope`` row only if the SAME skip
-        queue_key is re-posted (see the scope note in the module docstring);
-        otherwise preserve the existing lifecycle status (never reset an
+      * supersede an exact URL-keyed ``skipped:out-of-scope`` row when a
+        request-variant-backed item is admitted, or re-admit it if the SAME skip
+        queue key is reposted;
+      * otherwise preserve the existing lifecycle status (never reset an
         in-flight ``processing``/``done`` row on re-ingest).
     """
     url = str(fields.get("url") or "")
@@ -275,6 +274,25 @@ def _upsert_work_item(connection, engagement_id: int, *, fields: dict[str, Any])
     placeholders = ", ".join("?" for _ in _WORK_ITEM_INSERT_COLUMNS)
     columns = ", ".join(_WORK_ITEM_INSERT_COLUMNS)
     params = tuple(values[col] for col in _WORK_ITEM_INSERT_COLUMNS)
+
+    if values["request_variant_id"] is not None:
+        # Direct out-of-scope rows intentionally have a URL-keyed identity and no
+        # request variant. Once the exact URL is admitted, its derived variant row
+        # is the canonical work item; retain only that row so status/reason counts
+        # do not keep reporting a scope decision that is no longer true. This runs
+        # on the caller's ingest transaction, so a failed derived write rolls the
+        # supersession back with the rest of the observation.
+        connection.execute(
+            """
+            DELETE FROM assessment_work_items
+            WHERE engagement_id = ?
+              AND request_variant_id IS NULL
+              AND status = 'skipped'
+              AND terminal_reason LIKE 'skipped:out-of-scope%'
+              AND url = ?
+            """,
+            (engagement_id, url),
+        )
 
     connection.execute(
         f"""

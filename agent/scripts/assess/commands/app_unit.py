@@ -1,4 +1,4 @@
-"""vigil assess app-unit — inspect and override depth app-units (Wave 6a).
+"""vigil assess app-unit — inspect and override depth app-units.
 
 An "app unit" is an application boundary keyed (host, port-class, path-prefix)
 scored by the depth-gate (§5.2). This command surfaces the stored, advisory

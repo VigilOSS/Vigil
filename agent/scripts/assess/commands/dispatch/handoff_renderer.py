@@ -85,10 +85,14 @@ def _render_handoff(args, extra: list[str]) -> None:
 
         # Handoff payload extraction. JSON columns deserialize to lists/dicts
         # in the state-manager serializer; treat anything else defensively.
-        finding_slugs = handoff.get("finding_slugs") or []
-        if not isinstance(finding_slugs, list):
-            finding_slugs = []
-        finding_slugs = [str(s).strip() for s in finding_slugs if str(s).strip()]
+        handoff_finding_slugs = _normalise_finding_slugs(handoff.get("finding_slugs"))
+        dispatch_finding_slugs = _normalise_finding_slugs(
+            dispatch.get("finding_slugs") if dispatch is not None else None
+        )
+        # The two rows are independently useful audit surfaces. Enrich their
+        # stable union so a slug recorded at dispatch closure is not silently
+        # lost merely because the handoff author omitted it (or vice versa).
+        finding_slugs = list(dict.fromkeys(dispatch_finding_slugs + handoff_finding_slugs))
 
         next_steps = handoff.get("next_steps") or []
         if not isinstance(next_steps, list):
@@ -168,6 +172,8 @@ def _render_handoff(args, extra: list[str]) -> None:
         skills=skills,
         summary=summary,
         confidence=confidence,
+        dispatch_finding_slugs=dispatch_finding_slugs,
+        handoff_finding_slugs=handoff_finding_slugs,
         finding_rows=finding_rows,
         coverage_gaps=coverage_gaps,
         next_steps=next_steps,
@@ -193,6 +199,8 @@ def _render_handoff_blob(
     skills: str,
     summary: str,
     confidence: str,
+    dispatch_finding_slugs: list[str],
+    handoff_finding_slugs: list[str],
     finding_rows: list[dict],
     coverage_gaps: list[dict],
     next_steps: list[dict],
@@ -229,7 +237,11 @@ def _render_handoff_blob(
         head.append("- **Skills loaded:** (not recorded)")
 
     summary_lines = _summary_section(summary, confidence)
-    finding_lines = _findings_section(finding_rows, include_evidence=include_evidence)
+    finding_lines = (
+        _findings_section(finding_rows, include_evidence=include_evidence)
+        if finding_rows
+        else ["  - (none declared in handoff or dispatch)"]
+    )
     coverage_lines = _coverage_gaps_section(coverage_gaps)
     next_steps_lines = _next_steps_section(next_steps)
     open_questions_lines = _open_questions_section(open_questions)
@@ -241,11 +253,15 @@ def _render_handoff_blob(
     def _compose(findings_kept: list[str], findings_dropped: int,
                  artifacts_kept: list[tuple[str, str]],
                  runtime_kept: list[dict], runtime_dropped: int,
-                 artifacts_dropped: int) -> list[str]:
+        artifacts_dropped: int) -> list[str]:
         out: list[str] = []
         out.extend(head)
         out.extend(summary_lines)
-        out.append("- **Findings recorded:**")
+        out.append(
+            "- **Finding declarations:** "
+            f"**Dispatch-declared findings:** {_finding_declaration_value(dispatch_finding_slugs)}; "
+            f"**Handoff-declared findings:** {_finding_declaration_value(handoff_finding_slugs)}"
+        )
         out.extend(findings_kept)
         if findings_dropped > 0:
             out.append(f"  - ... and {findings_dropped} more")
@@ -305,6 +321,23 @@ def _render_handoff_blob(
         artifacts_dropped,
     )
     return "\n".join(composed)
+
+
+def _normalise_finding_slugs(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(slug).strip() for slug in value if str(slug).strip()]
+
+
+def _finding_declaration_value(slugs: list[str]) -> str:
+    """Render a bounded source summary without defeating --max-lines."""
+    if not slugs:
+        return "(none declared)"
+    preview_limit = 8
+    preview = ", ".join(f"`{slug}`" for slug in slugs[:preview_limit])
+    remaining = len(slugs) - preview_limit
+    suffix = f" … and {remaining} more" if remaining > 0 else ""
+    return f"{preview}{suffix}"
 
 
 def _summary_section(summary: str, confidence: str) -> list[str]:
@@ -494,4 +527,3 @@ def _truncate_findings(
             i += 1
         break
     return kept, truncated
-

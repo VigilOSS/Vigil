@@ -13,6 +13,8 @@ import sys
 import uuid
 from urllib.parse import urlsplit
 
+from assess.lib.config import resolve_engagement_dir
+
 
 _SNAPSHOT_FORMAT_VERSION = 1
 _MAP_SUFFIXES = (".js.map", ".css.map")
@@ -277,9 +279,7 @@ def run(args) -> None:
     if args.output_root:
         output_root = Path(args.output_root).expanduser().resolve()
     else:
-        engagement_root = Path(
-            args.engagement_dir or os.environ.get("ENGAGEMENT_DIR", os.getcwd())
-        ).expanduser().resolve()
+        engagement_root = Path(resolve_engagement_dir(args.engagement_dir))
         output_root = (
             engagement_root
             / "tools"

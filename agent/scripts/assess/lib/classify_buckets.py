@@ -1245,8 +1245,7 @@ _INERT_TYPES = INERT_TYPES
 # `_FULL_URL_REGEX_BUCKETS`, the object-ref / api-version / cluster regexes and
 # `_PLACEHOLDER_TOKENS` / `_CLUSTER_PLACEHOLDERS`), the boost-only context tables
 # (`_NONPROD_HOST_LABEL_RE`, `_NONDEFAULT_PORTS`, `_LIVE_STATUS_TOKENS`), the
-# dead-archive demotion tables (`_GAU_ARCHIVE_SOURCE`, `_DEAD_LIVE_STATUS_TOKENS`),
-# the weak-token cap / fragment boundary / camelCase splitter, the SAML-auth
+# weak-token cap / fragment boundary / camelCase splitter, the SAML-auth
 # fragments, the upload-shadow set, AND a hand-maintained `_CLASSIFIER_LOGIC_REVISION`
 # integer that maintainers MUST bump for any `classify_row` LOGIC change not
 # captured by one of those data tables (e.g. an edit to the +15/+5 context
@@ -1304,7 +1303,7 @@ def _canonicalize(obj: Any) -> Any:
 # `_CLASSIFIER_VERSION_INPUTS` and `CLASSIFIER_VERSION` are assembled at the END
 # of this module (see "Classifier version stamp — digest assembly" below): the
 # input set intentionally spans tables/regexes/scalars declared throughout the
-# file (context/demotion tables, weak-token cap, cluster placeholders, ...), so
+# file (context tables, weak-token cap, cluster placeholders, ...), so
 # the dict cannot be built here without forward-referencing names that do not
 # exist yet. `_canonicalize` (above) is the only piece needed at this point.
 
@@ -1398,39 +1397,6 @@ _NONDEFAULT_PORTS: frozenset[str] = frozenset(
 # Live-status tokens that indicate a reachable surface (vs a dead/archive URL).
 _LIVE_STATUS_TOKENS: frozenset[str] = frozenset({"live", "200"})
 
-# Dead-archive demotion (classify-context-and-surface 2026-06, Part 4 "Fix 6";
-# Issue H). The work buffer is dominated by `gau-archive`-sourced URLs, much of
-# which is dead (404/gone) and matched no `gf:*` bucket — pure noise that still
-# competes with live surfaces in priority mode. `_is_dead_archive_noise`
-# identifies exactly that intersection (archive source AND not live AND no
-# bucket) so a STRICTLY OPT-IN demotion can park it. It is symmetric to the type
-# floor but in the demotion direction, so it stays behind a default-OFF flag
-# (`demote_dead_archive`): with the flag off, scoring is byte-identical.
-_GAU_ARCHIVE_SOURCE = "gau-archive"
-# `live_status` values that count as NOT-live for the demotion predicate. A
-# row is demotable only when its liveness is unknown/absent or explicitly dead —
-# never when it is live/200 (those keep their score, and also earn the +5 live
-# context bonus above).
-_DEAD_LIVE_STATUS_TOKENS: frozenset[str] = frozenset({"", "dead", "blackholed"})
-
-
-def _is_dead_archive_noise(source: str | None, live_status: str | None) -> bool:
-    """True when a row is dead `gau-archive` noise eligible for demotion (Fix 6).
-
-    The predicate is the AND of three signals the plan names:
-      * the ingest `source` is exactly ``gau-archive``;
-      * `live_status` is null/dead (absent, ``dead``, or ``blackholed``) — NOT
-        live/200;
-    The caller additionally gates on "matched NO ``gf:*`` bucket" (it only
-    consults this on the bucket-less fallback branch), so this helper does not
-    re-check the bucket condition. Generic: keys off the archive source label and
-    liveness only — no host/product/path literal.
-    """
-    if (source or "").strip().lower() != _GAU_ARCHIVE_SOURCE:
-        return False
-    return str(live_status or "").strip().lower() in _DEAD_LIVE_STATUS_TOKENS
-
-
 def _context_bonus(
     url: str | None = None,
     source: str | None = None,
@@ -1479,7 +1445,6 @@ def classify_row(
     url: str | None = None,
     source: str | None = None,
     live_status: str | None = None,
-    demote_dead_archive: bool = False,
 ) -> dict[str, Any]:
     """Return the per-row assignment dict (always present, never None).
 
@@ -1489,14 +1454,8 @@ def classify_row(
     wins; the path fallback gives operators a coarse grouping when no bucket
     fires.
 
-    `demote_dead_archive` (Fix 6, Issue H) is a STRICTLY OPT-IN, default-OFF
-    flag. When True, a row that reaches the bucket-less `path:*` fallback AND is
-    dead `gau-archive` noise (`_is_dead_archive_noise`) is parked: its score is
-    forced to 0 and a structured `terminal_reason` is stamped with the existing
-    `low-signal-cluster` skip tag (no new terminal vocabulary). It only ever
-    touches the no-bucket / no-floor fallback, so it can never lower a
-    bucket-driven or floor-driven score; with the flag off scoring is
-    byte-identical.
+    Context is boost-only. Bucket-less rows use the ordinary ``path:*`` fallback;
+    source/liveness context never demotes or terminally skips them.
     """
     case_type = (row["type"] or "").lower()
     if case_type in _INERT_TYPES:
@@ -1695,26 +1654,8 @@ def classify_row(
             "secondary_buckets": [],
         }
 
-    # Bucket-less, floor-less, weak-less fallback. This is the ONLY branch the
-    # dead-archive demotion (Fix 6, default-OFF) can touch: by construction no
-    # `gf:*` bucket matched, no type floor fired, AND no weak inner-token matched
-    # here (the weak rescue above returns first), so the "matched NO gf:* bucket"
-    # condition holds. When the opt-in flag is set and the row is dead
-    # `gau-archive` noise, park it at 0 with the existing `low-signal-cluster`
-    # skip tag so the archive tail stops competing with live surfaces in
-    # priority mode. The bonus still applies otherwise (byte-identical when off).
-    if demote_dead_archive and _is_dead_archive_noise(source, live_status):
-        return {
-            "priority_score": 0,
-            "priority_reason": None,
-            "cluster_key": f"path:{normalize_path_for_cluster(url_path)}",
-            "terminal_reason": tagged_terminal_reason(
-                "low-signal-cluster", "gau-archive dead, no gf bucket"
-            ),
-            "matched_buckets": [],
-            "secondary_buckets": [],
-        }
-
+    # Bucket-less, floor-less, weak-less fallback. Context remains boost-only:
+    # no source or liveness value can lower the score or stamp a terminal skip.
     return {
         "priority_score": max(0, 0 + bonus),
         "priority_reason": None,
@@ -2042,7 +1983,6 @@ def classify_from_fields(
     url: str | None = None,
     source: str | None = None,
     live_status: str | None = None,
-    demote_dead_archive: bool = False,
 ) -> dict[str, Any]:
     """Adapter for ingest paths that classify from raw fields (no row yet).
 
@@ -2055,8 +1995,6 @@ def classify_from_fields(
     every pinned arithmetic test) stays byte-identical: with no context the
     `_context_bonus` is 0 and `max(base, base + 0) == base`.
 
-    `demote_dead_archive` (Fix 6) is the optional, default-OFF dead-archive
-    demotion gate, passed straight through to `classify_row`.
     """
     fake_row: dict[str, Any] = {
         "type": case_type,
@@ -2070,7 +2008,6 @@ def classify_from_fields(
         url=url,
         source=source,
         live_status=live_status,
-        demote_dead_archive=demote_dead_archive,
     )
 
 
@@ -2078,8 +2015,8 @@ def classify_from_fields(
 # Classifier version stamp — digest assembly.
 #
 # Assembled here, at the module's end, because a complete `classify_row` digest
-# must reference constants declared throughout the file (the context/demotion
-# tables, `WEAK_TOKEN_CAP`, `_CLUSTER_PLACEHOLDERS`, `_AUTH_SAML_FRAGMENTS`, ...).
+# must reference constants declared throughout the file (the context tables,
+# `WEAK_TOKEN_CAP`, `_CLUSTER_PLACEHOLDERS`, `_AUTH_SAML_FRAGMENTS`, ...).
 # See the "Classifier version stamp" comment near `_canonicalize` for the intent
 # and the determinism contract. Every entry below is a classification-affecting
 # module-level constant; compiled `re.Pattern` values are digested via their
@@ -2125,9 +2062,6 @@ _CLASSIFIER_VERSION_INPUTS: dict[str, Any] = {
     "nonprod_host_label_re": _NONPROD_HOST_LABEL_RE.pattern,
     "nondefault_ports": _NONDEFAULT_PORTS,
     "live_status_tokens": _LIVE_STATUS_TOKENS,
-    # Dead-archive demotion path (`_is_dead_archive_noise`).
-    "gau_archive_source": _GAU_ARCHIVE_SOURCE,
-    "dead_live_status_tokens": _DEAD_LIVE_STATUS_TOKENS,
     # Logic-revision escape hatch (see above).
     "logic_revision": _CLASSIFIER_LOGIC_REVISION,
 }

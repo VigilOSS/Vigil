@@ -138,7 +138,7 @@ def _raise_finding_clobber_conflict(
 # one silently RE-MINTS a finding the other already DISPROVED, with no flag.
 # Guard it with a BROADER match than the exact tuple: same ``defect_family``
 # (technique) AND a shared endpoint/canonical-location signal. Refuse-with-
-# override — the operator either reopens the real prior kill with ``reset-finding``
+# override — the operator either reopens the real prior kill with ``finding update``
 # (the earlier kill was wrong), or forces an intentional distinct re-mint with
 # ``--allow-remint`` / ``--force`` (a genuinely new finding that only coincidentally
 # shares the endpoint + technique). ``merged`` stays out (it is a different concept
@@ -235,8 +235,8 @@ def _raise_killed_remint_conflict(
             f"{killed_location!r}, and this net-new record targets the SAME technique + "
             f"endpoint at {canonical_location!r} under a different location/slug — minting it "
             f"would silently resurrect a disproven finding as a fresh duplicate. If the earlier "
-            f"kill was WRONG and this should re-open, run "
-            f"`vigil assess reset-finding {killed_slug} --reason \"...\"`. If this is a genuinely "
+            f"kill was WRONG and this should re-open, run `vigil assess finding update "
+            f"{killed_slug} --status draft --reason \"...\"`. If this is a genuinely "
             f"NEW finding that only coincidentally shares the endpoint + technique, re-record "
             f"with --allow-remint (a.k.a. --force) to override."
         ),
@@ -970,6 +970,14 @@ def patch_finding(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="details_mode='replace' requires details",
         )
+    if notes_mode == "replace" or details_mode == "replace":
+        if type(expected_row_version) is not int or expected_row_version < 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "replacement modes require a positive expected_row_version"
+                ),
+            )
 
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
@@ -1007,7 +1015,7 @@ def patch_finding(
         elif existing_verification == "disputed" and workflow_status is not None:
             # CR-31 (clear-disputed): a `disputed` verdict previously could only
             # be cleared by the verifier re-issuing finding verify (which lands
-            # `verified`, not a re-queue). Let a specialist reopen via reset-finding
+            # `verified`, not a re-queue). Let a specialist reopen via finding update
             # return it to `unreviewed`/`none` — re-queues for verification without
             # forcing a verdict. Only on an explicit workflow reopen, and only out
             # of `disputed` (does not touch verified/false_positive verdicts).
@@ -1266,6 +1274,66 @@ def merge_findings(
             _raise_stale_finding_conflict()
         if source["id"] == target["id"]:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="cannot merge a finding into itself")
+        if int(source["engagement_id"]) != engagement.id or int(target["engagement_id"]) != engagement.id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="cannot merge findings from different engagements",
+            )
+        if _row_workflow_status(source) == "merged":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"source finding {source_slug} is already merged",
+            )
+        if _row_workflow_status(target) == "merged":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"target finding {target_slug} is already merged",
+            )
+        if source["merged_into_finding_id"] is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"source finding {source_slug} has a merge target but is not marked merged",
+            )
+        if target["merged_into_finding_id"] is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"target finding {target_slug} has a merge target but is not marked merged",
+            )
+        merged_children = connection.execute(
+            """
+            SELECT slug
+            FROM assessment_findings
+            WHERE engagement_id = ? AND merged_into_finding_id = ?
+            ORDER BY slug
+            """,
+            (engagement.id, source["id"]),
+        ).fetchall()
+        if merged_children:
+            child_slugs = ", ".join(str(row["slug"]) for row in merged_children)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"cannot merge source finding {source_slug}; it represents merged findings "
+                    f"{child_slugs} and moving it would create a merge chain"
+                ),
+            )
+        foreign_child = connection.execute(
+            """
+            SELECT 1
+            FROM assessment_findings
+            WHERE engagement_id != ? AND merged_into_finding_id = ?
+            LIMIT 1
+            """,
+            (engagement.id, source["id"]),
+        ).fetchone()
+        if foreign_child is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"cannot merge source finding {source_slug}; a finding from another "
+                    "engagement references it"
+                ),
+            )
         if _row_workflow_status(target) == "false_positive" and _row_workflow_status(source) != "false_positive":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

@@ -21,9 +21,7 @@ from .config import (
 from .paths import (
     container_host_url,
     default_runtime_container,
-    engagements_root,
     read_env_file,
-    resolve_install_root,
     resolve_orchestrator_base_url,
 )
 
@@ -539,6 +537,7 @@ def start_bench_runtime(
     container_name: str,
     *,
     net: str,
+    engagement_dir: Path | None = None,
     image: str = "vigil:latest",
     runner: docker.Runner = docker.run_command,
 ) -> None:
@@ -553,16 +552,16 @@ def start_bench_runtime(
 
     The bench runtime makes ZERO backend calls (the host-side ``vigil`` CLI does
     every backend write and merely ``docker exec``s into this container), so it
-    needs the FRONT net and the ``/engagements`` mount and NOTHING else — no
-    ``--add-host`` host gateway, no ``--env-file``, no ``ORCHESTRATOR_BASE_URL``,
-    and no ``--restart`` (it is reaped at teardown, never meant to survive).
+    needs the FRONT net and, for an agent attempt, only that attempt's engagement
+    directory. Factory verification passes no ``engagement_dir`` and gets no host
+    filesystem mount. The whole engagements root is never exposed. There is no
+    ``--add-host`` host gateway, ``--env-file``, ``ORCHESTRATOR_BASE_URL``, or
+    ``--restart`` (it is reaped at teardown, never meant to survive).
     Runs at the lightweight ``BENCH_RUNTIME_RESOURCES`` tier, not the 8 GB
     operator tier, so many attempts can fan out concurrently on one Docker VM.
     The keep-alive is the image's own default CMD (``sleep infinity``), same as
     the shared runtime.
     """
-    engagements_dir = engagements_root(resolve_install_root()).expanduser().resolve()
-    engagements_dir.mkdir(parents=True, exist_ok=True)
     resources = BENCH_RUNTIME_RESOURCES
     argv = [
         "docker",
@@ -582,10 +581,31 @@ def start_bench_runtime(
         f"--pids-limit={resources.pids_limit}",
         f"--shm-size={resources.shm_size}",
         "--oom-score-adj=-500",
-        "-v",
-        f"{engagements_dir}:/engagements",
-        image,
     ]
+    if engagement_dir is not None:
+        mount_error = (
+            "bench runtime engagement_dir must be one engagement directory "
+            "under engagements/ with a scope.json and a safe key"
+        )
+        try:
+            resolved = Path(engagement_dir).expanduser().resolve(strict=True)
+        except OSError as exc:
+            raise ValueError(mount_error) from exc
+        key = resolved.name
+        valid_key = bool(key) and all(char.isalnum() or char == "-" for char in key)
+        if (
+            not resolved.is_dir()
+            or resolved.parent.name != "engagements"
+            or not valid_key
+            or not (resolved / "scope.json").is_file()
+            or "," in str(resolved)
+        ):
+            raise ValueError(mount_error)
+        argv.extend([
+            "--mount",
+            f"type=bind,source={resolved},target=/engagements/{key}",
+        ])
+    argv.append(image)
     # Raise a RuntimeError (not require_success's SystemExit) so a start failure
     # surfaces as a regular Exception, homogeneous with the network.create/connect
     # failures staging already handles on its one cleanup path.

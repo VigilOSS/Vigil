@@ -17,7 +17,7 @@ from typing import Any
 
 from .client import AssessError, AssessmentClient, default_runtime_container
 from .config import Config, load_config
-from .kali_audit import _patch_finalize, _post_pre_exec_row
+from .kali_audit import _patch_finalize, _post_pre_exec_row, _resolve_engagement_dir
 from .kali_output import _scope_version
 from .kali_tool_naming import _derive_tool_name
 from .kali_runtime_exec import (
@@ -377,13 +377,14 @@ def start_job(
     # now, not when this module was imported. Default stays "vigil" when unset.
     container_name = container_name or default_runtime_container()
     cfg = config or load_config(str(engagement_dir) if engagement_dir else None)
-    eng_dir = Path(engagement_dir).resolve() if engagement_dir is not None else Path(cfg.engagement_dir).resolve()
+    eng_dir = _resolve_engagement_dir(engagement_dir, cfg)
+    eng_key = eng_dir.name
     job_uuid = uuid.uuid4().hex
     socket_path = f"{dtach_socket_dir}/{job_uuid}.sock"
     pid_file = _job_pid_file(job_uuid)
     stdout_path, stderr_path = _job_paths(eng_dir, job_uuid)
 
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
+    client = AssessmentClient(cfg.base_url, eng_key)
     spawned = False
     job_id: int | None = None
     rate_lease_token = ""
@@ -405,7 +406,7 @@ def start_job(
             started_at_iso=_utcnow_iso(),
             stdout_path=str(stdout_path),
             stderr_path=str(stderr_path),
-            working_dir=f"/engagements/{cfg.engagement_key}",
+            working_dir=f"/engagements/{eng_key}",
             scope_version=str(audit_meta.get("scope_version") or _scope_version(eng_dir)),
             auth_context=str(audit_meta.get("auth_context") or "anonymous"),
             tool_name=tool_name or _derive_tool_name(cmd),
@@ -436,13 +437,13 @@ def start_job(
         # /engagements bind mount: ${ENGAGEMENT_DIR} is mounted at
         # /engagements/${ENGAGEMENT_KEY} inside the runtime.
         container_stdout = (
-            f"/engagements/{cfg.engagement_key}/scans/kali/jobs/{stdout_path.name}"
+            f"/engagements/{eng_key}/scans/kali/jobs/{stdout_path.name}"
         )
         container_stderr = (
-            f"/engagements/{cfg.engagement_key}/scans/kali/jobs/{stderr_path.name}"
+            f"/engagements/{eng_key}/scans/kali/jobs/{stderr_path.name}"
         )
         container_exit = (
-            f"/engagements/{cfg.engagement_key}/scans/kali/jobs/{job_uuid}.exit"
+            f"/engagements/{eng_key}/scans/kali/jobs/{job_uuid}.exit"
         )
         client.patch(
             f"jobs/{job_id}",
@@ -491,9 +492,9 @@ def start_job(
             "docker",
             "exec",
             "-d",
-            *_engagement_env_args(cfg.engagement_key),
+            *_engagement_env_args(eng_key),
             "-w",
-            f"/engagements/{cfg.engagement_key}",
+            f"/engagements/{eng_key}",
             container_name,
             "dtach",
             "-n",

@@ -68,7 +68,7 @@ The verifier:
   or killed (with detailed reasoning)
 
 **Clean-file spot-check:** After processing all findings, the verifier samples 2-3 critical
-files that have zero findings but high effort scores (>= 70 across applicable classes). The
+files that have zero findings and no below-threshold cells in the current CWE matrix. The
 verifier reads those files with CWE pattern references and checks whether the "clean"
 assessment from Phase 2 holds. This catches systematic blind spots where the hunter's
 analysis methodology consistently misses a pattern class. If the spot-check finds a missed

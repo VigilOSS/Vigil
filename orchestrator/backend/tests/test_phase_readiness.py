@@ -1,4 +1,4 @@
-"""Tests for Wave 6d — the consolidated phase-readiness assembly.
+"""Tests for the consolidated phase-readiness assembly.
 
 Covers ``state_manager.phase_readiness`` plus the
 ``GET /engagements/{key}/assessment/phase-readiness?phase=…`` endpoint. The
