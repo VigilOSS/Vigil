@@ -1979,6 +1979,10 @@ def test_update_finding_patches_by_slug_from_flags(monkeypatch, tmp_path):
             self.base_url = base_url
             self.engagement_key = engagement_key
 
+        def get(self, endpoint: str):
+            assert endpoint == "findings/VA-002"
+            return {"slug": "VA-002", "row_version": 4}
+
         def patch(self, endpoint: str, payload: dict):
             captured["endpoint"] = endpoint
             captured["payload"] = payload
@@ -2023,6 +2027,7 @@ def test_update_finding_patches_by_slug_from_flags(monkeypatch, tmp_path):
     assert captured["payload"]["workflow_status"] == "active"
     assert captured["payload"]["severity"] == "low"
     assert captured["payload"]["details"] == {"impact": "limited"}
+    assert captured["payload"]["expected_row_version"] == 4
 
 
 def test_update_finding_reopens_to_draft(monkeypatch, tmp_path):
@@ -2046,6 +2051,10 @@ def test_update_finding_reopens_to_draft(monkeypatch, tmp_path):
         def __init__(self, base_url: str, engagement_key: str) -> None:
             self.base_url = base_url
             self.engagement_key = engagement_key
+
+        def get(self, endpoint: str):
+            assert endpoint == "findings/VA-003"
+            return {"slug": "VA-003", "row_version": 7}
 
         def patch(self, endpoint: str, payload: dict):
             captured["endpoint"] = endpoint

@@ -10,8 +10,10 @@ from assess.lib.classify_buckets import SKIP_REASON_TAGS
 _ACTION_HELP: dict[str, str] = {
     "stats": (
         "Usage: vigil assess work-buffer stats "
-        "[--by status|source|cluster|host|reason|classifier_version]\n\n"
+        "[--by status|source|cluster|host|reason|classifier_version] "
+        "[--status STATUS]\n\n"
         "Print work-buffer counts grouped by status or another supported axis.\n"
+        "--status narrows host-grouped stats; other groupings ignore it.\n"
         "'classifier_version' sizes taxonomy drift (current vs stale vs (none) vs manual).\n"
     ),
     "peek": (
@@ -34,13 +36,19 @@ _ACTION_HELP: dict[str, str] = {
     ),
     "defer-cluster": (
         "Usage: vigil assess work-buffer defer-cluster <cluster_key> --reason TEXT "
-        "[--reason-tag TAG]\n\n"
+        "[--reason-tag TAG] [--dry-run]\n\n"
         "Mark a whole cluster skipped/deferred with an auditable reason.\n"
     ),
     "defer-items": (
         "Usage: vigil assess work-buffer defer-items <id> [<id> ...] --reason TEXT "
-        "[--reason-tag TAG]\n\n"
+        "[--reason-tag TAG] [--dry-run]\n\n"
         "Mark specific work-item ids skipped/deferred with an auditable reason.\n"
+    ),
+    "set-rationale": (
+        "Usage: vigil assess work-buffer set-rationale <id> [<id> ...] "
+        "--rationale TEXT\n\n"
+        "Persist the triage conclusion on selected work items without changing "
+        "their lifecycle status.\n"
     ),
     "done": (
         "Usage: vigil assess work-buffer done <id> [<id> ...]\n\n"
@@ -103,6 +111,17 @@ def register(subparsers) -> None:
     p.add_argument("extra", nargs="*", help="Action-specific arguments")
     p.add_argument("--reason", default="", help="Reason for defer-cluster / defer-items.")
     p.add_argument(
+        "--rationale",
+        dest="triage_rationale",
+        default="",
+        help="Triage conclusion for set-rationale.",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview defer-items/defer-cluster matches without mutating them.",
+    )
+    p.add_argument(
         "--reason-tag",
         dest="reason_tag",
         default="",
@@ -146,8 +165,15 @@ def register(subparsers) -> None:
     p.add_argument("--link-evidence-ref", dest="link_evidence_ref", default="",
                    help="(link-surface) Evidence reference for the surface link.")
     # clusters (folded-in list-clusters) flags.
-    p.add_argument("--status", dest="cluster_status", default="pending",
-                   help="(clusters) Work-item status filter (default: pending; 'skipped' audits deferred clusters).")
+    p.add_argument(
+        "--status",
+        dest="cluster_status",
+        default="",
+        help=(
+            "(clusters/stats --by host) Work-item status filter. "
+            "Clusters default to pending; host stats default to all statuses."
+        ),
+    )
     p.add_argument("--host", dest="cluster_host", default="",
                    help="(clusters) Only clusters containing a work_item whose URL matches this host "
                         "(exact, or leading-'*' fnmatch wildcard).")

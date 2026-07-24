@@ -43,7 +43,7 @@ Use emulator snapshots, Cuttlefish powerwash, `simctl erase`, device-farm cleanu
 
 Use synthetic PII, test payment instruments, lab push projects, dedicated email/SMS inboxes, and separated Apple/Google accounts.
 
-Export proxy logs, device logs, crash reports, and screenshots into engagement storage with secrets redacted unless the secret itself is the evidence.
+Export proxy logs, device logs, crash reports, and screenshots into engagement storage.
 
 ## Source Anchors
 

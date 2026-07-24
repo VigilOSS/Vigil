@@ -143,6 +143,29 @@ def test_record_probe_signal_requires_evidence(tmp_path, monkeypatch, capsys):
     assert fake.posts == []
 
 
+def test_record_probe_signal_without_outcome_assertion_is_inconclusive(
+    tmp_path, monkeypatch, capsys
+):
+    """A status/size-only signal is evidence of a request, not of a bypass."""
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        [
+            "record-probe", "--result-status", "signal", "--attack-family", "idor",
+            "--target-host", "h", "--input-slot", "path:id", "--auth-context", "member",
+            "--evidence-ref", "scans/response.txt", "--observed-status", "200",
+        ],
+        str(tmp_path),
+    )
+
+    record_probe.run(args)
+
+    err = capsys.readouterr().err
+    assert "--outcome-assertion" in err
+    assert fake.posts[0][1]["result_status"] == "attempted"
+    assert fake.posts[0][1]["outcome_assertion"] == ""
+
+
 # -- non-covering path (folded in from the former record-attempt) --------------
 
 
@@ -268,6 +291,7 @@ def test_record_probe_resolves_finding_slug(tmp_path, monkeypatch, capsys):
             "record-probe", "--result-status", "signal", "--attack-family", "ssrf",
             "--target-host", "api.example.com", "--input-slot", "query:url",
             "--auth-context", "anonymous", "--evidence-ref", "scans/ssrf.txt",
+            "--outcome-assertion", "OOB callback nonce matched the request",
             "--finding", "VA-047",
         ],
         str(tmp_path),
@@ -276,6 +300,7 @@ def test_record_probe_resolves_finding_slug(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     assert fake.gets == ["findings/VA-047"]
     assert fake.posts[0][1]["finding_id"] == 91
+    assert fake.posts[0][1]["outcome_assertion"] == "OOB callback nonce matched the request"
 
 
 def test_record_probe_finding_numeric_id_passthrough(tmp_path, monkeypatch, capsys):

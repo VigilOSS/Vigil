@@ -167,6 +167,24 @@ def read_auth(engagement_dir: Path) -> dict[str, object]:
     return result if isinstance(result, dict) else {"identities": {}, "active_identity": DEFAULT_IDENTITY}
 
 
+def read_identity(engagement_dir: Path, identity: str) -> dict[str, object]:
+    """Fetch exactly one named identity, never the full credential store."""
+    result = _api(engagement_dir, "GET", f"/{identity}")
+    if not isinstance(result, dict) or not result:
+        raise SystemExit(f"Identity not found: {identity}")
+    return result
+
+
+def quarantine_identity(
+    engagement_dir: Path, identity: str
+) -> dict[str, object]:
+    """Disable replay for one identity while retaining its credential evidence."""
+    result = _api(engagement_dir, "POST", f"/{identity}/quarantine")
+    if not isinstance(result, dict) or not result:
+        raise SystemExit(f"Identity not found: {identity}")
+    return result
+
+
 def env_preflight(keys: list[str]) -> list[dict[str, object]]:
     """Report environment credential prerequisites without exposing values."""
     return [

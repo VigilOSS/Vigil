@@ -124,7 +124,8 @@ def test_attempts_unfiltered_returns_all_with_shape(client, isolate_settings):
     expected_fields = {
         "id", "target_host", "target_path", "target_port", "auth_context",
         "attack_family", "lens", "result_status", "observed_http_status",
-        "signal_type", "tool_name", "agent_name", "finding_id", "finding_slug",
+        "signal_type", "outcome_assertion", "tool_name", "agent_name",
+        "finding_id", "finding_slug",
         "finding_title", "finding_severity", "created_at",
     }
     for attempt in body["attempts"]:

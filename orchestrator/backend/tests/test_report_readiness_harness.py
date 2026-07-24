@@ -188,3 +188,69 @@ def test_over_soften_guard_unverified_high_finding_still_blocks(client, isolate_
         b["kind"] == "finding_verification_state" and b["slug"] == "HR-003"
         for b in body["blockers"]
     ), body
+
+
+def test_chain_non_step_links_do_not_block_readiness(client, isolate_settings) -> None:
+    """I-14a: evidence/access/credential chain links (relation != 'step') are
+    legitimate supporting context, not path steps, so they must NOT be flagged
+    as unlinked finding-steps. Only genuine 'step' links must resolve to a
+    reportable finding slug.
+
+    Regression: the chain-link readiness query had no relation filter and
+    flagged every non-finding link as ``chain_step_not_finding_linked``.
+    """
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _reportable_finding(client, eng, slug="HR-010")
+
+    chain = client.post(
+        f"{BASE}/attack-chains",
+        json={
+            "chain_key": "chain-mixed-links",
+            "title": "Mixed-relation chain",
+            "severity": "high",
+            "links": [
+                {"relation": "step", "entity_kind": "finding", "entity_ref": "HR-010"},
+                {"relation": "evidence", "entity_kind": "evidence", "entity_ref": "notes/evidence.md"},
+                {"relation": "access", "entity_kind": "access", "entity_ref": "admin-shell"},
+                {"relation": "credential", "entity_kind": "credential", "entity_ref": "db-root"},
+            ],
+        },
+    )
+    assert chain.status_code == 201, chain.text
+
+    blockers = _readiness(client)["blockers"]
+    not_finding = [b for b in blockers if b.get("kind") == "chain_step_not_finding_linked"]
+    assert not_finding == [], not_finding
+    # The lone step points at a reportable finding, so no missing-step blocker either.
+    missing_step = [b for b in blockers if b.get("kind") == "chain_step_missing_finding"]
+    assert missing_step == [], missing_step
+
+
+def test_chain_non_finding_step_still_blocks_readiness(client, isolate_settings) -> None:
+    """Over-scope guard for I-14a: a genuine 'step' link whose entity is not a
+    finding MUST still block. The fix narrows the rule to steps, it does not
+    disable it."""
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _reportable_finding(client, eng, slug="HR-011")
+
+    chain = client.post(
+        f"{BASE}/attack-chains",
+        json={
+            "chain_key": "chain-bad-step",
+            "title": "Chain with a non-finding step",
+            "severity": "high",
+            "links": [
+                {"relation": "step", "entity_kind": "finding", "entity_ref": "HR-011"},
+                {"relation": "step", "entity_kind": "credential", "entity_ref": "db-root"},
+            ],
+        },
+    )
+    assert chain.status_code == 201, chain.text
+
+    blockers = _readiness(client)["blockers"]
+    not_finding = [b for b in blockers if b.get("kind") == "chain_step_not_finding_linked"]
+    assert len(not_finding) == 1, not_finding
+    assert not_finding[0]["chain_key"] == "chain-bad-step"
+    assert "credential" in not_finding[0]["detail"]

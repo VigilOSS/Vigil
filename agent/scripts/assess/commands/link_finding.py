@@ -40,7 +40,7 @@ def register(subparsers) -> None:
         default="eliminates_finding",
         help="Whether fixing the root fully resolves the finding or only this attack path",
     )
-    p.add_argument("--note", default="", help="One-sentence relationship note (root-cause and generic modes)")
+    p.add_argument("--note", default=None, help="One-sentence relationship note (root-cause and generic modes)")
     p.add_argument("--source-name", default="operator")
     p.add_argument("--provenance-inline", help="Inline JSON object merged into link provenance")
     p.add_argument("--clear-root-cause", action="store_true", help="Remove the root-cause link from this finding")
@@ -82,6 +82,24 @@ def register(subparsers) -> None:
     )
     p.add_argument("--target-id", dest="target_id", type=int, default=None, help="Generic link target id (int).")
     p.add_argument("--target-ref", dest="target_ref", default=None, help="Generic link target reference (e.g. a finding slug).")
+    p.add_argument(
+        "--link-id",
+        dest="link_id",
+        type=int,
+        default=None,
+        help="Update or retire this existing generic link in place.",
+    )
+    retirement = p.add_mutually_exclusive_group()
+    retirement.add_argument(
+        "--retire",
+        action="store_true",
+        help="Retire --link-id without deleting its evidence row.",
+    )
+    retirement.add_argument(
+        "--reactivate",
+        action="store_true",
+        help="Reactivate a retired --link-id.",
+    )
     p.set_defaults(func=run)
 
 
@@ -140,10 +158,11 @@ def _link_intel(client, finding_slug: str, raw_intel_ids: list[str], note: str) 
 
 def run(args) -> None:
     intel_ids = list(args.intel_ids or [])
+    link_update_selected = getattr(args, "link_id", None) is not None
     # Generic typed-link mode is selected by --link-kind or --target-kind (or a
     # target id/ref). The four modes — root-cause / clear / intel / generic — are
     # mutually exclusive; each collision gets a pointed message.
-    generic_selected = bool(
+    generic_selected = not link_update_selected and bool(
         getattr(args, "link_kind", None)
         or getattr(args, "target_kind", None)
         or getattr(args, "target_id", None) is not None
@@ -163,7 +182,9 @@ def run(args) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
-    if generic_selected and (args.root_cause_slug or args.clear_root_cause or intel_ids):
+    if (generic_selected or link_update_selected) and (
+        args.root_cause_slug or args.clear_root_cause or intel_ids
+    ):
         print(
             "finding link: generic link flags (--link-kind / --target-kind / --target-id / "
             "--target-ref) cannot be combined with --root-cause, --clear-root-cause, or --intel; "
@@ -176,11 +197,47 @@ def run(args) -> None:
         and not args.root_cause_slug
         and not intel_ids
         and not generic_selected
+        and not link_update_selected
     ):
         print(
             "finding link requires --root-cause <slug>, --intel <id> (one or more), "
             "--clear-root-cause, or a generic link (--link-kind + --target-kind + "
             "--target-id/--target-ref)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if link_update_selected and len(args.finding_slug) != 1:
+        print(
+            "finding link: --link-id updates exactly one finding at a time",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if (
+        getattr(args, "retire", False) or getattr(args, "reactivate", False)
+    ) and not link_update_selected:
+        print(
+            "finding link: --retire/--reactivate requires --link-id",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if (
+        getattr(args, "target_id", None) is not None
+        and getattr(args, "target_ref", None) is not None
+    ):
+        print(
+            "finding link: provide only one of --target-id or --target-ref",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if (
+        link_update_selected
+        and getattr(args, "target_kind", None) is not None
+        and getattr(args, "target_id", None) is None
+        and getattr(args, "target_ref", None) is None
+    ):
+        print(
+            "finding link: changing --target-kind requires --target-id or --target-ref",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -232,17 +289,40 @@ def run(args) -> None:
         "target_kind": target_kind,
         "target_id": target_id,
         "target_ref": target_ref,
-        "notes": args.note,
+        "notes": args.note or "",
         "provenance": provenance,
     } if generic_selected else None
     root_cause_payload = {
         "root_cause_slug": args.root_cause_slug,
         "sibling_order": args.sibling_order,
         "root_cause_effect": args.root_cause_effect,
-        "note": args.note,
+        "note": args.note or "",
         "source_name": args.source_name,
         "provenance": provenance,
     }
+    link_update_payload: dict[str, object] = {}
+    if link_update_selected:
+        if args.target_kind is not None:
+            link_update_payload["target_kind"] = args.target_kind
+        if args.target_id is not None:
+            link_update_payload["target_id"] = args.target_id
+        if args.target_ref is not None:
+            link_update_payload["target_ref"] = args.target_ref
+        if args.note is not None:
+            link_update_payload["notes"] = args.note
+        if args.provenance_inline is not None:
+            link_update_payload["provenance"] = provenance
+        if getattr(args, "retire", False):
+            link_update_payload["retired"] = True
+        elif getattr(args, "reactivate", False):
+            link_update_payload["retired"] = False
+        if not link_update_payload:
+            print(
+                "finding link: --link-id requires a field correction, --retire, "
+                "or --reactivate",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     slugs = args.finding_slug if isinstance(args.finding_slug, list) else [args.finding_slug]
     cfg = load_config(args.engagement_dir)
@@ -252,7 +332,12 @@ def run(args) -> None:
         for slug in slugs:
             try:
                 if intel_ids:
-                    result = _link_intel(client, slug, intel_ids, args.note)
+                    result = _link_intel(client, slug, intel_ids, args.note or "")
+                elif link_update_selected:
+                    result = client.patch(
+                        f"findings/{slug}/links/{args.link_id}",
+                        link_update_payload,
+                    )
                 elif generic_selected:
                     result = client.post(f"findings/{slug}/links", generic_payload)
                 elif args.clear_root_cause:

@@ -159,7 +159,7 @@ def _stale_threshold_for(role: str | None, *, override: float | None) -> float:
     return _STALE_THRESHOLD_BY_ROLE.get(str(role or ""), _DEFAULT_STALE_THRESHOLD_HOURS)
 
 
-# C4c: a dispatch that lands on a terminal status (failed/aborted) with no
+# A dispatch that lands on any terminal status with no
 # handoff row at all is silent state-loss — there is no artifact explaining
 # why it died, and (pre-fix) it was structurally invisible to this picture
 # because the in-progress-only gate below excluded it before the handoff-gap
@@ -167,7 +167,24 @@ def _stale_threshold_for(role: str | None, *, override: float | None) -> float:
 # `terminal_no_handoff` list; keep it in sync with the `agent.py`
 # `_reconcile_stale` mirror (which reports the same rows read-only, since a
 # handoff-less terminal dispatch has no ready/blocked handoff to close).
-_TERMINAL_NO_HANDOFF_STATUSES = frozenset({"failed", "aborted"})
+_TERMINAL_NO_HANDOFF_STATUSES = frozenset(
+    {"completed", "blocked", "failed", "aborted"}
+)
+
+# Newest-N dispatches shown in the `recent_dispatches` display list. This window
+# drives DISPLAY ONLY — stale/gap/terminal detection is decoupled from it (I-10).
+_DISPATCH_DISPLAY_LIMIT = 25
+# Stale/gap/terminal detection scans every in-progress (and terminal) dispatch,
+# not just the display window. Matches reconcile-stale's scan depth (agent.py
+# `_reconcile_stale`) so the two commands agree on the ROW SET, not just the
+# threshold. The handoffs map is scanned as deep so a handoff for an old
+# in-progress dispatch is still resolvable (else a false handoff gap).
+_DISPATCH_SCAN_LIMIT = 1000
+_HANDOFF_SCAN_LIMIT = 1000
+# Rendered worklists are capped; the true totals ride alongside as `*_count`
+# (the "capped list + absolute count" pattern used elsewhere, e.g.
+# blocked_techniques_count) so a capped list still signals real depth.
+_DISPATCH_LIST_RENDER_CAP = 10
 
 
 def _recent_dispatch_picture(
@@ -175,40 +192,55 @@ def _recent_dispatch_picture(
     *,
     max_age_hours: float | None,
 ) -> dict[str, Any]:
-    dispatches = state_manager.list_dispatches(engagement_id, limit=25)
-    handoffs = {row.get("agent_id"): row for row in state_manager.list_handoffs(engagement_id, limit=100)}
+    # Display window: newest-N dispatches across ALL statuses. Drives the
+    # `recent_dispatches` / `latest_handoffs` display lists only — NOT the
+    # stale/gap/terminal detection below.
+    display_dispatches = state_manager.list_dispatches(engagement_id, limit=_DISPATCH_DISPLAY_LIMIT)
+    # Handoffs keyed by agent_id, scanned as deep as reconcile-stale so a handoff
+    # belonging to an OLD in-progress dispatch (one that has sunk below the
+    # display window) is still resolvable; otherwise it would be mis-reported as
+    # a handoff gap.
+    handoffs = {
+        row.get("agent_id"): row
+        for row in state_manager.list_handoffs(engagement_id, limit=_HANDOFF_SCAN_LIMIT)
+    }
+    # A decision is the durable adjudication for a worker that genuinely
+    # produced no handoff. Read every matching row directly so a long-running
+    # engagement cannot lose older reconciliations behind an API page cap.
+    with get_connection() as connection:
+        decision_rows = connection.execute(
+            """
+            SELECT payload_json
+            FROM assessment_dispatch_decisions
+            WHERE engagement_id = ? AND kind = 'dispatch_reconciliation'
+            """,
+            (engagement_id,),
+        ).fetchall()
+    reconciled_agent_ids: set[str] = set()
+    for decision_row in decision_rows:
+        payload = _json_obj(decision_row["payload_json"])
+        if payload.get("agent_id"):
+            reconciled_agent_ids.add(str(payload["agent_id"]))
     now = dt.datetime.now(dt.timezone.utc)
+
+    # Stale + handoff-gap detection scans EVERY in-progress dispatch, not just the
+    # newest-N display window. An old in-progress dispatch sorts below that window
+    # and used to vanish from the brief entirely — even though `reconcile-stale`
+    # (same thresholds, but a status-filtered scan) still flagged it. Decoupling
+    # the scan from the display list is the I-10 fix: the ROW SET, not the
+    # threshold definition, was the divergence.
+    in_progress = state_manager.list_dispatches(
+        engagement_id, status_value="in-progress", limit=_DISPATCH_SCAN_LIMIT
+    )
     stale: list[dict[str, Any]] = []
     gaps: list[dict[str, Any]] = []
-    terminal_no_handoff: list[dict[str, Any]] = []
-    for row in dispatches:
+    for row in in_progress:
         agent_id = row.get("agent_id")
         agent_role = row.get("agent_role")
-        status_value = str(row.get("status") or "")
         handoff = handoffs.get(agent_id)
-        # A handoff-less dispatch is surfaced by exactly ONE list, keyed on status
-        # so nothing is double-reported and normal rows aren't flagged:
-        #   * terminal (failed/aborted) -> `terminal_no_handoff` — silent
-        #     state-loss, the load-bearing case that used to be invisible to the
-        #     brief (the in-progress-only gate below excluded it before the
-        #     handoff check ran);
-        #   * in-progress -> `handoff_gaps` — running but not yet checkpointed.
-        # A `completed` dispatch with no handoff is normal (not every completed
-        # dispatch owes one), so neither list flags it.
+        # In-progress with no handoff = running but not yet checkpointed.
         if not handoff:
-            if status_value in _TERMINAL_NO_HANDOFF_STATUSES:
-                terminal_no_handoff.append(
-                    {
-                        "agent_id": agent_id,
-                        "agent_role": agent_role,
-                        "status": status_value,
-                        "completed_at": row.get("completed_at"),
-                    }
-                )
-            elif status_value == "in-progress":
-                gaps.append({"agent_id": agent_id, "agent_role": agent_role, "reason": "no_handoff"})
-        if status_value != "in-progress":
-            continue
+            gaps.append({"agent_id": agent_id, "agent_role": agent_role, "reason": "no_handoff"})
         started = _parse_iso(row.get("dispatched_at"))
         age_hours = ((now - started).total_seconds() / 3600.0) if started else None
         threshold = _stale_threshold_for(agent_role, override=max_age_hours)
@@ -222,18 +254,53 @@ def _recent_dispatch_picture(
                     "threshold_hours": threshold,
                 }
             )
+
+    # Terminal dispatches with no handoff row = silent
+    # state-loss. Scanned via the same status-filtered path (mirrors agent.py's
+    # reconcile-stale) so a terminal row below the display window is not lost.
+    # A dispatch_reconciliation decision removes an honestly-empty worker from
+    # this worklist without fabricating a handoff.
+    terminal_no_handoff: list[dict[str, Any]] = []
+    for terminal_status in sorted(_TERMINAL_NO_HANDOFF_STATUSES):
+        for row in state_manager.list_dispatches(
+            engagement_id, status_value=terminal_status, limit=_DISPATCH_SCAN_LIMIT
+        ):
+            # Defensive: don't trust every backend to have filtered server-side.
+            if str(row.get("status") or "") != terminal_status:
+                continue
+            agent_id = row.get("agent_id")
+            if handoffs.get(agent_id):
+                continue
+            if str(agent_id or "") in reconciled_agent_ids:
+                continue
+            terminal_no_handoff.append(
+                {
+                    "agent_id": agent_id,
+                    "agent_role": row.get("agent_role"),
+                    "status": terminal_status,
+                    "completed_at": row.get("completed_at"),
+                }
+            )
+
     # The reported `stale_threshold_hours` is the override if set, else the
     # default — per-role thresholds applied per dispatch are also visible on
     # each stale entry's `threshold_hours`.
     reported_threshold = (
         float(max_age_hours) if max_age_hours is not None else _DEFAULT_STALE_THRESHOLD_HOURS
     )
+    # Rendered lists stay capped; the TRUE totals ride alongside so a capped list
+    # still signals the real depth of stale/gap/terminal work. The operator is
+    # pointed at `reconcile-stale` (already wired in _recommended_actions) for the
+    # full list + action.
     return {
-        "recent_dispatches": dispatches[:10],
+        "recent_dispatches": display_dispatches[:10],
         "latest_handoffs": list(handoffs.values())[:10],
-        "stale_in_progress_dispatches": stale,
-        "handoff_gaps": gaps[:10],
-        "terminal_no_handoff": terminal_no_handoff[:10],
+        "stale_in_progress_dispatches": stale[:_DISPATCH_LIST_RENDER_CAP],
+        "stale_in_progress_dispatches_count": len(stale),
+        "handoff_gaps": gaps[:_DISPATCH_LIST_RENDER_CAP],
+        "handoff_gaps_count": len(gaps),
+        "terminal_no_handoff": terminal_no_handoff[:_DISPATCH_LIST_RENDER_CAP],
+        "terminal_no_handoff_count": len(terminal_no_handoff),
         "stale_threshold_hours": reported_threshold,
         "stale_threshold_role_overrides": dict(_STALE_THRESHOLD_BY_ROLE) if max_age_hours is None else {},
     }
@@ -679,7 +746,13 @@ def build_resume_brief(
             target_finding = _finding_summary(row) if row else None
         findings = {
             "active": _limited_findings(connection, engagement_id, "status IN ('active', 'exploited', 'reported')", since=since),
-            "unreviewed": _limited_findings(connection, engagement_id, "verification_state = 'unreviewed'", since=since),
+            "unreviewed": _limited_findings(
+                connection,
+                engagement_id,
+                "verification_state = 'unreviewed' "
+                "AND status NOT IN ('merged', 'false_positive')",
+                since=since,
+            ),
             "verified": _limited_findings(connection, engagement_id, "verification_state = 'verified'", since=since),
             "killed": _limited_findings(connection, engagement_id, "status = 'false_positive'", since=since),
             "merged": _limited_findings(connection, engagement_id, "status = 'merged'", since=since),

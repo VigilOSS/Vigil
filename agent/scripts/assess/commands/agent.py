@@ -135,6 +135,12 @@ def register(subparsers) -> None:
     p.add_argument("--since", dest="filter_since", default=None)
     p.add_argument("--task-q", dest="task_q", default=None)
     p.add_argument("--limit", dest="dispatch_limit", default=None, type=int)
+    p.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="No-op: agent list already emits JSONL; accepted for list-verb symmetry.",
+    )
     p.add_argument("--max-lines", type=int, default=40)
     p.add_argument("--include-evidence", action="store_true")
     p.add_argument("--kind", dest="decision_kind", default=None)
@@ -277,13 +283,15 @@ def _warn_if_handoff_is_closable(args) -> None:
         # `agent reconcile-stale` can only report this after the fact; there
         # is no summary, no coverage_gaps, no next_steps. WARN only (never
         # block) so a crash-recovery force-close stays possible.
-        if str(getattr(args, "dispatch_status", "") or "") in {"failed", "aborted"}:
+        if str(getattr(args, "dispatch_status", "") or "") in {
+            "completed", "blocked", "failed", "aborted"
+        }:
             print(
                 f"WARN agent done: no handoff found for {args.agent_id} closing as "
                 f"{args.dispatch_status!r}; this is silent state-loss — resume-brief and "
-                "`agent reconcile-stale` will only ever see a bare terminal_no_handoff row, "
-                "not why the dispatch died. Consider `vigil assess agent handoff ...` first, "
-                "or note the cause via `agent decision` before closing.",
+                "`agent reconcile-stale` will see a bare terminal_no_handoff row, not what "
+                "the specialist produced. Write `vigil assess agent handoff ...` first, or "
+                "record a kind=dispatch_reconciliation decision naming this agent_id.",
                 file=sys.stderr,
             )
         return
@@ -441,7 +449,18 @@ def _reconcile_stale(args) -> None:
     try:
         dispatches = client.list_dispatches(status="in-progress", limit=1000)
         handoffs = {row.get("agent_id"): row for row in client.list_handoffs(limit=1000)}
+        reconciliation_decisions = client.list_decisions(
+            kind="dispatch_reconciliation", limit=1000
+        )
+        reconciled_agent_ids = {
+            str(payload.get("agent_id") or "")
+            for row in reconciliation_decisions
+            for payload in [row.get("payload")]
+            if isinstance(payload, dict) and payload.get("agent_id")
+        }
         for row in dispatches:
+            if str(row.get("status") or "") != "in-progress":
+                continue
             agent_role = row.get("agent_role")
             cutoff_hours = _stale_threshold_for(agent_role, override=cutoff_override)
             started = _parse_iso(str(row.get("dispatched_at") or ""))
@@ -483,13 +502,16 @@ def _reconcile_stale(args) -> None:
                     else "handoff is checkpointed; specialist must mark ready|blocked before close"
                 )
             rows_out.append(item)
-        # C4c: terminal (failed/aborted) dispatches with no handoff row at all
-        # are silent state-loss — mirrors assessment_memory._recent_dispatch_
-        # picture's `terminal_no_handoff` list so `reconcile-stale` is a
-        # complete picture on its own. Unlike the in-progress rows above,
-        # these have no ready/blocked handoff to consume, so they can never
-        # be "closed" here — this is read-only reporting, dry_run or not.
-        for terminal_status in ("failed", "aborted"):
+        # A terminal dispatch with no handoff is missing durable specialist
+        # output regardless of whether it completed or died. A
+        # dispatch_reconciliation decision is the explicit, auditable way to
+        # adjudicate a dispatch that genuinely produced nothing. This mirrors
+        # assessment_memory._recent_dispatch_picture's `terminal_no_handoff`
+        # list so `reconcile-stale` is a complete picture on its own. Unlike
+        # the in-progress rows above, these have no ready/blocked handoff to
+        # consume, so they can never be "closed" here — this is read-only
+        # reporting, dry_run or not.
+        for terminal_status in ("completed", "blocked", "failed", "aborted"):
             for row in client.list_dispatches(status=terminal_status, limit=1000):
                 # Defensive re-check: don't trust every client/backend combo to
                 # have filtered server-side by `status`.
@@ -497,6 +519,8 @@ def _reconcile_stale(args) -> None:
                     continue
                 agent_id = row.get("agent_id")
                 if handoffs.get(agent_id):
+                    continue
+                if str(agent_id or "") in reconciled_agent_ids:
                     continue
                 rows_out.append(
                     {

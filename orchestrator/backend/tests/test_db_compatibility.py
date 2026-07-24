@@ -145,6 +145,11 @@ def test_operational_error_passthrough_not_incompatibility(monkeypatch, isolate_
     assert db_path.exists()
 
 
+def test_default_busy_timeout_stays_below_agent_client_read_timeout(monkeypatch):
+    monkeypatch.delenv("VIGIL_DB_BUSY_TIMEOUT_MS", raising=False)
+    assert db_module._resolve_busy_timeout_ms() == 8_000
+
+
 def test_check_accepts_future_shared_table_without_engagement_id(isolate_settings):
     """A future non-engagement-scoped table with an ``assessment_`` or ``code_``
     prefix must NOT trigger a false-positive refuse-to-start unless it is added

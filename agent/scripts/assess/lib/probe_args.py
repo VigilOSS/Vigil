@@ -89,6 +89,16 @@ def add_common_probe_args(parser) -> None:
     parser.add_argument("--payload-value", dest="payload_value", default="", help="Optional payload value that was sent.")
     parser.add_argument("--signal-type", dest="signal_type", default="", help="Optional signal-type tag when partial signal was seen.")
     parser.add_argument(
+        "--outcome-assertion",
+        dest="outcome_assertion",
+        default="",
+        help=(
+            "Application-level observation that proves a positive signal "
+            "(for example, a returned foreign id or a matched OOB nonce). "
+            "Required for result-status=signal; HTTP status/size alone is inconclusive."
+        ),
+    )
+    parser.add_argument(
         "--observed-status",
         dest="observed_http_status",
         type=int,
@@ -286,6 +296,7 @@ def build_probe_payload(args, *, attack_family: str, result_status: str) -> dict
         "payload_family": args.payload_family or "",
         "payload_value": args.payload_value or "",
         "signal_type": args.signal_type or "",
+        "outcome_assertion": args.outcome_assertion or "",
         "target_host": (args.target_host or "").strip(),
         "target_path": (args.target_path or "").strip(),
         "evidence_ref": args.evidence_ref or "",

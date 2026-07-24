@@ -169,15 +169,11 @@ def test_app_unit_scoring_links_work_items_and_fetch_claims_coherent_unit(
     assert all(row["assigned_agent"] == "vulnerability-analyst" for row in body["claimed"])
 
 
-def test_fetch_by_unit_skips_unit_with_only_unroutable_unknown_rows(
+def test_fetch_by_unit_routes_low_signal_unknown_tail(
     client, isolate_settings
 ):
-    # A unit holding ONLY low-signal `unknown` rows (priority 0, no gf: signal) is
-    # unroutable: every candidate is dropped by _assigned_agent_for_row. Before the
-    # fix, EV selection still chose such a unit and returned an empty claim, then
-    # re-selected it on the next call — starving routable work in other units.
-    # fetch-by-unit must now apply the same high-signal predicate as
-    # fetch-by-priority and exclude the unit from selection entirely.
+    # Unknown is a weak classification, not a terminal verdict. The low-signal
+    # tail must remain claimable so coverage is not silently abandoned.
     _seed(client, isolate_settings)
     for i in range(4):
         _observe(
@@ -197,9 +193,39 @@ def test_fetch_by_unit_skips_unit_with_only_unroutable_unknown_rows(
     body = client.post(
         f"{BASE}/work-items/fetch-by-unit", json={"agent": "auto"}
     ).json()
-    assert body["claimed"] == []
-    assert body["unit"] is None
-    assert body["error"] == "no-unsatisfied-unit"
+    assert body["claimed"]
+    assert body["unit"] is not None
+    assert all(
+        row["assigned_agent"] == "vulnerability-analyst"
+        for row in body["claimed"]
+    )
+
+
+def test_fetch_by_priority_routes_host_root_and_sourcemap(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    _observe(
+        client,
+        url="https://app.example/",
+        case_type="host_root",
+        priority_score=0,
+    )
+    _observe(
+        client,
+        url="https://app.example/static/app.js.map",
+        case_type="sourcemap",
+        priority_score=5,
+    )
+
+    body = client.post(
+        f"{BASE}/work-items/fetch-by-priority",
+        json={"agent": "auto", "limit": 10},
+    ).json()
+
+    claimed = {row["type"]: row for row in body["claimed"]}
+    assert claimed["host_root"]["assigned_agent"] == "source-analyzer"
+    assert claimed["sourcemap"]["assigned_agent"] == "source-analyzer"
 
 
 def test_bare_ev_fetch_selects_highest_unsatisfied_unit_and_derives_limit(
@@ -347,6 +373,94 @@ def test_defer_cluster_and_reset_stale_and_retry(client, isolate_settings):
     client.post(f"{BASE}/work-items/error", json={"ids": [err_id]})
     retried = client.post(f"{BASE}/work-items/retry-errors", json={"max_retries": 3}).json()
     assert retried["affected"] == 1
+
+
+def test_defer_dry_run_previews_without_mutating(client, isolate_settings):
+    _seed(client, isolate_settings)
+    first = _observe(
+        client, url="https://app.example/api/preview-a",
+        case_type="api", cluster_key="gf:preview",
+    ).json()["work_item"]["id"]
+    second = _observe(
+        client, url="https://app.example/api/preview-b",
+        case_type="api", cluster_key="gf:preview",
+    ).json()["work_item"]["id"]
+
+    preview = client.post(
+        f"{BASE}/work-items/defer-cluster",
+        json={"cluster_key": "gf:preview", "reason": "reviewed", "dry_run": True},
+    )
+
+    assert preview.status_code == 200, preview.text
+    assert preview.json() == {
+        "affected": 2,
+        "ids": [first, second],
+        "cluster_key": "gf:preview",
+        "dry_run": True,
+    }
+    pending = client.get(f"{BASE}/work-items?status=pending").json()
+    assert {row["id"] for row in pending} == {first, second}
+
+
+def test_defer_items_chunks_large_id_sets_atomically(client, isolate_settings):
+    _seed(client, isolate_settings)
+    items = [
+        {
+            "queue_key": f"bulk:{index}",
+            "url": f"https://app.example/bulk/{index}",
+            "host": "app.example",
+            "url_path": f"/bulk/{index}",
+            "type": "api",
+            "status": "pending",
+        }
+        for index in range(1200)
+    ]
+    for start in range(0, len(items), 500):
+        inserted = client.post(
+            f"{BASE}/work-items/bulk",
+            json={"items": items[start:start + 500]},
+        )
+        assert inserted.status_code == 201, inserted.text
+    ids = [row["id"] for row in client.get(f"{BASE}/work-items?status=pending").json()]
+    assert len(ids) == 1200
+
+    deferred = client.post(
+        f"{BASE}/work-items/defer",
+        json={"ids": [*ids, ids[0], ids[-1]], "reason": "batch-reviewed"},
+    )
+
+    assert deferred.status_code == 200, deferred.text
+    assert deferred.json()["affected"] == 1200
+    assert len(deferred.json()["ids"]) == 1200
+    assert client.get(f"{BASE}/work-items?status=pending").json() == []
+
+
+def test_work_item_rationale_update_and_host_status_filter(client, isolate_settings):
+    _seed(client, isolate_settings)
+    pending = _observe(
+        client, url="https://app.example/api/pending", case_type="api"
+    ).json()["work_item"]["id"]
+    done = _observe(
+        client, url="https://app.example/api/done", case_type="api"
+    ).json()["work_item"]["id"]
+    client.post(f"{BASE}/work-items/done", json={"ids": [done]})
+
+    updated = client.post(
+        f"{BASE}/work-items/update",
+        json={"updates": [{"id": pending, "triage_rationale": "auth boundary lead"}]},
+    )
+    assert updated.status_code == 200, updated.text
+    row = next(
+        item for item in client.get(f"{BASE}/work-items?status=pending").json()
+        if item["id"] == pending
+    )
+    assert row["triage_rationale"] == "auth boundary lead"
+
+    stats = client.get(f"{BASE}/work-items/stats?by=host&status=pending")
+    assert stats.status_code == 200, stats.text
+    assert stats.json()["rows"] == [
+        {"host": "app.example", "status": "pending", "count": 1}
+    ]
 
 
 def test_direct_bulk_out_of_scope_skip(client, isolate_settings):

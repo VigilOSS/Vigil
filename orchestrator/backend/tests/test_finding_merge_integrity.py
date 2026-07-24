@@ -86,6 +86,249 @@ def _merge(client, source_slug: str, target_slug: str):
     )
 
 
+_HIGH_VECTOR = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"
+_MEDIUM_VECTOR = "CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:U/C:L/I:L/A:N"
+
+
+def _create_cvss_finding(
+    client,
+    slug: str,
+    *,
+    severity: str,
+    cvss_score: float,
+    cvss_vector: str,
+    impact: str,
+    workflow_status: str = "active",
+    verification_state: str = "verified",
+    verification_disposition: str = "confirmed",
+    key: str = ENGAGEMENT_KEY,
+) -> dict:
+    """Create a finding carrying flat CVSS/impact details_json keys."""
+    response = client.post(
+        f"/engagements/{key}/assessment/findings",
+        json={
+            "slug": slug,
+            "title": f"Finding {slug}",
+            "severity": severity,
+            "workflow_status": workflow_status,
+            "verification_state": verification_state,
+            "verification_disposition": verification_disposition,
+            "defect_family": "merge-integrity",
+            "auth_context": "anonymous",
+            "canonical_location": f"https://merge.example/{slug.lower()}",
+            "summary": f"Summary for {slug}",
+            "evidence_ref": f"evidence/{slug.lower()}.json",
+            "source_name": "test-agent",
+            "details": {
+                "cvss_score": cvss_score,
+                "cvss_vector": cvss_vector,
+                "impact": impact,
+                "evidence": "proof",
+            },
+            "provenance": {"agent_name": "test-agent"},
+            "links": [],
+        },
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["finding"]
+
+
+def test_merge_medium_into_high_preserves_canonical_cvss_and_impact(client, isolate_settings) -> None:
+    """I-13: merging a weaker (Medium) duplicate into the High canonical keeps
+    the canonical's severity AND its CVSS/impact.
+
+    Regression: ``details_json`` previously let the SOURCE win every non-empty
+    key, so the canonical's cvss_score/cvss_vector/impact were overwritten with
+    the Medium values while severity stayed High — tripping the severity↔CVSS
+    readiness gate.
+    """
+    _seed_engagement(client, isolate_settings)
+    _create_cvss_finding(
+        client, "MI-401",
+        severity="high", cvss_score=8.1, cvss_vector=_HIGH_VECTOR, impact="Full account takeover",
+    )
+    _create_cvss_finding(
+        client, "MI-402",
+        severity="medium", cvss_score=5.3, cvss_vector=_MEDIUM_VECTOR, impact="Limited disclosure",
+    )
+
+    response = _merge(client, "MI-402", "MI-401")
+    assert response.status_code == 200, response.text
+
+    target = response.json()["target"]
+    assert target["severity"] == "high"
+    details = json.loads(target["details_json"])
+    assert details["cvss_score"] == 8.1
+    assert details["cvss_vector"] == _HIGH_VECTOR
+    assert details["impact"] == "Full account takeover"
+
+    # The severity↔CVSS gate must not trip on the merged canonical.
+    readiness = client.get(f"{ASSESSMENT_BASE}/report-readiness")
+    assert readiness.status_code == 200, readiness.text
+    mismatches = [
+        blocker
+        for blocker in readiness.json()["blockers"]
+        if blocker.get("kind") == "severity_cvss_mismatch" and blocker.get("slug") == "MI-401"
+    ]
+    assert mismatches == [], mismatches
+
+
+def test_merge_high_source_into_medium_target_lets_stronger_source_cvss_win(
+    client, isolate_settings
+) -> None:
+    """A stronger source may raise CVSS, but cannot overwrite canonical prose."""
+    _seed_engagement(client, isolate_settings)
+    _create_cvss_finding(
+        client, "MI-403",
+        severity="medium", cvss_score=5.3, cvss_vector=_MEDIUM_VECTOR, impact="Limited disclosure",
+    )
+    _create_cvss_finding(
+        client, "MI-404",
+        severity="high", cvss_score=8.1, cvss_vector=_HIGH_VECTOR, impact="Full account takeover",
+    )
+
+    response = _merge(client, "MI-404", "MI-403")
+    assert response.status_code == 200, response.text
+
+    target = response.json()["target"]
+    assert target["severity"] == "high"
+    details = json.loads(target["details_json"])
+    assert details["cvss_score"] == 8.1
+    assert details["cvss_vector"] == _HIGH_VECTOR
+    assert details["impact"] == "Limited disclosure"
+
+
+def test_merge_source_only_fills_missing_narrative_keys(
+    client, isolate_settings
+) -> None:
+    _seed_engagement(client, isolate_settings)
+    target = _create_cvss_finding(
+        client,
+        "MI-407",
+        severity="medium",
+        cvss_score=5.3,
+        cvss_vector=_MEDIUM_VECTOR,
+        impact="Canonical impact.",
+    )
+    source = _create_cvss_finding(
+        client,
+        "MI-408",
+        severity="medium",
+        cvss_score=5.3,
+        cvss_vector=_MEDIUM_VECTOR,
+        impact="Duplicate impact.",
+    )
+    # Give both rows colliding narrative fields, with one source-only field.
+    for slug, chain, followup, extra in (
+        ("MI-407", "Canonical chain.", "Canonical follow-up.", {}),
+        (
+            "MI-408",
+            "Duplicate chain.",
+            "Merge into canonical.",
+            {"source_only_evidence": "preserve this additional fact"},
+        ),
+    ):
+        response = client.patch(
+            f"{ASSESSMENT_BASE}/findings/{slug}",
+            json={
+                "details": {
+                    "chain_rationale": chain,
+                    "required_followup": followup,
+                    **extra,
+                }
+            },
+        )
+        assert response.status_code == 200, response.text
+
+    merged = _merge(client, source["slug"], target["slug"])
+    assert merged.status_code == 200, merged.text
+    details = json.loads(merged.json()["target"]["details_json"])
+    assert details["chain_rationale"] == "Canonical chain."
+    assert details["required_followup"] == "Canonical follow-up."
+    assert details["source_only_evidence"] == "preserve this additional fact"
+
+
+def test_merge_retires_source_links_instead_of_deleting_evidence(
+    client, isolate_settings
+) -> None:
+    _seed_engagement(client, isolate_settings)
+    _create_finding(client, "MI-501")
+    _create_finding(client, "MI-502")
+    created_link = client.post(
+        f"{ASSESSMENT_BASE}/findings/MI-501/links",
+        json={
+            "link_kind": "related",
+            "target_kind": "chain",
+            "target_id": 77,
+            "notes": "Source relationship evidence.",
+        },
+    )
+    assert created_link.status_code == 200, created_link.text
+    source_link_id = created_link.json()["id"]
+
+    merged = _merge(client, "MI-501", "MI-502")
+
+    assert merged.status_code == 200, merged.text
+    links = client.get(f"{ASSESSMENT_BASE}/finding-links").json()
+    original = next(row for row in links if row["id"] == source_link_id)
+    assert original["finding_slug"] == "MI-501"
+    assert original["notes"] == "Source relationship evidence."
+    assert original["retired_at"]
+    copied = [
+        row
+        for row in links
+        if row["finding_slug"] == "MI-502"
+        and row["target_kind"] == "chain"
+        and row["target_id"] == 77
+    ]
+    assert len(copied) == 1
+    assert copied[0]["retired_at"] is None
+
+
+def test_merge_progressed_low_severity_source_keeps_canonical_high_cvss(
+    client, isolate_settings
+) -> None:
+    """Reverse edge (QC MINOR-2): details/summary precedence keys off confidence
+    (``source_stronger``), but CVSS must key off SEVERITY. A more-progressed
+    (verified/confirmed) but LOWER-severity source merged into a fresher,
+    HIGHER-severity target must NOT drag the canonical's CVSS down to the
+    source's band — which would leave severity=high with a medium cvss_score and
+    trip the severity↔CVSS readiness gate."""
+    _seed_engagement(client, isolate_settings)
+    # Target: fresh/unreviewed but HIGH.
+    _create_cvss_finding(
+        client, "MI-405",
+        severity="high", cvss_score=8.1, cvss_vector=_HIGH_VECTOR, impact="Full account takeover",
+        workflow_status="active", verification_state="unreviewed", verification_disposition="none",
+    )
+    # Source: more-progressed (verified/confirmed) but only MEDIUM -> source_stronger by confidence,
+    # even though its severity is lower.
+    _create_cvss_finding(
+        client, "MI-406",
+        severity="medium", cvss_score=5.3, cvss_vector=_MEDIUM_VECTOR, impact="Limited disclosure",
+        workflow_status="active", verification_state="verified", verification_disposition="confirmed",
+    )
+
+    response = _merge(client, "MI-406", "MI-405")
+    assert response.status_code == 200, response.text
+
+    target = response.json()["target"]
+    assert target["severity"] == "high"
+    details = json.loads(target["details_json"])
+    # CVSS follows the severity winner (target/high), NOT the confidence winner (source/medium).
+    assert details["cvss_score"] == 8.1
+    assert details["cvss_vector"] == _HIGH_VECTOR
+
+    readiness = client.get(f"{ASSESSMENT_BASE}/report-readiness")
+    assert readiness.status_code == 200, readiness.text
+    mismatches = [
+        blocker
+        for blocker in readiness.json()["blockers"]
+        if blocker.get("kind") == "severity_cvss_mismatch" and blocker.get("slug") == "MI-405"
+    ]
+    assert mismatches == [], mismatches
+
+
 @pytest.mark.parametrize(
     ("case", "expected_detail"),
     [

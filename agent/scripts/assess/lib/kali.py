@@ -948,11 +948,13 @@ def kali_exec(
                 )
         except AssessError as exc:
             print(
-                f"warning: pre-exec audit POST failed: {exc}; continuing without audit row.",
+                f"warning: pre-exec audit POST failed: {exc}; refusing target execution.",
                 file=sys.stderr,
             )
             _write_failed_audit_marker(eng_dir, run_uuid=run_uuid, error=str(exc))
-            audit_failed = True
+            raise AssessError(
+                "required pre-exec audit record was not created; refusing execution"
+            ) from exc
 
         reservation = aggregate_rate_reservation(
             str(eng_dir), cmd, derived_tool_name, execution_policy

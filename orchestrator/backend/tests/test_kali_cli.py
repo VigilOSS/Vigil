@@ -2167,7 +2167,7 @@ def test_kali_exec_rejects_intent_too_long(monkeypatch, fake_engagement):
     assert "intent" in str(exc.value).lower()
 
 
-def test_kali_exec_audit_post_failure_writes_marker_and_continues(
+def test_kali_exec_audit_post_failure_writes_marker_and_refuses_execution(
     monkeypatch, fake_engagement, capsys
 ):
     kali = _setup_fake_config(monkeypatch, fake_engagement)
@@ -2187,23 +2187,23 @@ def test_kali_exec_audit_post_failure_writes_marker_and_continues(
         kali, "AssessmentClient", lambda *a, **k: _BrokenClient("u", "k")
     )
     monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
-    monkeypatch.setattr(
-        kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0)
-    )
+    def _unexpected_exec(*args, **kwargs):
+        raise AssertionError("target command must not execute without an audit row")
 
-    result = kali.kali_exec(
-        ["nmap", "10.0.0.1"],
-        technique="RECON",
-        intent="probe",
-        probe_kind="fingerprint",
-        phase="recon",
-        timeout=30,
-        agent_name="recon-specialist",
-        engagement_dir=fake_engagement,
-        tool_name="nmap",
-    )
-    # Result should still come back even though audit POST failed.
-    assert result.status == "completed"
+    monkeypatch.setattr(kali.subprocess, "Popen", _unexpected_exec)
+
+    with pytest.raises(kali.AssessError, match="required pre-exec audit"):
+        kali.kali_exec(
+            ["nmap", "10.0.0.1"],
+            technique="RECON",
+            intent="probe",
+            probe_kind="fingerprint",
+            phase="recon",
+            timeout=30,
+            agent_name="recon-specialist",
+            engagement_dir=fake_engagement,
+            tool_name="nmap",
+        )
     err = capsys.readouterr().err
     assert "audit POST failed" in err
 
@@ -5037,6 +5037,48 @@ def test_sweep_orphans_skips_when_liveness_probe_fails(
     out = capsys.readouterr().out
     assert "skipped id=14" in out
     assert "liveness-probe-failed" in out
+
+
+def test_sweep_orphans_splits_skipped_into_benign_and_unverifiable(
+    monkeypatch, capsys, fake_engagement
+):
+    """I-05: the ``skipped`` counter must separate benign already-terminal rows
+    (the backend ?status=running blind spot pages every historical row) from
+    genuinely-unverifiable ones (liveness/pid/PATCH failures) so resume-brief
+    warns only on the latter. ``skipped`` stays the grand total."""
+    rows = [
+        # Two already-terminal historical rows — benign, must not warn.
+        {**_orphan_row(row_id=1, age_seconds=7200, run_uuid="aaaa0001"), "status": "completed"},
+        {**_orphan_row(row_id=2, age_seconds=7200, run_uuid="aaaa0002"), "status": "failed"},
+        # A running-status row whose liveness probe cannot complete — unverifiable.
+        _orphan_row(row_id=3, age_seconds=7200, run_uuid="bbbb0003"),
+    ]
+    sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, rows)
+
+    def fake_subprocess_run(argv, **kwargs):
+        if argv[3] == "cat":
+            return SimpleNamespace(returncode=0, stdout="12345\n", stderr="")
+        if argv[3] == "kill":
+            # The liveness probe itself fails → liveness unknown → unverifiable.
+            raise FileNotFoundError("docker")
+        raise AssertionError(f"unexpected subprocess call: {argv}")
+
+    monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
+
+    sweep.run(SimpleNamespace(
+        engagement_dir=str(fake_engagement),
+        max_age_seconds=3600,
+        container_name="vigil",
+        dry_run=False,
+    ))
+
+    # No terminal row was PATCHed; the unverifiable one was NOT finalized as lost.
+    assert fake_client.patches == []
+    summary = json.loads(capsys.readouterr().out.splitlines()[-1])["summary"]
+    assert summary["skipped_already_terminal"] == 2
+    assert summary["skipped_unverifiable"] == 1
+    assert summary["skipped"] == 3  # grand total preserved
+    assert summary["finalized"] == 0
 
 
 def test_sweep_orphans_uses_db_run_uuid_when_present(monkeypatch, fake_engagement):

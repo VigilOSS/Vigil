@@ -29,10 +29,12 @@ class _FakeClient:
 
     def get(self, endpoint: str) -> object:
         self.fetched.append(endpoint)
-        if endpoint == "credentials":
-            return []
         slug = endpoint.removeprefix("findings/")
         return {"slug": slug, "title": f"Finding {slug}", "severity": "medium"}
+
+    def get_engagement(self, endpoint: str) -> object:
+        assert endpoint == "credentials"
+        return []
 
 
 def _run_renderer(

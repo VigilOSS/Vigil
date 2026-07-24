@@ -10,8 +10,11 @@ Two levels, both network-free:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -141,3 +144,62 @@ def test_status_probe_missing_alias_does_not_persist_to_alias_name(
 
     assert persisted == []
     assert "persisted=False" in capsys.readouterr().out
+
+
+def test_auth_show_identity_fetches_only_requested_record(
+    tmp_path, monkeypatch, capsys
+):
+    eng = tmp_path / "agent" / "engagements" / "eng"
+    eng.mkdir(parents=True)
+    monkeypatch.setattr(main_mod, "_resolve_command_engagement", lambda *_: eng)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        main_mod.auth_module,
+        "read_identity",
+        lambda _eng, identity: calls.append(identity)
+        or {"identity_name": identity, "cookies": {"sid": "only-this-one"}},
+    )
+    monkeypatch.setattr(
+        main_mod.auth_module,
+        "read_auth",
+        lambda _eng: pytest.fail("full credential store must not be fetched"),
+    )
+    args = argparse.Namespace(
+        command="auth",
+        auth_command="show",
+        engagement=None,
+        select=False,
+        identity="user_a",
+    )
+
+    main_mod._auth(args, tmp_path)
+
+    assert calls == ["user_a"]
+    assert json.loads(capsys.readouterr().out)["identity_name"] == "user_a"
+
+
+def test_auth_quarantine_disables_identity_without_deleting(
+    tmp_path, monkeypatch, capsys
+):
+    eng = tmp_path / "agent" / "engagements" / "eng"
+    eng.mkdir(parents=True)
+    monkeypatch.setattr(main_mod, "_resolve_command_engagement", lambda *_: eng)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        main_mod.auth_module,
+        "quarantine_identity",
+        lambda _eng, identity: calls.append(identity)
+        or {"identity_name": identity, "use_for_requests": False},
+    )
+    args = argparse.Namespace(
+        command="auth",
+        auth_command="quarantine",
+        engagement=None,
+        select=False,
+        identity="retired_admin",
+    )
+
+    main_mod._auth(args, tmp_path)
+
+    assert calls == ["retired_admin"]
+    assert "quarantined credential retired_admin" in capsys.readouterr().out

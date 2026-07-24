@@ -226,11 +226,13 @@ class WorkItemIdsRequest(BaseModel):
 class WorkItemDeferItemsRequest(BaseModel):
     ids: list[int] = Field(default_factory=list)
     reason: str = Field(default="", max_length=1024)
+    dry_run: bool = False
 
 
 class WorkItemDeferClusterRequest(BaseModel):
     cluster_key: str = Field(default="", max_length=512)
     reason: str = Field(default="", max_length=1024)
+    dry_run: bool = False
 
 
 class WorkItemUpdate(BaseModel):
@@ -248,6 +250,7 @@ class WorkItemUpdate(BaseModel):
     cluster_key: str | None = None
     terminal_reason: str | None = None
     classifier_version: str | None = None
+    triage_rationale: str | None = Field(default=None, max_length=4096)
 
 
 class WorkItemUpdateRequest(BaseModel):
@@ -345,6 +348,10 @@ class ProbeRunRecordRequest(BaseModel):
     ] = "tested"
     observed_http_status: int | None = None
     signal_type: str = Field(default="", max_length=128)
+    # A signal must name the application-level observation that distinguishes a
+    # true positive from a status/size lookalike. The service demotes a signal
+    # with no assertion to an inconclusive attempt, including for direct callers.
+    outcome_assertion: str = Field(default="", max_length=1024)
     evidence_ref: str = Field(default="", max_length=1024)
     notes: str = Field(default="", max_length=4096)
     target_host: str = Field(default="", max_length=256)
@@ -795,6 +802,38 @@ class FindingLinkRequest(BaseModel):
     target_ref: str = Field(default="", max_length=1024)
     notes: str = Field(default="", max_length=4096)
     provenance: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def require_one_target_selector(self) -> FindingLinkRequest:
+        has_id = self.target_id is not None
+        has_ref = bool(self.target_ref.strip())
+        if has_id == has_ref:
+            raise ValueError("provide exactly one of target_id or target_ref")
+        return self
+
+
+class FindingLinkPatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_kind: str | None = Field(default=None, min_length=1, max_length=64)
+    target_id: int | None = None
+    target_ref: str | None = Field(default=None, max_length=1024)
+    notes: str | None = Field(default=None, max_length=4096)
+    provenance: dict[str, Any] | None = None
+    retired: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_patch(self) -> FindingLinkPatchRequest:
+        provided = self.model_fields_set
+        if not provided:
+            raise ValueError("finding link patch requires at least one field")
+        if {"target_id", "target_ref"} <= provided:
+            raise ValueError("provide only one of target_id or target_ref")
+        if "target_kind" in provided and not (
+            {"target_id", "target_ref"} & provided
+        ):
+            raise ValueError("changing target_kind requires a target selector")
+        return self
 
 
 class RootCauseLinkRequest(BaseModel):
@@ -1853,9 +1892,13 @@ def get_work_items(
 
 
 @router.get("/work-items/stats")
-def get_work_item_stats(engagement_key: str, by: str = "status") -> dict[str, Any]:
+def get_work_item_stats(
+    engagement_key: str, by: str = "status", status: str = ""
+) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.work_buffer_stats(engagement.id, by=by)
+    return state_manager.work_buffer_stats(
+        engagement.id, by=by, status_value=status
+    )
 
 
 @router.post("/work-items/bulk", status_code=status.HTTP_201_CREATED)
@@ -1937,7 +1980,13 @@ async def work_items_error(engagement_key: str, request: WorkItemIdsRequest) -> 
 async def work_items_defer(engagement_key: str, request: WorkItemDeferItemsRequest) -> dict[str, Any]:
     engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
     return await anyio.to_thread.run_sync(
-        functools.partial(state_manager.defer_work_items, engagement.id, ids=request.ids, reason=request.reason)
+        functools.partial(
+            state_manager.defer_work_items,
+            engagement.id,
+            ids=request.ids,
+            reason=request.reason,
+            dry_run=request.dry_run,
+        )
     )
 
 
@@ -1950,6 +1999,7 @@ async def work_items_defer_cluster(engagement_key: str, request: WorkItemDeferCl
             engagement.id,
             cluster_key=request.cluster_key,
             reason=request.reason,
+            dry_run=request.dry_run,
         )
     )
 
@@ -2856,6 +2906,40 @@ async def create_finding_link(
             actor_name="operator",
             result="linked",
             metadata={"finding_slug": finding_slug, "link_id": record.get("id")},
+        )
+    )
+    await _broadcast(engagement.key, "finding_link", record)
+    return record
+
+
+@router.patch("/findings/{finding_slug}/links/{link_id}")
+async def update_finding_link(
+    engagement_key: str,
+    finding_slug: str,
+    link_id: int,
+    request: FindingLinkPatchRequest,
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(
+        lambda: get_engagement_or_404(engagement_key)
+    )
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.update_finding_link,
+            engagement.id,
+            finding_slug=finding_slug,
+            link_id=link_id,
+            **request.model_dump(),
+        )
+    )
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_assessment_mutation,
+            engagement.id,
+            title="finding-link-update",
+            action=f"finding={finding_slug} link_id={link_id}",
+            actor_name="operator",
+            result="retired" if request.retired else "updated",
+            metadata={"finding_slug": finding_slug, "link_id": link_id},
         )
     )
     await _broadcast(engagement.key, "finding_link", record)

@@ -28,9 +28,17 @@ def _orphan_attention(output: str) -> str:
             break
     if payload is None:
         return ""
+    # Each section names ONLY its genuinely-actionable fields, so the WARN fires
+    # for stuck work — not for benign bookkeeping. For command_runs/jobs the
+    # sweep's ``skipped`` counter is a benign-vs-genuine union (the backend
+    # ignores ?status=running, so it pages ALL historical rows and "skips" every
+    # already-terminal one — a benign count that can reach the thousands). Key on
+    # ``skipped_unverifiable`` (liveness/pid/PATCH failures), NOT the conflated
+    # ``skipped``, mirroring how host_processes already keys on its bad states
+    # (unverifiable/failed) rather than a catch-all (I-05).
     sections = (
-        ("command_runs", payload.get("summary"), ("still_running", "skipped")),
-        ("jobs", payload.get("jobs_summary"), ("still_running", "skipped")),
+        ("command_runs", payload.get("summary"), ("still_running", "skipped_unverifiable")),
+        ("jobs", payload.get("jobs_summary"), ("still_running", "skipped_unverifiable")),
         (
             "host_processes",
             payload.get("host_processes_summary"),
@@ -211,22 +219,30 @@ def _render_markdown(brief: dict) -> str:
     _render_per_input_coverage(lines, brief.get("per_input_coverage") or {})
     lines.extend(["", "## Dispatches"])
     dispatches = brief.get("dispatches") or {}
-    for row in dispatches.get("stale_in_progress_dispatches") or []:
+    # The lists are capped by the backend; the *_count fields carry the TRUE
+    # totals so a stale row that sorts below the display window is still counted
+    # (I-10). Surface a "showing N of M" hint whenever the list was truncated.
+    stale_rows = dispatches.get("stale_in_progress_dispatches") or []
+    for row in stale_rows:
         lines.append(f"- stale: {row.get('agent_id')} role={row.get('agent_role')} age_h={row.get('age_hours')} handoff={row.get('handoff_status')}")
-    for row in dispatches.get("handoff_gaps") or []:
+    _render_dispatch_more(lines, len(stale_rows), dispatches.get("stale_in_progress_dispatches_count"), "stale in-progress dispatches")
+    gap_rows = dispatches.get("handoff_gaps") or []
+    for row in gap_rows:
         lines.append(f"- gap: {row.get('agent_id')} role={row.get('agent_role')} reason={row.get('reason')}")
-    for row in dispatches.get("terminal_no_handoff") or []:
+    _render_dispatch_more(lines, len(gap_rows), dispatches.get("handoff_gaps_count"), "handoff gaps")
+    terminal_rows = dispatches.get("terminal_no_handoff") or []
+    for row in terminal_rows:
         lines.append(
             f"- terminal-no-handoff: {row.get('agent_id')} role={row.get('agent_role')} "
             f"status={row.get('status')} completed_at={row.get('completed_at')} "
             "(silent state-loss — no handoff was ever written)"
         )
-    if not (
-        dispatches.get("stale_in_progress_dispatches")
-        or dispatches.get("handoff_gaps")
-        or dispatches.get("terminal_no_handoff")
-    ):
-        lines.append("- no stale in-progress dispatches, handoff gaps, or terminal handoff-less dispatches in the brief window")
+    _render_dispatch_more(lines, len(terminal_rows), dispatches.get("terminal_no_handoff_count"), "terminal handoff-less dispatches")
+    if not (stale_rows or gap_rows or terminal_rows):
+        lines.append(
+            "- no stale in-progress dispatches, handoff gaps, or terminal "
+            "handoff-less dispatches across the engagement"
+        )
     selected = dispatches.get("selected_dispatch")
     if selected:
         lines.extend(["", "## Selected Dispatch"])
@@ -306,6 +322,16 @@ def _render_markdown(brief: dict) -> str:
             entity = f" [{row.get('entity_kind')} {row.get('entity_id')}]"
         lines.append(f"- {row.get('reason')}{entity}: `{row.get('command')}`")
     return "\n".join(lines)
+
+
+def _render_dispatch_more(lines: list, shown: int, total, label: str) -> None:
+    """Emit a '… showing N of M' hint when the backend capped a dispatch worklist
+    (stale / gaps / terminal) but reported a larger true total via its ``*_count``
+    field (I-10). A ``None`` total (older backend) or an un-truncated list emits
+    nothing. The reconcile-stale action for the full set is already surfaced under
+    ## Next Actions, so this only signals depth."""
+    if isinstance(total, int) and total > shown:
+        lines.append(f"  - … showing {shown} of {total} {label}")
 
 
 _SURFACE_ROLLUP_LIMIT = 12

@@ -116,6 +116,23 @@ def test_apply_resolve_pin_pins_the_ipv4_address(monkeypatch):
     assert cmd[cmd.index("--resolve") + 1] == "example.com:443:93.184.216.34"
 
 
+def test_apply_resolve_pin_distributes_multi_address_hosts(monkeypatch):
+    """A multi-A target must not always concentrate traffic on address zero."""
+    addresses = ["203.0.113.10", "203.0.113.11", "203.0.113.12"]
+    monkeypatch.setattr(kali_resolve.secrets, "choice", lambda values: values[-1])
+    cmd = ["curl", "-sS", "https://example.com/"]
+
+    pinned = kali_resolve.apply_resolve_pin(
+        cmd,
+        "curl",
+        runtime=_docker_desktop(),
+        ips=addresses,
+    )
+
+    assert pinned == "203.0.113.12"
+    assert cmd[cmd.index("--resolve") + 1] == "example.com:443:203.0.113.12"
+
+
 # --------------------------------------------------------------------------- #
 # I-10 — ffuf takes no --resolve pin: must be OUT of RESOLVE_PIN_TOOLS.
 # --------------------------------------------------------------------------- #

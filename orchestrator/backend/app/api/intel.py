@@ -498,6 +498,7 @@ async def supersede_intel_record(
             intel_id,
             request.payload,
             rationale=request.rationale,
+            to_existing_id=request.to_existing_id,
         )
     )
     await _broadcast(engagement.key, intel_type.replace("-", "_"), result.get("current", {}))

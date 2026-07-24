@@ -1451,6 +1451,36 @@ def test_print_status_silent_when_install_current(
     assert "install stamp" not in out
 
 
+def test_print_status_warns_when_backend_sources_changed_after_process_start(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from vigil_cli.status import print_status
+
+    status = _minimal_status(
+        orchestrator={
+            "state": "running",
+            "healthy": True,
+            "readiness": {
+                "reachable": True,
+                "http_status": 200,
+                "status": "ready",
+                "backend_runtime": {
+                    "restart_required": True,
+                    "process_started_at": "2026-07-24T15:23:00Z",
+                    "source_root": "/Users/example/vigil/orchestrator/backend/app",
+                    "newer_source_files": ["services/state_manager/coverage.py"],
+                },
+            },
+        },
+    )
+
+    print_status(status)
+
+    out = capsys.readouterr().out
+    assert "backend restart required" in out
+    assert "coverage.py" in out
+
+
 def test_collect_status_includes_install_staleness(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -8145,6 +8175,9 @@ def _run_dispatch_action(
     reason: str = "",
     *,
     fetch_response: dict | None = None,
+    dry_run: bool = False,
+    rationale: str = "",
+    status: str = "pending",
 ) -> "_FakeWorkBufferClient":
     """Drive ``dispatch.run`` (work-buffer verbs) against the backend fake."""
     module = _load_assess_module(
@@ -8169,6 +8202,9 @@ def _run_dispatch_action(
             reason=reason,
             reason_tag="",
             by="status",
+            dry_run=dry_run,
+            triage_rationale=rationale,
+            cluster_status=status,
             engagement_dir=None,
         )
     )
@@ -8240,6 +8276,54 @@ def test_dispatch_defer_items_accepts_comma_separated(
     fake = _run_dispatch_action(monkeypatch, rows, "defer-items", ["10,11"], reason="noise")
 
     assert fake.posts == [("work-items/defer", {"ids": [10, 11], "reason": "noise"})]
+
+
+def test_dispatch_defer_items_dry_run_reaches_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _run_dispatch_action(
+        monkeypatch,
+        [{"id": 10}, {"id": 11}],
+        "defer-items",
+        ["10", "11"],
+        reason="reviewed",
+        dry_run=True,
+    )
+    assert fake.posts == [
+        (
+            "work-items/defer",
+            {"ids": [10, 11], "reason": "reviewed", "dry_run": True},
+        )
+    ]
+
+
+def test_dispatch_set_rationale_posts_work_item_updates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _run_dispatch_action(
+        monkeypatch,
+        [{"id": 3}, {"id": 4}],
+        "set-rationale",
+        ["3", "4"],
+        rationale="same-org path already covered by stronger cross-org probe",
+    )
+    assert fake.posts == [
+        (
+            "work-items/update",
+            {
+                "updates": [
+                    {
+                        "id": 3,
+                        "triage_rationale": "same-org path already covered by stronger cross-org probe",
+                    },
+                    {
+                        "id": 4,
+                        "triage_rationale": "same-org path already covered by stronger cross-org probe",
+                    },
+                ]
+            },
+        )
+    ]
 
 
 def test_dispatch_defer_items_with_no_ids_errors(
@@ -8466,6 +8550,127 @@ def test_supersede_intel_requires_natural_key_before_request(
     err = capsys.readouterr().err
     assert "missing required supersede natural-key field: cve_id" in err
     assert "missing required supersede natural-key field: affected_component" in err
+
+
+def test_supersede_intel_to_existing_sends_fk_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """I-15: --to-existing skips payload validation and POSTs a to_existing_id
+    body (no payload) to the existing supersede endpoint."""
+    supersede_module = _load_assess_module(
+        "supersede_intel_module_to_existing",
+        "agent/scripts/assess/commands/supersede_intel.py",
+    )
+
+    captured: dict[str, object] = {}
+
+    class _StubClient:
+        _engagement_prefix = "/engagements/test"
+
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def _request(self, method: str, path: str, body: bytes | None = None):
+            captured["method"] = method
+            captured["path"] = path
+            captured["body"] = body
+            return 201, json.dumps({"superseded": {"id": 5}, "current": {"id": 7}})
+
+        def close(self) -> None:
+            return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
+
+    monkeypatch.setattr(supersede_module, "AssessmentClient", _StubClient)
+    monkeypatch.setattr(
+        supersede_module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(tmp_path),
+            engagement_key="eng-test",
+            agent_root=str(tmp_path),
+        ),
+    )
+
+    supersede_module.run(
+        SimpleNamespace(
+            intel_type="tech-component",
+            intel_id=5,
+            payload=None,
+            inline_payload=None,
+            to_existing_id=7,
+            rationale="dup of canonical",
+            engagement_dir=str(tmp_path),
+        )
+    )
+
+    assert captured["method"] == "POST"
+    assert str(captured["path"]).endswith("/intel/tech-components/5/supersede")
+    sent = json.loads(captured["body"])
+    assert sent == {"to_existing_id": 7, "rationale": "dup of canonical"}
+    assert '"current"' in capsys.readouterr().out
+
+
+def test_supersede_intel_to_existing_rejects_payload_client_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--to-existing is mutually exclusive with a payload argument; the CLI
+    rejects it before any network round trip."""
+    supersede_module = _load_assess_module(
+        "supersede_intel_module_mutex",
+        "agent/scripts/assess/commands/supersede_intel.py",
+    )
+    sent: dict[str, object] = {}
+
+    class _StubClient:
+        _engagement_prefix = "/engagements/test"
+
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def _request(self, *_a: object, **_k: object):
+            sent["called"] = True
+            return 201, "{}"
+
+        def close(self) -> None:
+            return None
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(supersede_module, "AssessmentClient", _StubClient)
+    monkeypatch.setattr(
+        supersede_module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(tmp_path),
+            engagement_key="eng-test",
+            agent_root=str(tmp_path),
+        ),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        supersede_module.run(
+            SimpleNamespace(
+                intel_type="tech-component",
+                intel_id=5,
+                payload="new.json",
+                inline_payload=None,
+                to_existing_id=7,
+                rationale="",
+                engagement_dir=str(tmp_path),
+            )
+        )
+
+    assert exc.value.code == 1
+    assert sent == {}
+    assert "mutually exclusive" in capsys.readouterr().err
 
 
 def _validate_dispatch_contract(payload: dict, *, engagement_dir=None):
@@ -8826,9 +9031,12 @@ def _stub_render_handoff_environment(
                 if findings_by_slug and slug in findings_by_slug:
                     return findings_by_slug[slug]
                 raise module.AssessError("HTTP 404: not found")
+            raise module.AssessError(f"unexpected endpoint {endpoint}")
+
+        def get_engagement(self, endpoint: str):
             if endpoint == "credentials":
                 return list(credentials or [])
-            raise module.AssessError(f"unexpected endpoint {endpoint}")
+            raise module.AssessError(f"unexpected engagement endpoint {endpoint}")
 
         def get_handoff(self, agent_id: str):
             if handoff is None:
@@ -8981,7 +9189,7 @@ def test_render_handoff_emits_known_fields_for_existing_agent_id(
     assert "tools/exploit-state/EX-002-poc.py` (state: missing)" in out
     assert "replay captured cookie at /api/users/2" in out
     assert "Recommended next agent:** exploit-developer" in out
-    assert "Credentials captured:** 1 rows (ids: 17)" in out
+    assert "Credentials captured:** 2 rows (ids: 17, 18)" in out
 
 
 def test_render_handoff_404s_unknown_agent_id(
@@ -9126,6 +9334,7 @@ class _CapturingClient:
         self.dispatches_by_id: dict[str, dict] = {}
         self.handoff_response: dict | None = None
         self.decisions_recorded: list[dict] = []
+        self.decisions: list[dict] = []
         self.handoff_calls: list[dict] = []
         self.handoffs_by_id: dict[str, dict] = {}
 
@@ -9157,6 +9366,12 @@ class _CapturingClient:
     def record_decision(self, payload: dict) -> dict:
         self.decisions_recorded.append(payload)
         return {"id": 99, **payload}
+
+    def list_decisions(self, **filters):
+        return [
+            row for row in self.decisions
+            if not filters.get("kind") or row.get("kind") == filters["kind"]
+        ]
 
     def record_handoff(self, payload: dict, *, upsert: bool = False) -> dict:
         # Track every call for idempotency tests; the dispatch CLI should
@@ -9470,6 +9685,49 @@ def test_agent_reconcile_stale_dry_run_groups_handoffs(
     rows = {row["agent_id"]: row for row in json.loads(capsys.readouterr().out)}
     assert rows["AG-READY"]["category"] == "ready_handoff"
     assert rows["AG-GAP"]["category"] == "no_handoff"
+
+
+def test_agent_reconcile_stale_includes_completed_and_honors_reconciliation_decision(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_assess_module(
+        "agent_command_module_reconcile_terminal",
+        "agent/scripts/assess/commands/agent.py",
+    )
+    fake = _CapturingClient()
+    fake.dispatches_by_id["AG-COMPLETE"] = {
+        "agent_id": "AG-COMPLETE",
+        "agent_role": "recon-specialist",
+        "status": "completed",
+    }
+    fake.dispatches_by_id["AG-FAILED-ADJUDICATED"] = {
+        "agent_id": "AG-FAILED-ADJUDICATED",
+        "agent_role": "recon-specialist",
+        "status": "failed",
+    }
+    fake.decisions.append(
+        {
+            "kind": "dispatch_reconciliation",
+            "payload": {"agent_id": "AG-FAILED-ADJUDICATED", "reason": "worker died before output"},
+        }
+    )
+    monkeypatch.setattr(module.dispatch, "_client_for", lambda _args: (fake, SimpleNamespace()))
+
+    module.run(
+        SimpleNamespace(
+            action="reconcile-stale",
+            extra=[],
+            agent_id=None,
+            dry_run=True,
+            max_age_hours=1,
+        )
+    )
+
+    rows = {row["agent_id"]: row for row in json.loads(capsys.readouterr().out)}
+    assert rows["AG-COMPLETE"]["category"] == "terminal_no_handoff"
+    assert rows["AG-COMPLETE"]["dispatch_status"] == "completed"
+    assert "AG-FAILED-ADJUDICATED" not in rows
 
 
 def _invoke_backend_lifecycle(module, action: str, args) -> None:
@@ -10168,6 +10426,47 @@ def test_dispatch_record_handoff_flag_based(
     assert payload["recommended_next_agent"] == "exploit-developer"
     # The CLI MUST request upsert semantics so checkpointing is idempotent.
     assert fake.handoff_calls[-1]["upsert"] is True
+
+
+def test_dispatch_handoff_can_patch_status_without_replacing_summary(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _load_dispatch_module()
+    fake = _CapturingClient()
+    fake.handoffs_by_id["HF-PROMOTE"] = {
+        "id": 42,
+        "agent_id": "HF-PROMOTE",
+        "agent_role": "vulnerability-analyst",
+        "summary": "Specialist-authored detailed summary.",
+        "handoff_status": "checkpointed",
+    }
+    monkeypatch.setattr(module.agent, "_client_for", lambda _args: (fake, SimpleNamespace()))
+
+    module.agent._record_handoff(
+        SimpleNamespace(
+            from_json=None,
+            agent_id="HF-PROMOTE",
+            agent_role=None,
+            hf_summary=None,
+            hf_confidence=None,
+            finding_slugs=None,
+            hf_next_steps=None,
+            hf_coverage_gaps=None,
+            hf_runtime_issues=None,
+            hf_working_artifacts=None,
+            hf_open_questions=None,
+            hf_recommended_next_agent=None,
+            hf_handoff_status="ready",
+            hf_closed_dispatch_status=None,
+            hf_extras_json=None,
+        )
+    )
+
+    row = fake.handoffs_by_id["HF-PROMOTE"]
+    assert row["handoff_status"] == "ready"
+    assert row["summary"] == "Specialist-authored detailed summary."
+    assert fake.handoff_calls == []
+    assert json.loads(capsys.readouterr().out)["agent_id"] == "HF-PROMOTE"
 
 
 def test_dispatch_record_handoff_is_idempotent_for_repeat_calls(

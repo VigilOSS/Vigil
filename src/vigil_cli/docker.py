@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,8 +18,42 @@ class DockerResult:
 Runner = Callable[..., DockerResult]
 HOST_GATEWAY_ARG = "--add-host=host.docker.internal:host-gateway"
 
+# Fast Docker metadata queries (image/container inspects, ``docker info``,
+# ``docker ps``) and the DETACHED ``docker run -d`` start all return promptly
+# against a healthy daemon. When the Docker daemon/VM is wedged — a common
+# Docker Desktop failure mode on macOS — an un-bounded ``subprocess.run`` blocks
+# forever, hanging ``vigil runtime start``/``status``, ``vigil up`` and
+# ``vigil doctor`` with no output. Bounding every such call makes an
+# unresponsive daemon degrade to a clear error instead of a hang (I-02). Image
+# BUILDS deliberately route through ``run_command_streaming`` (NO timeout) —
+# a cold build legitimately runs for minutes — so this bound never touches them.
+_DEFAULT_TIMEOUT_SECONDS = 20.0
+# Distinct from Docker's own exit codes (125 run-failure / 126 not-executable /
+# 127 not-found) and mirrors coreutils ``timeout(1)`` so callers can recognise a
+# timeout specifically rather than confusing it with a real docker failure.
+TIMEOUT_RETURNCODE = 124
+
+
+def _resolve_timeout() -> float | None:
+    """Per-call timeout (seconds) for fast Docker metadata queries.
+
+    Overridable via ``VIGIL_DOCKER_TIMEOUT``. A value of ``0`` (or a negative /
+    unparseable value) disables the bound entirely — the escape hatch for an
+    operator on a slow box whose legitimate metadata query needs longer than the
+    default. An unset/blank env var uses ``_DEFAULT_TIMEOUT_SECONDS``.
+    """
+    raw = os.environ.get("VIGIL_DOCKER_TIMEOUT")
+    if raw is None or not raw.strip():
+        return _DEFAULT_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DEFAULT_TIMEOUT_SECONDS
+    return value if value > 0 else None
+
 
 def run_command(argv: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> DockerResult:
+    timeout = _resolve_timeout()
     try:
         completed = subprocess.run(
             argv,
@@ -27,9 +62,19 @@ def run_command(argv: list[str], *, cwd: Path | None = None, env: dict[str, str]
             text=True,
             capture_output=True,
             check=False,
+            timeout=timeout,
         )
     except FileNotFoundError as exc:
         return DockerResult(127, "", str(exc))
+    except subprocess.TimeoutExpired:
+        # Never surface a hang. A wedged daemon becomes a non-zero result that
+        # every metadata helper already treats as "unavailable/empty", and that
+        # callers can recognise as a timeout via ``TIMEOUT_RETURNCODE``.
+        return DockerResult(
+            TIMEOUT_RETURNCODE,
+            "",
+            f"docker command timed out after {timeout:g}s (daemon unresponsive?): {' '.join(argv)}",
+        )
     return DockerResult(completed.returncode, completed.stdout, completed.stderr)
 
 
@@ -126,8 +171,38 @@ def container_image_id(name: str, *, runner: Runner = run_command) -> str:
     return result.stdout.strip()
 
 
+@dataclass(frozen=True, slots=True)
+class DaemonStatus:
+    """Health of the Docker daemon from a single ``docker info`` probe.
+
+    ``responsive`` is True only when ``docker info`` returned rc=0. ``timed_out``
+    separates a wedged/unresponsive daemon (our bounded ``run_command`` timeout
+    fired) from a daemon that is simply not running or a missing CLI, so callers
+    can print a targeted recovery hint. ``detail`` carries the probe's stderr for
+    diagnostics (empty on the healthy path — ``docker info``'s success output is
+    large and unused).
+    """
+    responsive: bool
+    timed_out: bool
+    detail: str
+
+
+def daemon_status(*, runner: Runner = run_command) -> DaemonStatus:
+    """Probe the daemon once and classify the result. Cheap enough to gate a
+    ``runtime start`` / ``runtime status`` on, and bounded by ``run_command`` so
+    it degrades instead of hanging when the daemon is unresponsive."""
+    result = runner(["docker", "info"])
+    if result.returncode == 0:
+        return DaemonStatus(True, False, "")
+    return DaemonStatus(
+        False,
+        result.returncode == TIMEOUT_RETURNCODE,
+        (result.stderr or result.stdout or "").strip(),
+    )
+
+
 def daemon_available(*, runner: Runner = run_command) -> bool:
-    return runner(["docker", "info"]).returncode == 0
+    return daemon_status(runner=runner).responsive
 
 
 def container_mounts(name: str, *, runner: Runner = run_command) -> dict[str, str]:
