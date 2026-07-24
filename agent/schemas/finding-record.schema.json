@@ -293,6 +293,36 @@
           },
           "description": "Concrete next steps needed to validate or complete the chain (e.g. 'Confirm reachable network caller for the URL parser')."
         },
+        "precondition_analysis": {
+          "type": [
+            "string",
+            "object",
+            "array"
+          ],
+          "description": "Conditions required for exploitation and evidence establishing whether each condition is attacker-reachable."
+        },
+        "severity_ceiling": {
+          "type": [
+            "string",
+            "object"
+          ],
+          "description": "Program- or precondition-derived upper bound on severity, including the reason for the cap when structured."
+        },
+        "root_cause_candidates": {
+          "type": [
+            "array",
+            "object"
+          ],
+          "description": "Candidate shared causes considered during deduplication or grouping."
+        },
+        "notes_provenance": {
+          "type": [
+            "string",
+            "array",
+            "object"
+          ],
+          "description": "Attribution for lifecycle-repair or analysis notes without changing the finding's discovery source."
+        },
         "roe_blocked": {
           "type": "boolean",
           "description": "Set true when the primitive is proved but the program's rules of engagement forbid the final proof step; grade at impact-if-true. Distinct from a provisioning/access wall (see block_reason) and from chain_required (which needs another bug)."

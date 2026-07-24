@@ -1327,7 +1327,15 @@ MANUAL_CLASSIFIER_VERSION: str = "manual"
 # unauthorized host (gau/wayback historical URLs routinely surface these) is
 # recorded skipped instead of admitted to the work buffer.
 SKIP_REASON_TAGS: frozenset[str] = frozenset(
-    {"out-of-scope", "blackholed", "dead-host", "low-signal-cluster", "duplicate", "egress-blocked"}
+    {
+        "already-covered",
+        "out-of-scope",
+        "blackholed",
+        "dead-host",
+        "low-signal-cluster",
+        "duplicate",
+        "egress-blocked",
+    }
 )
 
 

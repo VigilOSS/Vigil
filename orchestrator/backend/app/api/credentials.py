@@ -206,6 +206,25 @@ async def activate_identity(
     return {"active_identity": identity_name}
 
 
+@router.post("/{identity_name}/quarantine")
+async def quarantine_identity(
+    engagement_key: str, identity_name: str
+) -> dict[str, Any]:
+    """Disable request replay while preserving the credential as evidence."""
+    engagement = await anyio.to_thread.run_sync(
+        lambda: get_engagement_or_404(engagement_key)
+    )
+    material = await anyio.to_thread.run_sync(
+        db.quarantine_credential, engagement.id, identity_name
+    )
+    if material is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Identity not found: {identity_name}",
+        )
+    return material
+
+
 @router.post("/{identity_name}/liveness")
 async def persist_liveness(
     engagement_key: str, identity_name: str, request: LivenessPersistRequest

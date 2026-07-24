@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 from fastapi import HTTPException, status
@@ -13,6 +14,33 @@ from . import _common
 from ._common import ROOT_CAUSE_LINK_KIND, SEVERITY_RANK, _json_object, _serialize_finding_record
 from .links import _root_cause_link_metadata
 from .coverage import coverage_readiness, web_uncovered_high_route_hosts
+from .cvss import CvssVectorError, base_score
+
+
+_MARKDOWN_PATH_REFERENCE_RE = re.compile(
+    r"(?<![A-Za-z0-9_:/.-])"
+    r"((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:md|markdown))"
+    r"(?![A-Za-z0-9_.-])",
+    re.IGNORECASE,
+)
+
+
+def _is_durable_markdown_path(path: str) -> bool:
+    lower_path = path.lower()
+    return lower_path.endswith((".md", ".markdown")) and (
+        lower_path.startswith("notes/") or "/" not in lower_path
+    )
+
+
+def _cited_markdown_exists(engagement_root: Path, cited_path: str) -> bool:
+    """Return true only for a real citation contained by the engagement."""
+    root = engagement_root.resolve()
+    candidate = (root / cited_path).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return False
+    return candidate.is_file()
 
 
 
@@ -233,6 +261,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
             WHERE links.engagement_id = ?
               AND links.link_kind = ?
               AND links.target_kind = 'finding'
+              AND links.retired_at IS NULL
             """,
             (engagement_id, ROOT_CAUSE_LINK_KIND),
         ).fetchall()
@@ -299,7 +328,40 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 }
             )
         cvss_score = details.get("cvss_score")
+        cvss_vector = details.get("cvss_vector")
         severity = str(row.get("severity", "")).lower()
+        if not is_blue and cvss_vector:
+            try:
+                computed_score = base_score(str(cvss_vector))
+            except CvssVectorError as exc:
+                blockers.append(
+                    {
+                        "kind": "cvss_vector_invalid",
+                        "slug": slug,
+                        "title": title,
+                        "detail": f"cvss_vector is invalid: {exc}",
+                    }
+                )
+            else:
+                try:
+                    stored_score = float(cvss_score)
+                except (TypeError, ValueError):
+                    stored_score = None
+                if (
+                    stored_score is not None
+                    and abs(stored_score - computed_score) >= 0.05
+                ):
+                    blockers.append(
+                        {
+                            "kind": "cvss_vector_score_mismatch",
+                            "slug": slug,
+                            "title": title,
+                            "detail": (
+                                f"cvss_score={stored_score} but cvss_vector "
+                                f"computes to {computed_score}"
+                            ),
+                        }
+                    )
         if not is_blue and cvss_score is not None and severity:
             try:
                 score = float(cvss_score)
@@ -377,9 +439,9 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 (engagement_id,),
             ).fetchall()
         }
+        missing_citations: dict[str, set[str]] = {}
         for artifact_path, artifact in artifact_rows.items():
-            lower_path = artifact_path.lower()
-            if not (lower_path.startswith("notes/") and lower_path.endswith((".md", ".markdown"))):
+            if not _is_durable_markdown_path(artifact_path):
                 continue
             if not bool(artifact.get("present")):
                 continue
@@ -412,6 +474,27 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                         ),
                     }
                 )
+            for cited_path in _MARKDOWN_PATH_REFERENCE_RE.findall(
+                str(artifact.get("indexed_text") or "")
+            ):
+                if cited_path == artifact_path or _cited_markdown_exists(
+                    engagement_root, cited_path
+                ):
+                    continue
+                missing_citations.setdefault(cited_path, set()).add(artifact_path)
+        for cited_path, citing_paths in sorted(missing_citations.items()):
+            advisories.append(
+                {
+                    "kind": "missing_cited_markdown_artifact",
+                    "path": cited_path,
+                    "cited_by": sorted(citing_paths),
+                    "detail": (
+                        f"markdown artifact '{cited_path}' is cited by durable engagement state "
+                        f"but is absent on disk. Restore it or correct the citations before treating "
+                        "the referenced backlog or evidence as empty."
+                    ),
+                }
+            )
         artifact_rows_by_id = {int(a["id"]): a for a in artifact_rows.values() if a.get("id")}
         for row in candidates:
             slug = str(row.get("slug", ""))
@@ -500,12 +583,18 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                     }
                 )
 
+        # Only STEP links represent the ordered attack path and must each resolve
+        # to a reportable finding slug. The schema legitimately permits
+        # evidence/access/credential links (relation != 'step'); those attach
+        # supporting context, not path steps, so they must NOT be flagged as
+        # unlinked finding-steps.
         chain_links = connection.execute(
             """
             SELECT chains.chain_key, links.entity_kind, links.entity_ref
             FROM assessment_attack_chain_links AS links
             JOIN assessment_attack_chains AS chains ON chains.id = links.chain_id
             WHERE links.engagement_id = ?
+              AND links.relation = 'step'
             """,
             (engagement_id,),
         ).fetchall()
@@ -779,6 +868,7 @@ def list_report_finding_groups(engagement_id: int, *, mode: str = "draft") -> di
             WHERE links.engagement_id = ?
               AND links.link_kind = ?
               AND links.target_kind = 'finding'
+              AND links.retired_at IS NULL
             """,
             (engagement_id, ROOT_CAUSE_LINK_KIND),
         ).fetchall()

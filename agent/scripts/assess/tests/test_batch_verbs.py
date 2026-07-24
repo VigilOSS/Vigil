@@ -57,6 +57,10 @@ class _FakeClient:
         self.patches.append((endpoint, payload))
         return {"endpoint": endpoint, "id": len(self.patches), **payload}
 
+    def get(self, endpoint: str) -> dict:
+        self._maybe_fail(endpoint)
+        return {"slug": endpoint.rsplit("/", 1)[-1], "row_version": 7}
+
     def put(self, endpoint: str, payload: dict) -> dict:
         self._maybe_fail(endpoint)
         self.puts.append((endpoint, payload))
@@ -184,6 +188,7 @@ def test_update_batch(tmp_path, monkeypatch, capsys):
     )
     update_finding.run(args)
     assert [ep for ep, _ in fake.patches] == ["findings/VA-1", "findings/VA-2"]
+    assert all(payload["expected_row_version"] == 7 for _, payload in fake.patches)
     assert "updated 2 finding(s); 0 failed" in capsys.readouterr().err
 
 

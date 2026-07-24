@@ -97,9 +97,14 @@ def test_resume_hydration_surfaces_bounded_orphan_attention_summary(
 
     def fake_sweep(_ns):
         print("still-running id=1 lots of internal detail")
+        # command_runs carries a huge BENIGN skipped_already_terminal (the
+        # backend ?status=running blind spot) that must NOT surface, alongside a
+        # genuine skipped_unverifiable=1 that must (I-05).
         print(
-            '{"summary":{"still_running":2,"skipped":1},'
-            '"jobs_summary":{"still_running":3,"skipped":0},'
+            '{"summary":{"still_running":2,"skipped":5001,'
+            '"skipped_already_terminal":5000,"skipped_unverifiable":1},'
+            '"jobs_summary":{"still_running":3,"skipped":0,'
+            '"skipped_already_terminal":0,"skipped_unverifiable":0},'
             '"host_processes_summary":{"unverifiable":4,"failed":1},'
             '"scope":"all"}'
         )
@@ -141,9 +146,105 @@ def test_resume_hydration_surfaces_bounded_orphan_attention_summary(
     captured = capsys.readouterr()
     assert "lots of internal detail" not in captured.out
     assert "orphan reconciliation needs attention" in captured.err
-    assert "command_runs:still_running=2,skipped=1" in captured.err
+    assert "command_runs:still_running=2,skipped_unverifiable=1" in captured.err
     assert "jobs:still_running=3" in captured.err
     assert "host_processes:unverifiable=4,failed=1" in captured.err
+    # The huge benign already-terminal skip count must NOT leak into the warning.
+    assert "skipped_already_terminal" not in captured.err
+    assert "5000" not in captured.err
+
+
+def test_resume_hydration_no_warning_when_skips_are_all_benign(
+    monkeypatch, tmp_path, capsys
+):
+    """A sweep dominated by already-terminal rows (the backend ?status=running
+    blind spot pages thousands of them) must produce NO orphan WARN — they are
+    benign, their outcome is already recorded (I-05)."""
+    monkeypatch.setattr(
+        resume_brief,
+        "load_config",
+        lambda _d: type(
+            "Cfg",
+            (),
+            {
+                "base_url": "http://backend",
+                "engagement_key": "eng",
+                "engagement_dir": str(tmp_path),
+            },
+        )(),
+    )
+
+    def fake_sweep(_ns):
+        print(
+            '{"summary":{"still_running":0,"skipped":9999,'
+            '"skipped_already_terminal":9999,"skipped_unverifiable":0},'
+            '"jobs_summary":{"still_running":0,"skipped":0,'
+            '"skipped_already_terminal":0,"skipped_unverifiable":0},'
+            '"host_processes_summary":{"checked":3,"reaped":0,"unverifiable":0,"failed":0},'
+            '"scope":"all"}'
+        )
+
+    class FakeClient:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def get(self, _endpoint):
+            return {"engagement": {"key": "eng"}}
+
+    monkeypatch.setattr(resume_brief.kali_sweep_orphans, "run", fake_sweep)
+    monkeypatch.setattr(resume_brief, "AssessmentClient", FakeClient)
+
+    resume_brief.run(
+        type(
+            "Args",
+            (),
+            {
+                "engagement_dir": str(tmp_path),
+                "q": "",
+                "finding": "",
+                "agent_id": "",
+                "since": "",
+                "max_age_hours": None,
+                "per_input_limit": None,
+                "all_cells": False,
+                "as_json": True,
+            },
+        )()
+    )
+
+    assert "orphan reconciliation needs attention" not in capsys.readouterr().err
+
+
+def test_orphan_attention_ignores_benign_terminal_skips():
+    payload = (
+        '{"summary":{"still_running":0,"skipped":9999,'
+        '"skipped_already_terminal":9999,"skipped_unverifiable":0},'
+        '"jobs_summary":{"still_running":0,"skipped":0,'
+        '"skipped_already_terminal":0,"skipped_unverifiable":0},'
+        '"host_processes_summary":{"unverifiable":0,"failed":0},"scope":"all"}'
+    )
+    assert resume_brief._orphan_attention(payload) == ""
+
+
+def test_orphan_attention_surfaces_unverifiable_and_still_running():
+    payload = (
+        '{"summary":{"still_running":2,"skipped":5001,'
+        '"skipped_already_terminal":5000,"skipped_unverifiable":1},'
+        '"jobs_summary":{"still_running":0,"skipped":0,'
+        '"skipped_already_terminal":0,"skipped_unverifiable":3},'
+        '"host_processes_summary":{"unverifiable":4,"failed":1},"scope":"all"}'
+    )
+    attention = resume_brief._orphan_attention(payload)
+    assert "command_runs:still_running=2,skipped_unverifiable=1" in attention
+    assert "jobs:skipped_unverifiable=3" in attention
+    assert "host_processes:unverifiable=4,failed=1" in attention
+    assert "skipped_already_terminal" not in attention
 
 
 def test_per_input_coverage_empty_is_noop():

@@ -279,6 +279,10 @@ def test_cli_plumbs_submission_status_into_patch_payload(monkeypatch):
         def __exit__(self, *a):
             return False
 
+        def get(self, path):
+            assert path == "findings/VA-001"
+            return {"slug": "VA-001", "row_version": 3}
+
         def patch(self, path, payload):
             captured["path"] = path
             captured["payload"] = payload
@@ -291,6 +295,7 @@ def test_cli_plumbs_submission_status_into_patch_payload(monkeypatch):
     uf.run(args)
     assert captured["path"] == "findings/VA-001"
     assert captured["payload"]["submission_status"] == "accepted"
+    assert captured["payload"]["expected_row_version"] == 3
     # workflow_status is NOT smuggled in when only --submission-status is passed.
     assert "workflow_status" not in captured["payload"]
 

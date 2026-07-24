@@ -292,6 +292,16 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
     print(
         f"orchestrator\t{orchestrator_blk['state']}\thealthy={orchestrator_blk['healthy']}{ready_bits}"  # type: ignore[index]
     )
+    if isinstance(readiness, dict):
+        backend_runtime = readiness.get("backend_runtime")
+        if isinstance(backend_runtime, dict) and backend_runtime.get("restart_required"):
+            changed = backend_runtime.get("newer_source_files")
+            preview = ", ".join(str(path) for path in changed[:3]) if isinstance(changed, list) else ""
+            suffix = f" ({preview})" if preview else ""
+            print(
+                "warn\tbackend restart required: source files changed after process start"
+                f"{suffix}; run `vigil orchestrator restart`"
+            )
     print(f"runtime\t{runtime['state']}\tmounts_ok={runtime['mounts_ok']}")  # type: ignore[index]
     resources = runtime.get("resources") if isinstance(runtime, dict) else None  # type: ignore[union-attr]
     if isinstance(resources, dict):
@@ -580,6 +590,7 @@ def _orchestrator_readyz_snapshot(install_root: Path) -> tuple[bool, dict[str, o
         "database_connected": None,
         "assessment_schema_ready": None,
         "code_analysis_schema_ready": None,
+        "backend_runtime": None,
     }
     try:
         with urllib.request.urlopen(url, timeout=1) as response:
@@ -609,6 +620,7 @@ def _merge_readyz_payload(readiness: dict[str, object], raw: bytes) -> None:
         "database_connected",
         "assessment_schema_ready",
         "code_analysis_schema_ready",
+        "backend_runtime",
     ):
         if key in parsed:
             readiness[key] = parsed[key]
@@ -623,11 +635,9 @@ def list_failed_audit_markers(engagement_dir: Path) -> list[Path]:
     """Return ``<run_uuid>.failed-audit`` markers under ``scans/kali/`` for one engagement.
 
     Each marker is written by ``agent/scripts/assess/lib/kali.py`` when the
-    pre-exec audit POST to the orchestrator backend fails — the assess CLI
-    keeps running the subprocess so the operator sees results, but the audit
-    row never lands. A pile of these on a long engagement signals silent
-    coverage drift, so any surface that wants to nag the operator (doctor,
-    a future cleanup verb) can call this helper.
+    pre-exec audit POST to the orchestrator backend fails. The assess CLI
+    refuses execution; the marker retains the failed attempt and backend error
+    for diagnosis without manufacturing an unaudited target request.
 
     Returns the markers sorted newest-first by mtime so callers can show the
     most recent ones without re-sorting. Missing directories return ``[]``.
@@ -643,12 +653,10 @@ def list_failed_audit_markers(engagement_dir: Path) -> list[Path]:
 def _failed_audit_marker_check(install_root: Path) -> Check:
     """Surface orphaned ``<run_uuid>.failed-audit`` markers across engagements.
 
-    The marker is the only on-disk signal that an ``vigil assess kali`` run
-    proceeded without a backend audit row. Nothing else inspects them —
-    ``sweep-orphans`` ignores them, the runtime never re-tries the POST —
-    so they accumulate silently. Surface a WARN with per-engagement counts
-    plus the most recent marker paths (capped at 5 per engagement) so the
-    operator can decide whether to investigate or sweep.
+    The marker is the on-disk signal that an ``vigil assess kali`` run was
+    refused because its backend audit row could not be created. Surface a WARN
+    with per-engagement counts plus the most recent marker paths (capped at 5
+    per engagement) so the operator can diagnose the write path.
     """
     root = engagements_root(install_root)
     if not root.is_dir():

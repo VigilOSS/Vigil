@@ -74,6 +74,21 @@ def test_agent_action_help_is_action_specific(capsys) -> None:
     assert "start-swarm" not in captured.out
 
 
+def test_agent_list_accepts_json_flag(monkeypatch, capsys) -> None:
+    """JSON-producing list verbs accept --json consistently."""
+    root = str(_scripts_root())
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    import assess.cli as cli
+    from assess.commands import dispatch
+
+    monkeypatch.setattr(dispatch, "_list_dispatches", lambda args: print("{}"))
+
+    cli.main(["agent", "list", "--limit", "5", "--json"])
+
+    assert capsys.readouterr().out.strip() == "{}"
+
+
 def test_get_command_run_accepts_json_flag(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_script_module(
         "test_get_command_run_module",
@@ -2522,14 +2537,11 @@ def test_agent_done_status_aborted_warns_when_no_handoff_exists(
     assert "WARN agent done: no handoff found for recon-died-2 closing as 'aborted'" in err
 
 
-def test_agent_done_status_completed_does_not_warn_when_no_handoff_exists(
+def test_agent_done_status_completed_warns_when_no_handoff_exists(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The terminal_no_handoff WARN is scoped to failed/aborted (the
-    `_TERMINAL_NO_HANDOFF_STATUSES` set in assessment_memory.py) — a normal
-    `--status completed` close with no handoff is common (many dispatches
-    never write one) and must NOT warn on every such close."""
+    """Completed-without-handoff is still unaccounted specialist output."""
     module = _load_script_module(
         "test_agent_done_no_handoff_completed_module",
         "agent/scripts/assess/commands/agent.py",
@@ -2549,7 +2561,8 @@ def test_agent_done_status_completed_does_not_warn_when_no_handoff_exists(
     )
 
     err = capsys.readouterr().err
-    assert "no handoff found" not in err
+    assert "no handoff found" in err
+    assert "dispatch_reconciliation" in err
 
 
 # ---------------------------------------------------------------------------

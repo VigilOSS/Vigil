@@ -2740,8 +2740,8 @@ def test_merge_false_positive_source_preserves_live_target(client, isolate_setti
     assert merge_payload["target"]["verification_state"] == "verified"
     assert merge_payload["target"]["verification_disposition"] == "confirmed"
     assert merge_payload["source"]["workflow_status"] == "merged"
-    assert merge_payload["source"]["verification_state"] == "unreviewed"
-    assert merge_payload["source"]["verification_disposition"] == "none"
+    assert merge_payload["source"]["verification_state"] == "verified"
+    assert merge_payload["source"]["verification_disposition"] == "false_positive"
 
     findings = client.get("/engagements/2026-03-30-120000-example/assessment/findings")
     assert findings.status_code == 200
@@ -2750,8 +2750,8 @@ def test_merge_false_positive_source_preserves_live_target(client, isolate_setti
     assert by_slug["CH-033"]["verification_state"] == "verified"
     assert by_slug["CH-033"]["verification_disposition"] == "confirmed"
     assert by_slug["CH-032"]["workflow_status"] == "merged"
-    assert by_slug["CH-032"]["verification_state"] == "unreviewed"
-    assert by_slug["CH-032"]["verification_disposition"] == "none"
+    assert by_slug["CH-032"]["verification_state"] == "verified"
+    assert by_slug["CH-032"]["verification_disposition"] == "false_positive"
 
 
 def test_findings_verify_downgrade_records_previous_severity_transition(client, isolate_settings):
@@ -2818,6 +2818,124 @@ def test_findings_verify_downgrade_records_previous_severity_transition(client, 
     assert latest["from_severity"] == "critical"
     assert latest["to_severity"] == "high"
     assert json.loads(latest["metadata_json"])["previous_severity"] == "critical"
+
+
+def test_verify_downgrade_can_audit_an_already_lowered_severity(
+    client, isolate_settings
+):
+    write_engagement(isolate_settings["engagements_dir"])
+    base = "/engagements/2026-03-30-120000-example/assessment/findings"
+    created = client.post(
+        base,
+        json={
+            "slug": "CH-140",
+            "title": "Pre-lowered finding",
+            "severity": "critical",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "defect_family": "access-control",
+            "auth_context": "user",
+            "canonical_location": "https://example.com/api/prelowered",
+            "summary": "Needs a recorded downgrade verdict.",
+            "source_name": "vulnerability-analyst",
+        },
+    )
+    assert created.status_code == 201, created.text
+    lowered = client.patch(
+        f"{base}/CH-140",
+        json={"severity": "high", "reason_text": "Pre-lowered by analyst."},
+    )
+    assert lowered.status_code == 200, lowered.text
+
+    verified = client.post(
+        f"{base}/CH-140/verify",
+        json={
+            "disposition": "downgraded",
+            "new_severity": "high",
+            "reason_text": "Record the already-applied downgrade.",
+            "source_name": "code-vuln-verifier",
+        },
+    )
+
+    assert verified.status_code == 200, verified.text
+    payload = verified.json()
+    assert payload["finding"]["verification_disposition"] == "downgraded"
+    assert payload["finding"]["severity"] == "high"
+    assert json.loads(payload["transition"]["metadata_json"])["prelowered"] is True
+
+
+def test_verify_downgrade_rejects_equal_severity_without_prior_lowering(
+    client, isolate_settings
+):
+    write_engagement(isolate_settings["engagements_dir"])
+    base = "/engagements/2026-03-30-120000-example/assessment/findings"
+    created = client.post(
+        base,
+        json={
+            "slug": "CH-142",
+            "title": "Never lowered",
+            "severity": "high",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "defect_family": "access-control",
+            "auth_context": "user",
+            "canonical_location": "https://example.com/api/not-lowered",
+            "summary": "An equal severity is not a downgrade.",
+            "source_name": "vulnerability-analyst",
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    verified = client.post(
+        f"{base}/CH-142/verify",
+        json={
+            "disposition": "downgraded",
+            "new_severity": "high",
+            "reason_text": "This must not manufacture a downgrade.",
+            "source_name": "code-vuln-verifier",
+        },
+    )
+
+    assert verified.status_code == 400
+    assert "prior severity-lowering transition" in verified.json()["detail"]
+
+
+def test_finding_update_source_name_is_actor_not_discovery_attribution(
+    client, isolate_settings
+):
+    write_engagement(isolate_settings["engagements_dir"])
+    base = "/engagements/2026-03-30-120000-example/assessment/findings"
+    created = client.post(
+        base,
+        json={
+            "slug": "CH-141",
+            "title": "Attribution stays stable",
+            "severity": "low",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "defect_family": "metadata",
+            "auth_context": "anonymous",
+            "canonical_location": "https://example.com/source",
+            "summary": "Discovery attribution is immutable on patch.",
+            "source_name": "vulnerability-analyst",
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    updated = client.patch(
+        f"{base}/CH-141",
+        json={
+            "summary": "Repaired by a later operator.",
+            "source_name": "lifecycle-repair-agent",
+            "reason_text": "Repair narrative only.",
+        },
+    )
+
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["finding"]["source_name"] == "vulnerability-analyst"
 
 
 def test_findings_verify_disputed_keeps_finding_live(client, isolate_settings):

@@ -604,12 +604,14 @@ def main(argv: list[str] | None = None) -> None:
 
     auth_p = sub.add_parser("auth")
     auth_sub = auth_p.add_subparsers(dest="auth_command", required=True)
-    for auth_name in ("status", "show", "edit", "clear", "export"):
+    for auth_name in ("status", "show", "edit", "clear", "export", "quarantine"):
         auth_cmd = auth_sub.add_parser(auth_name)
         auth_cmd.add_argument("engagement", nargs="?")
         auth_cmd.add_argument("--select", action="store_true")
         auth_cmd.add_argument(
-            "--identity", help="Named identity (default: the active identity)"
+            "--identity",
+            required=auth_name == "quarantine",
+            help="Named identity (default: the active identity)",
         )
         if auth_name == "clear":
             auth_cmd.add_argument(
@@ -1885,7 +1887,19 @@ def _auth(args: argparse.Namespace, install_root: Path) -> None:
                 detail += "\tpersisted=False"
             print(f"liveness={result['liveness']}\t{detail}")
     elif args.auth_command == "show":
-        print(json.dumps(auth_module.read_auth(engagement), indent=2, sort_keys=True))
+        material = (
+            auth_module.read_identity(engagement, identity)
+            if identity
+            else auth_module.read_auth(engagement)
+        )
+        print(json.dumps(material, indent=2, sort_keys=True))
+    elif args.auth_command == "quarantine":
+        assert identity is not None
+        auth_module.quarantine_identity(engagement, identity)
+        print(
+            f"quarantined credential {identity} for {engagement.name}; "
+            "material preserved, request replay disabled"
+        )
     elif args.auth_command == "export":
         print(auth_module.export_curl_args(
             engagement, identity, host=getattr(args, "host", None), method=getattr(args, "method", None)

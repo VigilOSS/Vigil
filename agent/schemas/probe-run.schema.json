@@ -102,6 +102,12 @@
       "type": "string",
       "description": "What anomaly was detected when result_status is 'signal' (e.g. 'time-delay', 'error-disclosure', 'different-response-length')."
     },
+    "outcome_assertion": {
+      "default": "",
+      "maxLength": 1024,
+      "title": "Outcome Assertion",
+      "type": "string"
+    },
     "evidence_ref": {
       "default": "",
       "maxLength": 1024,

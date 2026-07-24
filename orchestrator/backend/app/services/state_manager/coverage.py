@@ -64,6 +64,10 @@ class SurfaceStatus(enum.StrEnum):
     NOT_APPLICABLE = "not_applicable"
     DEFERRED = "deferred"
     PARTIALLY_COVERED = "partially-covered"
+    # Queue closeout without probe/evidence. Deliberately excluded from every
+    # covered/not-applicable predicate so administrative cleanup cannot
+    # masquerade as tested coverage.
+    ADMINISTRATIVELY_CLOSED = "administratively-closed"
 
 
 # Full membership set (frozenset of members, NOT an alias of the class).
@@ -506,6 +510,7 @@ def _upsert_probe_run(
     signal_type: str,
     evidence_ref: str,
     notes: str,
+    outcome_assertion: str = "",
     target_host: str = "",
     target_path: str = "",
     target_port: int | None = None,
@@ -547,15 +552,20 @@ def _upsert_probe_run(
         INSERT INTO assessment_probe_runs (
             engagement_id, request_variant_id, service_id, coverage_item_id, auth_context, input_slot, attack_family,
             payload_family, payload_value_hash, probe_key, tool_name, agent_name, result_status,
-            observed_http_status, signal_type, evidence_ref, notes, target_host, target_path, target_port,
+            observed_http_status, signal_type, outcome_assertion, evidence_ref, notes,
+            target_host, target_path, target_port,
             lens, finding_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(engagement_id, probe_key) DO UPDATE SET
             agent_name = COALESCE(NULLIF(excluded.agent_name, ''), assessment_probe_runs.agent_name),
             result_status = excluded.result_status,
             observed_http_status = COALESCE(excluded.observed_http_status, assessment_probe_runs.observed_http_status),
             signal_type = COALESCE(NULLIF(excluded.signal_type, ''), assessment_probe_runs.signal_type),
+            -- result_status and its application-level assertion are one
+            -- adjudication. A later inconclusive/attempted re-run must clear a
+            -- stale positive assertion instead of inheriting it.
+            outcome_assertion = excluded.outcome_assertion,
             evidence_ref = COALESCE(NULLIF(excluded.evidence_ref, ''), assessment_probe_runs.evidence_ref),
             target_host = COALESCE(NULLIF(excluded.target_host, ''), assessment_probe_runs.target_host),
             target_path = COALESCE(NULLIF(excluded.target_path, ''), assessment_probe_runs.target_path),
@@ -586,6 +596,7 @@ def _upsert_probe_run(
             result_status,
             observed_http_status,
             signal_type,
+            outcome_assertion,
             evidence_ref,
             notes,
             target_host,
@@ -1327,6 +1338,7 @@ def record_probe_run(
     result_status: str,
     observed_http_status: int | None,
     signal_type: str,
+    outcome_assertion: str = "",
     evidence_ref: str,
     notes: str,
     target_host: str = "",
@@ -1339,6 +1351,14 @@ def record_probe_run(
     no_drain: bool = False,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+    outcome_assertion = (outcome_assertion or "").strip()
+    if result_status == "signal" and not outcome_assertion:
+        result_status = "attempted"
+        demotion_note = (
+            "Signal demoted to attempted: no application-level outcome assertion "
+            "was supplied; HTTP status or response size alone is inconclusive."
+        )
+        notes = f"{notes.rstrip()}\n{demotion_note}".lstrip()
     with _common.get_connection() as connection:
         record = _upsert_probe_run(
             connection,
@@ -1356,6 +1376,7 @@ def record_probe_run(
             result_status=result_status,
             observed_http_status=observed_http_status,
             signal_type=signal_type,
+            outcome_assertion=outcome_assertion,
             evidence_ref=evidence_ref,
             notes=notes,
             target_host=target_host,
@@ -1475,7 +1496,8 @@ def list_probe_runs(
 _ATTEMPT_FIELDS: tuple[str, ...] = (
     "id", "target_host", "target_path", "target_port", "auth_context",
     "attack_family", "lens", "result_status", "observed_http_status",
-    "signal_type", "tool_name", "agent_name", "finding_id", "finding_slug",
+    "signal_type", "outcome_assertion", "tool_name", "agent_name",
+    "finding_id", "finding_slug",
     "finding_title", "finding_severity", "created_at",
 )
 
@@ -2102,6 +2124,11 @@ def coverage_readiness(engagement_id: int) -> dict[str, Any]:
         if row.get("status") == "deferred"
         and row.get("surface_type") in HIGH_RISK_DEFERRED_SURFACE_TYPES
     ]
+    administratively_closed = [
+        row
+        for row in surfaces
+        if row.get("status") == SurfaceStatus.ADMINISTRATIVELY_CLOSED.value
+    ]
 
     unresolved_blocking = [
         row for row in discovered if _surface_is_finding_linked(row, active_hosts)
@@ -2135,7 +2162,10 @@ def coverage_readiness(engagement_id: int) -> dict[str, Any]:
         len(unresolved_blocking) + len(partial_blocking) + len(deferred_blocking)
     )
     advisory_surfaces = (
-        unresolved_advisory + partial_advisory + deferred_advisory
+        unresolved_advisory
+        + partial_advisory
+        + deferred_advisory
+        + administratively_closed
     )
 
     return {
@@ -2848,9 +2878,9 @@ def _web_path_is_high_value(path: str) -> bool:
 def _scope_pattern_apex(pattern: str) -> str:
     """Apex of a scope.json host pattern: strips a leading ``*.`` wildcard.
 
-    Both a literal (``example.com``) and a wildcard (``*.example.com``) entry
-    cover the apex AND every subdomain (the HackerOne/Bugcrowd convention the
-    CLI ``scope.entry_matches_host`` encodes), so they reduce to the same apex.
+    ``*.example.com`` and ``example.com`` both reduce to ``example.com``; what
+    the apex then COVERS differs by side (see ``_host_matches_scope_pattern``
+    vs ``_host_matches_deny_pattern``).
     """
     p = (pattern or "").strip().lower()
     if p.startswith("*."):
@@ -2858,12 +2888,51 @@ def _scope_pattern_apex(pattern: str) -> str:
     return p
 
 
+def _scope_pattern_is_wildcard(pattern: str) -> bool:
+    """True for a ``*.example.com``-shaped entry (the only subdomain-expanding
+    entry kind the CLI ``scope.classify_scope_entry`` recognises)."""
+    p = (pattern or "").strip().lower()
+    return p.startswith("*.") and len(p) > 2
+
+
 def _host_matches_scope_pattern(host: str, pattern: str) -> bool:
-    """True when ``host`` is the apex of ``pattern`` or a subdomain of it."""
+    """ALLOWLIST match: ``host`` is the apex of ``pattern`` or a subdomain of it.
+
+    A literal allow entry expands to its subtree here (the HackerOne/Bugcrowd
+    reading of a bare program-scope host). That is deliberately permissive: an
+    over-broad ALLOW only ever ADDS coverage obligations, so it fails in the
+    safe direction for a completeness gate. The denylist does NOT mirror it —
+    see :func:`_host_matches_deny_pattern`.
+    """
     apex = _scope_pattern_apex(pattern)
     if not apex or not host:
         return False
     return host == apex or host.endswith("." + apex)
+
+
+def _host_matches_deny_pattern(host: str, pattern: str) -> bool:
+    """DENYLIST match — asymmetric with the allowlist ON PURPOSE.
+
+    A wildcard carve-out (``*.staging.example.com``) covers its apex and every
+    subdomain, exactly as on the allow side. A LITERAL carve-out
+    (``example.com``) covers ONLY that one host: the CLI's canonical
+    :func:`scope.entry_matches_host` matches a ``bare_host`` entry by equality,
+    and a scope.json that carves out an apex while listing two dozen of its
+    subdomains as in-scope means the apex host and nothing else.
+
+    The asymmetry is the point. The denylist WINS, so an over-broad deny
+    silently ERASES coverage obligations while an over-broad allow only adds
+    them. Apex-expanding a literal carve-out is what dropped 155 of 176
+    deep-required app units on 2026-07-24: the single ``acme-planner.example``
+    carve-out swallowed every explicitly in-scope ``*.acme-planner.example``
+    product host, leaving only the non-product hosts behind.
+    """
+    apex = _scope_pattern_apex(pattern)
+    if not apex or not host:
+        return False
+    if _scope_pattern_is_wildcard(pattern):
+        return host == apex or host.endswith("." + apex)
+    return host == apex
 
 
 def _host_admitted_by_scope(
@@ -2873,13 +2942,14 @@ def _host_admitted_by_scope(
 
     Mirrors the CLI ``scope.host_admitted`` contract (the denylist always wins)
     so the W3 gate filters route hosts through the same allow/deny semantics the
-    rest of the engagement trusts.
+    rest of the engagement trusts. Allow and deny matching are NOT the same
+    predicate: only ``*.`` carve-outs extend a denial to a subtree.
     """
     if not host:
         return False
     if not any(_host_matches_scope_pattern(host, p) for p in allow_patterns):
         return False
-    if any(_host_matches_scope_pattern(host, p) for p in deny_patterns):
+    if any(_host_matches_deny_pattern(host, p) for p in deny_patterns):
         return False
     return True
 
@@ -3037,13 +3107,30 @@ def update_coverage_item_status(
             "UPDATE assessment_coverage_items SET status = ?, notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND engagement_id = ?",
             (normalized_status, _common._append_notes(row["notes"], notes), coverage_item_id, engagement.id),
         )
+        # I-09: resolving a coverage item to covered/not_applicable drains the
+        # FK-linked pending/processing work items — the SAME drain the covering
+        # probe path runs (``_pending_work_item_ids_for_coverage_item`` +
+        # ``mark_work_items_done`` at :1393-1403). Without it, work buffered for an
+        # endpoint slot the operator has explicitly closed stays dispatchable
+        # forever. ``get_connection`` is re-entrant and commits at the outermost
+        # depth, so the drain commits atomically with this status write.
+        drained: dict[str, Any] | None = None
+        if normalized_status in {CoverageStatus.COVERED, CoverageStatus.NOT_APPLICABLE}:
+            drain_ids = _pending_work_item_ids_for_coverage_item(
+                connection, engagement.id, coverage_item_id
+            )
+            if drain_ids:
+                drained = mark_work_items_done(engagement.id, drain_ids)
         if row["service_id"] is not None:
             _refresh_service_coverage_status(connection, engagement.id, int(row["service_id"]))
         updated = connection.execute(
             "SELECT * FROM assessment_coverage_items WHERE id = ?", (coverage_item_id,)
         ).fetchone()
     assert updated is not None
-    return dict(updated)
+    result = dict(updated)
+    if drained is not None:
+        result["work_items_done"] = drained
+    return result
 
 
 _STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})

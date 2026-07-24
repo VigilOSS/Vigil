@@ -36,3 +36,18 @@ def test_schema_generator_check_mode_passes_for_committed_bundle(capsys):
 
     assert exit_code == 0
     assert "in sync" in capsys.readouterr().out.lower()
+
+
+def test_finding_record_accepts_lifecycle_analysis_detail_keys():
+    module = _load_schema_generator_module()
+
+    schema = module.build_schema_bundle()["finding-record.schema.json"]
+    properties = schema["properties"]["details"]["properties"]
+
+    for key in (
+        "precondition_analysis",
+        "severity_ceiling",
+        "root_cause_candidates",
+        "notes_provenance",
+    ):
+        assert key in properties

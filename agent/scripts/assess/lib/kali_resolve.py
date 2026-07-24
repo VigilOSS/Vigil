@@ -32,19 +32,16 @@ ON with an operator escape hatch: set ``VIGIL_NO_RESOLVE_PIN=1`` (or pass an
 explicit ``--resolve`` for the host yourself — pinning is idempotent and never
 double-adds).
 
-Multi-A-record hosts: a host with several A records is pinned to the FIRST address
-``getaddrinfo`` returns, by default (:func:`resolve_host_ips` returns the full,
-order-preserving, de-duplicated list; the pin uses ``ips[0]``). This is a
-deliberate, documented choice — pinning one edge keeps the probe deterministic and
-matches what a single in-container request would have hit. The trade-off is that a
-per-edge difference (one CDN PoP behaving differently) is not exercised by the pin;
-an operator who needs to fan across edges should pin each explicitly. The resolved
-IP is surfaced on stderr so it is auditable.
+Multi-address hosts: each invocation selects one resolved address uniformly instead
+of concentrating every engagement request on the resolver's first CDN edge. The
+selected address and full candidate set are surfaced on stderr so each audited run
+remains attributable and an operator can still pin an address explicitly.
 """
 from __future__ import annotations
 
 import ipaddress
 import os
+import secrets
 import socket
 import sys
 
@@ -231,8 +228,8 @@ def apply_resolve_pin(
     IP-literal / un-parseable / list-mode; host resolution failed; or a
     ``--resolve`` for this host:port is already present (idempotent).
 
-    Multi-A: pins the FIRST resolved address (see module docstring). ``ips`` may be
-    passed to reuse an already-resolved list (the post-run retry path does this).
+    Multi-A: selects from the full resolved set (see module docstring). ``ips`` may
+    be passed to reuse an already-resolved list (the post-run retry path does this).
     """
     if pinning_disabled():
         return None
@@ -248,7 +245,8 @@ def apply_resolve_pin(
     resolved = ips if ips is not None else resolve_host_ips(host)
     if not resolved:
         return None
-    pin_ip = resolved[0]
+    ipv4 = [address for address in resolved if ipaddress.ip_address(address).version == 4]
+    pin_ip = secrets.choice(ipv4 or resolved)
     cmd.extend(["--resolve", f"{host}:{port}:{pin_ip}"])
     return pin_ip
 
@@ -266,7 +264,10 @@ def warn_resolved_pin(host: str, port: int, pin_ip: str, *, all_ips: list[str]) 
     """Emit ONE concise stderr line recording the pinned IP (auditable choice)."""
     extra = ""
     if len(all_ips) > 1:
-        extra = f" (host has {len(all_ips)} A records {', '.join(all_ips)}; pinned the first)"
+        extra = (
+            f" (host has {len(all_ips)} addresses {', '.join(all_ips)}; "
+            "selected one for this run)"
+        )
     print(
         f"note: host-resolved {host}:{port} -> {pin_ip}; injected --resolve to "
         f"bypass the Docker Desktop container resolver{extra}.",

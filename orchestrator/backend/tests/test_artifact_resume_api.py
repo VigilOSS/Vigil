@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import json
 import sqlite3
 from pathlib import Path
@@ -719,6 +720,85 @@ def test_report_readiness_unlinked_markdown_notes_are_advisory(client, isolate_s
     assert body["ready"] is True, body
 
 
+def test_report_readiness_checks_unlinked_root_markdown_documents(client, isolate_settings) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _seed_finding(client, eng)
+    (eng / "RESUME.md").write_text("Durable engagement state", encoding="utf-8")
+    registered = client.post(
+        f"{BASE}/artifacts",
+        json={"path": "RESUME.md", "kind": "note"},
+    )
+    assert registered.status_code == 201, registered.text
+
+    readiness = client.get(f"{BASE}/report-readiness")
+    assert readiness.status_code == 200, readiness.text
+    advisory = next(
+        row
+        for row in readiness.json()["advisories"]
+        if row["kind"] == "unlinked_markdown_note" and row["path"] == "RESUME.md"
+    )
+    assert "artifact register RESUME.md --finding" in advisory["detail"]
+
+
+def test_report_readiness_flags_missing_markdown_paths_cited_by_durable_notes(
+    client,
+    isolate_settings,
+) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _seed_finding(client, eng)
+    (eng / "RESUME.md").write_text(
+        "Deferred work is tracked in `OOB-CALLBACKS.md`.",
+        encoding="utf-8",
+    )
+    registered = client.post(
+        f"{BASE}/artifacts",
+        json={"path": "RESUME.md", "kind": "note", "producer_agent_id": "operator"},
+    )
+    assert registered.status_code == 201, registered.text
+
+    readiness = client.get(f"{BASE}/report-readiness")
+    assert readiness.status_code == 200, readiness.text
+    advisory = next(
+        row
+        for row in readiness.json()["advisories"]
+        if row["kind"] == "missing_cited_markdown_artifact"
+    )
+    assert advisory["path"] == "OOB-CALLBACKS.md"
+    assert advisory["cited_by"] == ["RESUME.md"]
+
+
+def test_report_readiness_does_not_follow_markdown_citations_outside_engagement(
+    client,
+    isolate_settings,
+) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _seed_finding(client, eng)
+    outside = eng.parent / "outside.md"
+    outside.write_text("not engagement evidence", encoding="utf-8")
+    (eng / "RESUME.md").write_text(
+        "Deferred work is tracked in `../outside.md`.",
+        encoding="utf-8",
+    )
+    registered = client.post(
+        f"{BASE}/artifacts",
+        json={"path": "RESUME.md", "kind": "note", "producer_agent_id": "operator"},
+    )
+    assert registered.status_code == 201, registered.text
+
+    readiness = client.get(f"{BASE}/report-readiness")
+
+    assert readiness.status_code == 200, readiness.text
+    advisory = next(
+        row
+        for row in readiness.json()["advisories"]
+        if row["kind"] == "missing_cited_markdown_artifact"
+    )
+    assert advisory["path"] == "../outside.md"
+
+
 def test_report_readiness_normalizes_absolute_evidence_ref(client, isolate_settings) -> None:
     eng = _write_engagement(isolate_settings["engagements_dir"])
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
@@ -998,6 +1078,105 @@ def test_resume_brief_surfaces_terminal_handoff_less_dispatch(client, isolate_se
 
     stale_ids = [row["agent_id"] for row in dispatches.get("stale_in_progress_dispatches") or []]
     assert "recon-died-1" not in stale_ids
+
+
+def test_resume_brief_surfaces_completed_handoff_gap_until_decision_reconciles_it(
+    client, isolate_settings
+) -> None:
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    created = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": "recon-completed-no-handoff",
+            "agent_role": "recon-specialist",
+            "task": "enumerate",
+            "skills": "recon-methodology",
+        },
+    )
+    assert created.status_code == 201, created.text
+    closed = client.patch(
+        f"{BASE}/dispatches/recon-completed-no-handoff",
+        json={"status": "completed", "completed_at": "2026-07-08T12:00:00Z"},
+    )
+    assert closed.status_code == 200, closed.text
+
+    before = client.get(f"{BASE}/resume-brief").json()["dispatches"]
+    assert "recon-completed-no-handoff" in {
+        row["agent_id"] for row in before["terminal_no_handoff"]
+    }
+
+    decision = client.post(
+        f"{BASE}/dispatch-decisions",
+        json={
+            "kind": "dispatch_reconciliation",
+            "payload": {
+                "agent_id": "recon-completed-no-handoff",
+                "reason": "confirmed completed with no durable specialist output",
+            },
+            "surfaced_to_user": True,
+        },
+    )
+    assert decision.status_code == 201, decision.text
+
+    after = client.get(f"{BASE}/resume-brief").json()["dispatches"]
+    assert "recon-completed-no-handoff" not in {
+        row["agent_id"] for row in after["terminal_no_handoff"]
+    }
+
+
+def test_resume_brief_stale_in_progress_below_display_window_is_reported(client, isolate_settings) -> None:
+    """I-10: an OLD in-progress dispatch that sorts BELOW the newest-25 display
+    window must still be reported as stale (and counted). Pre-fix, stale/gap
+    detection scanned only that newest-25 window, so a stale row beneath it
+    silently vanished from resume-brief — even though `reconcile-stale` (which
+    scans in-progress with the SAME thresholds) still flagged it. The divergence
+    was the ROW SET, not the threshold."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+
+    # Dispatched "now" → age ~0h, well under the 24h default → NOT stale. 30 of
+    # them push any older dispatch out of the newest-25 display window.
+    recent_iso = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for index in range(30):
+        resp = client.post(
+            f"{BASE}/dispatches",
+            json={
+                "agent_id": f"recent-{index:02d}",
+                "agent_role": "vulnerability-analyst",
+                "task": "probe",
+                "skills": "web-methodology",
+                "dispatched_at": recent_iso,
+            },
+        )
+        assert resp.status_code == 201, resp.text
+
+    # One OLD in-progress dispatch: far past the 24h threshold and, having the
+    # oldest dispatched_at, sorted at the very bottom (below the newest-25).
+    old = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": "stale-old",
+            "agent_role": "vulnerability-analyst",
+            "task": "deep enumeration",
+            "skills": "web-methodology",
+            "dispatched_at": "2026-01-01T00:00:00Z",
+        },
+    )
+    assert old.status_code == 201, old.text
+
+    brief = client.get(f"{BASE}/resume-brief")
+    assert brief.status_code == 200, brief.text
+    dispatches = brief.json()["dispatches"]
+
+    # The old dispatch is NOT in the newest-window display list …
+    recent_ids = [row["agent_id"] for row in dispatches.get("recent_dispatches") or []]
+    assert "stale-old" not in recent_ids
+    # … yet it IS flagged stale by the decoupled full in-progress scan, and it is
+    # the only stale one (the 30 recent dispatches are not stale).
+    stale_ids = [row["agent_id"] for row in dispatches.get("stale_in_progress_dispatches") or []]
+    assert "stale-old" in stale_ids
+    assert dispatches["stale_in_progress_dispatches_count"] == 1
 
 
 def test_recommended_actions_keep_lifecycle_items_before_inspect_cap() -> None:

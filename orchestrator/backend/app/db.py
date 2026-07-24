@@ -40,7 +40,10 @@ def _resolve_busy_timeout_ms() -> int:
                 return value
         except ValueError:
             pass
-    return 5000
+    # Keep the default below AssessmentClient's 10 s read timeout. Exhausted
+    # contention must reach the HTTP layer as a retryable 503; a longer SQLite
+    # wait lets the client time out first and creates an ambiguous write result.
+    return 8_000
 
 
 _BUSY_TIMEOUT_MS = _resolve_busy_timeout_ms()
@@ -983,6 +986,7 @@ def _create_assessment_entity_tables(connection: sqlite3.Connection) -> None:
                 result_status TEXT NOT NULL DEFAULT 'tested',
                 observed_http_status INTEGER,
                 signal_type TEXT NOT NULL DEFAULT '',
+                outcome_assertion TEXT NOT NULL DEFAULT '',
                 evidence_ref TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 -- Target anchor. A raw/list-mode probe with a
@@ -1039,6 +1043,11 @@ def _create_assessment_entity_tables(connection: sqlite3.Connection) -> None:
     if probe_columns and "finding_id" not in probe_columns:
         connection.execute(
             "ALTER TABLE assessment_probe_runs ADD COLUMN finding_id INTEGER"
+        )
+    if probe_columns and "outcome_assertion" not in probe_columns:
+        connection.execute(
+            "ALTER TABLE assessment_probe_runs "
+            "ADD COLUMN outcome_assertion TEXT NOT NULL DEFAULT ''"
         )
     _dedupe_coverage_items(connection)
     connection.execute(
@@ -1259,6 +1268,7 @@ def _create_assessment_finding_tables(connection: sqlite3.Connection) -> None:
                 target_ref TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                retired_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
@@ -1266,6 +1276,11 @@ def _create_assessment_finding_tables(connection: sqlite3.Connection) -> None:
             )
             """
     )
+    finding_link_columns = _table_columns(connection, "assessment_finding_links")
+    if finding_link_columns and "retired_at" not in finding_link_columns:
+        connection.execute(
+            "ALTER TABLE assessment_finding_links ADD COLUMN retired_at TEXT"
+        )
     connection.execute(
         """
             CREATE TABLE IF NOT EXISTS assessment_attack_chains (
@@ -3455,8 +3470,8 @@ def _connection_for_thread(db_path: Path) -> sqlite3.Connection:
     # explicitly rather than relying on Python's implicit 5 s default so the wait
     # a concurrent writer takes on the BEGIN IMMEDIATE lock is documented and
     # tunable. Under multi-worker uvicorn (E1) several processes contend for the
-    # single write lock; this gives the loser room to wait instead of an immediate
-    # SQLITE_BUSY. Value matches the prior implicit default.
+    # single write lock; this gives the loser room to wait while remaining below
+    # the agent client's read timeout so exhausted contention is returned as 503.
     connection.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
     _thread_connections.connection = connection
     _thread_connections.path = db_path
@@ -4168,6 +4183,26 @@ def set_active_identity(engagement_id: int, identity_name: str) -> bool:
             (engagement_id, identity_name),
         )
     return True
+
+
+def quarantine_credential(
+    engagement_id: int, identity_name: str
+) -> dict[str, Any] | None:
+    """Disable replay for one identity without deleting its evidence material."""
+    with get_connection() as connection:
+        cursor = connection.execute(
+            "UPDATE engagement_credentials "
+            "SET use_for_requests = 0, is_active = 0, updated_at = ? "
+            "WHERE engagement_id = ? AND identity_name = ?",
+            (
+                datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                engagement_id,
+                identity_name,
+            ),
+        )
+    if cursor.rowcount == 0:
+        return None
+    return get_credential(engagement_id, identity_name)
 
 
 def delete_credential(engagement_id: int, identity_name: str) -> None:

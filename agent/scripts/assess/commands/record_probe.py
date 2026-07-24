@@ -81,9 +81,19 @@ def run(args) -> None:
         )
         sys.exit(1)
 
+    effective_status = args.result_status
+    if args.result_status == "signal" and not (args.outcome_assertion or "").strip():
+        effective_status = "attempted"
+        print(
+            "record-probe: result_status=signal requires --outcome-assertion with "
+            "an application-level marker; recording this status-only result as "
+            "attempted (inconclusive).",
+            file=sys.stderr,
+        )
+
     attack_family = probe_args.normalize_attack_family(args.attack_family, "record-probe")
     payload = probe_args.build_probe_payload(
-        args, attack_family=attack_family, result_status=args.result_status
+        args, attack_family=attack_family, result_status=effective_status
     )
 
     cfg = load_config(args.engagement_dir)

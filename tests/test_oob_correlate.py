@@ -822,6 +822,48 @@ def test_oob_status_ok_when_registered_and_resolving(monkeypatch):
     assert payload["issues"] == []
 
 
+def test_oob_status_recovers_from_one_transient_dns_and_registration_miss(monkeypatch):
+    monkeypatch.setattr(oob.docker, "container_running", lambda *a, **k: True)
+    sleeps = []
+    monkeypatch.setattr(oob.time, "sleep", sleeps.append)
+    scenario = {
+        "server": True,
+        "frpc": True,
+        "running": ["ssrf-a"],
+        "configured": ["ssrf-a"],
+        "logs": {"ssrf-a": ""},
+        "dig": "",
+    }
+    base_runner = _status_runner(scenario)
+    calls = {"logs": 0, "dig": 0}
+
+    def transient_runner(argv, **kwargs):
+        command = argv[-1]
+        if command.startswith("grep") and "clients/" in command and ".log" in command:
+            calls["logs"] += 1
+            if calls["logs"] == 2:
+                scenario["logs"]["ssrf-a"] = (
+                    "[INF] recovered-id.oob.example.com\n"
+                )
+        if command.startswith("dig"):
+            calls["dig"] += 1
+            if calls["dig"] == 2:
+                scenario["dig"] = "18.223.115.81\n"
+        return base_runner(argv, **kwargs)
+
+    payload = oob.oob_status(
+        oob_domain="oob.example.com",
+        runner=transient_runner,
+    )
+
+    assert payload["health"] == "ok"
+    assert payload["probe_attempts"] == 2
+    assert sleeps == [oob.OOB_STATUS_RETRY_DELAY_SECONDS]
+    assert payload["domain_resolves"] is True
+    assert payload["client_health"][0]["registered"] is True
+    assert payload["issues"] == []
+
+
 def test_oob_status_degrades_when_dns_resolves_but_edge_http_redirects(monkeypatch):
     monkeypatch.setattr(oob.docker, "container_running", lambda *a, **k: True)
     scenario = {

@@ -108,3 +108,26 @@ def test_liveness_verdict_is_case_insensitive(client, isolate_settings):
     )
     assert resp.status_code == 200
     assert resp.json()["state"] == "dead"
+
+
+def test_quarantine_preserves_material_and_disables_replay(client, isolate_settings):
+    _seed(client, isolate_settings)
+    _put_identity(client)
+
+    resp = client.post(f"/engagements/{KEY}/credentials/user_a/quarantine")
+
+    assert resp.status_code == 200
+    material = resp.json()
+    assert material["use_for_requests"] is False
+    assert material["is_active"] is False
+    assert material["cookies"] == {"sid": "abc"}
+    stored = client.get(f"/engagements/{KEY}/credentials/user_a").json()
+    assert stored["cookies"] == {"sid": "abc"}
+
+
+def test_quarantine_returns_404_for_unknown_identity(client, isolate_settings):
+    _seed(client, isolate_settings)
+
+    resp = client.post(f"/engagements/{KEY}/credentials/ghost/quarantine")
+
+    assert resp.status_code == 404

@@ -8,10 +8,16 @@ prior observation (because changing the natural key would lose history).
 Use ``update-intel`` instead for in-place edits where the prior shape was
 correct and only metadata changed.
 
+When the correct canonical row already exists (a duplicate landed under a
+slightly different natural key), pass ``--to-existing <id>`` to point the stale
+row at it. That skips the replacement upsert entirely, so the canonical row's
+own fields are never overwritten. It is mutually exclusive with a payload.
+
 Usage::
 
     vigil assess intel supersede <type> <id> <new-payload-json-file> --rationale "..."
     vigil assess intel supersede <type> <id> --inline '{...}' --rationale "..."
+    vigil assess intel supersede <type> <id> --to-existing <canonical-id> --rationale "..."
 """
 from __future__ import annotations
 
@@ -94,6 +100,7 @@ def register(subparsers) -> None:
             "Examples:\n"
             "  vigil assess intel supersede tech-component 42 new.json --rationale \"banner re-fingerprinted\"\n"
             "  vigil assess intel supersede cve 17 --inline '{\"cve_id\":\"CVE-2025-1\",\"affected_component\":\"x\"}' --rationale \"prior CVE was a false match\"\n"
+            "  vigil assess intel supersede tech-component 42 --to-existing 7 --rationale \"duplicate of the canonical row\"\n"
             f"\nValid types: {types_list}"
         ),
     )
@@ -102,12 +109,24 @@ def register(subparsers) -> None:
     p.add_argument(
         "payload",
         nargs="?",
-        help="Path to the new intel JSON payload, or inline JSON object",
+        help="Path to the new intel JSON payload, or inline JSON object (omit when using --to-existing)",
     )
     p.add_argument(
         "--inline",
         dest="inline_payload",
         help="Raw JSON payload string for the new intel record",
+    )
+    p.add_argument(
+        "--to-existing",
+        dest="to_existing_id",
+        type=int,
+        default=None,
+        metavar="ID",
+        help=(
+            "Point the stale row at an EXISTING same-type canonical row id "
+            "instead of recording a replacement. Mutually exclusive with the "
+            "payload/--inline argument."
+        ),
     )
     p.add_argument(
         "--rationale",
@@ -126,10 +145,31 @@ def run(args) -> None:
         sys.exit(1)
     schema_name, endpoint_segment = INTEL_TYPES[args.intel_type]
 
+    # --to-existing repoints the stale row at an already-recorded canonical row;
+    # no replacement payload is sent (the backend rejects one), so skip payload
+    # parsing/schema validation entirely.
+    to_existing_id = getattr(args, "to_existing_id", None)
+    if to_existing_id is not None:
+        if args.payload is not None or args.inline_payload is not None:
+            print(
+                "supersede-intel: --to-existing is mutually exclusive with a "
+                "payload/--inline argument (it repoints at an existing row "
+                "instead of recording a replacement)",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        body = json.dumps(
+            {"to_existing_id": int(to_existing_id), "rationale": args.rationale},
+            ensure_ascii=True,
+        ).encode("utf-8")
+        record = _send_supersede(args, endpoint_segment, body)
+        print(json.dumps(record, indent=2, ensure_ascii=False))
+        return
+
     raw_payload = args.inline_payload if args.inline_payload is not None else args.payload
     if raw_payload is None:
         print(
-            "supersede-intel: provide a JSON payload file path or --inline JSON",
+            "supersede-intel: provide a JSON payload file path, --inline JSON, or --to-existing <id>",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -174,28 +214,37 @@ def run(args) -> None:
             print(f"  - {error}", file=sys.stderr)
         sys.exit(1)
 
+    body = json.dumps(
+        {"payload": new_payload, "rationale": args.rationale},
+        ensure_ascii=True,
+    ).encode("utf-8")
+    record = _send_supersede(args, endpoint_segment, body)
+
+    print(json.dumps(record, indent=2, ensure_ascii=False))
+
+
+def _send_supersede(args, endpoint_segment: str, body: bytes) -> dict:
+    """POST a supersede request body and decode the JSON response.
+
+    Shared by the payload path and the ``--to-existing`` path so both hit the
+    same endpoint, 409 explainer, and decode fallback.
+    """
+    from urllib.parse import quote
+
     cfg = load_config(args.engagement_dir)
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        from urllib.parse import quote
-
         path = (
             f"{client._engagement_prefix}/intel/{quote(endpoint_segment)}/{int(args.intel_id)}/supersede"
         )
-        body = json.dumps(
-            {"payload": new_payload, "rationale": args.rationale},
-            ensure_ascii=True,
-        ).encode("utf-8")
         try:
             _, resp_body = client._request("POST", path, body=body)
         except AssessError as exc:
             _maybe_explain_409(exc)
             raise
-        try:
-            record = json.loads(resp_body)
-        except json.JSONDecodeError:
-            record = {"raw": resp_body}
-
-    print(json.dumps(record, indent=2, ensure_ascii=False))
+    try:
+        return json.loads(resp_body)
+    except json.JSONDecodeError:
+        return {"raw": resp_body}
 
 
 def _maybe_explain_409(exc: AssessError) -> None:

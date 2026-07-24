@@ -94,6 +94,7 @@ from assess.lib.finding_render import (
     string_list,
     strip_step_enumerator,
 )
+from assess.lib.outbound_redaction import redact_outbound_credentials
 from assess.lib.scope import rate_caps_for_dir
 
 _PLATFORMS = ("bugcrowd", "hackerone", "direct")
@@ -951,7 +952,9 @@ def run(args) -> None:
             args.weakness,
             durable_evidence,
         )
-        render_finding = dict(finding)
+        render_finding = redact_outbound_credentials(dict(finding))
+        resolved = redact_outbound_credentials(resolved)
+        linked_runs = redact_outbound_credentials(linked_runs)
         render_finding["evidence_ref"] = resolved["evidence_ref"]
 
         # Final mode refuses to write an incomplete submission.
@@ -980,8 +983,16 @@ def run(args) -> None:
         # warning strings themselves quote the leaked value (a UUID, a `cases.db`
         # literal), so scanning a render that already contains them would flag the
         # advisory text as if it were a fresh leak.
-        scan_markdown = _render_markdown(
-            render_finding, resolved, platform, linked_runs, draft, [], required_headers
+        scan_markdown = redact_outbound_credentials(
+            _render_markdown(
+                render_finding,
+                resolved,
+                platform,
+                linked_runs,
+                draft,
+                [],
+                required_headers,
+            )
         )
         hygiene_warnings = _hygiene_warnings(
             scan_markdown, slug, internal_ids, engagement_dir, resolved["title"]
@@ -1001,25 +1012,29 @@ def run(args) -> None:
                 "already exists; pass --overwrite to replace it."
             )
 
-        markdown = _render_markdown(
-            render_finding,
-            resolved,
-            platform,
-            linked_runs,
-            draft,
-            hygiene_warnings,
-            required_headers,
+        markdown = redact_outbound_credentials(
+            _render_markdown(
+                render_finding,
+                resolved,
+                platform,
+                linked_runs,
+                draft,
+                hygiene_warnings,
+                required_headers,
+            )
         )
-        context = _build_context(
-            slug,
-            platform,
-            draft,
-            resolved,
-            linked_runs,
-            submission_rel or str(submission_md),
-            hygiene_warnings,
-            readiness_blockers,
-            readiness_error,
+        context = redact_outbound_credentials(
+            _build_context(
+                slug,
+                platform,
+                draft,
+                resolved,
+                linked_runs,
+                submission_rel or str(submission_md),
+                hygiene_warnings,
+                readiness_blockers,
+                readiness_error,
+            )
         )
         context_text = json.dumps(context, indent=2, ensure_ascii=False)
 

@@ -159,6 +159,204 @@ def test_record_finding_rejects_embedded_root_cause_link(client, isolate_setting
     assert "root_cause links must be created with `finding link`" in response.text
 
 
+def test_root_cause_update_preserves_link_identity_note_and_order(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    for payload in (
+        _finding("RC-030", "Root", root_key="guard"),
+        _finding("RC-031", "Sibling", root_key="guard"),
+    ):
+        assert client.post(
+            f"/engagements/{ENGAGEMENT_KEY}/assessment/findings", json=payload
+        ).status_code in {200, 201}
+    endpoint = (
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/findings/RC-031/root-cause"
+    )
+    first = client.put(
+        endpoint,
+        json={
+            "root_cause_slug": "RC-030",
+            "sibling_order": 7,
+            "note": "Durable relationship evidence.",
+        },
+    ).json()
+
+    updated = client.put(
+        endpoint,
+        json={
+            "root_cause_slug": "RC-030",
+            "root_cause_effect": "eliminates_attack_path",
+        },
+    ).json()
+
+    assert updated["id"] == first["id"]
+    assert updated["root_cause_note"] == "Durable relationship evidence."
+    assert updated["sibling_order"] == 7
+    assert updated["root_cause_effect"] == "eliminates_attack_path"
+
+
+def test_root_cause_auto_order_is_idempotent_and_uses_max(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    for slug in ("RC-040", "RC-041", "RC-042"):
+        assert client.post(
+            f"/engagements/{ENGAGEMENT_KEY}/assessment/findings",
+            json=_finding(slug, slug, root_key="guard"),
+        ).status_code in {200, 201}
+    base = f"/engagements/{ENGAGEMENT_KEY}/assessment/findings"
+    first = client.put(
+        f"{base}/RC-041/root-cause",
+        json={"root_cause_slug": "RC-040", "sibling_order": 3},
+    ).json()
+    rerun = client.put(
+        f"{base}/RC-041/root-cause",
+        json={"root_cause_slug": "RC-040"},
+    ).json()
+    second = client.put(
+        f"{base}/RC-042/root-cause",
+        json={"root_cause_slug": "RC-040"},
+    ).json()
+
+    assert rerun["id"] == first["id"]
+    assert rerun["sibling_order"] == 3
+    assert second["sibling_order"] == 4
+
+
+def test_generic_finding_link_rejects_self_reference(client, isolate_settings):
+    _seed(client, isolate_settings)
+    assert client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/findings",
+        json=_finding("RC-050", "Self", root_key="self"),
+    ).status_code in {200, 201}
+
+    response = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/findings/RC-050/links",
+        json={
+            "link_kind": "related",
+            "target_kind": "finding",
+            "target_ref": "RC-050",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "itself" in response.text
+
+
+def test_generic_link_can_be_retargeted_and_retired_without_deletion(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    for slug in ("RC-060", "RC-061", "RC-062"):
+        assert client.post(
+            f"/engagements/{ENGAGEMENT_KEY}/assessment/findings",
+            json=_finding(slug, slug, root_key=slug),
+        ).status_code in {200, 201}
+    base = f"/engagements/{ENGAGEMENT_KEY}/assessment/findings/RC-060/links"
+    created = client.post(
+        base,
+        json={
+            "link_kind": "related",
+            "target_kind": "finding",
+            "target_ref": "RC-061",
+            "notes": "Original relationship.",
+        },
+    ).json()
+
+    retargeted = client.patch(
+        f"{base}/{created['id']}",
+        json={"target_ref": "RC-062", "notes": "Corrected target."},
+    )
+    assert retargeted.status_code == 200, retargeted.text
+    assert retargeted.json()["id"] == created["id"]
+    assert retargeted.json()["target_ref"] == "RC-062"
+
+    retired = client.patch(
+        f"{base}/{created['id']}",
+        json={"retired": True},
+    )
+    assert retired.status_code == 200, retired.text
+    assert retired.json()["id"] == created["id"]
+    assert retired.json()["retired_at"]
+    rows = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/finding-links"
+    ).json()
+    assert any(row["id"] == created["id"] for row in rows)
+
+
+def test_generic_link_retarget_normalizes_selector_shape(client, isolate_settings):
+    _seed(client, isolate_settings)
+    for slug in ("RC-063", "RC-064", "RC-065"):
+        assert client.post(
+            f"/engagements/{ENGAGEMENT_KEY}/assessment/findings",
+            json=_finding(slug, slug, root_key=slug),
+        ).status_code in {200, 201}
+    base = f"/engagements/{ENGAGEMENT_KEY}/assessment/findings/RC-063/links"
+    created = client.post(
+        base,
+        json={
+            "link_kind": "related",
+            "target_kind": "finding",
+            "target_ref": "RC-064",
+        },
+    ).json()
+    target = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/findings/RC-065"
+    ).json()
+
+    retargeted = client.patch(
+        f"{base}/{created['id']}",
+        json={"target_id": target["id"]},
+    )
+
+    assert retargeted.status_code == 200, retargeted.text
+    assert retargeted.json()["target_id"] == target["id"]
+    assert retargeted.json()["target_ref"] == "RC-065"
+    both = client.patch(
+        f"{base}/{created['id']}",
+        json={"target_id": target["id"], "target_ref": "RC-064"},
+    )
+    assert both.status_code == 422, both.text
+    kind_only = client.patch(
+        f"{base}/{created['id']}",
+        json={"target_kind": "chain"},
+    )
+    assert kind_only.status_code == 422, kind_only.text
+
+
+def test_report_readiness_recomputes_cvss_vector_score(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    payload = _finding("RC-070", "CVSS drift", root_key="cvss")
+    payload["severity"] = "low"
+    payload["details"]["cvss_score"] = 3.1
+    payload["details"]["cvss_vector"] = (
+        "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N"
+    )
+    response = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/findings",
+        json=payload,
+    )
+    assert response.status_code == 201, response.text
+
+    readiness = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-readiness"
+    ).json()
+
+    blockers = [
+        blocker
+        for blocker in readiness["blockers"]
+        if blocker.get("slug") == "RC-070"
+    ]
+    assert any(
+        blocker["kind"] == "cvss_vector_score_mismatch"
+        and "computes to 4.3" in blocker["detail"]
+        for blocker in blockers
+    )
+
+
 # ---------------------------------------------------------------------------
 # C44 — evidence_type field on findings (nullable, no backfill)
 # ---------------------------------------------------------------------------

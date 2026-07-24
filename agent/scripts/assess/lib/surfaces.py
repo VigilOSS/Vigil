@@ -17,6 +17,7 @@ RESOLVABLE_STATUSES = frozenset({
     "not_applicable",
     "deferred",
     "partially-covered",
+    "administratively-closed",
 })
 
 CATCH_ALL_SURFACE_TYPES = frozenset({
@@ -41,6 +42,7 @@ VALID_STATUSES = frozenset({
     "not_applicable",
     "deferred",
     "partially-covered",
+    "administratively-closed",
 })
 
 

@@ -44,6 +44,7 @@ from assess.commands.dispatch.work_items import (
     _fetch_by_unit,
     _defer_cluster,
     _defer_items,
+    _set_rationale,
     _mark_manual,
     _done,
     _error,
@@ -114,7 +115,11 @@ def run(args) -> None:
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         if action == "stats":
             by = getattr(args, "by", "status") or "status"
-            _stats(client, by=by)
+            _stats(
+                client,
+                by=by,
+                status=getattr(args, "cluster_status", "") or "",
+            )
         elif action == "peek":
             if len(extra) < 1:
                 print("Usage: work-buffer peek <type> [limit]", file=sys.stderr)
@@ -172,7 +177,12 @@ def run(args) -> None:
                 sys.exit(1)
             reason_tag = (getattr(args, "reason_tag", "") or "").strip()
             stored = tagged_terminal_reason(reason_tag, reason) if reason_tag else reason
-            _defer_cluster(client, extra[0], stored)
+            _defer_cluster(
+                client,
+                extra[0],
+                stored,
+                dry_run=bool(getattr(args, "dry_run", False)),
+            )
         elif action == "defer-items":
             if not extra:
                 print(
@@ -191,7 +201,27 @@ def run(args) -> None:
                 sys.exit(1)
             reason_tag = (getattr(args, "reason_tag", "") or "").strip()
             stored = tagged_terminal_reason(reason_tag, reason) if reason_tag else reason
-            _defer_items(client, extra, stored)
+            _defer_items(
+                client,
+                extra,
+                stored,
+                dry_run=bool(getattr(args, "dry_run", False)),
+            )
+        elif action == "set-rationale":
+            if not extra:
+                print(
+                    "Usage: work-buffer set-rationale <id> [<id> ...] "
+                    "--rationale TEXT",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            rationale = (
+                getattr(args, "triage_rationale", "") or ""
+            ).strip()
+            if not rationale:
+                print("set-rationale: --rationale is required", file=sys.stderr)
+                sys.exit(1)
+            _set_rationale(client, extra, rationale)
         elif action == "mark-manual":
             if not extra:
                 print(
