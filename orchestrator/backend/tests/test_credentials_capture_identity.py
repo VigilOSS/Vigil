@@ -64,6 +64,29 @@ def test_derive_ignores_non_anchor_cookies():
     assert base == churned
 
 
+def test_derive_recognizes_provider_prefixed_session_cookie_as_the_anchor():
+    base = creds.derive_capture_identity(
+        {
+            "acme_session": "stable-session-bearer",
+            "csrf_token": "first-rotating-value",
+            "AWSALB": "a" * 40,
+        },
+        {},
+        {},
+    )
+    refreshed = creds.derive_capture_identity(
+        {
+            "acme_session": "stable-session-bearer",
+            "csrf_token": "second-rotating-value",
+            "AWSALB": "b" * 40,
+        },
+        {},
+        {},
+    )
+
+    assert base == refreshed
+
+
 def test_derive_shared_high_entropy_cookie_does_not_merge_accounts():
     # Same AWSALB (shared stickiness), different sid -> must stay distinct.
     one = creds.derive_capture_identity(

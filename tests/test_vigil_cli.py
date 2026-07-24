@@ -58,6 +58,121 @@ def test_vigil_runtime_resources_helper_handles_real_docker_cli_gracefully(capsy
     assert "container not running" in output
 
 
+# --------------------------------------------------------------------------- #
+# I-02: Docker lifecycle must not hang when the daemon/VM is unresponsive.
+# run_command bounds every metadata query with a timeout and turns a
+# TimeoutExpired into a typed failed result; callers surface a clear message.
+# --------------------------------------------------------------------------- #
+
+
+def test_run_command_times_out_returns_failed_result_not_hang(monkeypatch):
+    """A wedged daemon makes subprocess.run raise TimeoutExpired; run_command
+    must convert that into a non-zero, timeout-tagged DockerResult (never hang,
+    never propagate the exception)."""
+    from vigil_cli import docker as docker_module
+
+    def fake_run(argv, **kwargs):
+        # The call is bounded — a timeout is always passed to subprocess.run.
+        assert kwargs.get("timeout"), "run_command must pass a timeout"
+        raise docker_module.subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout"))
+
+    monkeypatch.delenv("VIGIL_DOCKER_TIMEOUT", raising=False)
+    monkeypatch.setattr(docker_module.subprocess, "run", fake_run)
+
+    result = docker_module.run_command(["docker", "info"])
+    assert result.returncode == docker_module.TIMEOUT_RETURNCODE
+    assert result.returncode != 0
+    assert "timed out" in result.stderr
+
+
+def test_run_command_timeout_overridable_and_disablable_via_env(monkeypatch):
+    from types import SimpleNamespace
+
+    from vigil_cli import docker as docker_module
+
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(docker_module.subprocess, "run", fake_run)
+
+    monkeypatch.setenv("VIGIL_DOCKER_TIMEOUT", "5")
+    assert docker_module.run_command(["docker", "info"]).returncode == 0
+    assert captured["timeout"] == 5.0
+
+    # 0 (or negative/garbage) disables the bound for a slow-but-healthy daemon.
+    monkeypatch.setenv("VIGIL_DOCKER_TIMEOUT", "0")
+    docker_module.run_command(["docker", "info"])
+    assert captured["timeout"] is None
+
+
+def test_daemon_status_flags_timeout_vs_absent_vs_healthy():
+    from vigil_cli import docker as docker_module
+
+    timed = docker_module.daemon_status(
+        runner=lambda argv, **_: docker_module.DockerResult(docker_module.TIMEOUT_RETURNCODE, "", "timed out")
+    )
+    assert timed.responsive is False and timed.timed_out is True
+
+    absent = docker_module.daemon_status(
+        runner=lambda argv, **_: docker_module.DockerResult(1, "", "Cannot connect to the Docker daemon")
+    )
+    assert absent.responsive is False and absent.timed_out is False
+    assert "Cannot connect" in absent.detail
+
+    healthy = docker_module.daemon_status(
+        runner=lambda argv, **_: docker_module.DockerResult(0, "Server Version: 27\n", "")
+    )
+    assert healthy.responsive is True and healthy.timed_out is False
+
+
+def test_start_runtime_surfaces_unresponsive_docker_not_missing_image(tmp_path):
+    """When the first metadata probe times out, start_runtime must name the real
+    problem (Docker unresponsive + recovery hint), NOT the misleading
+    'Missing runtime image'."""
+    from vigil_cli.docker import DockerResult, TIMEOUT_RETURNCODE
+    from vigil_cli.runtime import RuntimeOptions, start_runtime
+
+    install_root = tmp_path / "install"
+    (install_root / "agent" / "engagements").mkdir(parents=True)
+
+    def runner(argv, **_):
+        if argv[:2] == ["docker", "info"]:
+            return DockerResult(TIMEOUT_RETURNCODE, "", "docker command timed out after 20s (daemon unresponsive?): docker info")
+        return DockerResult(0, "", "")
+
+    with pytest.raises(SystemExit) as exc_info:
+        start_runtime(RuntimeOptions(install_root=install_root), runner=runner, validate_tools=False)
+
+    message = str(exc_info.value)
+    assert "not responding" in message.lower() or "wedged" in message.lower()
+    assert "Missing runtime image" not in message
+    assert "docker info" in message.lower()
+
+
+def test_runtime_status_reports_docker_unavailable_on_unresponsive_daemon():
+    from vigil_cli.docker import DockerResult, TIMEOUT_RETURNCODE
+    from vigil_cli.runtime import runtime_status
+
+    def runner(argv, **_):
+        # Both the liveness (`docker ps`) and health (`docker info`) probes time out.
+        return DockerResult(TIMEOUT_RETURNCODE, "", "timed out")
+
+    assert runtime_status(container_name="vigil", runner=runner) == "docker-unavailable"
+
+
+def test_runtime_status_reports_stopped_when_daemon_healthy_but_container_absent():
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.runtime import runtime_status
+
+    def runner(argv, **_):
+        return DockerResult(0, "", "")  # `docker ps` empty, `docker info` ok
+
+    assert runtime_status(container_name="vigil", runner=runner) == "stopped"
+
+
 def _seed_engagement(eng_dir: Path) -> None:
     """Create a minimal engagement skeleton — scope.json is the discovery marker."""
     eng_dir.mkdir(parents=True, exist_ok=True)

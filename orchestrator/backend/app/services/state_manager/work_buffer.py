@@ -82,10 +82,17 @@ _VULN_ANALYST_TYPES: tuple[str, ...] = (
     "event_feed",
     "debug_config",
     "portal_session",
+    "unknown",
 )
-_SOURCE_ANALYZER_TYPES: tuple[str, ...] = ("page", "javascript", "stylesheet", "data")
+_SOURCE_ANALYZER_TYPES: tuple[str, ...] = (
+    "page",
+    "javascript",
+    "stylesheet",
+    "data",
+    "host_root",
+    "sourcemap",
+)
 _ROUTED_TYPES: tuple[str, ...] = _VULN_ANALYST_TYPES + _SOURCE_ANALYZER_TYPES
-_VULN_SIGNAL_FALLBACK_TYPES: tuple[str, ...] = ("unknown",)
 
 
 def _agent_route(agent: str) -> tuple[str, ...] | None:
@@ -94,28 +101,51 @@ def _agent_route(agent: str) -> tuple[str, ...] | None:
     if not normalized:
         return None
     if "vulnerability" in normalized or normalized.startswith("vuln"):
-        return _VULN_ANALYST_TYPES + _VULN_SIGNAL_FALLBACK_TYPES
+        return _VULN_ANALYST_TYPES
     if "source" in normalized:
         return _SOURCE_ANALYZER_TYPES
     return None
 
 
-def _is_vuln_signal_fallback(row: Any) -> bool:
-    """Unknown type with an explicit gf signal is vulnerability-analyst work."""
-    return (
-        row["type"] in _VULN_SIGNAL_FALLBACK_TYPES
-        and int(row["priority_score"] or 0) > 0
-        and str(row["cluster_key"] or "").startswith("gf:")
-    )
-
-
 def _assigned_agent_for_row(row: Any) -> str | None:
     case_type = row["type"]
-    if case_type in _VULN_ANALYST_TYPES or _is_vuln_signal_fallback(row):
+    if case_type in _VULN_ANALYST_TYPES:
         return "vulnerability-analyst"
     if case_type in _SOURCE_ANALYZER_TYPES:
         return "source-analyzer"
     return None
+
+
+def _work_scope_admission(engagement: Any) -> tuple[list[str], list[str]] | None:
+    """(allow, deny) scope-host patterns for ``engagement`` or None (fail OPEN).
+
+    Lazy import of the coverage scope reader avoids the coverage<->work_buffer
+    module import cycle (coverage imports ``_derive_work_item`` /
+    ``mark_work_items_done`` from here). None => scope undeterminable / no
+    allowlist => the caller keeps every candidate row (never drops all work).
+    """
+    from .coverage import _engagement_scope_admission
+
+    return _engagement_scope_admission(engagement)
+
+
+def _row_host_out_of_scope(host: Any, scope: tuple[list[str], list[str]] | None) -> bool:
+    """True only when ``scope`` is KNOWN and ``host`` is non-empty and NOT admitted.
+
+    I-07 dispatch guard: an admitted-but-not-owned co-tenant ``pending`` row
+    (``otherchurch.acme-portal.example`` under a specific-host allowlist, or a host
+    named in ``out_of_scope``) is excluded from every claim projection — the SAME
+    admission ``web_uncovered_high_route_hosts`` applies. A row with an EMPTY host
+    fails OPEN (kept): scope excludes KNOWN-foreign hosts, it never requires one.
+    """
+    if scope is None:
+        return False
+    h = str(host or "").strip().lower()
+    if not h:
+        return False
+    from .coverage import _host_admitted_by_scope
+
+    return not _host_admitted_by_scope(h, scope[0], scope[1])
 
 
 # ---------------------------------------------------------------------------
@@ -149,11 +179,16 @@ def _int_or_none(value: Any) -> int | None:
 
 def _int_ids(ids: Any) -> list[int]:
     out: list[int] = []
+    seen: set[int] = set()
     for raw in ids or []:
         try:
-            out.append(int(raw))
+            value = int(raw)
         except (TypeError, ValueError):
             continue
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
     return out
 
 
@@ -472,7 +507,9 @@ def record_work_items_bulk(engagement_id: int, items: list[dict[str, Any]]) -> d
 # ---------------------------------------------------------------------------
 # Reads
 # ---------------------------------------------------------------------------
-def work_buffer_stats(engagement_id: int, *, by: str = "status") -> dict[str, Any]:
+def work_buffer_stats(
+    engagement_id: int, *, by: str = "status", status_value: str = ""
+) -> dict[str, Any]:
     """Grouped counts for ``work-buffer stats``. Returns raw grouped rows; the
     CLI renders them identically to the former local-SQLite output (including
     the Python-side reason-tag rollup for ``by=reason``)."""
@@ -523,12 +560,17 @@ def work_buffer_stats(engagement_id: int, *, by: str = "status") -> dict[str, An
                 (eid,),
             )}
         if by == "host":
+            where = "engagement_id = ?"
+            params: tuple[Any, ...] = (eid,)
+            if status_value:
+                where += " AND status = ?"
+                params = (eid, status_value)
             return {"by": "host", "rows": _fetch_all(
                 connection,
                 "SELECT CASE WHEN host = '' THEN '(none)' ELSE host END AS host, status, COUNT(*) AS count "
-                "FROM assessment_work_items WHERE engagement_id = ? "
+                f"FROM assessment_work_items WHERE {where} "
                 "GROUP BY host, status ORDER BY host, status",
-                (eid,),
+                params,
             )}
         if by == "reason":
             return {"by": "reason", "rows": _fetch_all(
@@ -608,7 +650,26 @@ def _stamp_liveness_sql() -> str:
 def fetch_work_items(engagement_id: int, *, type_val: str, limit: int, agent: str) -> dict[str, Any]:
     """Atomically claim up to ``limit`` pending items of a type for ``agent``."""
     engagement = _engagement_or_404(engagement_id)
+    scope = _work_scope_admission(engagement)
     with _common.get_connection() as connection:
+        # I-07: exclude admitted-but-not-owned co-tenant / out-of-scope pending
+        # rows from the claim. Out-of-scope rows are RARE, so the excluded set is
+        # usually empty and the claim SQL is unchanged (fast path). The candidate
+        # read and the claim run on the same re-entrant connection; the UPDATE
+        # still re-checks status='pending', so a concurrent claim is never taken
+        # twice even if a row's state shifts between the read and the write.
+        exclude_sql = ""
+        exclude_params: tuple[Any, ...] = ()
+        if scope is not None:
+            candidates = connection.execute(
+                "SELECT id, host FROM assessment_work_items "
+                "WHERE engagement_id = ? AND status = 'pending' AND type = ?",
+                (engagement.id, type_val),
+            ).fetchall()
+            excluded = [r["id"] for r in candidates if _row_host_out_of_scope(r["host"], scope)]
+            if excluded:
+                exclude_sql = f" AND id NOT IN ({','.join('?' * len(excluded))})"
+                exclude_params = tuple(excluded)
         rows = connection.execute(
             f"""
             UPDATE assessment_work_items
@@ -619,13 +680,13 @@ def fetch_work_items(engagement_id: int, *, type_val: str, limit: int, agent: st
                    live_status = {_stamp_liveness_sql()}
              WHERE id IN (
                  SELECT id FROM assessment_work_items
-                  WHERE engagement_id = ? AND status = 'pending' AND type = ?
+                  WHERE engagement_id = ? AND status = 'pending' AND type = ?{exclude_sql}
                   ORDER BY priority_score DESC, cluster_key, id
                   LIMIT ?
              )
             RETURNING *
             """,
-            (agent, engagement.id, type_val, int(limit)),
+            (agent, engagement.id, type_val, *exclude_params, int(limit)),
         ).fetchall()
         claimed = [dict(r) for r in rows]
     claimed.sort(key=lambda r: (-(r.get("priority_score") or 0), r.get("cluster_key") or "", r.get("id") or 0))
@@ -638,17 +699,18 @@ def fetch_work_items_by_priority(engagement_id: int, *, limit: int, agent: str) 
     ``auto`` claims the highest-signal routable rows globally and assigns each to
     its canonical specialist; a concrete specialist name claims only the types it
     can handle. Rows with a terminal_reason are excluded (already skip-worthy).
-    High-signal ``unknown`` rows are a narrow vulnerability-analyst fallback.
+    ``unknown`` rows remain vulnerability-analyst work: classification weakness
+    must never make a pending coverage obligation unreachable.
     """
     engagement = _engagement_or_404(engagement_id)
+    scope = _work_scope_admission(engagement)  # I-07 dispatch scope guard
     agent = (agent or "auto").strip()
     auto_route = agent.lower() in {"auto", "routed", "route"}
-    allowed_types = (_ROUTED_TYPES + _VULN_SIGNAL_FALLBACK_TYPES) if auto_route else _agent_route(agent)
+    allowed_types = _ROUTED_TYPES if auto_route else _agent_route(agent)
     if allowed_types is None:
         return {"claimed": [], "non_routable": [], "error": "not-routed-agent"}
 
     type_ph = ",".join("?" * len(allowed_types))
-    fallback_ph = ",".join("?" * len(_VULN_SIGNAL_FALLBACK_TYPES))
     stamp = _stamp_liveness_sql()
     with _common.get_connection() as connection:
         candidates = connection.execute(
@@ -656,14 +718,15 @@ def fetch_work_items_by_priority(engagement_id: int, *, limit: int, agent: str) 
             SELECT * FROM assessment_work_items
              WHERE engagement_id = ? AND status = 'pending' AND terminal_reason IS NULL
                AND type IN ({type_ph})
-               AND (type NOT IN ({fallback_ph}) OR (priority_score > 0 AND cluster_key LIKE 'gf:%'))
              ORDER BY priority_score DESC, cluster_key, id
              LIMIT ?
             """,
-            (engagement.id, *allowed_types, *_VULN_SIGNAL_FALLBACK_TYPES, int(limit)),
+            (engagement.id, *allowed_types, int(limit)),
         ).fetchall()
         claimed: list[dict[str, Any]] = []
         for row in candidates:
+            if _row_host_out_of_scope(row["host"], scope):
+                continue  # I-07: never dispatch an out-of-scope / co-tenant host
             row_agent = _assigned_agent_for_row(row) if auto_route else agent
             if not row_agent:
                 continue
@@ -729,34 +792,16 @@ def fetch_work_items_by_unit(
     so already-active units yield smaller follow-on batches.
     """
     engagement = _engagement_or_404(engagement_id)
+    scope = _work_scope_admission(engagement)  # I-07 dispatch scope guard
     normalized_agent = (agent or "auto").strip()
     auto_route = normalized_agent.lower() in {"auto", "routed", "route"}
-    allowed_types = (
-        _ROUTED_TYPES + _VULN_SIGNAL_FALLBACK_TYPES
-        if auto_route
-        else _agent_route(normalized_agent)
-    )
+    allowed_types = _ROUTED_TYPES if auto_route else _agent_route(normalized_agent)
     if allowed_types is None:
         return {"claimed": [], "error": "not-routed-agent"}
     if work_class and work_class not in allowed_types:
         return {"claimed": [], "error": "class-not-routed"}
 
     type_ph = ",".join("?" * len(allowed_types))
-    # High-signal fallback predicate — mirror fetch_work_items_by_priority so an
-    # `unknown` row is only routable when it carries a gf: vuln signal. Without it,
-    # a unit holding ONLY low-signal unknown rows satisfies the EXISTS selection
-    # and is fetched as candidates, yet every candidate is dropped by
-    # _assigned_agent_for_row (returns None) — no status changes, the same unit is
-    # re-selected on the next call, and routable work in lower-ranked units starves.
-    fallback_ph = ",".join("?" * len(_VULN_SIGNAL_FALLBACK_TYPES))
-    exists_signal_sql = (
-        f" AND (wi.type NOT IN ({fallback_ph}) "
-        "OR (wi.priority_score > 0 AND wi.cluster_key LIKE 'gf:%'))"
-    )
-    claim_signal_sql = (
-        f" AND (type NOT IN ({fallback_ph}) "
-        "OR (priority_score > 0 AND cluster_key LIKE 'gf:%'))"
-    )
     class_sql = " AND wi.type = ?" if work_class else ""
     claim_class_sql = " AND type = ?" if work_class else ""
     class_params: tuple[Any, ...] = (work_class,) if work_class else ()
@@ -786,7 +831,6 @@ def fetch_work_items_by_unit(
                       AND wi.application_unit_id = au.id
                       AND wi.status = 'pending' AND wi.terminal_reason IS NULL
                       AND wi.type IN ({type_ph})
-                      {exists_signal_sql}
                       {class_sql}
                       {path_sql}
                )
@@ -798,7 +842,6 @@ def fetch_work_items_by_unit(
                 engagement.id,
                 *unit_params,
                 *allowed_types,
-                *_VULN_SIGNAL_FALLBACK_TYPES,
                 *class_params,
                 *path_params,
             ),
@@ -833,7 +876,6 @@ def fetch_work_items_by_unit(
              WHERE engagement_id = ? AND application_unit_id = ?
                AND status = 'pending' AND terminal_reason IS NULL
                AND type IN ({type_ph})
-               {claim_signal_sql}
                {claim_class_sql}
                {claim_path_sql}
              ORDER BY priority_score DESC, cluster_key, id
@@ -843,7 +885,6 @@ def fetch_work_items_by_unit(
                 engagement.id,
                 unit["id"],
                 *allowed_types,
-                *_VULN_SIGNAL_FALLBACK_TYPES,
                 *class_params,
                 *path_params,
                 effective_limit,
@@ -852,6 +893,8 @@ def fetch_work_items_by_unit(
         stamp = _stamp_liveness_sql()
         claimed: list[dict[str, Any]] = []
         for candidate in candidates:
+            if _row_host_out_of_scope(candidate["host"], scope):
+                continue  # I-07: never dispatch an out-of-scope / co-tenant host
             row_agent = _assigned_agent_for_row(candidate) if auto_route else normalized_agent
             if not row_agent:
                 continue
@@ -920,30 +963,68 @@ def mark_work_items_error(engagement_id: int, ids: list[int]) -> dict[str, Any]:
     return {"affected": affected, "ids": valid}
 
 
-def defer_work_items(engagement_id: int, *, ids: list[int], reason: str) -> dict[str, Any]:
+_SQL_ID_CHUNK = 300
+
+
+def defer_work_items(
+    engagement_id: int, *, ids: list[int], reason: str, dry_run: bool = False
+) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     valid = _int_ids(ids)
     if not valid:
         return {"affected": 0, "ids": []}
-    ph = ",".join("?" * len(valid))
+    matched: list[int] = []
     with _common.get_connection() as connection:
-        affected = connection.execute(
-            f"UPDATE assessment_work_items SET status = 'skipped', terminal_reason = ?, "
-            f"updated_at = CURRENT_TIMESTAMP WHERE engagement_id = ? AND status = 'pending' AND id IN ({ph})",
-            (reason, engagement.id, *valid),
-        ).rowcount
-    return {"affected": affected, "ids": valid}
+        if not dry_run:
+            connection.execute("BEGIN IMMEDIATE")
+        for start in range(0, len(valid), _SQL_ID_CHUNK):
+            chunk = valid[start:start + _SQL_ID_CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            rows = connection.execute(
+                "SELECT id FROM assessment_work_items WHERE engagement_id = ? "
+                f"AND status = 'pending' AND id IN ({placeholders}) ORDER BY id",
+                (engagement.id, *chunk),
+            ).fetchall()
+            chunk_ids = [int(row["id"]) for row in rows]
+            matched.extend(chunk_ids)
+            if dry_run or not chunk_ids:
+                continue
+            update_placeholders = ",".join("?" * len(chunk_ids))
+            connection.execute(
+                "UPDATE assessment_work_items SET status = 'skipped', terminal_reason = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE engagement_id = ? "
+                f"AND status = 'pending' AND id IN ({update_placeholders})",
+                (reason, engagement.id, *chunk_ids),
+            )
+    return {"affected": len(matched), "ids": matched, "dry_run": bool(dry_run)}
 
 
-def defer_work_item_cluster(engagement_id: int, *, cluster_key: str, reason: str) -> dict[str, Any]:
+def defer_work_item_cluster(
+    engagement_id: int, *, cluster_key: str, reason: str, dry_run: bool = False
+) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
-        affected = connection.execute(
-            "UPDATE assessment_work_items SET status = 'skipped', terminal_reason = ?, "
-            "updated_at = CURRENT_TIMESTAMP WHERE engagement_id = ? AND status = 'pending' AND cluster_key = ?",
-            (reason, engagement.id, cluster_key),
-        ).rowcount
-    return {"affected": affected, "cluster_key": cluster_key}
+        if not dry_run:
+            connection.execute("BEGIN IMMEDIATE")
+        rows = connection.execute(
+            "SELECT id FROM assessment_work_items WHERE engagement_id = ? "
+            "AND status = 'pending' AND cluster_key = ? ORDER BY id",
+            (engagement.id, cluster_key),
+        ).fetchall()
+        ids = [int(row["id"]) for row in rows]
+        if ids and not dry_run:
+            connection.execute(
+                "UPDATE assessment_work_items SET status = 'skipped', terminal_reason = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE engagement_id = ? "
+                "AND status = 'pending' AND cluster_key = ?",
+                (reason, engagement.id, cluster_key),
+            )
+    return {
+        "affected": len(ids),
+        "ids": ids,
+        "cluster_key": cluster_key,
+        "dry_run": bool(dry_run),
+    }
 
 
 def mark_work_items_manual(engagement_id: int, ids: list[int]) -> dict[str, Any]:
@@ -993,6 +1074,7 @@ _WORK_ITEM_UPDATE_FIELDS: tuple[str, ...] = (
     "cluster_key",
     "terminal_reason",
     "classifier_version",
+    "triage_rationale",
 )
 
 

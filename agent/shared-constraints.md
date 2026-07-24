@@ -13,6 +13,26 @@ enterprise behavior. Aggressive techniques are permitted within the declared sco
 
 ---
 
+## Credentials and Local State Are Self-Owned
+
+Vigil is single-operator and local: the credential store, `command-run` audit rows, intel,
+handoffs, and artifacts are your own private working state, and the audit trail exists to reproduce
+exactly what ran. So the engagement's own test credentials — and any secret you capture — are
+ordinary working data here, recorded in full by design. Treat them that way: keep testing, and let
+auth material appear wherever the tooling records it.
+
+Concretely, `vigil assess kali <tool> --identity <name>` expands that identity's cookies/token into
+a literal `Cookie:`/`Authorization` header in the command's `resolved_argv`, which `command-run`
+reads, then stores and returns. That is the intended inject-and-audit mechanism — not a leak, not a
+finding, and never a reason to redact it or pause authenticated work. (`vigil assess auth list`
+prints cookie names only to stay scannable, not because the value is secret.)
+
+Redaction and PII-masking are the report-writer's job at submission time, not yours. The one limit
+that still binds you is about the *target's* data, not your own: don't bulk-pull real user records
+to "prove" a finding — one minimal sample is the evidence (§4).
+
+---
+
 ## 1. Confirm Scope Before Any Target Work
 
 Read `scope.json` before making target-facing decisions. Confirm:
@@ -23,13 +43,15 @@ Read `scope.json` before making target-facing decisions. Confirm:
   proceeds (`pause` and `selected` are mechanically identical); `full_send` bypasses that review
   gate entirely
 - Auth state from the engagement's backend credential store (`vigil auth status`) — use credentials only when a record is populated and marked active
-  - Liveness is ground truth: a populated/active record is NOT proof the session is live — never trust cookie presence or the `stale` flag. Enumerate what's stored for a host with `vigil assess auth list --host <host> [--include-dead] [--json]` (identity name, `auth_context`, `state`, liveness verdict, age, cookie names only — never raw values; active identity marked `*`). Whoever takes an identity for a task owns proving it live: there is NO auto-detection of where a site handles auth, so first declare `material.liveness = {expect_status, authed_marker, dead_marker}` on that identity (via `vigil auth import`/`edit`), then probe it BY NAME with `vigil assess auth status --probe --identity <name> --probe-url <authed-endpoint>` before trusting any result or recording a "dead"/"unreachable" verdict. Pick an `authed_marker` that appears ONLY when logged in (the logged-in username, an account/settings link, a per-user CSRF token field) and a `dead_marker` from the login page — the same logged-in/logged-out markers a DAST scanner (InsightAppSec/Burp) uses to validate a session. Redirects are never followed; `live` clears a `stale` mark, `dead` is set only by a proven-dead probe, and no signature or a transport error ⇒ liveness stays `unknown` — never a false verdict.
+  - Liveness is ground truth: a populated/active record is NOT proof the session is live — never trust cookie presence or the `stale` flag. Enumerate what's stored for a host with `vigil assess auth list --host <host> [--include-dead] [--json]` (identity name, `auth_context`, `state`, liveness verdict, age, cookie names only — never raw values (kept scannable, not secret; see "Credentials and Local State Are Self-Owned"); active identity marked `*`). Whoever takes an identity for a task owns proving it live: there is NO auto-detection of where a site handles auth, so first declare `material.liveness = {expect_status, authed_marker, dead_marker}` on that identity (via `vigil auth import`/`edit`), then probe it BY NAME with `vigil assess auth status --probe --identity <name> --probe-url <authed-endpoint>` before trusting any result or recording a "dead"/"unreachable" verdict. Pick an `authed_marker` that appears ONLY when logged in (the logged-in username, an account/settings link, a per-user CSRF token field) and a `dead_marker` from the login page — the same logged-in/logged-out markers a DAST scanner (InsightAppSec/Burp) uses to validate a session. Redirects are never followed; `live` clears a `stale` mark, `dead` is set only by a proven-dead probe, and no signature or a transport error ⇒ liveness stays `unknown` — never a false verdict.
 
 `exploit_policy` governs *exploitation*, and it is resolved once **before** dispatch — not a
 per-action approval you re-request mid-task. The invariants that hold regardless of its value: stay
 within the in-scope hosts above, honor the program's ROE, and make no persistent or destructive
-change to anything outside operator-owned infrastructure. §2d's human-reach preflight is the one
-gate that survives every `exploit_policy` value and still applies per-action.
+change to the target's or a third party's state without operator approval — changes to
+operator-owned infrastructure, or to our own test data (accounts or artifacts we created), are
+fine. §2d's human-reach preflight is the one gate that survives every `exploit_policy` value and
+still applies per-action.
 
 **Reachability is not scope.** The Kali runtime is shared infrastructure, so it may be able to route to hosts that are NOT your target — other engagements' services, neighbouring Docker/internal subnets, or the host itself. Only the hosts in this engagement's `scope.json` are in scope. Never probe, pivot into, or build findings on infrastructure outside it, even when the runtime can reach it — a reachable-but-out-of-scope host is a distraction (and, on a shared runtime, often another engagement's state), not a lead.
 
@@ -122,6 +144,11 @@ required set is `--technique`, `--intent`, `--probe-kind`, `--phase`, and `--tim
 `--destructive` when the command writes/edits/deletes target state and `--force` to suppress the
 dedup-warning log on an intentional retry (a fresh audit row is written regardless;
 `superseded_by_id` links it to the predecessor).
+
+The persisted row records `command`/`argv` as a faithful copy of exactly what ran — including any
+`--identity` auth material expanded into a `Cookie:`/`Authorization` header. That is by design, not
+a leak; do not redact it or treat it as a finding (see "Credentials and Local State Are Self-Owned"
+above).
 
 Two judgment points that the mechanical layers can't give you: derive `--technique` from the
 skill you loaded (`ssrf-testing` → `SSRF`, `sqli-testing` → `SQLI`; `HEALTH` for runtime/tool
@@ -475,7 +502,7 @@ an already-recorded finding via `vigil assess finding update <slug> --details-in
 Use this instead of inventing a special workflow status for chain-only findings.
 
 **Proof-not-collection — one minimal sample is sufficient.** When you have proven access
-to a data set, one minimal **redacted** sample is all the evidence the finding needs.
+to a data set, one minimal sample is all the evidence the finding needs.
 Never bulk-pull real user records, credentials, or PII to "demonstrate" a finding —
 volume does not strengthen the proof and only increases harm. The "evidence beats volume"
 rule (`hunting.md §6`) applies at the collection boundary: more records is not more

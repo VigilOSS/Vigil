@@ -138,16 +138,15 @@ def _render_handoff(args, extra: list[str]) -> None:
                 finding_rows.append({"slug": slug, "_error": "non-dict response"})
 
         credential_rows: list[dict] = []
-        if role in ("vulnerability-analyst", "exploit-developer"):
-            try:
-                creds = client.get("credentials")
-            except AssessError:
-                creds = []
-            if isinstance(creds, list):
-                credential_rows = [
-                    c for c in creds
-                    if isinstance(c, dict) and (c.get("source_name") or "") == role
-                ]
+        try:
+            # Credentials are engagement-scoped, not under /assessment. The
+            # continuity line describes the store the next worker inherits,
+            # independent of which role originally captured each identity.
+            creds = client.get_engagement("credentials")
+        except AssessError:
+            creds = []
+        if isinstance(creds, list):
+            credential_rows = [c for c in creds if isinstance(c, dict)]
 
     # Local-disk presence check for working artifacts. The new payload uses
     # objects with a 'path' key; tolerate plain strings for forward-compat.

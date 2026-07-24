@@ -340,6 +340,15 @@ def run(args) -> None:
             )
             sys.exit(1)
 
+    if len(slugs) > 1 and payload.get("expected_row_version") is not None:
+        print(
+            "finding update: one --expected-row-version cannot safely guard "
+            "multiple findings; omit it and the command will fetch each slug's "
+            "current row_version immediately before its PATCH.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     # Set the explicit-flag mode so the backend overwrites rather than merges.
     if getattr(args, "details_replace", False):
         if payload.get("details") is None:
@@ -355,7 +364,26 @@ def run(args) -> None:
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         for slug in slugs:
             try:
-                results.append(client.patch(f"findings/{slug}", payload))
+                patch_payload = dict(payload)
+                if patch_payload.get("expected_row_version") is None:
+                    current = client.get(f"findings/{slug}")
+                    row_version = (
+                        current.get("row_version")
+                        if isinstance(current, dict)
+                        else None
+                    )
+                    if (
+                        not isinstance(row_version, int)
+                        or isinstance(row_version, bool)
+                        or row_version < 1
+                    ):
+                        raise RuntimeError(
+                            "backend did not return a positive row_version"
+                        )
+                    patch_payload["expected_row_version"] = row_version
+                results.append(
+                    client.patch(f"findings/{slug}", patch_payload)
+                )
             except Exception as exc:  # noqa: BLE001 - one bad slug must not drop the rest
                 failed += 1
                 print(f"finding update: {slug} failed: {exc}", file=sys.stderr)

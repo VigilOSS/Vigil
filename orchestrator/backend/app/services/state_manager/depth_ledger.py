@@ -47,6 +47,7 @@ from .app_units import (
     _port_class,
     _id_like_keys,
     _schema_nonempty,
+    _split_host_path,
     _surface_host_path,
     _params_match_tokens,
     _SSRF_PARAM_TOKENS,
@@ -56,7 +57,11 @@ from .app_units import (
     _DECISIVE_SURFACE_TYPES,
     CONF_HIGH,
 )
-from .coverage import PROBE_RESULT_STATUSES_COVERING
+from .coverage import (
+    PROBE_RESULT_STATUSES_COVERING,
+    _engagement_scope_admission,
+    _host_admitted_by_scope,
+)
 
 
 BLOCK_HIGH = "high"
@@ -212,6 +217,22 @@ def depth_ledger(engagement_id: int) -> dict[str, Any]:
             (eng_id,),
         ) if _table_exists(connection, "assessment_credentials") else []
 
+    # I-07 scope admission: drop out-of-scope units (wildcard co-tenants, vendor/
+    # SSO/CDN hosts) so a host the engagement does not own never becomes a depth
+    # blocker — the SAME primitive ``web_uncovered_high_route_hosts`` uses. The
+    # scorer already excludes them at write time and ``_prune_stale_units`` clears
+    # any pre-existing rows; this read-side filter keeps the projection correct
+    # even against a stale keyset. None => scope undeterminable => fail OPEN.
+    scope_admission = _engagement_scope_admission(engagement)
+    if scope_admission is not None:
+        units = [
+            u
+            for u in units
+            if _host_admitted_by_scope(
+                str(u["host"] or "").lower(), scope_admission[0], scope_admission[1]
+            )
+        ]
+
     variant_by_id = {int(v["id"]): v for v in variants}
     status_by_variant: dict[int, list[int]] = {}
     for obs in observations:
@@ -293,7 +314,10 @@ def _extract_host_tokens(value: str) -> set[str]:
     out: set[str] = set()
     if not value:
         return out
-    parsed_host, _ = _surface_host_path(value)
+    # RAW split: this matches a cred host against an already-trusted unit host, so
+    # it must not be gated by the ingest-side hostname validator (the dotted
+    # ``_HOST_TOKEN_RE`` pass below is the real extractor either way).
+    parsed_host, _ = _split_host_path(value)
     if parsed_host and "." in parsed_host:
         out.add(parsed_host)
     for m in _HOST_TOKEN_RE.finditer(value):
@@ -917,7 +941,10 @@ def _finding_maps_to_unit(
     loc = str(finding.get("canonical_location") or "")
     if not loc:
         return False
-    f_host, f_path = _surface_host_path(loc)
+    # RAW split: ``host`` is the already-trusted unit host, so an equality match
+    # must not be pre-filtered by the ingest-side hostname validator (avoids a
+    # NEW false-block if a unit host is single-label / internal).
+    f_host, f_path = _split_host_path(loc)
     return bool(f_host) and f_host == host and _path_under_prefix(f_path, prefix)
 
 
@@ -951,7 +978,9 @@ def _deferral_applies_to_unit(
     d_host = str(payload.get("host") or "").strip().lower()
     if not d_host:
         return False
-    parsed_host, _ = _surface_host_path(d_host)
+    # RAW split (compare-to-trusted-unit-host, ``or d_host`` fallback preserves
+    # the exact deferral-host semantics regardless of hostname shape).
+    parsed_host, _ = _split_host_path(d_host)
     norm_host = parsed_host or d_host
     if norm_host != host:
         return False

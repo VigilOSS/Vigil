@@ -25,6 +25,7 @@ class _FakeClient:
     def __init__(self) -> None:
         self.posts: list[tuple[str, dict]] = []
         self.puts: list[tuple[str, dict]] = []
+        self.patches: list[tuple[str, dict]] = []
 
     def post(self, endpoint: str, payload: dict) -> dict:
         self.posts.append((endpoint, payload))
@@ -32,6 +33,10 @@ class _FakeClient:
 
     def put(self, endpoint: str, payload: dict) -> dict:
         self.puts.append((endpoint, payload))
+        return {"endpoint": endpoint, **payload}
+
+    def patch(self, endpoint: str, payload: dict) -> dict:
+        self.patches.append((endpoint, payload))
         return {"endpoint": endpoint, **payload}
 
     def __enter__(self) -> "_FakeClient":
@@ -195,3 +200,85 @@ def test_root_cause_mode_still_uses_put(tmp_path, monkeypatch, capsys):
     endpoint, payload = fake.puts[0]
     assert endpoint == "findings/VA-070/root-cause"
     assert payload["root_cause_slug"] == "VA-001"
+
+
+def test_generic_link_can_be_retargeted_by_id(
+    tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        [
+            "link",
+            "VA-070",
+            "--link-id",
+            "42",
+            "--target-kind",
+            "finding",
+            "--target-ref",
+            "VA-072",
+            "--note",
+            "Corrected relationship.",
+        ],
+        str(tmp_path),
+    )
+
+    link_finding.run(args)
+    capsys.readouterr()
+
+    assert fake.posts == []
+    assert fake.patches == [
+        (
+            "findings/VA-070/links/42",
+            {
+                "target_kind": "finding",
+                "target_ref": "VA-072",
+                "notes": "Corrected relationship.",
+            },
+        )
+    ]
+
+
+def test_generic_link_rejects_ambiguous_target_selectors(
+    tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        [
+            "link",
+            "VA-070",
+            "--target-kind",
+            "finding",
+            "--target-id",
+            "72",
+            "--target-ref",
+            "VA-072",
+        ],
+        str(tmp_path),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        link_finding.run(args)
+
+    assert exc.value.code == 1
+    assert "only one" in capsys.readouterr().err
+    assert fake.posts == []
+
+
+def test_generic_link_can_be_retired_by_id(
+    tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        ["link", "VA-070", "--link-id", "42", "--retire"],
+        str(tmp_path),
+    )
+
+    link_finding.run(args)
+    capsys.readouterr()
+
+    assert fake.patches == [
+        ("findings/VA-070/links/42", {"retired": True})
+    ]

@@ -575,6 +575,56 @@ def test_execution_policy_dynamic_target_shell_requires_typed_destinations(
     assert result["target_facing"] is True
 
 
+def test_literal_shell_host_with_dynamic_path_needs_no_redundant_destination(
+    tmp_path: Path,
+) -> None:
+    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
+
+    result = scope.enforce_execution_policy(
+        ["bash", "-lc", 'path=/health; curl -sS "https://example.test$path"'],
+        tool_name="curl",
+        engagement_dir=eng,
+    )
+
+    assert result["checked_targets"] == ["example.test"]
+    assert result["target_facing"] is True
+
+
+def test_literal_shell_target_does_not_hide_a_second_dynamic_target(
+    tmp_path: Path,
+) -> None:
+    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
+
+    with pytest.raises(scope.ScopePolicyError, match="dynamic target.*typed destination"):
+        scope.enforce_execution_policy(
+            [
+                "bash",
+                "-lc",
+                'curl -sS "https://example.test/health" "$other_target"',
+            ],
+            tool_name="curl",
+            engagement_dir=eng,
+        )
+
+
+def test_shell_payload_variable_is_not_mistaken_for_a_target(
+    tmp_path: Path,
+) -> None:
+    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
+
+    result = scope.enforce_execution_policy(
+        [
+            "bash",
+            "-lc",
+            'curl -sS -d "$payload" "https://example.test/submit"',
+        ],
+        tool_name="curl",
+        engagement_dir=eng,
+    )
+
+    assert result["checked_targets"] == ["example.test"]
+
+
 def test_typed_destination_does_not_bypass_determinable_shell_no_fire_path(
     tmp_path: Path,
 ) -> None:

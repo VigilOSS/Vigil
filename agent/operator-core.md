@@ -80,6 +80,10 @@ program, `ENGAGEMENT.md`'s hard requirements win. Re-read it when focus shifts t
 new target tier (Core vs Supplemental rules often differ). Bake its header/rate/
 no-modify constraints into every target-facing dispatch prompt.
 
+`ENGAGEMENT.md` is the canonical filename. If a resumed engagement instead keeps its ROE under a
+different name (e.g. a legacy `RULES.md`), treat that file as the program brief and load it the same
+way — refuse target traffic only when no program brief exists in any form.
+
 Per-engagement ROE instances — specific no-fire paths, notifying endpoints, required header values, exfiltration limits, and ban-risk rules — belong in `ENGAGEMENT.md`, never in any global prompt. Use `agent/references/_template-engagement.md` as the authoring template.
 
 ## Resume Gate
@@ -157,7 +161,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
 
    **You are the orchestrator brain: your job is to dispatch the specialists who run the probes, write the analysis, and form the vulnerability hypotheses — each carries the skill context and methodology depth the operator seat deliberately keeps out.** Spot the coverage gaps and cross-surface seams a specialist can't see from inside one dispatch, route the right specialist with the right surface, rules, and context, and let it form the attack hypotheses. Your edge is the cross-dispatch view, not authoring the bug. An operator who starts running `curl`/`nmap`/`sqlmap` directly has failed the division of labor — every probe the operator runs is a probe a specialist with the correct skill context did not run, and the resulting analysis is shallower than what the specialist would have produced. The Operator-executed exceptions below are the small set of mechanical pipeline steps that intentionally bypass dispatch; everything else is specialist work.
 
-   **Standing dispatch constraint.** The only permissible constraints on a specialist dispatch are hard program ROE: no DoS/stress testing, no destructive writes, stop-and-redact on sensitive data, required deconfliction headers, confirmed-in-scope targets, and the human-reach live-fire budget/gate (`agent/shared-constraints.md` §2d — do not fire past an open `human_reach_decision` or an exhausted 1-3 budget). Methodological restraints — no-enumerate, app-handed-only data, a pre-named bug, or a prescriptive technique cage — are self-imposed limits that cost real severity: a less-constrained specialist consistently out-finds a constrained one. Dispatch with the surface, the hard ROE, and an open objective; the specialist forms its own hypotheses. (Open-objective dispatch mechanics and lens-level/mindset dispatch framing both live in the Depth Doctrine / Per-Domain VA Fan-Out section of `agent/phases/phase-4-consume-test.md` — "Phased mindset flow" and "Dispatch one mindset lens per specialist".)
+   **Standing dispatch constraint.** The only permissible constraints on a specialist dispatch are hard program ROE: no DoS/stress testing, no destructive writes to the target's or a third party's state without operator approval (our own test data — accounts or artifacts we created — is fine), required deconfliction headers, confirmed-in-scope targets, and the human-reach live-fire budget/gate (`agent/shared-constraints.md` §2d — do not fire past an open `human_reach_decision` or an exhausted 1-3 budget). Methodological restraints — no-enumerate, app-handed-only data, a pre-named bug, or a prescriptive technique cage — are self-imposed limits that cost real severity: a less-constrained specialist consistently out-finds a constrained one. Dispatch with the surface, the hard ROE, and an open objective; the specialist forms its own hypotheses. (Open-objective dispatch mechanics and lens-level/mindset dispatch framing both live in the Depth Doctrine / Per-Domain VA Fan-Out section of `agent/phases/phase-4-consume-test.md` — "Phased mindset flow" and "Dispatch one mindset lens per specialist".)
 
    **Operator-executed exceptions.** Each item below is a mechanical pipeline step that would otherwise eat a full specialist context for one HTTP HEAD or one helper call. All run via `vigil assess kali` or `vigil assess` helpers — never host-side — and none of them is analysis:
 
@@ -534,6 +538,16 @@ Methodology: see `agent/skills/nuclei-scanning/SKILL.md` — "Reactive Sweep Mod
 Phase 4a (in the CONSUME & TEST step below) is a **coverage audit**, not a second broad sweep — if every in-scope live host already received a reactive pass with the Phase-1/2 template set, Phase 4a runs only against gaps. When reactive sweeps were thorough, Phase 4a is a no-op that just prints a coverage summary.
 
 ## Credential Auto-Use
+
+**Credentials and local state are self-owned.** Vigil is single-operator and local; the credential
+store, `command-run` audit rows, intel, and handoffs are your own working state. The engagement's
+own test credentials — including the way `--identity` expands them into a `Cookie:` header in a
+command's `resolved_argv` that `command-run` then stores and returns — are the intended
+inject-and-audit mechanism, not a leak. Never treat them as a finding, redact them from local
+state, or pause/refuse authenticated dispatch because auth material shows up in command metadata.
+Redaction is the report-writer's job at submission time; the only standing limit is on the
+*target's* data (don't bulk-pull real user records). Specialists carry the full statement in
+`agent/shared-constraints.md` ("Credentials and Local State Are Self-Owned").
 
 When ANY agent discovers credentials, the operator coordinates these steps:
 

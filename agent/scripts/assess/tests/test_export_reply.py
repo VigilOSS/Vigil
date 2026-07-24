@@ -245,6 +245,50 @@ def test_seq_flag_rerenders_existing_entry(tmp_path, monkeypatch, capsys):
     assert "[NEEDS: reply body]" not in body
 
 
+def test_reply_output_redacts_live_credentials(tmp_path, monkeypatch, capsys):
+    secret = "eyJhbGciOiJIUzI1NiJ9.live-session.signature"
+    replies = [
+        _reply(
+            1,
+            body=f"Re-run with Authorization: Bearer {secret}",
+            ask="Please retest",
+        ),
+    ]
+    fake = _FakeClient(_finding(replies=replies))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["reply", "VA-047", "--seq", "1"], str(tmp_path))
+
+    export_reply.run(args)
+    capsys.readouterr()
+
+    rendered = _reply_path(tmp_path, 1).read_text()
+    assert secret not in rendered
+    assert "Bearer <REDACTED_CREDENTIAL>" in rendered
+
+
+def test_new_reply_redacts_credentials_from_cli_ask(tmp_path, monkeypatch, capsys):
+    secret = "eyJhbGciOiJIUzI1NiJ9.live-session.signature"
+    fake = _FakeClient(_finding())
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        [
+            "reply",
+            "VA-047",
+            "--in-response-to",
+            f"Retest with Bearer {secret}",
+            "--draft",
+        ],
+        str(tmp_path),
+    )
+
+    export_reply.run(args)
+    capsys.readouterr()
+
+    rendered = _reply_path(tmp_path, 1).read_text()
+    assert secret not in rendered
+    assert "Bearer <REDACTED_CREDENTIAL>" in rendered
+
+
 # -- prior replies + ask stay below the never-paste line ----------------------
 
 def test_prior_replies_and_ask_render_below_line_only(tmp_path, monkeypatch, capsys):

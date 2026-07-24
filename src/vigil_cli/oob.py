@@ -28,6 +28,7 @@ OOB_ROOT = "/data/oob"
 OOB_TENANT_ROUTE_FILE = f"{OOB_ROOT}/active-tenant-routing.json"
 FRPC_READY_TIMEOUT_SECONDS = 15.0
 MAX_OOB_POLL_RECORDS = 10_000
+OOB_STATUS_RETRY_DELAY_SECONDS = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +193,7 @@ def oob_status(
             "route_matches": None,
             "domain_resolves": None,
             "edge_route_healthy": None,
+            "probe_attempts": 0,
             "issues": ["Kali runtime container is not running — start it with `vigil runtime start`."],
         }
     server = _tmux_has_session(container_name, "oob-server", runner=runner)
@@ -220,10 +222,45 @@ def oob_status(
         edge_route_healthy = _oob_http_route_healthy(
             container_name, domain, runner=runner
         )
+        probe_attempts = 1
+        registration_failed = bool(running) and not any(
+            item["registered"] for item in client_health
+        )
+        if registration_failed or not domain_resolves or not edge_route_healthy:
+            probe_attempts = 2
+            time.sleep(OOB_STATUS_RETRY_DELAY_SECONDS)
+            if registration_failed:
+                client_health = [
+                    {
+                        "name": name,
+                        "registered": bool(
+                            client_payload_host(
+                                name,
+                                container_name,
+                                runner=runner,
+                                oob_domain=domain,
+                            )
+                        ),
+                    }
+                    for name in running
+                ]
+            if not domain_resolves:
+                domain_resolves = _oob_domain_resolves(
+                    container_name,
+                    domain,
+                    runner=runner,
+                )
+            if not edge_route_healthy:
+                edge_route_healthy = _oob_http_route_healthy(
+                    container_name,
+                    domain,
+                    runner=runner,
+                )
     else:
         client_health = [{"name": name, "registered": None} for name in running]
         domain_resolves = None
         edge_route_healthy = None
+        probe_attempts = 0
     if server and frpc:
         state = "running"
     elif server or frpc or clients:
@@ -271,6 +308,7 @@ def oob_status(
         "route_matches": route_matches,
         "domain_resolves": domain_resolves,
         "edge_route_healthy": edge_route_healthy,
+        "probe_attempts": probe_attempts,
         "issues": issues,
     }
 
@@ -298,22 +336,24 @@ def _assess_oob_health(
         issues.append("frpc tunnel session is down — run `vigil oob start`.")
     if domain and domain_resolves is False:
         issues.append(
-            f"OOB domain '{domain}' does not resolve from the runtime — callbacks cannot land. "
-            f"Check the Route53 NS delegation of '{domain}' to the frp host (must be the host NAME, not a raw IP)."
+            f"OOB domain '{domain}' does not resolve from the runtime after two probes — callbacks cannot land. "
+            "Inspect the runtime container's Docker DNS resolver and the server-side CoreDNS/frps "
+            "containers; verify public delegation only if those Docker services are healthy."
         )
     if domain and edge_route_healthy is False:
         issues.append(
-            f"OOB HTTP edge route for '{domain}' did not return a direct tenant response — "
-            "callbacks may be redirecting or reaching another tenant. Check the Caddy "
-            "apex/client/nonce-client host routes and the tenant FRP registration."
+            f"OOB HTTP edge route for '{domain}' did not return a direct tenant response on two probes — "
+            "callbacks may be redirecting or reaching another tenant. Inspect the server-side Caddy "
+            "and frps containers plus the persisted tenant route."
         )
     # Only flag registration when it was actually checked (deep=True); a None
     # entry means "not probed" (deep=False) and must not read as unregistered.
     known = [c for c in client_health if c.get("registered") is not None]
     if running and known and not any(c.get("registered") for c in known):
         issues.append(
-            f"{len(running)} OOB client(s) running but NONE registered an interactsh payload — clients cannot "
-            "reach the server (usually DNS/registration failure). Inspect `vigil oob client logs <name>`."
+            f"{len(running)} OOB client(s) running but NONE registered an interactsh payload on two probes — "
+            "clients cannot reach the server. Inspect `vigil oob client logs <name>`, the runtime Docker "
+            "resolver, and the server-side CoreDNS/frps containers."
         )
     if state == "stopped":
         health = "down"

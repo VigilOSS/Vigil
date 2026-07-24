@@ -35,6 +35,7 @@ _DB_ACTIONS = (
     "fetch-by-unit",
     "defer-cluster",
     "defer-items",
+    "set-rationale",
     "mark-manual",
     "done",
     "error",
@@ -53,13 +54,16 @@ _DB_ACTIONS = (
 _RECLASSIFY_CHUNK = 500
 
 
-def _stats(client, *, by: str = "status") -> None:
+def _stats(client, *, by: str = "status", status: str = "") -> None:
     """Print work-buffer statistics grouped by ``by`` (backend-computed).
 
     Output is byte-identical to the former local implementation so every
     operator script and dashboard that parses it keeps working.
     """
-    data = client.get(f"work-items/stats?by={by}")
+    endpoint = f"work-items/stats?by={by}"
+    if status and by == "host":
+        endpoint += f"&status={status}"
+    data = client.get(endpoint)
 
     if by == "status":
         print("--- Work Buffer Statistics ---")
@@ -189,10 +193,13 @@ def _fetch_by_unit(
     )
 
 
-def _defer_items(client, id_list, reason: str) -> None:
+def _defer_items(client, id_list, reason: str, *, dry_run: bool = False) -> None:
     """Mark specific pending work-item ids skipped with a terminal reason."""
     ids = _validate_id_list(id_list)
-    resp = client.post("work-items/defer", {"ids": ids, "reason": reason})
+    payload = {"ids": ids, "reason": reason}
+    if dry_run:
+        payload["dry_run"] = True
+    resp = client.post("work-items/defer", payload)
     affected = int(resp.get("affected", 0))
     ids_repr = ",".join(str(i) for i in ids)
     if affected == 0:
@@ -204,7 +211,8 @@ def _defer_items(client, id_list, reason: str) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
-    print(f"Deferred {affected} pending item(s): {ids_repr} (reason: {reason})")
+    verb = "Would defer" if dry_run else "Deferred"
+    print(f"{verb} {affected} pending item(s): {ids_repr} (reason: {reason})")
 
 
 def _mark_manual(client, id_list) -> None:
@@ -223,11 +231,30 @@ def _mark_manual(client, id_list) -> None:
     print(f"Marked {affected} item(s) manual (protected from --reclassify-stale): {ids_repr}")
 
 
-def _defer_cluster(client, cluster_key: str, reason: str) -> None:
+def _defer_cluster(
+    client, cluster_key: str, reason: str, *, dry_run: bool = False
+) -> None:
     """Mark every pending row in a cluster skipped with a terminal reason."""
-    resp = client.post("work-items/defer-cluster", {"cluster_key": cluster_key, "reason": reason})
+    payload = {"cluster_key": cluster_key, "reason": reason}
+    if dry_run:
+        payload["dry_run"] = True
+    resp = client.post("work-items/defer-cluster", payload)
     affected = int(resp.get("affected", 0))
-    print(f"Deferred {affected} pending item(s) in cluster '{cluster_key}' (reason: {reason})")
+    verb = "Would defer" if dry_run else "Deferred"
+    print(f"{verb} {affected} pending item(s) in cluster '{cluster_key}' (reason: {reason})")
+
+
+def _set_rationale(client, id_list, rationale: str) -> None:
+    ids = _validate_id_list(id_list)
+    updates = [{"id": item_id, "triage_rationale": rationale} for item_id in ids]
+    affected = 0
+    for start in range(0, len(updates), _RECLASSIFY_CHUNK):
+        response = client.post(
+            "work-items/update",
+            {"updates": updates[start:start + _RECLASSIFY_CHUNK]},
+        )
+        affected += int(response.get("affected", 0))
+    print(f"Updated triage rationale on {affected} item(s)")
 
 
 def _done(client, id_list) -> None:

@@ -657,6 +657,7 @@ def test_ingest_bridges_two_buckets_to_two_coverage_items(monkeypatch, tmp_path)
 
 def test_reason_tag_helpers_round_trip():
     cb = _classify_buckets()
+    assert "already-covered" in cb.SKIP_REASON_TAGS
     assert cb.tagged_terminal_reason("blackholed", "akamai 403") == "skipped:blackholed | akamai 403"
     assert cb.tagged_terminal_reason("duplicate", "") == "skipped:duplicate"
     assert cb.tagged_terminal_reason("", "plain text") == "plain text"

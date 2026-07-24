@@ -276,7 +276,26 @@ def _sweep_command_runs(
     Extracted verbatim from the pre-scope ``run`` so the default code path —
     output shape and per-row print lines included — is byte-for-byte unchanged.
     """
-    summary = {"checked": 0, "still_running": 0, "finalized": 0, "skipped": 0}
+    # ``skipped`` is a conflated union — split into two sub-counters so the
+    # resume-brief WARN (resume_brief._orphan_attention) fires ONLY on the
+    # genuinely-bad bucket. Because the backend ignores ?status=running
+    # (_list_running_rows), this sweep pages ALL historical rows and skips every
+    # already-terminal one; that benign count can reach the thousands and used to
+    # drown the actionable signal, making the warning fire on every resume
+    # (I-05). ``skipped`` is kept as the grand total for backward compatibility.
+    #   * skipped_already_terminal — BENIGN: the row's outcome is already
+    #     recorded, so re-finalizing would be a no-op (or a destructive
+    #     overwrite). Not worth surfacing.
+    #   * skipped_unverifiable — genuinely stuck: liveness/pid probe failed, or
+    #     the finalize PATCH failed. These are the rows an operator must chase.
+    summary = {
+        "checked": 0,
+        "still_running": 0,
+        "finalized": 0,
+        "skipped": 0,
+        "skipped_already_terminal": 0,
+        "skipped_unverifiable": 0,
+    }
     rows = _list_running_rows(client)
 
     for row in rows:
@@ -296,6 +315,7 @@ def _sweep_command_runs(
         existing_status = str(row.get("status") or "").strip().lower()
         if existing_status not in _RUNNING_STATUSES:
             summary["skipped"] += 1
+            summary["skipped_already_terminal"] += 1
             if args.dry_run:
                 print(
                     f"would-skip id={row_id} reason=already-terminal "
@@ -322,6 +342,7 @@ def _sweep_command_runs(
             continue
         if alive is None or pid_read.reason.startswith("pid-probe-failed"):
             summary["skipped"] += 1
+            summary["skipped_unverifiable"] += 1
             print(
                 f"skipped id={row_id} age={int(age_seconds)} "
                 f"reason={pid_read.reason if container_pid is None else 'liveness-probe-failed'} "
@@ -343,6 +364,7 @@ def _sweep_command_runs(
             _finalize_lost(client, run_id=int(row_id), now_iso=now_iso)
         except AssessError as exc:
             summary["skipped"] += 1
+            summary["skipped_unverifiable"] += 1
             print(
                 f"warning: finalize PATCH failed for id={row_id}: {exc}",
                 file=sys.stderr,
@@ -422,7 +444,18 @@ def _sweep_jobs(
     polling): marker present -> completed/failed; PID gone with no marker ->
     lost; PID alive -> left running; docker unreachable -> skipped.
     """
-    summary = {"checked": 0, "still_running": 0, "finalized": 0, "skipped": 0}
+    # Same benign-vs-genuine split as _sweep_command_runs so resume-brief warns
+    # only on the unverifiable bucket (I-05). The jobs backend DOES honour
+    # ?status= (_list_running_jobs), so already-terminal rows are rare here —
+    # but the split keeps the two sweeps' summary shape and semantics identical.
+    summary = {
+        "checked": 0,
+        "still_running": 0,
+        "finalized": 0,
+        "skipped": 0,
+        "skipped_already_terminal": 0,
+        "skipped_unverifiable": 0,
+    }
     rows = _list_running_jobs(client)
 
     for row in rows:
@@ -437,6 +470,7 @@ def _sweep_jobs(
         existing_status = str(row.get("status") or "").strip().lower()
         if existing_status not in _JOB_RECONCILABLE_STATUSES:
             summary["skipped"] += 1
+            summary["skipped_already_terminal"] += 1
             if args.dry_run:
                 print(
                     f"would-skip job id={row_id} reason=already-terminal "
@@ -475,6 +509,7 @@ def _sweep_jobs(
                 _release_swept_job_rate_lease(client, row)
             except AssessError as exc:
                 summary["skipped"] += 1
+                summary["skipped_unverifiable"] += 1
                 print(
                     f"warning: finalize PATCH failed for job id={row_id}: {exc}",
                     file=sys.stderr,
@@ -510,6 +545,7 @@ def _sweep_jobs(
             continue
         if alive is None:
             summary["skipped"] += 1
+            summary["skipped_unverifiable"] += 1
             print(
                 f"skipped job id={row_id} age={int(age_seconds)} "
                 f"reason=liveness-probe-failed"
@@ -538,6 +574,7 @@ def _sweep_jobs(
             _release_swept_job_rate_lease(client, row)
         except AssessError as exc:
             summary["skipped"] += 1
+            summary["skipped_unverifiable"] += 1
             print(
                 f"warning: finalize PATCH failed for job id={row_id}: {exc}",
                 file=sys.stderr,

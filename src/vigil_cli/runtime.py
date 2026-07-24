@@ -436,6 +436,27 @@ def start_runtime(
     data_dir.mkdir(parents=True, exist_ok=True)
     engagements_dir.mkdir(parents=True, exist_ok=True)
 
+    # Fail fast with an accurate message when the Docker daemon is unresponsive
+    # or not running. Without this, the first metadata query below
+    # (``image_exists``) returns empty against a wedged daemon — the bounded
+    # ``run_command`` timeout keeps it from hanging (I-02) — and start_runtime
+    # would raise the MISLEADING "Missing runtime image" instead of naming the
+    # real problem. Distinguish a hung daemon (timed out) from an absent one.
+    health = docker.daemon_status(runner=runner)
+    if not health.responsive:
+        headline = (
+            "Docker is not responding (the daemon/VM appears wedged)"
+            if health.timed_out
+            else "Docker does not appear to be running"
+        )
+        detail = f"\n  {health.detail}" if health.detail else ""
+        raise SystemExit(
+            f"{headline} — cannot start the runtime.{detail}\n"
+            "  Start or restart Docker (on macOS: launch Docker Desktop, or quit and reopen it "
+            "if it is hung), then retry. Confirm with `docker info`.\n"
+            "  Set VIGIL_DOCKER_TIMEOUT (seconds) if a slow-but-healthy daemon needs longer to respond."
+        )
+
     if not docker.image_exists(options.image, runner=runner):
         raise SystemExit(
             f"Missing runtime image: {options.image}. Run `vigil runtime build` first.\n"
@@ -635,7 +656,16 @@ def stop_bench_runtime(container_name: str, *, runner: docker.Runner = docker.ru
 
 def runtime_status(container_name: str | None = None, *, runner: docker.Runner = docker.run_command) -> str:
     container_name = container_name or default_runtime_container()
-    return "running" if docker.container_running(container_name, runner=runner) else "stopped"
+    if docker.container_running(container_name, runner=runner):
+        return "running"
+    # Not listed as running. Distinguish a genuinely stopped container from an
+    # unresponsive/absent Docker daemon so `vigil runtime status` (and the
+    # `vigil status` snapshot) never reports a wedged VM as a benign "stopped"
+    # (I-02). The daemon probe is bounded by run_command's timeout, so this
+    # degrades instead of hanging.
+    if not docker.daemon_available(runner=runner):
+        return "docker-unavailable"
+    return "stopped"
 
 
 def _already_running_message(container_name: str, install_root: Path) -> str:

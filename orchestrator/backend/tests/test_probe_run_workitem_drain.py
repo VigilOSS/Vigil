@@ -265,6 +265,88 @@ def test_noncovering_probe_does_not_cascade_by_default(client, isolate_settings)
     assert by_id[sid]["status"] == "discovered"  # surface untouched
 
 
+def test_signal_without_outcome_assertion_is_demoted_and_does_not_cascade(
+    client, isolate_settings
+):
+    """Direct API callers cannot manufacture coverage from HTTP status alone."""
+    _seed(client, isolate_settings)
+    obs = _make_linked_observation(client, "https://app.example/api/channels")
+    cov_id = int(obs["work_item"]["coverage_item_id"])
+    rv_id = int(obs["request_variant"]["id"])
+    sid = _make_surface(client, "app.example/api/channels/{id}")
+    _link_surface(client, sid, rv_id)
+
+    resp = client.post(
+        f"{BASE}/probe-runs",
+        json=_probe_payload(
+            result_status="signal",
+            observed_http_status=200,
+            target_path="/api/channels/foreign",
+            coverage_item_id=cov_id,
+            request_variant_id=rv_id,
+        ),
+    )
+
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["result_status"] == "attempted"
+    assert body["outcome_assertion"] == ""
+    assert "application-level outcome assertion" in body["notes"]
+    assert "work_items_done" not in body
+    assert "surfaces_advanced" not in body
+    assert _pending_count(client) == 1
+
+
+def test_signal_with_outcome_assertion_remains_covering(client, isolate_settings):
+    _seed(client, isolate_settings)
+    obs = _make_linked_observation(client, "https://app.example/api/channels")
+    cov_id = int(obs["work_item"]["coverage_item_id"])
+
+    resp = client.post(
+        f"{BASE}/probe-runs",
+        json=_probe_payload(
+            result_status="signal",
+            outcome_assertion="response person_id equals the foreign requested id",
+            coverage_item_id=cov_id,
+        ),
+    )
+
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["result_status"] == "signal"
+    assert body["outcome_assertion"] == "response person_id equals the foreign requested id"
+    assert body["work_items_done"]["affected"] == 1
+
+
+def test_probe_readjudication_clears_stale_positive_assertion(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    first = client.post(
+        f"{BASE}/probe-runs",
+        json=_probe_payload(
+            result_status="signal",
+            outcome_assertion="response owner_id equals the foreign requested id",
+            target_path="/api/reused-key",
+        ),
+    )
+    assert first.status_code == 201, first.text
+
+    second = client.post(
+        f"{BASE}/probe-runs",
+        json=_probe_payload(
+            result_status="attempted",
+            outcome_assertion="",
+            target_path="/api/reused-key",
+        ),
+    )
+
+    assert second.status_code == 201, second.text
+    assert second.json()["id"] == first.json()["id"]
+    assert second.json()["result_status"] == "attempted"
+    assert second.json()["outcome_assertion"] == ""
+
+
 def test_no_drain_suppresses_the_default_cascade(client, isolate_settings):
     """--no-drain suppresses BOTH halves of the default cascade even for a
     covering probe with FK links; the probe row is still written."""

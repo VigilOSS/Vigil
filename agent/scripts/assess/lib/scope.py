@@ -135,7 +135,7 @@ _TARGET_VALUE_FLAGS: dict[str, frozenset[str]] = {
 }
 
 _POSITIONAL_TARGET_TOOLS = frozenset(
-    {"cero", "curl", "gau", "nmap", "wafw00f", "whatweb"}
+    {"cero", "curl", "gau", "nmap", "wafw00f", "whatweb", "wget"}
 )
 
 _SHELL_BINARIES = frozenset({"sh", "bash", "dash", "zsh"})
@@ -169,6 +169,22 @@ _NON_TARGET_VALUE_FLAGS = frozenset(
         "--resolve",
     }
 )
+
+_TOOL_NON_TARGET_VALUE_FLAGS: dict[str, frozenset[str]] = {
+    "curl": frozenset(
+        {
+            "-X", "--request", "-d", "--data", "--data-raw", "--data-binary",
+            "--data-urlencode", "-F", "--form", "-u", "--user", "-b",
+            "--cookie", "--cert", "--key",
+        }
+    ),
+    "wget": frozenset(
+        {
+            "--post-data", "--post-file", "--body-data", "--body-file",
+            "--method", "--user", "--password",
+        }
+    ),
+}
 
 
 class ScopePolicyError(RuntimeError):
@@ -1226,6 +1242,20 @@ def _shell_target_tokens(
                 engagement_dir=engagement_dir,
                 engagement_key=engagement_key,
             )
+            target_flags = _TARGET_VALUE_FLAGS.get(tool, frozenset())
+            non_target_flags = (
+                _NON_TARGET_VALUE_FLAGS
+                | _TOOL_NON_TARGET_VALUE_FLAGS.get(tool, frozenset())
+            )
+            for index, value in enumerate(expanded[1:], start=1):
+                if not _SHELL_VARIABLE.search(value):
+                    continue
+                previous = expanded[index - 1]
+                if previous in non_target_flags:
+                    continue
+                if previous in target_flags or tool in _POSITIONAL_TARGET_TOOLS:
+                    if value not in found:
+                        found.append(value)
             candidates.extend(found)
             for value in found:
                 try:
@@ -1441,11 +1471,6 @@ def enforce_execution_policy(
             "use supported launcher options or invoke the tool directly"
         )
     dynamic_target_shell = _has_dynamic_target_shell(cmd, observed_tools)
-    if dynamic_target_shell and not typed_destinations:
-        raise ScopePolicyError(
-            "dynamic target in shell command cannot be resolved before execution; "
-            "provide an explicit typed destination"
-        )
 
     raw_targets = list(explicit_targets)
     raw_targets.extend(
@@ -1455,24 +1480,40 @@ def enforce_execution_policy(
     )
     if target_gate_configured:
         inspection_cmd = _unwrap_launcher_argv(cmd)
-        raw_targets.extend(
-            _command_target_tokens(
-                inspection_cmd,
-                tool_name=normalized_tool,
-                engagement_dir=eng_dir,
-                engagement_key=key,
-            )
-        )
         actual_tool = (
             Path(str(inspection_cmd[0])).name.strip().lower()
             if inspection_cmd
             else ""
         )
-        if actual_tool and actual_tool != normalized_tool:
+        # Shell script bodies need assignment-aware parsing below. Treating the
+        # whole `bash -lc` argv as if it were direct curl argv captures literal
+        # `$path` text as part of the hostname and falsely rejects an otherwise
+        # literal, admitted host.
+        if actual_tool not in _SHELL_BINARIES:
             raw_targets.extend(
                 _command_target_tokens(
                     inspection_cmd,
-                    tool_name=actual_tool,
+                    tool_name=normalized_tool,
+                    engagement_dir=eng_dir,
+                    engagement_key=key,
+                )
+            )
+            if actual_tool and actual_tool != normalized_tool:
+                raw_targets.extend(
+                    _command_target_tokens(
+                        inspection_cmd,
+                        tool_name=actual_tool,
+                        engagement_dir=eng_dir,
+                        engagement_key=key,
+                    )
+                )
+        elif normalized_tool == "cero":
+            # cero consumes a piped `cat <target-list>`; its existing
+            # pre-exec list inspection is intentionally shell-aware.
+            raw_targets.extend(
+                _command_target_tokens(
+                    inspection_cmd,
+                    tool_name=normalized_tool,
                     engagement_dir=eng_dir,
                     engagement_key=key,
                 )
@@ -1482,6 +1523,18 @@ def enforce_execution_policy(
         engagement_dir=eng_dir,
         engagement_key=key,
     )
+    if (
+        dynamic_target_shell
+        and not typed_destinations
+        and (
+            not shell_targets
+            or any(not host_from_token(token) for token in shell_targets)
+        )
+    ):
+        raise ScopePolicyError(
+            "dynamic target host in shell command cannot be resolved before "
+            "execution; provide an explicit typed destination"
+        )
     raw_targets.extend(shell_targets)
     if tool_analysis_ambiguous and any(
         (host := host_from_token(token))

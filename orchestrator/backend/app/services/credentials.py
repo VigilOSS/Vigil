@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 from typing import Any
 
 from .. import db
@@ -63,6 +64,13 @@ _MODELED_KEYS = frozenset(
         "last_probed_at", "updated_at", "make_active", "principal_id", "mfa_factor",
     }
 )
+
+
+def _is_session_hint_cookie(name: str) -> bool:
+    lowered = name.lower()
+    if lowered in _SESSION_HINT_COOKIE_NAMES:
+        return True
+    return "session" in re.split(r"[^a-z0-9]+", lowered)
 
 
 def load_identities(
@@ -221,7 +229,7 @@ def derive_capture_identity(
     hint_cookies = {
         name: value
         for name, value in live_cookies.items()
-        if name.lower() in _SESSION_HINT_COOKIE_NAMES
+        if _is_session_hint_cookie(name)
     }
     if hint_cookies:
         anchor_cookies = hint_cookies

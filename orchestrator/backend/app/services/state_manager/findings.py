@@ -535,6 +535,7 @@ def create_finding(
     transition_reason_text: str = "",
     transition_artifact_ref: str = "",
     transition_metadata: dict[str, Any] | None = None,
+    transition_actor: str = "",
     expected_row_version: int | None = None,
     notes_mode: str = "append",
     details_mode: str = "merge",
@@ -789,7 +790,11 @@ def create_finding(
         transition = None
         if _finding_state_changed(before_state, after_state):
             action = transition_action or _infer_transition_action(before_state, after_state)
-            actor = source_name or str((provenance or {}).get("agent_name", "") or (provenance or {}).get("verified_by", "") or (provenance or {}).get("reviewed_by", ""))
+            actor = transition_actor or source_name or str(
+                (provenance or {}).get("agent_name", "")
+                or (provenance or {}).get("verified_by", "")
+                or (provenance or {}).get("reviewed_by", "")
+            )
             transition = _record_finding_transition(
                 connection,
                 engagement_id=engagement.id,
@@ -1039,7 +1044,9 @@ def patch_finding(
         summary="" if summary is None else summary,
         evidence_ref=evidence_ref or "",
         notes="" if notes is None else notes,
-        source_name=source_name or "",
+        # Discovery attribution is immutable on patch. ``source_name`` names
+        # the mutation actor and is retained in transition audit when state changes.
+        source_name="",
         details=details,
         provenance=provenance,
         evidence_type=evidence_type,
@@ -1059,6 +1066,7 @@ def patch_finding(
         transition_reason_text=transition_reason_text,
         transition_artifact_ref=transition_artifact_ref,
         transition_metadata=transition_metadata,
+        transition_actor=source_name,
         expected_row_version=(
             current_row_version if expected_row_version is None else expected_row_version
         ),
@@ -1155,6 +1163,15 @@ def verify_finding(
             "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
             (engagement.id, slug),
         ).fetchone()
+        severity_transitions = connection.execute(
+            """
+            SELECT from_severity, to_severity
+            FROM assessment_finding_transitions
+            WHERE engagement_id = ? AND finding_id = ?
+            ORDER BY id DESC
+            """,
+            (engagement.id, int(existing["id"])),
+        ).fetchall()
 
     expected_row_version = int(existing["row_version"])
     existing_workflow = _row_workflow_status(existing)
@@ -1171,11 +1188,41 @@ def verify_finding(
         if not new_severity:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="downgraded verification requires new_severity")
         normalized_new_severity = _normalize_severity(new_severity)
-        if SEVERITY_RANK[normalized_new_severity] >= SEVERITY_RANK[_normalize_severity(str(existing["severity"]))]:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="new_severity must be lower than the current severity")
+        current_severity = _normalize_severity(str(existing["severity"]))
+        if SEVERITY_RANK[normalized_new_severity] > SEVERITY_RANK[current_severity]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="new_severity cannot be higher than the current severity",
+            )
+        prior_higher_severity = next(
+            (
+                _normalize_severity(str(row["from_severity"]))
+                for row in severity_transitions
+                if row["from_severity"]
+                and _normalize_severity(str(row["to_severity"])) == current_severity
+                and SEVERITY_RANK[_normalize_severity(str(row["from_severity"]))]
+                > SEVERITY_RANK[current_severity]
+            ),
+            None,
+        )
+        if (
+            normalized_new_severity == current_severity
+            and prior_higher_severity is None
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "new_severity must be lower than the current severity unless "
+                    "a prior severity-lowering transition proves it was pre-lowered"
+                ),
+            )
         target_severity = normalized_new_severity
         transition_action = "verified_downgraded"
-        transition_metadata["previous_severity"] = _normalize_severity(str(existing["severity"]))
+        transition_metadata["previous_severity"] = (
+            prior_higher_severity or current_severity
+        )
+        if normalized_new_severity == current_severity:
+            transition_metadata["prelowered"] = True
     elif normalized_disposition == "false_positive":
         if not details_payload.get("kill_reason") or details_payload.get("kill_check") is None:
             raise HTTPException(
@@ -1240,6 +1287,29 @@ def verify_finding(
             related_finding_slug=slug,
         )
     return result
+
+def _merge_details_precedence(winner: dict[str, Any], loser: dict[str, Any]) -> str:
+    """Merge two ``details_json`` payloads so the WINNING side survives on key
+    conflict while still inheriting keys the winner lacks from the loser.
+
+    ``merge_findings`` keeps the stronger finding's severity
+    (``_stronger_severity``) and its summary/evidence (``source_stronger``).
+    The canonical (kept) finding's CVSS/impact live as flat ``details_json``
+    keys (``cvss_score``/``cvss_vector``/``impact``), so its details MUST follow
+    the same side that won — otherwise a weaker duplicate overwrites the
+    canonical's CVSS/impact and trips the severity↔CVSS readiness gate. Seed
+    from the losing side (fill gaps), then overlay the winning side's non-empty
+    values (win conflicts). Empties are dropped with the same filter shared
+    ``_merge_object_text`` uses, so a blank winner value never clobbers a real
+    loser value.
+    """
+    def _non_empty(payload: dict[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in payload.items() if value not in (None, "", [], {})}
+
+    merged = _non_empty(loser)
+    merged.update(_non_empty(winner))
+    return _json_text(merged)
+
 
 def merge_findings(
     engagement_id: int,
@@ -1349,6 +1419,7 @@ def merge_findings(
               AND links.target_kind = 'finding'
               AND links.target_ref = ?
               AND findings.status != 'merged'
+              AND links.retired_at IS NULL
             """,
             (engagement.id, ROOT_CAUSE_LINK_KIND, source_slug),
         ).fetchall()
@@ -1366,6 +1437,7 @@ def merge_findings(
               AND finding_id = ?
               AND link_kind = ?
               AND target_kind = 'finding'
+              AND retired_at IS NULL
             LIMIT 1
             """,
             (engagement.id, int(source["id"]), ROOT_CAUSE_LINK_KIND),
@@ -1395,7 +1467,32 @@ def merge_findings(
             _common._append_notes(target["notes"], f"Merged {source_slug}: {reason}"),
             source["notes"],
         )
-        merged_details = _merge_object_text(target["details_json"], _json_object(source["details_json"]))
+        source_details = _json_object(source["details_json"])
+        target_details = _json_object(target["details_json"])
+        # The explicitly selected target is the canonical record. Source
+        # details fill missing keys but never overwrite canonical narrative.
+        merged_details_obj = _json_object(
+            _merge_details_precedence(target_details, source_details)
+        )
+        # CVSS-bearing keys are the exception: they must follow the SEVERITY winner
+        # (kept below via `_stronger_severity`), NOT the confidence winner. Otherwise
+        # a more-progressed but lower-severity duplicate leaves a higher-severity
+        # canonical carrying the duplicate's weaker CVSS and trips the severity↔CVSS
+        # readiness gate. Copy them from the severity-winning side when it actually
+        # has them (never fabricate a missing score — the gate can still flag that).
+        severity_winner_details = (
+            source_details
+            if (
+                _stronger_severity(target["severity"], source["severity"]) == source["severity"]
+                and source["severity"] != target["severity"]
+            )
+            else target_details
+        )
+        for _cvss_key in ("cvss_score", "cvss_vector"):
+            _cvss_value = severity_winner_details.get(_cvss_key)
+            if _cvss_value not in (None, "", [], {}):
+                merged_details_obj[_cvss_key] = _cvss_value
+        merged_details = _json_text(merged_details_obj)
         merged_provenance_payload = _json_object(target["provenance_json"])
         merged_provenance_payload.update(_json_object(source["provenance_json"]))
         merged_provenance_payload["merge"] = {
@@ -1405,22 +1502,26 @@ def merge_findings(
             "source_name": source_name,
         }
         source_links = connection.execute(
-            "SELECT * FROM assessment_finding_links WHERE engagement_id = ? AND finding_id = ?",
+            "SELECT * FROM assessment_finding_links "
+            "WHERE engagement_id = ? AND finding_id = ? AND retired_at IS NULL",
             (engagement.id, source["id"]),
         ).fetchall()
         source_cursor = connection.execute(
             """
             UPDATE assessment_findings
             SET status = 'merged',
-                verification_state = 'unreviewed',
-                verification_disposition = 'none',
                 merged_into_finding_id = ?,
                 notes = ?,
                 row_version = row_version + 1,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ? AND row_version = ?
             """,
-            (target["id"], _common._append_notes(source["notes"], reason), source["id"], source_row_version),
+            (
+                target["id"],
+                _common._append_notes(source["notes"], reason),
+                source["id"],
+                source_row_version,
+            ),
         )
         if source_cursor.rowcount != 1:
             _raise_stale_finding_conflict()
@@ -1510,7 +1611,12 @@ def merge_findings(
                 provenance=_json_object(row["provenance_json"]),
             )
         connection.execute(
-            "DELETE FROM assessment_finding_links WHERE engagement_id = ? AND finding_id = ?",
+            """
+            UPDATE assessment_finding_links
+            SET retired_at = COALESCE(retired_at, CURRENT_TIMESTAMP),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE engagement_id = ? AND finding_id = ?
+            """,
             (engagement.id, source["id"]),
         )
         link = _upsert_finding_link(

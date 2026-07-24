@@ -300,7 +300,7 @@ in `agent/references/access-control/idor-modern-architectures.md`.
 - Auth context — the **named identity** (`--identity user_a` / `user_b` / `admin`) that ran the probe — and the verb/variant that worked
 - Object accessed/modified and its owner — **hand-verified** as belonging to another account
 - Horizontal vs vertical access; cross-tenant if SaaS
-- Request/response evidence (redact sensitive data)
+- Request/response evidence
 - **VRT severity (BugCrowd model — iterability is the multiplier):**
   - iterable + sensitive + **modify** → **P1**
   - **modify** of an *iterable* ID → P2

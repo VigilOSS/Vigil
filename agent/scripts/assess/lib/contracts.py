@@ -778,6 +778,9 @@ _CONTRACTS: dict[str, CommandContract] = {
             "vigil assess finding link <sibling-slug> --root-cause <root-slug> --effect eliminates_attack_path --note 'Root removes this exploit chain; residual XXE remains.'",
             "vigil assess finding link <sibling-slug> --clear-root-cause",
             "vigil assess finding link <blocked-slug> --link-kind unblocked_by --target-kind finding --target-ref <unblocking-slug>",
+            "vigil assess finding link <slug> --link-id 123 --target-ref <corrected-slug>",
+            "vigil assess finding link <slug> --link-id 123 --retire",
+            "vigil assess finding link <slug> --link-id 123 --reactivate",
             "vigil assess finding link <unblocking-finding-slug> --link-kind unblocks --target-kind blocked_technique --target-ref <technique_key>",
             "vigil assess finding link <slug> --link-kind related --target-kind chain --target-id 12",
         ),
@@ -785,6 +788,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "finding_slug",
             "root_cause mode: root_cause_slug, root_cause_effect, note",
             "generic mode: --link-kind, --target-kind, and --target-id or --target-ref",
+            "generic update mode: --link-id plus fields to patch, --retire, or --reactivate",
         ),
         helper_defaults=(
             ("source_name", "operator"),
@@ -795,14 +799,18 @@ _CONTRACTS: dict[str, CommandContract] = {
         notes=(
             "Batch: list several sibling slugs positionally to attach them all to one --root-cause (or apply the same --intel / generic / --clear-root-cause op to each) in a resilient loop with a per-slug failure tally.",
             "Root-cause mode (--root-cause): use after findings are verified enough to consolidate. Records intentional grouping without touching root_cause_key, so dedup and human grouping stay separate.",
+            "Each finding has at most one active root-cause link. Reissuing --root-cause updates that row in place, preserving its id, note, and order unless replacements are supplied; --clear-root-cause retires it without deleting evidence.",
+            "Root-cause and sibling groupings cannot be nested, and merged/false-positive findings cannot appear on either end.",
             "Use --effect eliminates_attack_path when fixing the root removes only the demonstrated chain and the sibling still needs standalone remediation; use eliminates_finding when the root fix retires the sibling entirely.",
             "Generic mode (--link-kind + --target-kind + --target-id/--target-ref): records an arbitrary typed link (POST /findings/{slug}/links). link_kind=root_cause is refused here — use --root-cause.",
+            "Generic update mode (--link-id): patches, retires, or reactivates an existing non-root-cause link. Retirement is reversible and evidence-preserving; self-links are rejected on create and update.",
             "Unblock path (first-class): a blocked finding stays OUT of the report, but when a finding/chain that satisfies the wall lands, link it with `--link-kind unblocked_by --target-kind finding --target-ref <unblocking-slug>` (or --target-kind chain --target-id <id>) so the operator and the next engagement see the connection.",
             "Blocked TECHNIQUE (from block-technique) unblock: a blocked technique has no slug and cannot be a link SUBJECT — record it on the FINDING side with `--link-kind unblocks --target-kind blocked_technique --target-ref <technique_key>` (the unblocking finding points at the technique key). target_kind is free text, so blocked_technique is accepted without a backend change.",
         ),
         common_mistakes=(
             ("root_cause_key", "do not repurpose root_cause_key as a display grouping field; use finding link for intentional groups"),
             ("related", "generic related links do not suppress duplicate-root-cause report blockers"),
+            ("omitting --order in a rerun", "an existing root-cause link keeps its order; a new sibling receives max(active sibling_order)+1, so reruns do not duplicate orders"),
         ),
     ),
     "block-technique": CommandContract(
@@ -915,7 +923,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         schema_name="backend ProbeRunRecordRequest (POST /probe-runs)",
         preferred_invocations=(
             "vigil assess record-probe --result-status tested --attack-family idor --target-host app.example.com --target-path /orders/1001 --input-slot path:id --auth-context member --evidence-ref scans/idor-orders.txt --coverage-item-id 77",
-            "vigil assess record-probe --result-status signal --attack-family ssrf --target-host api.example.com --target-path /fetch --input-slot query:url --auth-context anonymous --lens blind-oob --evidence-ref scans/ssrf-oob.txt --finding VA-047",
+            "vigil assess record-probe --result-status signal --attack-family ssrf --target-host api.example.com --target-path /fetch --input-slot query:url --auth-context anonymous --lens blind-oob --evidence-ref scans/ssrf-oob.txt --outcome-assertion 'callback host matched the issued token' --finding VA-047",
             "vigil assess record-probe --result-status blocked --attack-family ssrf --lens tenant-boundary --target-host api.example.com --target-path /fetch --input-slot query:url --auth-context anonymous --notes 'WAF 403 on every internal host'",
             "vigil assess record-probe --result-status no-signal --attack-family idor --target-host app.example.com --target-path /orders/1001 --auth-context member --input-slot path",
         ),
@@ -923,6 +931,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "--result-status (tested|signal — covering, evidence required — or attempted|blocked|no-signal|error — non-covering)",
             "--attack-family (a vuln_taxonomy CLASS token — not a family heading; see agent/references/runtime-guides/vuln-taxonomy.md)",
             "--evidence-ref (REQUIRED for a covering status tested|signal; optional for the non-covering four)",
+            "--outcome-assertion (REQUIRED for signal; name the body/application marker that proves the positive outcome)",
             "--input-slot (REQUIRED — 'slot:name' or a bare coarse slot; 'unknown'/empty rejected)",
             "--auth-context (REQUIRED — explicit identity; no silent anonymous)",
             "--target-host (REQUIRED unless a --request-variant-id/--service-id anchor is passed) / --target-path / --lens as applicable",
@@ -938,6 +947,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         notes=(
             "One verb for every probe outcome (it absorbed the former record-attempt). Covering (tested|signal) advances the coverage map and REQUIRES --evidence-ref; non-covering (attempted|blocked|no-signal|error) records that the target was TOUCHED under a --lens without counting as coverage, so the resume-brief Attempts ledger surfaces it and the next dispatch does not re-run a dead end (evidence optional).",
             "`--evidence-ref` on a covering probe is mandatory: a covering verdict with no evidence is exactly the self-attested signal the doctrine forbids, and the depth ledger only counts covering probes with a real result.",
+            "A `signal` result also requires --outcome-assertion. Without a body/application-level marker, the backend demotes it to non-covering `attempted`; status code and response size alone can never manufacture a positive verdict.",
             "1b default cascade: a COVERING probe carrying --coverage-item-id drains the work-items FK-linked to that coverage item (marked `done` in the SAME transaction), and one carrying --request-variant-id advances the discovered surface(s) FK-linked to that variant to `partially-covered` — no extra verbs, so `vigil assess work-buffer stats` and the surface ledger stop disagreeing with the probe-derived coverage. It is covering-gated (a non-covering attempt never auto-cascades), never auto-promotes coverage_items.status to `covered`, and never regresses a human surface verdict.",
             "Override/suppress the cascade: --work-item-ids <id...> narrows the drain to explicit ids (unknown ids skipped, not an error); --resolve-surface <id> advances exactly that surface; --no-drain suppresses the whole cascade. Both overrides fire regardless of the covering gate.",
             "The same target under a DIFFERENT --lens is a distinct probe (lens is hashed into the probe key), not a dedup collision. Name the specific input as `--input-slot slot:name` (e.g. `header:X-Forwarded-Host`, `query:uid`) so per-input coverage stays queryable; a bare slot is fine for whole-slot probes.",
@@ -946,6 +956,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         common_mistakes=(
             ("omitting --evidence-ref on tested/signal", "a covering verdict requires evidence; without it, record it with a non-covering status (attempted/blocked/no-signal/error) or attach the evidence path"),
+            ("signal from status/size alone", "name the application-level success marker in --outcome-assertion; otherwise the result is recorded as inconclusive attempted work"),
             ("recording a wall as a bare blocked probe when it is a durable technique wall", "a one-off `blocked` probe is a lead; a durable technique-level wall on a target belongs in `vigil assess block-technique`"),
         ),
     ),
@@ -1097,7 +1108,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "When a payload file contains notes, it must set notes_mode to replace for a cumulative working document or append for a deliberate checkpoint.",
             "details and provenance merge by default. Set details_mode='replace' in a versioned payload file, or pair --details-inline with --details-replace plus --expected-row-version, only when stale detail keys must be removed. --notes-replace has the same compare-and-swap requirement.",
             "The generic --inline and trailing positional JSON forms were REMOVED. Use explicit flags or --payload-file <path>.",
-            "Batch: list several slugs positionally only with explicit flags (resilient loop with a per-slug failure tally).",
+            "Batch: list several slugs positionally only with explicit flags (resilient loop with a per-slug failure tally). The helper fetches each slug's current row_version and sends a separate compare-and-swap patch; one stale row cannot silently overwrite another.",
             "Use for workflow and metadata updates that are NOT verification lifecycle transitions.",
             "Reopening a verified or false-positive finding for re-triage: finding update --status draft.",
             "Verification disposition changes, disputed reviews, and false_positive kills belong in finding verify --disposition false_positive.",
@@ -3114,13 +3125,15 @@ def _work_buffer_contract() -> CommandContract:
         summary="Operate on the backend assessment_work_items work-buffer queue.",
         schema_name="backend assessment_work_items schema",
         preferred_invocations=(
-            "vigil assess work-buffer stats --by status|source|cluster|host",
+            "vigil assess work-buffer stats --by status|source|cluster|host [--status pending]",
             "vigil assess work-buffer peek <type> [limit]",
             "vigil assess work-buffer fetch <type> <limit> <agent-name>",
             "vigil assess work-buffer fetch-by-priority <limit> auto",
             "vigil assess work-buffer fetch-by-unit [--unit-id ID] [--path PREFIX] [--class TYPE] [--limit N] [--agent auto|NAME]",
             "vigil assess work-buffer done <id1,id2,...>",
-            "vigil assess work-buffer defer-cluster <cluster_key> --reason \"...\"",
+            "vigil assess work-buffer defer-cluster <cluster_key> --reason \"...\" [--reason-tag already-covered] [--dry-run]",
+            "vigil assess work-buffer defer-items <id...> --reason \"...\" [--dry-run]",
+            "vigil assess work-buffer set-rationale <id...> --rationale \"...\"",
             "vigil assess work-buffer reclassify [--reclassify-all|--reclassify-stale|--reclaim-skipped|--retype|--retype-all]",
             "vigil assess work-buffer link-surface --surface-id <id> --cluster <key>",
         ),
@@ -3133,6 +3146,8 @@ def _work_buffer_contract() -> CommandContract:
             "lifecycle rows. Use `vigil assess agent …` for backend dispatch rows, handoffs, and decisions.",
             "Mark items done only after the specialist has written durable backend state "
             "(findings, surfaces, probe runs, or coverage) for the work.",
+            "Use --dry-run on defer-items/defer-cluster to preview the exact pending rows before mutation. Use reason-tag=already-covered when retiring work against durable covering evidence rather than mislabelling it as noise.",
+            "stats --by host accepts --status so a pending-only queue census does not mix in terminal rows. set-rationale persists triage conclusions on selected work items.",
             "fetch-by-unit selects the highest-EV unsatisfied application unit when --unit-id is omitted. "
             "Omitting --limit derives a deterministic batch from depth tier and recent probe saturation; an explicit limit always wins and work-item priority scores are never rewritten.",
             "reclassify (folded-in classify-work) re-applies gf-style priority/cluster classification (default: unscored rows only); --retype/--retype-all re-derive `type` from stored fields. link-surface (folded-in link-surface-work-items) links backend surfaces to the request variants behind selected work_items. See `vigil assess contract work-buffer reclassify` / `contract work-buffer link-surface`.",
@@ -3366,6 +3381,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             notes=(
                 "Dry-run is the review surface: it groups stale rows by handoff availability/status.",
                 "Without --dry-run, only ready/blocked handoffs are closable; checkpointed or missing handoffs remain in-progress.",
+                "Terminal completed/blocked/failed/aborted dispatches without handoffs are also reported. Record an `agent decision --kind dispatch_reconciliation` carrying payload.agent_id to adjudicate an honest no-output terminal row without fabricating a handoff.",
             ),
         )
     if verb in {"record-handoff", "handoff"}:
@@ -3381,11 +3397,11 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "vigil assess agent handoff --from-json <handoff.json>",
                 "vigil assess agent handoff --agent-id <id> --role <role> "
                 "--summary \"...\" --handoff-status ready --next-step \"...\" --coverage-gap \"<area>: <reason>\"",
+                "vigil assess agent handoff --agent-id <id> --handoff-status ready",
             ),
             author_supplied_fields=(
                 "--agent-id",
-                "--role",
-                "--summary (≤2000 chars; required)",
+                "--role and --summary (≤2000 chars; required when creating a handoff)",
                 "structured payload via --from-json OR repeated --next-step / --coverage-gap / --runtime-issue / --working-artifact / --open-question",
             ),
             helper_defaults=(
@@ -3395,6 +3411,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             ),
             notes=(
                 "Specialists call this from their closing sequence before exiting; the row is then the canonical 'what was done, what's missing, what's next' record for the dispatch.",
+                "For an existing handoff, supplying only --agent-id plus changed fields performs a partial PATCH and preserves the specialist's summary and structured arrays.",
                 "`render-handoff <agent-id>` reads this row, fetches each named finding, and emits the bounded markdown blob the next dispatch pastes.",
                 "JSON payload schema: agent/references/runtime-guides/handoff-schema.md.",
             ),

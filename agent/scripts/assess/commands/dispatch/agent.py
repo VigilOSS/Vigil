@@ -43,6 +43,24 @@ _DBLESS_ACTIONS = (
     "record-handoff",
 )
 
+_HANDOFF_PATCHABLE_FIELDS = frozenset(
+    {
+        "summary",
+        "phase",
+        "confidence",
+        "finding_slugs",
+        "coverage_gaps",
+        "next_steps",
+        "runtime_issues",
+        "working_artifacts",
+        "open_questions",
+        "recommended_next_agent",
+        "handoff_status",
+        "closed_dispatch_status",
+        "extras",
+    }
+)
+
 
 def _client_for(args) -> tuple[AssessmentClient, Any]:
     cfg = load_config(getattr(args, "engagement_dir", None))
@@ -502,16 +520,18 @@ def _build_handoff_payload(args) -> dict:
     agent_id = getattr(args, "agent_id", None)
     agent_role = getattr(args, "agent_role", None)
     summary = getattr(args, "hf_summary", None)
-    if not agent_id or not agent_role or not summary:
+    if not agent_id:
         print(
-            "agent handoff: --agent-id, --agent-role, and --summary are required "
-            "(or pass --from-json with a payload that supplies them)",
+            "agent handoff: --agent-id is required "
+            "(or pass --from-json with an agent_id)",
             file=sys.stderr,
         )
         sys.exit(1)
     payload["agent_id"] = agent_id
-    payload["agent_role"] = agent_role
-    payload["summary"] = summary
+    if agent_role:
+        payload["agent_role"] = agent_role
+    if summary:
+        payload["summary"] = summary
     if getattr(args, "hf_confidence", None):
         payload["confidence"] = args.hf_confidence
     finding_slugs = _split_csv(getattr(args, "finding_slugs", None))
@@ -589,11 +609,35 @@ def _record_handoff(args) -> None:
     payload = _build_handoff_payload(args)
     client, _ = _client_for(args)
     try:
-        # Idempotent by design: agents call record-handoff after every major
-        # step in their methodology, so the same (engagement, agent_id) tuple
-        # collides on each subsequent call. The client retries the POST as a
-        # PATCH on 409 transparently.
-        row = client.record_handoff(payload, upsert=True)
+        agent_id = str(payload.get("agent_id") or "")
+        if payload.get("agent_role") and payload.get("summary"):
+            # Full checkpoints are idempotent: POST on the first write and
+            # transparently PATCH on a duplicate agent_id.
+            row = client.record_handoff(payload, upsert=True)
+        else:
+            # Lifecycle promotion is a true partial update. Requiring the
+            # caller to re-send the summary risks replacing the specialist's
+            # authored record just to change handoff_status.
+            existing = client.get_handoff(agent_id)
+            if existing is None:
+                print(
+                    "agent handoff: --agent-role and --summary are required when "
+                    f"creating new handoff {agent_id!r}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            patch = {
+                key: value
+                for key, value in payload.items()
+                if key in _HANDOFF_PATCHABLE_FIELDS
+            }
+            if not patch:
+                print(
+                    "agent handoff: supply at least one handoff field to update",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            row = client.update_handoff(agent_id, patch)
     finally:
         client.close()
     print(json.dumps({

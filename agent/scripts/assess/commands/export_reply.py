@@ -49,6 +49,7 @@ from assess.lib.finding_render import (
     nonempty,
     poc_lines,
 )
+from assess.lib.outbound_redaction import redact_outbound_credentials
 # ``export-reply`` reuses export-submission's finding-links → command-run resolution
 # so the reply's THREAD HISTORY surfaces the same explicitly-linked reproducing runs
 # the submission does (author NEW evidence from them). No cycle: export_submission does
@@ -305,6 +306,7 @@ def run(args) -> None:
         finding = client.get(f"findings/{slug}")
         if not isinstance(finding, dict):
             raise AssessError(f"export-reply: unexpected response fetching finding {slug!r}")
+        finding = redact_outbound_credentials(finding)
 
         replies = _replies(finding)
         max_seq = max((_seq_of(entry) for entry in replies), default=0)
@@ -364,7 +366,9 @@ def run(args) -> None:
                 "already exists; pass --overwrite to replace it."
             )
 
-        linked_runs = _linked_command_runs(client, slug)
+        linked_runs = redact_outbound_credentials(
+            _linked_command_runs(client, slug)
+        )
         internal_ids = collect_internal_ids(finding, linked_runs)
         prior_entries = _prior_replies(replies, seq)
         reply_rel = engagement_relative(reply_md, engagement_dir)
@@ -375,11 +379,22 @@ def run(args) -> None:
         # leaked value (a UUID, a `cases.db` literal), so scanning a render that
         # already contains them would flag the advisory text as a fresh leak. Hygiene
         # scans only the PASTEABLE body — above the single `---` (separator_ordinal=1).
-        scan_markdown = _render_markdown(entry, prior_entries, finding, linked_runs, draft, [])
+        scan_markdown = redact_outbound_credentials(
+            _render_markdown(entry, prior_entries, finding, linked_runs, draft, [])
+        )
         hygiene = hygiene_warnings(
             scan_markdown, slug, internal_ids, engagement_dir, separator_ordinal=1
         )
-        markdown = _render_markdown(entry, prior_entries, finding, linked_runs, draft, hygiene)
+        markdown = redact_outbound_credentials(
+            _render_markdown(
+                entry,
+                prior_entries,
+                finding,
+                linked_runs,
+                draft,
+                hygiene,
+            )
+        )
 
         out_dir.mkdir(parents=True, exist_ok=True)
         reply_md.write_text(markdown, encoding="utf-8")

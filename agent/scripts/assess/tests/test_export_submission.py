@@ -818,6 +818,62 @@ def test_linked_runs_are_reference_not_evidence(tmp_path, monkeypatch, capsys):
     assert not any(g.startswith("command-runs?") for g in fake.gets)
 
 
+def test_submission_outputs_redact_live_credentials(tmp_path, monkeypatch, capsys):
+    secret = "eyJhbGciOiJIUzI1NiJ9.live-session.signature"
+    second_secret = "eyJhbGciOiJIUzI1NiJ9.second-session.signature"
+    links = [
+        {"finding_slug": "VA-047", "target_kind": "command_run", "target_id": 5},
+    ]
+    command_runs = {
+        5: {
+            "id": 5,
+            "command": (
+                "curl -H 'Cookie: acme_session="
+                f"{secret}' -H 'Authorization: Bearer {secret}' "
+                f"-b 'acme_session={secret}; other={second_secret}' "
+                "https://app.example.com"
+            ),
+            "intent": "reproduce with user_a",
+            "return_code": 0,
+        },
+    }
+    details = _complete_details(
+        notes=f"temporary apikey={secret}",
+        poc_request={
+            "method": "GET",
+            "url": "https://app.example.com/private",
+            "headers": {
+                "Cookie": f"sid={secret}",
+                "Authorization": f"Bearer {secret}",
+            },
+        },
+    )
+    fake = _FakeClient(
+        _finding(details=details),
+        links=links,
+        command_runs=command_runs,
+    )
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        ["submission", "VA-047", "--platform", "bugcrowd"],
+        str(tmp_path),
+    )
+
+    export_submission.run(args)
+    capsys.readouterr()
+
+    markdown = _submission_path(tmp_path).read_text()
+    context = (
+        tmp_path / "submissions" / "VA-047" / "submission-context.json"
+    ).read_text()
+    assert secret not in markdown
+    assert secret not in context
+    assert second_secret not in markdown
+    assert second_secret not in context
+    assert "<YOUR_SESSION_COOKIE>" in markdown
+    assert "<REDACTED_CREDENTIAL>" in markdown
+
+
 def test_operator_details_consolidates_all_reference(tmp_path, monkeypatch, capsys):
     """One OPERATOR DETAILS section holds metadata + structured proof + linked runs.
 
