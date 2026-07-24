@@ -4,7 +4,6 @@ from __future__ import annotations
 import sqlite3
 
 import pytest
-
 from app import db as db_module
 from app.services import backup as backup_service
 
@@ -40,6 +39,33 @@ def test_run_backup_now_writes_snapshot_of_live_db(client, isolate_settings):
             "SELECT key FROM engagements WHERE key = ?", ("live-sample",)
         ).fetchone()
     assert row == ("live-sample",)
+
+
+def test_run_backup_now_closes_sqlite_connections(
+    client, isolate_settings, monkeypatch
+):
+    real_connect = sqlite3.connect
+    opened_connections = []
+
+    class TrackingConnection(sqlite3.Connection):
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+            super().close()
+
+    def tracking_connect(*args, **kwargs):
+        connection = real_connect(*args, factory=TrackingConnection, **kwargs)
+        opened_connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(backup_service.sqlite3, "connect", tracking_connect)
+
+    out = backup_service.run_backup_now()
+
+    assert out is not None
+    assert len(opened_connections) == 2
+    assert all(connection.closed for connection in opened_connections)
 
 
 def test_run_backup_now_rotates_to_max_copies(client, isolate_settings):

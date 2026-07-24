@@ -22,11 +22,11 @@ import os
 import shutil
 import sqlite3
 import threading
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .. import db as db_module
-
 
 SCHEDULER_DISABLED_ENV = "VIGIL_BACKUP_DISABLED"
 SCHEDULER_MAX_COPIES_ENV = "VIGIL_BACKUP_MAX_COPIES"
@@ -117,7 +117,9 @@ def run_backup_now(
 
     tmp_target = target.with_name(target.name + ".partial")
     try:
-        with sqlite3.connect(str(live_db)) as source, sqlite3.connect(str(tmp_target)) as dest:
+        with closing(sqlite3.connect(str(live_db))) as source, closing(
+            sqlite3.connect(str(tmp_target))
+        ) as dest:
             source.backup(dest)
         tmp_target.rename(target)
     except Exception as exc:
