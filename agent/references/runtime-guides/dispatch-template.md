@@ -27,7 +27,9 @@ authorized_phase: <phase, e.g. 4>
 
 ## Dispatch Mindset
 hunt_scope: <wide | deep>
-mindset lens: <agent/rules/mindsets/<name>.md> — <one line: why this lens fits the observed signal>
+mindset lens: <agent/rules/mindsets/<name>.md> [(<finer-grained lens name>)] — <one line: why this lens fits the observed signal>
+  # the finer-grained name (Caching, Race conditions, ...) is an optional parenthetical qualifier
+  # on a real backing path — never a bare value; see phase-4-consume-test.md "Lens Vocabulary"
 
 <if resumed/continuation: paste `vigil assess resume-brief` output here>
 <if a prior dispatch touched this surface/finding: paste `vigil assess agent render-handoff <prior-agent-id>` output here>
@@ -73,7 +75,7 @@ vigil assess agent done <agent_id> --status completed --finding-slugs <slugs>
 |---|---|---|
 | `agent_id` / `agent_role` / `authorized_phase` | Required | § Runtime Identity Block — `authorized_phase` is also the "Current phase" field cited by § Dispatch Context Template; there is no separate `phase` field in Dispatch Context, it is not restated below |
 | `hunt_scope` | Required (VA); default `deep` for EX | `agent/phases/phase-4-consume-test.md` "Phased mindset flow" (Pass-1 WIDE / Pass-2 DEEP / Pass-3 EXPLOIT) — WIDE = open objective, baseline + `developer.md` only; DEEP = one family mindset + matching skill per signal/high-yield cell |
-| `mindset lens` | Required | Role file's own `## Dispatch Mindset` slot (VA/EX) — the injected packet is MORE SPECIFIC than the role's baseline mindset and governs where the two compete |
+| `mindset lens` | Pass-scoped, not role-scoped — Required on DEEP/VARIANT/SYNTHESIS-pass dispatches, OMITTED on WIDE/SURVEY-pass dispatches | `agent/operator-core.md` § Specialist Dispatch Contract `mindset lens` row (canonical statement of which passes require it) and the role file's own `## Dispatch Mindset` slot — the injected packet is MORE SPECIFIC than the role's baseline mindset and governs where the two compete |
 | resume-brief / render-handoff paste | Required when continuation or prior dispatch exists | § Runtime Identity Block ("If this is a continuation…") + § Dispatch Context Template "Cross-agent prior work" |
 | `target` | Required | § Dispatch Context Template "Agent identity and target URL" |
 | `outcome objective` | Required | § Dispatch Context Template "specific outcome objective" |

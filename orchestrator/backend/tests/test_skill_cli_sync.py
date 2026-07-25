@@ -190,7 +190,11 @@ def _doc_files() -> list[Path]:
     files += sorted((_REPO_ROOT / "agent" / "agents").glob("*.md"))
     files += sorted(_REPO_ROOT.glob("agent/shared-constraints*.md"))
     files += sorted((_REPO_ROOT / "agent" / "references").rglob("*.md"))
-    files += sorted((_REPO_ROOT / "agent" / "rules").glob("*.md"))
+    # rglob, not glob: `agent/rules/` has a `mindsets/` subdirectory (the
+    # Dispatch-Mindset lens library) that a non-recursive glob structurally
+    # excluded. Those packets are operator-facing prose the specialist loads, so
+    # a `vigil assess` invocation inside one must be linted like any other rule.
+    files += sorted((_REPO_ROOT / "agent" / "rules").rglob("*.md"))
     files += sorted((_REPO_ROOT / "agent" / ".claude" / "agents").glob("*.md"))
     files += sorted((_REPO_ROOT / "agent" / ".codex" / "agents").glob("*.toml"))
     # Single-file additions guarded with existence checks so a future rename of
@@ -419,7 +423,17 @@ def test_documented_oob_verbs_exist(oob_registries, doc_files):
 # `intel supersede`), so they are no longer top-level assess verbs and no longer
 # belong on this top-level allowlist. The subverb doc debt is carried by the
 # pending prompt sweep and surfaced by the docs<->CLI parity assertions.
-_KNOWN_UNDOCUMENTED_ASSESS: set[str] = set()
+_KNOWN_UNDOCUMENTED_ASSESS: set[str] = {
+    # `list-mindsets` shipped as the mindsets analogue of `list-skills` /
+    # `list-references` / `list-commands` (the lens library under
+    # agent/rules/mindsets/ was the last discovery axis still enumerated by hand
+    # in per-doc menus). Its prose wiring — replacing those hard-coded menus with
+    # a pointer at the verb — belongs to the prompt sweep, not to the CLI change
+    # that introduced it. This entry is temporary by construction:
+    # `test_known_undocumented_allowlist_has_no_stale_entries` fails the moment
+    # any operator doc names the verb, forcing the entry back out.
+    "list-mindsets",
+}
 _KNOWN_UNDOCUMENTED_OOB = {
     "restart",  # stop+start convenience; ops doc start/stop/status/test/mint/poll
     "stop",     # lifecycle verb; the docs lean on `vigil oob start`/`status`

@@ -1,6 +1,9 @@
 # Shared Subagent Constraints
 
-Load this file first — before your role-specific skill and before any target work.
+Load this file as part of your Load First set — together with your role file and
+`agent/shared-specialist-core.md` — before any target-facing work. All three load together, not
+in a race to be "first"; the one ordered load sequence (Load First batch → skill/reference
+discovery → target work) is stated once in `agent/shared-specialist-core.md` "Load Sequence".
 These rules apply to every specialist agent regardless of role.
 They are extracted from the operator prompt so you receive only what is relevant to you.
 
@@ -43,7 +46,28 @@ Read `scope.json` before making target-facing decisions. Confirm:
   proceeds (`pause` and `selected` are mechanically identical); `full_send` bypasses that review
   gate entirely
 - Auth state from the engagement's backend credential store (`vigil auth status`) — use credentials only when a record is populated and marked active
-  - Liveness is ground truth: a populated/active record is NOT proof the session is live — never trust cookie presence or the `stale` flag. Enumerate what's stored for a host with `vigil assess auth list --host <host> [--include-dead] [--json]` (identity name, `auth_context`, `state`, liveness verdict, age, cookie names only — never raw values (kept scannable, not secret; see "Credentials and Local State Are Self-Owned"); active identity marked `*`). Whoever takes an identity for a task owns proving it live: there is NO auto-detection of where a site handles auth, so first declare `material.liveness = {expect_status, authed_marker, dead_marker}` on that identity (via `vigil auth import`/`edit`), then probe it BY NAME with `vigil assess auth status --probe --identity <name> --probe-url <authed-endpoint>` before trusting any result or recording a "dead"/"unreachable" verdict. Pick an `authed_marker` that appears ONLY when logged in (the logged-in username, an account/settings link, a per-user CSRF token field) and a `dead_marker` from the login page — the same logged-in/logged-out markers a DAST scanner (InsightAppSec/Burp) uses to validate a session. Redirects are never followed; `live` clears a `stale` mark, `dead` is set only by a proven-dead probe, and no signature or a transport error ⇒ liveness stays `unknown` — never a false verdict.
+  - **Liveness is ground truth — never trust cookie presence or the `stale` flag as proof a
+    session is live.** A populated/active record only means credential material exists, not that
+    it still authenticates. Enumerate what's stored for a host with `vigil assess auth list
+    --host <host> [--include-dead] [--json]` (identity name, `auth_context`, `state`, liveness
+    verdict, age, cookie names only — never raw values (kept scannable, not secret; see
+    "Credentials and Local State Are Self-Owned"); active identity marked `*`).
+
+    Whoever takes an identity for a task owns proving it live: there is NO auto-detection of
+    where a site handles auth. First declare `material.liveness = {expect_status, authed_marker,
+    dead_marker}` on that identity (via `vigil auth import`/`edit`), then probe it BY NAME with
+    `vigil assess auth status --probe --identity <name> --probe-url <authed-endpoint>` before
+    trusting any result or recording a "dead"/"unreachable" verdict. Pick an `authed_marker` that
+    appears ONLY when logged in (the logged-in username, an account/settings link, a per-user
+    CSRF token field) and a `dead_marker` from the login page — the same logged-in/logged-out
+    markers a DAST scanner (InsightAppSec/Burp) uses to validate a session. Redirects are never
+    followed.
+
+    | Probe result | Resulting state | Meaning |
+    |---|---|---|
+    | `authed_marker` matched | `live` | Clears any prior `stale` mark |
+    | `dead_marker` matched | `dead` | Set only by a proven-dead probe |
+    | No signature match, or a transport error | `unknown` | Never a false verdict — stays `unknown` rather than guessing |
 
 `exploit_policy` governs *exploitation*, and it is resolved once **before** dispatch — not a
 per-action approval you re-request mid-task. The invariants that hold regardless of its value: stay
@@ -53,7 +77,9 @@ operator-owned infrastructure, or to our own test data (accounts or artifacts we
 fine. §2d's human-reach preflight is the one gate that survives every `exploit_policy` value and
 still applies per-action.
 
-**Reachability is not scope.** The Kali runtime is shared infrastructure, so it may be able to route to hosts that are NOT your target — other engagements' services, neighbouring Docker/internal subnets, or the host itself. Only the hosts in this engagement's `scope.json` are in scope. Never probe, pivot into, or build findings on infrastructure outside it, even when the runtime can reach it — a reachable-but-out-of-scope host is a distraction (and, on a shared runtime, often another engagement's state), not a lead.
+### Reachability Is Not Scope
+
+The Kali runtime is shared infrastructure, so it may be able to route to hosts that are NOT your target — other engagements' services, neighbouring Docker/internal subnets, or the host itself. Only the hosts in this engagement's `scope.json` are in scope. Never probe, pivot into, or build findings on infrastructure outside it, even when the runtime can reach it — a reachable-but-out-of-scope host is a distraction (and, on a shared runtime, often another engagement's state), not a lead.
 
 ---
 
@@ -161,6 +187,101 @@ assessment-binding/`--agent-name` attribution rules live in
 by `vigil assess contract kali <verb>` / `vigil assess list-commands`. Dispatch wrappers must
 export `AGENT_NAME=<role>` or pass `--agent-name <role>` — a silent `operator` attribution breaks
 coverage ownership.
+
+---
+
+## 2a. Listener, Tunnel, and OOB Responsibility
+
+Starting, stopping, restarting, or reconfiguring shared listener, tunnel, and OOB server
+processes belongs to the **operator** — these are global runtime state whose disruption breaks
+other concurrent specialists: pwncat-vl listeners, frp tunnels, chisel listeners, `nc -lvp`,
+`socat` listeners, `frpc`, `oob-server`, interactsh servers, or equivalent.
+
+Agent-side OOB readiness checks, named per-agent clients, and the mint→poll→correlate
+procedure are canonical in `agent/references/offensive-tactics/frp-tunneling.md`
+("Agent OOB Readiness Check" and "OOB Procedure (mint→poll→correlate)") — read those
+sections there; do not re-derive the workflow here.
+
+When exploitation requires a reverse-shell listener or tunnel exposure:
+1. Provide the exact listener or tunnel commands in your output using `# MANUAL:`
+   annotation, because the operator owns shared listener processes.
+2. Reference `agent/references/offensive-tactics/shell-handling.md` for shell
+   listener commands.
+3. Reference `agent/references/offensive-tactics/frp-tunneling.md` for OOB
+   readiness, per-agent clients, tunnel exposure, and log interpretation.
+4. Proceed after the listener URL file or `vigil oob` client is available; do not
+   block on the operator for checks that `vigil oob status`, `vigil oob poll`, or
+   the raw-debug tails (`vigil logs oob`, `vigil oob client logs`) can answer
+   directly.
+
+---
+
+## 2b. Coverage Check Before Probing
+
+Every `vigil assess kali` call records its command, argv, tool, agent, phase,
+technique, intent, probe_kind, destructive flag, exit code, timeout state,
+timings, and an output preview (or artifact ref) to the orchestrator backend.
+Treat that history as a **coverage map** — a record of what's already been
+probed so your next probe goes somewhere the engagement hasn't covered yet.
+
+Before issuing a probing, scanning, fuzzing, or credential-testing command,
+search for prior work on this surface:
+
+```bash
+vigil assess command-run list --q <keyword> --show-matches
+```
+
+Default to an unscoped fuzzy search so finding aliases, nearby metadata, every
+agent, and every phase are included; narrow with exact filters only if the broad
+result is overwhelming. Cross-agent and cross-phase context is usually the most
+valuable coverage signal.
+
+Mode-of-search guidance:
+
+- Default (`--q "VA-047 OIDC"`) OR-unions the raw input with every finding
+  alias. Loose; surfaces anything related to the finding even when the topic
+  token is missing. Best for coverage-mapping.
+- `--all` keeps alias expansion but intersects every non-alias token — use when
+  you want "rows that mention VA-047 (in any alias form) AND mention OIDC".
+- `--exact` skips alias expansion entirely; the FTS phrase is searched
+  verbatim. Strictest; use when a recall miss would be worse than a precision
+  miss.
+
+Read the results as a coverage map, not a reuse gate. Red-team depth comes
+from variants — different SQLi techniques, different SSRF payload encodings,
+different XXE entity styles, different wordlists, different auth contexts.
+If `sqlmap` already ran against this endpoint with the audit row's
+`--technique SQLI` and a `--intent` mentioning UNION, your next probe picks a
+different SQLi class. If `ffuf` ran `raft-medium-directories`, try
+`quickhits` or a tech-specific wordlist.
+
+**The only probe you should skip is an identical command against identical
+input.** Any variant — different payload family, different tool, different
+flag, different target scope, different credentials — is new coverage and
+belongs in the engagement. Don't ask for permission to probe a variant. Pass
+the audit-flag set on every variant (`--technique`, `--intent`, `--probe-kind`,
+`--phase`, `--timeout`, plus `--destructive` when applicable) so the next
+specialist's coverage check sees it.
+
+When a prior run genuinely covers your current question, cite its id in your
+output — but first fetch the preview with `vigil assess command-run get <id>`
+and confirm the stored evidence actually answers that question. A row with
+`success=true` only means `return_code=0`, not that the output is on-point.
+Open the preview to rule out soft-failure pages, WAF intercepts, and
+rate-limited stubs that exit cleanly. Citing an id you never looked at is
+worse than running a fresh probe.
+
+Full coverage-vs-duplicate decision table and output-field interpretation:
+`agent/references/runtime-guides/command-history-auditing.md`.
+
+---
+
+## 2c. Resource-safety preflight
+
+Active recon dispatches must declare candidate count, rate limit, thread count, retry,
+timeout, output mode, stop condition, and expected wall-clock in dispatch context. The
+Recon Dispatch Resource Policy in `agent/references/runtime-guides/dispatch-resource-policy.md` is the calibration source of
+truth.
 
 ---
 
@@ -330,109 +451,19 @@ the real `--details-inline`/`--details-replace`, `kali katana -H`, `kali exec
 
 ---
 
-## 2a. Listener, Tunnel, and OOB Responsibility
-
-Starting, stopping, restarting, or reconfiguring shared listener, tunnel, and OOB server
-processes belongs to the **operator** — these are global runtime state whose disruption breaks
-other concurrent specialists: pwncat-vl listeners, frp tunnels, chisel listeners, `nc -lvp`,
-`socat` listeners, `frpc`, `oob-server`, interactsh servers, or equivalent.
-
-Agent-side OOB readiness checks, named per-agent clients, and the mint→poll→correlate
-procedure are canonical in `agent/references/offensive-tactics/frp-tunneling.md`
-("Agent OOB Readiness Check" and "OOB Procedure (mint→poll→correlate)") — read those
-sections there; do not re-derive the workflow here.
-
-When exploitation requires a reverse-shell listener or tunnel exposure:
-1. Provide the exact listener or tunnel commands in your output using `# MANUAL:`
-   annotation, because the operator owns shared listener processes.
-2. Reference `agent/references/offensive-tactics/shell-handling.md` for shell
-   listener commands.
-3. Reference `agent/references/offensive-tactics/frp-tunneling.md` for OOB
-   readiness, per-agent clients, tunnel exposure, and log interpretation.
-4. Proceed after the listener URL file or `vigil oob` client is available; do not
-   block on the operator for checks that `vigil oob status`, `vigil oob poll`, or
-   the raw-debug tails (`vigil logs oob`, `vigil oob client logs`) can answer
-   directly.
-
----
-
-## 2b. Coverage Check Before Probing
-
-Every `vigil assess kali` call records its command, argv, tool, agent, phase,
-technique, intent, probe_kind, destructive flag, exit code, timeout state,
-timings, and an output preview (or artifact ref) to the orchestrator backend.
-Treat that history as a **coverage map** — a record of what's already been
-probed so your next probe goes somewhere the engagement hasn't covered yet.
-
-Before issuing a probing, scanning, fuzzing, or credential-testing command,
-search for prior work on this surface:
-
-```bash
-vigil assess command-run list --q <keyword> --show-matches
-```
-
-Default to an unscoped fuzzy search so finding aliases, nearby metadata, every
-agent, and every phase are included; narrow with exact filters only if the broad
-result is overwhelming. Cross-agent and cross-phase context is usually the most
-valuable coverage signal.
-
-Mode-of-search guidance:
-
-- Default (`--q "VA-047 OIDC"`) OR-unions the raw input with every finding
-  alias. Loose; surfaces anything related to the finding even when the topic
-  token is missing. Best for coverage-mapping.
-- `--all` keeps alias expansion but intersects every non-alias token — use when
-  you want "rows that mention VA-047 (in any alias form) AND mention OIDC".
-- `--exact` skips alias expansion entirely; the FTS phrase is searched
-  verbatim. Strictest; use when a recall miss would be worse than a precision
-  miss.
-
-Read the results as a coverage map, not a reuse gate. Red-team depth comes
-from variants — different SQLi techniques, different SSRF payload encodings,
-different XXE entity styles, different wordlists, different auth contexts.
-If `sqlmap` already ran against this endpoint with the audit row's
-`--technique SQLI` and a `--intent` mentioning UNION, your next probe picks a
-different SQLi class. If `ffuf` ran `raft-medium-directories`, try
-`quickhits` or a tech-specific wordlist.
-
-**The only probe you should skip is an identical command against identical
-input.** Any variant — different payload family, different tool, different
-flag, different target scope, different credentials — is new coverage and
-belongs in the engagement. Don't ask for permission to probe a variant. Pass
-the audit-flag set on every variant (`--technique`, `--intent`, `--probe-kind`,
-`--phase`, `--timeout`, plus `--destructive` when applicable) so the next
-specialist's coverage check sees it.
-
-When a prior run genuinely covers your current question, cite its id in your
-output — but first fetch the preview with `vigil assess command-run get <id>`
-and confirm the stored evidence actually answers that question. A row with
-`success=true` only means `return_code=0`, not that the output is on-point.
-Open the preview to rule out soft-failure pages, WAF intercepts, and
-rate-limited stubs that exit cleanly. Citing an id you never looked at is
-worse than running a fresh probe.
-
-Full coverage-vs-duplicate decision table and output-field interpretation:
-`agent/references/runtime-guides/command-history-auditing.md`.
-
----
-
-## 2c. Resource-safety preflight
-
-Active recon dispatches must declare candidate count, rate limit, thread count, retry,
-timeout, output mode, stop condition, and expected wall-clock in dispatch context. The
-Recon Dispatch Resource Policy in `agent/references/runtime-guides/dispatch-resource-policy.md` is the calibration source of
-truth.
-
----
-
 ## 3. Use Skills and References — They Are the Methodology
+
+This is the skill/reference half of the Load Sequence (`agent/shared-specialist-core.md` "Load
+Sequence") — it runs immediately after your Load First batch and before any target-facing work.
 
 **Step 1 — Load the skill(s) named in your dispatch prompt.** The operator selects skills via
 `vigil assess list-skills` (compact name + one-line "Use when:") and includes the path(s) in the
 dispatch prompt. Read each named `agent/skills/<name>/SKILL.md` in full before doing anything else.
 If no skill was named and you believe one exists, run `vigil assess list-skills` to discover it
-yourself and report back rather than improvising — skill selection is the operator's job, but
-discovery is fast (~200 tokens) and usually faster than guessing.
+yourself — discovery is fast (~200 tokens) and usually faster than guessing. Skill selection is
+still the operator's job, so name the skill you found in your dispatch response's `#### Recommended
+Next Actions` (and in the handoff's `open_questions` if you checkpoint before returning) rather than
+unilaterally committing to it — the operator confirms or redirects on the next dispatch.
 
 **Step 2 — Run `vigil assess list-references`** after loading the skill (add `--skill <name>` to
 filter to that skill's paired references). Identify the paired
@@ -556,17 +587,10 @@ fast, speculative language, filler/padding, the sibling rule, credentials requir
 before writing, evidence beats volume) are not restated here — see those files.
 
 - **Severity by structured field, not shouting or slang.** Convey severity through the `severity` field and the CVSS vector plus calm, precise prose. Do not use ALL-CAPS for emphasis to signal criticality and do not use casual / "reddit" severity language ("this is insane", "game over", "pwned hard"). A critical finding reads as a measured, exact description of the attacker outcome — that is more credible to a triager than capitalized adjectives. (Literal CLI tokens, flags, and enum values written in caps — `REQUIRED`, `IDOR`, `--force` — are vocabulary, not emphasis, and are unaffected.)
-- **Precondition analysis governs severity** (essence; full table in `reporting.md` §3). Before
-  assigning severity, ask what the attacker needs to already have — every precondition not freely
-  available to an anonymous internet attacker reduces severity, and stacking enough of them turns
-  an impressive bug into low-impact. Defense-in-depth: if exploiting the finding requires already
-  possessing the secret or credential it bypasses, rate the bypass relative to how hard that
-  precondition is to satisfy independently, not as a standalone critical. Reduces severity: an
-  authenticated session, a non-iterable identifier (UUID/GUID/token) the attacker can't enumerate,
-  a second vulnerability supplying the input, source/CI access to extract a secret,
-  attacker-controlled infrastructure, dev/staging-only reproduction. Does NOT reduce severity: an
-  iterable integer ID, a free self-registration account, or a single crafted request with no prior
-  knowledge.
+- **Precondition analysis governs severity** — what the attacker needs to already have before
+  exploiting the finding. This is fully covered in co-loaded `reporting.md` §3 (the reduces/does-not-
+  reduce table and the defense-in-depth rule) and `hunting.md` §3; per the policy above, not
+  restated here.
 
 Full rule sets: `agent/rules/hunting.md`, `agent/rules/reporting.md`, `agent/rules/adversarial-mindset.md`
 
@@ -596,13 +620,83 @@ Record state immediately using `vigil assess` with JSON files:
 - **Credentials:** `vigil assess post credentials <credential-json-file>` — recording a discovered credential (`status=discovered`) automatically flags a candidate finding and, when the secret is a session artifact (a session-hint cookie or a bearer/JWT), mints a usable identity from it and cross-links the two; a plain password records as intel plus a candidate finding only. List every identity a host holds with `vigil assess auth list --host <host> [--include-dead] [--json]`.
 - **Credential tests:** `vigil assess post credential-tests <json-file>`
 - **Access records:** `vigil assess post access-records <json-file>`
-- **Coverage updates:** `vigil assess resolve coverage-item <id> --status <covered|not_applicable|deferred|blocked|queued|pending> --rationale "..."` — advance a class-typed coverage item (one per implied vuln-class on a surface; resolve EVERY implied class, not just the cluster winner). `covered`/`not_applicable` require a non-empty rationale. Raw `patch coverage-items/<id>` is redirected here. This is the deliberate, rationale-bearing human verdict — `covered` is never self-attested, so recording a covering probe (below) does not by itself mark a coverage item `covered`; call this verb explicitly when you're making that call.
+- **Coverage updates:** `covered` is never self-attested — recording a covering probe (below)
+  does not by itself mark a coverage item `covered`; call this verb explicitly whenever you're
+  making that deliberate, rationale-bearing human verdict:
+  `vigil assess resolve coverage-item <id> --status <covered|not_applicable|deferred|blocked|queued|pending> --rationale "..."`.
+  Advances a class-typed coverage item (one per implied vuln-class on a surface; resolve EVERY
+  implied class, not just the cluster winner). `covered`/`not_applicable` require a non-empty
+  rationale. Raw `patch coverage-items/<id>` is redirected here.
 - **Blocked techniques:** `vigil assess block-technique --technique <TECHNIQUE> --target-kind <kind> --target-ref <ref> --reason <why>` (the technique-key auto-derives; override with `--technique-key`. Review with `vigil assess list-blocked-techniques`). Prefer this first-class verb over the raw `vigil assess post blocked-techniques <json-file>`.
-- **Captured HTTP traffic:** `vigil assess http list --host <host> --method <verb> --content-type <family>` queries the canonical full-flow store (`vigil assess http show <flow_uid>` for one flow, `vigil assess http search <text>` for a LIKE query, `vigil assess http export-har -o <file>` / `vigil assess http import-har <file>` for HAR round-trips). Capture is a per-engagement policy, not a proxy selector — review it with `vigil assess http policy`. The three states are deliberate: disabled records only the always-on compact observation; `policy set --enabled` adds full-flow metadata/index rows without bodies; adding `--capture-request-bodies` and/or `--capture-response-bodies` stores only those selected body sidecars. Full-flow and raw-body capture are OFF by default.
-- **Probe runs (covering and non-covering):** `vigil assess record-probe --result-status <tested|signal|attempted|blocked|no-signal|error> --attack-family <class> --target-host <host> --target-path <path> --input-slot <slot:name> --auth-context <identity> [--evidence-ref <path>] [--coverage-item-id <id>] [--finding <slug>]` — one verb for every probe verdict. `tested`/`signal` are the covering verdicts and REQUIRE `--evidence-ref` (a covering verdict without evidence is not coverage); `attempted`/`blocked`/`no-signal`/`error` record a touched-but-inconclusive target (a lead, not a verdict) and don't need it. `--input-slot` and `--auth-context` are required on every call regardless of verdict — pass both, never a silent default. Name the specific input as `slot:name` (`header:X-Forwarded-Host`, `query:uid`) so it surfaces as its own cell in the resume-brief's `## Per-Input Coverage` grid; a non-covering verdict lands there too (distinguished by verdict word), not in `## Attempts` (which carries only blocked techniques and roe_blocked findings), and does not count as coverage. **`--auth-context` is a grid axis, not paperwork:** the grid keys per-input coverage on (host × path × attack_family × input_slot × auth_context), so omitting it — or letting it silently default to `anonymous` — collapses every identity you actually tested into one anonymous cell, hiding the exact cross-identity IDOR/BOLA gap the grid exists to surface. Pass the real identity name (`anonymous`, `member`, `admin`, a credential slug from `vigil assess auth list --host <host>`). Raw `post probe-runs` is redirected here.
-- **Work-buffer id passing and the auto-cascade.** When a probe traces back to a `vigil assess work-buffer fetch` batch, carry its `coverage_item_id`, `request_variant_id`, and `service_id` in your working notes and pass them into `record-probe` (`--coverage-item-id`, `--request-variant-id`, `--service-id`) so the probe attaches to the exact coverage item and request it satisfies. Recording that one covering probe is now the whole write: the work-items linked to the coverage item drain and the mapped surface advances toward `partially-covered` automatically off the FK link — do not also make a separate drain or surface-advance call for the same probe. `--work-item-ids`/`--resolve-surface` still exist to override or narrow that default (point the drain at a different set of items, or suppress the automatic surface advance) when the default cascade isn't the right target. If a batch omitted `coverage_item_id`, look up the matching row via `vigil assess fetch coverage-items` before you resolve coverage state. Reach for `vigil assess resolve coverage-item` separately only for the deliberate manual verdict (`covered`/`not_applicable`/`deferred`/`blocked`) a probe doesn't already imply — never to double-record a probe you just recorded.
+- **Captured HTTP traffic:** capture is a per-engagement policy, not a proxy selector — review it
+  with `vigil assess http policy`. Query the canonical full-flow store with `vigil assess http
+  list --host <host> --method <verb> --content-type <family>` (`http show <flow_uid>` for one
+  flow, `http search <text>` for a LIKE query, `http export-har -o <file>` / `http import-har
+  <file>` for HAR round-trips). The three policy states are deliberate:
 
-Write payloads to `/tmp/<type>-<slug>.json` before calling — inline JSON shell arguments cause escaping damage and are not auditable.
+  | State | Behavior |
+  |---|---|
+  | disabled (default) | Always-on compact observation only |
+  | `policy set --enabled` | Adds full-flow metadata/index rows, no bodies |
+  | `--capture-request-bodies` / `--capture-response-bodies` | Also stores those selected body sidecars |
+
+  Full-flow and raw-body capture are OFF by default.
+- **Probe runs (covering and non-covering):** `record-probe` is one verb for every probe
+  verdict — pass the full flag set every time:
+
+  ```
+  vigil assess record-probe --result-status <tested|signal|attempted|blocked|no-signal|error> \
+      --attack-family <class> --target-host <host> --target-path <path> \
+      --input-slot <slot:name> --auth-context <identity> \
+      [--evidence-ref <path>] [--coverage-item-id <id>] [--finding <slug>]
+  ```
+
+  | `--result-status` | Covering? | `--evidence-ref` required? | Means |
+  |---|---|---|---|
+  | `tested` | yes | **yes** | Probe covered the surface; evidence proves it |
+  | `signal` | yes | **yes** | Probe found something notable; evidence proves it |
+  | `attempted` | no | no | Touched but inconclusive — a lead, not a verdict |
+  | `blocked` | no | no | Touched but inconclusive — a lead, not a verdict |
+  | `no-signal` | no | no | Touched but inconclusive — a lead, not a verdict |
+  | `error` | no | no | Touched but inconclusive — a lead, not a verdict |
+
+  A covering verdict (`tested`/`signal`) without `--evidence-ref` is not coverage — the flag is
+  conditionally mandatory, not optional decoration.
+
+  `--input-slot` and `--auth-context` are required on **every** call regardless of verdict — pass
+  both, never let either silently default:
+  - `--input-slot` names the specific input as `slot:name` (`header:X-Forwarded-Host`,
+    `query:uid`) so it surfaces as its own cell in the resume-brief's `## Per-Input Coverage`
+    grid. A non-covering verdict lands there too (distinguished by verdict word), not in
+    `## Attempts` (which carries only blocked techniques and roe_blocked findings), and does not
+    count as coverage.
+  - **`--auth-context` is a grid axis, not paperwork:** the grid keys per-input coverage on
+    **(host × path × attack_family × input_slot × auth_context)**, so omitting it — or letting it
+    silently default to `anonymous` — collapses every identity you actually tested into one
+    anonymous cell, hiding the exact cross-identity IDOR/BOLA gap the grid exists to surface.
+    Pass the real identity name (`anonymous`, `member`, `admin`, a credential slug from `vigil
+    assess auth list --host <host>`).
+
+  Raw `post probe-runs` is redirected here.
+- **Work-buffer id passing and the auto-cascade.** **Recording one covering probe is now the
+  whole write — do not also make a separate drain or surface-advance call for the same probe.**
+  When a probe traces back to a `vigil assess work-buffer fetch` batch, carry its
+  `coverage_item_id`, `request_variant_id`, and `service_id` in your working notes and pass them
+  into `record-probe` (`--coverage-item-id`, `--request-variant-id`, `--service-id`) so the probe
+  attaches to the exact coverage item and request it satisfies; the work-items linked to the
+  coverage item drain and the mapped surface advances toward `partially-covered` automatically
+  off the FK link. `--work-item-ids`/`--resolve-surface` still exist to override or narrow that
+  default (point the drain at a different set of items, or suppress the automatic surface
+  advance) when the default cascade isn't the right target. If a batch omitted
+  `coverage_item_id`, look up the matching row via `vigil assess fetch coverage-items` before you
+  resolve coverage state. Reach for `vigil assess resolve coverage-item` separately only for the
+  deliberate manual verdict (`covered`/`not_applicable`/`deferred`/`blocked`) a probe doesn't
+  already imply — never to double-record a probe you just recorded.
+
+Write payloads to `/tmp/<type>-<slug>.json` before calling — inline JSON shell arguments cause
+escaping damage and are not auditable. This is host-side only: a transient JSON payload file for
+the `vigil assess` call itself, distinct from the container-side rule in §11 below, which forbids
+`/tmp`/`/data` for durable engagement artifacts written inside the Kali runtime.
 
 These follow the same backend-first principle as finding recording. Do not defer chain or credential
 recording to the operator. The agent that proves the state writes it; the operator verifies it landed in
@@ -616,7 +710,13 @@ Engagement artifacts live at one physical location on disk but have two names de
 
 - **Host side** — `$DIR = $ROOT_DIR/engagements/<engagement_key>`. Launchers export this as `ENGAGEMENT_DIR` for local file work; assessment-state selection follows the short binding rule in `agent/shared-specialist-core.md`, not this path variable. Use `$DIR/...` (or `$ENGAGEMENT_DIR/...`) for local files and host-side scripts. The Kali runtime remains engagement-agnostic (per-command working dir). The shared mitmproxy normally routes by target host; only an otherwise-unclaimed flow uses the global active pointer, and only when that selected engagement declares `scope_enforcement: bypass`, so attribution and capture still have one owner. Neither service reads `ENGAGEMENT_DIR`, and switching needs no restart.
 - **Kali side** — `/engagements/$ENGAGEMENT_KEY` is the same directory via the bind mount managed by `vigil runtime start`. Launchers also export `ENGAGEMENT_KEY` (the basename of `$DIR`) so commands inside the runtime can resolve it.
-- **`vigil assess kali ...` invocations MUST reference paths as `/engagements/$ENGAGEMENT_KEY/...`** in their command argv — the host path `$DIR` is not valid inside the container, and writing to `/tmp` or `/data` for engagement-scoped artifacts loses them outside the shared-infra conventions.
+- **`vigil assess kali ...` invocations MUST reference paths as
+  `/engagements/$ENGAGEMENT_KEY/...`** in their command argv — the host path `$DIR` is not valid
+  inside the container. Writing to `/tmp` or `/data` for engagement-scoped artifacts loses them:
+  those are container-local scratch paths outside the bind mount, so anything written there
+  doesn't survive outside the shared-infra conventions. (Different `/tmp` than §10's host-side
+  `/tmp/<type>-<slug>.json` payload convention above — that one is a transient JSON file for a
+  host-side `vigil assess` call, never written inside the Kali container.)
 
 ---
 
@@ -723,19 +823,17 @@ Root: `scope.json`, `report.md`, and the transient worker buffer only. Credentia
 
 ## 16. Mandatory Closing Sequence
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+**Two authorities, not one universal list.** The closing-sequence *wrapper* — the parts true
+across every role regardless of what it records (why `agent handoff` is idempotent and worth
+checkpointing mid-task, the exact `agent_id`/`agent_role`/`phase` values to use from the Runtime
+Identity block and why a mismatch orphans the row, why `agent done`/`agent close` are
+operator-only, the plan-state digest cadence) — is canonical in `agent/shared-specialist-core.md`
+"Mandatory Closing Sequence — wrapper". Read it there; do not re-derive it here.
 
-Every specialist runs this before returning:
-
-1. `vigil assess finding record <agent-name> <finding-json>` per finding.
-2. `vigil assess intel record <type> <intel-json>` per intel row.
-3. `vigil assess record-surface <type> <target> <source> [--rationale TEXT]` per surface candidate.
-4. `vigil assess agent handoff --from-json <path>` — use the exact
-   `agent_id`, `agent_role`, and `phase` values from the **Runtime Identity block**
-   the operator placed at the top of your dispatch prompt. The handoff row is keyed
-   on `agent_id`; using a different value creates an orphaned row the operator cannot render.
-   Set `handoff_status` to `ready` when the operator can close the dispatch, or
-   `blocked` when the objective could not complete.
-5. `vigil assess agent render-handoff <agent_id>` — run after step 4 as a self-check.
-   Exit only after the render succeeds. A 404 means the `agent_id` in step 4 did not
-   match the registered dispatch.
+**The exact numbered verb list is role-specific.** Your role prompt states its own under
+`### Closing verbs` (or its own `## Mandatory Closing Sequence` heading) — that list, not a fixed
+sequence in this file, is what you run before returning. Every role's list draws on the same pool
+of backend writes documented elsewhere in this file (finding record §4, intel record §13,
+record-surface §5, `agent handoff` + `render-handoff` self-check), instantiated with that role's
+agent-name, its own additional verbs, and its own ordering — there is no single sequence that
+fits every role, which is why this file does not assert one.

@@ -1,11 +1,12 @@
 # IDOR / Broken-Access-Control Mindset
 
-The generative layer that runs *before* `vulnerability-analyst.md`'s Multi-Perspective Checklist
-and the `idor-testing` skill's methodology — those gate and structure the work; this primes what
-to go looking for. Load it wherever an object, a role, or a tenant boundary is in play, which is
-nearly every authenticated surface. Stop reading an endpoint as "the profile page"; read it as
-*whose data, reachable by what proof of ownership, checked where.* Every ID is a hypothesis that
-the check is missing, misplaced, or only half-applied — not a fixed list to swap and move past.
+The generative layer that runs *before* `agent/agents/vulnerability-analyst.md`'s Multi-Perspective
+Checklist and the `idor-testing` skill's methodology — those gate and structure the work; this
+primes what to go looking for. The operator injects this lens wherever an object, a role, or a
+tenant boundary is in play — which is nearly every authenticated surface. Stop reading an endpoint
+as "the profile page"; read it as *whose data, reachable by what proof of ownership, checked
+where.* Every ID is a hypothesis that the check is missing, misplaced, or only half-applied — not
+a fixed list to swap and move past.
 
 ## 1. Every identifier is a hypothesis
 A numeric ID, UUID, slug, hash, filename, S3 key, order reference — each is a claim that only the
@@ -44,16 +45,35 @@ a new one), they were likely authorized independently, by different code. A reso
 enforces cleanly. Treat each transport as a fresh hypothesis on the same object graph, not a
 redundant re-test.
 
-## 7. Revocation is a race, not an event
+## 7. Two authorities, one decision — the generalization of §5 and §6
+§5 asks which single layer holds the check; §6 asks what happens when REST and GraphQL each
+implement authz independently. Both are one instance of a broader shape: wherever two components
+independently derive the *same* access decision — a permission model and a search controller, an
+API gateway and a web route, a sanitizer at write-time and a renderer at read-time, a client-side
+gate and its server counterpart — one derivation is usually wrong, and the disagreement between
+them is both the finding and the proof. No inference is needed beyond the two answers: if
+subsystem A says a principal may not read X and subsystem B hands X over in the same window, the
+target's own code has already contradicted itself. Look for the second oracle everywhere a
+decision is made once and trusted everywhere else.
+
+## 8. Revocation is a race, not an event
 Deactivated account, downgraded role, revoked share link, expired invite, logged-out session — the
 access decision was made once, at issuance, and may never be re-checked. Test the reference
 (session token, presigned URL, cached capability, cursor, API key) *after* the state change that
 should have killed it, not just before. A check that only fires at mint time is not one that holds
 at use time.
 
+## 9. Instantiate the role nobody has instantiated
+A permission combination that exists in the role model but that no real grant has ever
+instantiated — a tier defined in the schema with zero rows, a combination where every prior grant
+hard-coded one flag off — is a testable configuration, not an absent one. Create it, then test it.
+Keep this distinct from a genuine provisioning wall: "no test account in the required group" is
+sometimes `agent/rules/hunting.md` §2's blocked-for-provisioning case (the precondition truly
+cannot be met) and sometimes a fixture you can simply build — check which one before you record a
+block.
+
 ---
 
-This is a lens, not a checklist — it tells you what to go hunting for, not the full list of what
-you'll find. Run the leads it produces through the Multi-Perspective Checklist and `idor-testing`
-to gate and prove them; the sibling, variant, or adjacent access-control gap on this surface is
+This is guidance, not a cage or a checklist: it does not restrict which candidates you may pursue,
+and it does not enumerate every case you will find — the sibling, variant, or adjacent case is
 still yours to find.
