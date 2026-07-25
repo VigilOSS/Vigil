@@ -66,12 +66,19 @@ def _runtimes():
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_pin_injects_resolve_for_curl_on_docker_desktop():
+def test_pin_injects_resolve_for_curl_on_docker_desktop(monkeypatch):
+    # Multi-A selection is `secrets.choice` over the resolved set — deliberately
+    # randomized so a multi-A target does not concentrate every request on
+    # address zero (see `test_apply_resolve_pin_distributes_multi_address_hosts`
+    # in agent/scripts/assess/tests/test_kali_resolve.py). This test is about the
+    # INJECTION, not the selection, so pin the choice to make it deterministic;
+    # asserting a specific element made it a ~50% flake.
     kr = _import("assess.lib.kali_resolve")
     _rr, dd, _lx = _runtimes()
+    monkeypatch.setattr(kr.secrets, "choice", lambda values: values[0])
     cmd = ["curl", "-sS", "https://api.example.com/v1/users"]
     ip = kr.apply_resolve_pin(cmd, "curl", runtime=dd, ips=["203.0.113.7", "203.0.113.8"])
-    assert ip == "203.0.113.7"  # multi-A pins the FIRST address (documented)
+    assert ip == "203.0.113.7"
     assert cmd[-2:] == ["--resolve", "api.example.com:443:203.0.113.7"]
 
 

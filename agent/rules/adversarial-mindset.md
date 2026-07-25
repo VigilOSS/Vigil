@@ -164,8 +164,9 @@ probe that answers the question) for the operational discipline this mindset mot
 ## 10. Dispatch one lens. Cycle across batches.
 
 > This is operator-only dispatch doctrine (which lens to name, cadence rule for cycling lenses
-> across batches) — it now lives in `agent/operator-core.md`'s dispatch doctrine, not the
-> specialist-facing baseline.
+> across batches) — it now lives in `agent/phases/phase-4-consume-test.md`'s "Lens Vocabulary —
+> Finer-Grained Failure-Family Lenses" section ("Dispatch one mindset lens per specialist; cycle
+> across batches" and "Lens rotation"), not the specialist-facing baseline.
 
 ---
 
@@ -174,7 +175,11 @@ probe that answers the question) for the operational discipline this mindset mot
 This document generates hypotheses. `hunting.md` gates them into findings.
 
 - A hypothesis from this document is not a finding. It is a candidate to test.
-- A candidate that passes the 8-question gate in `hunting.md` with proved attacker outcome is a finding.
+- A candidate becomes a finding when it clears `agent/rules/hunting.md` §2: evidence-backed, proved
+  attacker outcome, not just an existence proof. The vulnerability-analyst applies this bar through
+  the 8-Question Gate in `agent/agents/vulnerability-analyst.md` ("## The 8-Question Gate"); every
+  other hunting role — fuzzer, source-analyzer, exploit-developer, code-vuln-hunter — applies the
+  same `hunting.md` §2 bar directly, without that gate's mechanics.
 - The mindset accelerates finding generation. The discipline prevents false positives.
 
 The adversarial frame accelerates discovery — evidence requirements keep it honest. The most dangerous attacker is creative AND precise. Be both.

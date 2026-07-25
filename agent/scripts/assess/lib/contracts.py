@@ -1717,6 +1717,25 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Discovery command. Filter by `--skill <name>` (references whose `skill:` frontmatter includes it), `--category <label>`, or `--grep <s>`.",
         ),
     ),
+    "list-mindsets": CommandContract(
+        name="list-mindsets",
+        goals=("discovery", "dispatch"),
+        summary="List the Dispatch-Mindset lens packets (agent/rules/mindsets/) with compact descriptions.",
+        schema_name="agent/rules/mindsets/*.md (H1 + preamble; no frontmatter by design)",
+        preferred_invocations=(
+            "vigil assess list-mindsets",
+            "vigil assess list-mindsets --sections",
+            "vigil assess list-mindsets --grep access-control",
+            "vigil assess list-mindsets --json",
+        ),
+        author_supplied_fields=(),
+        notes=(
+            "Discovery command — the mindsets analogue of `list-skills` / `list-references` / `list-commands`. The lens library was the last discovery axis enumerated by hand in per-doc menus; this command discovers it from disk so a new packet is picked up on the next run.",
+            "Name exactly ONE packet per dispatch in the `mindset lens:` row — a menu handed to a specialist defeats the point of the lens.",
+            "Mindset packets carry NO YAML frontmatter on purpose (they are prose the specialist reads top-to-bottom, and a metadata block would head its context window). `title` is the H1 and `description` is derived from the file's own preamble.",
+            "`--sections` expands each packet into its `##` headings — the detail needed to choose a lens without opening the file; `--grep <s>` filters on name/title/description/headings; `--json` emits the structured rows.",
+        ),
+    ),
     "contract": CommandContract(
         name="contract",
         goals=("discovery",),

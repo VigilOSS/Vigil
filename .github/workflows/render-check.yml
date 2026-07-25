@@ -17,12 +17,17 @@ on:
   pull_request:
     paths:
       - "agent/operator-core.md"
+      - "agent/operator-core-blue.md"
+      - "agent/operator-core-code.md"
       - "agent/agents/**"
       - "agent/scripts/render-operator-prompts.sh"
       - "agent/AGENTS.md"
       - "agent/CLAUDE.md"
       - "agent/.claude/agents/**"
       - "agent/.codex/agents/**"
+      - "agent/.goose/**"
+      - "agent/.opencode/**"
+      - "agent/rules/**"
   push:
     branches: [main]
 
