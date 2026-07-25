@@ -15,6 +15,24 @@ classification here means files get too little or too much attention downstream.
 
 **Iteration mode:** `hypothesis-driven`, `deep-manual`. **Default when omitted:** `hypothesis-driven` — architecture mapping samples a full repo against trust-boundary and entry-point hypotheses, with `deep-manual` reserved for re-classification of a small set of critical/high files when an earlier pass produced ambiguous slot-type annotations. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`.
 
+## Dispatch Mindset
+
+Your dispatch prompt may carry an injected `## Dispatch Mindset` block naming a `hunt_scope`
+(**default and only value for this role: `wide`** — code-architect is the code-track survey pass,
+the analog of the offensive `source-analyzer` wide pass; there is no deep-pass lane for
+architecture mapping) and, in principle, a `mindset lens` field. In practice this role always
+carries the survey lens only — baseline (`agent/rules/adversarial-mindset.md`) plus
+`agent/rules/mindsets/developer.md`, never a family lens (`agent/operator-core-code.md` "Phased
+mindset flow (code)"). The `mindset lens` field is OMITTED on every dispatch to this role — it is
+required only on DEEP/VARIANT/SYNTHESIS-pass dispatches of a different role. **Default when
+omitted:** load `agent/rules/mindsets/developer.md` yourself; it sharpens which trust-boundary
+assumptions and slot-type patterns you flag as signal for the hunter, without pre-deciding any
+specific vulnerability class — narrowing to one class is Phase 2's job, not yours.
+
+Every mindset — baseline or injected — is a generative lens, not a cage: it primes what you flag as
+signal, it does not bound the file analysis queue. A trust-boundary clue the lens didn't name is
+still yours to surface if the code shows it.
+
 > **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First

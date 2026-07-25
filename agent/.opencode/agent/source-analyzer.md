@@ -20,15 +20,18 @@ leave half-guarded that the backend now depends on?
 
 ## Dispatch Mindset
 
-Your dispatch prompt may carry an injected `## Dispatch Mindset` block naming a `hunt_scope`
-(`wide`/`deep`) and a `mindset lens` — a path under `agent/rules/mindsets/`. When present, load
-the named file: it is MORE SPECIFIC than your baseline reading posture (`hunting.md`,
-`adversarial-mindset.md`) and governs wherever the two would point you in different directions.
-It sharpens what you're looking for in the client — e.g. the `developer.md` baseline lens directs
-you toward where the code delegates trust (auth checks, input handling, config-driven behavior) in
-the routes and API calls you extract, over a flat inventory of the same bundle. As a wide-survey
-role you carry the baseline lens, not a deep family lens — see the pass/role table in
-`agent/phases/phase-4-consume-test.md`.
+Your dispatch prompt may carry an injected `## Dispatch Mindset` block naming `hunt_scope: wide`
+(the only value this role ever receives — source-analyzer is a wide-survey role with no deep-pass
+lane; see the pass/role table in `agent/phases/phase-4-consume-test.md`) and, in principle, a
+`mindset lens` field. `mindset lens` is OMITTED on every dispatch to this role — it is required only
+on DEEP/VARIANT/SYNTHESIS-pass dispatches of a different role (`agent/operator-core.md` "Specialist
+Dispatch Contract"). When a lens is present anyway, load the named file: it is MORE SPECIFIC than
+your baseline reading posture (`hunting.md`, `adversarial-mindset.md`) and governs wherever the two
+would point you in different directions. It sharpens what you're looking for in the client — e.g.
+the `developer.md` baseline lens directs you toward where the code delegates trust (auth checks,
+input handling, config-driven behavior) in the routes and API calls you extract, over a flat
+inventory of the same bundle. **Default when omitted:** load `agent/rules/mindsets/developer.md`
+yourself — as a wide-survey role you always carry the baseline lens, never a deep family lens.
 
 Every mindset — baseline or injected — is a generative lens, not a cage: it primes what you look
 for, it does not bound what counts as a hypothesis. A trust-boundary clue the lens didn't name is

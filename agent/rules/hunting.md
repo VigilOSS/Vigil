@@ -33,9 +33,63 @@ A strong-but-unproven finding is parked, not dropped: hold it with `evidence_typ
 
 **Recording a finding is not grading it.** A finding at `verification_state=unreviewed` is an **open question**, not a graded N/A — the lifecycle default means "not yet judged," not "judged harmless." Do not assert "no P2 here" / "this surface is clean" while any unauth or medium-plus finding is still `unreviewed`: an unreviewed finding is exactly what a clean-bill-of-health claim is supposed to have already resolved. Drive it to a verifier disposition before you grade the surface.
 
-**ROE-blocked proof is a CANDIDATE, not a severity downgrade.** This rule demands the attacker outcome — but when you cannot safely complete the final proof step because the program's rules of engagement forbid it (touching real customer data, pivoting into production, exfiltrating a record you have already shown you can reach), that is a constraint on *you*, not a weakness in the finding. Do not lower the severity to match what you were permitted to demonstrate. Grade the **candidate at impact-if-true** — the severity it carries if the blocked step succeeds, which the surrounding evidence already makes likely — and record the single unblocking test that would convert it: set `details.roe_blocked=true` and put the exact next action in `details.required_followup`. This is distinct from the theoretical/`chain_required` park above (which needs another *bug* to land): here the primitive is proved and only the demonstration is walled off by policy. An ROE wall must never masquerade as a low-severity verdict.
+### ROE-blocked: a candidate, not a severity downgrade
 
-**Blocked-for-provisioning is a THIRD category — distinct from both `roe_blocked` and theoretical/`chain_required`.** `roe_blocked` means the primitive is proved and only the final demonstration is walled off by policy; theoretical/`chain_required` means the finding needs another *bug* to complete. A third case is neither: the attempt cannot even start because a precondition is missing — no test account in the required group, no access to the physical line/device, no additional credential or access grant — and the wall may be permanent for this engagement. Record this with `details.block_reason` (why the attempt could not proceed) and `details.unblock_requirements` (`{kind: account|line|device|credential|access, description, requested_from}` — what is missing and who/what would need to provision it); roll repeated attempts up into `details.attempts_summary` instead of scattering them across free-text notes. A `blocked` finding stays OUT of the report — unlike an `roe_blocked` candidate, it is not gradeable at impact-if-true, because the primitive itself was never reached. But the unblock path is first-class, not a dead end: when a later finding or chain lands that would satisfy the block (the missing account gets provisioned, the missing device turns up, the missing credential surfaces elsewhere), link the two — `vigil assess finding link <blocked-finding-slug> --link-kind unblocked_by --target-kind finding --target-ref <finding-that-unblocks-it>` — so the operator, and the next engagement against this target, see the connection instead of re-discovering it from scratch.
+This rule demands the attacker outcome — but when you cannot safely complete the final
+proof step because the program's rules of engagement forbid it (touching real customer
+data, pivoting into production, exfiltrating a record you have already shown you can
+reach), that is a constraint on *you*, not a weakness in the finding. Do not lower the
+severity to match what you were permitted to demonstrate. Grade the **candidate at
+impact-if-true** — the severity it carries if the blocked step succeeds, which the
+surrounding evidence already makes likely — and record the single unblocking test that
+would convert it:
+
+| Field | Value |
+|---|---|
+| `details.roe_blocked` | `true` |
+| `details.required_followup` | the exact next action that would convert the candidate |
+
+This is distinct from the theoretical/`chain_required` park above (which needs another
+*bug* to land): here the primitive is proved and only the demonstration is walled off by
+policy. An ROE wall must never masquerade as a low-severity verdict.
+
+### Blocked-for-provisioning: a third category
+
+Distinct from both `roe_blocked` and theoretical/`chain_required`: `roe_blocked` means
+the primitive is proved and only the final demonstration is walled off by policy;
+theoretical/`chain_required` means the finding needs another *bug* to complete. A third
+case is neither — the attempt cannot even start because a precondition is missing: no
+test account in the required group, no access to the physical line/device, no
+additional credential or access grant. The wall may be permanent for this engagement.
+Record it with:
+
+| Field | Purpose |
+|---|---|
+| `details.block_reason` | why the attempt could not proceed |
+| `details.unblock_requirements` | `{kind: account\|line\|device\|credential\|access, description, requested_from}` — what is missing and who/what would need to provision it |
+| `details.attempts_summary` | repeated attempts rolled up here instead of scattered across free-text notes |
+
+A `blocked` finding stays OUT of the report — unlike an `roe_blocked` candidate, it is
+not gradeable at impact-if-true, because the primitive itself was never reached. But the
+unblock path is first-class, not a dead end: when a later finding or chain lands that
+would satisfy the block (the missing account gets provisioned, the missing device turns
+up, the missing credential surfaces elsewhere), link the two — `vigil assess finding
+link <blocked-finding-slug> --link-kind unblocked_by --target-kind finding --target-ref
+<finding-that-unblocks-it>` — so the operator, and the next engagement against this
+target, see the connection instead of re-discovering it from scratch.
+
+### Re-derive a blocked record before accepting it
+
+A `blocked` record encodes a premise that was true when it was written — an identity
+that did not exist yet, a fixture nobody had built, a role that could not be granted, a
+product "not provisioned for this user." Premises expire; the record does not.
+Re-derive the premise before accepting the block, and re-read the standing block list
+(`vigil assess list-blocked-techniques`, plus `vigil assess finding list
+--verification-disposition blocked`) whenever a new identity, credential, or access
+grant lands — tie the re-check to that state change, or to phase entry, never to a
+feeling that the block is probably still good. A single stale "not provisioned for this
+user" sentence can hide an entire product's surface for the rest of the engagement once
+a second identity gains access to it.
 
 ## 3. Precondition equivalence check
 
@@ -129,7 +183,7 @@ Switch endpoint, method, surface, or hypothesis when a lead is genuinely exhaust
 
 Being thorough and refusing to rush is what earns high confidence that no vulnerability was left undiscovered; a pass that finishes fast but shallow has not done the job. Do not trade coverage or validation depth for speed, and do not abandon a live lead because it is taking time. This is not license to grind genuinely dead surface — rules 5 and 15 govern that: rotate only when a surface is truly exhausted, then spend the reclaimed time going deep on live surface.
 
-## 16b. Exhaust confirmed leads first; break the same-response-class loop
+## 16a. Exhaust confirmed leads first; break the same-response-class loop
 
 A *confirmed* lead — a host that answers but blocks, a gate that rejects (any
 auth/permission wall), a partial primitive that half-works — must be either
@@ -149,7 +203,7 @@ signal. This does NOT apply to a probe you are repeating on purpose to detect
 state divergence (rule 4's push-harder signals) — that is new information, not
 a stall.
 
-## 16c. Phase-exhausted means every flagged host has a recorded verdict — not a feeling of completion
+## 16b. Phase-exhausted means every flagged host has a recorded verdict — not a feeling of completion
 
 Rule 16 measures the *job* by confidence; this rule operationalizes when a
 *phase* is actually done. A phase is **exhausted** only when every real-app
@@ -170,8 +224,8 @@ the hunt is the one to distrust most.
 ledger means every *flagged* host has a verdict — it does **not** mean the
 surface is fully explored. A high-value API that sits below the route
 threshold may never have been flagged at all, so a green ledger can co-exist
-with an entire untested application (the "a URL can be a whole application"
-rule below is the companion check). Treat ledger-green as the minimum bar you
+with an entire untested application (rule 25, "A URL can be a whole application,"
+below, is the companion check). Treat ledger-green as the minimum bar you
 cleared, then keep looking for the surface the ledger could not see.
 
 **A negative verdict on one tier or lens does not cover siblings.** A
@@ -181,6 +235,15 @@ sibling tier — different auth level, different role, different trust context �
 lens on an already-worked surface is a fresh test, not a redundant one. Before recording
 a negative and closing the work item, state "proven fails-closed at [tier] / [lens] /
 [run-id]" — anything shorter than that is a disposition you cannot defend.
+
+**Bracket every negative with a live positive control.** Prove a positive on the same
+route, verb, identity, and gateway, in the same window, before you record the negative.
+Without one you cannot distinguish "denied" from "blocked," "not found," "not
+provisioned," or "not reached" — the response bytes alone don't carry that distinction.
+This generalizes a case already enforced narrowly: before a failed replay becomes a
+negative disposition, `agent/agents/vulnerability-analyst.md` requires proving the
+identity is actually live — `vigil assess auth status --probe --identity <name>
+--probe-url <known-authed-url>` — the identity-specific instance of this general rule.
 
 **Pull the next uncovered host; do not sample.** The default loop is
 structural, not intuitive: take the next `uncovered` real-app host straight off
@@ -207,8 +270,8 @@ When progress stalls, use this table to pick a concrete next action instead of g
 
 > **Sub-agent dispatch discipline** (default-to-dispatch, inline only for
 > operator-scoped work, one-specialist/one-objective/one-skill-set): moved to
-> `agent/operator-core.md`'s dispatch doctrine — operator-only content, not a
-> specialist read.
+> `agent/operator-core.md`'s "### Dispatch Discipline" section (under
+> "## Subagent Dispatch") — operator-only content, not a specialist read.
 
 ## 19. Developer psychology heuristics
 
@@ -220,13 +283,16 @@ When progress stalls, use this table to pick a concrete next action instead of g
 ## 20. Severity-CVSS alignment audit before report
 
 > **Severity-CVSS alignment audit before report:** moved to
-> `agent/operator-core.md`'s dispatch doctrine — operator-only content, not a
-> specialist read.
+> `agent/operator-core.md`'s "### Mandatory Phase-Exit Passes" section —
+> operator-only content, not a specialist read.
 
 ## 21. Stale-text scrub before publishing
 
-> **Stale-text scrub before publishing:** moved to `agent/operator-core.md`'s
-> dispatch doctrine — operator-only content, not a specialist read.
+> **Stale-text scrub before publishing:** moved to the "Stale-text scrub clean"
+> Definition-of-Done item in `agent/phases/phase-8-report.md`, with the
+> executable recipe under "### Stale-text scrub (runs before every QA pass)"
+> in `agent/skills/report-generation/SKILL.md` — operator/report-writer
+> content, not a specialist read.
 
 ## 22. Smallest probe that answers the question
 
@@ -367,7 +433,7 @@ may have been an `http=000` transport error (c); a "clean" may have been a statu
 never read the body (a); a "gated"/"not-present" may have been a WAF challenge page never
 re-rendered in a browser (d).
 
-## 23a. Aggregate-rate discipline — a shared egress IP sees the SUM of every concurrent dispatch
+## 23a. Aggregate-rate discipline — a shared egress IP sees the SUM of every concurrent dispatch (a sibling rule to §23; not that section's sub-clause 23(a))
 
 A WAF-fronted estate rate-limits (or hard-blocks) the shared runtime egress IP, not any single
 dispatch — four agents each issuing a "safe" 5 r/s look like one client doing 20 r/s at the
@@ -412,7 +478,7 @@ To avoid fabricating self-resolution hits:
   source IP falls in RFC-1918 space is self-resolution regardless of the DNS name.
 - Confirm public egress on the OOB hit before recording a SSRF finding.
 
-## A URL can be a whole application — go deep on app units
+## 25. A URL can be a whole application — go deep on app units
 
 A single host often carries several distinct applications under different
 path-prefixes — `host/giving` (a donations app), `host/admin` (tenant
@@ -465,7 +531,7 @@ with `vigil assess work-buffer fetch-by-unit`; inspect `vigil assess contract
 work-buffer` for optional unit/path/class narrowing and explicit sizing before
 dispatching it.
 
-## Attack headers are ordinary injected inputs, not special-cased
+## 26. Attack headers are ordinary injected inputs, not special-cased
 
 A header the application (or a fronting proxy/CDN) trusts as authoritative is an
 injected-at-test-time input like any query param or body field — you choose which

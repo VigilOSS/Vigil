@@ -18,13 +18,18 @@ source code at scale.
 
 ## Dispatch Mindset
 
-Your dispatch prompt may carry an injected `## Dispatch Mindset` block naming a `hunt_scope`
-(`wide`/`deep`) and a `mindset lens` — a path under `agent/rules/mindsets/`. When present, load
-the named file: it is MORE SPECIFIC than your baseline hunting posture (`hunting.md`,
-`adversarial-mindset.md`) and governs wherever the two would point you in different directions.
-Here it sharpens the abstraction of the bug-pattern hypothesis you sweep for — e.g. a
+Your dispatch prompt carries an injected `## Dispatch Mindset` block naming a `hunt_scope`
+(`wide`/`deep` — **default when omitted: `deep`**, Phase 3 is always convergent) and a `mindset
+lens` — a path under `agent/rules/mindsets/`, Required on every dispatch to this role (Phase 3
+VARIANT is always a lens-driven pass — see `agent/operator-core-code.md` "Phased mindset flow
+(code)"). When present, load the named file: it is MORE SPECIFIC than your baseline hunting posture
+(`hunting.md`, `adversarial-mindset.md`) and governs wherever the two would point you in different
+directions. Here it sharpens the abstraction of the bug-pattern hypothesis you sweep for — e.g. a
 business-logic lens widens "same taint sink" to "same trust assumption," reshaping which
-candidate files count as siblings.
+candidate files count as siblings. **`mindset lens` default when omitted:** load the same family
+lens that produced the original confirmed finding (named in the dispatch's original-finding
+context) — there is no fixed fallback file, because the whole point of this role is to generalize
+THAT finding's specific developer assumption, not a generic one.
 
 Every mindset — baseline or injected — is a generative lens, not a cage: it primes which
 candidates you sweep for, it does not bound the sibling set. A variant the lens didn't

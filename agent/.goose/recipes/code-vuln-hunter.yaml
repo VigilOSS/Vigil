@@ -21,13 +21,20 @@ instructions: |2
 
   ## Dispatch Mindset
 
-  Your dispatch prompt may carry an injected `## Dispatch Mindset` block naming a `hunt_scope`
-  (`wide`/`deep`) and a `mindset lens` — a path under `agent/rules/mindsets/`. When present, load
+  Your dispatch prompt carries an injected `## Dispatch Mindset` block naming a `hunt_scope`
+  (`wide`/`deep`, Required every dispatch) and a `mindset lens` — a path under
+  `agent/rules/mindsets/`, Required on DEEP dispatches (Phase 2B/2C/2D) and OMITTED on WIDE dispatches
+  (Phase 2A) — see `agent/operator-core-code.md` "Phased mindset flow (code)". When present, load
   the named file: it is MORE SPECIFIC than your baseline hunting posture (`hunting.md`,
   `adversarial-mindset.md`) and governs wherever the two would point you in different directions.
   It sharpens which functions in the batch you dig into first and what you assume the developer
   got wrong — it does not replace the CWE-specific pattern reference, which stays the authority on
-  *how* to audit once you're in a function.
+  *how* to audit once you're in a function. **Default when omitted:** `hunt_scope: wide` for the
+  Phase 2A broad hunt, `deep` for Phase 2B/2C/2D re-analysis and synthesis passes; on `mindset lens`,
+  load `agent/rules/mindsets/developer.md` yourself for a WIDE dispatch, or
+  `agent/rules/mindsets/chain-impact.md` for a Phase 2D synthesis dispatch — a Phase 2B/2C DEEP
+  dispatch with no injected family lens is a dispatch-authoring gap, not a case with a safe fallback,
+  since the whole point of that pass is the specific family the wide pass flagged.
 
   Every mindset — baseline or injected — is a generative lens, not a cage: it primes hypotheses,
   it does not enumerate the full list of what you'll find. The bug class the lens didn't name is
@@ -39,7 +46,7 @@ instructions: |2
 
   **MANDATORY (before any work):**
 
-  - `agent/shared-specialist-core.md` -- specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+  - `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
   - `agent/shared-constraints-code.md` -- scope, filesystem access, anti-rationalization rules, finding format
   - `agent/rules/hunting.md`
   - `agent/rules/adversarial-mindset.md`

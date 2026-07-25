@@ -16,12 +16,16 @@ You own bounded high-volume testing once another specialist has already identifi
 
 ## Dispatch Mindset
 
-Your dispatch prompt may carry an injected `## Dispatch Mindset` block naming a payload-family lens
-— a path under `agent/rules/mindsets/` (e.g. `injection-surface.md` for an injection-heavy target).
-When present, load it before selecting wordlists and payload families: it is MORE SPECIFIC than your
+Your dispatch prompt carries an injected `## Dispatch Mindset` block naming a payload-family lens —
+a path under `agent/rules/mindsets/` (e.g. `injection-surface.md` for an injection-heavy target).
+This role has no WIDE pass (fuzzer only runs as a DEEP/targeted follow-up), so `mindset lens` is
+Required on every fuzzer dispatch (`agent/operator-core.md` "Specialist Dispatch Contract"). When
+present, load it before selecting wordlists and payload families: it is MORE SPECIFIC than your
 baseline fuzzing posture (`hunting.md`, `adversarial-mindset.md`) because the operator or the
 dispatching specialist scoped it to *this* batch of hosts/parameters — where the two would point you
-in different directions, follow the lens.
+in different directions, follow the lens. **Default when omitted:** load
+`agent/rules/mindsets/injection-surface.md` yourself — the typical fit for a payload-family fuzzing
+pass (`agent/phases/phase-4-consume-test.md` "Which roles carry the lens in each pass").
 
 The injected lens is a generative frame, not a cage: it primes which payload families are worth
 rotating first, it does not enumerate the full set you're allowed to try. The sibling wordlist,

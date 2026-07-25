@@ -137,8 +137,11 @@ through, an injected packet under `agent/rules/mindsets/` that is MORE SPECIFIC 
 baseline mindset. Three knobs; a full code dispatch sets `dispatch_mode` + `hunt_scope` and, on the
 lens-carrying roles below, the mindset lens.
 
-**Which code roles carry an injected mindset lens.** Every vuln-hunting role has its own
-`## Dispatch Mindset` slot; the pass decides which lens fills it:
+**Which code roles carry an injected mindset lens.** `code-architect`, `code-vuln-hunter`, and
+`code-variant-hunter` each carry their own `## Dispatch Mindset` slot; the pass decides which lens
+fills it. `code-vuln-verifier` and `code-fuzz-engineer` do NOT carry a slot at all — see "Scoped
+out" below for why. `source-analyzer` is named here too, for the case where it runs a code-track
+dispatch (see its own bullet below):
 - **`code-architect` (Phase 1 CLASSIFY+MAP)** — the code-track survey role, analog of the offensive
   `source-analyzer` wide pass. Carries the survey lens only: baseline (`agent/rules/adversarial-mindset.md`)
   plus `agent/rules/mindsets/developer.md`, no family lens. It maps files/modules for per-family
@@ -178,9 +181,14 @@ item-iterating` over the file queue), and the code DEEP pass as `deep-manual` (P
 per-role `dispatch_mode` defaults from the "Agent Roster" — do not force a code wide pass onto
 `hypothesis-driven`.
 
-**Verification uses the verification-skeptic stance — by reference, not duplication.** The offensive
-core injects `agent/rules/mindsets/verification-skeptic.md` (burden-of-proof; **PASS and KILL cost the
-same** cited-evidence bar) into VA verification. The code track already realizes that exact stance in
+**Verification uses the verification-skeptic stance — by reference, not duplication.** On the
+offensive side, `vulnerability-analyst` loads `agent/rules/mindsets/verification-skeptic.md`
+(burden-of-proof; **PASS and KILL cost the same** cited-evidence bar) directly as MANDATORY standing
+context for every pass it runs (`agent/agents/vulnerability-analyst.md` Load First and its
+`## Dispatch Mindset` slot) — this is the role's own standing load, not an operator-injected
+`hunt_scope`/`mindset lens` dispatch value, and `agent/operator-core.md` does not name the file
+anywhere (no operator menu offers it as a per-dispatch choice). The code track already realizes that
+exact stance in
 `code-vuln-verifier` via `agent/skills/code-finding-verification/SKILL.md` (PASS requires cited
 supporting evidence at the hunter's rigor bar; KILL requires cited counter-evidence at the same bar;
 absence of counter-evidence is not PASS, plausibility of counter-evidence is not KILL — see also
@@ -275,7 +283,7 @@ flow (code)" above for which pass sets which value):
 ```
 ## Dispatch Mindset
 hunt_scope: <wide|deep>
-mindset lens: <path under agent/rules/mindsets/> — <one-line reason it fits the observed signal>
+mindset lens: <path under agent/rules/mindsets/>[ (<finer-grained qualifier>)] — <one-line reason it fits the observed signal>
 ```
 
 Omit the lens line on WIDE survey dispatches (baseline + `developer.md` only, no family lens) and on

@@ -2,15 +2,34 @@
 
 Load this file first alongside your role file and the family's
 `shared-constraints*.md` (offensive: `agent/shared-constraints.md`; code:
-`agent/shared-constraints-code.md`). It holds the universal layer shared across
-roles — Specialist Context Isolation, the closing-sequence wrapper, and the
-finding-recording contract (restated from `agent/shared-constraints.md` §4).
+`agent/shared-constraints-code.md`) — see "Load Sequence" below for how this fits with
+skill/reference loading and target-facing work. This file holds the universal layer shared
+across roles — Specialist Context Isolation, the closing-sequence wrapper, and the finding-ID
+prefix table, title formula, and CVSS↔severity mapping that is the counterpart to the full
+finding-recording contract in `agent/shared-constraints.md` §4.
 Read it once; do not re-author any of this in a role file.
 
 **Canonical pointer string** — every role file references this content with
 this exact line (use verbatim so all call sites match):
 
 > **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+
+---
+
+## Load Sequence
+
+One order, so "load this file first" claims across the Load First set don't compete with each
+other:
+
+1. **Load First batch.** Read your role file's `## Load First` "MANDATORY" list in one pass —
+   this file, `agent/shared-constraints*.md`, the rules files, and the skill(s) your dispatch
+   names. These load together as one set; none of them is "first" ahead of the others.
+2. **Skill + reference discovery** (`agent/shared-constraints.md` §3) — immediately after the
+   Load First batch, run `vigil assess list-references` (add `--skill <name>` to filter) to find
+   and load the paired references for your named skill(s). `list-commands` / `list-skills` (see
+   "Command & Skill Discovery" below) are the same one-time "learn the shape of the surface"
+   pass — run them in this step, not as a separate later "first."
+3. **Target-facing work begins only after 1 and 2 are complete.**
 
 ---
 
@@ -24,6 +43,18 @@ startup, and cross-agent state management. Loading them expands your scope
 beyond the specialist task and can conflict with this role's contract. Shared
 rules that specialists need live in `agent/shared-constraints*.md` and are
 already listed below.
+
+---
+
+## Reasoning quality > response brevity
+
+Reason fully through the work as you go — narrate observations between tool calls, work through
+hypotheses, summarize findings as you discover them. Careful, unhurried reasoning is how an
+agent produces good red-team analysis — don't truncate it to be brief.
+
+This is not a license to pad the response instead of writing to the backend: the response is
+your reflection on the work, not a replacement for it. Both coexist — detailed reasoning in the
+response, structured state in the backend tables (see "Output Hygiene" below).
 
 ---
 
@@ -59,13 +90,10 @@ Bad: "IDOR vulnerability found." Good: "IDOR in /api/users/{id} allows anonymous
 
 If your CVSS score does not fall within the matching severity range, adjust one or the other before recording.
 
-Record every finding with `vigil assess finding record <agent-name>
-<finding-json-file>`; the payload must match
-`schemas/finding-record.schema.json`. Run `vigil assess contract
-finding record` for the canonical field list, lifecycle defaults, and an
-example payload before your first call (Contract-First Rule). Full recording
-rules — dedup, chain metadata, the `notes` replayable-commands requirement —
-live in `agent/shared-constraints.md` §4.
+The recording command, the JSON schema, the Contract-First check, and the full rules (dedup,
+chain metadata, the `notes` replayable-commands requirement) are canonical in
+`agent/shared-constraints.md` §4 ("Finding IDs and Recording") — read them there, do not
+re-derive them here.
 
 ---
 
@@ -85,8 +113,9 @@ neither `vigil use` nor `ENGAGEMENT_DIR` selects `vigil assess` state.
 
 ## Command & Skill Discovery
 
-Your dispatch names the skills and commands relevant to the task it hands you,
-but it will not enumerate everything available — learn the *shape* of the
+This is "Load Sequence" step 2 above — run it once, immediately after your Load First batch, not
+as a separate later "first." Your dispatch names the skills and commands relevant to the task it
+hands you, but it will not enumerate everything available — learn the *shape* of the
 help surface once, at the start, so you can recall the right category
 yourself when a lead appears mid-task (e.g. an SSRF signal → the oob/callback
 group) instead of re-deriving from prose or asking the operator:
@@ -164,15 +193,5 @@ context grows long mid-task, even between checkpoints — re-emit a compact
 plan-state digest in your response — objective / done so far / still pending /
 immediate next step (~3-5 lines) — so the objective does not drift to the
 bottom of a long context. This is additive to the handoff write, not a
-separate ceremony.
-
-### Reasoning quality > response brevity
-
-Reason fully through the work as you go — narrate observations between tool
-calls, work through hypotheses, summarize findings as you discover them. That's
-how Claude reasons well, and red-team work depends on careful reasoning. Don't
-truncate analysis to be brief.
-
-The point of this section is not "be terse"; it's "don't let the markdown
-response *replace* the backend writes." Both can coexist: detailed reasoning
-in the response, structured state in the backend.
+separate ceremony. See "Reasoning quality > response brevity" above — the digest
+is additive to, not a replacement for, working through the reasoning as you go.
