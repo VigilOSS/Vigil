@@ -3749,7 +3749,9 @@ def _sweep_credential_age(
     """Lazy age-backstop sweep, run at the start of every credential read.
 
     ``now - last_seen_at > 8h`` and state not already ``dead`` -> persist
-    ``stale`` (advisory; the row stays listed so the LLM re-probes it).
+    ``stale`` (advisory; the row stays listed so the LLM re-probes it, and the
+    runtime identity injector still REPLAYS it with a warning — only a
+    proven-dead probe verdict blocks replay).
     ``> 5 days`` -> hard-DELETE the row. Rows with a NULL/unparseable
     ``last_seen_at`` (predate the column) are left untouched — no backstop
     rather than a false purge. Operates on the caller's (thread-local)
@@ -3779,6 +3781,35 @@ def _sweep_credential_age(
     if to_stale:
         connection.executemany(
             "UPDATE engagement_credentials SET state = 'stale' WHERE id = ?", to_stale
+        )
+
+
+def touch_credential_use(
+    engagement_id: int,
+    identity_name: str,
+    *,
+    now: datetime | None = None,
+) -> None:
+    """Refresh ``last_seen_at`` because the identity was USED, not written.
+
+    The age backstop (:func:`_sweep_credential_age`) measures ``now -
+    last_seen_at``, but before this existed only a WRITE (capture / import /
+    live probe) ever moved ``last_seen_at``. An identity that was being
+    replayed on every request therefore still flipped to ``stale`` at exactly
+    ``_CRED_STALE_TTL_SECONDS`` — the backstop fired against actively-used
+    sessions, which is the opposite of what an age backstop is for.
+
+    A resolve-for-replay is a use, so it refreshes the clock. ``updated_at`` is
+    deliberately NOT moved: it means "material last changed", and a use changes
+    nothing. ``dead`` rows are never touched — a proven-dead session must age
+    out to the hard-delete backstop rather than be kept alive by reads.
+    """
+    stamp = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with get_connection() as connection:
+        connection.execute(
+            "UPDATE engagement_credentials SET last_seen_at = ? "
+            "WHERE engagement_id = ? AND identity_name = ? AND state != 'dead'",
+            (stamp, engagement_id, identity_name),
         )
 
 
@@ -3909,7 +3940,17 @@ def list_credentials(
     return materials
 
 
-def get_credential(engagement_id: int, identity_name: str) -> dict[str, Any] | None:
+def get_credential(
+    engagement_id: int, identity_name: str, *, touch: bool = False
+) -> dict[str, Any] | None:
+    """Read one identity's material.
+
+    ``touch=True`` marks this read as a USE and refreshes ``last_seen_at`` (see
+    :func:`touch_credential_use`) so an actively-replayed identity cannot age
+    into ``stale``. The age sweep still runs FIRST, against the previous use
+    time, so a genuine 8h gap is still flagged for re-probing before the new
+    use resets the clock. Plain reads (listing, display) leave the clock alone.
+    """
     with get_connection() as connection:
         _sweep_credential_age(connection, engagement_id)
         row = connection.execute(
@@ -3919,6 +3960,15 @@ def get_credential(engagement_id: int, identity_name: str) -> dict[str, Any] | N
         ).fetchone()
     if not row:
         return None
+    if touch:
+        touch_credential_use(engagement_id, identity_name)
+        with get_connection() as connection:
+            refreshed = connection.execute(
+                "SELECT * FROM engagement_credentials "
+                "WHERE engagement_id = ? AND identity_name = ?",
+                (engagement_id, identity_name),
+            ).fetchone()
+        row = refreshed or row
     material = _credential_row_to_material(row)
     material["liveness_observations"] = list_credential_liveness(
         engagement_id, identity_name
@@ -3926,14 +3976,18 @@ def get_credential(engagement_id: int, identity_name: str) -> dict[str, Any] | N
     return material
 
 
-def get_active_credential(engagement_id: int) -> dict[str, Any] | None:
+def get_active_credential(
+    engagement_id: int, *, touch: bool = False
+) -> dict[str, Any] | None:
     """Return the active identity's material, or the first USABLE one if none is
     explicitly active, or None when the engagement has no live credentials.
 
     The no-active fallback is restricted to ``use_for_requests`` rows so an
     unreviewed opt-in identity (e.g. a discovered secret minted
     ``use_for_requests=0``) is never replayed by default; an explicitly activated
-    row (``is_active=1``) is always returned regardless of that flag."""
+    row (``is_active=1``) is always returned regardless of that flag.
+
+    ``touch=True`` records the read as a USE (see :func:`get_credential`)."""
     with get_connection() as connection:
         _sweep_credential_age(connection, engagement_id)
         row = connection.execute(
@@ -3943,7 +3997,16 @@ def get_active_credential(engagement_id: int) -> dict[str, Any] | None:
             "ORDER BY is_active DESC, identity_name LIMIT 1",
             (engagement_id,),
         ).fetchone()
-    return _credential_row_to_material(row) if row else None
+    if row is None:
+        return None
+    if touch:
+        touch_credential_use(engagement_id, str(row["identity_name"]))
+        with get_connection() as connection:
+            refreshed = connection.execute(
+                "SELECT * FROM engagement_credentials WHERE id = ?", (row["id"],)
+            ).fetchone()
+        row = refreshed or row
+    return _credential_row_to_material(row)
 
 
 def upsert_credential(
@@ -4116,7 +4179,12 @@ def resolve_credential_alias(
             "ORDER BY l.observed_at DESC, COALESCE(c.last_seen_at,c.updated_at) DESC LIMIT 1",
             (engagement_id, alias.strip(), scope_key.strip(), now),
         ).fetchone()
-    return get_credential(engagement_id, row["identity_name"]) if row else None
+    # An alias resolve is a resolve-for-replay, so it counts as a USE.
+    return (
+        get_credential(engagement_id, row["identity_name"], touch=True)
+        if row
+        else None
+    )
 
 
 def set_liveness(

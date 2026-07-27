@@ -14,12 +14,13 @@ A reply is NOT a submission: there is no Title / VRT / CVSS / Summary. The layou
 
     <reply body — leads with the new proof, answers the specific ask>   ← the ONLY
                                                                           pasteable block
-    <optional NEW-evidence proof/attachment pointer>
+    <optional NEW-evidence proof prose, authored + masked>
 
     ---
 
     ## THREAD HISTORY — NOT FOR SUBMISSION (reference only — never paste below this line)
     **Answering (this reply):** <in_response_to, verbatim>
+    **New-evidence attachment:** <engagement-relative artifact path (internal reference)>
     **Prior replies (most recent first):** <every prior reply, body inlined and fenced>
     **Parent finding proof ...:** <the finding's structured proof + linked runs to author NEW
                                     evidence FROM (mask + weave; never paste raw)>
@@ -33,7 +34,9 @@ the finding and NEVER writes ``submission_status`` (the durable write path is th
 dedicated ``record-reply`` verb). Internal identifiers (this finding's slug, engagement
 UUIDs, absolute engagement paths, cases.db references) are FLAGGED non-destructively via
 the shared hygiene gate, never rewritten, so the reply-format checklist / blind-triage
-gate strips them deliberately before an external send.
+gate strips them deliberately before an external send — and a FINAL (non-``--draft``)
+render REFUSES while any flag remains, so the only way to ship a flagged reply is a
+deliberate diagnostic ``--draft``.
 """
 from __future__ import annotations
 
@@ -168,19 +171,26 @@ def _prior_reply_line(entry: dict) -> str:
 
 
 def _pasteable_lines(entry: dict, draft: bool) -> list[str]:
-    """The copy-paste block: the reply body, then any NEW-evidence pointer."""
+    """The copy-paste block: the reply body, then any AUTHORED new-evidence prose.
+
+    ``new_evidence_ref`` is deliberately NOT here — it renders below the never-paste
+    separator instead (:func:`_thread_history_lines`). Every engagement-relative
+    evidence path carries an internal identifier: a dispatch id
+    (``scans/va-jolt-0725c/…``) or the finding's own slug (``submissions/EX-006/…``).
+    Emitting it above the separator put an internal identifier into the exact block
+    the operator is told to paste to the program, for ANY value of the field. It is
+    also useless to the triager — the file they receive is the one the operator
+    attaches in the platform form, not a path into our engagement tree. Same
+    reasoning, same conclusion as ``export submission``'s deliberate omission of a
+    ``POC:`` line from its paste header.
+    """
     lines: list[str] = []
     body = nonempty(entry.get("body"))
     lines += [body or "[NEEDS: reply body]", ""]
 
     new_evidence = nonempty(entry.get("new_evidence"))
-    new_evidence_ref = nonempty(entry.get("new_evidence_ref"))
-    if new_evidence or new_evidence_ref:
-        lines += ["**New evidence:**", ""]
-        if new_evidence:
-            lines += [new_evidence, ""]
-        if new_evidence_ref:
-            lines += [f"**Attachment:** {new_evidence_ref}", ""]
+    if new_evidence:
+        lines += ["**New evidence:**", "", new_evidence, ""]
     return lines
 
 
@@ -193,9 +203,10 @@ def _thread_history_lines(
 ) -> list[str]:
     """The never-paste THREAD HISTORY below the single ``---``.
 
-    Carries the ask this reply answers, the FULL prior thread (every reply's body,
-    fenced), the parent finding's structured proof + linked runs to author NEW
-    evidence FROM (masked + woven, never pasted raw), and the FLAGGED hygiene warnings.
+    Carries the ask this reply answers, the internal pointer to this reply's NEW
+    evidence artifact, the FULL prior thread (every reply's body, fenced), the parent
+    finding's structured proof + linked runs to author NEW evidence FROM (masked +
+    woven, never pasted raw), and the FLAGGED hygiene warnings.
     """
     lines = [
         "---",
@@ -207,6 +218,17 @@ def _thread_history_lines(
     in_response_to = nonempty(entry.get("in_response_to"))
     if in_response_to:
         lines += [f"**Answering (this reply):** {in_response_to}", ""]
+
+    new_evidence_ref = nonempty(entry.get("new_evidence_ref"))
+    if new_evidence_ref:
+        # INTERNAL reference, never pasted: the path names our engagement layout
+        # (dispatch id / finding slug) and means nothing to a triager. It lives here
+        # so the operator can find the file to ATTACH in the platform form.
+        lines += [
+            "**New-evidence attachment** (internal reference — attach this FILE in the "
+            f"platform form; never paste the path): {new_evidence_ref}",
+            "",
+        ]
 
     if prior_entries:
         lines += ["**Prior replies (most recent first):**", ""]
@@ -370,12 +392,6 @@ def run(args) -> None:
             )
 
         reply_md = out_dir / f"reply-{seq}.md"
-        if reply_md.exists() and not args.overwrite:
-            raise AssessError(
-                f"export-reply: {engagement_relative(reply_md, engagement_dir) or reply_md} "
-                "already exists; pass --overwrite to replace it."
-            )
-
         linked_runs = _linked_command_runs(client, slug)
         internal_ids = collect_internal_ids(finding, linked_runs)
         prior_entries = _prior_replies(replies, seq)
@@ -393,6 +409,26 @@ def run(args) -> None:
         hygiene = hygiene_warnings(
             scan_markdown, slug, internal_ids, engagement_dir, separator_ordinal=1
         )
+        # FAIL CLOSED on a FINAL reply, exactly as `export submission` does. A reply
+        # is sent to the program verbatim, so an internal identifier left in the
+        # pasteable body is the same leak in either verb; flagging it only on stderr
+        # made export-reply the softer of two doors onto the same external send.
+        # --draft stays the diagnostic render: it always writes and reports.
+        if not draft and hygiene:
+            raise AssessError(
+                f"export-reply: cannot render a FINAL reply (seq {seq}) for {slug!r} "
+                f"while hygiene warnings remain: {'; '.join(hygiene)}. Fix the reply "
+                "content (record-reply) or re-run with --draft for a diagnostic render."
+            )
+
+        # Checked only after every final-mode gate so a blocked render never leaves a
+        # partial output or buries its actionable diagnostics behind this one.
+        if reply_md.exists() and not args.overwrite:
+            raise AssessError(
+                f"export-reply: {engagement_relative(reply_md, engagement_dir) or reply_md} "
+                "already exists; pass --overwrite to replace it."
+            )
+
         markdown = _render_markdown(
             entry,
             prior_entries,

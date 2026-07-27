@@ -576,6 +576,83 @@ def test_age_sweep_leaves_fresh_untouched(client, isolate_settings):
     assert mat["state"] == "available"
 
 
+def test_resolve_for_replay_refreshes_last_seen_so_an_in_use_identity_never_ages_out(
+    client, isolate_settings
+):
+    """An identity that is actively being replayed must not hit the age backstop.
+
+    ``last_seen_at`` used to move only on a WRITE (capture / import / live
+    probe), so a session that was being injected into every request still
+    flipped to ``stale`` at exactly the 8h TTL. A resolve-for-replay is a USE
+    and now resets the clock.
+    """
+    eng = _seed(client, isolate_settings)
+    mat = _capture(eng, "app.example.com", {"sid": "IN-CONSTANT-USE"})
+    name = mat["identity_name"]
+    now = datetime.now(timezone.utc)
+
+    # Last WRITE was 7h59m ago — still inside the TTL, about to cross it.
+    _backdate(eng, name, now - timedelta(hours=7, minutes=59))
+
+    resolved_name, material = creds.resolve_identity(eng, name)
+    assert resolved_name == name
+    assert material["state"] == "available"
+
+    # Seven hours after that USE the row must still be available. Without the
+    # touch its last_seen_at is still the 7h59m-old write, so the sweep would
+    # see ~15h and flag it stale while it was being used every minute.
+    with db.get_connection() as conn:
+        db._sweep_credential_age(conn, eng, now=now + timedelta(hours=7))
+    assert db.get_credential(eng, name)["state"] == "available"
+
+
+def test_plain_listing_is_not_a_use_and_does_not_reset_the_age_clock(
+    client, isolate_settings
+):
+    """Only a resolve-for-replay counts as a USE; listing must not keep rows alive."""
+    eng = _seed(client, isolate_settings)
+    mat = _capture(eng, "app.example.com", {"sid": "ONLY-LISTED"})
+    name = mat["identity_name"]
+    stale_seen = (datetime.now(timezone.utc) - timedelta(hours=7, minutes=59)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    _backdate(eng, name, datetime.now(timezone.utc) - timedelta(hours=7, minutes=59))
+
+    db.list_credentials(eng)
+    db.get_credential(eng, name)
+
+    with db.get_connection() as conn:
+        row = conn.execute(
+            "SELECT last_seen_at FROM engagement_credentials "
+            "WHERE engagement_id = ? AND identity_name = ?",
+            (eng, name),
+        ).fetchone()
+    assert row["last_seen_at"] == stale_seen
+
+
+def test_touch_credential_use_never_revives_a_probe_dead_session(
+    client, isolate_settings
+):
+    eng = _seed(client, isolate_settings)
+    mat = _capture(eng, "app.example.com", {"sid": "PROVEN-DEAD"})
+    name = mat["identity_name"]
+    db.set_liveness(eng, name, "dead", "2026-07-03T10:00:00Z")
+    dead_seen = (datetime.now(timezone.utc) - timedelta(days=4)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    _backdate(eng, name, datetime.now(timezone.utc) - timedelta(days=4))
+
+    db.touch_credential_use(eng, name)
+
+    with db.get_connection() as conn:
+        row = conn.execute(
+            "SELECT last_seen_at FROM engagement_credentials "
+            "WHERE engagement_id = ? AND identity_name = ?",
+            (eng, name),
+        ).fetchone()
+    assert row["last_seen_at"] == dead_seen
+
+
 def test_age_sweep_never_marks_dead(client, isolate_settings):
     # 9h old but probe-proven dead must STAY dead (age never overrides a probe).
     eng = _seed(client, isolate_settings)

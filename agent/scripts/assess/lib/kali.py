@@ -35,6 +35,7 @@ import subprocess
 import sys
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -397,12 +398,140 @@ def _identity_bearer_token(material: dict) -> str:
     return ""
 
 
-def _identity_material_replayable(material: dict) -> bool:
-    """Honor the credential store's explicit replay and lifecycle controls."""
+# Identity lifecycle states, from the credential store (backend db.py):
+#   ""/"available" — replay normally.
+#   "stale"        — ADVISORY age flag only. `_sweep_credential_age` sets it
+#                    purely because `now - last_seen_at > 8h`; NOTHING has
+#                    observed the session failing. Replay it and WARN.
+#   "missing"      — no material was stored; nothing to inject.
+#   "dead"         — a liveness PROBE proved the session dead. Refuse.
+#   anything else  — an operator-set marker (the upsert API takes free text).
+#                    Refuse: an explicit marker is a deliberate signal.
+# `stale` is the ONE state that widened. Treating that advisory flag as a hard
+# refusal deadlocked the store: an identity aged out at exactly 8h no matter how
+# actively it was used, and the documented recovery (`auth status --probe`) runs
+# THROUGH this same injector, so the recovery could not run against the state it
+# recovers from. Operators worked around it by pasting the cookie as a plain
+# `-H "Cookie: ..."` header, which records the audit row as
+# auth_context=anonymous and silently destroys the cross-identity evidence the
+# depth ledger measures access-control coverage from.
+_IDENTITY_STATES_CLEAN = frozenset({"", "available"})
+_IDENTITY_STATES_ADVISORY = frozenset({"stale"})
+_IDENTITY_STATE_DEAD = "dead"
+
+
+def _identity_material_replayable(material: dict, *, probe: bool = False) -> bool:
+    """Honor the credential store's explicit replay and lifecycle controls.
+
+    ``probe=True`` is the AUTH liveness-probe path (``auth status --probe``). It
+    allows ANY flagged state, including ``dead``: probing is precisely how a
+    flag gets re-tested, and ``db.set_liveness`` documents that a ``live``
+    verdict "revives a session probed with --include-dead" — unreachable if the
+    probe itself is refused. No other caller sets it, so a proven-dead or
+    operator-flagged session is still never replayed by ordinary tooling.
+    """
     if material.get("use_for_requests") is False:
         return False
     state = str(material.get("state") or "").strip().lower()
-    return not state or state == "available"
+    if state in _IDENTITY_STATES_CLEAN or state in _IDENTITY_STATES_ADVISORY:
+        return True
+    return bool(probe)
+
+
+def _identity_age_text(material: dict) -> str:
+    """Human-readable ``last_seen_at`` + age, or ``"never recorded"``."""
+    raw = str(material.get("last_seen_at") or "").strip()
+    if not raw:
+        return "last_seen_at never recorded"
+    parsed: datetime | None = None
+    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            parsed = datetime.strptime(raw, fmt).replace(tzinfo=timezone.utc)
+            break
+        except ValueError:
+            continue
+    if parsed is None:
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return f"last seen {raw}"
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - parsed).total_seconds()
+    if age < 0:
+        return f"last seen {raw}"
+    hours, minutes = divmod(int(age) // 60, 60)
+    return f"last seen {raw} ({hours}h{minutes:02d}m ago)"
+
+
+def _identity_probe_recovery_command(identity_name: str) -> str:
+    return (
+        "vigil assess auth status --probe --identity "
+        f"{identity_name or '<identity>'} --probe-url <an-authenticated-url>"
+    )
+
+
+def _warn_degraded_identity(material: dict) -> None:
+    """Warn — but do not refuse — when replaying an advisory identity state."""
+    state = str(material.get("state") or "").strip().lower()
+    if state not in _IDENTITY_STATES_ADVISORY:
+        return
+    name = str(material.get("identity_name") or "").strip()
+    detail = (
+        "an age backstop, NOT a failed probe — nothing has observed this "
+        "session failing"
+    )
+    print(
+        f"warning: identity '{name or '(unnamed)'}' is in state '{state}' "
+        f"({_identity_age_text(material)}); {detail}. Replaying it anyway — "
+        "do NOT fall back to a hand-written `-H \"Cookie: ...\"` header, which "
+        "records the run as auth_context=anonymous and destroys the "
+        "cross-identity evidence the depth ledger credits. Confirm or refresh "
+        f"it with: {_identity_probe_recovery_command(name)}",
+        file=sys.stderr,
+    )
+
+
+def identity_refusal_detail(identity: str, material: dict) -> str:
+    """Explain WHY a requested identity cannot be replayed, and how to recover.
+
+    The old message named neither the state nor the age nor a recovery command,
+    so an operator hitting it had no path forward except the anonymous-header
+    workaround that corrupts the audit trail.
+    """
+    name = str(material.get("identity_name") or identity or "").strip()
+    if material.get("use_for_requests") is False:
+        return (
+            "it is quarantined (use_for_requests=0), so the store forbids "
+            "replaying it. Re-enable it by re-importing the session "
+            "(`vigil auth import`), or pick another identity with "
+            "`vigil assess auth list`"
+        )
+    state = str(material.get("state") or "").strip().lower()
+    if state == _IDENTITY_STATE_DEAD:
+        return (
+            f"its stored state is 'dead' ({_identity_age_text(material)}) — a "
+            "liveness probe PROVED this session dead, so it is never replayed. "
+            "Re-authenticate and re-capture the session (proxy login, or "
+            "`vigil auth import`), then verify with: "
+            f"{_identity_probe_recovery_command(name)}"
+        )
+    if state not in _IDENTITY_STATES_CLEAN and state not in _IDENTITY_STATES_ADVISORY:
+        return (
+            f"the credential store holds it in state '{state}' "
+            f"({_identity_age_text(material)}), which the injector will not "
+            "replay — only the age-advisory 'stale' state is replayed with a "
+            "warning. Re-test it (this clears the flag when the session is "
+            f"still live) with: {_identity_probe_recovery_command(name)}"
+        )
+    return (
+        f"the stored material carries nothing this tool can take (state="
+        f"{state or 'unset'}, {_identity_age_text(material)}): no headers, no "
+        "cookies for this request host, and no bearer token — or the tool "
+        "accepts no injected headers. Check what the store actually holds with "
+        "`vigil assess auth list`, then refresh it with "
+        f"{_identity_probe_recovery_command(name)}"
+    )
 
 
 def prepare_browser_identity_material(
@@ -432,9 +561,18 @@ def prepare_browser_identity_material(
         else resolve_identity(engagement_dir, identity_name)
     )
     if not isinstance(material, dict) or not material:
+        empty["refusal_detail"] = (
+            f"identity '{identity_name}' was not found in the credential store "
+            "(check `vigil assess auth list`; `--include-dead` also shows "
+            "probe-proven-dead sessions)"
+        )
         return "anonymous", empty
     if not _identity_material_replayable(material):
+        empty["refusal_detail"] = identity_refusal_detail(
+            str(identity_name), material
+        )
         return "anonymous", empty
+    _warn_degraded_identity(material)
     try:
         host = (urlsplit(target_url).hostname or "").lower()
     except ValueError:
@@ -463,10 +601,17 @@ def prepare_browser_identity_material(
         "storage_state": None,
     }
     applied = bool(headers or cookies or external_state_applied)
-    return (resolved_name or identity_name, prepared) if applied else ("anonymous", prepared)
+    if applied:
+        return (resolved_name or identity_name, prepared)
+    prepared["refusal_detail"] = identity_refusal_detail(
+        str(resolved_name or identity_name), material
+    )
+    return ("anonymous", prepared)
 
 
-def _apply_identity_material(cmd: list[str], tool_name: str, material: dict) -> bool:
+def _apply_identity_material(
+    cmd: list[str], tool_name: str, material: dict, *, probe: bool = False
+) -> bool:
     """Inject a named identity's auth headers/cookies into an HTTP command argv so
     the request actually runs AS that identity.
 
@@ -475,11 +620,15 @@ def _apply_identity_material(cmd: list[str], tool_name: str, material: dict) -> 
     tool can't take injected headers. A False return MUST prevent relabeling, so
     a run that did not actually carry the identity's credentials is never counted
     as a distinct identity by the depth ledger's cross-identity rule.
+
+    ``probe=True`` marks the AUTH liveness-probe path, which may also replay a
+    ``dead`` identity (that is how a dead verdict gets re-tested).
     """
     if not isinstance(material, dict):
         return False
-    if not _identity_material_replayable(material):
+    if not _identity_material_replayable(material, probe=probe):
         return False
+    _warn_degraded_identity(material)
     request_host = kali_resolve.target_host_port(tool_name, cmd)[0]
     state_changing = _request_is_state_changing(cmd)
     pairs = _identity_header_pairs(
@@ -577,11 +726,16 @@ def prepare_execution_command(
     identity_scope: str = "",
     nuclei_oob_explicit: bool = False,
     prepared_auth_context: str | None = None,
+    identity_probe: bool = False,
 ) -> tuple[str, str]:
     """Apply shared identity, attribution, and OOB preparation for sync/jobs.
 
     Returns ``(auth_context, attribution_gap)``. The caller owns how a gap is
     surfaced, but must refuse before audit/spawn when the second value is set.
+
+    ``identity_probe=True`` is reserved for the AUTH liveness probe
+    (``auth status --probe``): it may replay a ``dead`` identity, because a
+    probe is how a dead verdict gets re-tested.
     """
     _apply_nuclei_oob_safety(cmd, explicit_oob=nuclei_oob_explicit)
     prepared = str(prepared_auth_context or "").strip()
@@ -603,15 +757,21 @@ def prepare_execution_command(
         )
         if not material:
             raise scope_lib.ScopePolicyError(
-                f"requested identity '{identity}' was not found or is unavailable; "
-                "refusing to run anonymously"
+                f"requested identity '{identity}' was not found in the credential "
+                f"store, so tool '{tool_name}' has nothing to inject; refusing to "
+                "run anonymously. List what IS stored with `vigil assess auth "
+                "list` (add --include-dead to see probe-proven-dead sessions)."
             )
-        elif _apply_identity_material(cmd, tool_name, material):
+        elif _apply_identity_material(cmd, tool_name, material, probe=identity_probe):
             auth_context = identity_name or auth_context
         else:
+            # Say WHY: state + age + the exact recovery command. A bare
+            # "could not be applied" pushed operators onto the anonymous
+            # `-H "Cookie: ..."` workaround, which mislabels the audit row.
             raise scope_lib.ScopePolicyError(
                 f"requested identity '{identity}' could not be applied to tool "
-                f"'{tool_name}'; refusing to run anonymously"
+                f"'{tool_name}'; refusing to run anonymously because "
+                f"{identity_refusal_detail(str(identity), material)}."
             )
 
     if required:
@@ -732,6 +892,7 @@ def kali_exec(
     tool_name: str | None = None,
     identity: str | None = None,
     identity_scope: str = "",
+    identity_probe: bool = False,
     rate_override_reason: str = "",
     destinations: tuple[scope_lib.ExecutionDestination, ...] = (),
     nuclei_oob_explicit: bool = False,
@@ -807,6 +968,7 @@ def kali_exec(
             identity_scope=identity_scope,
             nuclei_oob_explicit=nuclei_oob_explicit,
             prepared_auth_context=prepared_auth_context,
+            identity_probe=identity_probe,
         )
         execution_policy = scope_lib.enforce_execution_policy(
             cmd,

@@ -303,3 +303,82 @@ def test_body_file_is_read(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     replies = _patched_replies(fake)
     assert replies[0]["body"] == "body from a file"
+
+
+# -- new-evidence fields are clearable ----------------------------------------
+
+@pytest.mark.parametrize("empty", ["", "   "])
+def test_new_evidence_ref_is_cleared_by_an_explicit_empty_value(
+    tmp_path, monkeypatch, capsys, empty
+):
+    """An empty --new-evidence-ref CLEARS the field instead of being a silent no-op.
+
+    The field was truthiness-gated, so once a ref was recorded no value could unset
+    it and every later `export reply` re-rendered a pointer to evidence that had been
+    superseded. --body one flag above already uses the presence-gated (default=None)
+    pattern; this follows it.
+    """
+    entry = _reply(1, body="answered", ask="q1")
+    entry["new_evidence_ref"] = "scans/va-jolt-0725c/old-proof.txt"
+    fake = _FakeClient(_finding(replies=[entry]))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        ["record-reply", "VA-047", "--seq", "1", "--new-evidence-ref", empty],
+        str(tmp_path),
+    )
+
+    record_reply.run(args)
+    capsys.readouterr()
+
+    assert _patched_replies(fake)[0]["new_evidence_ref"] == ""
+
+
+def test_new_evidence_prose_is_cleared_by_an_explicit_empty_value(
+    tmp_path, monkeypatch, capsys
+):
+    """Same defect, same fix, on the adjacent --new-evidence flag."""
+    entry = _reply(1, body="answered", ask="q1")
+    entry["new_evidence"] = "superseded proof narrative"
+    fake = _FakeClient(_finding(replies=[entry]))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        ["record-reply", "VA-047", "--seq", "1", "--new-evidence", ""], str(tmp_path)
+    )
+
+    record_reply.run(args)
+    capsys.readouterr()
+
+    assert _patched_replies(fake)[0]["new_evidence"] == ""
+
+
+def test_omitting_the_new_evidence_flags_preserves_recorded_values(
+    tmp_path, monkeypatch, capsys
+):
+    """Clearing must require the flag: an unrelated update never blanks the fields."""
+    entry = _reply(1, body="answered", ask="q1")
+    entry["new_evidence"] = "member B read order 1001"
+    entry["new_evidence_ref"] = "scans/va-jolt-0725c/proof.txt"
+    fake = _FakeClient(_finding(replies=[entry]))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["record-reply", "VA-047", "--seq", "1", "--sent"], str(tmp_path))
+
+    record_reply.run(args)
+    capsys.readouterr()
+
+    updated = _patched_replies(fake)[0]
+    assert updated["new_evidence"] == "member B read order 1001"
+    assert updated["new_evidence_ref"] == "scans/va-jolt-0725c/proof.txt"
+
+
+def test_new_evidence_ref_is_stored_stripped(tmp_path, monkeypatch, capsys):
+    fake = _FakeClient(_finding(replies=[_reply(1, body="answered", ask="q1")]))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        ["record-reply", "VA-047", "--seq", "1", "--new-evidence-ref", "  scans/proof.txt  "],
+        str(tmp_path),
+    )
+
+    record_reply.run(args)
+    capsys.readouterr()
+
+    assert _patched_replies(fake)[0]["new_evidence_ref"] == "scans/proof.txt"

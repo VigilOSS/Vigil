@@ -15,6 +15,7 @@ from assess.lib.contracts import common_mistake_hints, render_contract
 from assess.lib.findings import finding_lock_path, next_finding_id
 from assess.lib.locking import file_lock
 from assess.lib.schema_validation import collect_validation_errors, load_schema
+from assess.lib.evidence_ref import evidence_ref_exists, is_single_path_shaped
 
 
 def register(subparsers) -> None:
@@ -96,17 +97,13 @@ def _normalize_payload(payload: dict, *, agent_name: str, candidate_slug: str) -
     return normalized
 
 
-def _evidence_file_exists(ref: str, eng_dir: str, engagement_key: str) -> bool:
-    """True when evidence_ref resolves to a real file (so the backend will
-    auto-register it). Checks the ref as-is, relative to the engagement dir, and
-    the container-path form ``/engagements/<key>/...`` mapped back to the host."""
-    candidates = [Path(ref)]
-    if not Path(ref).is_absolute():
-        candidates.append(Path(eng_dir) / ref)
-    prefix = f"/engagements/{engagement_key}/"
-    if ref.startswith(prefix):
-        candidates.append(Path(eng_dir) / ref[len(prefix):])
-    return any(c.is_file() for c in candidates)
+# Evidence-ref shape and existence rules live in ``assess.lib.evidence_ref`` so this
+# command, ``finding update`` and ``record-probe`` cannot drift apart on what counts
+# as one engagement-local path. That module mirrors the backend indexer
+# (``artifact_index._path_ref``), which is the rule that actually decides whether an
+# artifact row gets minted.
+_evidence_file_exists = evidence_ref_exists
+_is_single_path_shaped = is_single_path_shaped
 
 
 def _normalize_evidence_ref(payload: dict, *, eng_dir: str, engagement_key: str, allow_unindexed: bool) -> None:
@@ -117,10 +114,13 @@ def _normalize_evidence_ref(payload: dict, *, eng_dir: str, engagement_key: str,
     readiness is the terminal backstop for missing evidence, not record time.
     So this warns and, for URLs, reroutes — it never exits.
 
-    - existing on-disk file -> accepted as-is (the backend auto-registers it).
+    - existing on-disk file OR directory -> accepted as-is (the backend
+      auto-registers it).
     - URL -> rerouted into ``details.references`` and evidence_ref cleared
       (a URL is never an auto-registerable artifact path).
-    - prose / non-existent path -> warned; the record still proceeds.
+    - composite ("scans/a.out; scans/b.out") / prose ("command-runs 1/2/3") ->
+      warned, and the backend mints NO artifact row for it; the record proceeds.
+    - path-shaped but non-existent -> warned; the record still proceeds.
     - empty -> warned; evidence may be attached on a later update.
 
     ``allow_unindexed`` silences the warnings for intentionally-unindexed
@@ -162,19 +162,20 @@ def _normalize_evidence_ref(payload: dict, *, eng_dir: str, engagement_key: str,
     if _evidence_file_exists(ref, eng_dir, engagement_key):
         return  # existing artifact — the backend registers + links it on record.
 
-    looks_like_path = ("/" in ref or "." in ref) and "  " not in ref
-    if looks_like_path:
+    if _is_single_path_shaped(ref):
         print(
-            f"finding record: warning — evidence_ref '{ref}' looks like a path but no file exists "
+            f"finding record: warning — evidence_ref '{ref}' looks like a path but nothing exists "
             "there; recording anyway. check-phase-readiness --phase report will flag it until a real artifact is "
             "attached. Pass --allow-unindexed-evidence to silence.",
             file=sys.stderr,
         )
     else:
         print(
-            f"finding record: warning — evidence_ref '{ref}' is free-text prose, not an artifact "
-            "path or URL; recording anyway. Put external links in details.references and attach a "
-            "captured artifact for report-readiness. Pass --allow-unindexed-evidence to silence.",
+            f"finding record: warning — evidence_ref '{ref}' is not a single engagement-local path "
+            "(it reads as prose or joins several references), so NO artifact row is created for it; "
+            "recording anyway. Point evidence_ref at ONE captured path — a directory of captured "
+            "evidence is fine — put external links in details.references, and use `vigil assess "
+            "finding link` / details.evidence for the rest. Pass --allow-unindexed-evidence to silence.",
             file=sys.stderr,
         )
 

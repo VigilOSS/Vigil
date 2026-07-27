@@ -150,6 +150,13 @@ def _run_identity_probe(
             engagement_dir=Path(engagement_dir),
             identity=identity,
             identity_scope=scope_key,
+            # The liveness probe is the documented recovery path for a session
+            # the store has flagged. It MUST be able to run against the state it
+            # recovers from, so it is the one caller allowed to replay an
+            # identity the store has already marked `dead` (an age-flagged
+            # `stale` identity is replayable by every caller). Without this the
+            # store deadlocks: the flag blocks the probe that would clear it.
+            identity_probe=True,
             tool_name="curl",
         )
     except Exception as exc:  # noqa: BLE001 — a live probe must never crash auth-status

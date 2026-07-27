@@ -187,15 +187,199 @@ _TOOL_NON_TARGET_VALUE_FLAGS: dict[str, frozenset[str]] = {
 }
 
 
+# CURATED third-party research/intelligence infrastructure.
+#
+# Reachability is not scope, and the target-admission gate below exists to keep it
+# that way: a host the engagement did not authorize is refused, full stop. That
+# rule is correct and load-bearing for the TARGET ESTATE — but it was also
+# refusing the third-party services we query *about* the target. Asking GitHub
+# whether the target's source leaked, asking crt.sh which certificates name it, or
+# asking the Wayback CDX which URLs it used to serve does not touch the target at
+# all; the request lands on someone else's public API. Refusing those returned
+# zero bytes, and a whole OSINT dispatch's empty output was then read as "nothing
+# is exposed" when it was a tool artifact.
+#
+# This is a CURATED, in-code allowlist and deliberately NOT an operator-supplied
+# pass-through: a `--research <host>` flag would be exactly the arbitrary
+# out-of-scope probe the scope rule exists to prevent. Extend it HERE, with hosts
+# that are genuinely third-party research infrastructure.
+#
+# Matching is EXACT on the normalized host — never by suffix — so a lookalike
+# (`api.github.com.evil.test`, `crt.sh.attacker.test`) can never ride in on a
+# listed name. A host that also appears in the engagement's own scope.json is
+# NEVER admitted through this path: target-scope rules win (see
+# :func:`enforce_execution_policy`), so this can never become a side door onto the
+# estate under assessment.
+RESEARCH_HOSTS: frozenset[str] = frozenset(
+    {
+        # Certificate transparency
+        "crt.sh",
+        # Source hosting / code search
+        "api.github.com",
+        "github.com",
+        "gist.github.com",
+        "raw.githubusercontent.com",
+        "objects.githubusercontent.com",
+        "codeload.github.com",
+        # Package registries
+        "registry.npmjs.org",
+        "www.npmjs.com",
+        "rubygems.org",
+        "index.rubygems.org",
+        "pypi.org",
+        "files.pythonhosted.org",
+        # Web archives / crawl indexes
+        "web.archive.org",
+        "archive.org",
+        "index.commoncrawl.org",
+        "data.commoncrawl.org",
+        # Scan / vulnerability intelligence
+        "urlscan.io",
+        "nvd.nist.gov",
+        "services.nvd.nist.gov",
+    }
+)
+
+# Domain families whose hosts LOOK like research infrastructure without being on
+# the curated allowlist. This list grants NOTHING — it only shapes the refusal
+# message, so an operator who runs a passive lookup against an unlisted
+# intelligence service is told the run was REFUSED (and why) instead of reading a
+# zero-byte result as a measurement.
+_RESEARCH_LIKE_SUFFIXES: tuple[str, ...] = (
+    "crt.sh",
+    "github.com",
+    "githubusercontent.com",
+    # NOT github.io: that is user-published content, so a target's own Pages site
+    # would be mislabelled "research infrastructure" in its refusal.
+    "npmjs.org",
+    "npmjs.com",
+    "rubygems.org",
+    "pypi.org",
+    "pythonhosted.org",
+    "archive.org",
+    "commoncrawl.org",
+    "urlscan.io",
+    "nist.gov",
+    "shodan.io",
+    "censys.io",
+    "securitytrails.com",
+    "virustotal.com",
+    "alienvault.com",
+    "hackertarget.example",
+    "dnsdumpster.com",
+    "builtwith.com",
+    "binaryedge.io",
+    "fofa.info",
+    "zoomeye.org",
+    "certspotter.com",
+    "sslmate.com",
+)
+
+# Every role an :class:`ExecutionDestination` may declare. ``target`` is the only
+# one the scope allowlist admits; the other three name destinations that are not
+# the target estate at all.
+EXECUTION_DESTINATION_ROLES: tuple[str, ...] = (
+    "target",
+    "passive_source",
+    "control",
+    "research",
+)
+
+# Roles whose hosts are, by construction, not the engagement's targets: they are
+# skipped by target admission and by the no-fire path checks (which describe the
+# TARGET's off-limits paths, not a third party's API routes).
+_NON_TARGET_ROLES: frozenset[str] = frozenset(
+    {"passive_source", "control", "research"}
+)
+
+
 class ScopePolicyError(RuntimeError):
     """Raised before execution when engagement target/tool policy rejects a run."""
 
 
 class ExecutionDestination(NamedTuple):
-    """One explicitly classified network destination in an execution plan."""
+    """One explicitly classified network destination in an execution plan.
+
+    ``research`` differs from ``passive_source`` in exactly one way, and it is the
+    important one: ``passive_source`` admits whatever host the caller names (a
+    blanket bypass), while ``research`` is validated against :data:`RESEARCH_HOSTS`
+    and refuses anything else. Prefer ``research`` for third-party intelligence
+    lookups so a typo — or a future edit — cannot silently turn the typed
+    destination into an unauthorized probe.
+    """
 
     value: str
-    role: Literal["target", "passive_source", "control"] = "target"
+    role: Literal["target", "passive_source", "control", "research"] = "target"
+
+
+def is_research_host(host: str | None) -> bool:
+    """True when ``host`` is on the curated third-party research allowlist."""
+    if not host:
+        return False
+    return _normalize_host_for_match(host) in RESEARCH_HOSTS
+
+
+def looks_like_research_host(host: str | None) -> bool:
+    """True when ``host`` belongs to a domain family that reads as research infra.
+
+    Advisory only — it grants no admission. See :data:`_RESEARCH_LIKE_SUFFIXES`.
+    """
+    normalized = _normalize_host_for_match(host or "")
+    if not normalized:
+        return False
+    return any(
+        normalized == suffix or normalized.endswith("." + suffix)
+        for suffix in _RESEARCH_LIKE_SUFFIXES
+    )
+
+
+def research_allowlist_hint(limit: int = 10) -> str:
+    """A short, stable rendering of the curated research allowlist for messages."""
+    hosts = sorted(RESEARCH_HOSTS)
+    shown = ", ".join(hosts[:limit])
+    if len(hosts) > limit:
+        shown += f", … ({len(hosts)} total)"
+    return shown
+
+
+def _out_of_scope_refusal(
+    host: str, reason: str, *, matched_scope_entry: bool = False
+) -> str:
+    """The target-admission refusal text, annotated when research infra is involved.
+
+    A zero-byte result from a refused OSINT lookup is indistinguishable from a
+    genuine "nothing found" unless the refusal says so out loud. When the refused
+    host reads as research infrastructure, the message names the research-host path
+    and exactly why it did not apply here.
+    """
+    message = f"refusing target outside engagement scope: {host} ({reason})"
+    if is_research_host(host) and matched_scope_entry:
+        return (
+            message
+            + f". NOTE: {host} is on the curated research-host allowlist, but it also "
+            "matches this engagement's scope.json, so target-scope rules win — the "
+            "research path can never admit a host in the engagement's own estate. "
+            "Query it as a target (or not at all)."
+        )
+    if is_research_host(host):
+        return (
+            message
+            + f". NOTE: {host} is on the curated research-host allowlist, but this run "
+            "declared it as a TARGET destination, and an explicit target declaration is "
+            "always honoured. Drop the typed target destination to query it as research "
+            "infrastructure."
+        )
+    if looks_like_research_host(host):
+        return (
+            message
+            + f". NOTE: {host} looks like third-party research infrastructure, but it "
+            "is not on the curated research-host allowlist, so this run was REFUSED "
+            "and produced nothing — do not read an empty result here as a "
+            f"measurement. Admitted research hosts: {research_allowlist_hint()}. "
+            "Add the host to assess.lib.scope.RESEARCH_HOSTS if it is genuinely "
+            "third-party infrastructure queried ABOUT the target."
+        )
+    return message
 
 
 def execution_policy_notes(policy: dict[str, Any]) -> str:
@@ -1452,15 +1636,43 @@ def enforce_execution_policy(
     # exact-vs-wildcard authorization, so preserve their legacy behavior. Every
     # engagement created by the supported CLI has an explicit ``hosts`` list.
     target_gate_configured = "hosts" in scope_doc
+    try:
+        scope_allow_entries = scope_entries(scope_doc)
+        scope_deny_entries = out_of_scope_entries(scope_doc)
+    except SystemExit as exc:
+        raise ScopePolicyError(str(exc)) from exc
     typed_destinations: list[tuple[str, str]] = []
     for destination in destinations:
-        if destination.role not in {"target", "passive_source", "control"}:
+        if destination.role not in EXECUTION_DESTINATION_ROLES:
             raise ScopePolicyError(f"unknown execution destination role: {destination.role}")
         host = host_from_token(destination.value)
         if not host:
             raise ScopePolicyError(
                 f"typed execution destination is not a resolvable host: {destination.value}"
             )
+        if destination.role == "research":
+            # The whole point of the role: unlike ``passive_source`` it is NOT a
+            # blanket bypass for whatever host the caller names.
+            if not is_research_host(host):
+                raise ScopePolicyError(
+                    f"refusing research destination {host}: it is not on the curated "
+                    f"research-host allowlist ({research_allowlist_hint()}). The research "
+                    "role admits ONLY curated third-party intelligence infrastructure "
+                    "queried ABOUT the target; it is not a pass-through for arbitrary "
+                    "out-of-scope hosts."
+                )
+            # Target-scope rules win on any overlap, so the research path can never
+            # be used to reach a host in the engagement's own estate (where no-fire,
+            # rate governance and admission must all apply).
+            if host_in_scope(host, scope_allow_entries) or host_in_scope(
+                host, scope_deny_entries
+            ):
+                raise ScopePolicyError(
+                    f"refusing research destination {host}: it is part of this "
+                    "engagement's own target estate (scope.json), so target-scope rules "
+                    "win — declare it as a 'target' destination so admission, no-fire, "
+                    "and rate governance all apply."
+                )
         typed_destinations.append((host, destination.role))
     typed_by_host: dict[str, str] = {}
     for host, role in typed_destinations:
@@ -1546,7 +1758,7 @@ def enforce_execution_policy(
     raw_targets.extend(shell_targets)
     if tool_analysis_ambiguous and any(
         (host := host_from_token(token))
-        and typed_by_host.get(host) not in {"passive_source", "control"}
+        and typed_by_host.get(host) not in _NON_TARGET_ROLES
         for token in raw_targets
     ):
         raise ScopePolicyError(
@@ -1560,7 +1772,7 @@ def enforce_execution_policy(
     if no_fire_patterns:
         for token in unresolved_shell_paths:
             host = host_from_token(token)
-            if host and typed_by_host.get(host) in {"passive_source", "control"}:
+            if host and typed_by_host.get(host) in _NON_TARGET_ROLES:
                 continue
             raise ScopePolicyError(
                 "unresolved shell target URL path may match no-fire paths; typed "
@@ -1568,7 +1780,7 @@ def enforce_execution_policy(
             )
     for token in raw_targets:
         token_host = host_from_token(token)
-        if token_host and typed_by_host.get(token_host) in {"passive_source", "control"}:
+        if token_host and typed_by_host.get(token_host) in _NON_TARGET_ROLES:
             continue
         try:
             blocked_pattern = no_fire.match_url(scope_doc, token)
@@ -1580,6 +1792,7 @@ def enforce_execution_policy(
                 f"{blocked_pattern!r}"
             )
     checked_hosts: list[str] = []
+    research_hosts: list[str] = []
     external_destinations: list[dict[str, str]] = []
     for host, role in typed_destinations:
         if role != "target" and {"host": host, "role": role} not in external_destinations:
@@ -1594,7 +1807,34 @@ def enforce_execution_policy(
         if not host:
             continue
         host = str(host)
-        if typed_by_host.get(host) in {"passive_source", "control"}:
+        if typed_by_host.get(host) in _NON_TARGET_ROLES:
+            continue
+        matched_scope_entry = (
+            verdict.get("allow_entry") is not None
+            or verdict.get("deny_entry") is not None
+        )
+        # Curated third-party research infrastructure, admitted WITHOUT being
+        # counted as a target — and only when the engagement's scope.json says
+        # nothing at all about the host. `allow_entry`/`deny_entry` come straight
+        # from the admission verdict, so any overlap with the target estate (in
+        # scope OR explicitly carved out) falls through to the target rules below:
+        # target-scope always wins. A caller that explicitly TYPED the host as a
+        # target is likewise never re-read as research — an explicit declaration of
+        # intent outranks a name on a list. The host is still audited, as a
+        # `research` external destination: only the target-scope predicate is
+        # skipped, never the audit path.
+        if (
+            target_gate_configured
+            and not verdict["admitted"]
+            and not matched_scope_entry
+            and typed_by_host.get(host) != "target"
+            and is_research_host(host)
+        ):
+            if host not in research_hosts:
+                research_hosts.append(host)
+            entry = {"host": host, "role": "research"}
+            if entry not in external_destinations:
+                external_destinations.append(entry)
             continue
         if host not in checked_hosts:
             checked_hosts.append(host)
@@ -1603,13 +1843,21 @@ def enforce_execution_policy(
         bypassed = bypassed or bool(verdict.get("bypassed"))
         if not verdict["admitted"]:
             raise ScopePolicyError(
-                f"refusing target outside engagement scope: {host} ({verdict['reason']})"
+                _out_of_scope_refusal(
+                    host,
+                    str(verdict["reason"]),
+                    matched_scope_entry=matched_scope_entry,
+                )
             )
 
     target_facing = bool(checked_hosts) or any(
         role == "target" for _, role in typed_destinations
     )
-    if not typed_destinations and observed_tools & _TARGET_FACING_TOOLS:
+    if (
+        not typed_destinations
+        and not research_hosts
+        and observed_tools & _TARGET_FACING_TOOLS
+    ):
         target_facing = True
     result: dict[str, Any] = {
         "scope_enforcement": scope_enforcement(scope_doc),
@@ -1618,7 +1866,12 @@ def enforce_execution_policy(
     }
     if external_destinations:
         result["external_destinations"] = external_destinations
-    if typed_destinations or dynamic_target_shell or (not checked_hosts and target_facing):
+    if (
+        typed_destinations
+        or research_hosts
+        or dynamic_target_shell
+        or (not checked_hosts and target_facing)
+    ):
         result["target_facing"] = target_facing
     return result
 
