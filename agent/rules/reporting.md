@@ -93,7 +93,10 @@ Sentence one should explain what the attacker gains, not what category label the
 
 ## 7. Keep it concise and human-readable
 
-A strong report should be fast to scan without losing exact technical proof.
+A strong report should be fast to scan without losing exact technical proof. This is the standing
+principle; Rules 11 (banned phrases), 12 (active voice), 15 (load-bearing sentences), 20 (human
+voice), and 21 (state each fact once) are its concrete mechanics — apply them together, not as
+independent checklists.
 
 ## 8. Title quality matters
 
@@ -109,11 +112,13 @@ Vague titles that fail this formula:
 
 Every claim in the report traces back to a recorded finding, backend state, or confirmed evidence reference — the report reflects proved state, not memory or inference.
 
-## 10. Section length limits
+## 10. Section length ceilings — internal `report.md` only
 
-Reports are for humans who scan fast. Enforce these ceilings per finding:
+Reports are for humans who scan fast, and these are ceilings, not targets: a Description that uses
+one sentence because one sentence carries the fact is better written than one that pads out to four.
+Hitting the ceiling on every finding is a sign of padding, not thoroughness.
 
-| Section | Maximum |
+| Section | Ceiling |
 |---------|---------|
 | Description | 2-4 sentences |
 | Steps to Reproduce | Numbered steps, one action per step, no narrative between steps. Each step that sends a request includes the request block and the relevant response excerpt (truncated to 5-15 lines) inline — proof lives inside the step that produces it. |
@@ -122,7 +127,13 @@ Reports are for humans who scan fast. Enforce these ceilings per finding:
 
 If you need more space, the finding is probably two findings. Split it.
 
-The executive summary is one page maximum. If it does not fit on one page, cut words.
+The executive summary is one page maximum. If it does not fit on one page, cut words, not font size.
+
+**External submissions have their own, separate ceiling table.** This table governs the internal
+`report.md`'s `Description`/`Steps to Reproduce`/`Impact`/`Remediation` sections only.
+`agent/references/submission-format.md` "Section budgets" is the sole owner of ceilings for a
+submission's `Summary`/`Steps to Reproduce`/`Evidence`/`Attack Scenario`/`Impact`/`Remediation` — do
+not cross-apply either table to the other artifact.
 
 ## 11. Language that signals confidence and precision
 
@@ -221,7 +232,7 @@ When the server-side technology is unknown, state the control that failed and th
 
 ## 15. Keep every sentence load-bearing
 
-Every sentence in a finding must contribute new information. If removing a sentence does not reduce the reader's understanding, remove it.
+Every sentence in a finding must contribute new information. If removing a sentence does not reduce the reader's understanding, remove it. Rule 21 is the specific case of this where the repeated sentence re-proves a fact already established elsewhere.
 
 Common padding to avoid:
 - Background paragraphs explaining the technology stack before getting to the bug

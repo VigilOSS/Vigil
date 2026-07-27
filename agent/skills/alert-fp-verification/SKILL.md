@@ -45,7 +45,7 @@ investigator's annotations are inputs, never trusted on their own.
   customer's documented identities, schedules, change tickets, on-call
   calendar, vendor maintenance windows, and known-benign register that
   Check 5's devil's advocate searches against.
-- `agent/skills/code-finding-verification/SKILL.md` — the red-mode origin
+- `agent/skills/code-finding-verification/SKILL.md` — the owning definition
   of the five-check protocol. Skim it when in doubt about the rigor of a
   Check 1 or Check 4 evidence citation — the standard is identical, only
   the data source differs.
@@ -96,47 +96,21 @@ investigator's annotations are inputs, never trusted on their own.
 
 ## Methodology — Five-Check Protocol
 
-### Preamble (verbatim from red-mode origin + blue translation)
+### Preamble
 
-Verbatim from `agent/skills/code-finding-verification/SKILL.md:36`:
+The four-outcome vocabulary (PASS, KILL, DOWNGRADE, ESCALATE), the evidence-symmetry
+bar behind it, and the Multi-Perspective Voting escalation are owned by
+`agent/skills/code-finding-verification/SKILL.md`'s "Methodology — Five-Check
+Protocol" section — read it once for the rigor bar, then apply the same discipline
+here against telemetry instead of source code. Blue disposition vocabulary maps onto
+that outcome set: PASS closes toward `verified`, KILL closes toward `false_positive`,
+DOWNGRADE narrows severity without closing the check, and an unresolved ESCALATE
+routes to voting below. "Symmetric Evidence Rule" states how the five checks resolve
+to one of the four blue dispositions.
 
-> *"absence of counter-evidence is not PASS evidence, and plausibility of
-> counter-evidence is not KILL evidence."*
-
-Blue translation (PASS → `verified`, KILL → `false_positive`): absence of
-counter-evidence is not enough to verify, and plausibility of a benign
-explanation is not enough to false-positive. The two dispositions carry
-identical evidence cost — a `verified` finding must cite supporting
-telemetry at the same rigor a `false_positive` finding cites the
-tenant-ref benign pattern or the change ticket. A vague "looks like normal
-admin behavior" is not `false_positive`; it is `escalated` until a
-citation lands. A vague "the actor seems suspicious" is not `verified`;
-it is also `escalated`.
-
-Each of the five checks below produces one outcome:
-
-- **PASS** — supporting evidence at the rigor bar (cited artifact IDs,
-  cited tenant-ref entries, cited log slices); the check confirms the
-  finding for this dimension.
-- **KILL** — counter-evidence at the same rigor bar; the check refutes the
-  finding for this dimension.
-- **DOWNGRADE** — counter-evidence reduces the alleged impact but does
-  not eliminate the adversarial primitive (e.g., the rule fired on
-  "credential theft + active use" but evidence only supports "failed
-  credential probe").
-- **ESCALATE** — evidence fits neither PASS nor KILL at the rigor bar;
-  route to the Multi-Perspective Voting Protocol section.
-
-Disposition synthesis after all five checks:
-
-- All five PASS (or PASS-equivalent with cited DOWNGRADE rationale) →
-  `verified` (`downgraded` if any DOWNGRADE landed).
-- Any one check produces a KILL with same-bar counter-evidence and the
-  remaining checks do not contradict the kill → `false_positive`.
-- Mixed evidence with at least one ESCALATE that voting did not resolve
-  → `escalated` (handoff to operator with FOR/AGAINST summary).
-- Symmetric outcomes that cannot be reconciled → ESCALATE (do not
-  default to either disposition).
+Each check below keeps the code-mode check's name and evidence discipline; only the
+evidence source and platform vocabulary change — telemetry and tenant-ref citations
+in place of source-code citations.
 
 ### Check 1: Reachability from external entry
 
@@ -354,8 +328,7 @@ The reproduction is registered as a new artifact (`kind=evidence`,
 `finding=<slug>`) with the cross-source query embedded.
 
 **(B) Prove a specific constraint prevents the alleged exploit
-trajectory.** Symmetric to red-mode Check 4's "specific blocking
-constraint" — name the constraint and demonstrate the attacker
+trajectory.** Name the constraint and demonstrate the attacker
 cannot route around it.
 
 Standard constraint shapes:
@@ -439,7 +412,7 @@ support it with same-bar evidence.
   is still calibrated to the prior baseline. Search: tenant config
   change history; CA policy version artifact.
 
-**Rigor requirement (verbatim from red-mode Check 5):** A DA
+**Rigor requirement:** A DA
 counter-argument must meet the same evidence bar as the original
 finding. The investigator provided MITRE technique, actor + target +
 time, evidence_refs from registered artifacts, and a confidence
@@ -596,8 +569,7 @@ vigil assess finding verify <slug> \
 
 ## Multi-Perspective Voting Protocol
 
-Entered when any of Checks 1-5 returns ESCALATE. The voting protocol is
-intentionally identical in shape to red-mode's: a second verifier
+Entered when any of Checks 1-5 returns ESCALATE: a second verifier
 dispatch with explicit disagreement scope, then operator decision.
 
 **When to invoke voting:**
@@ -744,9 +716,9 @@ handoff schema.
 
 ## Reference Block
 
-- `agent/skills/code-finding-verification/SKILL.md` — red-mode origin of
-  the five-check; the symmetric evidence rule (line 36) is verbatim
-  the same in blue.
+- `agent/skills/code-finding-verification/SKILL.md` — the "Methodology —
+  Five-Check Protocol" section this skill's five checks translate to
+  blue evidence sources and disposition vocabulary.
 - `agent/rules/triage.md` — disposition vocabulary (rule 3), symmetric
   evidence bar (rule 4), devil's advocate mandate (rule 15), severity
   ↔ technique alignment (rule 16).

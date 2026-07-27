@@ -3,6 +3,7 @@ name: gf-patterns:oauth-oidc
 description: OAuth2/OIDC flow endpoints and discovery keys (authorize, token, JWKS, well-known config)
 origin: local overlay (no upstream gf equivalent)
 bucket: oauth-oidc
+skill: oauth-oidc-testing
 weight: 35
 ---
 

@@ -3,6 +3,7 @@ name: gf-patterns:sqli
 description: Query-identifier and search parameter patterns that signal SQL injection surfaces
 origin: 1ndianl33t/Gf-Patterns (+ local overlay)
 bucket: sqli
+skill: sqli-testing
 weight: 40
 ---
 

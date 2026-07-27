@@ -108,8 +108,6 @@ while [[ -n "$URL" ]]; do
   printf '%s\n' "$body" >> "$ENGAGEMENT_DIR/ir/reports/okta_systemlog_${USER_ID}.json"
   URL=$(printf '%s' "$resp" | awk -F'[<>]' 'tolower($0) ~ /rel="next"/ {print $2; exit}')
 done
-shasum -a 256 "$ENGAGEMENT_DIR/ir/reports/okta_systemlog_${USER_ID}.json" \
-  >> "$ENGAGEMENT_DIR/ir/reports/SHA256SUMS.txt"
 ```
 
 ## Methodology

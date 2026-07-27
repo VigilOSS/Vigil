@@ -1,5 +1,6 @@
 ---
 description: Browser-mode decision guide for real-browser semantics, headless Chromium/Playwright evidence capture, headed browser + mitmproxy escalation, and cases where browser mode is the wrong tool
+skill: browser-semantic-analysis
 ---
 
 # Browser Semantic Evidence

@@ -17,19 +17,31 @@ DIR="${ENGAGEMENT_DIR:?set by the engagement launcher}"
    **Breadth-bias is the dominant failure mode at scale.** The operator's pull toward breadth — covering everything, resolving each surface to a status, advancing the phase — silently degrades the hunt: it favors quicker checks, which means fewer vuln-class checks per surface, which means shallow depth, premature closure, and missed vulnerabilities. The countervailing doctrine for Phase 4 is depth, expressed as a *concentrated* fan-out, not a swarm. This is the operator-side complement of the Re-anchor cue (Core Loop in `agent/operator-core.md`) and Core-Loop step 2's Phase-4 prioritization — re-read both when the cadence drifts back toward item-ticking.
 
    - **Focus 1-2 TARGETS at a time; a SURFACE can BE a target.** At any moment, concentrate the active fan-out on one or two targets — where a "target" may be a single high-value surface (an auth portal, an API root, an admin console), not necessarily a whole apex. Set `--scope-host` to the focused domain for every dispatch in the batch. When a hot lead emerges, converge concurrent disjoint-host lanes on it; once the lead is resolved, **re-widen back to breadth** — converge and release, not permanent narrowing.
-   - **Fan VA lanes at DEPTH, not a swarm.** Partition the focused target's surfaces into lanes keyed on **(surface-group × vuln-class × mindset)** — e.g. lane A = the API surface group × access-control/IDOR × `idor-bac.md`, lane B = upload/form surfaces × injection + file-upload × `injection-surface.md`, lane C = auth/session surfaces × auth-logic × `business-logic.md` — one `vulnerability-analyst` per lane, each loading the matching vuln-class skill AND the matching mindset from `agent/rules/mindsets/` (see "Phased mindset flow" below for which pass sets the mindset), running a real campaign at `item-iterating`/`hypothesis-driven` depth. This is **deep** fan-out: it is the opposite of the corpus `swarm` mode (which is many shallow `low`/`medium` scans over a corpus — see Iteration-mode (dispatch_mode) Declaration). Do not use `swarm` here.
-   - **Phased mindset flow gates which mindset each lane loads.** The mindset axis of the lane key is set mechanically by a coverage-driven wide→deep→exploit schedule, never chosen from a flat menu — a lane's `mindset lens` field (Specialist Dispatch Contract) is a function of which pass the lane is in and which family the wide pass's signal pointed at, not an operator free-choice:
-     - **Pass-1 WIDE** — `hunt_scope: wide`, `dispatch_mode: hypothesis-driven` (broad sampling — NOT the deep `item-iterating` cap; see the `hunt_scope` ↔ iteration-mode pairing under Iteration-mode Declaration), open objective, baseline mindset (`agent/rules/adversarial-mindset.md`) plus `agent/rules/mindsets/developer.md` only, no family lens yet. Sweeps the focused target's surfaces broadly and records per-family **signal** (which vuln-class each surface leans toward) rather than confirming or killing anything.
-     - **Pass-2 DEEP** — `hunt_scope: deep`, one family mindset (`idor-bac.md`, `injection-surface.md`, `business-logic.md`, or the closest fit) plus the matching vuln-class skill, dispatched per signal/high-yield cell the wide pass flagged — this is the lane fan-out the bullet above describes.
-     - **Pass-3 EXPLOIT** — `exploit-developer` loaded with `agent/rules/mindsets/chain-impact.md` for cross-lane chain synthesis over the confirmed set (see the exploit-developer fan-out bullet below).
-     - **Which roles carry the lens in each pass.** The Dispatch-Mindset slot is not VA/EX-only — every role named in this bullet has its own `## Dispatch Mindset` slot and the flow sets which pass fills it. In the WIDE survey pass, `source-analyzer` and `code-architect` carry the survey lens (baseline + `agent/rules/mindsets/developer.md`) as they map code/surface for per-family signal, exactly as a wide VA does. In the DEEP pass, the family lens is injected on the roles that drill a flagged cell: `vulnerability-analyst`, `fuzzer` (payload-family lens — typically `injection-surface.md`), `code-vuln-hunter`, and `code-variant-hunter` (the sibling/variant lens of the confirmed family) each load the matching `agent/rules/mindsets/` packet into their own slot, the same way VA does. In the EXPLOIT pass, `exploit-developer` carries `chain-impact.md`. Recon / surface-collector / osint / report-writer / blue roles, plus `code-vuln-verifier` (carries the verification-skeptic stance via its own skill, not a family lens — `agent/operator-core-code.md` "Phased mindset flow (code)") and `code-fuzz-engineer` (mechanical fuzz-harness campaign, not a lens-driven hunt), do NOT carry a family mindset — they precede, follow, or stand outside the lens-driven hunt rather than hunting a vuln-class under a lens.
-     - **Standing context, separate from the per-pass lens.** `vulnerability-analyst` also loads
-       `agent/rules/mindsets/verification-skeptic.md` — the burden-of-proof stance ("PASS and KILL
-       cost the same evidence") — as MANDATORY standing context on every pass it runs (Phase-4
-       minting and Phase-5 review alike), not as a `hunt_scope`/`mindset lens` value set per dispatch.
-       It is not part of the WIDE/DEEP lens rotation above; it applies regardless of which family
-       lens (or none) the current dispatch carries. See the role file's own Load First and
-       `## Dispatch Mindset` slot (`agent/agents/vulnerability-analyst.md`).
+   - **Fan VA lanes at DEPTH, not a swarm.** Partition the focused target's surfaces into lanes
+     keyed on **(surface-group × mindset lens)** — e.g. lane A = the API surface group under
+     `idor-bac.md`, lane B = upload/form surfaces under `injection-surface.md`, lane C =
+     auth/session surfaces under `business-logic.md` — one `vulnerability-analyst` per lane, each
+     loading the matching mindset from `agent/rules/mindsets/` (see "Phased mindset flow" below)
+     and running a real campaign at `item-iterating`/`hypothesis-driven` depth. The lane names the
+     surface and the lens; which vuln class(es) the lane actually finds signal in is the
+     specialist's own hypothesis, reported post-hoc via `--vuln-classes` on `agent start` for the
+     audit trail — never a precondition (`agent/operator-core.md` "Iteration-mode (dispatch_mode)
+     Declaration"). This is **deep** fan-out: the opposite of the corpus `swarm` mode (many shallow
+     scans over a corpus). Do not use `swarm` here.
+   - **Phased mindset flow sets which mindset each lane loads, by pass:**
+
+     | Pass | `hunt_scope` / `dispatch_mode` | Mindset | Carried by |
+     |---|---|---|---|
+     | 1 — WIDE | `wide` / `hypothesis-driven` | Baseline (`adversarial-mindset.md` + `mindsets/developer.md`), no family lens — sweeps broadly and records per-family **signal**, confirms/kills nothing | `vulnerability-analyst`, `source-analyzer`, `code-architect` |
+     | 2 — DEEP | `deep` / `item-iterating` | One family lens (`idor-bac.md` / `injection-surface.md` / `business-logic.md`, closest fit) + matching vuln-class skill, per signal cell the wide pass flagged | `vulnerability-analyst`, `fuzzer`, `code-vuln-hunter`, `code-variant-hunter` |
+     | 3 — EXPLOIT | `deep` / `deep-manual` | `chain-impact.md`, cross-lane chain synthesis over the confirmed set | `exploit-developer` |
+
+     Recon, surface-collector, osint-analyst, report-writer, blue roles, `code-vuln-verifier` (its
+     own verification-skeptic stance via its own skill, not a family lens) and `code-fuzz-engineer`
+     (mechanical harness work) sit outside this rotation. `vulnerability-analyst` additionally
+     carries `agent/rules/mindsets/verification-skeptic.md` as MANDATORY standing context on every
+     pass (Phase 4 and Phase 5 alike) — separate from, and not part of, the per-pass lens rotation
+     above.
    - **Exploit-developer fan-out for high-value targets (low-bias, chain-synthesizing).** On a rich, high-value target where slow+thorough beats breadth, fan **`exploit-developer`** (deep-manual) across the same surface lanes — but give each lane the **full surface + intel context with a deliberately OPEN objective** ("find and prove P1/P2 impact on this surface"), NOT a pre-named bug. This is **Pass-3 EXPLOIT** in the phased mindset flow above — load `agent/rules/mindsets/chain-impact.md` on every dispatch in this fan-out; it is the generative lens for which chain to pursue and when to stop, not a replacement for the exploit-developer's own A→B Chain Table. Pre-pointing biases the hunt and hides chains; the exploit-developer self-serves the full endpoint map and is told to "start with the landscape, then narrow." The operator's job is **cross-dispatch chain synthesis**: after each batch, read the lanes' handoffs together, look for A→B primitives across them (auth-bypass + IDOR, reset-poisoning + takeover, info-leak + SSRF), and only THEN dispatch chain-directed follow-ups. Run several under-directed lanes first; let the chain context accumulate across dispatches before you start steering. This complements (does not replace) the VA fan-out — use VA for breadth-of-vuln-class discovery, exploit-developer fan-out when the target warrants concentrated deep manual hunting.
    - **Scale lane count to surface count — within the runtime-tier ceiling.** Thin surface = 1 VA lane; a broad, app-like target = 3-4 lanes. The Heavy/Comfortable concurrency floor (4-6 specialists; see "Aggregate concurrency + shared-VM ceiling" in `agent/references/runtime-guides/dispatch-resource-policy.md`) is the budget on a dedicated runtime. **But the runtime tier caps the lane count regardless of surface breadth:** the Standard tier handles ~2-3 concurrent lanes on a small target (see "Resource sizing" in `AGENTS.md` / "Aggregate concurrency" in `agent/references/runtime-guides/dispatch-resource-policy.md`); do not fan 5-7 lanes into a VM that cannot absorb them. Size the fan-out to the smaller of (surface breadth, VM capacity).
    - **The "very little attack surface" exception.** Breadth-style coverage of many surfaces at once is acceptable in exactly one case: the target genuinely has very little attack surface — operationally, a handful of routes, no object references, no privileged features, no auth boundary, and no useful source intel *after a thorough pass* (not after a quick look). This is the only exception to 1-2-target focus; rotate to breadth only when the focused target is genuinely dry, per `agent/rules/hunting.md` (rules 5 and 15, "rotate only when genuinely dry").
@@ -41,15 +53,10 @@ DIR="${ENGAGEMENT_DIR:?set by the engagement launcher}"
 
    **Dispatch one mindset lens per specialist; cycle across batches.** Name exactly ONE mindset lens per Pass-2/Pass-3 dispatch — a family of related developer assumptions that fail together — never a menu the specialist chooses from. A lens is not a bug: it describes *how the developer was thinking*, so the specialist derives its own hypotheses instead of executing a pre-named checklist; naming the bug caps depth at the operator's guess, naming the lens lets the specialist generalize to every surface the family touches. Beyond the current `agent/rules/mindsets/` library files, these finer-grained failure-family lenses remain valid to name explicitly when the signal is more specific than a family file — most map onto `developer.md`'s cognitive-state patterns or `business-logic.md`'s state-machine lens.
 
-   **Syntax — a finer-grained lens is never a bare value.** The `mindset lens` field always carries a
-   real backing packet path under `agent/rules/mindsets/`; a finer-grained name from the table below is
-   expressed as a parenthetical qualifier on that path, per
-   `agent/references/runtime-guides/dispatch-template.md`'s skeleton syntax:
+   Express a finer-grained lens as a parenthetical qualifier on its backing packet path, e.g.
    `mindset lens: agent/rules/mindsets/developer.md (Caching) — stale invalidation on the CDN edge
-   cache key`. Pick whichever backing packet is the closer parent for the row — `developer.md` for the
-   cognitive-state-flavored rows, `business-logic.md` for the state-machine-flavored ones (Race
-   conditions, Mass assignment) — then qualify it with the specific name; `mindset lens: Caching` alone,
-   with no backing path, is malformed.
+   cache key` (`business-logic.md` is the closer parent for the state-machine-flavored rows: Race
+   conditions, Mass assignment).
 
    | Lens | What fails together |
    |---|---|

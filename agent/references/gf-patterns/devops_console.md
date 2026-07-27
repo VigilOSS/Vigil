@@ -3,6 +3,7 @@ name: gf-patterns:devops_console
 description: Ops dashboards, metrics planes, and registry/CI APIs routinely deployed unauthenticated (Grafana, Jenkins, Jolokia, Kibana, Solr, Druid, pprof, Docker registry, GitLab API)
 origin: local overlay (no upstream gf equivalent)
 bucket: devops_console
+skill: info-disclosure-testing
 weight: 30
 ---
 

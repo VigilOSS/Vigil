@@ -13,10 +13,13 @@ INVARIANTS:
   * **NEVER count a self-attested-without-evidence signal.** A failed/blocked/
     empty probe, an evidence-free "covered" coverage_item, or a dispatch merely
     flagged ``status="completed"`` does NOT satisfy a class (S5/S7).
-  * **STRUCTURED dispatch match, NEVER task-text** (S7). Dispatches resolve to
-    classes via their structured ``vuln_classes`` / ``skills`` columns and their
-    ``(scope_host, scope_path_prefix)`` containment — the free-text ``task``
-    column is never read.
+  * **CLASS COVERAGE COMES FROM EVIDENCE, NOT DECLARATIONS** (S7). Which classes
+    a unit covered is decided by the ``attack_family`` on recorded probe_runs and
+    coverage_items — what was demonstrably probed. A dispatch matches a unit only
+    by ``(scope_host, scope_path_prefix)`` containment plus ``status``; its
+    self-declared ``vuln_classes``/``skills`` and its free-text ``task`` are never
+    read as coverage, so no dispatch can satisfy a class it did not probe and the
+    operator never has to name the vulnerability class before the hunt.
   * **WEB-ONLY.** Built on the web-guarded app-unit scorer; a non-web
     engagement yields an empty, skipped ledger.
   * **Read OUTCOMES, not tool runs.** Reads probe_runs / coverage_items /
@@ -31,7 +34,6 @@ tied to the unit's host. A bare "I looked for secrets" probe never counts
 """
 from __future__ import annotations
 
-import functools
 import json
 from typing import Any
 
@@ -566,11 +568,7 @@ def _unit_ledger(
                 miss_entry["identities_seen"] = sorted(ac_identities)
             (missing_block if block_level == BLOCK_HIGH else missing_warn).append(miss_entry)
 
-    block_families = {f for f, lvl in (
-        (fam, _FAMILY_BLOCK_LEVEL.get(fam, BLOCK_WARN)) for fam in expected
-    ) if lvl == BLOCK_HIGH}
     dedicated = _dedicated_dispatch_satisfied(
-        block_families=block_families,
         host=host,
         prefix=prefix,
         dispatches=dispatches,
@@ -836,46 +834,6 @@ def _coverage_maps_to_unit(
     return vid is not None and int(vid) in unit_variant_ids
 
 
-def _dispatch_classes(dispatch: dict[str, Any]) -> set[str]:
-    """Resolve a dispatch to canonical FAMILIES via STRUCTURED metadata only.
-
-    ``vuln_classes`` (comma-list) if present, ELSE the declared ``skills``
-    resolved to classes via the canonical taxonomy skill-to-class index. NEVER the
-    free-text ``task`` column (S7).
-    """
-    families: set[str] = set()
-    raw_classes = str(dispatch.get("vuln_classes") or "").strip()
-    if raw_classes:
-        for tok in raw_classes.replace(",", " ").split():
-            fam = vuln_taxonomy.family_of(vuln_taxonomy.normalize_class(tok))
-            if fam:
-                families.add(fam)
-    if not families:
-        skill_to_families = _skill_to_families()
-        for sk in str(dispatch.get("skills") or "").replace(",", " ").split():
-            families |= skill_to_families.get(sk.strip(), frozenset())
-    return families
-
-
-@functools.lru_cache(maxsize=1)
-def _skill_to_families() -> dict[str, frozenset[str]]:
-    """Inverse skill -> declared FAMILIES index, derived once from the canonical
-    taxonomy. ``build_class_to_skills`` re-reads the whole skills dir (a glob plus
-    a frontmatter parse per ``SKILL.md``), so resolving it inside
-    ``_dispatch_classes`` ran it once per dispatch×unit in the synchronous
-    terminal-block request path. The skills tree is baked at install time and
-    does not change while the orchestrator runs, so a process-lifetime cache is
-    safe (a re-install restarts the service)."""
-    skill_to_families: dict[str, set[str]] = {}
-    for cls, skills in vuln_taxonomy.build_class_to_skills().items():
-        fam = vuln_taxonomy.family_of(cls)
-        if not fam:
-            continue
-        for sk in skills:
-            skill_to_families.setdefault(sk, set()).add(fam)
-    return {sk: frozenset(fams) for sk, fams in skill_to_families.items()}
-
-
 def _dispatch_contains_unit(
     dispatch: dict[str, Any], host: str, prefix: str,
 ) -> bool:
@@ -889,14 +847,12 @@ def _dispatch_contains_unit(
 
 def _dedicated_dispatch_satisfied(
     *,
-    block_families: set[str],
     host: str,
     prefix: str,
     dispatches: list[dict[str, Any]],
     unit_has_work_evidence: bool,
 ) -> bool:
-    """≥1 completed dispatch with WORK EVIDENCE that, between qualifying
-    dispatches, covers every block-level Expected class for the unit (S7).
+    """≥1 completed dispatch WITH WORK EVIDENCE was aimed at this unit (S7).
 
     A dispatch QUALIFIES when:
       * ``status='completed'`` AND
@@ -913,26 +869,26 @@ def _dedicated_dispatch_satisfied(
 
     Work evidence is a per-UNIT property (does the unit have a covering probe or a
     finding), NOT per-dispatch — so the caller computes it ONCE and passes it in,
-    rather than re-scanning every probe per dispatch (the old O(dispatches x
-    probes) hot path). With no work evidence, no dispatch can qualify.
+    rather than re-scanning every probe per dispatch. With no work evidence, no
+    dispatch can qualify.
 
-    The union of qualifying dispatches' resolved classes must cover every
-    block-level family. When there are NO block-level families (degenerate), a
-    deep_required unit still owes ≥1 qualifying dispatch.
+    This answers only "was this unit actually worked", never "which classes did it
+    cover". Class coverage is decided by ``missing_block`` from recorded probe and
+    coverage-item ``attack_family`` — i.e. from what was demonstrably probed. A
+    dispatch's declared ``vuln_classes``/``skills`` are an intent label the agent
+    writes about itself, so gating on them would let a declaration that no probe
+    backs satisfy the unit, while forcing the operator to name the vulnerability
+    class up front — the pre-naming that caps a specialist at the operator's
+    guess. Evidence answers the coverage question; this function answers only the
+    assignment question.
     """
-    covered_block: set[str] = set()
-    any_qualifying = False
-    if unit_has_work_evidence:
-        for d in dispatches:
-            if str(d.get("status") or "").strip().lower() != "completed":
-                continue
-            if not _dispatch_contains_unit(d, host, prefix):
-                continue
-            any_qualifying = True
-            covered_block |= _dispatch_classes(d) & block_families
-    if not block_families:
-        return any_qualifying
-    return block_families.issubset(covered_block)
+    if not unit_has_work_evidence:
+        return False
+    return any(
+        str(d.get("status") or "").strip().lower() == "completed"
+        and _dispatch_contains_unit(d, host, prefix)
+        for d in dispatches
+    )
 
 
 def _finding_maps_to_unit(

@@ -18,10 +18,20 @@ this file is retained for on-demand internal summaries (an operator or client wa
 document mid-engagement) but is no longer the default final artifact. Blue incident reporting is
 unaffected by any of this — see "Blue Mode" at the bottom of this file, unchanged.
 
-## Query Backend First
+**Dispatched in default per-finding submission mode? Read only two sections below:** "Proof Standard
+by Finding Class" and "Submission-First Closeout". Everything between "Report Structure (Legacy
+Internal Report — On-Demand Only)" and "Publish After QA Pass (Legacy Internal Report)" — the
+`report.md` template, its generation procedure, and its publish sequence — applies only when the
+operator explicitly dispatched internal-report or blue mode. Skip that whole span; nothing in it is
+needed to draft, QA, or publish a submission.
 
-Before writing anything, pull the canonical state from the orchestrator API.
-Use the helper script or `curl` — never query the SQLite database file directly.
+## Query Backend First (internal report / blue only)
+
+Per-finding submissions use the lighter pull in `agent/agents/report-writer.md` "Per-Finding
+Dispatch" instead of this section — skip to "Submission-First Closeout" below.
+
+Before writing an internal `report.md` or a blue report, pull the canonical state from the
+orchestrator API. Use the helper script or `curl` — never query the SQLite database file directly.
 
 ```bash
 # Final report gate and grouped final-mode findings
@@ -98,18 +108,26 @@ Calculation", and "Proof Standard by Finding Class" below apply per-finding here
 do for the internal report — plus a mandatory blind triage gate before anything external ships.
 
 **The finding is the source of truth; `submission.md` is a render of it.** `export submission`
-renders the copy-paste layout (`**Title:** / **VRT:** or **Weakness:** / **Severity:** / **CVSS** /
---- / ### Summary / ### Steps to Reproduce / ### Evidence / (### Attack Scenario) / ### Impact /
-### Remediation`, then a second `---` and ONE "OPERATOR DETAILS — NOT FOR SUBMISSION" reference
-section — finding metadata, hygiene warnings, structured proof, and linked command runs — present in
-both draft and final below the never-paste line) FROM the finding's own fields — see
-`agent/references/submission-format.md`. `### Evidence` renders ONLY the authored
-`details.evidence`; the raw structured proof and linked runs stay in OPERATOR DETAILS, which you
-author Evidence FROM. You author each section ONCE, write it back to
-the finding, and re-render; a hand edit made only in `submission.md` is lost on the next render,
-while a write to the finding is durable and reproduces at publish. Storing the MASKED, annotated
-Evidence in the finding is also what keeps a re-render from re-leaking PII — the raw tool output
-stays in `scans/` (or `tools/` for code/fuzz) and is referenced, never rendered.
+renders this layout FROM the finding's own fields — full authoritative version in
+`agent/references/submission-format.md` "Structure":
+
+```
+**Title:** / **VRT:** or **Weakness:** / **Severity:** / **CVSS**
+---
+### Summary / ### Steps to Reproduce / ### Evidence / (### Attack Scenario) / ### Impact / ### Remediation
+---
+## OPERATOR DETAILS — NOT FOR SUBMISSION
+```
+
+The second `---` closes the pasteable body. Everything below it is the single OPERATOR DETAILS
+reference section — finding metadata, hygiene warnings, structured proof, and linked command runs —
+present in both draft and final. `### Evidence` renders ONLY the authored `details.evidence`; the raw
+structured proof and linked runs stay in OPERATOR DETAILS, which you author Evidence FROM. You author
+each section ONCE, write it back to the finding, and re-render; a hand edit made only in
+`submission.md` is lost on the next render, while a write to the finding is durable and reproduces at
+publish. Storing the MASKED, annotated Evidence in the finding is also what keeps a re-render from
+re-leaking PII — the raw tool output stays in `scans/` (or `tools/` for code/fuzz) and is referenced,
+never rendered.
 
 1. **Confirm proof readiness.** Before drafting, check the finding against "Proof Standard by
    Finding Class" below and the CVSS↔severity / missing-field checks in "Pre-Report Validation"
@@ -401,10 +419,9 @@ The check items are the **one consolidated pre-submission / report QA checklist*
 `agent/references/submission-format.md` — grouped into Structure & mandatory fields · Proof &
 evidence · PII & internal identifiers · Human voice / AI-tell elimination, each row tagged `[both]` /
 `[submission]` / `[report]`. Run it against the deliverable: apply the `[both]` and `[report]` rows
-for an internal `report.md`, and every row for a submission. That single checklist replaced the
-duplicate list that used to live here, so the submission QA path (step 4 above) and the
-internal-report QA path (Review-and-Fix QA Mode below) point at exactly the same checks and cannot
-drift apart.
+for an internal `report.md`, and every row for a submission. Both QA paths — the submission path
+(step 4 above) and the internal-report path (Review-and-Fix QA Mode below) — run against that one
+checklist, so they cannot drift apart.
 
 ## Review-and-Fix QA Mode
 
@@ -420,7 +437,7 @@ blind-triage gate (`agent/skills/blind-triage/SKILL.md`) when the artifact is a 
 
 ### Stale-text scrub (runs before every QA pass)
 
-Per `agent/rules/hunting.md` §21, no finding's `summary` or `details` text may contradict the current state. Stale narrative ("severity adjusted from X to Y" when severity is no longer Y, "originally rated as Z" after the rating shifted twice, "merged from W" after W was split off, "previously high" / "downgraded to medium" / "upgraded to high" mismatched against the current `severity` field) is invisible to status fields and ends up verbatim in `report.md`.
+Per the "Stale-text scrub clean" Definition-of-Done item in `agent/phases/phase-8-report.md`, no finding's `summary` or `details` text may contradict the current state. Stale narrative ("severity adjusted from X to Y" when severity is no longer Y, "originally rated as Z" after the rating shifted twice, "merged from W" after W was split off, "previously high" / "downgraded to medium" / "upgraded to high" mismatched against the current `severity` field) is invisible to status fields and ends up verbatim in `report.md`.
 
 Run this scan against the backend BEFORE rendering the report so the underlying findings are clean — fixing it in `report.md` alone leaks back the next time the report is regenerated.
 
@@ -501,33 +518,6 @@ Load before writing:
 - `agent/references/examples/disclosure-email-fast-import.txt` — working example with control test
 
 Output path: `$ENGAGEMENT_DIR/submissions/<slug>/disclosure.txt`
-
-The `submissions/<slug>/` directory is the staging tree for all external deliverables for that finding (see "Per-Finding Submission Staging" below).
-
-## Bug Bounty Submissions
-
-This is the default closeout path for red/code/android engagements — see "Submission-First
-Closeout" above for the full draft → QA → blind-triage → publish procedure. Each finding is a
-standalone submission — never bundle findings.
-
-`vigil assess export submission <slug> --platform bugcrowd|hackerone|direct --draft` renders
-`submission.md` FROM the finding's fields (the finding is the source of truth); it is the normal
-entrypoint. The report-writer authors each section and writes it back to the finding (Submission-First
-Closeout step 3), then re-renders — it does not hand-edit `submission.md` as the durable copy.
-Reference material for the copy-paste structure, taxonomy fields, and PoC hygiene, and for the two
-Bugcrowd/HackerOne-style platforms plus the no-program `direct` writeup:
-- `agent/skills/report-generation/templates/bugcrowd.md`, `.../hackerone.md`, `.../direct.md` —
-  per-platform structure the generated draft follows
-- `agent/references/submission-format.md` — authoritative structure/rules reference
-  (platform-agnostic; the templates above are the platform-specific renderings of it)
-- `agent/references/reporting/bugcrowd-vrt.md` — offline VRT leaf + P1-P5 priority + CVSS lookup
-  (data in `bugcrowd-vrt.tsv`); holds the IDOR Iterable-vs-Complex fork and other leaf-selection judgment
-- `agent/references/reporting/hackerone-weaknesses.md` — offline CWE weakness lookup (data in
-  `hackerone-weaknesses.tsv`); holds the CVSS→severity-band table and the weakness != severity guardrail
-- `agent/references/examples/bugbounty-submission-ldap-injection.md` — working example with POC
-
-Output path: `$ENGAGEMENT_DIR/submissions/<slug>/submission.md` (+ `submission-context.json` from
-the draft step).
 
 The `submissions/<slug>/` directory is the staging tree for all external deliverables for that finding (see "Per-Finding Submission Staging" below).
 

@@ -68,7 +68,7 @@ cross-references the always-loaded rules rather than restating them.
   Precondition analysis + `hunting.md §3`; id structure/prediction lives in
   `agent/references/access-control/idor-identifier-prediction.md`.)
 - **C5 — Does the CVSS reflect real-world attacker impact (not inflated)?** *(net-new — extends the
-  band-level `hunting.md §20` audit to a per-metric one.)* Recompute the vector and confirm it
+  band-level severity-CVSS alignment audit (`agent/operator-core.md` "Mandatory Phase-Exit Passes") to a per-metric one.)* Recompute the vector and confirm it
   equals the stated score (a vector that does not compute to its score is an automatic blocker).
   Justify each base metric against the proof:
   - `S:C` only if the vulnerable component's authority differs from the impacted component's
@@ -202,7 +202,8 @@ compared against. See the "Four Validation Gates" (Gate 3) in `agent/agents/vuln
 
 ## Related
 
-- `agent/rules/hunting.md` — §2 (existence-vs-exploitation), §3 (precondition equivalence), §20 (severity-CVSS audit)
+- `agent/rules/hunting.md` — §2 (existence-vs-exploitation), §3 (precondition equivalence)
+- `agent/operator-core.md` — "Mandatory Phase-Exit Passes" (severity-CVSS alignment audit)
 - `agent/rules/reporting.md` — §2 (proof), §3 (severity follows impact + precondition analysis; also the home of the info-disclosure / stack-trace "informational unless it enables a proven higher-impact attack" rule), §4 (non-public data), §5 (distinct identities)
 - `agent/skills/osint-recon/SKILL.md` — the CVE/disclosure-history research C7's precedent question
   draws on; also the role best placed to build a per-capability vendor-docs boundary map (docs SHOULD

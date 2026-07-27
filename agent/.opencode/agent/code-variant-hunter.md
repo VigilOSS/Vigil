@@ -20,9 +20,10 @@ source code at scale.
 
 Your dispatch prompt carries an injected `## Dispatch Mindset` block naming a `hunt_scope`
 (`wide`/`deep` — **default when omitted: `deep`**, Phase 3 is always convergent) and a `mindset
-lens` — a path under `agent/rules/mindsets/`, Required on every dispatch to this role (Phase 3
-VARIANT is always a lens-driven pass — see `agent/operator-core-code.md` "Phased mindset flow
-(code)"). When present, load the named file: it is MORE SPECIFIC than your baseline hunting posture
+lens` — a path under `agent/rules/mindsets/`. The operator should always be able to name this lens
+(Phase 3 VARIANT is always a lens-driven pass — see `agent/operator-core-code.md` "Phased mindset
+flow (code)"), but if it is omitted, do not treat the dispatch as invalid: apply the default below
+instead. When present, load the named file: it is MORE SPECIFIC than your baseline hunting posture
 (`hunting.md`, `adversarial-mindset.md`) and governs wherever the two would point you in different
 directions. Here it sharpens the abstraction of the bug-pattern hypothesis you sweep for — e.g. a
 business-logic lens widens "same taint sink" to "same trust assumption," reshaping which
@@ -84,35 +85,23 @@ You receive:
 
 ## Methodology
 
-### Step 1: Extract Abstract Pattern
-From the original finding, derive the pattern at the right abstraction level:
-- **Too specific**: "memcpy at line 342 of urlapi.c" — matches nothing else
-- **Too general**: "any memcpy call" — matches everything, useless
-- **Right level**: "memcpy where size parameter derives from attacker-controlled string length without bounds check, and the destination is a fixed-size or separately-allocated buffer"
+Extract the bug pattern from the confirmed finding at the abstraction level that generalizes
+without becoming useless — too specific ("memcpy at line 342 of urlapi.c") matches nothing else;
+too general ("any memcpy call") matches everything. The right level names the actual failure
+condition, e.g.: "memcpy where size derives from attacker-controlled string length without a
+bounds check, into a fixed-size or separately-allocated buffer."
 
-### Step 2: Generate Search Patterns
-Derive concrete search queries from the abstract pattern:
-- Function names: `memcpy`, `memmove`, `Curl_dyn_addn` (project-specific wrappers)
-- Code shapes: size variables derived from `strlen`, `strchr` arithmetic, or header parsing
-- Anti-patterns: absence of bounds check between size derivation and memory write
-- Guard patterns to check: signed/unsigned comparison, off-by-one in check
+From that pattern, derive concrete search queries — function names (including project-specific
+wrappers), the code shape of the missing guard, anti-patterns like a missing bounds check between
+size derivation and write — and scan each candidate file: search for the pattern, quick-taint-check
+any match (does untrusted data actually reach here?), and confirm whether the same guard failure
+exists before recording a variant. Use full filesystem access (Read, Grep, ctags) to trace
+cross-module paths when a match needs it.
 
-### Step 3: Scan Systematically
-For each candidate file:
-1. Read the file directly from the filesystem (full Read/Grep/Glob access available)
-2. Search for the concrete patterns
-3. For each match: quick taint check — does untrusted data actually flow here?
-4. If YES → assess whether the same guard failure exists
-5. If the same failure exists → create variant finding
-6. Use full filesystem access (Read, Grep, ctags) to trace cross-module paths
-
-### Step 4: Record Variants
-Each variant becomes a separate finding linked to the original:
-- Same CWE as original
-- Own severity assessment (same pattern in less-reachable code may be lower severity)
-- Link kind: `variant_of`
-- Include all report-readiness fields in `details`: `evidence`, `impact`, `remediation`,
-  `steps_to_reproduce`, `cvss_vector`, and `cvss_score` (CVSS must align with severity)
+Each confirmed variant becomes a separate finding linked to the original (`variant_of`, same CWE),
+with its own severity assessment (the same pattern in less-reachable code may be lower severity)
+and the full report-readiness fields in `details`: `evidence`, `impact`, `remediation`,
+`steps_to_reproduce`, `cvss_vector`, and `cvss_score` (CVSS must align with severity).
 
 ## Output Sections
 
@@ -193,10 +182,17 @@ handoffs and verifier follow-up.
 
 ## Key Principles
 
-- **Abstraction level matters**: too specific finds nothing; too general finds everything
-- **Quick taint check, not deep analysis**: you're scanning for PATTERN matches, not doing full analysis
+- **Quick taint check for candidates, full rigor for confirmed variants**: scanning is
+  lightweight — most candidate files are ruled out by a quick check, not a full independent audit.
+  But once a match confirms the same guard failure, it is recorded as fully as any other finding:
+  complete `details` (evidence, impact, remediation, steps_to_reproduce, cvss_vector,
+  cvss_score), not an abbreviated variant stub.
 - **Same pattern, different severity**: the variant may be higher or lower severity than the original
-- **Link to original**: every variant finding MUST reference the original finding
+- **Link to original**: every variant finding references the original via `variant_of` — this is
+  provenance (which pattern this generalizes from), not a shared fate. If the original is later
+  killed as a false positive, an already-confirmed variant is independently re-evaluated on its
+  own taint path and guard evidence, not auto-killed by association (see `code-vuln-verifier.md`
+  "Variant awareness").
 - **Document checked files**: record which files were scanned even if no variants were found — this is coverage evidence
 
 ## Handoffs

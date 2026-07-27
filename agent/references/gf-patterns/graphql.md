@@ -3,6 +3,7 @@ name: gf-patterns:graphql
 description: GraphQL endpoint and request-key patterns that signal introspection, query-injection, and BOLA surfaces
 origin: local overlay (no upstream gf equivalent)
 bucket: graphql
+skill: graphql-testing
 weight: 45
 ---
 

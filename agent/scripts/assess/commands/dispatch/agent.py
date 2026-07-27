@@ -155,9 +155,6 @@ def _build_register_payload(args) -> dict:
             "Pass --dispatch-mode explicitly to override.",
             file=sys.stderr,
         )
-    allow_no_skills = bool(getattr(args, "allow_no_skills", False))
-    if allow_no_skills:
-        payload["allow_no_skills"] = True
     # Engagement dir lets the validator check scope_host against scope.json
     try:
         _cfg_for_validation = load_config(getattr(args, "engagement_dir", None))
@@ -173,7 +170,6 @@ def _build_register_payload(args) -> dict:
     errors, warnings = validate_specialist_dispatch_contract(
         payload,
         engagement_dir=_eng_dir_for_validation,
-        allow_no_skills=allow_no_skills,
     )
     for warning in warnings:
         print(f"WARN agent start: {warning}", file=sys.stderr)

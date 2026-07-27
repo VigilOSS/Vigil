@@ -1,3 +1,8 @@
+---
+description: Subdomain-takeover claimability — why a dangling-CNAME/dangling-cloud-resource signature is necessary but not sufficient, per-provider claimability rules (CloudFront, Azure, S3, and others), and the benign own-account-claim proof required before recording a finding
+skill: cloud-exposure
+---
+
 # Subdomain Takeover — Claimability, Not Just the Signature
 
 **The core lesson (learned the expensive way, twice):** a dangling-DNS "takeover

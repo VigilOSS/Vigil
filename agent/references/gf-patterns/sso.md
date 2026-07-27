@@ -3,6 +3,7 @@ name: gf-patterns:sso
 description: SAML/SSO routing and federation endpoint patterns (/sso/, /saml, /cas/, /adfs/)
 origin: local overlay (no upstream gf equivalent)
 bucket: sso
+skill: saml-sso-testing
 weight: 35
 ---
 

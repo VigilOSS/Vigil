@@ -3,6 +3,7 @@ name: gf-patterns:secret_vault
 description: Credential-store and secrets-manager API path patterns (HashiCorp Vault, AWS Secrets Manager, Azure Key Vault, credential-proxy endpoints)
 origin: local overlay (no upstream gf equivalent)
 bucket: secret_vault
+skill: sensitive-data-detection, source-analysis
 weight: 45
 ---
 

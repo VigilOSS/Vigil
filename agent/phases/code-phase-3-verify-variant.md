@@ -56,8 +56,10 @@ Provide:
 The verifier's job is precise FP elimination. False positives are expected in any
 AI-assisted vulnerability pipeline, but so are wrongly killed real findings. A killed
 finding is only a good outcome when the counter-evidence is as rigorous as the original
-finding. If the verifier kills >80% of findings, review whether kills are based on
-specific code evidence or circumstantial reasoning.
+finding. When reviewing the verifier's kills, check whether each one cites specific code
+evidence at the hunter's original rigor bar, or leans on circumstantial reasoning (a guard
+"looks sufficient," a test "seems to cover it") -- the second pattern, not a raw kill count,
+is the signal to re-open kills for a second look.
 
 The verifier:
 - Traces the full entry-to-sink path for each finding, reading source directly
@@ -164,11 +166,11 @@ vigil assess finding merge <source-slug> <target-slug> "<reason>"
 vigil assess transition-phase fuzz
 ```
 
-Exit: All findings verified. Variant scan complete. If the verifier killed >80% of the findings
-dispatched to it, review whether Phase 2 hunter dispatch context (CWE pattern references, threat
-model) needs tightening before the next batch — a high kill rate this far past hunt is a dispatch
-signal, not just an FP-elimination stat. Transition to Phase 4 (Fuzz) if the codebase is C/C++
-with memory-safety targets, otherwise skip directly to report.
+Exit: All findings verified. Variant scan complete. If most of the verifier's kills lean on
+circumstantial reasoning rather than code evidence at the hunter's rigor bar (the same check as
+above), that pattern is the signal that Phase 2 hunter dispatch context (CWE pattern references,
+threat model) needs tightening before the next batch. Transition to Phase 4 (Fuzz) if the codebase
+is C/C++ with memory-safety targets, otherwise skip directly to report.
 
 ---
 

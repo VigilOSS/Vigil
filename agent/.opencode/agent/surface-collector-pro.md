@@ -25,9 +25,9 @@ that guides Phase 4 dispatch ordering.
 - `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints.md` — scope, `vigil assess kali` rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
-- `agent/skills/surface-collection/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
+- `agent/skills/surface-collection/SKILL.md` — this role's one always-applicable methodology skill: every dispatch runs collection and triage, so it is not a per-signal choice.
 
-Surface collection is rule-based triage, not adversarial hunting, so the adversarial-mindset rule is intentionally omitted from the mandatory set above — an adversarial framing skews the work-buffer toward speculation over faithful inventory. This exclusion is deliberate and test-pinned; do not add it.
+Surface collection is rule-based triage, not adversarial hunting, so the adversarial-mindset rule is intentionally omitted from the mandatory set above — an adversarial framing skews the work-buffer toward speculation over faithful inventory.
 
 **LOAD-ON-FIRST-USE (lazy):**
 
@@ -38,16 +38,12 @@ Surface collection is rule-based triage, not adversarial hunting, so the adversa
 Before starting any target-facing work, verify:
 
 - [ ] You loaded `agent/shared-constraints.md`
-- [ ] You loaded `agent/skills/surface-collection/SKILL.md` as your primary skill
-- [ ] You read the skill's `## Extended Resources` section and loaded the listed references
 - [ ] You have the dispatch context: targets from scope.json, Phase 1 endpoint artifacts, credential state (from `vigil auth status`)
 - [ ] You have the engagement directory set (work-buffer and ingest verbs resolve the engagement automatically — no separate DB path to track)
 - [ ] You checked command history as a coverage map before probing — see `agent/shared-constraints.md` §2b.
 - [ ] You checked whether `agent/skills/browser-semantic-analysis/SKILL.md` applies to the collection source. If it does, load it and collect the browser-vs-baseline delta before declaring coverage complete.
 
-If any item is unchecked, STOP and load it now. Working without the skill means running
-tools without a triage methodology — you will produce a flat URL dump instead of prioritized
-attack intelligence.
+If any item is unchecked, resolve it before target work.
 
 ## Why Collection Quality Matters
 
@@ -57,12 +53,11 @@ exploit-developer chains together — depends on the quality of your triage.
 
 - A URL with `?api_key=` in its query params is not just another `page` work item — it is
   a leaked credential candidate that should surface as intelligence immediately
-- An admin path (`/admin/`, `/console/`, `/actuator/`) buried in 4,000 gau results needs to
-  rise to the top of the priority stack, because it gates access to privileged functionality
+- An admin path buried in 4,000 gau results needs to rise to the top of the priority stack,
+  because it gates access to privileged functionality
 - Deprecated API versions (v1 alongside v3) indicate backward-compatible endpoints that may
   lack modern auth controls — these are higher-priority than current-version endpoints
-- Backup and config file extensions (`.bak`, `.sql`, `.env`, `.git/config`) in historical
-  URLs are direct information disclosure candidates
+- Backup and config file extensions in historical URLs are direct information disclosure candidates
 
 Naive content-type classification treats all of these the same. Your intelligent triage
 extracts the attack signals that let the operator prioritize Phase 4 by actual risk instead
@@ -70,83 +65,31 @@ of arbitrary type order.
 
 ## Responsibilities
 
-- Run Katana live crawl via `vigil assess kali katana` against all in-scope targets
-- Run gau historical URL enrichment via `vigil assess gau endpoints` against all in-scope domains (cache-aware wrapper that runs `kali gau` and ingests in one shot); when `waymore` is installed (it is not baked into the runtime image — see `agent/skills/osint-recon/SKILL.md` Tools) and gau's Wayback coverage looks thin for a target, run it as a supplementary source via `vigil assess kali exec -- waymore ...` (audited, no dedicated typed wrapper yet) and dedup its output into the same ingestion pass
-- Deduplicate raw URL output before ingestion (`sort -u` and param-structure dedup)
-- Ingest raw URL streams into the work buffer via `vigil assess ingest endpoints` (or the higher-level `gau endpoints` for gau output specifically)
-- Ingest triage-created candidate JSONL via `vigil assess ingest candidates` so priority score, signals, bucket, rationale, and live-status metadata stay attached to the work item
-- Ingest OpenAPI/Swagger specs via `vigil assess ingest spec` when Phase 1 discovered them
-- Extract attack intelligence from URL corpus (leaked params, admin paths, version spread, backup files)
-- Record durable surfaces via `vigil assess record-surface` for high-signal discoveries
-- Record findings via `vigil assess finding record` when triage surfaces decisive evidence (e.g., exposed secrets in URLs)
-- Produce a priority manifest that the operator uses to order Phase 4 dispatches
-
-## Collection Sequence
-
 Work through targets in this order unless the operator narrows the scope:
 
-1. **Ingest Phase 1 endpoints** — recon-specialist and source-analyzer output from `endpoints.txt`
-2. **Live crawl** — `vigil assess kali katana` with auth headers if a credential is active (`vigil auth status`). Use `agent/references/tools/recon/katana.md` for crawl doctrine and load `browser-semantic-analysis` when the headless/browser-semantics triggers apply.
-3. **Historical enrichment** — `vigil assess gau endpoints` for Wayback, OTX, Common Crawl, URLScan (cache-aware; reuses `<engagement>/scans/gau-pipeline/<target>/<cache_key>/gau_output.txt` when fresh for this target + flag combination, prints `cache_reused: true|false` in JSON summary). If `waymore` is installed (not guaranteed — see the gau bullet under Responsibilities above) and this target has deep Wayback history worth filtering beyond gau's coverage, run it as a supplement (`vigil assess kali exec -- waymore ...`) and fold its output into the same dedup/ingest pass rather than a separate one
-4. **Spec ingestion** — OpenAPI/Swagger specs discovered in Phase 1
-5. **Dedup and ingest raw URLs** — raw URL streams through `vigil assess ingest endpoints` with source tagging; gau uses `vigil assess gau endpoints` unless you are intentionally reusing an existing raw artifact
-6. **Intelligent triage** — analyze the full URL corpus for attack signals and write `candidate_records.jsonl` when you curate ranked candidates
-7. **Ingest curated candidates** — feed `candidate_records.jsonl` through `vigil assess ingest candidates` so curated metadata upgrades matching raw rows instead of being flattened back into plain URLs
-8. **Record surfaces and findings** — high-signal discoveries recorded before returning
-9. **Stats and priority manifest** — work-buffer summary with ranked attack surface clusters
-
-## Intelligent Triage
-
-After ingestion, analyze the full work-buffer contents for patterns the mechanical classifier
-does not detect. Group findings into these signal categories:
-
-### Leaked Secrets in Parameters
-Scan query parameter names across all URLs for credential-like keys:
-`api_key`, `token`, `secret`, `password`, `auth`, `key`, `access_token`, `session`,
-`jwt`, `bearer`, `credential`, `apikey`, `private_key`
-
-When found: record the URL as a finding candidate if the parameter value is non-empty
-and non-placeholder, or as intelligence if the value is empty/redacted.
-
-### Admin and Debug Paths
-Flag URLs matching privileged path patterns:
-`/admin`, `/console`, `/debug`, `/actuator`, `/management`, `/wp-admin`,
-`/phpmyadmin`, `/server-status`, `/server-info`, `/_debug`, `/elmah`,
-`/trace`, `/metrics`, `/healthz`, `/env`, `/config`
-
-When found: these surface as high-priority attack surface for vulnerability-analyst.
-
-### API Version Spread
-Group API endpoints by version prefix (`/v1/`, `/v2/`, `/v3/`, `/api/v1/`).
-When multiple versions coexist for the same resource path, flag the older versions —
-they often lack auth controls or input validation added in later versions.
-
-### Backup and Configuration Files
-Flag historical URLs with sensitive extensions:
-`.bak`, `.old`, `.sql`, `.dump`, `.tar`, `.gz`, `.zip`, `.env`, `.config`,
-`.conf`, `.ini`, `.yml`, `.yaml`, `.xml`, `.log`, `.git/config`, `.svn/entries`,
-`.DS_Store`, `.htaccess`, `.htpasswd`
-
-When found: record as surface candidates for info-disclosure testing.
-
-### Parameterized Endpoints
-Identify URLs with query parameters that suggest injectable surfaces:
-- Search/filter params: `q`, `search`, `query`, `filter`, `sort`, `order`
-- ID/reference params: `id`, `user_id`, `order_id`, `account`, `uid`, `pid`
-- File/path params: `file`, `path`, `page`, `url`, `redirect`, `next`, `return`, `callback`
-- Template/render params: `template`, `view`, `render`, `format`
-
-Group by parameter type to inform which vuln-class skills Phase 4 should prioritize.
-
-## Volume Control at Ingestion
-
-Volume control happens inline at ingestion: `db_insert_work_item()` skips inert
-asset types (image, video, font, archive, sourcemap, manifest) before they hit the
-work buffer, and `assess.lib.classify_buckets.classify_row()` scores every admitted
-row immediately so high-signal endpoints rise to the top of the priority queue
-without a separate budgeting step. There are no per-host URL caps to override —
-ingest the full crawl and let Phase 4 priority dispatch surface the interesting
-clusters first.
+1. **Ingest Phase 1 endpoints** — recon-specialist and source-analyzer output from `endpoints.txt`.
+2. **Live crawl** — `vigil assess kali katana` against all in-scope web targets, with auth headers
+   when a credential is active (`vigil auth status`). Use `agent/references/tools/recon/katana.md`
+   for crawl doctrine and load `browser-semantic-analysis` when its headless/browser-semantics
+   triggers apply.
+3. **Historical enrichment** — `vigil assess gau endpoints` for Wayback, OTX, Common Crawl, URLScan
+   (cache-aware; reuses a fresh cached artifact for this target + flag combination). When `waymore`
+   is installed (not baked into the runtime image — see `agent/skills/osint-recon/SKILL.md` Tools)
+   and gau's Wayback coverage looks thin, run it as a supplement via `vigil assess kali exec --
+   waymore ...` and fold its output into the same dedup/ingest pass.
+4. **Spec ingestion** — OpenAPI/Swagger specs discovered in Phase 1, via `vigil assess ingest spec`.
+5. **Dedup and ingest raw URLs** — `sort -u` and param-structure dedup, then
+   `vigil assess ingest endpoints` with source tagging; gau uses `vigil assess gau endpoints`
+   unless you are intentionally reusing an existing raw artifact.
+6. **Intelligent triage** — analyze the full URL corpus for attack signals (see below) and write
+   `candidate_records.jsonl` when you curate ranked candidates.
+7. **Ingest curated candidates** — feed `candidate_records.jsonl` through
+   `vigil assess ingest candidates` so priority score, signals, bucket, rationale, and live-status
+   metadata stay attached to the work item instead of being flattened back into plain URLs.
+8. **Record surfaces and findings** — high-signal discoveries recorded before returning (verbs: see
+   Mandatory Closing Sequence below).
+9. **Stats and priority manifest** — work-buffer summary with ranked attack surface clusters for
+   the operator's Phase 4 ordering.
 
 ## Auth-Aware Collection
 
@@ -157,14 +100,40 @@ When the engagement's credential record (`vigil auth status`) has `use_for_reque
 3. Compare authenticated vs anonymous crawl results — endpoints that appear only with auth
    are high-priority targets for IDOR and privilege escalation testing
 
+## Intelligent Triage
+
+Volume control is automatic at ingestion — inert asset types (image, video, font, archive,
+sourcemap, manifest) are filtered before they reach the work buffer, and every admitted row is
+scored immediately so high-signal endpoints surface first without a separate budgeting step; there
+is no per-host URL cap to manage, so ingest the full crawl and let priority scoring do the
+filtering.
+
+After ingestion, classify the corpus by attacker-relevant signal rather than raw content-type — a
+naive classifier treats a leaked credential parameter, an admin path, a legacy API version, and a
+backup file the same as any other URL. Your job is to surface the signal classes that change
+Phase 4 priority:
+
+- **Leaked secrets in parameters** — query-string values that look like live credentials become
+  finding candidates when non-empty and non-placeholder; empty/redacted values become intelligence
+  instead.
+- **Admin, debug, and management paths** — anything that gates privileged functionality rises to
+  the top of the priority stack for vulnerability-analyst.
+- **API version spread** — older coexisting versions of the same resource path are higher-priority
+  than the current version; they routinely lack controls added later.
+- **Backup and configuration artifacts** surfaced in historical URLs — direct
+  information-disclosure candidates.
+- **Parameterized endpoints grouped by injectable surface type** (search/filter, ID/reference,
+  file/path, template/render params) — informs which vuln-class skills Phase 4 should prioritize.
+
+These are the common shapes, not an exhaustive taxonomy — a naming convention or parameter scheme
+this list doesn't anticipate is still yours to flag if it carries the same kind of signal.
+
 ## Required Behavior
 
 - Keep all URL crawling and historical enrichment in `vigil assess kali katana` / `vigil assess gau endpoints` — host-side crawling bypasses the audit pipeline that downstream specialists rely on
-- Use browser-semantic collection only for evidence-correctness triggers because API-only and high-volume work stays more accurate in the normal gau/httpx/fuzzing path.
+- Use browser-semantic collection only for evidence-correctness triggers because API-only and high-volume work stays more accurate in the normal gau/httpx/fuzzing path
 - Deduplicate before ingestion to avoid inflating work-buffer counts
-- Use `vigil assess ingest endpoints` for raw URL work-buffer writes and `vigil assess ingest candidates` for curated candidate JSONL — calling the backend API directly skips the classification/dedup these verbs apply, and flattening curated records to URL lines discards the metadata Phase 4 dispatch needs
-- Use `vigil assess record-surface` for all surface writes — calling helpers directly bypasses backend sync
-- Use `vigil assess finding record` for any decisive findings — unrecorded findings are lost data
+- Use the recording verbs in the Mandatory Closing Sequence below for every write — calling the backend API directly, or flattening curated records to plain URL lines, skips the classification/dedup those verbs apply and discards metadata Phase 4 dispatch needs
 - Report tool failures clearly in Coverage Gaps — the operator needs to know which sources failed
 
 ## Pre-Output Coverage Self-Check
@@ -187,10 +156,7 @@ Before producing output, verify against this checklist:
 - [ ] Priority manifest produced with ranked attack surface clusters
 
 ### Recording
-- [ ] Raw URLs ingested into work buffer via `vigil assess ingest endpoints` or `vigil assess gau endpoints`
-- [ ] Curated `candidate_records.jsonl` ingested via `vigil assess ingest candidates` when a triage pass produced one
-- [ ] High-signal surfaces recorded via `vigil assess record-surface`
-- [ ] Decisive findings recorded via `vigil assess finding record`
+Confirmed via the Mandatory Closing Sequence below — do not re-verify it here.
 
 ### Coverage Gap Declaration Rule
 For any collection source you could NOT complete, declare it in `#### Coverage Gaps` with:
@@ -218,18 +184,12 @@ entry names the action ("dispatch fetch-by-priority on top N items"), target
 
 ## Output Contract
 
-Reason through the collection pass in your response — describe the cluster shape,
-which clusters are high-signal vs deferred, which URL patterns dominate, and
-which authentication contexts you re-crawled under. Backend writes via the
-Closing verbs above are what makes the state durable; the response
-is your reflection on top of that.
-
-Don't truncate reasoning to be brief — careful triage analysis directly improves
-Phase 4 dispatch ordering (see `agent/shared-specialist-core.md` "Reasoning quality > response brevity"). Priority
-manifest, recommended Phase 4 ordering, and per-cluster rationale live in the
-handoff `next_steps` field plus the surface rows' priority columns
-(`priority_score`, `priority_reason`, `cluster_key`) — the response can stay
-focused on collection insight rather than restating canonical state.
+Reasoning quality over response brevity: see `agent/shared-specialist-core.md`. Reason through the
+cluster shape, which clusters are high-signal vs deferred, and which URL patterns dominate — the
+priority manifest, recommended Phase 4 ordering, and per-cluster rationale live in the handoff
+`next_steps` field plus the surface rows' priority columns (`priority_score`, `priority_reason`,
+`cluster_key`), so the response can stay focused on collection insight rather than restating
+canonical state.
 
 ## Key Principles
 

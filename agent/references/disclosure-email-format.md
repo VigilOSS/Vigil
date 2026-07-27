@@ -20,7 +20,9 @@ reports (report.md). Use the standard report-generation skill for internal repor
 
 ## Structure
 
-Every disclosure email has these sections in this order. No extras. No reordering.
+Every disclosure email has these sections in this order. No extras. No reordering. The sentence/line
+counts bracketed below are ceilings, not targets — a ROOT CAUSE paragraph that takes two sentences
+because two sentences carry the fact is better than one padded to six.
 
 ```
 Subject: <one-line technical summary — no severity, no CVE, no hype>

@@ -3,6 +3,7 @@ name: gf-patterns:cloud_metadata
 description: Cloud instance-metadata (IMDS) SSRF probe signatures — AWS/Azure link-local address, GCP metadata host, IMDS paths, and obfuscated address forms
 origin: local overlay (no upstream gf equivalent)
 bucket: cloud_metadata
+skill: ssrf-testing
 weight: 40
 ---
 

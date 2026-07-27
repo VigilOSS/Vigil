@@ -3,6 +3,7 @@ name: gf-patterns:object-storage
 description: Cloud and Domino object-storage path patterns (S3, GCS, blob, Lotus .nsf file objects)
 origin: local overlay (no upstream gf equivalent)
 bucket: object-storage
+skill: info-disclosure-testing
 weight: 25
 ---
 

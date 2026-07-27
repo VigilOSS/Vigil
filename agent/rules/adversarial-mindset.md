@@ -51,14 +51,6 @@ The instant you name the trust, you know what to test: break the assumption the 
 
 ---
 
-## 3. Developers are not your adversaries. They are your collaborators — involuntarily.
-
-> This lens (cognitive-state patterns for reading code/behavior as developer-decision evidence) now
-> lives in `agent/rules/mindsets/developer.md` — load it when the dispatch calls for generating your
-> own hypotheses about where a codebase under-guarded.
-
----
-
 ## 4. The gap between design and implementation is where you live.
 
 Security specifications, threat models, and architecture diagrams describe the system the
@@ -158,15 +150,6 @@ A surface is "tested" when you have checked it from perspectives the developer d
 Elite offensive practitioners do not spray payloads — they construct one precise request that
 proves or disproves a hypothesis. See `hunting.md §6` (evidence beats volume) and `§22` (smallest
 probe that answers the question) for the operational discipline this mindset motivates.
-
----
-
-## 10. Dispatch one lens. Cycle across batches.
-
-> This is operator-only dispatch doctrine (which lens to name, cadence rule for cycling lenses
-> across batches) — it now lives in `agent/phases/phase-4-consume-test.md`'s "Lens Vocabulary —
-> Finer-Grained Failure-Family Lenses" section ("Dispatch one mindset lens per specialist; cycle
-> across batches" and "Lens rotation"), not the specialist-facing baseline.
 
 ---
 

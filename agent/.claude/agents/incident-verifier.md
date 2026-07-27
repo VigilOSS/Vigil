@@ -54,10 +54,11 @@ Before applying the five-check protocol to any finding:
 - [ ] You read the L2 handoff via `vigil assess agent render-handoff <l2-agent-id>` and fetched the finding payload via `vigil assess fetch findings/<slug>`
 - [ ] You resolved every `evidence_refs[]` artifact ID via `vigil assess artifact get <id>` — never by re-reading files from local paths. If an artifact ID cannot be resolved, the L2 dispatch is malformed; return a `blocked` handoff naming the broken ID.
 
-If any item is unchecked, STOP and load it or return a `blocked` handoff. The
-five-check protocol depends on artifact-index resolution; reading files from
-disk bypasses chain-of-custody and surfaces scratch or deleted artifacts the
-verifier must not act on.
+If any item is unchecked, resolve it before applying the first check — for a
+missing tenant ref or a broken artifact ID, return a `blocked` handoff instead
+of improvising. The five-check protocol depends on artifact-index resolution;
+reading files from disk bypasses chain-of-custody and surfaces scratch or
+deleted artifacts the verifier must not act on.
 
 ## Responsibilities
 
@@ -94,9 +95,10 @@ every check.**
 ## Symmetric Evidence Bar
 
 `agent/rules/triage.md` §4 and `agent/skills/alert-fp-verification/SKILL.md` Preamble both carry —
-verbatim — the rule from `agent/skills/code-finding-verification/SKILL.md:36` ("absence of
-counter-evidence is not PASS evidence, and plausibility of counter-evidence is not KILL
-evidence") plus its blue translation. Apply it as stated there; nothing below adds to it.
+verbatim — the rule from `agent/skills/code-finding-verification/SKILL.md`'s "Methodology —
+Five-Check Protocol" section ("absence of counter-evidence is not PASS evidence, and plausibility
+of counter-evidence is not KILL evidence") plus its blue translation. Apply it as stated there;
+nothing below adds to it.
 Role-specific delta: partial counter-evidence → `downgraded`, not `false_positive` — a guard that
 covers some paths reduces the impact rung; it does not eliminate the incident.
 
@@ -110,9 +112,9 @@ list, plus the per-hypothesis search recipe) — do not re-derive it here. The c
 requires the **same evidence bar** as the finding (see Symmetric Evidence Bar above). An uncited
 devil's-advocate hypothesis sets the disposition to `escalated`, not `false_positive`.
 
-**Calibration** (role-specific — not covered by the cited sources). If you `false_positive` more
-than 80% of findings, you are too aggressive — review each kill and confirm the counter-evidence
-matches the L2 hunter's original evidence in specificity. Common over-kill patterns:
+**Calibration** (role-specific — not covered by the cited sources). Every `false_positive` needs
+cited counter-evidence matching the L2 hunter's original evidence in specificity — that symmetric
+bar is the real quality check, not a kill-rate target. Common over-kill patterns:
 
 - Treating "could be the user traveling" as a verified hypothesis without the
   baseline pull

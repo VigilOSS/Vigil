@@ -2,8 +2,9 @@
 
 Load this file as part of your Load First set — together with your role file and
 `agent/shared-specialist-core.md` — before any target-facing work. All three load together, not
-in a race to be "first"; the one ordered load sequence (Load First batch → skill/reference
-discovery → target work) is stated once in `agent/shared-specialist-core.md` "Load Sequence".
+in a race to be "first". Skills and references are trigger-gated — loaded on-signal throughout the
+task, not as a pre-work gate — with one exception: a role's single always-applicable methodology
+skill loads in Load First too. See §3 below and `agent/shared-specialist-core.md` "Load Sequence".
 These rules apply to every specialist agent regardless of role.
 They are extracted from the operator prompt so you receive only what is relevant to you.
 
@@ -383,11 +384,11 @@ vigil assess agent decision --kind human_reach_decision --surfaced-to-user \
     "evidence": "<what Step 1-3 showed>"}'
 ```
 
-The `choice` field **must** live inside `--payload-json` (as above), not as a
-standalone `--choice` flag: when `--payload-json` is supplied the CLI uses it
-verbatim and ignores the shorthand flags, so a top-level `--choice` would be
-silently dropped and the cross-dispatch gate — which reads `payload.choice` —
-would never fire. Do not continue live-firing that endpoint/action until the
+Put `choice` inside `--payload-json` as shown — never as a standalone `--choice`
+flag. `--payload-json`, when supplied, is used verbatim and the shorthand flags
+are ignored, so a top-level `--choice` is silently dropped and the cross-dispatch
+gate (which reads `payload.choice`) never fires. Do not continue live-firing that
+endpoint/action until the
 operator resolves the decision. Valid resolutions:
 
 - `approved_continue` — proceed with further live-fire (rare; the operator has
@@ -451,30 +452,49 @@ the real `--details-inline`/`--details-replace`, `kali katana -H`, `kali exec
 
 ---
 
-## 3. Use Skills and References — They Are the Methodology
+## 3. Skills and References Are Trigger-Gated Procedures — With One Exception
 
-This is the skill/reference half of the Load Sequence (`agent/shared-specialist-core.md` "Load
-Sequence") — it runs immediately after your Load First batch and before any target-facing work.
+The dividing line: **does the role pick this skill, or does the signal?** Role picks once and
+always → MANDATORY, load it in your Load First batch. Signal picks → trigger-gated, load it the
+instant the signal appears, never before.
 
-**Step 1 — Load the skill(s) named in your dispatch prompt.** The operator selects skills via
-`vigil assess list-skills` (compact name + one-line "Use when:") and includes the path(s) in the
-dispatch prompt. Read each named `agent/skills/<name>/SKILL.md` in full before doing anything else.
-If no skill was named and you believe one exists, run `vigil assess list-skills` to discover it
-yourself — discovery is fast (~200 tokens) and usually faster than guessing. Skill selection is
-still the operator's job, so name the skill you found in your dispatch response's `#### Recommended
-Next Actions` (and in the handoff's `open_questions` if you checkpoint before returning) rather than
-unilaterally committing to it — the operator confirms or redirects on the next dispatch.
+**MANDATORY exception — a role's one always-applicable methodology skill.** Where a role pairs 1:1
+with a single skill that applies on every dispatch it ever receives — `recon-specialist` ↔
+`web-recon`, `surface-collector` ↔ `surface-collection` — that skill IS the role's methodology,
+not a per-signal choice, so it belongs in the role's own `## Load First` MANDATORY list. (The code
+track's analogous 1:1 pairs — `code-vuln-hunter` ↔ `code-vulnerability-analysis`, `code-architect`
+↔ `code-architecture-mapping`, `code-vuln-verifier` ↔ `code-finding-verification`,
+`code-fuzz-engineer` ↔ `code-fuzz-campaign` — follow the same rule; `agent/shared-constraints-code.md`
+states them for that track.)
 
-**Step 2 — Run `vigil assess list-references`** after loading the skill (add `--skill <name>` to
-filter to that skill's paired references). Identify the paired
-payload files, tool cheatsheets, and OWASP checklists that apply to your task and load them.
+**Everything else is trigger-gated — load it the instant the signal appears, not before:**
+- Every vuln-class skill selected by observed signal (`ssrf-testing`, `sqli-testing`,
+  `idor-testing`, `jwt-testing`, …) — a `vulnerability-analyst` cannot know which applies until it
+  sees the surface. A URL/hostname-shaped parameter or a fetch-on-behalf-of feature (webhook,
+  importer, preview, PDF/screenshot renderer) → `ssrf-testing`; a JWT on the wire → `jwt-testing`.
+- All CWE/vuln-pattern references (`agent/references/code-vuln-patterns/**`) — selected by the
+  slot types actually observed in the code.
+- **Every skill's `## Extended Resources` list, without exception — including a MANDATORY
+  skill's own list.** This is the load-bearing half: Extended Resources are a menu the skill
+  itself points at, loaded when the skill's own procedure needs one of them — never auto-required
+  just because you loaded (or were required to load) the skill. Following the old "required
+  reading" rule literally cost a `recon-specialist` dispatch ~126,000 tokens (two skills plus the
+  union of 29 Extended Resources) and a `code-vuln-hunter` dispatch ~109,000 (one skill plus 23
+  CWE pattern files) before either read anything real.
 
-**Complete both reads before target-facing work begins, and only improvise after confirming
-the set is genuinely insufficient.** References are not a fallback: improvising a technique that
-already exists wastes tokens, produces inconsistent results, and misses encoded methodology
-(mitmproxy setup, payload libraries, tool flags). A skill's "Extended Resources" list is required
-reading for that test class, not optional. The `references/` library contains:
-- `payloads/` — 20 copy-pasteable attack payload files per bug class
+When your dispatch names a skill, load it before acting on that signal; when it doesn't and you
+observe a signal a skill exists for, load that skill yourself — `vigil assess list-skills`
+(compact name + one-line "Use when:") finds it faster than guessing. State which skill you loaded
+and why in your response's `#### Recommended Next Actions` (and in the handoff if you checkpoint)
+— that is the reporting requirement; loading it does not need an operator round-trip first.
+
+Reach for the skill rather than improvising the invocation whenever one exists for what you are
+about to do: it usually encodes harness specifics and measured calibration — mitmproxy setup, OOB
+mint→poll binding, rate ceilings, tool-flag defaults — that you cannot derive from general
+knowledge. Once you've loaded a skill, run `vigil assess list-references --skill <name>` for its
+paired payload files, tool cheatsheets, and checklists — the same trigger-gated principle applies:
+load the ones your current probe needs, not the whole set up front. The `references/` library:
+- `payloads/` — copy-pasteable attack payload files per bug class
 - `api-security/` — OWASP API Security Top 10:2023 checklists
 - `offensive-tactics/` — red team TTPs by kill-chain phase
 - `tools/` — CLI tool cheatsheets (nmap, ffuf, sqlmap, hydra, etc.)
@@ -579,20 +599,14 @@ not prose descriptions.
 
 ---
 
-## 7. Rule Reminders
+## 7. Severity by Structured Field, Not Shouting or Slang
 
-These are the most commonly violated rules — internalize them before you start. Bullets already
-covered in full in co-loaded `hunting.md`/`reporting.md` (no theoretical findings, kill weak leads
-fast, speculative language, filler/padding, the sibling rule, credentials require proof, validate
-before writing, evidence beats volume) are not restated here — see those files.
+Convey severity through the `severity` field and the CVSS vector plus calm, precise prose. Do not use ALL-CAPS for emphasis to signal criticality and do not use casual / "reddit" severity language ("this is insane", "game over", "pwned hard"). A critical finding reads as a measured, exact description of the attacker outcome — that is more credible to a triager than capitalized adjectives. (Literal CLI tokens, flags, and enum values written in caps — `REQUIRED`, `IDOR`, `--force` — are vocabulary, not emphasis, and are unaffected.)
 
-- **Severity by structured field, not shouting or slang.** Convey severity through the `severity` field and the CVSS vector plus calm, precise prose. Do not use ALL-CAPS for emphasis to signal criticality and do not use casual / "reddit" severity language ("this is insane", "game over", "pwned hard"). A critical finding reads as a measured, exact description of the attacker outcome — that is more credible to a triager than capitalized adjectives. (Literal CLI tokens, flags, and enum values written in caps — `REQUIRED`, `IDOR`, `--force` — are vocabulary, not emphasis, and are unaffected.)
-- **Precondition analysis governs severity** — what the attacker needs to already have before
-  exploiting the finding. This is fully covered in co-loaded `reporting.md` §3 (the reduces/does-not-
-  reduce table and the defense-in-depth rule) and `hunting.md` §3; per the policy above, not
-  restated here.
-
-Full rule sets: `agent/rules/hunting.md`, `agent/rules/reporting.md`, `agent/rules/adversarial-mindset.md`
+Everything else commonly violated — no theoretical findings, kill weak leads fast, the sibling
+rule, credentials require proof, evidence beats volume, precondition analysis governing severity —
+is owned by `agent/rules/hunting.md` and `agent/rules/reporting.md`; read those, not a restatement
+here.
 
 ---
 
@@ -660,22 +674,16 @@ Record state immediately using `vigil assess` with JSON files:
   | `no-signal` | no | no | Touched but inconclusive — a lead, not a verdict |
   | `error` | no | no | Touched but inconclusive — a lead, not a verdict |
 
-  A covering verdict (`tested`/`signal`) without `--evidence-ref` is not coverage — the flag is
-  conditionally mandatory, not optional decoration.
+  A covering verdict (`tested`/`signal`) without `--evidence-ref` is not coverage.
 
-  `--input-slot` and `--auth-context` are required on **every** call regardless of verdict — pass
-  both, never let either silently default:
-  - `--input-slot` names the specific input as `slot:name` (`header:X-Forwarded-Host`,
-    `query:uid`) so it surfaces as its own cell in the resume-brief's `## Per-Input Coverage`
-    grid. A non-covering verdict lands there too (distinguished by verdict word), not in
-    `## Attempts` (which carries only blocked techniques and roe_blocked findings), and does not
-    count as coverage.
-  - **`--auth-context` is a grid axis, not paperwork:** the grid keys per-input coverage on
-    **(host × path × attack_family × input_slot × auth_context)**, so omitting it — or letting it
-    silently default to `anonymous` — collapses every identity you actually tested into one
-    anonymous cell, hiding the exact cross-identity IDOR/BOLA gap the grid exists to surface.
-    Pass the real identity name (`anonymous`, `member`, `admin`, a credential slug from `vigil
-    assess auth list --host <host>`).
+  Pass `--input-slot` and `--auth-context` on **every** call, never defaulted — the resume-brief's
+  `## Per-Input Coverage` grid keys on **(host × path × attack_family × input_slot × auth_context)**.
+  `--input-slot` names the input as `slot:name` (`header:X-Forwarded-Host`, `query:uid`); a
+  non-covering verdict lands in the grid too (by verdict word), not in `## Attempts` (blocked
+  techniques and roe_blocked findings only). Letting `--auth-context` silently default to
+  `anonymous` collapses every identity you actually tested into one cell, hiding the exact
+  cross-identity IDOR/BOLA gap the grid exists to surface — pass the real identity name
+  (`anonymous`, `member`, `admin`, a credential slug from `vigil assess auth list --host <host>`).
 
   Raw `post probe-runs` is redirected here.
 - **Work-buffer id passing and the auto-cascade.** **Recording one covering probe is now the

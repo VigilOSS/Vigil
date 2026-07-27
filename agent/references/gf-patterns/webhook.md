@@ -3,6 +3,7 @@ name: gf-patterns:webhook
 description: Inbound/outbound webhook registration and delivery endpoint patterns
 origin: local overlay (no upstream gf equivalent)
 bucket: webhook
+skill: ssrf-testing
 weight: 30
 ---
 

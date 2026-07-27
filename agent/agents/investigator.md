@@ -30,18 +30,18 @@ needing 5–15 platform pulls. See "Iteration-mode (dispatch_mode) Declaration" 
 - `agent/rules/adversarial-mindset.md` — the lens through which alerts get re-read after audit pulls land
 - `agent/rules/resume.md` — universal resume hydration
 - `agent/shared-constraints-blue.md` — tenant scope, read-only-by-default, artifact-index chain of custody, UTC, look-back, host-exec audit pipeline, confidence labels, dispatch-handoff conventions
-- **One platform skill per dispatch**, named in the dispatch prompt. Allowed names:
-  - `agent/skills/google-workspaces/SKILL.md` — Google Workspace IR
-  - `agent/skills/m365-signin-investigation/SKILL.md` — Microsoft 365 sign-in and Conditional Access
-  - `agent/skills/aws-cloudtrail-investigation/SKILL.md` — AWS CloudTrail and IAM
-  - `agent/skills/okta-investigation/SKILL.md` — Okta System Log
-  - `agent/skills/edr-alert-triage/SKILL.md` — CrowdStrike, Defender, and SentinelOne
-  - `agent/skills/network-threat-hunt/SKILL.md` — proxy, DNS, and NetFlow
-  - `agent/skills/phishing-triage/SKILL.md` — email-borne phishing
 - **Every tenant ref named in `scope.json:tenant_reference_paths[]`.** Missing tenant ref → halt with a `blocked` handoff naming the path.
 
 **LOAD-ON-FIRST-USE (lazy):**
 
+- **Exactly one platform skill — picked by the dispatch's platform, never all seven, never more than one:**
+  - `agent/skills/google-workspaces/SKILL.md` — platform=gws
+  - `agent/skills/m365-signin-investigation/SKILL.md` — platform=m365
+  - `agent/skills/aws-cloudtrail-investigation/SKILL.md` — platform=aws
+  - `agent/skills/okta-investigation/SKILL.md` — platform=okta
+  - `agent/skills/edr-alert-triage/SKILL.md` — platform=edr (CrowdStrike, Defender, SentinelOne)
+  - `agent/skills/network-threat-hunt/SKILL.md` — platform=network (proxy, DNS, NetFlow)
+  - `agent/skills/phishing-triage/SKILL.md` — the alert is email-phishing-class (Proofpoint, Defender for O365, GWS Quarantine) regardless of underlying platform
 - `agent/skills/ioc-enrichment/SKILL.md` — load when the dispatch is IOC-heavy (multiple new domains / IPs / hashes to enrich).
 - `agent/rules/reporting.md` — **conditional (severity + banned hedge phrases).** L2 does telemetry pulls and evidence-ladder construction, not report authoring: load it only immediately before drafting the promoted finding's narrative fields (`severity_rationale`, timeline text) — which L3 verification and report-writer still reshape before they are report-final.
 
@@ -56,7 +56,10 @@ Before any tenant-facing pull:
 - [ ] You read the L1 handoff via `vigil assess agent render-handoff <l1-agent-id>` — NOT by re-reading the L1 dispatch's response text. The handoff row is canonical.
 - [ ] You confirmed `host-exec` is available. If not, return a blocked handoff and name the missing audit path in `runtime_issues`; do not run tenant-facing commands outside `host-exec`.
 
-If any item is unchecked, STOP and load it now or return a `blocked` handoff.
+If any item is unchecked, resolve it before the first tenant-facing pull — for a missing
+tenant ref, return a `blocked` handoff instead of improvising. `ioc-enrichment` and
+`reporting.md` load the instant their trigger fires (IOC-heavy dispatch; drafting a
+promoted finding's narrative fields) — not a precondition of this checkpoint.
 
 ## Responsibilities
 

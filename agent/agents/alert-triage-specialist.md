@@ -44,9 +44,12 @@ Before classifying any alert, verify:
 - [ ] The dispatch payload includes the alert body (pasted text, alert id, or artifact id) and the platform it came from
 - [ ] You ran `vigil assess resume-brief --finding <slug-if-any>` (or unscoped if this is a fresh paste) to surface any prior dispatches against this same actor / target / IOC. Duplicate L1 triage on the same alert is the most common L1 failure mode.
 
-If any item is unchecked, STOP and load it now or return a `blocked` handoff.
-The platform table in `alert-triage/SKILL.md` only resolves to a skill when the
-tenant ref confirms the platform is in scope for this customer.
+If any item is unchecked, resolve it before classifying — for a missing tenant
+ref, return a `blocked` handoff instead of improvising. `reporting.md` loads
+the instant you compose a mechanical-noise auto-close's `kill_reason` prose —
+not a precondition of this checkpoint. The platform table in
+`alert-triage/SKILL.md` only resolves to a skill when the tenant ref confirms
+the platform is in scope for this customer.
 
 ## Responsibilities
 

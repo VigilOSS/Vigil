@@ -30,8 +30,11 @@ renders each section FROM the finding's own fields — `summary` (Summary), `det
 `details.impact` (Impact), `remediation`/`details.remediation` (Remediation) — and consolidates the
 finding metadata, any hygiene warnings, the structured proof, and every linked command run into ONE
 "OPERATOR DETAILS — NOT FOR SUBMISSION" reference section below the second `---` (present in both
-draft and final, always below the never-paste line). You AUTHOR each section, then write it back to the finding with `vigil assess
-finding update <slug> --summary "..." --details-inline '{...}'`, and re-render.
+draft and final, always below the never-paste line). You AUTHOR each section, then write it back to
+the finding with `vigil assess finding update <slug> --payload-file <path.json>` (the default write
+path — see `agent/skills/report-generation/SKILL.md` "Submission-First Closeout" step 3 for the
+payload shape; reserve `--details-inline` for a short value with nothing a shell would mangle), and
+re-render.
 
 **Re-rendering is the normal, expected operation** — the loop is author → write to the finding →
 re-render, repeatedly. `--overwrite` is what makes that loop work, not a hazard to avoid:
@@ -167,42 +170,20 @@ mask and author Evidence from, and every linked command run. The pasteable body 
 `### Summary` down to this second `---`.]
 ```
 
-## Steps to Reproduce vs Evidence — keep them non-overlapping
+## Steps to Reproduce vs Evidence
 
-These also read as near-duplicates when written loosely — the easy failure mode is retyping the same
-request twice, once as a step and once inside Evidence — so give each section a distinct job:
+**Steps to Reproduce owns the action** — what was sent, in order, no output. **Evidence owns the
+result** — the response bytes that prove it, truncated to what matters and `<-- proof`-annotated.
+When a step's request and Evidence's request are identical, don't retype it: reference the step
+("the response to step 3") and show only the outcome (reporting.md Rules 15, 21).
 
-- **Steps to Reproduce** is the bare action script: what was sent, in what order, one action per
-  step, no output. A triager replays it verbatim to reproduce the bug themselves.
-- **Evidence** is the annotated proof pulled from those exact actions: the response bytes that show
-  the result, truncated to the lines that matter and marked with `<-- proof`. A triager who never
-  runs anything still sees the outcome here.
+## Attack Scenario vs Impact
 
-When a step's request and Evidence's request are identical, don't retype it — reference the step
-("the response to step 3's request") and show only the response/outcome that step produced. Evidence
-exists to carry the *result*, not to restate the *action*; the action already lives in Steps to
-Reproduce. Cutting that overlap keeps every sentence load-bearing (reporting.md Rule 15) and avoids
-re-proving the same fact twice (reporting.md Rule 21).
-
-## Attack Scenario vs Impact — keep them non-overlapping
-
-These two sections read as near-duplicates when written loosely, but they answer different questions
-and defend against different triager objections, so each must carry load the other doesn't:
-
-- **Attack Scenario** is the *plausibility* argument — a realistic adversary class, the access they
-  start with, and the action, ending at the moment of compromise. It answers "who realistically
-  reaches this, and how does it play out?" (the exploitability / privileges-required side a triager
-  weighs). It never quantifies scope.
-- **Impact** is the *severity* argument — the consequence and how far it reaches (blast radius),
-  quantified by shape/count. It answers "so what, and how bad?" (the CVSS impact metrics). It never
-  re-describes the actor or the reproduction steps.
-
-Attack Scenario is optional — drop it when Steps to Reproduce plus Impact already make reachability
-obvious, and include it only when a triager might doubt *who can realistically reach this*. Impact is
-mandatory. When both are present, the scope / "how many" sentence lives ONLY in Impact: a scenario
-that ends "…pulls every other tenant's data in one pass" has leaked Impact's job into itself, and an
-Impact that opens "any authenticated tenant reads…" has pulled the actor back out of the scenario.
-Cutting that overlap is also what keeps every sentence load-bearing (reporting.md Rule 15).
+**Attack Scenario owns plausibility** — adversary class, starting access, the action, ending at
+compromise; never quantifies scope. **Impact owns severity** — consequence and blast radius,
+quantified by shape/count; never re-describes the actor or the steps. The scope/"how many" sentence
+lives only in Impact. Attack Scenario is optional — drop it whenever Steps to Reproduce plus Impact
+already make reachability obvious (reporting.md Rule 15).
 
 ## PoC block
 
@@ -310,9 +291,12 @@ target-facing proof.
 
 ## Section budgets
 
-These are hard ceilings. A section that exceeds its budget needs to be cut, not wrapped.
+These are ceilings, not targets. A one-sentence Summary that lands the attacker outcome is a complete
+Summary — using the full ceiling on every finding is a sign the prose is padded to look thorough, not
+that it is thorough. Write the fact in as little space as it needs, then stop; only cut when a section
+runs past its ceiling below.
 
-| Section | Budget |
+| Section | Ceiling |
 |---|---|
 | Title | 12 words, single clause |
 | Summary | 4 sentences |
@@ -325,6 +309,12 @@ These are hard ceilings. A section that exceeds its budget needs to be cut, not 
 | Deconfliction (if required by program) | 3 lines: researcher ID, source IP, UTC time window |
 
 Sections not in this table (Chain Potential, Defender-positive, Probe Coverage, Architectural Analysis, Fix Validation steps) do not exist in external submissions. If content belongs in one of those categories, it belongs in the internal `report.md`, not the submission.
+
+**This table is the sole owner of external-submission section length.** `agent/rules/reporting.md`
+Rule 10 owns the internal `report.md`'s separate, non-conflicting ceilings for
+`Description`/`Steps to Reproduce`/`Impact`/`Remediation` — the two tables use different section
+names for a reason (this one is the submission's rendered fields, that one is `report.md`'s), and
+neither number cross-applies to the other artifact.
 
 ## Rules
 
@@ -404,7 +394,7 @@ Where a row's rationale is a reporting rule it cites the rule (`agent/rules/repo
 - [ ] **[both]** Evidence is authored, annotated proof — not a raw tool dump; each request/response is truncated to the 5-15 lines that prove the finding, with the critical line bolded or `<-- proof`-annotated so a reviewer finds it in seconds (reporting.md Rule 13)
 - [ ] **[submission]** Evidence does not retype a request Steps to Reproduce already shows — it references the step and carries only the response/outcome ("Steps to Reproduce vs Evidence" above; reporting.md Rule 21)
 - [ ] **[both]** Title and summary claim no reach, read, or impact beyond what the Evidence block literally shows — read them once as a blind triager would before publish, pre-empting the blind-triage lens rather than waiting for it to catch overclaim
-- [ ] **[both]** A reachable-but-not-fully-exploited finding separates a Demonstrated CVSS (what the proof shows) from a Potential CVSS (the further reach a defender should still fix); the potential vector never appears in the title or summary
+- [ ] **[both]** A reachable-but-not-fully-exploited finding scores CVSS on the demonstrated outcome only — there is a single `cvss_vector` field, not a separate score for the further reach a defender should still fix; name that further reach in `remediation` or one caveat sentence in `impact`, never as a second CVSS vector, and never in the title or summary
 - [ ] **[submission]** For any finding with claimed CVSS ≥ 8.0 (critical-severity), `agent/skills/disclosure-deployment-shape-check/SKILL.md`'s eight-category audit ran and passed before send — it catches the deployment-shape overstatement class (allocator dependence, build-flag gates, claim-vs-evidence fidelity, vendor-distro variation) that source-only verification does not, because those facts live in the runtime deployment, not the code. The audit memo lives at `tools/analysis-state/disclosure-shape-check-<slug>.md`.
 - [ ] **[submission]** PoC form matches the reproduction: inline-only → no attachment; a script → staged `poc.<ext>` with the correct extension, its run command, and a one-line pass criterion; multi-file → every file staged and attached
 - [ ] **[submission]** The attached PoC is agent-independent by inspection (de-harness rules above) and its clean-environment reproduction was established at exploit time — the report-writer does not re-run it here

@@ -291,8 +291,8 @@ vigil assess dns-discovery target.example --brute \
 ```
 
 > **Resolver-list provisioning.** The shipped premium/trusted lists are the safe
-> default. The skill's historical `/engagements/$ENGAGEMENT_KEY/wordlists/resolvers.txt`
-> path is an operator-provisioned pool — if you point `-r` at a large public list,
+> default. An operator-provisioned resolver pool lives at
+> `/engagements/$ENGAGEMENT_KEY/wordlists/resolvers.txt` — if you point `-r` at a large public list,
 > validate it under bulk load first (single-query liveness is not enough, CR-18)
 > and keep the in-container distinct-resolver-IP count under the CR-3 ceiling, or
 > route the brute to the host (`--runtime host`).

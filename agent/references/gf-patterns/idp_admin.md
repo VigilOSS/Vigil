@@ -3,6 +3,7 @@ name: gf-patterns:idp_admin
 description: Identity-provider admin / realm-config surfaces (Keycloak, PingFederate, ADFS, generic IdP admin and realm management)
 origin: local overlay (no upstream gf equivalent); classify-context-and-surface 2026-06 Part 3 §A.5
 bucket: idp_admin
+skill: auth-bypass
 weight: 35
 ---
 

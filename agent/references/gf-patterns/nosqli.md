@@ -3,6 +3,7 @@ name: gf-patterns:nosqli
 description: NoSQL operator-injection patterns (MongoDB / Elasticsearch query operators and search-aggregation routes)
 origin: local overlay (no upstream gf equivalent)
 bucket: nosqli
+skill: nosql-injection
 weight: 35
 ---
 

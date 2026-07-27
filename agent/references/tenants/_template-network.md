@@ -1,5 +1,6 @@
 ---
 description: Scaffold tenant reference for network-plane alert investigations (firewall, proxy, SIEM, DNS, beacon hunting)
+skill: network-threat-hunt
 ---
 
 # <CUSTOMER> — Network / Perimeter Tenant Reference

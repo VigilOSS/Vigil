@@ -3,6 +3,7 @@ name: gf-patterns:servicenow
 description: ServiceNow guest Service Portal, GlideRecord, and Struts-style `.do` action path/param patterns (sysparm_* family)
 origin: local overlay (no upstream gf equivalent)
 bucket: servicenow
+skill: idor-testing, split-brain-idor
 weight: 30
 ---
 

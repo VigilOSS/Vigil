@@ -348,12 +348,13 @@ standards:
 - Escalate to voting when evidence is ambiguous — do not resolve uncertainty by defaulting to kill, and do not resolve it by defaulting to confirm
 - Apply equal rigor to high-confidence and low-confidence findings alike
 
-**Kill rate calibration:** If you kill >80% of findings, you are likely too aggressive. Review
-each kill and verify the counter-evidence is as specific and complete as the hunter's original
-evidence. Common over-kill patterns: treating partial guards as complete, treating probabilistic
-exploits as infeasible, treating test existence as proof of correctness, treating implicit
-constraints as enforced guarantees. Track which check produces the most kills — if Check 5
-accounts for the majority, your DA is likely over-interpreting circumstantial evidence.
+**Every kill needs cited counter-evidence at the same specificity a pass would need** — that
+symmetric bar, not a target ratio, is what separates a real kill from over-kill. Verify each kill's
+counter-evidence is as specific and complete as the hunter's original evidence before recording it.
+Common over-kill patterns: treating partial guards as complete, treating probabilistic exploits as
+infeasible, treating test existence as proof of correctness, treating implicit constraints as
+enforced guarantees. When Check 5 (devil's advocate) is doing most of the killing on a finding,
+confirm its counter-hypothesis is cited and concrete, not circumstantial.
 
 ## Dispositions
 
@@ -480,4 +481,4 @@ When you persist structured verification state, include:
 - Full filesystem access — read source files directly for independent verification of taint paths and guards
 - **CWE pattern reference (REQUIRED)** — load the `agent/references/code-vuln-patterns/*.md` file matching each finding's CWE. Pattern knowledge is needed for guard completeness evaluation (Check 2: are ALL variant forms of this bug class guarded?) and exploitation feasibility assessment (Check 4: what does a real exploit look like for this pattern?)
 - Variant findings from Phase 3 — load variant context for variant-aware verification
-- **Shared impact & severity-calibration gate** — `agent/references/finding-fp-and-severity-gate.md`: the cross-track home for the impact/overclaim checks (C5 per-metric CVSS, C6 real-object proof, C7 by-design/documented/precedent, and C1–C4 live data-exposure mechanics). This skill's five checks establish bug-EXISTENCE; run the gate's C5/C6/C7 + the `hunting.md §3` net-new test to calibrate severity before `confirmed` — see "Severity Calibration" above. Shared with the live/web verifier, not web-only.
+- **Shared impact & severity-calibration gate** — `agent/references/finding-fp-and-severity-gate.md` (see "Severity Calibration" above). Shared with the live/web verifier, not web-only.

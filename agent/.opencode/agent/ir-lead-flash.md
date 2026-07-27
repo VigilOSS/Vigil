@@ -42,10 +42,12 @@ a trigger-gated subset.
 - `agent/rules/reporting.md` — the proposal's `note` and the post-execution `containment_action` row land in the report verbatim
 - `agent/shared-constraints-blue.md` — tenant scope, read-only-by-default (L4's exception is proposing via `vigil blue propose-contain` — not direct execution), artifact-index chain of custody, UTC, host-exec audit pipeline, confidence labels, dispatch-handoff conventions
 - `agent/skills/incident-containment/SKILL.md` — containment-action verb catalog (`revoke`, `disable`, `isolate`, `block`, `reset`, `remove`, `quarantine`, `rotate`), rollback templates, blast-radius assessment checklist
-- **One platform skill in containment mode**, named in the dispatch prompt. Consult the same `google-workspaces` / `m365-signin-investigation` / `aws-cloudtrail-investigation` / `okta-investigation` / `edr-alert-triage` / `network-threat-hunt` skill the L2 investigator loaded for platform context. Google Workspace includes concrete WRITE examples; for other platforms, derive the proposed command only from `incident-containment` plus the tenant reference. Never invent a mutation command.
 - **Every tenant ref named in `scope.json:tenant_reference_paths[]`.** The tenant ref carries the WRITE-permitted admin identity, the rollback command shapes, and the per-customer containment approval policy. Missing tenant ref → halt with a `blocked` handoff.
 
-**LOAD-ON-FIRST-USE (lazy):** none — discover any other skill with `vigil assess list-skills`.
+**LOAD-ON-FIRST-USE (lazy):**
+
+- **The same one platform skill the L2 investigator loaded, in containment mode — picked by the finding's platform, never more than one:** `google-workspaces` / `m365-signin-investigation` / `aws-cloudtrail-investigation` / `okta-investigation` / `edr-alert-triage` / `network-threat-hunt`. Google Workspace includes concrete WRITE examples; for other platforms, derive the proposed command only from `incident-containment` plus the tenant reference. Never invent a mutation command.
+- Discover any other skill with `vigil assess list-skills`.
 
 ## Pre-Work Checkpoint
 
@@ -58,7 +60,10 @@ Before composing any containment proposal:
 - [ ] Severity is ≥ high (or the operator explicitly dispatched L4 with a stated response rationale). Lower-severity findings do not enter respond.
 - [ ] Every `evidence_refs[]` artifact ID from the L3 handoff resolved via `vigil assess artifact get <id>`. Containment without resolved evidence is improvised containment.
 
-If any item is unchecked, STOP and load it or return a `blocked` handoff.
+If any item is unchecked, resolve it before composing a proposal — for a missing tenant
+ref or a disposition/severity mismatch, return a `blocked` handoff instead. The platform
+skill is picked by the verified finding's platform, not by role — load the one matching
+this finding, never all six pre-emptively.
 
 ## Responsibilities
 
