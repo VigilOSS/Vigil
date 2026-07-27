@@ -164,9 +164,13 @@ _FINDING_DETAIL_PROPERTIES = {
         "description": "Specific fix or missing control (e.g. 'Use parameterized queries', 'Add bounds check on schemelen before memcpy').",
     },
     "steps_to_reproduce": {
-        "type": "array",
+        "type": ["string", "array"],
         "items": {"type": "string"},
-        "description": "Ordered reproduction steps, one action per string. Start from initial access state; end at impact observation.",
+        "description": "Ordered reproduction steps, starting from initial access state and ending at impact observation. Preferred form is ONE string holding the whole block with your own numbering — renderers emit it verbatim, and prose elsewhere in the submission that cites a step number only resolves against numbers you wrote. A list of strings is also accepted, one action per string.",
+    },
+    "attack_scenario": {
+        "type": "string",
+        "description": "Realistic adversary, starting access, and action, ending at first compromise. Renders as the submission's Attack Scenario section; omit when the reproduction already carries the narrative.",
     },
     "poc_code": {
         "type": "string",
@@ -228,6 +232,111 @@ _FINDING_DETAIL_PROPERTIES = {
     "roe_blocked": {
         "type": "boolean",
         "description": "Set true when the primitive is proved but the program's rules of engagement forbid the final proof step; grade at impact-if-true. Distinct from a provisioning/access wall (see block_reason) and from chain_required (which needs another bug).",
+    },
+    # Platform taxonomy for an external submission. `export submission` reads
+    # these (falling back to `cwe_id` for weakness) and its final gate REQUIRES
+    # the platform's own field — VRT for Bugcrowd, weakness for HackerOne — so
+    # `details` must accept them or a submission cannot be recorded complete.
+    "vrt_category": {
+        "type": "string",
+        "description": "Bugcrowd VRT category for this finding (e.g. 'broken_access_control.idor'). Overridden by the --vrt-category flag on export.",
+    },
+    "weakness": {
+        "type": "string",
+        "description": "HackerOne weakness for this finding (e.g. 'CWE-639 Authorization Bypass Through User-Controlled Key'). Overridden by the --weakness flag on export; falls back to cwe_id.",
+    },
+    # Code/fuzzing detail keys, recorded by code-fuzz-engineer on a crash finding
+    # so the verifier and report-writer can judge reachability without re-running
+    # the campaign.
+    "crash_input": {
+        "type": "string",
+        "description": "Path to the minimized crash input that reproduces the fault.",
+    },
+    "asan_report": {
+        "type": "string",
+        "description": "ASAN/UBSAN summary line identifying the fault class and location.",
+    },
+    "attacker_trace": {
+        "type": "string",
+        "description": "Full byte-to-crash trace: how attacker-controlled input reaches the faulting operation.",
+    },
+    "caller_feasibility": {
+        "type": "string",
+        "description": "Which real entry points reach this code path, and under what conditions.",
+    },
+    "fp_gates": {
+        "type": ["object", "array", "string"],
+        "description": "Results of every false-positive gate applied to this crash, so a reviewer sees which gates passed rather than a bare verdict.",
+    },
+    "campaign_id": {
+        "type": ["string", "integer"],
+        "description": "Identifier of the fuzzing campaign that produced this crash.",
+    },
+    "fuzzer_confirmation": {
+        "type": "boolean",
+        "description": "True when a fuzzer reproduced this finding, distinguishing it from a static-only inference.",
+    },
+    # Reachability of disclosed material in a code engagement: severity follows the
+    # access path, so both keys are populated together.
+    "attacker_access_path": {
+        "type": "string",
+        "enum": [
+            "public_web_exposure",
+            "runtime_file_read_lfi",
+            "exposed_build_artifact",
+            "repository_or_backup_disclosure",
+            "privileged_insider",
+            "unknown",
+        ],
+        "description": "How a real attacker obtains the disclosed bytes. Severity must follow this access path.",
+    },
+    "exposure_prerequisite": {
+        "type": "string",
+        "description": "The concrete condition that gives a real attacker the bytes (e.g. 'file is served from a public S3 path', 'confirmed LFI reads this path').",
+    },
+    "bounded_or_systemic": {
+        "type": "string",
+        "description": "Whether the observed impact is bounded to one object/tenant or systemic across them. Record the verdict when it is established — it cannot be reconstructed later.",
+    },
+    "credential_id": {
+        "type": ["string", "integer"],
+        "description": "Identifier of the captured credential row this finding's PoC depends on, so a chain prerequisite stays traceable.",
+    },
+    "related_intel_ids": {
+        "type": "array",
+        "description": "Identifiers of intel rows enriched from this finding's indicators.",
+    },
+    "disposition": {
+        "type": "string",
+        "description": "Incident-response disposition in the blue vocabulary, carried for the report-writer.",
+    },
+    # Incident-response detail keys. Blue role prompts (investigator,
+    # alert-triage-specialist) instruct these on every finding they record, and
+    # report readiness REQUIRES a non-empty ``mitre_techniques`` for a blue
+    # engagement — so ``details`` must accept them or `finding record` rejects the
+    # documented blue finding shape outright. Shapes stay permissive because the
+    # role prompts define the contents, not this schema.
+    "mitre_techniques": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "MITRE ATT&CK technique IDs (e.g. 'T1078') this finding maps to. Required on a blue-engagement finding before report readiness passes.",
+    },
+    "timeline": {
+        "type": "array",
+        "description": "Ordered incident timeline entries, each a UTC ISO-8601 event citing its `source_file` and `command_run_id` per agent/rules/ir-evidence.md. Appended across investigation rungs, never replaced.",
+    },
+    "iocs": {
+        "type": "array",
+        "description": "Indicators of compromise observed for this finding (IP, domain, email, file hash, OAuth client_id, URL). Each one gets an `intel_*` row via `vigil assess intel record`.",
+    },
+    "confidence": {
+        "type": "string",
+        "enum": ["low", "medium", "high"],
+        "description": "Stated confidence in the finding's disposition, paired with severity_rationale. Single-signal triage is `low` by definition.",
+    },
+    "severity_rationale": {
+        "type": "string",
+        "description": "One-line justification for the assigned severity, per the impact-based severity model in agent/rules/triage.md.",
     },
     "block_reason": {
         "type": "string",

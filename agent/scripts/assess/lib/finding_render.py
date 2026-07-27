@@ -28,17 +28,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
 # Longest run of backticks anywhere in a string — used to pick a code fence
 # that the content cannot prematurely close.
 _BACKTICK_RUN = re.compile(r"`+")
-
-# A leading enumerator an author may have baked into a ``steps_to_reproduce``
-# item ("1. ", "2) "). Stripped before a renderer prepends its own ``N. ``
-# counter so the two never double up into "1. 1. …".
-_STEP_ENUMERATOR = re.compile(r"^\s*\d+[.)]\s+")
 
 # UUID shape — used only to confirm a collected internal id is genuinely a UUID
 # before we FLAG (never rewrite) its presence in an outward-facing render. A
@@ -56,15 +52,29 @@ def nonempty(value: object) -> str:
     return str(value or "").strip()
 
 
-def strip_step_enumerator(step: str) -> str:
-    """Drop a leading ``N.`` / ``N)`` enumerator from a steps_to_reproduce item.
+def step_lines(steps: object) -> list[str]:
+    """Render ``steps_to_reproduce`` exactly as authored — no marker, no counter.
 
-    Both step renderers prepend their own ``{i}. `` counter; an item the author
-    already numbered would otherwise render as ``1. 1. …``. Only a single leading
-    ``<digits><.|)><whitespace>`` run is removed, so a step whose prose merely
-    contains a number ("Request 3 times") is left untouched.
+    The preferred shape is ONE authored string holding the whole reproduction
+    block, numbered by the author; it renders through untouched. A list is also
+    accepted, and each item renders as its own paragraph so distinct steps stay
+    distinct without a marker being invented for them.
+
+    Formatting belongs to the author because the rest of the submission depends on
+    it: prose in Summary or Impact cross-references step numbers ("follow the
+    location header from step 4"), and those references resolve only against
+    numbers the author actually wrote. A renderer that supplied its own counter, or
+    stripped one, would restate the reproduction in its own words — leaving the
+    report-writer unable to tell its text from the tool's, and unable to trust the
+    document it is about to file.
     """
-    return _STEP_ENUMERATOR.sub("", str(step), count=1)
+    items = string_list(steps)
+    if not items:
+        return []
+    body: list[str] = [items[0]]
+    for item in items[1:]:
+        body += ["", item]
+    return body
 
 
 def _fence_for(*parts: str) -> str:
@@ -87,14 +97,35 @@ def details_object(finding: dict) -> dict:
     The backend stores extended fields in a ``details_json`` text column; the
     serialized read payloads can carry it either as a JSON string or as an
     already-parsed object depending on the endpoint, so handle both.
+
+    A parse failure is REPORTED, never silently swallowed. Returning a bare ``{}``
+    makes every details-sourced section — steps, evidence, impact, remediation,
+    CVSS, the structured proof — render as absent, which reads exactly like a
+    finding nobody authored. A render that quietly drops half the report is worse
+    than a loud one, so the reason goes to stderr where the caller's WARN lines
+    already go.
     """
     details_json = finding.get("details_json")
     if isinstance(details_json, str):
         try:
             parsed = json.loads(details_json)
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError) as exc:
+            print(
+                f"WARN finding_render: finding {finding.get('slug') or '?'} has "
+                f"unparseable details_json ({exc}); every details-sourced field "
+                "will render as missing",
+                file=sys.stderr,
+            )
             return {}
-        return parsed if isinstance(parsed, dict) else {}
+        if not isinstance(parsed, dict):
+            print(
+                f"WARN finding_render: finding {finding.get('slug') or '?'} has a "
+                f"details_json that is {type(parsed).__name__}, not an object; "
+                "every details-sourced field will render as missing",
+                file=sys.stderr,
+            )
+            return {}
+        return parsed
     return details_json if isinstance(details_json, dict) else {}
 
 
@@ -138,6 +169,20 @@ def blocked_reason_summary(finding: dict) -> str:
 
 
 def string_list(values: object) -> list[str]:
+    """Coerce an authored list-or-string field to a list of strings.
+
+    A bare string becomes a ONE-ELEMENT list rather than an empty one. Authors
+    routinely record a multi-item field as a single block of prose — a numbered
+    reproduction, one string — and discarding that silently is the worst available
+    outcome: the section vanishes from the render while the value sits plainly in
+    the record, and ``export submission``'s final gate reports the field as missing
+    for content the author can see they wrote. Backend ``_as_string_list``
+    (``report_readiness.py``) coerces the same way, so readiness and export agree
+    on what counts as authored.
+    """
+    if isinstance(values, str):
+        text = values.strip()
+        return [text] if text else []
     if not isinstance(values, list):
         return []
     return [str(value) for value in values if value not in (None, "")]
@@ -187,18 +232,27 @@ def render_finding(finding: dict, *, include_root_cause_group: bool = False) -> 
     The returned string is the stripped block; callers decide whether to append
     a trailing newline (export findings re-joins blocks; the tree adds one).
     """
+    # An unset field renders as ``(unset)``, never as a plausible value. Printing
+    # ``MEDIUM`` for a finding whose severity nobody set states a triage decision
+    # the record does not contain, and the reader cannot tell it apart from a real
+    # one.
     slug = str(finding.get("slug") or "")
-    title = str(finding.get("title") or "(untitled)")
-    severity = str(finding.get("severity") or "medium").upper()
-    workflow_status = finding.get("workflow_status") or "active"
-    verification_state = finding.get("verification_state") or "unreviewed"
-    verification_disposition = finding.get("verification_disposition") or "none"
-    source_name = finding.get("source_name") or finding.get("discovered_by") or "unknown"
+    title = str(finding.get("title") or "(unset)")
+    severity = str(finding.get("severity") or "(unset)").upper()
+    workflow_status = finding.get("workflow_status") or "(unset)"
+    verification_state = finding.get("verification_state") or "(unset)"
+    verification_disposition = finding.get("verification_disposition") or "(unset)"
+    source_name = finding.get("source_name") or finding.get("discovered_by") or "(unset)"
     defect_family = finding.get("defect_family") or ""
     location = finding.get("canonical_location") or ""
     auth_context = finding.get("auth_context") or ""
     evidence = finding.get("evidence_detail") or finding.get("evidence_ref") or ""
-    impact = finding.get("impact") or finding.get("summary") or ""
+    # No ``impact ← summary`` fallback: showing Summary prose under an Impact
+    # heading makes an unauthored impact statement look authored, and the reader
+    # cannot tell which field they are reading. ``export submission`` already
+    # refuses that substitution deliberately (``_evaluate``); the two renderers
+    # agreeing matters more than filling the bullet.
+    impact = finding.get("impact") or ""
     owasp_category = str(detail_value(finding, "owasp_category", "") or "")
     cwe_id = str(detail_value(finding, "cwe_id", "") or "")
     cvss_vector = str(detail_value(finding, "cvss_vector", "") or "")
@@ -261,8 +315,7 @@ def render_finding(finding: dict, *, include_root_cause_group: bool = False) -> 
     if steps:
         lines.append("")
         lines.append("**Steps to Reproduce:**")
-        for i, step in enumerate(steps, 1):
-            lines.append(f"{i}. {strip_step_enumerator(step)}")
+        lines.extend(step_lines(steps))
     if poc_code:
         lines.append("")
         lines.append("**PoC Code:**")
@@ -291,7 +344,12 @@ def render_finding(finding: dict, *, include_root_cause_group: bool = False) -> 
         lines.append("")
         lines.append("**PoC Response:**")
         resp_headers = header_lines(poc_response.get("headers"))
-        resp_body = str(poc_response.get("body_excerpt") or "")
+        # Same either-key read as :func:`poc_lines`, so this renderer and the
+        # submission/reply renderer never disagree about whether a finding has a
+        # response body.
+        resp_body = str(
+            poc_response.get("body_excerpt") or poc_response.get("body") or ""
+        )
         fence = _fence_for(
             f"HTTP {poc_response.get('status', '')}",
             "\n".join(resp_headers),
@@ -299,8 +357,8 @@ def render_finding(finding: dict, *, include_root_cause_group: bool = False) -> 
         )
         lines.append(f"{fence}\nHTTP {poc_response.get('status', '')}")
         lines.extend(resp_headers)
-        if poc_response.get("body_excerpt"):
-            lines.append(f"\n{poc_response['body_excerpt']}")
+        if resp_body:
+            lines.append(f"\n{resp_body}")
         lines.append(fence)
 
     block = "\n".join(lines).rstrip()
@@ -352,13 +410,18 @@ def poc_lines(finding: dict) -> list[str]:
     poc_response = detail_value(finding, "poc_response")
     if isinstance(poc_response, dict) and poc_response:
         resp_headers = header_lines(poc_response.get("headers"))
-        resp_body = str(poc_response.get("body_excerpt") or "")
+        # Accept either key: recorders write ``body_excerpt``, but a hand-authored
+        # or tool-captured response often carries plain ``body``. Reading only one
+        # key drops the response body — the proof itself — from the render.
+        resp_body = str(
+            poc_response.get("body_excerpt") or poc_response.get("body") or ""
+        )
         status_line = f"HTTP {poc_response.get('status', '')}".strip()
         fence = _fence_for(status_line, "\n".join(resp_headers), resp_body)
         block = [f"{fence}\n{status_line}"]
         block += resp_headers
-        if poc_response.get("body_excerpt"):
-            block.append(f"\n{poc_response['body_excerpt']}")
+        if resp_body:
+            block.append(f"\n{resp_body}")
         block.append(fence)
         lines += ["**PoC Response:**", "\n".join(block), ""]
     return lines
@@ -412,26 +475,51 @@ def pasteable_body(text: str, *, separator_ordinal: int = 2) -> str:
     return text
 
 
+def title_advisories(title: str) -> list[str]:
+    """Prose-quality advice about a submission title. NEVER blocking.
+
+    Kept apart from :func:`hygiene_warnings` because the two answer different
+    questions and earn different authority. A leaked internal identifier is a fact
+    about the document and rightly fails a final export closed. Title length is an
+    editorial opinion: enforcing it as a refusal lets a 13-word title block
+    publication of a finished, verified finding — the tool overruling the author on
+    style. Surface it and let the report-writer decide.
+    """
+    advisories: list[str] = []
+    title = nonempty(title)
+    if title:
+        word_count = len(title.split())
+        if word_count > 12:
+            advisories.append(
+                f"submission title is {word_count} words (max 12) — tighten it to a concise, "
+                "specific one-liner before external submission"
+            )
+    return advisories
+
+
 def hygiene_warnings(
     text: str,
     slug: str,
     internal_ids: list[str],
     engagement_dir: str,
-    title: str = "",
     *,
     separator_ordinal: int = 2,
 ) -> list[str]:
     """Non-destructively FLAG internal identifiers that leaked into the output.
 
-    Returns advisory strings; it NEVER mutates ``text``. The finding's content
+    Returns warning strings; it NEVER mutates ``text``. The finding's content
     reaches the report-writer verbatim — a target-app UUID, filename, or path must
     survive — and these warnings let the report-writer (and the blind-triage gate)
     decide what to strip before an EXTERNAL submission or reply.
 
+    Every entry here fails a FINAL export closed, so only a FACT about the document
+    belongs in this list. Prose-quality opinions go to :func:`title_advisories`
+    instead, where they are reported and never gated on.
+
     The slug / engagement-path / internal-UUID checks scan ONLY the PASTEABLE body
     (above the ``separator_ordinal``-th ``---``): those identifiers routinely and
     legitimately appear in the never-paste reference below it, so scanning the
-    whole document flagged every render. ``cases.db`` is the exception — a target
+    whole document would flag every render. ``cases.db`` is the exception — a target
     application never references the internal work database, so ANY mention
     (reference section included) is a genuine leak and is scanned whole-document.
     """
@@ -456,17 +544,6 @@ def hygiene_warnings(
         warnings.append(
             "reference to the internal cases.db work database appears — remove before external submission"
         )
-    # Title length is a submission-quality hygiene warning: a title over 12
-    # words reads as a run-on and weakens triage. Drafts surface it in context,
-    # stderr, and OPERATOR DETAILS; final submission export fails closed on it.
-    title = nonempty(title)
-    if title:
-        word_count = len(title.split())
-        if word_count > 12:
-            warnings.append(
-                f"submission title is {word_count} words (max 12) — tighten it to a concise, "
-                "specific one-liner before external submission"
-            )
     return warnings
 
 

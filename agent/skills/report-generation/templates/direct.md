@@ -76,8 +76,11 @@ the steps — this is the severity justification. See "Attack Scenario vs Impact
   `severity` field, not Bugcrowd's P1-P4 — there's no bounty-program priority scale to map onto.
 - **PoC is an operator-side attachment, not a rendered body line.** If the proof is a script, stage
   it as `submissions/<slug>/poc.<ext>` and hand it to the vendor alongside the writeup — see
-  `submission-format.md` "PoC block". `export submission` emits no PoC line into the body; a
-  hand-inserted one is wiped on the next `--overwrite`.
+  `submission-format.md` "PoC block". `export submission` emits no attachment block into the body;
+  the **Run:** / **Pass if:** pointer lines in the operational header ARE rendered, from the
+  finding's `details.run` and `details.pass_if` — write there so they reproduce on the next
+  `--overwrite` instead of typing them only into the body. The proof pointer itself
+  (`evidence_ref`/`poc_code`) stays under OPERATOR DETAILS, not the pasteable header.
 - Add a contact line if the vendor's intake doesn't already capture the researcher elsewhere (the
   writeup may be attached to a portal ticket or a cover email that already carries a From:
   address):

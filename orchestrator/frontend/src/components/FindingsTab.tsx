@@ -1935,9 +1935,9 @@ function Drawer({
   // Steps to reproduce moved from Overview to PoC (Issue 3b): the tab
   // count mirrors what PocPane actually renders so the badge stays
   // honest. Count a non-empty steps_to_reproduce array as one section.
-  const hasStepsForCount = !!(
-    d.steps_to_reproduce && d.steps_to_reproduce.length > 0
-  );
+  // Non-empty after joining, so an authored block that is only whitespace does
+  // not inflate the PoC badge.
+  const hasStepsForCount = (d.steps_to_reproduce ?? []).join("").trim().length > 0;
   const pocCount =
     [d.poc_code, d.poc_request, d.poc_response, d.evidence].filter(Boolean)
       .length + (hasStepsForCount ? 1 : 0);
@@ -2286,7 +2286,11 @@ function OverviewPane({ d, proseMode, toast }: { d: Derived; proseMode: ProseMod
 }
 
 function PocPane({ d, proseMode, toast }: { d: Derived; proseMode: ProseMode; toast: ToastFn }) {
-  const hasSteps = !!(d.steps_to_reproduce && d.steps_to_reproduce.length > 0);
+  // A single authored block arrives as one element; a list arrives as several.
+  // Joining on a newline reproduces either shape as written, so what is copied
+  // out of here is byte-identical to what the finding holds.
+  const stepsText = (d.steps_to_reproduce ?? []).join("\n").trim();
+  const hasSteps = stepsText.length > 0;
   const hasAny =
     hasSteps ||
     d.evidence ||
@@ -2314,16 +2318,14 @@ function PocPane({ d, proseMode, toast }: { d: Derived; proseMode: ProseMode; to
     <>
       {hasSteps && (
         <div className="section">
-          <SectionHead
-            title="Steps to reproduce"
-            copyText={d.steps_to_reproduce!.map((s, i) => `${i + 1}. ${s}`).join("\n")}
-            toast={toast}
-          />
-          <ol className="steps">
-            {d.steps_to_reproduce!.map((s, i) => (
-              <li key={i}>{s}</li>
-            ))}
-          </ol>
+          {/* Steps render exactly as authored — no imposed counter, no list
+              marker. Numbering belongs to whoever wrote the finding: prose in
+              Impact or Summary cites step numbers, and an `<ol>` counter would
+              disagree with those citations the moment the author's own numbering
+              is non-sequential or sub-stepped. `white-space: pre-wrap` keeps the
+              line breaks of a single authored block. */}
+          <SectionHead title="Steps to reproduce" copyText={stepsText} toast={toast} />
+          <div className="steps-verbatim">{stepsText}</div>
         </div>
       )}
       {ev && (

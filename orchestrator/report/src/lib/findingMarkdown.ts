@@ -10,6 +10,9 @@
 
 import type { ReportFinding } from "../types";
 
+export { stepsText } from "./steps";
+import { stepsText } from "./steps";
+
 function refLabel(ref: unknown): string {
   if (typeof ref === "string") return ref.trim();
   if (ref && typeof ref === "object") {
@@ -67,9 +70,10 @@ export function findingToMarkdown(d: ReportFinding): string {
     push("```");
     push();
   }
-  if (d.steps_to_reproduce && d.steps_to_reproduce.length > 0) {
+  const steps = stepsText(d.steps_to_reproduce);
+  if (steps) {
     push("### Steps to Reproduce");
-    d.steps_to_reproduce.forEach((s, i) => push(`${i + 1}. ${s}`));
+    push(steps);
     push();
   }
   if (d.poc_code && d.poc_code.trim()) {

@@ -1185,7 +1185,7 @@ def test_export_findings_uses_canonical_findings_and_renders_details(monkeypatch
             engagement_dir=str(engagement_dir),
         ),
     )
-    monkeypatch.setattr(module, "load_scope", lambda engagement_dir: {"engagement_name": "Demo Engagement"})
+    monkeypatch.setattr(module, "load_scope", lambda engagement_dir, **kwargs: {"engagement_name": "Demo Engagement"})
 
     class FakeClient:
         def __init__(self, base_url: str, engagement_key: str) -> None:
@@ -1254,8 +1254,10 @@ def test_export_findings_uses_canonical_findings_and_renders_details(monkeypatch
     assert "- **Entry Point**: parse_input" in findings_md
     assert "- **Sink**: render_output" in findings_md
     assert "- **References**: https://example.test/advisory, {'id': 7}, 42" in findings_md
-    assert "1. send payload" in findings_md
-    assert "2. 2" in findings_md
+    # Steps render exactly as authored: no counter and no list marker are added, so
+    # authored text is never rewritten. A list renders one step per paragraph (a
+    # non-string entry is still coerced to text by ``string_list``).
+    assert "**Steps to Reproduce:**\nsend payload\n\n2" in findings_md
 
 
 def test_export_findings_separates_sections_with_blank_line(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -1278,7 +1280,7 @@ def test_export_findings_separates_sections_with_blank_line(monkeypatch, tmp_pat
             engagement_dir=str(engagement_dir),
         ),
     )
-    monkeypatch.setattr(module, "load_scope", lambda engagement_dir: {"engagement_name": "Demo"})
+    monkeypatch.setattr(module, "load_scope", lambda engagement_dir, **kwargs: {"engagement_name": "Demo"})
 
     class FakeClient:
         def __init__(self, base_url: str, engagement_key: str) -> None:
@@ -1426,6 +1428,39 @@ def test_export_findings_preserves_legacy_non_mapping_poc_headers() -> None:
     assert "**PoC Response:**" in rendered
     assert "HTTP 200" in rendered
     assert "Content-Type: text/plain" in rendered
+
+
+def test_render_finding_accepts_poc_response_body_as_well_as_body_excerpt() -> None:
+    """A response body under either key reaches the render — it is the proof.
+
+    Recorders write ``body_excerpt``; a hand-authored or tool-captured response
+    often carries plain ``body``. ``export submission``'s structured-proof block
+    reads both keys, and this renderer must agree, or one finding's response body
+    appears in the submission reference and vanishes from ``findings.md``.
+    """
+    module = _load_script_module(
+        "test_export_findings_body_key_module",
+        "agent/scripts/assess/commands/export_findings.py",
+    )
+
+    rendered = module._render_finding(
+        {
+            "slug": "finding-001",
+            "title": "Plain body key",
+            "details_json": json.dumps(
+                {
+                    "poc_response": {
+                        "status": 200,
+                        "headers": {"Content-Type": "application/json"},
+                        "body": '{"owner":"someone-else"}',
+                    },
+                }
+            ),
+        }
+    )
+
+    assert "**PoC Response:**" in rendered
+    assert '{"owner":"someone-else"}' in rendered
 
 
 def test_render_finding_widens_fence_when_poc_code_contains_backtick_run() -> None:
@@ -2047,7 +2082,7 @@ def test_review_exploits_lists_backend_candidates(monkeypatch, tmp_path: Path, c
     monkeypatch.setattr(
         module,
         "load_scope",
-        lambda engagement_dir: {
+        lambda engagement_dir, **kwargs: {
             "current_phase": "exploit",
             "exploit_policy": "selected",
             "exploit_review_state": "pending",

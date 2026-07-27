@@ -10,6 +10,14 @@ from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 from assess.lib.contracts import SUBMISSION_STATUSES, render_contract_epilog
 from assess.lib.json_inputs import parse_json_argument, parse_optional_inline_json
+from assess.lib.schema_validation import collect_patch_validation_errors, load_schema
+
+# The same contract `finding record` validates against. Recording a finding and
+# patching one must agree on what a detail key is called and what type it holds:
+# when only the create path checked, a mistyped or misspelled key patched in
+# cleanly, persisted, and then read as absent — surfacing much later as a missing
+# field on an export gate, pointing at content the author could see they wrote.
+_FINDING_SCHEMA = load_schema("finding-record.schema.json")
 
 
 def register(subparsers) -> None:
@@ -317,6 +325,32 @@ def run(args) -> None:
             "by themselves, and empty merge values are no-ops.",
             file=sys.stderr,
         )
+        sys.exit(1)
+
+    # Validate `details` against the record contract, in PATCH mode so a partial
+    # update is not required to carry every field. The top-level patch shape is
+    # already strict server-side (`FindingPatchRequest` forbids extras), but
+    # `details` is an opaque `dict[str, Any]` there, so nothing checked it: a
+    # misspelled or mistyped key patched in cleanly, persisted, and then read as
+    # absent — surfacing much later as a missing field on an export gate, naming
+    # content the author could see they had written. It now gets a did-you-mean at
+    # author time instead.
+    #
+    # `provenance` is deliberately NOT validated here. Its schema admits only
+    # `agent_name`/`artifact`, while the report-generation skill instructs
+    # `reported_by` and the operator UI reads `artifact_ref`/`captured_at`/
+    # `evidence_quote`; until those three agree on one vocabulary, enforcing any
+    # of them would reject writes the prompts ask for.
+    schema_errors: list[str] = []
+    details_schema = _FINDING_SCHEMA["properties"].get("details")
+    if isinstance(payload.get("details"), dict) and isinstance(details_schema, dict):
+        schema_errors += collect_patch_validation_errors(
+            payload["details"], details_schema, path="details"
+        )
+    if schema_errors:
+        print("finding update: payload failed schema validation:", file=sys.stderr)
+        for error in schema_errors:
+            print(f"  - {error}", file=sys.stderr)
         sys.exit(1)
 
     if payload_file:

@@ -81,8 +81,11 @@ the steps — this is the severity justification. See "Attack Scenario vs Impact
   VRT default, not by inflating the vector.
 - **PoC is an operator-side attachment, not a rendered body line.** If the proof is a script, stage
   it as `submissions/<slug>/poc.<ext>` and attach it in the Bugcrowd form — see
-  `submission-format.md` "PoC block". `export submission` emits no PoC line into the body; a
-  hand-inserted one is wiped on the next `--overwrite`.
+  `submission-format.md` "PoC block". `export submission` emits no attachment block into the body;
+  the **Run:** / **Pass if:** pointer lines in the operational header ARE rendered, from the
+  finding's `details.run` and `details.pass_if` — write there so they reproduce on the next
+  `--overwrite` instead of typing them only into the body. The proof pointer itself
+  (`evidence_ref`/`poc_code`) stays under OPERATOR DETAILS, not the pasteable header.
 - Bugcrowd programs frequently require a deconfliction line (researcher ID / source IP / UTC
   window) for active-testing categories. If the brief asks for one, add it after Remediation — 3
   lines max, see "Section budgets" in the generic format.

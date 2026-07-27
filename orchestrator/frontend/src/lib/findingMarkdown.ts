@@ -122,9 +122,12 @@ export function findingToMarkdown(d: MarkdownFinding): string {
     push("```");
     push();
   }
-  if (d.steps_to_reproduce && d.steps_to_reproduce.length > 0) {
+  // Verbatim: the author's own numbering is what other sections cite, so no
+  // counter is imposed here.
+  const stepsText = (d.steps_to_reproduce ?? []).join("\n").trim();
+  if (stepsText) {
     push("### Steps to Reproduce");
-    d.steps_to_reproduce.forEach((s, i) => push(`${i + 1}. ${s}`));
+    push(stepsText);
     push();
   }
   if (d.poc_code && d.poc_code.trim()) {

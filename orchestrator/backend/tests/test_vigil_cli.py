@@ -11901,7 +11901,8 @@ def test_engagement_export_markdown_tree_writes_per_finding_dirs(
     assert "- **Severity**: HIGH" in draft
     assert "- **CWE**: CWE-89" in draft
     assert "- **Remediation**: Use parameterized queries." in draft
-    assert "1. POST /login" in draft
+    # Steps render exactly as authored — no counter and no list marker added.
+    assert "**Steps to Reproduce:**\nPOST /login" in draft
 
     # debate.md = the linked verification-narrative artifact content.
     debate = (va001 / "debate.md").read_text(encoding="utf-8")
@@ -11915,6 +11916,11 @@ def test_engagement_export_markdown_tree_writes_per_finding_dirs(
     assert "(`VA-001`)" in report
     assert "## Remediation" in report
     assert "Use parameterized queries." in report
+    # report.md and draft.md share one step renderer, so the same finding's steps
+    # read identically in both files: verbatim, no imposed counter or marker.
+    assert "POST /login" in report
+    assert "1. POST /login" not in report
+    assert "- POST /login" not in report
 
     # VA-002 has no narrative → placeholder debate.md (still git-diff-able).
     va002_debate = (out_root / "VA-002" / "debate.md").read_text(encoding="utf-8")

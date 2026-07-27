@@ -211,8 +211,11 @@ instructions: |2
 
   - `Summary` (finding `summary`): impact-first paragraph — bug class, endpoint, and auth context
     folded in
-  - `Steps to Reproduce` (`details.steps_to_reproduce`): one action per item, no leading `1. `/`2. ` —
-    the renderer prepends the `N.` numbering; copy-pasteable
+  - `Steps to Reproduce` (`details.steps_to_reproduce`): one authored block, numbered by you
+    (`1.`, `2.`, …) and rendered exactly as written — the renderer adds no numbering or marker, so
+    your numbers are what a triager reads and what any step cross-reference elsewhere in the
+    submission resolves against; see submission-format.md "Structure" for the full shape rule (a list
+    of strings is still accepted, each rendering as its own paragraph)
   - `Evidence` (`details.evidence`): the annotated proof, genuine third-party PII partial-masked only
     (self-owned/synthetic data shown in full — see submission-format.md "PII redaction") — authored
     from the OPERATOR DETAILS section's structured proof and linked command runs plus a targeted
@@ -253,12 +256,11 @@ instructions: |2
   ### Closing verbs (submission mode — default)
 
   **The finding is the source of truth; `submission.md` is a render of it.** You author each section
-  ONCE, write it back to the finding, and let `export submission` render it — so a re-render at
-  publish reproduces your authored content exactly and never loses a hand edit. Do not treat
-  `submission.md` as the durable copy: an edit made only in the file is overwritten on the next
-  render, while a write to the finding is durable. Storing the MASKED, annotated Evidence in the
-  finding is also what keeps a re-render from re-leaking PII — the raw tool output stays in `scans/`
-  and is never rendered.
+  ONCE, write it back to the finding, and let `export submission` render it. Content written to the
+  finding reproduces exactly on every re-render, including at publish; content typed only into
+  `submission.md` does not survive the next render — do not treat the file as the durable copy.
+  Storing the MASKED, annotated Evidence in the finding is also what keeps a re-render from
+  re-leaking PII — the raw tool output stays in `scans/` and is never rendered.
 
   1. **Confirm proof readiness.** Check the finding against "Proof Standard by Finding Class" and
      "Pre-Report Validation" checks 3-5 in `agent/skills/report-generation/SKILL.md`. A finding that
@@ -289,27 +291,40 @@ instructions: |2
        and annotate each with a `<-- proof` marker. Verify any verb before citing it —
        `vigil assess list-commands --grep command` or read `agent/scripts/assess/commands/` — never
        reference a command that does not exist.
-     - **Write the authored sections back to the finding** so it holds exactly what we would send:
-       ```bash
-       vigil assess finding update <slug> \
-         --summary "<authored Summary — impact-first>" \
-         --details-inline '{
-           "steps_to_reproduce": ["<step 1>", "<step 2>"],
+     - **Write the authored sections back to the finding with `--payload-file`** (the default write
+       path — see "Read vs write asymmetry" and "Submission-First Closeout" step 3 in
+       `agent/skills/report-generation/SKILL.md`) so it holds exactly what we would send.
+       `steps_to_reproduce` renders exactly as authored with no numbering added — write it as ONE
+       string carrying your own `1.`/`2.`/… numbering. Write the complete patch to a file with the
+       Write tool (no shell quoting to corrupt Evidence's quotes, newlines, or backtick fences):
+       ```json
+       {
+         "summary": "<authored Summary — impact-first>",
+         "details": {
+           "steps_to_reproduce": "1. <step 1>\n2. <step 2>",
            "evidence": "<annotated proof authored from the runs above; third-party PII partial-masked, self-owned/synthetic shown in full>",
            "attack_scenario": "<optional: realistic adversary + starting access + action, ending at first compromise; no scope counts>",
            "impact": "<consequence + blast radius, quantified; don't restate the actor or steps>",
            "remediation": "<specific control + technology>"
-         }' \
-         --reason "Authored submission-ready sections to the finding (backend is source of truth)" \
-         --source-name report-writer
+         },
+         "reason_text": "Authored submission-ready sections to the finding (backend is source of truth)",
+         "source_name": "report-writer",
+         "expected_row_version": <current row_version>
+       }
        ```
-       `--summary` writes the top-level Summary; `--details-inline` MERGES the rest into the finding's
-       `details` (`steps_to_reproduce`, `evidence`, `attack_scenario`, `impact`, `remediation`)
-       without touching `cvss_vector`, `vrt_category`, or `poc_*`. The authored `details.evidence` is
-       what renders as the Evidence section; it does not itself satisfy the executable gate's durable
-       proof requirement. Read `vigil assess contract export submission`, register the finding's raw
-       evidence artifact, and set `--evidence-ref scans/<file>` when absent. Inline request/response
-       or PoC code remains authoring material. If nothing resolves a marker, the finding is not ready — do not submit around it;
+       ```bash
+       vigil assess finding update <slug> --payload-file <path.json>
+       ```
+       The `details` key MERGES into the finding's stored details (`steps_to_reproduce`, `evidence`,
+       `attack_scenario`, `impact`, `remediation`) without touching `cvss_vector`, `vrt_category`, or
+       `poc_*`. `--payload-file` cannot be combined with content flags, so `summary` and `reason_text`
+       go in the file too, alongside the required `expected_row_version`. Use `--details-inline`
+       instead only for a short single-value edit with nothing to corrupt. The authored
+       `details.evidence` is what renders as the Evidence section; it does not itself satisfy the
+       executable gate's durable proof requirement. Read `vigil assess contract export submission`,
+       register the finding's raw evidence artifact, and set `--evidence-ref scans/<file>` (a
+       standalone short edit) when absent. Inline request/response or PoC code remains authoring
+       material. If nothing resolves a marker, the finding is not ready — do not submit around it;
        hand back instead of fabricating.
   4. **Checklist/QA (Pass 1 — in-context).** Re-render from the finding — `vigil assess
      export submission <slug> --platform <same> --draft --overwrite` — then run the one consolidated
@@ -321,7 +336,10 @@ instructions: |2
      `submission.md` is lost on the next render. Address every `hygiene_warnings` entry
      `export submission` reported (leaked internal UUIDs, absolute engagement paths, `cases.db`
      references) the same way — the generator flags them but deliberately never strips them, so
-     removing them (from the finding) is your job. Return `QA PASS` or `QA BLOCKED` with the exact gap.
+     removing them (from the finding) is your job, and a leak left in place fails the publish render
+     closed. `advisories` is the separate, never-blocking list (title length is one): weigh each
+     against the checklist row it names and fix it at the finding when you agree. Return `QA PASS` or
+     `QA BLOCKED` with the exact gap.
   5. **Blind pre-submission triage (Pass 2) — mandatory for every Medium-or-above finding**, per
      `agent/skills/blind-triage/SKILL.md`, before the submission leaves the engagement. This is an
      operator-run dispatch of a separate zero-context agent (`agent/phases/phase-8-report.md` step
@@ -362,8 +380,9 @@ instructions: |2
      `details.replies` entry, and the current `submission_status`. Don't repeat or contradict a prior
      reply — the triager sees the whole thread even when you aren't looking at it.
   2. **Scaffold** — `vigil assess export reply <slug> --in-response-to "<ask>" --platform <p>
-     --draft`. Renders `reply-N.md` with `[NEEDS: reply body]` where the body is missing and the ask
-     in the never-paste thread-history section.
+     --draft`. Renders `reply-N.md` with `[NEEDS: reply body]` where the body is missing, and — in the
+     never-paste thread-history section — the ask plus the full body of every prior reply, so the whole
+     thread is in front of you when you write the continuation.
   3. **Author, then write back** — `vigil assess record-reply <slug> --seq N --in-response-to "<ask>"
      --platform <p> --body "<authored>" [--new-evidence "<masked>" --new-evidence-ref
      scans/<file>]`. Follow `agent/references/reply-format.md` for voice and budgets; mask PII the
