@@ -107,14 +107,19 @@ def resolve_identity(
     * known identity -> that identity's material.
     * unknown identity -> ``(requested, {})`` so the caller can warn while the
       requested name is still recorded as the probe's auth_context.
+
+    This is the resolve-for-replay path (kali identity injection, the browser
+    identity path, ``auth status --probe``), so a hit counts as a USE and
+    refreshes ``last_seen_at`` — an identity that is actively being replayed
+    must not age into ``stale`` while it is in use.
     """
     if requested is None:
-        material = db.get_active_credential(engagement_id)
+        material = db.get_active_credential(engagement_id, touch=True)
         if material is None:
             return (None, {})
         return (str(material.get("identity_name") or DEFAULT_IDENTITY), material)
     requested = requested.strip()
-    material = db.get_credential(engagement_id, requested)
+    material = db.get_credential(engagement_id, requested, touch=True)
     if material is not None:
         return (requested, material)
     aliased = db.resolve_credential_alias(engagement_id, requested, scope_key)

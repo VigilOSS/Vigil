@@ -9,6 +9,7 @@ from pathlib import Path
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 from assess.lib.contracts import SUBMISSION_STATUSES, render_contract_epilog
+from assess.lib.evidence_ref import warn_evidence_ref
 from assess.lib.json_inputs import parse_json_argument, parse_optional_inline_json
 from assess.lib.schema_validation import collect_patch_validation_errors, load_schema
 
@@ -62,7 +63,13 @@ def register(subparsers) -> None:
     p.add_argument("--auth-context")
     p.add_argument("--canonical-location")
     p.add_argument("--summary")
-    p.add_argument("--evidence-ref")
+    p.add_argument(
+        "--evidence-ref",
+        help=(
+            "ONE engagement-owned artifact path (e.g. scans/idor.txt). A URL, a "
+            "composite (a;b), or prose WARNs — it cannot be indexed as proof."
+        ),
+    )
     p.add_argument("--notes")
     p.add_argument("--source-name")
     p.add_argument("--reason-code")
@@ -73,7 +80,14 @@ def register(subparsers) -> None:
         type=int,
         help="Reject the patch if the finding changed since this row_version was read.",
     )
-    p.add_argument("--details-inline", help="Inline JSON object for details")
+    p.add_argument(
+        "--details-inline",
+        help=(
+            "Inline JSON object MERGED into details. Empty values (null/\"\"/[]/{}) are "
+            "rejected: the merge drops them, so the patch would report success while "
+            "changing nothing. Clear a key with --details-replace instead."
+        ),
+    )
     p.add_argument("--provenance-inline", help="Inline JSON object for provenance")
     p.add_argument(
         "--notes-replace",
@@ -166,6 +180,34 @@ def _has_patch_content(payload: dict[str, object]) -> bool:
         and value not in ("", None)
         for key, value in payload.items()
     )
+
+
+# Exactly the values the backend details merge discards. Kept as a literal mirror
+# of `state_manager/_common.py::_merge_object_text`, which does
+# `current.update({k: v for k, v in incoming.items() if v not in (None, "", [], {})})`.
+_MERGE_DROPPED_VALUES: tuple = (None, "", [], {})
+
+
+def _silently_dropped_detail_keys(details: object) -> list[str]:
+    """Top-level ``details`` keys the merge would DROP, in payload order.
+
+    The details merge is a shallow ``dict.update()`` over the non-empty items only,
+    so a key whose value is ``null`` / ``""`` / ``[]`` / ``{}`` never lands. The
+    PATCH still succeeds — HTTP 200, a bumped ``row_version``, a fresh
+    ``updated_at`` — while the content it reported writing is unchanged. A write
+    that reports success and changes nothing is worse than a refusal: a rendered
+    submission kept a dead ``**Run:** bash poc.sh`` line long after the operator had
+    been told it was cleared.
+
+    Enforced HERE rather than in the merge on purpose. The merge's empty-drop is
+    deliberately relied on by ``merge_findings`` (findings.py), and changing it is
+    invisible to the backend suite — a naive-merge experiment passed all 2867 tests
+    — so a provenance regression there would sail through CI. The CLI is the layer
+    where the no-op can be made impossible to hit without touching either.
+    """
+    if not isinstance(details, dict):
+        return []
+    return [key for key, value in details.items() if value in _MERGE_DROPPED_VALUES]
 
 
 def _provided_content_flags(args) -> list[str]:
@@ -327,6 +369,24 @@ def run(args) -> None:
         )
         sys.exit(1)
 
+    # Fail LOUD on a details key the merge would silently discard. Only merge mode
+    # is affected: --details-replace overwrites the object wholesale, which is the
+    # supported (and verified) way to clear a key, so an empty value there is a real
+    # instruction and passes through untouched.
+    if payload.get("details_mode") != "replace":
+        dropped = _silently_dropped_detail_keys(payload.get("details"))
+        if dropped:
+            keys = ", ".join(repr(key) for key in dropped)
+            print(
+                f"finding update: details {keys} would be silently discarded — the "
+                "details merge drops null/\"\"/[]/{} values, so this patch would report "
+                "success (HTTP 200, bumped row_version) while changing nothing. To CLEAR "
+                "a details key, send the complete object with --details-replace "
+                "--expected-row-version <n>. To SET one, give it a non-empty value.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
     # Validate `details` against the record contract, in PATCH mode so a partial
     # update is not required to carry every field. The top-level patch shape is
     # already strict server-side (`FindingPatchRequest` forbids extras), but
@@ -393,6 +453,22 @@ def run(args) -> None:
         payload["details_mode"] = "replace"
 
     cfg = load_config(args.engagement_dir)
+
+    # Shape-check evidence_ref through the SAME classification `finding record`
+    # applies, so a composite / prose / dangling ref cannot enter unremarked through
+    # the update door. WARN only: blocking an update mid-hunt risks losing work, and
+    # check-phase-readiness --phase report is the terminal backstop for unindexable
+    # proof.
+    # getattr fallbacks so callers that build a config via SimpleNamespace (test
+    # fixtures) don't AttributeError — the same defensive pattern the flag payload
+    # above uses. A missing dir only costs the on-disk existence check.
+    warn_evidence_ref(
+        str(payload.get("evidence_ref") or ""),
+        verb="finding update",
+        engagement_dir=str(getattr(cfg, "engagement_dir", "") or ""),
+        engagement_key=str(getattr(cfg, "engagement_key", "") or ""),
+    )
+
     results: list = []
     failed = 0
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:

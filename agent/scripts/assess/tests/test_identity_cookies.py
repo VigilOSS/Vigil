@@ -13,6 +13,8 @@ captured host_cookies that this run is not using.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from assess.lib import auth, identity, kali
@@ -395,10 +397,15 @@ def test_prepare_browser_identity_material_only_stamps_when_materialized(monkeyp
     ]
 
     monkeypatch.setattr(kali, "resolve_identity", lambda *_args: ("empty", {}))
-    assert kali.prepare_browser_identity_material(tmp_path, "empty", "https://app.example.com") == (
-        "anonymous",
-        {"headers": {}, "cookies": [], "storage_state": None},
+    context, prepared = kali.prepare_browser_identity_material(
+        tmp_path, "empty", "https://app.example.com"
     )
+    assert context == "anonymous"
+    assert prepared["headers"] == {}
+    assert prepared["cookies"] == []
+    assert prepared["storage_state"] is None
+    # The refusal must carry a reason the operator can act on.
+    assert "vigil assess auth list" in str(prepared["refusal_detail"])
 
 
 def test_prepare_execution_command_refuses_missing_requested_identity(
@@ -450,7 +457,9 @@ def test_prepare_browser_identity_stamps_replayable_external_storage_state(
     [
         {"use_for_requests": False},
         {"state": "dead"},
-        {"state": "stale"},
+        # An operator-set marker is a deliberate signal: only the age-advisory
+        # `stale` state widened, not every non-`available` state.
+        {"state": "revoked"},
     ],
 )
 def test_disabled_identity_material_is_never_injected_or_audit_stamped(
@@ -478,12 +487,14 @@ def test_disabled_identity_material_is_never_injected_or_audit_stamped(
             identity="member",
         )
     assert cmd == ["curl", "https://app.example.com/account"]
-    assert kali.prepare_browser_identity_material(
+    context, prepared = kali.prepare_browser_identity_material(
         tmp_path, "member", "https://app.example.com/account"
-    ) == (
-        "anonymous",
-        {"headers": {}, "cookies": [], "storage_state": None},
     )
+    assert context == "anonymous"
+    assert prepared["headers"] == {}
+    assert prepared["cookies"] == []
+    assert prepared["storage_state"] is None
+    assert str(prepared["refusal_detail"]).strip()
 
 
 def test_scoped_alias_is_propagated_to_command_and_browser_resolution(
@@ -516,3 +527,197 @@ def test_scoped_alias_is_propagated_to_command_and_browser_resolution(
     )
     assert browser_context == "member"
     assert calls == [("member", "billing"), ("member", "billing")]
+
+
+# --------------------------------------------------------------------------- #
+# Identity staleness is ADVISORY, and a refusal must say why
+# --------------------------------------------------------------------------- #
+
+def _aged_material(**over):
+    material = {
+        "identity_name": "member",
+        "headers": {"Authorization": "Bearer secret"},
+        "last_seen_at": (
+            datetime.now(timezone.utc) - timedelta(hours=9)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    material.update(over)
+    return material
+
+
+def test_stale_identity_is_replayed_with_a_warning_not_refused(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """`stale` is an age flag, not a verdict — replay it and warn.
+
+    Refusing it deadlocked the store: the flag is set purely by age, and the
+    documented recovery (`auth status --probe`) runs through this same
+    injector, so the flag blocked the probe that would clear it.
+    """
+    material = _aged_material(state="stale")
+    monkeypatch.setattr(
+        kali, "resolve_identity", lambda _eng, requested: (requested, material)
+    )
+
+    cmd = ["curl", "https://app.example.com/account"]
+    auth_context, _gap = kali.prepare_execution_command(
+        cmd, tool_name="curl", engagement_dir=tmp_path, identity="member"
+    )
+
+    assert auth_context == "member"
+    assert "Authorization: Bearer secret" in cmd
+    err = capsys.readouterr().err
+    assert "state 'stale'" in err
+    assert "auth status --probe --identity member" in err
+
+
+def test_stale_identity_is_replayed_by_the_browser_path_too(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    material = _aged_material(state="stale")
+    monkeypatch.setattr(
+        kali, "resolve_identity", lambda _eng, requested: (requested, material)
+    )
+
+    context, prepared = kali.prepare_browser_identity_material(
+        tmp_path, "member", "https://app.example.com/account"
+    )
+
+    assert context == "member"
+    assert prepared["headers"] == {"Authorization": "Bearer secret"}
+    assert "state 'stale'" in capsys.readouterr().err
+
+
+def test_liveness_probe_may_replay_a_probe_dead_identity(
+    monkeypatch, tmp_path
+) -> None:
+    """The probe is the recovery mechanism, so it must run on the dead state.
+
+    `db.set_liveness` documents that a `live` verdict "revives a session probed
+    with --include-dead"; that is unreachable if the probe itself is refused.
+    Only this one caller passes `identity_probe`.
+    """
+    material = _aged_material(state="dead")
+    monkeypatch.setattr(
+        kali, "resolve_identity", lambda _eng, requested: (requested, material)
+    )
+
+    cmd = ["curl", "https://app.example.com/account"]
+    auth_context, _gap = kali.prepare_execution_command(
+        cmd,
+        tool_name="curl",
+        engagement_dir=tmp_path,
+        identity="member",
+        identity_probe=True,
+    )
+
+    assert auth_context == "member"
+    assert "Authorization: Bearer secret" in cmd
+
+
+def test_identity_refusal_names_state_age_and_the_recovery_command(
+    monkeypatch, tmp_path
+) -> None:
+    material = _aged_material(state="dead")
+    monkeypatch.setattr(
+        kali, "resolve_identity", lambda _eng, requested: (requested, material)
+    )
+
+    with pytest.raises(kali.scope_lib.ScopePolicyError) as excinfo:
+        kali.prepare_execution_command(
+            ["curl", "https://app.example.com/account"],
+            tool_name="curl",
+            engagement_dir=tmp_path,
+            identity="member",
+        )
+
+    message = str(excinfo.value)
+    assert "'dead'" in message                       # the state
+    assert "ago)" in message                         # the age
+    assert (                                         # the exact recovery command
+        "vigil assess auth status --probe --identity member --probe-url"
+        in message
+    )
+
+
+def test_quarantined_identity_refusal_explains_the_quarantine(
+    monkeypatch, tmp_path
+) -> None:
+    material = _aged_material(state="available", use_for_requests=False)
+    monkeypatch.setattr(
+        kali, "resolve_identity", lambda _eng, requested: (requested, material)
+    )
+
+    with pytest.raises(kali.scope_lib.ScopePolicyError) as excinfo:
+        kali.prepare_execution_command(
+            ["curl", "https://app.example.com/account"],
+            tool_name="curl",
+            engagement_dir=tmp_path,
+            identity="member",
+        )
+
+    message = str(excinfo.value)
+    assert "quarantined" in message
+    assert "vigil assess auth list" in message
+
+
+def test_missing_identity_refusal_points_at_the_listing_command(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(
+        kali, "resolve_identity", lambda _eng, requested: (requested, {})
+    )
+
+    with pytest.raises(kali.scope_lib.ScopePolicyError) as excinfo:
+        kali.prepare_execution_command(
+            ["curl", "https://app.example.com/account"],
+            tool_name="curl",
+            engagement_dir=tmp_path,
+            identity="ghost",
+        )
+
+    message = str(excinfo.value)
+    assert "was not found in the credential store" in message
+    assert "vigil assess auth list" in message
+
+
+def test_operator_flagged_state_refusal_names_the_state_and_the_probe(
+    monkeypatch, tmp_path
+) -> None:
+    material = _aged_material(state="revoked")
+    monkeypatch.setattr(
+        kali, "resolve_identity", lambda _eng, requested: (requested, material)
+    )
+
+    with pytest.raises(kali.scope_lib.ScopePolicyError) as excinfo:
+        kali.prepare_execution_command(
+            ["curl", "https://app.example.com/account"],
+            tool_name="curl",
+            engagement_dir=tmp_path,
+            identity="member",
+        )
+
+    message = str(excinfo.value)
+    assert "state 'revoked'" in message
+    assert "only the age-advisory 'stale' state is replayed" in message
+    assert "auth status --probe --identity member" in message
+
+
+def test_liveness_probe_may_re_test_any_flagged_state(monkeypatch, tmp_path) -> None:
+    """The recovery mechanism must run against whatever state it recovers from."""
+    material = _aged_material(state="revoked")
+    monkeypatch.setattr(
+        kali, "resolve_identity", lambda _eng, requested: (requested, material)
+    )
+
+    cmd = ["curl", "https://app.example.com/account"]
+    auth_context, _gap = kali.prepare_execution_command(
+        cmd,
+        tool_name="curl",
+        engagement_dir=tmp_path,
+        identity="member",
+        identity_probe=True,
+    )
+
+    assert auth_context == "member"
+    assert "Authorization: Bearer secret" in cmd

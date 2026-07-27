@@ -290,6 +290,18 @@ The triage above keys on parameters the corpus already shows. Arjun discovers pa
 endpoint silently accepts but never advertised — inputs no crawl or archive surfaced. Run it on
 the param-poor dynamic endpoints with a **bounded first pass** (focused wordlist + `--stable --rate-limit`), escalating for depth.
 
+**On a JS-bundle SPA over an allowlisted JSON:API, mine the bundles first and treat Arjun and a
+deep Katana crawl as confirmation.** Where the client is a compiled SPA, the endpoint and parameter
+surface is *in the shipped JavaScript* — routes, field names, and request builders are all readable
+there — so mining the bundles enumerates it directly instead of guessing at it. Blind discovery
+does badly on this shape for two structural reasons: a server that allowlists its accepted
+parameters (a JSON:API layer, a strong-params filter) will reject anything not already in the
+allowlist, so a wordlist cannot find what the server refuses by design; and a deep crawl of a
+client-rendered app mostly re-walks routes the bundle already declares. Both still earn their place
+confirming that a mined parameter is live and reachable — run them against the mined manifest
+rather than against a wordlist. On a server-rendered estate the ordering reverses: Arjun is
+discovery there, because the parameters are not published anywhere the client can be read from.
+
 ```bash
 # Gate the target list (live + dynamic + template-deduped + param-poor).
 # This engagement has no liveness ledger? add --include-unknown.

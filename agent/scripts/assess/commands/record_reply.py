@@ -85,17 +85,27 @@ def register(subparsers) -> None:
         default=None,
         help="Path to a file holding the reply body (relative paths resolve against the engagement dir).",
     )
+    # default=None (NOT "") — the same pattern --body uses, and for the same reason:
+    # with a "" default the update path cannot distinguish "flag omitted" from
+    # "operator asked for an empty value", so the field could be set once and never
+    # unset. Passing the flag with an empty value CLEARS it.
     p.add_argument(
         "--new-evidence",
         dest="new_evidence",
-        default="",
-        help="Optional NEW proof authored for THIS reply (masked per submission-format.md PII rules).",
+        default=None,
+        help=(
+            "Optional NEW proof authored for THIS reply (masked per submission-format.md "
+            "PII rules). Pass an empty value (--new-evidence '') to clear it."
+        ),
     )
     p.add_argument(
         "--new-evidence-ref",
         dest="new_evidence_ref",
-        default="",
-        help="Optional pointer to raw new-evidence (e.g. scans/<file>).",
+        default=None,
+        help=(
+            "Optional pointer to raw new-evidence (e.g. scans/<file>). Pass an empty "
+            "value (--new-evidence-ref '') to clear a ref recorded earlier."
+        ),
     )
     p.add_argument(
         "--sent",
@@ -204,10 +214,14 @@ def run(args) -> None:
                 entry["reply_to_seq"] = args.reply_to
             if body is not None:
                 entry["body"] = body
-            if nonempty(args.new_evidence):
+            # Presence-gated, not truthiness-gated: an empty value is a deliberate
+            # CLEAR, not a no-op. The ref is stored stripped (it is a path, not
+            # prose), so `--new-evidence-ref ''` and `--new-evidence-ref ' '` both
+            # blank it and a copy-pasted path with stray whitespace still resolves.
+            if args.new_evidence is not None:
                 entry["new_evidence"] = args.new_evidence
-            if nonempty(args.new_evidence_ref):
-                entry["new_evidence_ref"] = args.new_evidence_ref
+            if args.new_evidence_ref is not None:
+                entry["new_evidence_ref"] = nonempty(args.new_evidence_ref)
             if args.sent:
                 entry["sent_status"] = "sent"
                 if not nonempty(entry.get("sent_at")):

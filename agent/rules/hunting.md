@@ -553,3 +553,31 @@ identity, and method-override names can arrive as first-class `header:<name>`
 coverage items; manual probes still land in the same per-input grid when no item
 was derived. For exploitation depth once a header vector shows signal, see
 `agent/skills/host-header-injection/SKILL.md`.
+
+---
+
+## 27. An empty result from your own tooling is not a measurement of the target
+
+Rule 23 governs what the *target* returned. This one governs what *your own tooling* returned. A
+refusal, a zero-byte result, a parse error, or an empty match set is a fact about the run, not a
+fact about the target — and it arrives looking exactly like a clean negative. Before recording any
+"nothing there," establish that the probe reached the target and did the thing you asked.
+
+The failure is expensive because it is confident and it compounds: a scope layer that refuses a
+research host returns zero bytes, and "nothing exposed on their GitHub" enters the record as a
+finding-grade negative that later work inherits without re-deriving.
+
+Two habits catch it:
+
+- **Ask what a false result would look like, before you run the probe.** If your grep would match a
+  string you introduced yourself, or your search pattern assumes wording the file may not use, the
+  probe cannot answer the question — and you know that in advance, not afterwards.
+- **Bracket a negative with a positive control.** Confirm the same query returns hits for something
+  known-present before believing the empty result for your target. An archive index that is empty
+  for every host is broken; one that is empty only for yours is evidence.
+
+The same rule applies to writes: **verify the effect, not the acknowledgement.** An operation can
+succeed structurally while being empty of the thing you needed — a write that returns 200 and
+changes nothing, a self-check that renders a stale row, a 200 whose body carries no data because a
+cache had not filled. Re-read the state you intended to change rather than trusting the response
+that says you changed it.

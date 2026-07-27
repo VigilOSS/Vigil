@@ -516,9 +516,15 @@ def run(args) -> None:
         identity_headers = dict(prepared.get("headers") or {})
         cookies = list(prepared.get("cookies") or [])
         if prepared_auth_context == "anonymous":
+            # Name the reason (state + age + recovery command) rather than
+            # leaving the operator to guess — a bare refusal is what pushes
+            # people onto hand-written Cookie headers, which record the run as
+            # auth_context=anonymous and destroy cross-identity evidence.
+            detail = str(prepared.get("refusal_detail") or "").strip()
             raise AssessError(
                 f"browser requested identity '{identity}' could not be applied; "
                 "refusing to run anonymously"
+                + (f" because {detail}." if detail else ".")
             )
 
     config = {

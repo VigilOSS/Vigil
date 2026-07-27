@@ -3045,7 +3045,9 @@ def test_evidence_ref_missing_path_warns_not_rejects(tmp_path, capsys):
         {"evidence_ref": "scans/does-not-exist.txt"},
         eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False,
     )
-    assert "no file exists" in capsys.readouterr().err
+    # "nothing exists", not "no file exists": a DIRECTORY is a valid
+    # evidence_ref too, so the warning must not imply only a file would count.
+    assert "nothing exists there" in capsys.readouterr().err
 
 
 def test_evidence_ref_empty_warns_not_rejects(tmp_path, capsys):

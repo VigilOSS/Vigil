@@ -16,6 +16,8 @@ import sys
 
 from assess.lib import vuln_taxonomy
 from assess.lib.client import AssessError, AssessmentClient
+from assess.lib.config import load_config
+from assess.lib.evidence_ref import warn_evidence_ref
 from assess.lib.schema_validation import suggest_close_match
 
 
@@ -105,7 +107,16 @@ def add_common_probe_args(parser) -> None:
         default=None,
         help="Observed HTTP status code (int), when the target answered.",
     )
-    parser.add_argument("--evidence-ref", dest="evidence_ref", default="", help="Engagement-relative evidence path (e.g. scans/idor.txt). REQUIRED for a covering status (tested|signal); optional for the non-covering four.")
+    parser.add_argument(
+        "--evidence-ref",
+        dest="evidence_ref",
+        default="",
+        help=(
+            "ONE engagement-relative evidence path (e.g. scans/idor.txt). REQUIRED for "
+            "a covering status (tested|signal); optional for the non-covering four. A "
+            "URL, a composite (a;b), or prose WARNs — it cannot be indexed as proof."
+        ),
+    )
     parser.add_argument("--notes", default="", help="Short free-text note on what was tried and what the outcome shows.")
     parser.add_argument("--agent-name", dest="agent_name", default="", help="Recording agent name (audit attribution).")
     parser.add_argument(
@@ -263,6 +274,36 @@ def _enforce_target_anchor(args, verb: str) -> None:
     ))
 
 
+def _warn_evidence_ref_shape(args, verb: str) -> None:
+    """WARN (never block) when ``--evidence-ref`` is not one engagement-owned path.
+
+    Same classification ``finding record`` applies, so a composite
+    (``scans/a.txt;scans/b.txt``), a URL, or prose (``command-runs 56052/56054``)
+    reads the same on every write path instead of passing unremarked here.
+
+    The engagement dir is resolved best-effort: a probe must still record when
+    config resolution fails, so an unresolvable engagement degrades to a
+    shape-only check rather than aborting the write.
+    """
+    ref = (getattr(args, "evidence_ref", "") or "").strip()
+    if not ref:
+        return
+    engagement_dir = ""
+    engagement_key = ""
+    try:
+        cfg = load_config(getattr(args, "engagement_dir", None))
+        engagement_dir = str(getattr(cfg, "engagement_dir", "") or "")
+        engagement_key = str(getattr(cfg, "engagement_key", "") or "")
+    except (SystemExit, Exception):  # noqa: BLE001 - advisory check, never fatal
+        pass
+    warn_evidence_ref(
+        ref,
+        verb=verb,
+        engagement_dir=engagement_dir,
+        engagement_key=engagement_key,
+    )
+
+
 def enforce_required_inputs(args, verb: str) -> None:
     """Run()-time recording-quality guards for record-probe.
 
@@ -274,10 +315,15 @@ def enforce_required_inputs(args, verb: str) -> None:
     defaults for the raw-POST / machine auto-emit path; enforcement lives here,
     where the error can be reasoned. Mirrors the ``--evidence-ref`` guard: each
     message states what/why/how and points at ``vigil assess contract <verb>``.
+
+    ``--evidence-ref`` shape is the one ADVISORY check in this set: it warns and
+    lets the probe land, because losing a recorded probe costs more than a
+    malformed pointer that report-readiness will flag anyway.
     """
     _enforce_input_slot(args, verb)
     _enforce_auth_context(args, verb)
     _enforce_target_anchor(args, verb)
+    _warn_evidence_ref_shape(args, verb)
 
 
 def build_probe_payload(args, *, attack_family: str, result_status: str) -> dict:

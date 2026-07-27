@@ -113,6 +113,22 @@ def _render_handoff(args, extra: list[str]) -> None:
         summary = str(handoff.get("summary") or "")
         confidence = str(handoff.get("confidence") or "")
 
+        # Handoff-row provenance. Every specialist's closing sequence is "write
+        # the handoff, then render it as a self-check". A REJECTED write (e.g.
+        # HTTP 422 on an over-long summary) leaves the PRIOR row intact, so the
+        # render succeeded and exited 0 against stale content — the self-check
+        # could not detect the failure it exists to detect. The renderer has no
+        # way to know what the caller tried to write, so it surfaces the row's
+        # own identity instead: handoff_version and last_checkpoint_at both move
+        # on every accepted write, so an unchanged pair after a "successful"
+        # write is the tell. `dispatched_at` is the DISPATCH timestamp and never
+        # moves on a handoff write, which is why it must not be read as one.
+        handoff_status = str(handoff.get("handoff_status") or "")
+        handoff_version = handoff.get("handoff_version")
+        handoff_written_at = str(
+            handoff.get("last_checkpoint_at") or handoff.get("created_at") or ""
+        )
+
         # Per-slug enrichment from the backend. Tolerate 404s — the operator
         # may have killed a finding between dispatch and handoff render.
         # ISSUE-010 fix: the previous fallback emitted "non-dict response" when
@@ -169,6 +185,9 @@ def _render_handoff(args, extra: list[str]) -> None:
         dispatched_at=dispatched_at,
         status=dispatch_status,
         skills=skills,
+        handoff_status=handoff_status,
+        handoff_version=handoff_version,
+        handoff_written_at=handoff_written_at,
         summary=summary,
         confidence=confidence,
         dispatch_finding_slugs=dispatch_finding_slugs,
@@ -196,6 +215,9 @@ def _render_handoff_blob(
     dispatched_at: str,
     status: str,
     skills: str,
+    handoff_status: str = "",
+    handoff_version: object = None,
+    handoff_written_at: str = "",
     summary: str,
     confidence: str,
     dispatch_finding_slugs: list[str],
@@ -224,6 +246,7 @@ def _render_handoff_blob(
         f"- **Prior task:** {task}",
         f"- **Scope host:** {scope_host or '(none recorded)'}",
         f"- **Dispatched at:** {dispatched_at or '(unknown)'} (status: {status or 'unknown'})",
+        _handoff_provenance_line(handoff_status, handoff_version, handoff_written_at),
     ]
     # Skills loaded by the prior dispatch are part of the audit surface — the
     # next dispatch should know which procedure context the previous agent
@@ -320,6 +343,31 @@ def _render_handoff_blob(
         artifacts_dropped,
     )
     return "\n".join(composed)
+
+
+def _handoff_provenance_line(
+    handoff_status: str, handoff_version: object, handoff_written_at: str
+) -> str:
+    """Render the handoff row's OWN identity: status, version, write time.
+
+    This is what makes the "write the handoff, then render it" self-check able
+    to fail. Both the version and the write timestamp advance on every accepted
+    write, so a specialist that just wrote a handoff can confirm the write
+    landed instead of reading a stale prior row as success. The wording names
+    the timestamp as the HANDOFF write time so it is never confused with the
+    ``Dispatched at`` line above, which does not move on a handoff write.
+    """
+    try:
+        version = int(handoff_version)  # type: ignore[arg-type]
+        version_text = f"v{version}"
+    except (TypeError, ValueError):
+        version_text = "v(unrecorded)"
+    return (
+        f"- **Handoff row:** {handoff_status or '(status unrecorded)'} "
+        f"{version_text}, last written {handoff_written_at or '(unknown)'} "
+        "(this is the handoff write time, NOT the dispatch time — if it did not "
+        "advance, your write did not land)"
+    )
 
 
 def _normalise_finding_slugs(value: object) -> list[str]:

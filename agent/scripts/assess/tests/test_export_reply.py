@@ -11,7 +11,10 @@ client, pinning the behaviour the plan locks down:
   * the ask (`in_response_to`) and prior replies render ONLY below the `---` and
     never leak into the pasteable body;
   * next-seq selection: max(seq)+1 for a new reply; `--seq N` re-renders entry N;
-  * internal-identifier hygiene FLAGS leaks in the body without mutating it;
+  * the `new_evidence_ref` attachment pointer is an INTERNAL reference and renders
+    only below the never-paste line (it always carries a dispatch id / finding slug);
+  * internal-identifier hygiene FLAGS leaks in the body without mutating it, and a
+    FINAL (non-`--draft`) render fails CLOSED while any flag stands;
   * the reply is registered as `kind="reply"` and NO payload carries
     `submission_status` — export-reply is a PURE render that never PATCHes.
 """
@@ -336,7 +339,9 @@ def test_hygiene_flags_body_leaks_without_mutating(tmp_path, monkeypatch, capsys
     finding["engagement_id"] = _UUID
     fake = _FakeClient(finding)
     _install(monkeypatch, tmp_path, fake)
-    args = _parse(["reply", "VA-047", "--seq", "1", "--json"], str(tmp_path))
+    # --draft is the DIAGNOSTIC render: it always writes and reports. A FINAL render
+    # of the same content fails closed (see the gate test below).
+    args = _parse(["reply", "VA-047", "--seq", "1", "--draft", "--json"], str(tmp_path))
     export_reply.run(args)
     captured = capsys.readouterr()
     out = json.loads(captured.out)
@@ -478,3 +483,99 @@ def test_thread_history_lists_a_linked_run_with_no_command(tmp_path, monkeypatch
     assert "**Linked command runs**" in hist
     assert "retest as member B" in hist
     assert "(no command recorded on this run)" in hist
+
+
+# -- new-evidence attachment: internal reference, never pasteable --------------
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "scans/va-jolt-0725c/reply-proof.txt",   # carries a dispatch id
+        "submissions/EX-006/attachments/poc.har",  # carries a finding slug
+        "scans/proof.txt",                        # plain — still an internal path
+    ],
+)
+def test_new_evidence_ref_renders_below_the_never_paste_line(
+    tmp_path, monkeypatch, capsys, ref
+):
+    """The attachment pointer is an INTERNAL reference, so it must never be pasteable.
+
+    Every engagement-relative evidence path names our own layout — a dispatch id, a
+    finding slug, or at minimum the engagement's directory structure — and none of it
+    means anything to a triager, who receives the file the operator attaches in the
+    platform form. `export submission` documents exactly this for its (deliberately
+    absent) POC line; the reply exporter emitted it ABOVE the separator, so ANY value
+    for --new-evidence-ref put an internal identifier into the block the operator is
+    told to paste to the program.
+    """
+    entry = _reply(1, body="Retested as member B; the foreign order still returns 200.", ask="proof?")
+    entry["new_evidence"] = "Member B's session read order 1001, owned by member A."
+    entry["new_evidence_ref"] = ref
+    fake = _FakeClient(_finding(replies=[entry]))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["reply", "VA-047", "--seq", "1"], str(tmp_path))
+
+    export_reply.run(args)
+    capsys.readouterr()
+
+    body = _reply_path(tmp_path, 1).read_text()
+    assert ref not in _pasteable(body), "internal evidence path leaked into the paste block"
+    assert ref in _thread_history(body), "the operator lost the pointer to the attachment"
+    # The AUTHORED prose still leads the pasteable block — only the path moved.
+    assert "Member B's session read order 1001" in _pasteable(body)
+
+
+def test_new_evidence_header_is_omitted_when_only_a_ref_is_recorded(
+    tmp_path, monkeypatch, capsys
+):
+    """A ref-only reply must not leave an empty `**New evidence:**` heading to paste."""
+    entry = _reply(1, body="Retested; same result.", ask="proof?")
+    entry["new_evidence_ref"] = "scans/va-jolt-0725c/reply-proof.txt"
+    fake = _FakeClient(_finding(replies=[entry]))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["reply", "VA-047", "--seq", "1"], str(tmp_path))
+
+    export_reply.run(args)
+    capsys.readouterr()
+
+    assert "**New evidence:**" not in _pasteable(_reply_path(tmp_path, 1).read_text())
+
+
+# -- fail-closed hygiene gate (parity with export submission) ------------------
+
+def test_final_reply_refuses_while_hygiene_warnings_remain(tmp_path, monkeypatch, capsys):
+    """A FINAL reply is sent verbatim, so a flagged leak must fail closed.
+
+    `export submission` already refuses a final render while any hygiene warning
+    stands. export-reply only printed WARN to stderr, making it the softer of two
+    doors onto the same external send.
+    """
+    finding = _finding(
+        replies=[_reply(1, body="Confirmed again — see VA-047 for the full write-up.", ask="proof?")]
+    )
+    fake = _FakeClient(finding)
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["reply", "VA-047", "--seq", "1"], str(tmp_path))
+
+    with pytest.raises(AssessError) as exc:
+        export_reply.run(args)
+
+    assert "hygiene warnings remain" in str(exc.value)
+    assert "finding slug 'VA-047'" in str(exc.value)
+    # Nothing written, nothing registered: a blocked render leaves no partial output.
+    assert not _reply_path(tmp_path, 1).exists()
+    assert fake.posts == []
+
+
+def test_final_reply_renders_when_the_body_is_clean(tmp_path, monkeypatch, capsys):
+    """The gate is a leak check, not a tax on every final render."""
+    fake = _FakeClient(_finding(replies=[_reply(1, body="Retested; still reproduces.", ask="proof?")]))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["reply", "VA-047", "--seq", "1", "--json"], str(tmp_path))
+
+    export_reply.run(args)
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["mode"] == "final"
+    assert out["hygiene_warnings"] == []
+    assert _reply_path(tmp_path, 1).exists()
