@@ -3,6 +3,7 @@ name: gf-patterns:auth
 description: Authentication-entry path and credential-key patterns (login, MFA, SAML assertion endpoints)
 origin: local overlay (gf upstream only had interestingparams at weight 15)
 bucket: auth
+skill: auth-bypass
 weight: 40
 ---
 

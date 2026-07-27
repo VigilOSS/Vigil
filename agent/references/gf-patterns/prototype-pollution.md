@@ -3,6 +3,7 @@ name: gf-patterns:prototype-pollution
 description: Object-merge gadget key patterns (__proto__/constructor/prototype) that signal server-side prototype pollution surfaces
 origin: Vigil (vuln-taxonomy-audit 2026-07 — no upstream 1ndianl33t/Gf-Patterns equivalent exists)
 bucket: prototype-pollution
+skill: prototype-pollution
 weight: 35
 ---
 

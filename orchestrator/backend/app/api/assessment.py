@@ -3164,34 +3164,6 @@ class DispatchCreate(BaseModel):
     scope_path_prefix: str | None = Field(default=None, max_length=512)
     vuln_classes: str | None = Field(default=None, max_length=2048)
     identity: str | None = Field(default=None, max_length=128)
-    allow_no_skills: bool = False
-
-    @model_validator(mode="after")
-    def _enforce_skills_for_specialists(self) -> "DispatchCreate":
-        """Specialist dispatches must declare which skills the agent loaded.
-
-        The dispatch row is the audit surface for "what context did this
-        specialist actually carry"; without a skill list it loses the
-        provenance report-writer relies on. Operators are exempt because
-        they coordinate phases rather than executing a single skill. L2-2 /
-        L3-6: `allow_no_skills=true` provides an explicit escape for ad-hoc
-        roles so the recording path is not hard-blocked on a self-attested
-        signal — per the harness-not-gate doctrine, prefer a loud WARN +
-        proceed over a 422.
-        """
-        role = (self.agent_role or "").strip()
-        if role.lower() in _DISPATCH_ROLES_WITHOUT_SKILLS:
-            return self
-        if self.allow_no_skills:
-            return self
-        skills = (self.skills or "").strip()
-        if not skills:
-            raise ValueError(
-                f"skills is required for role '{role}'; "
-                "list at least one skill name from `vigil assess list-skills` "
-                "(or set allow_no_skills=true for an ad-hoc role)"
-            )
-        return self
 
 
 class DispatchUpdate(BaseModel):

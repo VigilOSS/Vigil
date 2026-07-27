@@ -1,5 +1,6 @@
 ---
 description: Standard endpoints checklist (/metrics, /.env, /actuator, cloud metadata)
+skill: info-disclosure-testing
 source: Custom — compiled from security research and common patterns
 ---
 

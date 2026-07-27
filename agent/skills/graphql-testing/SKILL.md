@@ -112,7 +112,7 @@ vuln_class: graphql-injection, bola
 - GraphQL endpoint URL and supported methods
 - Schema dump or partial schema (sanitized)
 - Queries/mutations with broken access control
-- Injection payload and result — confirming a query returns another user's ID is not enough; you must show the **attacker outcome** (e.g., the IDOR query returned the victim's email, billing address, and payment method; the injection payload executed OS command `id` and returned `uid=0(root)`; the batched alias attack enumerated 500 valid usernames in a single HTTP request)
+- Injection payload and result — prove the attacker outcome (`agent/rules/hunting.md` §2), e.g., the IDOR query returned the victim's email, billing address, and payment method; the injection payload executed OS command `id` and returned `uid=0(root)`; the batched alias attack enumerated 500 valid usernames in a single HTTP request
 - DoS threshold (depth/complexity before failure)
 - Severity based on impact (data leak, RCE, DoS)
 - Remediation: disable introspection in prod, enforce depth/complexity limits, field-level authz

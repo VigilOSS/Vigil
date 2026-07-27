@@ -3,6 +3,7 @@ name: gf-patterns:xxe
 description: XML/SOAP endpoint and parameter patterns that signal XML external entity (XXE) injection surfaces
 origin: Vigil (vuln-taxonomy-audit 2026-07 — no upstream 1ndianl33t/Gf-Patterns equivalent exists)
 bucket: xxe
+skill: xxe-testing
 weight: 40
 ---
 

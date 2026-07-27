@@ -24,7 +24,7 @@ Command injection in 2025 lives in: file conversion endpoints (ImageMagick, FFmp
 - Burp Suite Repeater + Intruder (craft the request — then replay via kali exec for audit pipeline coverage)
 - `vigil assess kali exec --technique CMDI --probe-kind payload --phase consume-test --timeout 300 -- commix ...` (automated command injection — useful for initial sweep, but misses argument injection entirely)
 - `vigil assess classify-payload <value> --mutations` (type the injected parameter value and generate type-aware variants — see "Type the Injected Value First" below)
-- `vigil oob mint` / `vigil oob poll` (mint a nonce-tagged callback and correlate blind-injection hits — `mint` binds the nonce under a running client's interactsh id so `poll` can correlate it; pass `--client <name>` when several clients run; fire the EXACT host mint prints (`$OOB_HOST`); see DNS-Based below; this replaces reading the listener log by hand)
+- `vigil oob mint` / `vigil oob poll` (mint a nonce-tagged callback and correlate blind-injection hits — `mint` binds the nonce under a running client's interactsh id so `poll` can correlate it; pass `--client <name>` when several clients run; fire the EXACT host mint prints (`$OOB_HOST`); see DNS-Based below)
 - Custom wordlists for injection payloads (prepare host-side, deliver via kali exec)
 
 ---
@@ -312,7 +312,7 @@ Then read the file through the other vulnerability. This provides both confirmat
 
 ## Exploitation
 
-Once injection is confirmed, record the finding only after showing the **attacker outcome** — not just "command injection confirmed":
+Once injection is confirmed, record the finding only after showing the attacker outcome (`agent/rules/hunting.md` §2) — not just "command injection confirmed":
 
 - [ ] Read sensitive files: `/etc/passwd`, `/etc/shadow`, application config files, `.env`, database credentials — show the actual file contents in the finding evidence
 - [ ] Establish reverse shell (MANUAL listener required — see `references/offensive-tactics/shell-handling.md`):

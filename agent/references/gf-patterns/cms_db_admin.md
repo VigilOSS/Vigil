@@ -3,6 +3,7 @@ name: gf-patterns:cms_db_admin
 description: CMS and database admin-panel path patterns (Joomla, Umbraco, Sitecore, TYPO3, Ghost, phpMyAdmin, Adminer, Tomcat Manager) the /admin boundary matcher misses
 origin: local overlay (no upstream gf equivalent)
 bucket: cms_db_admin
+skill: auth-bypass
 weight: 35
 ---
 

@@ -3,6 +3,7 @@ name: gf-patterns:deserialization
 description: Unsafe deserialization path and parameter patterns (Java serial, ASP.NET ViewState, Siteforce loader-state)
 origin: local overlay (no upstream gf equivalent)
 bucket: deserialization
+skill: code-variant-analysis, code-vulnerability-analysis, deserialization-testing
 weight: 40
 ---
 

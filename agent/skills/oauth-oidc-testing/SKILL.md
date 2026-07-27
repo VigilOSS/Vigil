@@ -143,7 +143,7 @@ curl -X POST https://target/oauth/token \
 - Vulnerable endpoint and parameter (redirect_uri, state, scope, code_challenge)
 - Exact payload/request that exploits the flaw
 - Token contents (decoded JWT claims) and scope differences
-- Impact: account takeover, privilege escalation, token theft, CSRF — confirming the redirect_uri or state weakness exists is not enough; you must show the **attacker outcome** (e.g., authorization code was delivered to attacker-controlled redirect_uri and exchanged for an access token that reads victim's profile, forged id_token with elevated claims was accepted and granted admin access, stolen refresh_token maintains persistent authenticated sessions without re-authorization)
+- Impact: account takeover, privilege escalation, token theft, CSRF — prove the attacker outcome (`agent/rules/hunting.md` §2), e.g., authorization code was delivered to attacker-controlled redirect_uri and exchanged for an access token that reads victim's profile, forged id_token with elevated claims was accepted and granted admin access, stolen refresh_token maintains persistent authenticated sessions without re-authorization
 - Full request/response chain including authorization and token exchange
 
 ## Extended Resources

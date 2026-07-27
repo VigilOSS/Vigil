@@ -2,6 +2,7 @@
 name: cloud-exposure
 description: Exposed cloud storage triage — S3/GCS/Azure buckets, severity escalation, swarm-dispatch over corpus
 origin: Vigil
+vuln_class: info-disclosure
 ---
 
 # Cloud Exposure Investigation

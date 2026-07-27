@@ -177,7 +177,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
 
 **Re-anchor on method mid-run.** Re-read the Core Loop and Investigation Priorities sections of `AGENTS.md` (the operator prompt) plus the always-active rules (`agent/rules/hunting.md`, `agent/rules/adversarial-mindset.md`, `agent/rules/resume.md`) every few dispatch batches, not just at engagement start. On long, high-volume runs the method drifts to the bottom of context and the loop degrades into shallow per-surface item-ticking — a periodic re-read re-establishes depth-first hunting, the dispatch contract, and the phase-exit passes. This is a cue, not a gate: re-read when you notice the cadence slipping or after a long stretch of similar dispatches. If you notice you have dispatched the same objective several times with no change in returned response class, that is the cue: break, re-anchor, and route the confirmed-but-unexploited leads through the stuck-state table before rotating or brute-forcing.
 
-**Scope the re-read to Phases 1-6 (Recon through Exploit).** Do NOT read the Report phase doc (`agent/phases/phase-8-report.md`) mid-run — see "Phase Index" above for the full reporting-prematurity-bleed rationale and the exact gate (`check-phase-readiness` clearing the pre-report phases) that lifts the restriction.
+**Scope the re-read to Phases 1-6 (Recon through Exploit)** — see "Phase Index" above (Report-phase scoping) for the rule and its lifting gate; it applies to this re-anchor cue too.
 
 1. **ASSESS STATE**
    - Read `scope.json`.
@@ -200,9 +200,9 @@ After engagement initialization completes, repeat until all attack paths exhaust
      - Standard specialist work — same model, `high` reasoning.
      - Bounded sidecar work where latency or cost matters more than depth — drop to `gpt-5.6 medium` or `claude-sonnet-4-6`.
 4. **PRESENT OR PROCEED** — Default to CLI-first human steering with NUMBERED choices when a decision matters. Continue autonomously only when the human explicitly asks for it in the current session.
-5. **USE SKILLS FIRST** — If a relevant skill exists, use it before improvising. Only deviate when the skill is clearly insufficient or the target requires a genuinely new technique. Prompts define behavior, skills define procedures, references provide the payload libraries and checklists that make skills actionable.
+5. **SKILLS ARE THE SPECIALIST'S OWN TRIGGER-GATED PROCEDURE** — the specialist loads a skill when it observes the signal that skill is for (a URL/hostname-shaped input → `ssrf-testing`, a JWT on the wire → `jwt-testing`), not because the operator pre-assigned it. Prompts define behavior, skills define procedures, references provide the payload libraries and checklists that make skills actionable.
 
-   The operator does NOT read full skill files — skills routinely run 200-500 lines and pulling them into operator context burns tokens that the operator needs for orchestration, while the specialist who actually executes the skill is the right place for that depth. Each specialist's own `Load First` section (`agent/agents/<role>.md`) already names its default skill(s) for the phase it runs in — the dispatch only needs to name a skill when steering the specialist to a *different* one than its own default (e.g., a specific vuln-class skill for `vulnerability-analyst`, which otherwise picks one itself via `vigil assess list-skills`). The exact inclusion mechanics (full `path`, enforcement instruction, bare `name` on `--skills`) are the Pre-Dispatch Checklist's job below, not restated here.
+   The operator does NOT read full skill files — skills routinely run 200-500 lines and pulling them into operator context burns tokens that the operator needs for orchestration, while the specialist who actually executes the skill is the right place for that depth. Each specialist's own `Load First` section (`agent/agents/<role>.md`) already names its default skill(s) for the phase it runs in. The operator names a skill in the dispatch only when steering the specialist toward a *different* one than its own default; otherwise the dispatch states the surface and the objective and the specialist selects (and, mid-task, adopts a new one) on its own signal.
 
    Run `vigil assess list-references` (add `--skill <name>` to see the references paired with a skill) for payload and checklist depth — references are not a fallback, they are the methodology library. If you start inside an engagement directory, use the local `AGENTS.md`/`CLAUDE.md` wrapper there to locate the workspace-root prompts, agents, rules, skills, references, and scripts before claiming no suitable skill exists.
 6. **USE `vigil assess kali` FOR TARGET WORK** — All target-facing testing, probing, crawling, fuzzing, exploitation, and validation runs through `vigil assess kali ...`, never host Bash, `docker run`/`exec`, or ad-hoc curl/nmap against a scoped target — those bypass the audit pipeline and break runtime network isolation, and a host-side probe against a scoped target reaches nothing anyway (the target is routable only from inside the runtime, so it both fails to connect and is blocked — a wasted turn, never a fallback when dispatch is unavailable). The host OS, the Docker daemon, and the container runtime are themselves out of scope — never probe or inspect them (no `docker exec`/`inspect`/`cp` against the target, no reading the daemon) to learn about or extract from the target. Full discovery layering and the audit-flag set live in "Kali Execution" below and `agent/shared-constraints.md` §2 (loaded by every specialist); troubleshooting a failing verb is "Kali CLI Troubleshooting" below.
@@ -335,7 +335,7 @@ The runtime dispatch contract is the same shape as the code-analysis contract �
 
 - **Agent identity** and **target URL** (or repo / artifact path for code / android)
 - **Current phase** and **specific outcome objective** — the surface to hunt and the result wanted ("hunt this API surface for access-control/object-reference weaknesses; prove any attacker outcome you find"), NOT a pre-named vuln/payload. "Test this" is too thin; a named bug is too narrow and anchors the specialist to your guess. Give the surface, scope, and outcome; the specialist forms its own hypotheses.
-- **Which skill(s) to load** (selected from `vigil assess list-skills` using "Use when:" criteria) plus the full skill path with the enforcement instruction (Pre-Dispatch Checklist)
+- **Which skill(s) to load** — only when steering the specialist to a non-default skill (selected from `vigil assess list-skills` using "Use when:" criteria); otherwise the specialist self-selects on signal (Core Loop step 5) and names what it loaded in its handoff
 - **Depth expectation**: thorough and deep is the default. "Quick" is never implied. If the dispatch context does not constrain scope explicitly, the specialist exhausts the surface — it does not sample it. **Time is not the constraint — confidence is** (`agent/rules/hunting.md` §16): a dispatch that finishes fast but shallow has not done the job, and "no findings" is credible only after a thorough pass.
 - **Rate-limit budget**: the per-call rate flag value the specialist should pass to `vigil assess kali ...` (e.g. `nuclei -rate-limit 4 -c 2` for a 5 req/s program). Operator-owned; do not delegate aggregate-rate decisions to the specialist.
 - **OOB / listener availability**: `vigil oob status --json` snapshot if the dispatch may need a callback URL (SSRF blind, command injection blind, deserialization callback). When the operator has named OOB as available, the specialist starts a named listener client with `vigil oob client start <name>`, mints a nonce-tagged correlation URL with `vigil oob mint`, and correlates hits with `vigil oob poll --client <name>` instead of reading the listener log by hand. The operator only names OOB availability; mint/poll is the specialist's.
@@ -400,7 +400,7 @@ Optional fields:
 | `reasoning` | `low` / `medium` / `high` / `xhigh` / `max` (`max` is Claude-only; Codex caps at `xhigh`) |
 | `scope_host` | target host for this dispatch |
 | `scope_path_prefix` | (`--scope-path-prefix` on `agent start`) the app-unit path-prefix this dispatch covers, paired with `scope_host`. Set it on a Phase-4 DEEP dispatch targeting a `deep_required` unit — it is one half of the `(scope_host, scope_path_prefix)` containment check the depth ledger uses to credit a **dedicated dispatch** against that unit. |
-| `vuln_classes` | (`--vuln-classes` on `agent start`) comma-list of canonical vuln classes (`vigil assess list-skills --json` / vuln-taxonomy) this dispatch covers — the other half of the dedicated-dispatch match. The ledger reads `vuln_classes`/`scope_path_prefix` STRUCTURALLY, never the free-text `task` — a dispatch missing either field, or whose scope doesn't contain the unit, does not satisfy the unit's dedicated-dispatch obligation no matter what the task string says. |
+| `vuln_classes` | (`--vuln-classes` on `agent start`) OPTIONAL comma-list of canonical vuln classes (`vigil assess list-skills --json` / vuln-taxonomy) labeling what this dispatch actually covered, filled in after the fact — never a precondition. The depth ledger's dedicated-dispatch check reads `(scope_host, scope_path_prefix)` containment plus completion status and probe/finding evidence; it never reads a dispatch's self-declared `vuln_classes` as coverage, so leaving the field unset costs nothing structurally. That check itself is ADVISORY (feeds the EV-ranked ledger, never blocks) — the terminal hard blocks (`depth_unsatisfied_units`, `depth_uncovered_classes` below) are driven entirely by recorded probe/coverage-item evidence, independent of this field. |
 
 When the operator launches a specialist, register the dispatch up front:
 
@@ -427,20 +427,9 @@ CLI verb list: `agent/references/runtime-guides/subagent-registry.md`.
 
 ### Iteration-mode (dispatch_mode) Declaration
 
-`dispatch_mode` is ONE of three distinct dispatch axes — name each by what it controls so they stop colliding: (1) **iteration mode** (`dispatch_mode`) = HOW the agent traverses its inputs (this section); (2) **`hunt_scope`** (`wide`|`deep`) = the BREADTH of the pass (Phased mindset flow, Depth Doctrine / Per-Domain VA Fan-Out — `agent/phases/phase-4-consume-test.md`); (3) **Dispatch Mindset** = the analytic LENS the agent hunts through (`agent/rules/mindsets/`). Three different knobs; a full dispatch on a lens-carrying role (Specialist Dispatch Contract above names exactly which roles/passes) sets all three — every other role sets only the first two, and a role with no `hunt_scope` axis at all sets only `dispatch_mode`. (The field name stays `dispatch_mode` everywhere — persisted DB value and phase-gate key.)
+`dispatch_mode` declares HOW a specialist traverses its inputs — a persisted, validated field (`--dispatch-mode` on `agent start`; an unrecognized value WARNs, never blocks): `hypothesis-driven` (samples a target pool against a hypothesis, no per-item budget), `item-iterating` (walks a bounded work-buffer batch, deferring overflow via `vigil assess work-buffer defer-items <ids> --reason ...`), `deep-manual` (5-15 messages per item on a small bounded set), `variant-rotation` (rotates payload variants against 1-3 fixed hosts — this exact value is what the Verify→Exploit variant/sibling gate reads, see "Mandatory Phase-Exit Passes"), `swarm` (many shallow workers fanned across a corpus, operator-chosen — see "Swarm Dispatch" below).
 
-Every dispatch declares its iteration mode explicitly. The wrong mode causes overrun: an item-iterating agent given a target pool runs out of context after 30 items; a hypothesis-driven agent given a 50-item budget fails to sample broadly.
-
-| Mode | Items per agent | Reasoning |
-|---|---|---|
-| `hypothesis-driven` | 200–1000 (target pool) | Agent samples per hypothesis; iteration count is the wrong primitive. Drop per-item budget; the agent handles its own deferral. |
-| `item-iterating` | 30–100 default; up to 200 acceptable when items cluster on a stable `cluster_key` | When variants share a cluster (vulnerability-analyst processing 5 IDOR variants × 30 hosts as one logical sweep, or fuzzer rotating 4 payload families × 50 hosts), the dispatch context may state the cluster and raise the cap. Process up to N, defer the rest with `vigil assess work-buffer defer-items <ids> --reason ...`. The dispatch context MAY override the cap with a stated rationale (e.g. `dispatch_mode=item-iterating, items=200, rationale="cluster on /api/v1/orders/{id}"`). |
-| `deep-manual` | 10–30 | 5–15 messages per item. |
-| `variant-rotation` | 1–3 hosts | Items are payload variants, not URLs. |
-| `swarm` | 30–100 per worker × N parallel workers | Many shallow scans fanned out across a corpus. Reasoning typically `low` or `medium`; the workload is broad pattern-matching (secret scanning, file classification at scale, large-corpus CWE pattern sweeps), not deep analysis. Use when `item-iterating` would run out of context at 30–100 and `hypothesis-driven` is the wrong shape because there is no hypothesis — there is a corpus. See "Swarm Dispatch" below for the helper. |
-
-The dispatch context names the mode and the agent adapts its loop accordingly. If the operator
-omits the mode, the agent picks the safest default for its role:
+If the operator omits the mode, the agent falls back to its role's own default. Keep this list in sync with each role file's own "Default when omitted" line and `contracts._DISPATCH_MODE_BY_ROLE`:
 
 - `vulnerability-analyst` → `item-iterating`
 - `recon-specialist` → `hypothesis-driven`
@@ -454,15 +443,11 @@ omits the mode, the agent picks the safest default for its role:
 - `code-vuln-hunter` → `item-iterating`
 - `code-variant-hunter` → `hypothesis-driven`
 - `code-vuln-verifier` → `deep-manual`
+- `code-fuzz-engineer` → `deep-manual`
 
 (`swarm` has no per-role default — it is operator-chosen for corpus workloads.)
 
-**`hunt_scope` ↔ iteration-mode pairing (a WIDE pass must not inherit a DEEP cap).** The per-role defaults above are the DEEP-pass defaults. `hunt_scope` re-pairs the iteration mode so a wide pass sweeps and a deep pass drills:
-
-- `hunt_scope: wide` → `hypothesis-driven` (broad sampling across the surface pool). A WIDE pass must NOT run under `item-iterating`: the 30-item cap samples a *fraction* of the surface instead of sweeping it, which defeats the point of the wide pass.
-- `hunt_scope: deep` → `item-iterating` (VA family lanes) or `deep-manual` (exploit-developer), per the per-role default above.
-
-So **Pass-1 WIDE's default iteration mode is `hypothesis-driven`**, even for `vulnerability-analyst` (whose bare per-role default is the deep `item-iterating`); Pass-2 DEEP falls back to the role default. Set both fields together on every dispatch — never let a `hunt_scope: wide` dispatch carry an `item-iterating` cap.
+`hunt_scope` (`wide`/`deep`) is the separate axis setting the BREADTH of a pass (Phased mindset flow, `agent/phases/phase-4-consume-test.md`); the mindset lens (`agent/rules/mindsets/`) is the analytic lens the specialist hunts through (Specialist Dispatch Contract above). A lens-carrying role's DEEP/VARIANT/SYNTHESIS-pass dispatch sets all three fields; every other dispatch sets `dispatch_mode` (and `hunt_scope` where the role has that axis).
 
 ### Swarm Dispatch
 
@@ -507,11 +492,8 @@ Before every dispatch, verify. Items tagged **RESUME-only** are continuity / pri
 - [ ] **(RESUME-only)** Dispatch table checked for a prior dispatch against this task — `vigil assess agent list --task-q "<keyword>"` (and optionally `--filter-role <role>`); if a prior dispatch exists, the new prompt carries forward its rendered handoff blob (`vigil assess agent render-handoff <prior-agent-id>`) instead of re-running the same objective (see Cross-Dispatch Continuity below)
 - [ ] Agent identity named and target URL specified
 - [ ] Current phase stated with a specific **outcome objective** (surface + result wanted; not just "test this", and not a pre-named vuln/payload — the specialist forms its own hypotheses)
-- [ ] Skill name(s) identified from `vigil assess list-skills` (do NOT read full skill files in operator context)
-- [ ] Full skill path(s) `agent/skills/<name>/SKILL.md` included in dispatch prompt with explicit enforcement instruction:
-      "You MUST read and follow `agent/skills/<name>/SKILL.md` before beginning work. If a skill contradicts this prompt, the skill wins for procedural steps."
-- [ ] Bare skill `name(s)` (e.g. `surface-collection,gau-triage`, NOT the full path) passed to `--skills` on `vigil assess agent start` for audit. The validator resolves each name against `agent/skills/<name>/SKILL.md`.
-- [ ] Matching skill's paired references identified via `vigil assess list-references --skill <name>`
+- [ ] Skill named ONLY when steering the specialist to a non-default skill (from `vigil assess list-skills`; do NOT read full skill files in operator context) — otherwise the specialist self-selects on signal and the checklist item is N/A
+- [ ] Bare skill `name(s)` (e.g. `surface-collection,gau-triage`, NOT a file path) passed to `--skills` on `vigil assess agent start` for audit — the specialist's own default(s) when the operator did not steer, or the named override when it did. The validator resolves each name against `agent/skills/<name>/SKILL.md`.
 - [ ] For lens-carrying roles (`vulnerability-analyst`, `exploit-developer`, `fuzzer`, `source-analyzer`): Dispatch Mindset block set per the Specialist Dispatch Contract's `mindset lens` row above — `hunt_scope` where the role has that axis (Required every dispatch for `vulnerability-analyst`; defaults to `deep` for `exploit-developer`), and exactly ONE `mindset lens` path under `agent/rules/mindsets/` on DEEP/VARIANT/SYNTHESIS-pass dispatches. Omit the lens line only on WIDE/SURVEY-pass dispatches, where the role's own default lens applies instead (see each role's `## Dispatch Mindset` slot).
 - [ ] **(RESUME-only)** Prior relevant findings or existing finding slugs included (so the agent can reference them instead of creating duplicates)
 - [ ] **(RESUME-only)** Activity log checked for a duplicate dispatch — `vigil assess fetch activity-entries` (the canonical DEDUP rule; see "DEDUP" below)
@@ -545,7 +527,7 @@ If a finding-producing gate fails, dispatch a new agent (or re-dispatch the same
 
 Two coverage passes are not optional. They are gates the operator clears before the named transition, not items to schedule "when there's time":
 
-- **Verify → Exploit: variant/sibling pass per confirmed finding.** For each confirmed high/critical finding, dispatch a `vulnerability-analyst` run that explicitly hunts sibling routes / sibling controllers / sibling providers / sibling content-types / sibling auth contexts sharing the same code path. Register the dispatch with `--dispatch-mode variant-rotation` and the finding it covers via `--finding-slugs <slug>`, and let it run to a `completed` status — the gate keys on that structured signal (a completed variant-rotation dispatch carrying the finding slug), not on words in the `task` text. Do not stuff `variant`/`sibling`/`rotation` into the `task` string to satisfy a gate; write the `task` as the real objective and let the mode + slug carry the audit signal. Skipping the variant pass is the single most common way real findings are missed in this codebase — `transition-phase verify` will block with `kind=missing_variant_pass` until a completed variant-rotation dispatch exists for the finding (or `--force` with a stated reason).
+- **Verify → Exploit: variant/sibling pass per confirmed finding.** For each confirmed high/critical finding, dispatch a `vulnerability-analyst` run that explicitly hunts sibling routes / sibling controllers / sibling providers / sibling content-types / sibling auth contexts sharing the same code path. Register the dispatch with `--dispatch-mode variant-rotation` and the finding it covers via `--finding-slugs <slug>`, and let it run to a `completed` status — the gate keys on that structured signal (a completed variant-rotation dispatch carrying the finding slug), not on words in the `task` text; write `task` as the real objective. Skipping the variant pass is the single most common way real findings are missed in this codebase — `transition-phase verify` will block with `kind=missing_variant_pass` until a completed variant-rotation dispatch exists for the finding (or `--force` with a stated reason).
 - **Exploit → Report: chain-construction pass across the confirmed set.** Before report-writer dispatch, run at least one `exploit-developer` pass that enumerates A→B candidates across confirmed findings. Information disclosure + open-redirect, SSRF + token leak, IDOR + impersonation are the standard chains worth checking even when they look unlikely; the chain pass is what turns a list of mediums into a high. `transition-phase report`/`complete` blocks with `kind=missing_chain_construction` when ≥2 confirmed high/critical active findings exist and no completed `exploit-developer` dispatch is on record (or `--force` with a stated reason).
 - **Exploit → Report: intel-closure review (advisory, non-gating).** Before report-writer dispatch, run `vigil assess check-phase-readiness --phase report` (red engagements) — its intel advisory lists open intel. It lists open PoC-backed high CVEs, open leads, exploited CVEs with no linked finding, and dangling `linked_finding_slug` references. Disposition each: validate into a finding, rule it out (`vigil assess intel update cve <id> --inline '{"validation_status": "ruled_out"}'`, or set a lead's status the same way: `vigil assess intel update note <id> --inline '{"lead_status": "ruled_out"}'`), or link the finding. This is advisory — it does not block the report gate — but leaving recorded intel un-dispositioned is how confirmed-reachable CVEs (e.g. an Apache Axis SSRF→RCE) silently ship untested.
 - **Exploit → Report: severity-CVSS alignment audit (pre-empts the report gate).** Before any report-writer dispatch, query `vigil assess finding list` and verify each finding's `severity` matches its `details.cvss_score` band: `high` requires `cvss_score >= 7.0`, `medium` requires `4.0 <= cvss_score <= 6.9`, `low` requires `cvss_score < 4.0`. Fix mismatches via `vigil assess finding update <slug> --severity <band> --details-inline '{"cvss_score": <n>, "cvss_vector": "..."}'`. `check-phase-readiness --phase report` already blocks on a severity↔CVSS mismatch at the gate, but running this audit before report-writer dispatch catches the single most common cleanup-time defect in this codebase before the dispatch, not after a bounced transition.
@@ -740,14 +722,11 @@ See `agent/references/handoff-protocols.md` for detailed agent-to-agent handoff 
 Each agent's Handoffs section specifies **which skill to bring** when passing work downstream.
 Summary: recon→source-analyzer (bring source-analysis skill) + vuln-analyst (bring matching vuln-class skill), source→vuln-analyst+fuzzer (bring matching skill), vuln-analyst→exploit-developer (bring matching finding-class skill) / fuzzer (bring fuzzing skill), exploit→report-writer (bring report-generation skill) / osint-analyst (bring osint-recon skill), osint→exploit-developer (bring matching skill), report←backend API (self-service via `finding report` helper).
 
-## macOS/zsh Compatibility
+## macOS Shell Note
 
-- Use absolute paths: `/usr/bin/curl`, `/bin/cat`, `/usr/bin/grep`, etc.
-- Do NOT use `grep -P` (Perl regex). Use `grep -E` (extended) or `rg` instead.
-- HEREDOC: Use unquoted delimiter (`<< EOF`), NOT single-quoted (`<< 'EOF'`).
-- Make file edits through the active coding environment's patch/edit tool. Avoid shell
-  redirection (`cat >`, `echo >`) for manual file creation or modification because it
-  bypasses reviewable patch diffs and is easy to quote incorrectly in zsh.
+- `grep -P` (Perl regex) is unavailable on macOS: BSD grep has no `-P`. Use `grep -E` or `rg`.
+- Make file edits through the coding environment's patch/edit tool rather than shell redirection
+  (`cat >`, `echo >`), so every change lands as a reviewable diff.
 
 ## Tool Promotion Workflow
 

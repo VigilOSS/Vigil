@@ -3,6 +3,7 @@ name: gf-patterns:xss
 description: Reflected-input parameter patterns that signal cross-site scripting surfaces
 origin: 1ndianl33t/Gf-Patterns (+ local overlay)
 bucket: xss
+skill: xss-testing
 weight: 20
 ---
 

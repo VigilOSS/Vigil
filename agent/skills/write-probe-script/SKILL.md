@@ -62,7 +62,7 @@ not cosmetic, it is what keeps the blast radius honest.
 | **Passive / fingerprint** | Reads the target: GETs, header inspection, TLS introspection, response-shape differentials with no state change. | `fingerprint` / `baseline` | no |
 | **Active / payload** | Sends a crafted input testing one hypothesis (a traversal string, an injected parameter, an oversized body) and inspects the response. | `payload` | only if it writes/edits/deletes target state |
 | **Blind / callback** | Fires an input that should trigger an out-of-band hit (SSRF, blind XXE, command injection) and correlates the callback. | `payload` | usually no (the *callback* is the signal, not a target write) |
-| **Exploit / proof** | Demonstrates the attacker outcome end-to-end (extracts a record, proves the IDOR boundary, chains two primitives). | `exploit` | per the actual writes performed |
+| **Exploit / proof** | Demonstrates the attacker outcome (`agent/rules/hunting.md` §2) end-to-end (extracts a record, proves the IDOR boundary, chains two primitives). | `exploit` | per the actual writes performed |
 
 A passive probe that quietly starts POSTing is mislabelled and under-audits its
 risk. Pick the shape up front; if the probe grows a write, bump `--probe-kind` and

@@ -62,7 +62,7 @@ The `code-index` command:
 - Writes a per-repo manifest at `tools/analysis-state/structural-index/<repo_key>-manifest.json` (its `path_to_index` maps repo-relative file path -> index filename relative to `structural-index/`, e.g. `<repo_key>/<fid>.json`) and updates an aggregate manifest at `tools/analysis-state/structural-index-manifest.json` (schema `structural-index-aggregate/v1`, top-level `repos` dict keyed by `repo_key` with `manifest_path` and `index_dir`, plus an `aggregate` totals block). Consumers resolve a per-repo index by: aggregate -> `repos[<repo_key>]` -> read `manifest_path` -> per-repo `path_to_index[<rel_path>]`
 - If tree-sitter is still unavailable, fix the local `uv` environment and rerun. Do not skip
   structural indexing for a fresh engagement.
-- The structural index accelerates Phase 2 hunting by giving the hunter a pre-built function map, export list, import dependency graph, and advisory sink annotations instead of requiring manual code triage. The function map is the primary completeness anchor -- every function must be accounted for. Sinks, exports, and import targets are advisory metadata that aids navigation but does not constrain the hunter's analysis scope
+- The structural index accelerates Phase 2 hunting by giving the hunter a pre-built function map, export list, import dependency graph, and advisory sink annotations instead of requiring manual code triage. The function map is the completeness anchor (`agent/shared-constraints-code.md` §2); sinks, exports, and import targets stay advisory navigation, not a scope limiter
 
 Output: `tools/analysis-state/structural-index/` directory with per-file JSON + manifest.
 

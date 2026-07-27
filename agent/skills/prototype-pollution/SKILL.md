@@ -119,7 +119,7 @@ deep-extend          deap.merge             mixin-deep
 
 - Pollution vector (URL parameter, JSON body, hash fragment)
 - Exact payload that achieves pollution
-- Proof of pollution (console output, behavior change, error) — confirming `({}).polluted === "yes"` is not enough; you must show the **attacker outcome** (e.g., polluted `isAdmin: true` property was respected by the access check and granted admin panel access, EJS `outputFunctionName` gadget chain achieved RCE via `id` execution, XSS payload fired in another user's browser via polluted innerHTML handler)
+- Proof of pollution (console output, behavior change, error) — prove the attacker outcome (`agent/rules/hunting.md` §2), e.g., polluted `isAdmin: true` property was respected by the access check and granted admin panel access, EJS `outputFunctionName` gadget chain achieved RCE via `id` execution, XSS payload fired in another user's browser via polluted innerHTML handler
 - Gadget chain details if escalated to XSS/RCE/DoS
 - Affected library/function and version
 - Full request/response for reproducibility

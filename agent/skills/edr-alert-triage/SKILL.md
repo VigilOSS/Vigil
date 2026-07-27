@@ -356,33 +356,15 @@ investigator judgment calls applied AFTER the audit pull.
   lineage and includes benign helpers. Same as Falcon: count distinct
   adversarial signals, not total Storyline events.
 
-### MITRE Technique Mapping (curated)
+### MITRE Technique Mapping
 
 The seed list L1 emitted on the dispatch handoff is starter-grade. Refine
-it here based on what the audit pull surfaced. Common technique families
-for EDR alerts:
-
-- **TA0007 Discovery**
-  - `T1057` Process Discovery
-  - `T1082` System Information Discovery
-  - `T1087.001` / `T1087.002` Account Discovery (local / domain)
-  - `T1018` Remote System Discovery
-- **TA0003 Persistence**
-  - `T1547.001` Registry Run Keys / Startup Folder
-  - `T1543.003` Windows Service
-  - `T1053.005` Scheduled Task
-  - `T1546.003` WMI Event Subscription
-  - `T1546.012` Image File Execution Options Injection
-- **TA0005 Defense Evasion**
-  - `T1027` Obfuscated Files or Information
-  - `T1036.005` Masquerading (Match Legitimate Name or Location)
-  - `T1218` System Binary Proxy Execution (rundll32, regsvr32, mshta, etc.)
-  - `T1562.001` Disable or Modify Tools
-  - `T1055` Process Injection
-- **TA0011 Command and Control**
-  - `T1071.001` Web Protocols (chain to `network-threat-hunt` for full hunt)
-  - `T1071.004` DNS
-  - `T1572` Protocol Tunneling
+it here based on what the audit pull surfaced — assign the specific
+sub-technique IDs the Step 1-4 evidence supports (discovery, persistence,
+defense-evasion, and C2 tactics all commonly appear in EDR alerts). When
+Step 2 surfaces confirmed C2 (beaconing, DNS tunneling, encrypted-channel
+egress), chain to `network-threat-hunt` for the full network-plane hunt
+rather than closing the C2 angle from host telemetry alone.
 
 `triage.md` rule 11 forbids leaving `details_json.mitre_techniques`
 empty. Default fallback when nothing better fits: `T1059` (Command and

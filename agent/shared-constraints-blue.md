@@ -466,10 +466,8 @@ it stays bounded where raw transcript pastes grow linearly.
 
 The Runtime Identity banner is a binding agreement on `agent_id`, `agent_role`,
 `phase`. It appears once at dispatch time — echoing it in the handoff or response
-wastes context, pollutes FTS preview, and adds no signal.
-
-This is parity with red mode (`agent/shared-constraints.md` banner-policing).
-The handoff JSON is the durable record; the response is reflection.
+wastes context, pollutes FTS preview, and adds no signal. The handoff JSON is
+the durable record; the response is reflection.
 
 Same for `--intent` on `vigil assess host-exec`: do not prefix with agent
 name or phase — those land in the audit row via `--phase` and `agent_name`.

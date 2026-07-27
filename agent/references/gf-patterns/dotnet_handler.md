@@ -3,6 +3,7 @@ name: gf-patterns:dotnet_handler
 description: ASP.NET / WCF HTTP-handler path and ViewState parameter patterns (.axd/.ashx/.asmx/.svc, _vti_bin, ELMAH, trace.axd)
 origin: local overlay (no upstream gf equivalent)
 bucket: dotnet_handler
+skill: code-variant-analysis, code-vulnerability-analysis, deserialization-testing
 weight: 40
 ---
 

@@ -2,9 +2,10 @@
 
 This is a generative lens for the injection family (SQLi, XXE, SSTI, command injection, NoSQLi,
 LDAP, and their kin) — it shapes *where you look and how you decide a value is a candidate*, not
-*how you send the payload*. Detection technique order (error-based → time-based → OOB →
-boolean-based) is `agent/agents/vulnerability-analyst.md`'s Injection Detection Cascade;
-payload/bypass detail lives in the vuln-class skill (`sqli-testing`, `ssti-testing`,
+*how you send the payload*. Detection escalates from the cheapest, most-observable signal toward
+the most expensive — a visible error or reflected value first, then a timing delta, then an OOB
+callback, then a boolean/blind differential last — and stops the moment a signal resolves the
+question; payload/bypass detail lives in the vuln-class skill (`sqli-testing`, `ssti-testing`,
 `nosql-injection`, etc.). This file is upstream of both: it generates the candidate list they then
 work.
 
@@ -43,10 +44,10 @@ than the filter's inspection.
 Absence of reflected output or an error is not a verdict — it is the default state you must
 actively disprove. Assume every candidate is blind until you either observe visible signal or
 prove the value never reaches an interpreter (parameterized query, escaped output, dead code path,
-literal storage). The Injection Detection Cascade governs the *order* you probe a candidate in —
-cheap signals first, OOB later, stop at the first signal; this rule governs the *bar* for
-concluding not-vulnerable. Reaching OOB last in that order is not the same as skipping it: you may
-not close a candidate as clean without having actually run the disproof.
+literal storage). Escalating from cheap signals toward OOB last (above) governs the *order* you
+probe a candidate in; this rule governs the *bar* for concluding not-vulnerable. Reaching OOB last
+in that order is not the same as skipping it: you may not close a candidate as clean without having
+actually run the disproof.
 
 ---
 

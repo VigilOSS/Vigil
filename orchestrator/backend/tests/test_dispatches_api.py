@@ -218,29 +218,18 @@ def test_dispatch_validation_rejects_bad_status_and_unknown_fields(client, isola
     assert bad.status_code == 422
 
 
-def test_dispatch_specialist_requires_skills(client, isolate_settings) -> None:
-    """Specialist roles must declare at least one skill so the dispatch row is auditable."""
-    _seed(client, isolate_settings)
-    bad = client.post(f"{BASE}/dispatches", json={
-        "agent_id": "NO-SKILLS",
-        "agent_role": "vulnerability-analyst",
-    })
-    assert bad.status_code == 422, bad.text
-    assert "skills is required" in bad.text
-
-
-def test_dispatch_allow_no_skills_accepts_skill_less_specialist(client, isolate_settings) -> None:
-    """L2-2 / L3-6: allow_no_skills=true lets an ad-hoc specialist dispatch
-    through instead of 422'ing on the missing skills audit."""
+def test_dispatch_without_skills_is_accepted(client, isolate_settings) -> None:
+    """A specialist dispatch may omit skills: the specialist selects them from
+    what it observes on the surface, so the honest list is only known after the
+    dispatch runs. Requiring it up front would force the operator to name a
+    vulnerability class before the hunt."""
     _seed(client, isolate_settings)
     resp = client.post(f"{BASE}/dispatches", json={
         "agent_id": "ADHOC-1",
         "agent_role": "vulnerability-analyst",
-        "allow_no_skills": True,
     })
     assert resp.status_code == 201, resp.text
     assert resp.json()["agent_id"] == "ADHOC-1"
-    assert "allow_no_skills" not in resp.json()
 
 
 def test_dispatch_unknown_dispatch_mode_stored_as_text(client, isolate_settings) -> None:
