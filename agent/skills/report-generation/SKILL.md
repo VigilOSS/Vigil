@@ -54,7 +54,7 @@ The `finding report --json` helper returns grouped report findings. Root and sib
 - `remediation`, `steps_to_reproduce`, `cwe_id`, `owasp_category` — extracted from `details_json`
 - `impact`, `evidence_detail` — extracted from `details_json`
 
-> **Read vs write asymmetry.** The backend stores finding metadata in a column literally named `details_json` (a JSON string) — that's why the `finding report` projection above references `details_json` as a source. When you **write** via `vigil assess finding update --details-inline`, pass the details object directly as `{...}`. A payload file instead uses `{"details": {...}}`. The asymmetry is intentional: the API decodes/encodes the JSON column behind the field name `details` on writes, leaving `details_json` as the raw storage name on reads. If a prompt or recipe says to pass `details_json` to `finding update`, that's drift — flag it.
+> **Read vs write asymmetry.** The backend stores finding metadata in a column literally named `details_json` (a JSON string) — that's why the `finding report` projection above references `details_json` as a source. On write, the field name is `details`: a `--payload-file` document nests it as `{"details": {...}, "expected_row_version": <n>}`; `--details-inline` takes the object directly as `{...}`. The asymmetry is intentional: the API decodes/encodes the JSON column behind the field name `details` on writes, leaving `details_json` as the raw storage name on reads. If a prompt or recipe says to pass `details_json` to `finding update`, that's drift — flag it. **`--payload-file` is the default way to write authored prose** — Evidence and Steps to Reproduce routinely carry single quotes, double quotes, newlines, and backtick fences that corrupt `--details-inline`'s shell-single-quoted JSON, and a file has no shell quoting to corrupt. See "Submission-First Closeout" step 3 below for the full write-back procedure and payload shape.
 - top-level `groups` and `standalone`; each group has a `root` finding and `siblings`
 
 Sibling rows include
@@ -124,7 +124,10 @@ stays in `scans/` (or `tools/` for code/fuzz) and is referenced, never rendered.
    `submission-context.json` from the finding's fields, consolidates the finding metadata, any
    hygiene warnings, the structured proof, and every linked command run into the single OPERATOR
    DETAILS section below the second `---`, and marks any missing proof field with `[NEEDS: ...]` —
-   this is the normal report-writer entrypoint, not the final gate. Pick the platform by audience: `bugcrowd` / `hackerone` for an active program, `direct`
+   this is the normal report-writer entrypoint, not the final gate. This first render omits
+   `--overwrite` (no `submission.md` exists yet); every render after this one — the QA re-render
+   (step 4) and publish (step 6) — needs it, since the CLI refuses to clobber an existing
+   `submission.md` without it. Pick the platform by audience: `bugcrowd` / `hackerone` for an active program, `direct`
    for a company-facing writeup with no external program (the code track's default — see
    `agent/operator-core-code.md`). Template references for the per-platform scaffold:
    `agent/skills/report-generation/templates/bugcrowd.md`,
@@ -141,24 +144,47 @@ stays in `scans/` (or `tools/` for code/fuzz) and is referenced, never rendered.
    command_run --target-id <run_id>` — durable reference), then partial-mask genuine third-party PII
    only — self-owned/synthetic data stays in full (see "PII redaction" in
    `agent/references/submission-format.md`), truncate to the proof lines,
-   and annotate each. Write the authored sections back so the finding holds exactly what would be
-   sent (`steps_to_reproduce` items are bare action strings — no leading `1. `/`2. `; the renderer
-   prepends the `N.` numbering):
-   ```bash
-   vigil assess finding update <slug> \
-     --summary "<authored Summary — impact-first>" \
-     --details-inline '{"steps_to_reproduce":["<step 1>","<step 2>"],"evidence":"<annotated proof; third-party PII partial-masked, self-owned/synthetic shown in full>","attack_scenario":"<optional>","impact":"<proven, quantified>","remediation":"<specific control>"}' \
-     --reason "Authored submission-ready sections to the finding (backend is source of truth)"
+   and annotate each. `steps_to_reproduce` renders exactly as authored, with no numbering or marker
+   added — write it as ONE string carrying your own `1.`/`2.`/… numbering (a list of strings still
+   renders, one paragraph per item, but only a single block lets you control the numbers that later
+   prose cross-references — see `agent/references/submission-format.md` "Structure").
+
+   **Write via `--payload-file`, the default write path.** Evidence in particular routinely contains
+   single quotes, double quotes, newlines, and backtick fences that corrupt `--details-inline`'s
+   shell-single-quoted JSON or the shell command around it; a payload file has no shell quoting to
+   corrupt. Write the complete patch to a file with the Write tool — no shell quoting at all — then
+   pass only the file:
+   ```json
+   {
+     "summary": "<authored Summary — impact-first>",
+     "details": {
+       "steps_to_reproduce": "1. <step 1>\n2. <step 2>",
+       "evidence": "<annotated proof; third-party PII partial-masked, self-owned/synthetic shown in full>",
+       "attack_scenario": "<optional: realistic adversary + starting access + action, ending at first compromise>",
+       "impact": "<proven, quantified>",
+       "remediation": "<specific control>"
+     },
+     "reason_text": "Authored submission-ready sections to the finding (backend is source of truth)",
+     "source_name": "report-writer",
+     "expected_row_version": <current row_version>
+   }
    ```
-   `--summary` writes the top-level Summary; `--details-inline` MERGES the rest into `details`
-   (`steps_to_reproduce`, `evidence`, `attack_scenario`, `impact`, `remediation`) — the field name
-   is `details`, not `details_json` (see "Read vs write asymmetry" above) — without touching
-   `cvss_vector`, `vrt_category`, or `poc_*`. The authored `details.evidence` is what renders as the
-   Evidence section; it does NOT by itself satisfy the strict gate's durable-proof requirement
-   (step 6). The finding must carry `evidence_ref` pointing inside the engagement to an indexed,
-   present artifact (normally a raw file under `scans/`, set with `--evidence-ref scans/<file>`
-   after registering it). `poc_request`+`poc_response` and `poc_code` remain useful content but do
-   not replace that durable artifact. If nothing resolves a
+   ```bash
+   vigil assess finding update <slug> --payload-file <path.json>
+   ```
+   The document's `details` key MERGES into the finding's stored details (`steps_to_reproduce`,
+   `evidence`, `attack_scenario`, `impact`, `remediation`) — the key is `details`, not `details_json`
+   (see "Read vs write asymmetry" above) — without touching `cvss_vector`, `vrt_category`, or
+   `poc_*`. `--payload-file` CANNOT be combined with any content flag (`--summary`,
+   `--details-inline`, `--reason`, …) — the whole patch goes in the file, which must carry
+   `expected_row_version` (refresh it from the finding's last response) and, whenever it carries
+   `notes`, an explicit `notes_mode` of `"append"` or `"replace"`. Reserve `--details-inline` for a
+   short single-value edit with nothing to corrupt. The authored `details.evidence` is what renders
+   as the Evidence section; it does NOT by itself satisfy the strict gate's durable-proof requirement
+   (step 6) — the finding must separately carry `evidence_ref` pointing inside the engagement to an
+   indexed, present artifact (normally a raw file under `scans/`, set with `vigil assess finding
+   update <slug> --evidence-ref scans/<file>` after registering it). `poc_request`+`poc_response` and
+   `poc_code` remain useful content but do not replace that durable artifact. If nothing resolves a
    marker, the finding is not ready — do not submit around it.
 4. **QA pass.** Re-render from the finding (`export submission <slug> --platform <same> --draft
    --overwrite`), then run the "Post-Generation Self-Review" checks below (Rule-based: banned
@@ -194,7 +220,10 @@ target-application UUID or filename in a PoC reaches you verbatim. Instead it FL
 internal identifier that leaked — engagement / finding / `producer_agent_id` UUIDs, absolute
 `$ENGAGEMENT_DIR` paths, `cases.db` references — as `hygiene_warnings` in `submission-context.json`
 and on stderr in draft mode; final mode refuses to write while any remain. The finding slug is kept
-out of the body by design. Fix every warning at the finding source and re-render.
+out of the body by design. Fix every warning at the finding source and re-render. Editorial advice
+(title length) arrives separately as `advisories` / stderr `ADVISORY` lines and never blocks a
+publish — see "Hygiene warnings block; advisories do not" in
+`agent/references/submission-format.md`.
 
 ## Report Structure (Legacy Internal Report — On-Demand Only)
 
@@ -406,16 +435,22 @@ for slug in $(vigil assess finding list --status active --json | jq -r '.[].slug
 done
 ```
 
-For each hit, fix the source-of-truth on the finding (NOT in `report.md`):
+For each hit, fix the source-of-truth on the finding (NOT in `report.md`) via `--payload-file` — the
+default write path (see "Read vs write asymmetry" and "Submission-First Closeout" step 3 above):
 
+```json
+{
+  "summary": "<rewritten summary without stale narrative>",
+  "details": { "...": "rewritten details" },
+  "reason_text": "stale-text scrub before report QA",
+  "expected_row_version": <current row_version>
+}
+```
 ```bash
-vigil assess finding update <slug> \
-  --summary "<rewritten summary without stale narrative>" \
-  --details-inline '{ ... rewritten details ... }' \
-  --reason "stale-text scrub before report QA"
+vigil assess finding update <slug> --payload-file <path.json>
 ```
 
-The field name in a `finding update --payload-file` document is `details` (dict), not `details_json`; `--details-inline` takes that object directly. Re-run the scan after the fix to confirm zero hits, then proceed with the consolidated checklist. `QA BLOCKED` if any finding still carries stale text after the fix attempt.
+Re-run the scan after the fix to confirm zero hits, then proceed with the consolidated checklist. `QA BLOCKED` if any finding still carries stale text after the fix attempt.
 
 ## Publish After QA Pass (Legacy Internal Report)
 
@@ -553,7 +588,7 @@ vigil assess finding update <slug> \
   --reason "Program: duplicate of existing report"
 ```
 
-The `needs_info` state is the trigger for a targeted reply — not a `submission.md` hand-edit, which the next `export submission --overwrite` wipes. Run the reply flow instead: `vigil assess export reply <slug> --in-response-to "<triager's question>" --platform <p> --draft`, author the answer per `agent/references/reply-format.md`, then `vigil assess record-reply <slug> --seq N ...` to write it back durably. Once sent, `record-reply --seq N --sent --set-submission-status submitted` closes the loop in one call — `record-reply` never sets `submission_status` on its own, so `--set-submission-status` is the explicit opt-in for the `needs_info → submitted` transition. See "Reply mode" in `agent/agents/report-writer.md` for the full closing sequence.
+The `needs_info` state is the trigger for a targeted reply, authored through the reply flow and written durably onto the finding's reply record — not a `submission.md` hand-edit, which does not survive the next `export submission --overwrite`. Run the reply flow instead: `vigil assess export reply <slug> --in-response-to "<triager's question>" --platform <p> --draft`, author the answer per `agent/references/reply-format.md`, then `vigil assess record-reply <slug> --seq N ...` to write it back durably. Once sent, `record-reply --seq N --sent --set-submission-status submitted` closes the loop in one call — `record-reply` never sets `submission_status` on its own, so `--set-submission-status` is the explicit opt-in for the `needs_info → submitted` transition. See "Reply mode" in `agent/agents/report-writer.md` for the full closing sequence.
 
 `workflow_status` is unchanged by any submission outcome. A finding that the program rejects as duplicate still carries `workflow_status=reported` in the internal engagement record — the internal report is complete regardless of program outcome.
 

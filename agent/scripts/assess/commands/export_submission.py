@@ -17,10 +17,31 @@ path. Two modes:
 
 BACKEND FINDING IS THE SOURCE OF TRUTH. The submission is rendered FROM the
 finding's fields; the report-writer writes final content back to the finding
-(``finding update``), so a re-render at publish time is reproducible and loses no
-hand edits, and PII masking is safe — the MASKED evidence is stored in the finding
-and reaches the copy-paste body, while the raw tool output stays in ``scans/`` and
-is never rendered here.
+(``finding update``), so a re-render at publish time reproduces the authored
+content exactly. Content typed only into ``submission.md`` is NOT durable — the
+next render replaces the file. PII masking is the report-writer's job, performed
+once while authoring: the MASKED evidence is stored in the finding and reaches
+the copy-paste body, while the raw tool output stays in ``scans/`` and is never
+rendered here.
+
+NOTHING IS REWRITTEN ON THE WAY OUT. This command assembles and presents; it
+never edits authored text. There is deliberately NO automatic credential
+redaction: a masking pass cannot tell the operator's own session cookie (mask)
+from a credential the target disclosed (that IS the finding's proof), and one
+that rewrites the render makes the last step before filing the least trustworthy
+one — a report-writer cannot QA a document that changes under it. Masking
+decisions belong to the report-writer, who has the context to make them, and are
+stored in the finding so every later render reproduces them.
+
+The same rule governs everything else here. Steps render VERBATIM as list items —
+no imposed ``N.`` counter, and nothing strips an enumerator the author wrote, so
+``2024. Renewal year field accepts a past date`` survives as written. The bullet
+is container formatting, like the code fences: it keeps each step on its own line
+when the markdown is pasted into a platform form. What code MAY still do is FLAG
+(``hygiene_warnings`` — leaks, and they fail a final export closed), ADVISE
+(``advisories`` — prose opinions that never block), and REFUSE outright (the
+final gate, which writes nothing). Adding a marker, an advisory, or a refusal
+leaves the operator's words intact; rewriting them does not.
 
 OUTPUT SHAPE — the real platform copy-paste layout, matching the scaffolds under
 ``agent/skills/report-generation/templates/{bugcrowd,hackerone,direct}.md`` (this
@@ -91,10 +112,10 @@ from assess.lib.finding_render import (
     engagement_relative as _engagement_relative,
     hygiene_warnings as _hygiene_warnings,
     poc_lines as _poc_lines,
+    step_lines,
     string_list,
-    strip_step_enumerator,
+    title_advisories,
 )
-from assess.lib.outbound_redaction import redact_outbound_credentials
 from assess.lib.scope import rate_caps_for_dir
 
 _PLATFORMS = ("bugcrowd", "hackerone", "direct")
@@ -499,7 +520,7 @@ def _linked_command_runs(client, slug: str) -> list[dict]:
         except AssessError as exc:
             print(f"WARN export submission: command-run {run_id} unavailable: {exc}", file=sys.stderr)
             continue
-        if isinstance(row, dict) and _nonempty(row.get("command")):
+        if isinstance(row, dict):
             runs.append(row)
     return runs
 
@@ -527,6 +548,32 @@ def _evidence_body(evidence_text: str, draft: bool) -> list[str]:
     return []
 
 
+def _method_prefixed_location(finding: dict) -> str:
+    """``canonical_location``, prefixed with ``request_method`` when it is missing.
+
+    ONE implementation shared by the OPERATOR DETAILS ``Location`` line and the A2
+    operational-header ``Asset`` line, so the two can never disagree about the same
+    finding.
+
+    Some findings bake the verb into ``canonical_location`` ("POST https://…"), so
+    prepending unconditionally would produce "POST POST https://…". The dedup
+    compares the location's FIRST WHITESPACE-DELIMITED TOKEN to the method rather
+    than testing ``startswith``: a location like "POSTMAN collection endpoint /x"
+    starts with the string "POST" without starting with the verb, so a prefix test
+    would drop the real method from the render.
+    """
+    location = _nonempty(finding.get("canonical_location"))
+    if not location:
+        return ""
+    method = _nonempty(details_object(finding).get("request_method"))
+    if not method:
+        return location
+    first_token = location.split(maxsplit=1)[0]
+    if first_token.upper() == method.upper():
+        return location
+    return f"{method} {location}"
+
+
 def _metadata_reference_lines(finding: dict) -> list[str]:
     """Finding metadata that isn't a copy-paste header field, for OPERATOR DETAILS.
 
@@ -542,14 +589,8 @@ def _metadata_reference_lines(finding: dict) -> list[str]:
     owasp = _nonempty(detail_value(finding, "owasp_category", ""))
     if owasp:
         lines.append(f"- OWASP: {owasp}")
-    location = _nonempty(finding.get("canonical_location"))
+    location = _method_prefixed_location(finding)
     if location:
-        method = _nonempty(details_object(finding).get("request_method"))
-        # Some findings bake the method into canonical_location ("POST https://…");
-        # only prepend request_method when it is not already the prefix (avoids
-        # "POST POST https://…").
-        if method and not location.upper().startswith(method.upper()):
-            location = f"{method} {location}"
         lines.append(f"- Location: {location}")
     auth_context = _nonempty(finding.get("auth_context"))
     if auth_context:
@@ -619,18 +660,23 @@ def _operator_details_block(
     resolved: dict,
     linked_runs: list[dict],
     hygiene_warnings: list[str],
+    advisories: list[str],
     draft: bool,
 ) -> list[str]:
     """The single OPERATOR DETAILS reference section below the second ``---``.
 
     ONE section consolidates everything the operator never pastes and the
     report-writer authors the body FROM: the finding metadata to weave in, any
-    internal-identifier hygiene warnings to strip, the structured proof
-    (``poc_*`` / ``evidence_ref``) to mask into Evidence, and the explicitly
-    linked command runs to author Evidence from. It renders in BOTH draft and
-    final (it sits below the never-paste line) so the structure never diverges
-    between modes. The finding slug is deliberately never emitted here — it would
-    otherwise self-trip the hygiene gate.
+    internal-identifier hygiene warnings to strip, prose advisories to weigh, the
+    structured proof (``poc_*`` / ``evidence_ref``) to mask into Evidence, and the
+    explicitly linked command runs to author Evidence from. It renders in BOTH
+    draft and final (it sits below the never-paste line) so the structure never
+    diverges between modes. The finding slug is deliberately never emitted here —
+    it would otherwise self-trip the hygiene gate.
+
+    Warnings and advisories are separate sub-blocks because they carry different
+    authority: a hygiene warning is a fact that fails a final export closed, while
+    an advisory is an opinion the report-writer may overrule.
     """
     lines = [
         "---",
@@ -651,9 +697,19 @@ def _operator_details_block(
         lines += [f"- {warning}" for warning in hygiene_warnings]
         lines.append("")
 
+    if advisories:
+        lines += ["**Advisories** (non-blocking — your call):", ""]
+        lines += [f"- {advisory}" for advisory in advisories]
+        lines.append("")
+
     proof_lines = _poc_lines(finding)
     if resolved["evidence_ref"]:
         proof_lines += [f"- **Evidence reference:** {resolved['evidence_ref']}", ""]
+    # Show what the operator actually wrote when the path was normalized, so the
+    # authored value is not invisible in both output files.
+    raw_ref = _nonempty(resolved["durable_evidence"].get("raw_ref"))
+    if raw_ref and raw_ref != resolved["evidence_ref"]:
+        proof_lines += [f"- **Evidence reference (as authored):** {raw_ref}", ""]
     lines += ["**Structured proof** (mask + weave into the Evidence section above; do NOT paste raw):", ""]
     if proof_lines:
         lines += proof_lines
@@ -676,12 +732,16 @@ def _operator_details_block(
         ]
         for row in linked_runs:
             command = _nonempty(row.get("command"))
-            if not command:
-                continue
             intent = _nonempty(row.get("intent"))
             rc = row.get("return_code")
             rc_str = "" if rc is None else f" (rc={rc})"
             header = f"- **Run{rc_str}**" + (f" — {intent}" if intent else "") + ":"
+            if not command:
+                # The operator linked this run deliberately, so it is listed even
+                # with no command string: dropping the row hides a link they made,
+                # while naming it as empty tells them the link needs fixing.
+                lines += [f"{header} (no command recorded on this run)", ""]
+                continue
             fence = _fence_for(command)
             lines += [header, f"{fence}\n{command}\n{fence}", ""]
 
@@ -691,64 +751,33 @@ def _operator_details_block(
     return lines
 
 
-def _asset_location(finding: dict) -> str:
-    """The finding's affected location, method-prefixed (deduping a baked-in verb).
-
-    Mirrors ``_metadata_reference_lines`` so the A2 operational-header ``Asset``
-    line renders the same location string the OPERATOR DETAILS ``Location`` line
-    does, and never produces "POST POST https://…" when ``canonical_location``
-    already carries the verb.
-    """
-    location = _nonempty(finding.get("canonical_location"))
-    if not location:
-        return ""
-    method = _nonempty(details_object(finding).get("request_method"))
-    if method and not location.upper().startswith(method.upper()):
-        location = f"{method} {location}"
-    return location
-
-
-def _poc_ref(finding: dict) -> str:
-    """A pointer to the finding's PoC for the A2 ``POC`` line.
-
-    Prefers a staged evidence file (``evidence_ref``); falls back to the captured
-    request line, then a marker that inline ``poc_code`` exists. Returns "" when
-    the finding carries no proof pointer at all (the line is then omitted).
-    """
-    ref = _nonempty(detail_value(finding, "evidence_ref", ""))
-    if ref:
-        return ref
-    poc_request = detail_value(finding, "poc_request")
-    if isinstance(poc_request, dict) and poc_request:
-        request_line = f"{poc_request.get('method', '')} {poc_request.get('url', '')}".strip()
-        if request_line:
-            return request_line
-    if _nonempty(detail_value(finding, "poc_code", "")):
-        return "inline PoC code (see Evidence / OPERATOR DETAILS)"
-    return ""
-
-
 def _operational_header_lines(finding: dict, required_headers: dict[str, str]) -> list[str]:
-    """The A2 operational overlay — Asset / POC / Run / Pass if / Deconfliction.
+    """The operational overlay — Asset / Run / Pass if / Deconfliction.
 
     Emitted in the copy-paste header block FROM finding fields so a re-render or
     ``--overwrite`` reconstructs the operator's operational overlay instead of
     wiping it. Every line is omitted when its backing field is empty, so a finding
-    with none of these produces nothing (the prior header shape is unchanged).
+    with none of these produces nothing.
 
-    Sources: Asset ← ``canonical_location`` (method-prefixed); POC ← the proof
-    pointer (``evidence_ref`` / request line / inline poc_code); Run ←
-    ``details.run``; Pass if ← ``details.pass_if``; Deconfliction ← the
-    engagement's program-attribution ``required_headers`` (scope.json), so the
-    triager/blue-team can attribute the traffic.
+    EVERY LINE HERE IS EITHER AUTHORED OR PROGRAM-REQUIRED. Above the paste
+    boundary nothing may be composed by this command: whatever appears here gets
+    sent to a triager, so a value the author did not write is one the report-writer
+    has to notice and delete on every render. Asset ← ``canonical_location``
+    verbatim (put the verb in that field when it matters); Run ← ``details.run``;
+    Pass if ← ``details.pass_if``; Deconfliction ← the engagement's
+    program-attribution ``required_headers`` (scope.json), which the
+    triager/blue-team needs to attribute the traffic.
+
+    There is deliberately no ``POC:`` line. A proof pointer synthesized from
+    ``evidence_ref`` names an internal engagement artifact (``scans/…``) that means
+    nothing to a triager and leaks the engagement's layout into the paste block.
+    The pointer belongs under OPERATOR DETAILS, which already carries it, and the
+    file the triager receives is the one the operator attaches in the platform form.
     """
     lines: list[str] = []
-    asset = _asset_location(finding)
+    asset = _nonempty(finding.get("canonical_location"))
     if asset:
         lines.append(f"**Asset:** {asset}")
-    poc = _poc_ref(finding)
-    if poc:
-        lines.append(f"**POC:** {poc}")
     run = _nonempty(detail_value(finding, "run", ""))
     if run:
         lines.append(f"**Run:** {run}")
@@ -773,6 +802,7 @@ def _render_markdown(
     draft: bool,
     hygiene_warnings: list[str],
     required_headers: dict[str, str],
+    advisories: list[str],
 ) -> str:
     # --- header field lines (the platform copy-paste layout) ----------------
     # The slug is NOT emitted in the body (submission-format.md "No internal
@@ -804,10 +834,7 @@ def _render_markdown(
     # --- stable body sections (### headers) ---------------------------------
     lines += _section("Summary", [resolved["summary"] or "[NEEDS: summary]"])
 
-    step_body = [
-        f"{i}. {strip_step_enumerator(step)}"
-        for i, step in enumerate(resolved["steps"], 1)
-    ] or ["[NEEDS: steps to reproduce]"]
+    step_body = step_lines(resolved["steps"]) or ["[NEEDS: steps to reproduce]"]
     lines += _section("Steps to Reproduce", step_body)
 
     lines += _section("Evidence", _evidence_body(resolved["evidence"], draft))
@@ -822,7 +849,9 @@ def _render_markdown(
 
     # --- single OPERATOR DETAILS reference section below the second divider --
     # (never pasted; the report-writer authors the body sections FROM it).
-    lines += _operator_details_block(finding, resolved, linked_runs, hygiene_warnings, draft)
+    lines += _operator_details_block(
+        finding, resolved, linked_runs, hygiene_warnings, advisories, draft
+    )
 
     text = "\n".join(lines).rstrip()
     return text + "\n"
@@ -838,6 +867,7 @@ def _build_context(
     hygiene_warnings: list[str],
     readiness_blockers: list[dict],
     readiness_error: str,
+    advisories: list[str],
 ) -> dict:
     return {
         "slug": slug,
@@ -850,6 +880,9 @@ def _build_context(
             "poc_code": bool(resolved["poc_code"]),
             "has_content_proof": resolved["has_content_proof"],
             "evidence_ref": resolved["evidence_ref"],
+            # The authored value, before path normalization — so the JSON shows
+            # what the operator wrote as well as what the render used.
+            "evidence_ref_raw": resolved["durable_evidence"]["raw_ref"],
             "evidence_path": resolved["durable_evidence"]["path"],
             "evidence_indexed": resolved["durable_evidence"]["indexed"],
             "evidence_linked": resolved["durable_evidence"]["linked"],
@@ -862,16 +895,12 @@ def _build_context(
         "taxonomy": {"vrt_category": resolved["vrt"], "weakness": resolved["weakness"]},
         # Clean REFERENCE for the report-writer to author Evidence from — surfaced
         # under OPERATOR DETAILS, never auto-rendered into the Evidence section.
-        "linked_command_runs": [
-            {
-                "id": row.get("id"),
-                "intent": _nonempty(row.get("intent")),
-                "command": _nonempty(row.get("command")),
-                "return_code": row.get("return_code"),
-            }
-            for row in linked_runs
-        ],
+        # Each run row passes through WHOLE: this JSON exists to hand the LLM
+        # everything the backend knows about the run it is writing Evidence from,
+        # so any projection here would decide for it which fields are proof.
+        "linked_command_runs": list(linked_runs),
         "hygiene_warnings": hygiene_warnings,
+        "advisories": advisories,
         "readiness_blockers": readiness_blockers,
         "readiness_error": readiness_error,
     }
@@ -952,9 +981,7 @@ def run(args) -> None:
             args.weakness,
             durable_evidence,
         )
-        render_finding = redact_outbound_credentials(dict(finding))
-        resolved = redact_outbound_credentials(resolved)
-        linked_runs = redact_outbound_credentials(linked_runs)
+        render_finding = dict(finding)
         render_finding["evidence_ref"] = resolved["evidence_ref"]
 
         # Final mode refuses to write an incomplete submission.
@@ -981,22 +1008,23 @@ def run(args) -> None:
         # once WITHOUT the hygiene-warnings sub-block to scan the real content, then
         # re-render with the resulting warnings woven into OPERATOR DETAILS — the
         # warning strings themselves quote the leaked value (a UUID, a `cases.db`
-        # literal), so scanning a render that already contains them would flag the
-        # advisory text as if it were a fresh leak.
-        scan_markdown = redact_outbound_credentials(
-            _render_markdown(
-                render_finding,
-                resolved,
-                platform,
-                linked_runs,
-                draft,
-                [],
-                required_headers,
-            )
+        # literal), so scanning a render that already contains them would flag that
+        # warning text as if it were a fresh leak.
+        scan_markdown = _render_markdown(
+            render_finding,
+            resolved,
+            platform,
+            linked_runs,
+            draft,
+            [],
+            required_headers,
+            [],
         )
         hygiene_warnings = _hygiene_warnings(
-            scan_markdown, slug, internal_ids, engagement_dir, resolved["title"]
+            scan_markdown, slug, internal_ids, engagement_dir
         )
+        # Prose advisories are surfaced, never gated on: only leaks fail closed.
+        advisories = title_advisories(resolved["title"])
         if not draft and hygiene_warnings:
             raise AssessError(
                 f"export submission: cannot render a FINAL {platform} submission for {slug!r} "
@@ -1012,29 +1040,27 @@ def run(args) -> None:
                 "already exists; pass --overwrite to replace it."
             )
 
-        markdown = redact_outbound_credentials(
-            _render_markdown(
-                render_finding,
-                resolved,
-                platform,
-                linked_runs,
-                draft,
-                hygiene_warnings,
-                required_headers,
-            )
+        markdown = _render_markdown(
+            render_finding,
+            resolved,
+            platform,
+            linked_runs,
+            draft,
+            hygiene_warnings,
+            required_headers,
+            advisories,
         )
-        context = redact_outbound_credentials(
-            _build_context(
-                slug,
-                platform,
-                draft,
-                resolved,
-                linked_runs,
-                submission_rel or str(submission_md),
-                hygiene_warnings,
-                readiness_blockers,
-                readiness_error,
-            )
+        context = _build_context(
+            slug,
+            platform,
+            draft,
+            resolved,
+            linked_runs,
+            submission_rel or str(submission_md),
+            hygiene_warnings,
+            readiness_blockers,
+            readiness_error,
+            advisories,
         )
         context_text = json.dumps(context, indent=2, ensure_ascii=False)
 
@@ -1096,6 +1122,10 @@ def run(args) -> None:
     # failed closed above and therefore reach this point clean.
     for warning in hygiene_warnings:
         print(f"WARN export submission: {warning}", file=sys.stderr)
+    # ADVISORY, not WARN: a final export never fails on these, so the prefix
+    # should not read like something that did.
+    for advisory in advisories:
+        print(f"ADVISORY export submission: {advisory}", file=sys.stderr)
     for blocker in readiness_blockers:
         print(
             "WARN export submission: target readiness blocker: "
@@ -1118,6 +1148,7 @@ def run(args) -> None:
             "linked_command_runs": len(linked_runs),
             "artifact_registered": artifact_registered,
             "hygiene_warnings": hygiene_warnings,
+            "advisories": advisories,
             "readiness_blockers": readiness_blockers,
             "readiness_error": readiness_error,
         }

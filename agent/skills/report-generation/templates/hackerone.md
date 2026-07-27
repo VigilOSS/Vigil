@@ -79,8 +79,11 @@ the steps — this is the severity justification. See "Attack Scenario vs Impact
   that weakness and severity are decoupled — never carry a Bugcrowd P-rating into this field.
 - **PoC is an operator-side attachment, not a rendered body line.** If the proof is a script, stage
   it as `submissions/<slug>/poc.<ext>` and attach it in the HackerOne form — see
-  `submission-format.md` "PoC block". `export submission` emits no PoC line into the body; a
-  hand-inserted one is wiped on the next `--overwrite`.
+  `submission-format.md` "PoC block". `export submission` emits no attachment block into the body;
+  the **Run:** / **Pass if:** pointer lines in the operational header ARE rendered, from the
+  finding's `details.run` and `details.pass_if` — write there so they reproduce on the next
+  `--overwrite` instead of typing them only into the body. The proof pointer itself
+  (`evidence_ref`/`poc_code`) stays under OPERATOR DETAILS, not the pasteable header.
 - Some HackerOne programs add an "Asset" field mapped to their published scope (e.g.,
   `api.example.com` vs `www.example.com`). Name the exact in-scope asset in Steps to Reproduce —
   this template doesn't carry a separate field for it because it isn't part of the strict gate.

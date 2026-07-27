@@ -10,7 +10,6 @@ category: Disclosure & Reporting Formats
 
 **Severity:** High — CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:N (7.1)
 
-**POC:** `poc-ssrf-webhook.py` — attach
 **Run:** `python3 poc-ssrf-webhook.py`
 **Pass if:** the script prints the stolen `AccessKeyId`/`SecretAccessKey` pair
 

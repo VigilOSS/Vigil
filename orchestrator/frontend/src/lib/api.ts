@@ -125,11 +125,14 @@ export type FindingDetails = {
   cvss_vector?: string;
   cvss_score?: number;
   remediation?: string;
-  steps_to_reproduce?: string[];
+  // Authored either as one block (the preferred shape — the author owns the
+  // numbering, and other sections cite those numbers) or as a list of steps.
+  // `toStringArray` in FindingsTab normalizes both before render.
+  steps_to_reproduce?: string | string[];
   // Chain context panel.
   chain_required?: boolean;
   chain_rationale?: string;
-  required_followup?: string[];
+  required_followup?: string | string[];
   // Proof-of-concept panel.
   poc_code?: string;
   poc_language?: string;

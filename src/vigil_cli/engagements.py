@@ -1285,10 +1285,14 @@ def _render_finding_report(record: dict, *, group: dict | None = None) -> str:
     rendering can note sibling findings the way the report-writer consumes
     them.
     """
+    # An unset field renders as ``(unset)``, matching ``render_finding`` in
+    # ``assess.lib.finding_render``: printing ``INFO`` for a finding whose severity
+    # nobody set states a triage decision the record does not contain, and the
+    # reader cannot tell it apart from a real one.
     report_id = str(record.get("report_id") or "---")
     slug = str(record.get("slug") or "")
-    title = str(record.get("title") or "(untitled)")
-    severity = str(record.get("severity") or "info").upper()
+    title = str(record.get("title") or "(unset)")
+    severity = str(record.get("severity") or "(unset)").upper()
     header = f"# {report_id} — {title}"
     lines = [header, ""]
     meta = f"- **ID**: {report_id}"
@@ -1311,7 +1315,11 @@ def _render_finding_report(record: dict, *, group: dict | None = None) -> str:
         score_str = f" ({cvss_score})" if cvss_score is not None else ""
         lines.append(f"- **CVSS**: {cvss_vector}{score_str}")
 
-    impact = record.get("impact") or record.get("summary") or ""
+    # No ``impact ← summary`` fallback: Summary prose under an Impact heading makes
+    # an unauthored impact statement look authored, and the reader cannot tell which
+    # field they are reading. ``render_finding`` and ``export submission`` refuse the
+    # same substitution, so all three renderings of one finding agree.
+    impact = record.get("impact") or ""
     if impact:
         lines.extend(["", "## Impact", "", str(impact)])
     evidence = record.get("evidence_detail") or record.get("evidence_ref") or ""
@@ -1320,8 +1328,10 @@ def _render_finding_report(record: dict, *, group: dict | None = None) -> str:
     steps = _string_list(record.get("steps_to_reproduce"))
     if steps:
         lines.extend(["", "## Steps to Reproduce", ""])
-        for i, step in enumerate(steps, 1):
-            lines.append(f"{i}. {step}")
+        # The shared ``step_lines`` helper, so report.md and draft.md render one
+        # finding's steps identically: each authored item verbatim, numbering left
+        # to the author.
+        lines.extend(_finding_render().step_lines(steps))
     remediation = record.get("remediation") or ""
     if remediation:
         lines.extend(["", "## Remediation", "", str(remediation)])

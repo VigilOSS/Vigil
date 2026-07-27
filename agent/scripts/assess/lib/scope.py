@@ -329,8 +329,16 @@ def _write_scope_file(scope_path: Path, scope: dict[str, Any]) -> None:
     tmp_path.rename(scope_path)
 
 
-def load_scope(engagement_dir: str) -> dict[str, Any]:
-    """Load and return scope.json from the engagement directory."""
+def load_scope(engagement_dir: str, *, persist_migration: bool = True) -> dict[str, Any]:
+    """Load and return scope.json from the engagement directory.
+
+    Normalizing the payload can rewrite the file (migrating the legacy
+    ``approved_findings`` key, or materializing an absent ``approved_targets``),
+    which also re-serializes it with sorted keys. Callers that only READ scope —
+    exporters especially — pass ``persist_migration=False`` so merely rendering a
+    report never reformats engagement state on disk. The in-memory normalization
+    still happens either way, so every caller sees the same shape.
+    """
     scope_path = Path(engagement_dir) / "scope.json"
     if not scope_path.is_file():
         raise SystemExit(f"scope.json not found in {engagement_dir}")
@@ -338,7 +346,7 @@ def load_scope(engagement_dir: str) -> dict[str, Any]:
     if not isinstance(scope, dict):
         raise SystemExit(f"scope.json is not a JSON object in {engagement_dir}")
     scope, changed = normalize_scope_payload(scope)
-    if changed:
+    if changed and persist_migration:
         _write_scope_file(scope_path, scope)
     return scope
 

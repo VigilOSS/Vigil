@@ -12,7 +12,7 @@ three targets; each finding is a standalone submission.
 
 ## Platform selector
 
-`vigil assess export submission <slug> --platform <p> --draft` generates the per-finding draft; pick the platform below and use its scaffold for the platform-specific fields. This doc holds the cross-platform authoring rules all three share (voice, section budgets, PII redaction, PoC authoring, de-harnessing, and one consolidated pre-submission / report QA checklist) — the templates link back here rather than repeating them.
+`vigil assess export submission <slug> --platform <p> --draft` generates the per-finding draft; once it is authored, QA'd, and blind-triaged, `vigil assess export submission <slug> --platform <p> --overwrite` (no `--draft`) publishes it — see "Finding is the source of truth" below for the `--overwrite` rule. Pick the platform below and use its scaffold for the platform-specific fields. This doc holds the cross-platform authoring rules all three share (voice, section budgets, PII redaction, PoC authoring, de-harnessing, and one consolidated pre-submission / report QA checklist) — the templates link back here rather than repeating them.
 
 | Target | Scaffold | Platform-specific field | Taxonomy lookup |
 |---|---|---|---|
@@ -31,11 +31,24 @@ renders each section FROM the finding's own fields — `summary` (Summary), `det
 finding metadata, any hygiene warnings, the structured proof, and every linked command run into ONE
 "OPERATOR DETAILS — NOT FOR SUBMISSION" reference section below the second `---` (present in both
 draft and final, always below the never-paste line). You AUTHOR each section, then write it back to the finding with `vigil assess
-finding update <slug> --summary "..." --details-inline '{...}'`, and re-render. A hand edit made
-only in `submission.md` is overwritten on the next render; a write to the finding is durable and
-reproduces at publish. Because the MASKED evidence lives in the finding (raw tool output stays in
-`scans/` and is only referenced), a re-render never re-leaks PII. Full procedure: "Submission-First
-Closeout" in `agent/skills/report-generation/SKILL.md`.
+finding update <slug> --summary "..." --details-inline '{...}'`, and re-render.
+
+**Re-rendering is the normal, expected operation** — the loop is author → write to the finding →
+re-render, repeatedly. `--overwrite` is what makes that loop work, not a hazard to avoid:
+- The first render (`--draft`, before `submission.md` exists) omits `--overwrite`; every render
+  after that needs it, because the CLI refuses to clobber an existing `submission.md` without it.
+- It rewrites only `submission.md` and `submission-context.json` — it never touches the finding
+  record.
+- Because every rendered field is read back from the finding, a re-render reproduces your authored
+  content exactly. A hand edit made only in `submission.md` does not survive it; a write to the
+  finding does.
+
+Because the MASKED evidence lives in the finding (raw tool output stays in `scans/` and is only
+referenced), a re-render never re-leaks PII. Publish once QA and blind triage clear the finding:
+`vigil assess export submission <slug> --platform <same platform> --overwrite` (no `--draft`)
+re-renders the same authored content through the final gate — it exits non-zero before writing if a
+required field or hygiene check fails — and registers `submission.md` as a finding-linked artifact.
+Full procedure: "Submission-First Closeout" in `agent/skills/report-generation/SKILL.md`.
 
 ## Staging Convention
 
@@ -70,19 +83,24 @@ The output is designed to map cleanly onto the platform's submission form. The o
 
 The first `---` separator exists so the operator can select the entire body block in one contiguous paste without stripping the `Title:`/`VRT:`/`Severity:`/`CVSS` metadata lines. Do not put anything between that separator and `### Summary` that the operator should not paste into the platform. The second `---` closes the pasteable body — everything below it is the OPERATOR DETAILS reference section, never pasted.
 
-**The "OPERATOR DETAILS — NOT FOR SUBMISSION" section is never pasted.** It sits below the second `---` (the never-paste line) in both the draft and the final render, and consolidates everything you author the body FROM: the finding metadata to weave in, any internal-identifier hygiene warnings to strip, the structured proof (poc_* / evidence_ref) to mask and weave into Evidence, and the explicitly linked command runs. The pasteable body always ends at that second `---` — select from `### Summary` down to it.
+**The "OPERATOR DETAILS — NOT FOR SUBMISSION" section is never pasted.** It sits below the second `---` (the never-paste line) in both the draft and the final render, and consolidates everything you author the body FROM: the finding metadata to weave in, any internal-identifier hygiene warnings to strip, any advisories to weigh, the structured proof (poc_* / evidence_ref) to mask and weave into Evidence, and the explicitly linked command runs. The pasteable body always ends at that second `---` — select from `### Summary` down to it.
+
+**Hygiene warnings block; advisories do not.** A `hygiene_warnings` entry is a fact about the document — a leaked internal UUID, an absolute engagement path, a `cases.db` reference — so an unresolved one fails the publish render closed; fix it at the finding. An `advisories` entry (title length, for example) is an editorial opinion the command surfaces without gating on: weigh it against the checklist row it names below and fix it at the finding when you agree. Both appear in `submission-context.json`, in the `--json` summary, and as their own OPERATOR DETAILS sub-block; only the first one can stop a publish.
 
 ## Structure
 
-`export submission` renders the layout below FROM the finding's fields. The PoC is NOT a body slot —
-it is an attachment the operator adds in the platform form (see "PoC block"); the renderer emits no
-PoC line into the body, and a hand-inserted one is wiped on the next `--overwrite`.
+`export submission` renders the layout below FROM the finding's fields. The PoC *attachment* is NOT
+a body slot — it is the file the operator adds in the platform's attachment area (see "PoC block");
+the renderer emits no attachment block into the pasteable body. The proof pointer itself
+(`evidence_ref` / `poc_code`) stays under OPERATOR DETAILS, below the second `---` — it is an
+internal reference (often a `scans/…` path) with no business above the paste boundary, so the
+pasteable header carries no POC line at all.
 
-The operational header (`Asset` / `POC` / `Run` / `Pass if` / `Deconfliction`, below) is likewise
-rendered FROM the finding, not hand-typed, so a re-render/`--overwrite` reproduces it instead of
-wiping an operator's hand-applied overlay. Sourcing: **Asset** ← finding `canonical_location`;
-**POC** ← PoC refs (`poc_code` / staged `poc.<ext>` filenames — same field the "PoC block" below
-describes); **Run** ← `details.run`; **Pass if** ← `details.pass_if`; **Deconfliction** ← the
+The operational header (`Asset` / `Run` / `Pass if` / `Deconfliction`, below) is rendered FROM the
+finding, not hand-typed, so a re-render/`--overwrite` reproduces it instead of wiping an operator's
+hand-applied overlay. Sourcing: **Asset** ← finding `canonical_location`, rendered verbatim — if the
+request method matters, put it in `canonical_location` itself, since the renderer composes nothing
+onto it. **Run** ← `details.run`; **Pass if** ← `details.pass_if`; **Deconfliction** ← the
 engagement's required attribution header (`scope.json:required_headers`) — this is the header value
 itself (e.g. `X-HackerOne: <id>`), distinct from the 3-line researcher/IP/window Deconfliction block
 in "Section budgets" below. Omit any line with no backing data — an empty field renders as nothing,
@@ -97,9 +115,7 @@ not a placeholder.
 
 **CVSS:** CVSS:3.1/[vector] ([score])
 
-**Asset:** [finding canonical_location]
-
-**POC:** [poc_code / staged poc filename(s)]
+**Asset:** [finding canonical_location, verbatim]
 
 **Run:** [details.run]
 
@@ -113,8 +129,11 @@ not a placeholder.
 [2-4 sentences. First sentence = attacker outcome. Then the code fault. Then what the POC proves.]
 
 ### Steps to Reproduce
-[Numbered steps. One action per step. No narrative between steps. Include the run command or
-inline requests — whichever form the PoC takes.]
+[One authored block, numbered by you (`1.`, `2.`, …) and rendered exactly as written — the renderer
+adds no numbering or marker of its own, so your numbers are what a triager reads and what any later
+cross-reference in the submission ("follow the redirect from step 4") resolves against. One action
+per step, no narrative between steps. Include the run command or inline requests — whichever form
+the PoC takes.]
 
 ### Evidence
 [AUTHORED proof, not a raw command dump. Author it from the OPERATOR DETAILS section's structured
@@ -188,12 +207,15 @@ Cutting that overlap is also what keeps every sentence load-bearing (reporting.m
 ## PoC block
 
 The PoC block is **operator-side attachment guidance, not a `submission.md` body slot.**
-`export submission` renders no PoC line into the body (see "Structure"), so a block hand-inserted
-into the body is wiped on the next `--overwrite`. Use it when the finding's proof is an attached
-script rather than inline requests: stage the file as `submissions/<slug>/poc.<ext>` and, when the
-operator submits, attach it in the platform's attachment / PoC area with the run command and pass
-criterion below. The `**Run:**` command also belongs inside Steps to Reproduce (which the renderer
-DOES emit, from `details.steps_to_reproduce`), so a triager sees it in the pasteable body too. Omit
+`export submission` renders no attachment block into the pasteable body (see "Structure") — but the
+**Run:** and **Pass if:** values it documents ARE rendered into the operational header from
+`details.run` and `details.pass_if`, so write them there rather than typing them only into this
+block; a value typed only here does not survive the next `--overwrite`. Use it when the finding's
+proof is an attached script rather than inline requests: stage the file as
+`submissions/<slug>/poc.<ext>` and, when the operator submits, attach it in the platform's
+attachment / PoC area with the run command and pass criterion below. The `**Run:**` command also
+belongs inside Steps to Reproduce (which the renderer DOES emit, from
+`details.steps_to_reproduce`), so a triager sees it in the pasteable body too. Omit
 the whole block when every reproduction step is an inline request or command in Steps to Reproduce.
 
 Choose the form that fits the reproduction:
@@ -204,7 +226,7 @@ Omit the block. Steps to Reproduce contains everything the triager needs to run.
 **Single file:**
 
 ```
-**POC:** `<filename>` — attach
+Attach: `<filename>`
 **Run:** `<runtime> <filename>`
 **Pass if:** <one-line observable success criterion>
 ```
@@ -212,12 +234,14 @@ Omit the block. Steps to Reproduce contains everything the triager needs to run.
 **Multiple files:**
 
 ```
-**POC:** `<main>`, `<file2>`, `<file3>` — attach all
+Attach (all): `<main>`, `<file2>`, `<file3>`
 **Run:** `<runtime> <main>`
 **Pass if:** <one-line observable success criterion>
 ```
 
 Rules for the PoC block:
+- The attached filename(s) are operator-side attachment notes, not a rendered field — no header
+  line reproduces them, so name them plainly for whoever is doing the attaching.
 - `**Run:**` is the exact command the triager copies and pastes. Include environment setup (e.g., `source env.sh && python3 poc.py`) in the command, not in a separate step.
 - `**Pass if:**` is one observable line — what the triager sees in output that confirms the finding. Not a paragraph, not a list.
 - Use the actual file extension. Do not normalize everything to `.sh`.
@@ -349,8 +373,9 @@ Bug bounty submissions are standalone deliverables — nothing inside them shoul
 file to the operator, and it is also the internal-report QA checklist that
 `agent/skills/report-generation/SKILL.md` "Post-Generation Self-Review" and "Review-and-Fix QA Mode"
 run against `report.md`. Verify every applicable row; any failing row blocks delivery. Fix failures
-at the SOURCE (the finding, then re-render) — a fix made only in `submission.md` / `report.md` is
-lost on the next render.
+at the SOURCE: write the correction to the finding (`vigil assess finding update` /
+`finding link`) and re-render — that is the only fix that survives, since a correction made only in
+`submission.md` / `report.md` is lost on the next render.
 
 Each row is tagged for where it applies:
 - **[both]** — a submission AND the internal report
@@ -366,7 +391,7 @@ Where a row's rationale is a reporting rule it cites the rule (`agent/rules/repo
 - [ ] **[both]** `Severity:` and CVSS vector match the proved impact — if write operations were rejected by application-layer validation with nothing mutated, `I` is not `H` (reporting.md Rules 3, 20)
 - [ ] **[submission]** First `---` separator is present so the operator can paste `Title:`/`VRT:`/`Severity:` plus the body in one block; a second `---` closes the body with `## OPERATOR DETAILS — NOT FOR SUBMISSION` beneath it (never pasted)
 - [ ] **[both]** Body starts with `### Summary` and the summary leads with the attacker outcome in sentence 1 (reporting.md Rule 6)
-- [ ] **[both]** Steps to Reproduce are numbered, one action per step, copy-pasteable, with no narrative between steps (reporting.md Rule 10)
+- [ ] **[both]** Steps to Reproduce is a single authored block, numbered by you (`1.`, `2.`, …) and rendered exactly as written — the renderer imposes no numbering or marker, so any step cross-reference elsewhere in the submission only resolves because you wrote the number; one action per step, copy-pasteable, no narrative between steps (reporting.md Rule 10)
 - [ ] **[both]** Remediation names a specific technology and control, not generic advice — ≤3 items, primary fix first, ≤1 defense-in-depth, no "validate the fix" item (reporting.md Rule 14)
 - [ ] **[both]** Findings that share one vulnerable component or configuration are consolidated — one root cause, one submission, with siblings only as downstream outcomes (reporting.md Rule 18)
 - [ ] **[submission]** No section exists outside the defined structure — no Chain Potential, Architectural Analysis, Fix Validation, Probe Coverage, or Defender-positive block (reporting.md Rule 15; "Section budgets" above)
