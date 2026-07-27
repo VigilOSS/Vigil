@@ -357,9 +357,11 @@ def test_execution_policy_allows_only_explicitly_typed_passive_destination(
     tmp_path: Path,
 ) -> None:
     eng = _engagement(tmp_path, {"hosts": ["example.test"]})
-    command = ["curl", "https://crt.sh/?q=%25.example.test&output=json"]
+    # Deliberately NOT a curated research host: an arbitrary passive-looking
+    # service stays typed-or-refused, which is the invariant this test protects.
+    command = ["curl", "https://passive-intel.test/?q=%25.example.test&output=json"]
 
-    with pytest.raises(scope.ScopePolicyError, match="crt.sh"):
+    with pytest.raises(scope.ScopePolicyError, match="passive-intel.test"):
         scope.enforce_execution_policy(
             command, tool_name="curl", engagement_dir=eng
         )
@@ -368,12 +370,14 @@ def test_execution_policy_allows_only_explicitly_typed_passive_destination(
         command,
         tool_name="curl",
         engagement_dir=eng,
-        destinations=(scope.ExecutionDestination("crt.sh", "passive_source"),),
+        destinations=(
+            scope.ExecutionDestination("passive-intel.test", "passive_source"),
+        ),
     )
 
     assert result["checked_targets"] == []
     assert result["external_destinations"] == [
-        {"host": "crt.sh", "role": "passive_source"}
+        {"host": "passive-intel.test", "role": "passive_source"}
     ]
     assert result["target_facing"] is False
 
@@ -788,3 +792,224 @@ def test_execution_policy_notes_are_bounded_hashed_and_sampled() -> None:
     assert len(decoded["checked_targets_sha256"]) == 64
     assert 0 < len(decoded["checked_targets_sample"]) < 1000
     assert "checked_targets" not in decoded
+
+
+# ---------------------------------------------------------------------------
+# Curated research-host admission
+#
+# Reachability is not scope, and the target gate must keep refusing anything that
+# is not the engagement's estate. But the third-party services we query ABOUT the
+# target (GitHub, npm, RubyGems, crt.sh, Wayback, CommonCrawl, urlscan, NVD) were
+# refused too, so an entire OSINT dispatch returned zero bytes and the emptiness
+# was read as a measurement. These tests pin the admission AND its four guards.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://api.github.com/search/code?q=example.test",
+        "https://registry.npmjs.org/-/v1/search?text=example.test",
+        "https://crt.sh/?q=%25.example.test&output=json",
+        "https://web.archive.org/cdx/search/cdx?url=example.test",
+    ],
+)
+def test_curated_research_host_is_admitted_without_typing(
+    tmp_path: Path, url: str
+) -> None:
+    eng = _engagement(tmp_path, {"hosts": ["*.example.test"]})
+
+    result = scope.enforce_execution_policy(
+        ["curl", "-sS", url], tool_name="curl", engagement_dir=eng
+    )
+
+    host = scope.host_from_token(url)
+    # Admitted, but NEVER counted as a target: a research query is not an
+    # engagement target and must not consume target rate governance.
+    assert result["checked_targets"] == []
+    assert result["target_facing"] is False
+    # The audit path is not bypassed — only the target-scope predicate is.
+    assert {"host": host, "role": "research"} in result["external_destinations"]
+
+
+def test_research_admission_still_records_an_auditable_destination(
+    tmp_path: Path,
+) -> None:
+    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
+
+    result = scope.enforce_execution_policy(
+        ["curl", "-sS", "https://urlscan.io/api/v1/search/?q=example.test"],
+        tool_name="curl",
+        engagement_dir=eng,
+    )
+    notes = __import__("json").loads(scope.execution_policy_notes(result))
+
+    assert notes["external_destination_count"] == 1
+    assert notes["external_destinations_sample"] == [
+        {"host": "urlscan.io", "role": "research"}
+    ]
+
+
+def test_out_of_scope_non_research_host_is_still_refused(tmp_path: Path) -> None:
+    """NEGATIVE: research admission must not widen the gate for anything else."""
+    eng = _engagement(tmp_path, {"hosts": ["*.example.test"]})
+
+    with pytest.raises(scope.ScopePolicyError, match="outside engagement scope.*evil.test"):
+        scope.enforce_execution_policy(
+            ["curl", "-sS", "https://evil.test/?q=example.test"],
+            tool_name="curl",
+            engagement_dir=eng,
+        )
+
+
+def test_research_lookalike_host_is_refused_and_names_the_research_path(
+    tmp_path: Path,
+) -> None:
+    """A passive lookup at an UNLISTED intel service is refused — and says so.
+
+    The zero-byte result of a refusal is otherwise indistinguishable from a
+    genuine 'nothing found', which is exactly how the original OSINT dispatch was
+    misread.
+    """
+    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
+
+    with pytest.raises(scope.ScopePolicyError) as excinfo:
+        scope.enforce_execution_policy(
+            ["curl", "-sS", "https://api.shodan.io/shodan/host/search?query=example.test"],
+            tool_name="curl",
+            engagement_dir=eng,
+        )
+
+    message = str(excinfo.value)
+    assert "REFUSED" in message
+    assert "research-host allowlist" in message
+    assert "crt.sh" in message  # the curated set is named, so the fix is actionable
+
+
+def test_research_host_in_the_target_estate_obeys_target_scope_rules(
+    tmp_path: Path,
+) -> None:
+    """NEGATIVE: scope.json always wins over the research allowlist.
+
+    `github.com` is curated research infrastructure, but if the engagement carves
+    it OUT of scope the research path must not admit it — otherwise the allowlist
+    becomes a side door onto the estate under assessment.
+    """
+    eng = _engagement(
+        tmp_path,
+        {"hosts": ["*.github.com", "example.test"], "out_of_scope": ["github.com"]},
+    )
+
+    with pytest.raises(scope.ScopePolicyError, match="outside engagement scope.*github.com"):
+        scope.enforce_execution_policy(
+            ["curl", "-sS", "https://github.com/example"],
+            tool_name="curl",
+            engagement_dir=eng,
+        )
+
+
+def test_in_scope_research_host_is_treated_as_a_target_not_a_research_query(
+    tmp_path: Path,
+) -> None:
+    """An in-scope research host stays a TARGET: rate + no-fire must still apply."""
+    eng = _engagement(tmp_path, {"hosts": ["api.github.com"]})
+
+    result = scope.enforce_execution_policy(
+        ["curl", "-sS", "https://api.github.com/meta"],
+        tool_name="curl",
+        engagement_dir=eng,
+    )
+
+    assert result["checked_targets"] == ["api.github.com"]
+    assert "external_destinations" not in result
+
+
+def test_typed_research_destination_rejects_a_non_curated_host(tmp_path: Path) -> None:
+    """NEGATIVE: the typed role is curated, never a pass-through.
+
+    `passive_source` admits whatever host it is handed; `research` must not, or it
+    becomes precisely the arbitrary out-of-scope probe the scope rule prevents.
+    """
+    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
+
+    with pytest.raises(scope.ScopePolicyError, match="curated research-host allowlist"):
+        scope.enforce_execution_policy(
+            ["curl", "-sS", "https://evil.test/collect"],
+            tool_name="curl",
+            engagement_dir=eng,
+            destinations=(scope.ExecutionDestination("evil.test", "research"),),
+        )
+
+
+def test_typed_research_destination_rejects_a_host_in_the_target_estate(
+    tmp_path: Path,
+) -> None:
+    """NEGATIVE: the typed research role cannot be aimed at the engagement's estate."""
+    eng = _engagement(tmp_path, {"hosts": ["api.github.com"]})
+
+    with pytest.raises(scope.ScopePolicyError, match="own target estate"):
+        scope.enforce_execution_policy(
+            ["curl", "-sS", "https://api.github.com/meta"],
+            tool_name="curl",
+            engagement_dir=eng,
+            destinations=(
+                scope.ExecutionDestination("api.github.com", "research"),
+            ),
+        )
+
+
+def test_typed_research_destination_skips_no_fire_like_a_passive_source(
+    tmp_path: Path,
+) -> None:
+    eng = _engagement(
+        tmp_path,
+        {"hosts": ["example.test"], "off_limits_paths": ["/admin/*"]},
+    )
+
+    result = scope.enforce_execution_policy(
+        ["sh", "-c", 'domain=example.test; curl "https://crt.sh/?q=$domain"'],
+        tool_name="curl",
+        engagement_dir=eng,
+        destinations=(scope.ExecutionDestination("crt.sh", "research"),),
+    )
+
+    assert result["checked_targets"] == []
+    assert result["external_destinations"] == [{"host": "crt.sh", "role": "research"}]
+    assert result["target_facing"] is False
+
+
+def test_research_host_lookalike_subdomain_is_not_admitted(tmp_path: Path) -> None:
+    """NEGATIVE: matching is exact, so an attacker-controlled lookalike is refused."""
+    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
+
+    with pytest.raises(
+        scope.ScopePolicyError, match="outside engagement scope.*api.github.com.evil.test"
+    ):
+        scope.enforce_execution_policy(
+            ["curl", "-sS", "https://api.github.com.evil.test/x"],
+            tool_name="curl",
+            engagement_dir=eng,
+        )
+
+
+def test_explicit_target_typing_outranks_the_research_allowlist(tmp_path: Path) -> None:
+    """NEGATIVE: a caller that declared a TARGET is never re-read as research.
+
+    `kali browser` types every navigation URL as a target. If a name on the research
+    allowlist could silently downgrade that declaration, an explicit target
+    destination would quietly stop being scope-checked.
+    """
+    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
+
+    with pytest.raises(scope.ScopePolicyError) as excinfo:
+        scope.enforce_execution_policy(
+            ["curl", "-sS", "https://api.github.com/meta"],
+            tool_name="curl",
+            engagement_dir=eng,
+            destinations=(scope.ExecutionDestination("api.github.com", "target"),),
+        )
+
+    message = str(excinfo.value)
+    assert "outside engagement scope: api.github.com" in message
+    # The refusal is accurate about WHY the research path did not apply.
+    assert "declared it as a TARGET destination" in message

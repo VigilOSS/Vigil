@@ -994,7 +994,11 @@ def _discover_once(args, cfg, apexes: list[str], seed_hosts: set[str],
             ct_host, ct_container = _paths(cfg, "subs_ct.txt")
             _exec(args, ["sh", "-c", _crt_sh_script(apexes, ct_container)],
                   "dns-discovery: certificate-transparency harvest (crt.sh)", "crt.sh", route="container",
-                  destinations=(scope_lib.ExecutionDestination("crt.sh", "passive_source"),))
+                  # `research`, not `passive_source`: the research role is validated
+                  # against the curated allowlist in scope.py, so this typed
+                  # destination cannot be edited into a blanket bypass for an
+                  # arbitrary out-of-scope host.
+                  destinations=(scope_lib.ExecutionDestination("crt.sh", "research"),))
             produced.append(ct_host)
 
         # OPT-IN axes (CR-6) — only when explicitly enabled; never default-on.

@@ -462,3 +462,83 @@ def test_record_probe_missing_required_flag_shows_pointer(tmp_path, monkeypatch,
         )
     err = capsys.readouterr().err
     assert "See: vigil assess contract record-probe" in err
+
+
+# -- evidence_ref shape: WARN, never block -------------------------------------
+#
+# `finding record` has warned on composite / URL / prose refs for a while;
+# record-probe writes the same field and had no check, so a ref that can never be
+# indexed as proof entered the ledger unremarked. The check WARNS: losing a
+# recorded probe mid-hunt costs more than a malformed pointer that
+# check-phase-readiness will flag anyway.
+
+
+def _install_probe_args_config(monkeypatch, tmp_path) -> None:
+    """probe_args resolves the engagement itself, so point it at tmp_path too."""
+    from assess.lib import probe_args
+
+    monkeypatch.setattr(probe_args, "load_config", lambda *a, **k: _Cfg(str(tmp_path)))
+
+
+@pytest.mark.parametrize(
+    ("ref", "marker"),
+    [
+        ("scans/a.txt;scans/b.txt", "is not a single engagement-local path"),
+        ("command-runs 56052/56054/56060", "is not a single engagement-local path"),
+        ("https://example.test/proof", "is a URL, not a registered artifact path"),
+        ("see my notes above", "is not a single engagement-local path"),
+        ("scans/does-not-exist.txt", "looks like a path but nothing exists there"),
+    ],
+)
+def test_record_probe_warns_on_malformed_evidence_ref_but_records(
+    tmp_path, monkeypatch, capsys, ref, marker
+):
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    _install_probe_args_config(monkeypatch, tmp_path)
+    args = _parse(_probe_argv(**{"--evidence-ref": ref}), str(tmp_path))
+
+    record_probe.run(args)
+
+    err = capsys.readouterr().err
+    assert "record-probe: warning" in err
+    assert marker in err
+    # HARNESS, NOT GATE: the probe still lands, with the ref stored verbatim.
+    assert len(fake.posts) == 1
+    assert fake.posts[0][1]["evidence_ref"] == ref
+
+
+def test_record_probe_is_silent_for_an_existing_engagement_artifact(
+    tmp_path, monkeypatch, capsys
+):
+    (tmp_path / "scans").mkdir()
+    (tmp_path / "scans" / "e.txt").write_text("proof", encoding="utf-8")
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    _install_probe_args_config(monkeypatch, tmp_path)
+    args = _parse(_probe_argv(), str(tmp_path))
+
+    record_probe.run(args)
+
+    assert "warning" not in capsys.readouterr().err
+    assert len(fake.posts) == 1
+
+
+def test_record_probe_evidence_ref_check_survives_unresolvable_config(
+    tmp_path, monkeypatch, capsys
+):
+    """Config resolution failure must degrade to a shape check, never abort the write."""
+    from assess.lib import probe_args
+
+    def _boom(*a, **k):
+        raise SystemExit("Cannot resolve engagement directory.")
+
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    monkeypatch.setattr(probe_args, "load_config", _boom)
+    args = _parse(_probe_argv(**{"--evidence-ref": "see my notes above"}), str(tmp_path))
+
+    record_probe.run(args)
+
+    assert "is not a single engagement-local path" in capsys.readouterr().err
+    assert len(fake.posts) == 1

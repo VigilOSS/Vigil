@@ -98,10 +98,28 @@ def _is_textual(media_type: str, sample: bytes) -> bool:
 
 
 def _file_payload(root: Path, relative_path: str, media_type: str) -> dict[str, Any]:
+    """Index one registered path. ``present`` is EXISTENCE, not file-ness.
+
+    ``vigil assess artifact register <dir>`` accepts a directory, and specialists
+    legitimately point ``evidence_ref`` at a directory holding a whole capture
+    set. An ``is_file()`` predicate here reported every one of those as
+    ``present=False``, which report-readiness surfaces as "the file is missing on
+    disk" against directories that were sitting there full of live evidence. A
+    directory has no single body to hash or preview, so those fields stay empty —
+    but it is unambiguously present.
+    """
     path = root / relative_path
-    if not path.is_file():
+    if not path.exists():
         return {
             "present": False,
+            "size_bytes": 0,
+            "sha256": "",
+            "preview_text": "",
+            "indexed_text": "",
+        }
+    if not path.is_file():
+        return {
+            "present": True,
             "size_bytes": 0,
             "sha256": "",
             "preview_text": "",
@@ -162,6 +180,10 @@ def _file_payload_if_changed(
     """
     path = root / relative_path
     if not path.is_file():
+        # Directories (a registered evidence directory) and absent paths both
+        # fall through to the full builder — the (size, mtime) fast path below
+        # only models a regular file's body. `_file_payload` is the single
+        # existence predicate for both, so a directory is reported present.
         return _file_payload(root, relative_path, media_type)
     try:
         stat = path.stat()
@@ -350,19 +372,40 @@ def refresh_artifacts(engagement_id: int) -> dict[str, Any]:
     }
 
 
+# Characters that can only appear in a COMPOSITE or prose reference, never in
+# one engagement-local path: the semicolon/pipe list joiners and any control
+# whitespace. A ref carrying these describes several things (or a sentence), so
+# there is no single path an artifact row could ever point at.
+_COMPOSITE_REF_CHARS = (";", "|", "\n", "\r", "\t", "\x00")
+
+
 def _path_ref(value: Any) -> str | None:
-    """Return *value* when it looks like a plausible engagement-local path.
+    """Return *value* when it looks like ONE plausible engagement-local path.
 
     Used by ``register_reference_if_local`` so a finding/transition/chain
     write with ``evidence_ref`` set automatically lands an artifact row when
-    the value is a file path.  Rejects obvious sentence-text so callers don't
-    silently create ghost artifact rows for prose descriptions.
+    the value is a file path.  Rejects sentence-text and multi-path composites
+    so callers don't silently create ghost artifact rows: a composite ref
+    ("scans/a.out; scans/b.out", "command-runs 56052/56054/56061") minted a
+    PERMANENT artifact row for a path that can never exist and then linked it
+    as the finding's ``evidence_artifact_id``.
+
+    This is a shape check, not a gate. The finding/transition/chain write itself
+    still succeeds — recording a real finding mid-hunt must never be blocked —
+    it just does not acquire a bogus artifact link. The CLI
+    (``record_finding._normalize_evidence_ref``) mirrors these rules to warn the
+    author at record time; keep the two in sync.
 
     Heuristics (any match → reject):
     - contains ``://`` (URL)
     - empty or whitespace-only
     - no ``/`` or ``.`` (real paths have at least an extension or a directory)
     - two or more consecutive spaces (natural language, not a path)
+    - a composite/prose separator (``;``, ``|``, newline, tab)
+    - contains a space AND the first token is not itself path-shaped
+      ("command-runs 56052/..." — a prose prefix), or a later token carries its
+      own ``/`` (a second path root). A single path with a space inside one
+      component ("notes/my triage.md") still passes.
     """
     if not isinstance(value, str):
         return None
@@ -373,6 +416,14 @@ def _path_ref(value: Any) -> str | None:
         return None
     if "  " in stripped:
         return None
+    if any(char in stripped for char in _COMPOSITE_REF_CHARS):
+        return None
+    tokens = stripped.split(" ")
+    if len(tokens) > 1:
+        if "/" not in tokens[0] and "." not in tokens[0]:
+            return None
+        if any("/" in token for token in tokens[1:]):
+            return None
     return stripped
 
 
@@ -570,19 +621,21 @@ def set_scratch_flag(
         else:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="path or artifact_id is required")
     if row is None:
-        # Path-based mark on a file that exists on disk but has not been
+        # Path-based mark on a path that exists on disk but has not been
         # indexed yet — register inline so the operator does not have to
         # chase a sync before scratching a brand-new note. Refuse the
-        # convenience path when the file does not exist on disk: scratching
+        # convenience path when nothing exists on disk: scratching
         # a ghost path would leave a row with present=False that future
         # consumers can't act on, and the operator probably mistyped.
-        on_disk = (root / _normalize_relative_path(root, path)).is_file()
+        # EXISTENCE, not file-ness: a registered evidence DIRECTORY is a valid
+        # artifact here exactly as it is in `_file_payload`.
+        on_disk = (root / _normalize_relative_path(root, path)).exists()
         if not on_disk:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=(
-                    f"artifact not found for path={path!r} and the file does not exist on disk. "
-                    "Register the file with `vigil assess artifact register <path>` first, or check the path."
+                    f"artifact not found for path={path!r} and that path does not exist on disk. "
+                    "Register it with `vigil assess artifact register <path>` first, or check the path."
                 ),
             )
         row_dict = register_artifact(engagement_id, path=path)

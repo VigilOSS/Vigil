@@ -510,11 +510,20 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                             "kind": "finding_evidence_missing_artifact",
                             "slug": slug,
                             "title": row.get("title", ""),
+                            # Wording matters here: this fires against real
+                            # evidence directories and captures. "Restore the
+                            # file" reads as an instruction to recreate or
+                            # overwrite it, which would destroy the evidence the
+                            # finding rests on. Say VERIFY first, and never
+                            # imply re-authoring.
                             "detail": (
-                                f"finding {slug} evidence artifact id={evidence_artifact_id} is indexed "
-                                f"but the file is missing on disk. Restore the file and re-register with "
-                                f"`vigil assess artifact register {linked_evidence_artifact.get('relative_path', '')} --finding {slug}`, "
-                                f"or repoint the finding via "
+                                f"finding {slug} evidence artifact id={evidence_artifact_id} "
+                                f"({linked_evidence_artifact.get('relative_path', '')!r}) is indexed but the "
+                                f"index last saw nothing at that path. VERIFY the path first — do NOT recreate "
+                                f"or overwrite anything there. If the evidence IS present, re-index it with "
+                                f"`vigil assess artifact register {linked_evidence_artifact.get('relative_path', '')} --finding {slug}` "
+                                f"(a directory of captured evidence is valid). If it genuinely moved, repoint "
+                                f"the finding via "
                                 f"`vigil assess finding update {slug} --evidence-ref <relative-path>`."
                             ),
                         }
@@ -555,11 +564,16 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                         "kind": "finding_evidence_missing_artifact",
                         "slug": slug,
                         "title": row.get("title", ""),
+                        # See the wording note on the sibling blocker above:
+                        # never phrase this as "restore the file", which invites
+                        # overwriting live evidence.
                         "detail": (
-                            f"finding {slug} evidence_ref={evidence_ref!r} is indexed but the file is "
-                            f"missing on disk. Restore the file and re-register with "
-                            f"`vigil assess artifact register {indexed_evidence_ref} --finding {slug}`, "
-                            f"or repoint the finding via "
+                            f"finding {slug} evidence_ref={evidence_ref!r} is indexed but the index "
+                            f"last saw nothing at that path. VERIFY the path first — do NOT recreate or "
+                            f"overwrite anything there. If the evidence IS present, re-index it with "
+                            f"`vigil assess artifact register {indexed_evidence_ref} --finding {slug}` "
+                            f"(a directory of captured evidence is valid). If it genuinely moved, repoint "
+                            f"the finding via "
                             f"`vigil assess finding update {slug} --evidence-ref <relative-path>`."
                         ),
                     }

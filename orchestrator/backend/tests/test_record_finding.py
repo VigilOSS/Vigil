@@ -607,3 +607,78 @@ def test_cli_register_adds_allow_remint_flag():
         assert args.allow_remint is True
     args_default = parser.parse_args(["record", "vulnerability-analyst", "finding.json"])
     assert args_default.allow_remint is False
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# evidence_ref normalization at the CLI boundary (warn, never block)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_cli_accepts_a_directory_evidence_ref_without_warning(tmp_path, capsys):
+    """A directory holding a capture set is a valid evidence_ref.
+
+    `artifact register <dir>` accepts one and the indexer records it present,
+    so an `is_file()` check here warned "no file exists there" about
+    directories full of live evidence.
+    """
+    rf = _record_finding()
+    (tmp_path / "scans" / "idor-capture").mkdir(parents=True)
+    (tmp_path / "scans" / "idor-capture" / "req.txt").write_text("GET /", encoding="utf-8")
+
+    payload = {"evidence_ref": "scans/idor-capture"}
+    rf._normalize_evidence_ref(
+        payload, eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False
+    )
+
+    assert payload["evidence_ref"] == "scans/idor-capture"
+    assert capsys.readouterr().err == ""
+
+
+def test_cli_warns_but_still_records_a_composite_evidence_ref(tmp_path, capsys):
+    """Warn-don't-block is deliberate: blocking mid-hunt risks losing the finding.
+
+    The warning must say no artifact row is created, because the backend shape
+    check refuses to mint one for a ref that can never resolve to a path.
+    """
+    rf = _record_finding()
+    for ref in ("scans/a.out; scans/b.out", "command-runs 56052/56054/56061"):
+        payload = {"evidence_ref": ref}
+        rf._normalize_evidence_ref(
+            payload, eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False
+        )
+        # The ref is preserved and nothing exits — recording proceeds.
+        assert payload["evidence_ref"] == ref
+        err = capsys.readouterr().err
+        assert "not a single engagement-local path" in err
+        assert "NO artifact row is created" in err
+
+
+def test_cli_single_path_with_no_file_keeps_the_path_shaped_warning(tmp_path, capsys):
+    rf = _record_finding()
+    payload = {"evidence_ref": "scans/never-written.out"}
+    rf._normalize_evidence_ref(
+        payload, eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False
+    )
+    err = capsys.readouterr().err
+    assert "looks like a path but nothing exists there" in err
+    assert "NO artifact row is created" not in err
+
+
+def test_cli_evidence_ref_shape_check_mirrors_the_backend_indexer():
+    """The CLI warning and the backend's row-minting decision must not disagree."""
+    from app.services.artifact_index import _path_ref
+
+    rf = _record_finding()
+    cases = [
+        "scans/kali/abcdef.out",
+        "notes/triage.md",
+        "notes/my triage.md",
+        "scans/a.out; scans/b.out",
+        "command-runs 56052/56054/56061",
+        "see scans/a.out",
+        "https://example.com/evidence",
+        "the app leaks other users' orders",
+        "scans/a.out scans/b.out",
+    ]
+    for ref in cases:
+        assert rf._is_single_path_shaped(ref) is (_path_ref(ref) is not None), ref

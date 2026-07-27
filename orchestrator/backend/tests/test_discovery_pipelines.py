@@ -176,7 +176,7 @@ def test_dns_discovery_pipeline_real_dnsx_flags(monkeypatch, tmp_path):
     assert "subfinder" in tools and "crt.sh" in tools and "dnsx" in tools
     ct_call = next(c for c in calls if c["tool"] == "crt.sh")
     assert [(item.value, item.role) for item in ct_call["kwargs"]["destinations"]] == [
-        ("crt.sh", "passive_source")
+        ("crt.sh", "research")
     ]
     assert not any(t == "puredns" for t in calls if isinstance(t, str))  # brute off
 

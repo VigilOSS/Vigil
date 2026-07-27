@@ -43,6 +43,7 @@ def _run_renderer(
     *,
     dispatch_slugs: object,
     handoff_slugs: object,
+    handoff_extra: dict[str, object] | None = None,
 ) -> _FakeClient:
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
@@ -56,6 +57,7 @@ def _run_renderer(
         "working_artifacts": [],
         "runtime_issues": [],
         "open_questions": [],
+        **(handoff_extra or {}),
     }
     _FakeClient.dispatch = {
         "agent_id": "agent-1",
@@ -129,3 +131,77 @@ def test_render_handoff_does_not_claim_no_findings_when_neither_source_declares_
     assert "(none declared in handoff or dispatch)" in output
     assert "no findings" not in output.lower()
     assert client.fetched == []
+
+
+def test_render_handoff_surfaces_the_handoff_rows_own_version_status_and_write_time(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The render is a specialist's write-landed self-check, so it must be falsifiable.
+
+    A rejected `agent handoff` write (e.g. HTTP 422 on an over-long summary)
+    leaves the PRIOR row intact and `render-handoff` exits 0 against it. Without
+    the row's own version/status/write time in the output there is nothing in
+    the render that moves when a write lands, so the check cannot fail — and the
+    only timestamp shown was the DISPATCH time, which never moves either.
+    """
+    _run_renderer(
+        monkeypatch,
+        tmp_path,
+        dispatch_slugs=[],
+        handoff_slugs=[],
+        handoff_extra={
+            "handoff_status": "ready",
+            "handoff_version": 3,
+            "last_checkpoint_at": "2026-07-27T09:15:00Z",
+            "created_at": "2026-07-27T08:00:00Z",
+        },
+    )
+
+    output = capsys.readouterr().out
+    assert "**Handoff row:**" in output
+    assert "ready" in output
+    assert "v3" in output
+    assert "2026-07-27T09:15:00Z" in output
+    # ...and it must not be mistakable for the dispatch timestamp.
+    assert "NOT the dispatch time" in output
+
+
+def test_render_handoff_write_time_falls_back_to_created_at(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run_renderer(
+        monkeypatch,
+        tmp_path,
+        dispatch_slugs=[],
+        handoff_slugs=[],
+        handoff_extra={
+            "handoff_status": "checkpointed",
+            "handoff_version": 1,
+            "last_checkpoint_at": None,
+            "created_at": "2026-07-27T08:00:00Z",
+        },
+    )
+
+    output = capsys.readouterr().out
+    assert "**Handoff row:** checkpointed v1, last written 2026-07-27T08:00:00Z" in output
+
+
+def test_render_handoff_provenance_line_tolerates_a_legacy_row(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A pre-migration row with no status/version must still render, not crash."""
+    _run_renderer(
+        monkeypatch,
+        tmp_path,
+        dispatch_slugs=[],
+        handoff_slugs=[],
+    )
+
+    output = capsys.readouterr().out
+    assert "**Handoff row:** (status unrecorded) v(unrecorded), last written (unknown)" in output

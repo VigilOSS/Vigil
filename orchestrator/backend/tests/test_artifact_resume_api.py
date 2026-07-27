@@ -1192,3 +1192,195 @@ def test_recommended_actions_keep_lifecycle_items_before_inspect_cap() -> None:
     assert len(actions) == 8
     assert "vigil assess agent render-handoff va-memory" in commands
     assert "vigil assess agent reconcile-stale --dry-run" in commands
+
+
+# ---------------------------------------------------------------------------
+# Directory evidence_refs are present, not "missing on disk"
+# ---------------------------------------------------------------------------
+
+def test_registered_directory_is_indexed_as_present(client, isolate_settings) -> None:
+    """`artifact register <dir>` already accepts a directory at write time.
+
+    The indexer's existence predicate was `is_file()`, so every registered
+    directory came back `present=False` and report-readiness reported "the file
+    is missing on disk" against directories holding the whole capture set.
+    """
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    evidence_dir = eng / "scans" / "idor-capture"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    (evidence_dir / "request-01.txt").write_text("GET /account/2", encoding="utf-8")
+
+    registered = _register_note(client, "scans/idor-capture", kind="scan-report")
+    assert registered["present"] is True
+
+    refreshed = client.post(f"{BASE}/artifacts/refresh")
+    assert refreshed.status_code in (200, 201), refreshed.text
+    assert refreshed.json()["missing"] == 0
+
+    detail = client.get(f"{BASE}/artifacts/{registered['id']}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["present"] is True
+
+
+def test_finding_with_directory_evidence_ref_is_not_reported_missing(
+    client, isolate_settings
+) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    evidence_dir = eng / "scans" / "va-049-evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    (evidence_dir / "response-01.txt").write_text("HTTP/1.1 200 OK", encoding="utf-8")
+
+    created = client.post(
+        f"{BASE}/findings",
+        json={
+            "slug": "VA-049",
+            "title": "Directory evidence set",
+            "severity": "high",
+            "workflow_status": "active",
+            "verification_state": "verified",
+            "verification_disposition": "confirmed",
+            "canonical_location": "https://example.com/account",
+            "summary": "The proof is a directory of captured request/response pairs.",
+            "evidence_ref": "scans/va-049-evidence",
+            "source_name": "vulnerability-analyst",
+            "details": {
+                "cvss_score": 7.1,
+                "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+                "steps_to_reproduce": ["capture pair", "replay as second identity"],
+                "remediation": "Enforce object-level authorization",
+                "impact": "Cross-account read",
+                "evidence": "Captured pairs in the linked directory",
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    readiness = client.get(f"{BASE}/report-readiness")
+    assert readiness.status_code == 200, readiness.text
+    blockers = readiness.json()["blockers"]
+    assert not any(
+        blocker["slug"] == "VA-049"
+        and blocker["kind"]
+        in {"finding_evidence_missing_artifact", "finding_evidence_unindexed"}
+        for blocker in blockers
+    )
+
+
+def test_mark_scratch_accepts_an_unindexed_directory(client, isolate_settings) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    scratch_dir = eng / "notes" / "scratch-set"
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    (scratch_dir / "a.md").write_text("scratch", encoding="utf-8")
+
+    response = client.post(
+        f"{BASE}/artifacts/scratch-by-path",
+        json={"path": "notes/scratch-set", "scratch": True},
+    )
+    assert response.status_code in (200, 201), response.text
+    assert response.json()["scratch"] is True
+
+
+def test_missing_evidence_blocker_never_tells_the_operator_to_restore_the_file(
+    client, isolate_settings
+) -> None:
+    """The remediation text lands on real evidence directories — it must not
+    read as an instruction to recreate or overwrite what is there."""
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _seed_finding(client, eng)
+    (eng / "notes" / "VA-047-note.md").unlink()
+    assert client.post(f"{BASE}/artifacts/refresh").status_code in (200, 201)
+
+    readiness = client.get(f"{BASE}/report-readiness")
+    assert readiness.status_code == 200, readiness.text
+    blocker = next(
+        b
+        for b in readiness.json()["blockers"]
+        if b["kind"] == "finding_evidence_missing_artifact" and b["slug"] == "VA-047"
+    )
+    detail = blocker["detail"]
+    assert "Restore the file" not in detail
+    assert "VERIFY the path first" in detail
+    assert "do NOT recreate or overwrite" in detail
+
+    # Same wording rule on the sibling branch, reached when the finding carries
+    # no evidence_artifact_id and the path is resolved through the index.
+    with sqlite3.connect(str(db_module.database_path())) as connection:
+        connection.execute(
+            "UPDATE assessment_findings SET evidence_artifact_id = NULL WHERE slug = ?",
+            ("VA-047",),
+        )
+        connection.commit()
+    readiness = client.get(f"{BASE}/report-readiness")
+    assert readiness.status_code == 200, readiness.text
+    unlinked = next(
+        b
+        for b in readiness.json()["blockers"]
+        if b["kind"] == "finding_evidence_missing_artifact" and b["slug"] == "VA-047"
+    )
+    assert "Restore the file" not in unlinked["detail"]
+    assert "VERIFY the path first" in unlinked["detail"]
+    assert "do NOT recreate or overwrite" in unlinked["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Composite / prose evidence_refs must not mint a ghost artifact row
+# ---------------------------------------------------------------------------
+
+def test_composite_evidence_ref_records_the_finding_but_mints_no_artifact_row(
+    client, isolate_settings
+) -> None:
+    """Warn-don't-block is correct and preserved; the ghost row is the bug.
+
+    A semicolon-joined or prose-prefixed ref can never resolve to a path, so
+    minting a permanent artifact row for it and linking it as
+    evidence_artifact_id fabricates evidence provenance that does not exist.
+    """
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+
+    for slug, ref in (
+        ("VA-051", "scans/a.out; scans/b.out"),
+        ("VA-052", "command-runs 56052/56054/56061"),
+    ):
+        created = client.post(
+            f"{BASE}/findings",
+            json={
+                "slug": slug,
+                "title": f"Composite evidence ref {slug}",
+                "severity": "medium",
+                "workflow_status": "active",
+                "verification_state": "unreviewed",
+                "verification_disposition": "none",
+                "canonical_location": f"https://example.com/{slug}",
+                "summary": "Recording must still succeed with a composite ref.",
+                "evidence_ref": ref,
+                "source_name": "vulnerability-analyst",
+                "details": {"evidence": "prose", "impact": "n/a"},
+            },
+        )
+        # The finding still records — blocking a finding mid-hunt risks losing it.
+        assert created.status_code == 201, created.text
+        assert created.json()["finding"]["evidence_artifact_id"] in (None, 0, "")
+
+    rows = client.get(f"{BASE}/artifacts/search", params={"q": "scans"}).json()
+    assert not any(
+        row["relative_path"].startswith("scans/a.out;")
+        or "command-runs 56052" in row["relative_path"]
+        for row in rows
+    )
+
+
+def test_single_path_evidence_ref_still_mints_its_artifact_row(
+    client, isolate_settings
+) -> None:
+    """The tightened shape check must not stop a genuine single path."""
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _seed_finding(client, eng)
+
+    rows = client.get(f"{BASE}/artifacts/search", params={"q": "VA047"}).json()
+    assert any(row["relative_path"] == "notes/VA-047-note.md" for row in rows)
