@@ -9,7 +9,6 @@ category: Disclosure & Reporting Formats
 
 **Severity:** P2 (High)
 
-**POC:** `poc-ldap-injection.py` — attach
 **Run:** `python3 poc-ldap-injection.py`
 **Pass if:** every `[INJECTION CONFIRMED]` line prints
 

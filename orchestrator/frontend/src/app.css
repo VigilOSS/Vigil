@@ -2685,6 +2685,14 @@ input {
   font-size: 0.82rem;
 }
 
+/* Steps to reproduce render verbatim — the author owns the numbering, so this
+   preserves their line breaks and markers instead of imposing list styling. */
+.findings-redesign .steps-verbatim {
+  font-size: 0.9rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* Taint path */
 .findings-redesign .taint {
   display: grid;

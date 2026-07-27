@@ -62,7 +62,11 @@ export interface ReportFinding {
   impact?: string;
   evidence_detail?: string;
   remediation?: string;
-  steps_to_reproduce?: string[];
+  // Authored either as one block (the preferred shape — the author owns the
+  // numbering, and other sections cite those numbers) or as a list of steps.
+  // The backend projection normalizes to a list, but renderers accept both so a
+  // raw record never breaks them; see lib/steps.ts.
+  steps_to_reproduce?: string | string[];
   cwe_id?: string;
   owasp_category?: string;
   cvss_score?: number | null;

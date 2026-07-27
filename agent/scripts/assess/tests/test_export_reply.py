@@ -245,12 +245,19 @@ def test_seq_flag_rerenders_existing_entry(tmp_path, monkeypatch, capsys):
     assert "[NEEDS: reply body]" not in body
 
 
-def test_reply_output_redacts_live_credentials(tmp_path, monkeypatch, capsys):
-    secret = "eyJhbGciOiJIUzI1NiJ9.live-session.signature"
+def test_reply_output_renders_authored_body_verbatim(tmp_path, monkeypatch, capsys):
+    """No masking pass runs on the way out — the authored body is what renders.
+
+    Masking is the report-writer's decision, made once while authoring and stored
+    in the reply entry. A render that rewrote it could not tell a credential we
+    hold from one the target disclosed (which is often the proof), and silently
+    corrupted the reply at the last step before sending.
+    """
+    token = "eyJhbGciOiJIUzI1NiJ9.session-under-test.signature"
     replies = [
         _reply(
             1,
-            body=f"Re-run with Authorization: Bearer {secret}",
+            body=f"Re-run with Authorization: Bearer {token}",
             ask="Please retest",
         ),
     ]
@@ -262,12 +269,12 @@ def test_reply_output_redacts_live_credentials(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
 
     rendered = _reply_path(tmp_path, 1).read_text()
-    assert secret not in rendered
-    assert "Bearer <REDACTED_CREDENTIAL>" in rendered
+    assert f"Bearer {token}" in rendered
+    assert "<REDACTED_CREDENTIAL>" not in rendered
 
 
-def test_new_reply_redacts_credentials_from_cli_ask(tmp_path, monkeypatch, capsys):
-    secret = "eyJhbGciOiJIUzI1NiJ9.live-session.signature"
+def test_new_reply_renders_cli_ask_verbatim(tmp_path, monkeypatch, capsys):
+    token = "eyJhbGciOiJIUzI1NiJ9.session-under-test.signature"
     fake = _FakeClient(_finding())
     _install(monkeypatch, tmp_path, fake)
     args = _parse(
@@ -275,7 +282,7 @@ def test_new_reply_redacts_credentials_from_cli_ask(tmp_path, monkeypatch, capsy
             "reply",
             "VA-047",
             "--in-response-to",
-            f"Retest with Bearer {secret}",
+            f"Retest with Bearer {token}",
             "--draft",
         ],
         str(tmp_path),
@@ -285,8 +292,8 @@ def test_new_reply_redacts_credentials_from_cli_ask(tmp_path, monkeypatch, capsy
     capsys.readouterr()
 
     rendered = _reply_path(tmp_path, 1).read_text()
-    assert secret not in rendered
-    assert "Bearer <REDACTED_CREDENTIAL>" in rendered
+    assert f"Bearer {token}" in rendered
+    assert "<REDACTED_CREDENTIAL>" not in rendered
 
 
 # -- prior replies + ask stay below the never-paste line ----------------------
@@ -411,3 +418,63 @@ def test_json_summary_shape(tmp_path, monkeypatch, capsys):
     assert out["prior_replies"] == 1
     assert out["artifact_registered"] is True
     assert out["hygiene_warnings"] == []  # clean finding
+
+
+def test_every_prior_reply_body_is_inlined_and_fenced(tmp_path, monkeypatch, capsys):
+    """A long thread carries ALL prior bodies, not just the most recent few.
+
+    Dropping the older bodies withholds the thread's own history from the section
+    whose entire job is handing it to the report-writer. Bodies are fenced so a
+    multi-line reply — or one whose lines start with `-`/`#`/`>` — cannot break out
+    of the list and re-parse as new markdown structure.
+    """
+    replies = [
+        _reply(seq, body=f"Reply-{seq} body text", ask=f"ask number {seq}")
+        for seq in range(1, 7)
+    ]
+    # A multi-line body whose second line would otherwise become a list item.
+    replies[0]["body"] = "First line of reply one\n- second line looks like a bullet"
+    fake = _FakeClient(_finding(replies=replies))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        ["reply", "VA-047", "--in-response-to", "the seventh ask", "--draft"],
+        str(tmp_path),
+    )
+
+    export_reply.run(args)
+    capsys.readouterr()
+
+    hist = _thread_history(_reply_path(tmp_path, 7).read_text())
+    # Every prior body present, including the oldest of the six.
+    assert "First line of reply one" in hist
+    assert "- second line looks like a bullet" in hist
+    for seq in range(2, 7):
+        assert f"Reply-{seq} body text" in hist, f"prior reply {seq} body was dropped"
+    # Fenced, so the multi-line body keeps its own structure.
+    assert "```\nFirst line of reply one\n- second line looks like a bullet\n```" in hist
+
+
+def test_thread_history_lists_a_linked_run_with_no_command(tmp_path, monkeypatch, capsys):
+    """An explicitly linked run with no command string is NAMED, not hidden.
+
+    The operator linked it deliberately, so silently dropping the row hides a link
+    they made and leaves them hunting for a run the reply never mentions. Same
+    treatment as ``export submission``'s OPERATOR DETAILS block, so one linked run
+    reads the same in both renders.
+    """
+    links = [{"finding_slug": "VA-047", "target_kind": "command_run", "target_id": 5}]
+    command_runs = {5: {"id": 5, "command": "", "intent": "retest as member B", "return_code": 0}}
+    fake = _FakeClient(_finding(), links=links, command_runs=command_runs)
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        ["reply", "VA-047", "--in-response-to", "Please retest", "--draft"],
+        str(tmp_path),
+    )
+
+    export_reply.run(args)
+    capsys.readouterr()
+
+    hist = _thread_history(_reply_path(tmp_path, 1).read_text())
+    assert "**Linked command runs**" in hist
+    assert "retest as member B" in hist
+    assert "(no command recorded on this run)" in hist

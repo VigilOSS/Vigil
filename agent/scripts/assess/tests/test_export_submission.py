@@ -43,7 +43,7 @@ from assess.lib.client import AssessError
 # rewritten) when it leaks into the output.
 _UUID = "550e8400-e29b-41d4-a716-446655440000"
 # A TARGET-application UUID that is PROOF (e.g. IDOR on a UUID-keyed resource) and
-# must reach the report-writer verbatim — the old blanket regex used to redact it.
+# must reach the report-writer verbatim — a blanket scrub would destroy the finding.
 _TARGET_UUID = "11111111-2222-3333-4444-555555555555"
 
 
@@ -377,6 +377,34 @@ def test_location_method_not_doubled(tmp_path, monkeypatch, capsys):
     body = _submission_path(tmp_path).read_text()
     assert "POST POST" not in body
     assert "Location: POST https://app.example.com/api/tame/qtameSubmit" in body
+
+
+def test_location_method_kept_when_location_merely_starts_with_the_verb(
+    tmp_path, monkeypatch, capsys
+):
+    """The reference Location line composes the verb; the pasteable Asset does not.
+
+    Under OPERATOR DETAILS, below the never-paste line, composing
+    `request_method` onto the location gives the report-writer the fuller picture —
+    that section exists to gather context. The dedup there compares the location's
+    first whitespace-delimited token rather than testing a prefix, so
+    'POSTMAN collection endpoint …' keeps its real verb instead of having it
+    swallowed. Above the paste boundary nothing is composed: Asset is
+    `canonical_location` verbatim, so the author decides whether the verb belongs in
+    what a triager reads.
+    """
+    finding = _finding(details=_complete_details(request_method="POST"))
+    finding["canonical_location"] = "POSTMAN collection endpoint /api/orders/1001"
+    fake = _FakeClient(finding)
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path))
+    export_submission.run(args)
+    capsys.readouterr()
+
+    body = _submission_path(tmp_path).read_text()
+    header = body.partition("\n---\n")[0]
+    assert "**Asset:** POSTMAN collection endpoint /api/orders/1001" in header
+    assert "- Location: POST POSTMAN collection endpoint /api/orders/1001" in body
 
 
 # -- per-platform blockers (each blocks final, passes draft) ------------------
@@ -818,34 +846,48 @@ def test_linked_runs_are_reference_not_evidence(tmp_path, monkeypatch, capsys):
     assert not any(g.startswith("command-runs?") for g in fake.gets)
 
 
-def test_submission_outputs_redact_live_credentials(tmp_path, monkeypatch, capsys):
-    secret = "eyJhbGciOiJIUzI1NiJ9.live-session.signature"
-    second_secret = "eyJhbGciOiJIUzI1NiJ9.second-session.signature"
+def test_submission_outputs_render_proof_verbatim(tmp_path, monkeypatch, capsys):
+    """Nothing is masked on the way out — the render is faithful to the finding.
+
+    A masking pass over the render breaks the deliverable three ways, all pinned
+    here: collapsing every ``-b``/``--cookie`` argument to one placeholder leaves a
+    two-identity repro showing one identity, rewriting a credential the TARGET
+    disclosed erases the finding itself, and running over ``details_json`` as
+    serialized text can invalidate the JSON and blank every details-sourced section.
+    Masking is the report-writer's decision, stored in the finding so a re-render
+    reproduces it.
+    """
+    admin = "session=admin_a1b2c3d4"
+    member = "session=member_e5f6g7h8"
     links = [
         {"finding_slug": "VA-047", "target_kind": "command_run", "target_id": 5},
     ]
     command_runs = {
         5: {
             "id": 5,
+            # The admin-vs-member distinction IS the finding; a masking pass that
+            # rewrites both -b values to one placeholder erases it.
             "command": (
-                "curl -H 'Cookie: acme_session="
-                f"{secret}' -H 'Authorization: Bearer {secret}' "
-                f"-b 'acme_session={secret}; other={second_secret}' "
-                "https://app.example.com"
+                f"curl -b '{admin}' https://app.example.com/orders/1001; "
+                f"curl -b '{member}' https://app.example.com/orders/1001"
             ),
-            "intent": "reproduce with user_a",
+            "intent": "cross-identity read as admin then member",
             "return_code": 0,
         },
     }
     details = _complete_details(
-        notes=f"temporary apikey={secret}",
-        poc_request={
-            "method": "GET",
-            "url": "https://app.example.com/private",
-            "headers": {
-                "Cookie": f"sid={secret}",
-                "Authorization": f"Bearer {secret}",
-            },
+        # A double-quoted header inside details: any rewrite over the serialized
+        # ``details_json`` can consume this JSON escape and blank the sections below.
+        steps_to_reproduce=[
+            'Replay: curl -s https://app.example.com/orders/1001 -H "Cookie: session=abc123def456"',
+            "Observe another member's order fields",
+        ],
+        attack_scenario="An attacker replays the session to read other members' orders.",
+        # The disclosed credential IS the proof — masking it leaves nothing.
+        poc_response={
+            "status": 200,
+            "headers": {"set-cookie": "__prerender_bypass=0c3eab9f7d21"},
+            "body": '{"owner":"someone-else"}',
         },
     )
     fake = _FakeClient(
@@ -866,12 +908,18 @@ def test_submission_outputs_redact_live_credentials(tmp_path, monkeypatch, capsy
     context = (
         tmp_path / "submissions" / "VA-047" / "submission-context.json"
     ).read_text()
-    assert secret not in markdown
-    assert secret not in context
-    assert second_secret not in markdown
-    assert second_secret not in context
-    assert "<YOUR_SESSION_COOKIE>" in markdown
-    assert "<REDACTED_CREDENTIAL>" in markdown
+
+    # Each identity survives independently — the repro is still runnable.
+    assert admin in markdown
+    assert member in markdown
+    # The target's disclosed credential — the proof itself — is intact.
+    assert "__prerender_bypass=0c3eab9f7d21" in markdown
+    # A double-quoted header in details costs nothing below it.
+    assert "### Attack Scenario" in markdown
+    assert '-H "Cookie: session=abc123def456"' in markdown
+    assert "<YOUR_SESSION_COOKIE>" not in markdown
+    assert "<REDACTED_CREDENTIAL>" not in markdown
+    assert "<YOUR_SESSION_COOKIE>" not in context
 
 
 def test_operator_details_consolidates_all_reference(tmp_path, monkeypatch, capsys):
@@ -1057,17 +1105,24 @@ def test_slug_in_pasteable_body_still_warns(tmp_path, monkeypatch, capsys):
     assert any("finding slug" in w and "VA-047" in w for w in warnings)
 
 
-# -- steps: no double-numbering of pre-numbered items -------------------------
+# -- steps: rendered verbatim, never renumbered or stripped -------------------
 
-def test_pre_numbered_steps_are_not_double_numbered(tmp_path, monkeypatch, capsys):
-    """An authored step that already starts with '1. ' / '2) ' must not render as
-    '1. 1. …' — the leading enumerator is stripped before the renderer prepends its
-    own counter."""
+def test_steps_render_verbatim_without_renumbering(tmp_path, monkeypatch, capsys):
+    """Authored step text reaches the submission byte-for-byte.
+
+    The renderer imposes no counter of its own and strips nothing, so an author who
+    numbers their own steps keeps that numbering — including the non-sequential and
+    sub-step forms (`2a.`, `2024.`) that any strip-and-renumber pass would rewrite
+    into something the author never wrote. Each step becomes one `- ` item purely so
+    the steps stay separate lines when pasted into a platform form.
+    """
     details = _complete_details(
         steps_to_reproduce=[
             "1. Log in as member A",
             "2) GET /orders/1001 (member B's order)",
-            "Observe member B's data in the response",  # unnumbered: left as-is
+            "2a. Repeat as the second member",
+            "2024. Renewal year field accepts a past date",
+            "Observe member B's data in the response",
         ]
     )
     fake = _FakeClient(_finding(details=details))
@@ -1078,50 +1133,89 @@ def test_pre_numbered_steps_are_not_double_numbered(tmp_path, monkeypatch, capsy
 
     body = _submission_path(tmp_path).read_text()
     steps = body[body.index("### Steps to Reproduce"):body.index("### Evidence")]
-    # No doubled counters.
+    for authored in (
+        "1. Log in as member A",
+        "2) GET /orders/1001 (member B's order)",
+        "2a. Repeat as the second member",
+        "2024. Renewal year field accepts a past date",
+        "Observe member B's data in the response",
+    ):
+        assert authored in steps, f"step not rendered verbatim: {authored}"
+    # No marker and no counter are contributed, so nothing can double up.
     assert "1. 1." not in steps
     assert "2. 2)" not in steps
-    # The author's own enumerator is gone; the renderer's counter is authoritative.
-    assert "1. Log in as member A" in steps
-    assert "2. GET /orders/1001 (member B's order)" in steps
-    assert "3. Observe member B's data in the response" in steps
+    assert "- 1. Log in" not in steps
+
+
+def test_authored_step_block_renders_byte_for_byte(tmp_path, monkeypatch, capsys):
+    """A single authored string is the preferred shape and passes through untouched.
+
+    Prose elsewhere in a submission cites step numbers ("follow the location header
+    from step 2"); those references resolve only against numbers the author wrote,
+    so the whole block ships exactly as stored.
+    """
+    block = (
+        "1. Log in as member A and note the session cookie\n"
+        "2. GET /orders/1001 — member B's order\n"
+        "3. Follow the location header from step 2 and observe member B's data"
+    )
+    details = _complete_details(steps_to_reproduce=block)
+    _install(monkeypatch, tmp_path, _FakeClient(_finding(details=details)))
+    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+    export_submission.run(args)
+    capsys.readouterr()
+
+    body = _submission_path(tmp_path).read_text()
+    assert block in body
+    # A string is authored content, not a missing field — the final gate passed.
+    assert "[NEEDS: steps to reproduce]" not in body
+    assert _context(tmp_path)["missing"] == []
 
 
 # -- hygiene warnings: diagnostic in draft, strict in final -------------------
 
 @pytest.mark.parametrize(
-    "title, expect_warn",
+    "title, expect_advisory",
     [
-        # 15 words -> warns.
+        # 15 words -> advises.
         ("This finding demonstrates a very long run on submission title that clearly exceeds the limit", True),
-        # 10 words -> no warning.
+        # 10 words -> silent.
         ("Short concise title that stays under the required word limit", False),
     ],
 )
-def test_title_word_count_warning_gates_only_final(tmp_path, monkeypatch, capsys, title, expect_warn):
+def test_title_word_count_advises_but_never_blocks(
+    tmp_path, monkeypatch, capsys, title, expect_advisory
+):
+    """Title length is editorial advice, not a gate.
+
+    Failing a FINAL export on it would let a 13-word title block publication of a
+    finished, verified finding — code overruling the author on prose. It is reported
+    as an advisory and kept out of `hygiene_warnings` (whose entries DO fail closed)
+    so the two authorities cannot be confused.
+    """
     finding = _finding(details=_complete_details())
     finding["title"] = title
     fake = _FakeClient(finding)
     _install(monkeypatch, tmp_path, fake)
     args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
-    if expect_warn:
-        with pytest.raises(AssessError) as exc:
-            export_submission.run(args)
-        assert "hygiene" in str(exc.value)
-        assert not _submission_path(tmp_path).exists()
 
-        draft_args = _parse(
-            ["submission", "VA-047", "--platform", "bugcrowd", "--draft"],
-            str(tmp_path),
-        )
-        export_submission.run(draft_args)
-        capsys.readouterr()
-        assert any("max 12" in w for w in _context(tmp_path)["hygiene_warnings"])
+    export_submission.run(args)
+    captured = capsys.readouterr()
+
+    # Publishes either way — a long title never blocks.
+    assert _submission_path(tmp_path).exists()
+    context = _context(tmp_path)
+    # Never a hygiene warning, whatever the length.
+    assert not any("max 12" in w for w in context["hygiene_warnings"])
+
+    body = _submission_path(tmp_path).read_text()
+    if expect_advisory:
+        assert any("max 12" in a for a in context["advisories"])
+        assert "ADVISORY" in captured.err
+        assert "**Advisories** (non-blocking — your call):" in body
     else:
-        export_submission.run(args)
-        capsys.readouterr()
-        assert _submission_path(tmp_path).exists()
-        assert not any("max 12" in w for w in _context(tmp_path)["hygiene_warnings"])
+        assert context["advisories"] == []
+        assert "**Advisories**" not in body
 
 
 # -- overwrite guard ----------------------------------------------------------
@@ -1263,9 +1357,16 @@ def _write_scope(engagement_dir, required_headers):
 
 
 def test_a2_operational_header_renders_from_fields(tmp_path, monkeypatch, capsys):
-    """The Asset/POC/Run/Pass if/Deconfliction overlay is emitted in the copy-paste
+    """The Asset/Run/Pass if/Deconfliction overlay is emitted in the copy-paste
     header (above the first `---`), each line sourced from a finding field so a
-    re-render reproduces it — not hand-applied text a re-render would wipe."""
+    re-render reproduces it — not hand-applied text a re-render would wipe.
+
+    Nothing above the paste boundary is composed by the exporter. Asset renders
+    `canonical_location` verbatim, and there is no `POC:` line: a pointer derived
+    from `evidence_ref` names an internal `scans/…` artifact, which means nothing to
+    a triager and puts the engagement's layout in text the operator pastes. The
+    proof pointer stays under OPERATOR DETAILS.
+    """
     _write_scope(tmp_path, {"X-Bug-Bounty": "vigiloss"})
     finding = _finding(
         evidence_ref="scans/va-003-poc.sh",
@@ -1284,12 +1385,17 @@ def test_a2_operational_header_renders_from_fields(tmp_path, monkeypatch, capsys
     body = _submission_path(tmp_path).read_text()
     header, sep, _sections = body.partition("\n---\n")
     assert sep == "\n---\n"
-    # All five operational lines render, and all sit in the pasteable header block.
     assert "**Asset:** https://app.example.com/api/orders/1001" in header
-    assert "**POC:** scans/va-003-poc.sh" in header
     assert "**Run:** bash scans/va-003-poc.sh" in header
     assert "**Pass if:** HTTP 200 returns another member's order record" in header
     assert "**Deconfliction:** X-Bug-Bounty: vigiloss" in header
+    # No derived proof pointer in the pasteable block; it lives below the line.
+    # The artifact path appears in the header ONLY inside the authored Run command —
+    # the author put it there, so it stays; nothing derives a second copy from
+    # evidence_ref.
+    assert "**POC:**" not in body
+    assert header.count("scans/va-003-poc.sh") == 1
+    assert "- **Evidence reference:** scans/va-003-poc.sh" in body
     # Still the platform copy-paste layout — the overlay sits after CVSS, not before Title.
     assert body.startswith("**Title:**")
 
@@ -1316,7 +1422,6 @@ def test_a2_operational_header_survives_overwrite(tmp_path, monkeypatch, capsys)
     header = _submission_path(tmp_path).read_text().partition("\n---\n")[0]
     for line in (
         "**Asset:** https://app.example.com/api/orders/1001",
-        "**POC:** scans/va-003-poc.sh",
         "**Run:** bash scans/va-003-poc.sh",
         "**Pass if:** HTTP 200 leak",
         "**Deconfliction:** X-Bug-Bounty: vigiloss",
@@ -1339,3 +1444,66 @@ def test_a2_operational_lines_omitted_without_backing_data(tmp_path, monkeypatch
     assert "**Pass if:**" not in header
     assert "**Deconfliction:**" not in header
     assert "**Asset:** /orders/1001" in header  # canonical_location is present
+
+
+def test_final_render_keeps_every_details_section(tmp_path, monkeypatch, capsys):
+    """A FINAL, publishable submission carries all details-sourced content.
+
+    This failure mode is silent and fires at the last step before filing: the strict
+    gate reads the raw finding and passes, so any renderer that reads a mangled copy
+    drops Attack Scenario, the operational header, the finding metadata and the whole
+    structured-proof block at exit 0 with no warning. A section that was never
+    rendered reads exactly like a section nobody wrote.
+    """
+    _write_scope(tmp_path, {"X-Bug-Bounty": "vigiloss"})
+    details = _complete_details(
+        steps_to_reproduce=[
+            'curl -s https://app.example.com/orders/1001 -H "Cookie: session=abc123def456"',
+        ],
+        attack_scenario="An attacker reads any member's order by id.",
+        cwe_id="CWE-639",
+        owasp_category="A01:2021 Broken Access Control",
+        run="bash scans/va-047-poc.sh",
+        pass_if="HTTP 200 returns another member's order record",
+    )
+    finding = _finding(details=details)
+    finding["canonical_location"] = "https://app.example.com/api/orders/1001"
+    finding["notes"] = "Mechanism: no ownership check on the order id."
+    _install(monkeypatch, tmp_path, _FakeClient(finding))
+    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+
+    export_submission.run(args)
+    capsys.readouterr()
+
+    body = _submission_path(tmp_path).read_text()
+    for expected in (
+        "### Attack Scenario",
+        "**Run:** bash scans/va-047-poc.sh",
+        "**Pass if:** HTTP 200 returns another member's order record",
+        "**Asset:** https://app.example.com/api/orders/1001",
+        "**Deconfliction:** X-Bug-Bounty: vigiloss",
+        "- CWE: CWE-639",
+        "- OWASP: A01:2021 Broken Access Control",
+        "**PoC Request:**",
+        "**PoC Response:**",
+        "Investigation notes",
+    ):
+        assert expected in body, f"missing from final submission: {expected}"
+
+
+def test_unparseable_details_json_warns_instead_of_blanking_silently(
+    tmp_path, monkeypatch, capsys
+):
+    """Corrupt details must announce themselves, not render as an unauthored finding."""
+    finding = _finding(details=_complete_details())
+    finding["details_json"] = '{"evidence": "truncated'  # invalid JSON
+    _install(monkeypatch, tmp_path, _FakeClient(finding))
+    args = _parse(
+        ["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path)
+    )
+
+    export_submission.run(args)
+    captured = capsys.readouterr()
+
+    assert "unparseable details_json" in captured.err
+    assert "VA-047" in captured.err

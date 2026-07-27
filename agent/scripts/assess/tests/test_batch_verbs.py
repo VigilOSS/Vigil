@@ -813,3 +813,64 @@ def test_update_rejects_positional_json_file(tmp_path, monkeypatch, capsys):
     assert exc.value.code == 1
     assert "looks like a JSON payload" in capsys.readouterr().err
     assert fake.patches == []
+
+
+def test_update_validates_details_against_the_record_contract(
+    tmp_path, monkeypatch, capsys
+):
+    """`finding update` checks `details` the way `finding record` does.
+
+    Recording a finding and patching one have to agree on what a detail key is
+    called and what type it holds. With only the create path checked, a mistyped
+    or misspelled key patched in cleanly, persisted, and then read as absent —
+    surfacing much later as an export gate naming a field the author could see
+    they had written. Required fields are still skipped, because a patch
+    legitimately carries a subset.
+    """
+    fake = _FakeClient()
+    _install(monkeypatch, update_finding, tmp_path, fake)
+
+    # A misspelled key earns a did-you-mean and writes nothing.
+    args = _parse(
+        update_finding,
+        ["update", "VA-1", "--details-inline", json.dumps({"remediaton": "fix it"})],
+        tmp_path,
+    )
+    with pytest.raises(SystemExit) as exc:
+        update_finding.run(args)
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "remediaton is not allowed" in err
+    assert "Did you mean: remediation?" in err
+    assert fake.patches == []
+
+    # A wrong type is caught too — this is the shape mismatch that used to
+    # persist and then read as an empty field at export time.
+    args = _parse(
+        update_finding,
+        ["update", "VA-1", "--details-inline", json.dumps({"steps_to_reproduce": 42})],
+        tmp_path,
+    )
+    with pytest.raises(SystemExit) as exc:
+        update_finding.run(args)
+    assert exc.value.code == 1
+    assert "steps_to_reproduce" in capsys.readouterr().err
+    assert fake.patches == []
+
+    # A partial patch of valid keys goes through: `required` is not enforced, and
+    # both authored shapes of steps_to_reproduce are accepted.
+    for steps in ("1. Log in\n2. GET /orders/1001", ["Log in", "GET /orders/1001"]):
+        fake.patches.clear()
+        args = _parse(
+            update_finding,
+            [
+                "update",
+                "VA-1",
+                "--details-inline",
+                json.dumps({"steps_to_reproduce": steps, "vrt_category": "broken_access_control.idor"}),
+            ],
+            tmp_path,
+        )
+        update_finding.run(args)
+        capsys.readouterr()
+        assert len(fake.patches) == 1

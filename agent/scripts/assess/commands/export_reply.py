@@ -4,7 +4,11 @@ Renders ONE outgoing reply (a Bugcrowd comment / HackerOne activity reply / dire
 vendor follow-up) into a pasteable ``reply-<N>.md`` under
 ``$ENGAGEMENT_DIR/submissions/<slug>/replies/``. Mirrors the submission-first
 architecture: the finding is the source of truth (its ``details.replies`` thread),
-and the ``.md`` is a disposable render — a re-render loses nothing.
+and the ``.md`` is a disposable render — a re-render loses nothing that was written
+back to the finding (``record-reply``). Like ``export submission``, this command
+assembles and presents but never rewrites authored text: there is no automatic
+credential redaction, because masking is an authoring decision the report-writer
+makes and stores in the reply entry, so every later render reproduces it.
 
 A reply is NOT a submission: there is no Title / VRT / CVSS / Summary. The layout is
 
@@ -16,7 +20,7 @@ A reply is NOT a submission: there is no Title / VRT / CVSS / Summary. The layou
 
     ## THREAD HISTORY — NOT FOR SUBMISSION (reference only — never paste below this line)
     **Answering (this reply):** <in_response_to, verbatim>
-    **Prior replies (most recent first):** <inlined body for the latest ~3, older one-line>
+    **Prior replies (most recent first):** <every prior reply, body inlined and fenced>
     **Parent finding proof ...:** <the finding's structured proof + linked runs to author NEW
                                     evidence FROM (mask + weave; never paste raw)>
     **Hygiene warnings ...:** <FLAGGED internal-identifier leaks to strip before sending>
@@ -49,7 +53,6 @@ from assess.lib.finding_render import (
     nonempty,
     poc_lines,
 )
-from assess.lib.outbound_redaction import redact_outbound_credentials
 # ``export-reply`` reuses export-submission's finding-links → command-run resolution
 # so the reply's THREAD HISTORY surfaces the same explicitly-linked reproducing runs
 # the submission does (author NEW evidence from them). No cycle: export_submission does
@@ -60,8 +63,6 @@ _PLATFORMS = ("bugcrowd", "hackerone", "direct")
 # When the finding has no prior reply and no recorded submission platform, fall back
 # here rather than hard-failing — a company-facing reply is the safe default.
 _DEFAULT_PLATFORM = "direct"
-# How many prior replies get their body inlined; older ones render one-line.
-_INLINE_PRIOR_CAP = 3
 
 
 def register(subparsers) -> None:
@@ -192,8 +193,8 @@ def _thread_history_lines(
 ) -> list[str]:
     """The never-paste THREAD HISTORY below the single ``---``.
 
-    Carries the ask this reply answers, the prior thread (latest ~3 with body, older
-    one-line), the parent finding's structured proof + linked runs to author NEW
+    Carries the ask this reply answers, the FULL prior thread (every reply's body,
+    fenced), the parent finding's structured proof + linked runs to author NEW
     evidence FROM (masked + woven, never pasted raw), and the FLAGGED hygiene warnings.
     """
     lines = [
@@ -209,12 +210,18 @@ def _thread_history_lines(
 
     if prior_entries:
         lines += ["**Prior replies (most recent first):**", ""]
-        for index, prior in enumerate(prior_entries):
+        for prior in prior_entries:
             lines.append(_prior_reply_line(prior))
-            if index < _INLINE_PRIOR_CAP:
-                prior_body = nonempty(prior.get("body"))
-                if prior_body:
-                    lines.append(f"  {prior_body}")
+            prior_body = nonempty(prior.get("body"))
+            if prior_body:
+                # EVERY prior body is inlined, and each is fenced. Dropping the
+                # older bodies would withhold the thread's own history from the
+                # section whose whole job is supplying it. Fencing (rather than
+                # indenting the first line only) keeps a multi-line body — or one
+                # whose lines start with `-`, `#` or `>` — from breaking out of
+                # this list and re-parsing as new markdown structure.
+                fence = _fence_for(prior_body)
+                lines.append(f"{fence}\n{prior_body}\n{fence}")
         lines.append("")
 
     proof = poc_lines(finding)
@@ -231,12 +238,16 @@ def _thread_history_lines(
         lines += ["**Linked command runs** (author NEW evidence from these):", ""]
         for row in linked_runs:
             command = nonempty(row.get("command"))
-            if not command:
-                continue
             intent = nonempty(row.get("intent"))
             rc = row.get("return_code")
             rc_str = "" if rc is None else f" (rc={rc})"
             header = f"- **Run{rc_str}**" + (f" — {intent}" if intent else "") + ":"
+            if not command:
+                # Listed even with no command string, exactly as export-submission
+                # lists it: the operator linked this run deliberately, so hiding
+                # the row hides a link they made.
+                lines += [f"{header} (no command recorded on this run)", ""]
+                continue
             fence = _fence_for(command)
             lines += [header, f"{fence}\n{command}\n{fence}", ""]
 
@@ -306,7 +317,6 @@ def run(args) -> None:
         finding = client.get(f"findings/{slug}")
         if not isinstance(finding, dict):
             raise AssessError(f"export-reply: unexpected response fetching finding {slug!r}")
-        finding = redact_outbound_credentials(finding)
 
         replies = _replies(finding)
         max_seq = max((_seq_of(entry) for entry in replies), default=0)
@@ -366,9 +376,7 @@ def run(args) -> None:
                 "already exists; pass --overwrite to replace it."
             )
 
-        linked_runs = redact_outbound_credentials(
-            _linked_command_runs(client, slug)
-        )
+        linked_runs = _linked_command_runs(client, slug)
         internal_ids = collect_internal_ids(finding, linked_runs)
         prior_entries = _prior_replies(replies, seq)
         reply_rel = engagement_relative(reply_md, engagement_dir)
@@ -377,23 +385,21 @@ def run(args) -> None:
         # sub-block to scan the real content, then re-render with the resulting
         # warnings woven into THREAD HISTORY: the warning strings themselves quote the
         # leaked value (a UUID, a `cases.db` literal), so scanning a render that
-        # already contains them would flag the advisory text as a fresh leak. Hygiene
+        # already contains them would flag that warning text as a fresh leak. Hygiene
         # scans only the PASTEABLE body — above the single `---` (separator_ordinal=1).
-        scan_markdown = redact_outbound_credentials(
-            _render_markdown(entry, prior_entries, finding, linked_runs, draft, [])
+        scan_markdown = _render_markdown(
+            entry, prior_entries, finding, linked_runs, draft, []
         )
         hygiene = hygiene_warnings(
             scan_markdown, slug, internal_ids, engagement_dir, separator_ordinal=1
         )
-        markdown = redact_outbound_credentials(
-            _render_markdown(
-                entry,
-                prior_entries,
-                finding,
-                linked_runs,
-                draft,
-                hygiene,
-            )
+        markdown = _render_markdown(
+            entry,
+            prior_entries,
+            finding,
+            linked_runs,
+            draft,
+            hygiene,
         )
 
         out_dir.mkdir(parents=True, exist_ok=True)

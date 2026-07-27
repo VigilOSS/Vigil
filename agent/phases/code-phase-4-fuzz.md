@@ -185,9 +185,10 @@ See `agent/references/examples/submission-direct-buffer-overflow-fuzz.md` for a 
    linked command/crash run into ONE "OPERATOR DETAILS — NOT FOR SUBMISSION" reference section below
    the second `---` (present in both draft and final; never pasted), and marks anything missing with
    `[NEEDS: ...]`.
-2. **Author + write back to the finding:** author the stable sections and write each back so the
-   finding holds exactly what would be sent — `vigil assess finding update <slug> --summary "..."
-   --details-inline '{"steps_to_reproduce":[...],"evidence":"...","impact":"...","remediation":"..."}'`.
+2. **Author + write back to the finding:** author the stable sections and write each back via
+   `--payload-file` (the default write path — see "Submission-First Closeout" step 3 in
+   `agent/skills/report-generation/SKILL.md`) so the finding holds exactly what would be sent, with
+   `steps_to_reproduce` as one authored, self-numbered string.
    Author Evidence from the OPERATOR DETAILS section's structured proof and linked runs plus a
    *targeted* `vigil assess command-run list --q <finding's file/function/parameter>` (keyed tightly
    to this finding, not a broad sweep) to
