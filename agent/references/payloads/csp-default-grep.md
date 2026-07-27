@@ -1,5 +1,6 @@
 ---
 description: Vendor-template CSP / CORS placeholder grep — placeholder-literal regex, unsafe-inline + unsafe-eval check, overly-broad wildcard check, per-vendor known-default snippets, sweep helper
+skill: web-recon
 source: Custom — compiled from vendor production-hardening checklists and template-default research.
 ---
 

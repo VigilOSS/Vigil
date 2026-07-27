@@ -16,25 +16,27 @@ origin: Vigil
 
 ## Operating Rules
 
-These constrain every action taken under this skill. They apply before any command runs.
+Always-active references — load before the first command runs:
 
-**Attribution and evidence discipline.** The always-active rules in `agent/rules/ir-evidence.md` govern how agents attribute actions to actors, interpret audit events, and write evidence claims. Those rules apply here — this section adds platform-specific constraints, not replacements.
+- `agent/rules/triage.md` — disposition vocabulary, severity recompute, 30-day
+  default look-back, UTC, MITRE-on-every-finding rule, writing discipline
+  (anti-slop).
+- `agent/rules/ir-evidence.md` — attribution gates, multi-signal
+  corroboration, confidence labels on attribution claims, evidence-file
+  conventions. Verify the legitimate-actor hypothesis (travel, VPN, shared
+  delegate) before calling an audit event adversarial — a single unfamiliar
+  IP is a lead, not a conclusion.
+- `agent/shared-constraints-blue.md` — read-only by default (§2: every WRITE
+  — password reset, suspend, signOut, token revoke, OAuth-app removal,
+  filter deletion, role change, MFA enrollment change — goes through
+  propose → approve → execute → record, never silent action mid-investigation),
+  artifact-index chain of custody (§3: register every durable pull via
+  `vigil assess artifact register`; manual `shasum ... > SHA256SUMS.txt` is
+  deprecated — the backend computes the hash on register), UTC (§4),
+  30-day look-back (§5), host-exec audit pipeline (§6), stay in scope (§7).
 
-**Read-only by default.** Every command in this skill is read-only unless explicitly marked **WRITE**. Read-only pulls produce artifacts the investigator reviews; write actions change tenant state (sessions end, users lose access, filters disappear, passwords rotate). An incident investigation does not become a containment action without an explicit user authorization for the specific target and the specific action.
-
-**WRITE actions require user approval.** Password reset, suspend, unsuspend, signOut, token revoke, OAuth-app removal, filter deletion, role changes, MFA enrollment changes, and any Directory API mutation are WRITE actions. The pattern: surface the evidence, propose the action with the exact command, wait for the user to approve this specific action against this specific target, then run it. A broad "you can contain" authorization is not specific. Silent destructive action during an investigation is how evidence gets lost and users get locked out mid-business-hours.
-
-**Chain of custody.** Every raw pull lands under `$ENGAGEMENT_DIR/ir/reports/` with a predictable filename (`<feed>_<target>_<window>.json|csv`). SHA-256 every artifact immediately: `/usr/bin/shasum -a 256 ir/reports/*.json > ir/reports/SHA256SUMS.txt`. Derived analysis goes in `ir/evidence/` as markdown with the source-file path and the jq/sqlite command embedded in the evidence file. Nothing is edited in place. A timeline without source paths cannot be defended.
-
-**UTC is the working timezone.** Audit logs, Chrome history timestamps, and cloud telemetry are all UTC. Convert to user-local only when writing narrative for a human reader. Mixing zones mid-analysis drops events and turns a 5-minute phishing-to-login window into a phantom gap.
-
-**Timeline reconstruction starts from the earliest plausible trigger, not from "when the user noticed."** User-visible detection lags initial access by days or weeks. A compromise reported today routinely traces back 14–30 days; the starting look-back window is 30 days minimum and extends if anything anomalous sits at the boundary.
-
-**Every sentence must carry new information.** Finding write-ups, reports, and evidence files obey: if removing a sentence does not reduce the reader's understanding, remove it. Restating what the code does is slop; explaining why a field matters is not.
-
-**Verify attribution before asserting attacker action.** An IP you do not recognize inside an audit log may still belong to a user on travel, a VPN, or a shared mailbox with many delegates. Before calling an event adversarial, rule out the legitimate actor by (a) checking the user's normal ASN/region history, (b) asking the user or a teammate out-of-band, or (c) finding a corroborating anomaly (IP + user-agent + action type). Acting on suspicion alone leads to misattributed findings the user has to correct under stress.
-
-**Stay in scope.** Artifacts that look interesting but belong to a different investigation (different tenant, different user, different time window) do not enter this engagement's evidence tree. Scope creep in IR produces reports that the client has to strip.
+This section adds Google-Workspace-specific detail on top of those rules; it
+does not restate or replace them.
 
 ## Tool Roster — Picking the Right CLI
 
@@ -906,33 +908,22 @@ Each entry below reflects a specific mistake observed on at least one engagement
 
 **A14. Passing the RFC 2822 Message-ID from Alert Center directly to `gam show message`.** Alert Center's `messages[].messageId` field is the RFC 2822 `Message-ID` header (e.g. `message-id@sender.example`), not the Gmail internal ID. `gam show message` and the Gmail API `GET /messages/{id}` require the Gmail internal 16-char hex ID. Correct approach: resolve first with `gam user <user> print messages query "rfc822msgid:<rfc2822-id>" max_to_print 1` and use the `id` field from the result. Also: `print messages` uses `max_to_print <N>` for the result cap — `maxresults` throws `Invalid argument`.
 
-## Prompting Subordinate Agents Under This Skill
-
-When dispatching a subagent to run a piece of this work, write the prompt so the agent understands the constraint rather than memorizes a rule. Prefer explaining the consequence over issuing an imperative. Two examples of the same instruction:
-
-Weaker (imperative, brittle):
-> Do not run `gam user ... delete ...` commands.
-
-Stronger (explanatory, generalizes):
-> All `gam user ... delete ...` operations terminate live sessions or remove mailbox configuration; they require the investigator to review evidence first and approve the specific command and target. If you reach a point where deletion appears warranted, produce the exact command and a one-line evidence summary, then stop and wait for approval.
-
-Weaker:
-> Do not modify raw audit JSON files.
-
-Stronger:
-> Raw audit JSON is the canonical evidence the finding is built on; overwriting it breaks chain of custody and makes the finding unreproducible. Derived analysis lives in markdown under `ir/evidence/` with the source-file path and the jq command embedded.
-
-The pattern is: say *why* once, then the rule follows from it without needing repetition or emphasis formatting.
-
 ## Output Conventions
 
-Raw pulls: `$ENGAGEMENT_DIR/ir/reports/<feed>_<target>_<window>.{json,csv}`. SHA-256 into `ir/reports/SHA256SUMS.txt`. Never edit in place.
+Raw pulls: `$ENGAGEMENT_DIR/ir/reports/<feed>_<target>_<window>.{json,csv}`. Derived
+analysis: `$ENGAGEMENT_DIR/ir/evidence/*.md`, every claim citing a source file +
+timestamp + IP + actor + eventName, with the jq/sqlite command that produced it
+embedded so another investigator can re-run it. Never edit either in place.
 
-Derived analysis: `$ENGAGEMENT_DIR/ir/evidence/*.md`. Every claim cites a source file + timestamp + IP + actor + eventName. Derived files embed the jq/sqlite command they used so another investigator can re-run.
-
-Timelines: one `ir/timeline/<topic>.md` per narrative thread (admin-account events, financial-fraud events, endpoint events). Events listed UTC, one per line, with source file reference.
-
-Containment log: `ir/containment.md` — every WRITE action with its timestamp, the command, the approver, and the user-visible outcome.
+Register every durable pull and every derived-analysis file via
+`vigil assess artifact register --kind <ir_log|ir_evidence> --finding <slug>
+--agent-id <id> --command-run-id <id>` before the dispatch closes — the backend
+computes the SHA-256 on register, so a separate `shasum` pass is not needed.
+Containment actions (signOut, token revoke, password reset, filter deletion)
+land in `activity_entries` via `vigil blue contain`, not a hand-maintained
+markdown log. The full closing sequence (register → mark-scratch → finding
+record/update → intel record → log → handoff) is `agent/agents/investigator.md`'s
+Mandatory Closing Sequence — this skill does not restate it.
 
 ## Extended Resources
 

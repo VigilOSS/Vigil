@@ -227,9 +227,8 @@ the authorization envelope even if the finding would be accurate.
 Phase 4a is not a second broad sweep — it is an audit that confirms every in-scope live host
 received a reactive pass with the expected template set, and fills any gaps. When Phase 1 and
 Phase 2 reactive sweeps were thorough, Phase 4a prints a coverage summary and advances without
-running nuclei again. The audit replaces the old "broad nuclei sweep before the work-buffer
-loop" pattern because a blind rerun wastes rate budget and inflates `command-run list`
-without finding new signal.
+running nuclei again. A blind rerun instead of this audit wastes rate budget and inflates
+`command-run list` without finding new signal.
 
 ### Audit procedure
 

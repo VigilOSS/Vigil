@@ -202,7 +202,7 @@ A non-empty `matched` array for your nonce proves the server dereferenced your U
 - Vulnerable parameter and endpoint
 - Traversal depth required (how many `../`)
 - Encoding/bypass technique needed (null byte, double encoding, etc.)
-- Files successfully read and their content — confirming `/etc/passwd` is readable is a start; you must show the **attacker outcome** (e.g., the `/etc/shadow` file was read and contains hashed credentials for 5 accounts, the `.env` file disclosed database password that authenticated against the production MySQL instance, log poisoning via User-Agent injection achieved RCE confirmed with `id` output showing `uid=33(www-data)`)
+- Files successfully read and their content — confirming `/etc/passwd` is readable only starts the finding; prove the attacker outcome (`agent/rules/hunting.md` §2), e.g., the `/etc/shadow` file was read and contains hashed credentials for 5 accounts, the `.env` file disclosed database password that authenticated against the production MySQL instance, log poisoning via User-Agent injection achieved RCE confirmed with `id` output showing `uid=33(www-data)`
 - RCE method if achieved (log poisoning, PHP wrappers, filter chains)
 - Severity: Critical (RCE), High (sensitive file read), Medium (limited file read)
 

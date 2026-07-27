@@ -159,7 +159,7 @@ A non-empty `matched` array for your nonce confirms blind code execution — eac
 - Endpoint and parameter carrying serialized data
 - Serialization format and language
 - Gadget chain used (if RCE)
-- Proof of execution (command output or callback) — confirming the gadget chain payload was accepted is not enough; you must show the **attacker outcome** (e.g., the CommonsCollections1 payload executed `whoami` and `vigil oob poll --client <name>` returned a matched callback whose left label was `root` — proving the chain fired as root; the pickle payload read `/etc/passwd` and its contents were exfiltrated via HTTP callback; the tampered session role field of `admin` was accepted and granted access to the admin dashboard)
+- Proof of execution (command output or callback) — prove the attacker outcome (`agent/rules/hunting.md` §2), e.g., the CommonsCollections1 payload executed `whoami` and `vigil oob poll --client <name>` returned a matched callback whose left label was `root` — proving the chain fired as root; the pickle payload read `/etc/passwd` and its contents were exfiltrated via HTTP callback; the tampered session role field of `admin` was accepted and granted access to the admin dashboard
 - Libraries enabling the chain
 - Severity: Critical (RCE) or High (data tampering)
 - Remediation: avoid native deserialization, use allowlists, sign serialized data

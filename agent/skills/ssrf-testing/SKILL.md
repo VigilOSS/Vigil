@@ -566,7 +566,7 @@ SSRF + CRLF injection -> GCP metadata with Metadata-Flavor header -> service acc
 - SSRF type (full response, status-code-only, partial, blind, timing-only)
 - OOB callback confirmation — the matched probe<->callback pair from `vigil oob poll --client <name> --json` (for blind SSRF)
 - Filter bypass technique used (encoding, redirect chain, DNS rebinding)
-- Internal services or metadata accessed — confirming an OOB callback fired is not enough; you must show the **attacker outcome** (e.g., full SSRF returned AWS IAM credentials from 169.254.169.254 and those credentials granted `s3:ListBucket` on the production data bucket exposing 50,000 customer records; blind SSRF via gopher reached the unauthenticated Redis instance on port 6379 and set a cron job payload achieving RCE as www-data; SSRF to the internal Docker API at `127.0.0.1:2375` listed running containers and the privileged container creation command confirmed host root access)
+- Internal services or metadata accessed — prove the attacker outcome (`agent/rules/hunting.md` §2), e.g., full SSRF returned AWS IAM credentials from 169.254.169.254 and those credentials granted `s3:ListBucket` on the production data bucket exposing 50,000 customer records; blind SSRF via gopher reached the unauthenticated Redis instance on port 6379 and set a cron job payload achieving RCE as www-data; SSRF to the internal Docker API at `127.0.0.1:2375` listed running containers and the privileged container creation command confirmed host root access
 - Full request/response or OOB evidence for reproducibility
 
 ---

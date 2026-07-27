@@ -377,14 +377,11 @@ EOF
     cat "$CORE_FILE"
     cat <<'EOF'
 
-## macOS/zsh Compatibility
+## macOS Shell Note
 
-- Use absolute paths: `/usr/bin/curl`, `/bin/cat`, `/usr/bin/grep`, etc.
-- Do NOT use `grep -P` (Perl regex). Use `grep -E` (extended) or `rg` instead.
-- HEREDOC: Use unquoted delimiter (`<< EOF`), NOT single-quoted (`<< 'EOF'`).
-- Make file edits through the active coding environment's patch/edit tool. Avoid shell
-  redirection (`cat >`, `echo >`) for manual file creation or modification because it
-  bypasses reviewable patch diffs and is easy to quote incorrectly in zsh.
+- `grep -P` (Perl regex) is unavailable on macOS: BSD grep has no `-P`. Use `grep -E` or `rg`.
+- Make file edits through the coding environment's patch/edit tool rather than shell redirection
+  (`cat >`, `echo >`), so every change lands as a reviewable diff.
 
 ## Tool Promotion Workflow
 

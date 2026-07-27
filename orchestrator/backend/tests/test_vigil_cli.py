@@ -8942,17 +8942,6 @@ def test_validate_dispatch_contract_warns_on_unknown_dispatch_mode() -> None:
     assert "newly-coined mode" in blob
 
 
-def test_validate_dispatch_contract_requires_skills_for_specialist() -> None:
-    """Specialist dispatches must declare which skills the agent loaded."""
-    errors, _warnings = _validate_dispatch_contract(
-        {
-            "role": "vulnerability-analyst",
-            "dispatch_mode": "item-iterating",
-        }
-    )
-    assert any("skills is required" in e for e in errors)
-
-
 def test_validate_dispatch_contract_operator_skills_optional() -> None:
     """Operator role coordinates phases; skills are not required on operator dispatches."""
     errors, _warnings = _validate_dispatch_contract(
@@ -9796,7 +9785,6 @@ def _run_dispatch_verb(monkeypatch, action: str, *, extra=None, **flags):
         "reasoning": None,
         "dispatch_mode_arg": None,
         "from_json": None,
-        "allow_no_skills": False,
         "check_overlap": False,
         "dispatch_status": None,
         "completed_at": None,
@@ -9846,7 +9834,6 @@ def _dispatch_args(action: str, *, db_path: str | None = None, extra=None, **fla
         "reasoning": None,
         "dispatch_mode_arg": None,
         "from_json": None,
-        "allow_no_skills": False,
         "check_overlap": False,
         "dispatch_status": None,
         "completed_at": None,
@@ -9961,23 +9948,6 @@ def test_dispatch_register_normalizes_list_skills_from_json(
     assert fake.recorded[0]["skills"] == "idor-testing,auth-bypass"
 
 
-def test_dispatch_register_rejects_missing_skills_locally(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    with pytest.raises(SystemExit) as exc_info:
-        _run_dispatch_verb(
-            monkeypatch,
-            "register",
-            agent_id="AG-NO-SKILL",
-            agent_role="vulnerability-analyst",
-            task="IDOR sweep",
-            dispatch_mode_arg="item-iterating",
-        )
-    assert exc_info.value.code == 1
-    err = capsys.readouterr().err
-    assert "skills is required for role 'vulnerability-analyst'" in err
-
-
 def test_dispatch_register_defaults_missing_dispatch_mode_from_role(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -10016,11 +9986,11 @@ def test_dispatch_register_defaults_mode_for_recon_role(
     assert fake.recorded[0]["dispatch_mode"] == "hypothesis-driven"
 
 
-def test_dispatch_register_allow_no_skills_proceeds_with_warning(
+def test_dispatch_register_without_skills_proceeds_with_warning(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """L2-2 / L3-6: --allow-no-skills converts the skills requirement into a
-    WARN and proceeds instead of exiting non-zero."""
+    """A dispatch with no --skills WARNs and proceeds rather than exiting
+    non-zero — the specialist picks its skills from the surface."""
     fake = _run_dispatch_verb(
         monkeypatch,
         "register",
@@ -10028,13 +9998,10 @@ def test_dispatch_register_allow_no_skills_proceeds_with_warning(
         agent_role="vulnerability-analyst",
         task="ad-hoc probe",
         dispatch_mode_arg="item-iterating",
-        allow_no_skills=True,
     )
     err = capsys.readouterr().err
     assert "skills not set for role 'vulnerability-analyst'" in err
-    assert "--allow-no-skills" in err
     assert fake.recorded[0]["agent_id"] == "AG-ADHOC"
-    assert fake.recorded[0]["allow_no_skills"] is True
 
 
 def test_dispatch_register_normalizes_role_to_agent_role(
@@ -11168,18 +11135,15 @@ def test_validate_dispatch_unknown_mode_warns_not_errors() -> None:
     assert any("freshly-coined-mode" in w for w in warnings), warnings
 
 
-def test_validate_dispatch_allow_no_skills_downgrades_error_to_warning() -> None:
-    """L2-2 / L3-6: allow_no_skills converts the skills requirement into a
-    warning so an ad-hoc role can proceed."""
+def test_validate_dispatch_missing_skills_is_a_warning_not_an_error() -> None:
+    """A missing skills list never blocks a dispatch — it warns."""
     from assess.lib.contracts import validate_specialist_dispatch_contract
 
     payload = {
         "agent_role": "vulnerability-analyst",
         "dispatch_mode": "item-iterating",
     }
-    errors, warnings = validate_specialist_dispatch_contract(
-        payload, allow_no_skills=True
-    )
+    errors, warnings = validate_specialist_dispatch_contract(payload)
     assert not any("skills is required" in e for e in errors), errors
     assert any("skills not set" in w for w in warnings), warnings
 

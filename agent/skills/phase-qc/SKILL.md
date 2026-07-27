@@ -156,8 +156,6 @@ A miss that is silently dropped is the failure mode this skill exists to prevent
   the per-PHASE level. blind-triage judges one submission's bytes blind; phase-qc
   judges a whole phase's coverage / depth / grading / chains. They stack: blind-triage
   per Medium+ finding, phase-qc once at the boundary.
-- `agent/references/finding-fp-and-severity-gate.md` — the C1–C7 FP / severity-downgrade
-  catalog phase-qc applies for `grading` misses.
 - `vigil assess coverage` (operator-core "Read the coverage ledger…") — the measured
   baseline phase-qc reasons against and never recomputes.
 - operator-core "Closed-surface dead-vs-unfinished re-audit" + "Depth Doctrine" — the

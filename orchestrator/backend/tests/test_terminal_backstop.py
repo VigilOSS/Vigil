@@ -451,3 +451,77 @@ def test_self_attested_handoff_does_not_downgrade_block(client, isolate_settings
     result = _block(eng_id)
     assert ("auth.example.com", "/login") in _labels(result["blocking"]), result
     assert ("auth.example.com", "/login") not in _labels(result["warned_under_observed"])
+
+
+def _probe_as(eng_id, *, attack_family, auth_context, target_path="/login"):
+    state_manager.record_probe_run(
+        eng_id, request_variant_id=None, service_id=None, coverage_item_id=None,
+        auth_context=auth_context, input_slot="query", attack_family=attack_family,
+        payload_family="", payload_value="p", tool_name="curl",
+        agent_name="vulnerability-analyst", result_status="tested",
+        observed_http_status=None, signal_type="", evidence_ref="ev.txt", notes="",
+        target_host="auth.example.com", target_path=target_path, target_port=None,
+    )
+
+
+def _cover_all_block_families(eng_id):
+    """Cover every BLOCK_HIGH family the decisive /login unit expects, using
+    recorded probe evidence only. access-control needs two distinct identities."""
+    _probe_as(eng_id, attack_family="sqli", auth_context="anonymous")
+    _probe_as(eng_id, attack_family="auth-bypass", auth_context="anonymous")
+    _probe_as(eng_id, attack_family="idor", auth_context="user_a")
+    _probe_as(eng_id, attack_family="idor", auth_context="user_b")
+
+
+def test_undeclared_vuln_classes_clear_the_dedicated_dispatch_obligation(
+    client, isolate_settings
+):
+    """A dispatch that declares NO `vuln_classes` but whose probes covered every
+    block-level family satisfies the dedicated-dispatch obligation.
+
+    Coverage is read from recorded probe `attack_family`, never from what a
+    dispatch declared about itself, so an open-objective dispatch that never
+    named a vulnerability class up front is neither blocked nor flagged as an
+    unmet obligation.
+    """
+    key = "2026-07-27-000001-undeclared"
+    eng_id = _seed_decisive_small_unit(client, isolate_settings, key)
+    state_manager.record_dispatch(
+        eng_id, agent_id="va-undeclared", agent_role="vulnerability-analyst",
+        task="hunt the login surface; prove any attacker outcome you find",
+        scope_host="auth.example.com", scope_path_prefix="/login",
+        status_value="completed",
+    )
+    state_manager.update_dispatch(eng_id, agent_id="va-undeclared",
+                                  status_value="completed",
+                                  completed_at="2026-07-27T12:00:00Z")
+    _cover_all_block_families(eng_id)
+
+    result = _block(eng_id)
+    label = ("auth.example.com", "/login")
+    assert label not in _labels(result["blocking"]), result
+    unmet = [w for w in result["warned_under_observed"]
+             if "dedicated-dispatch obligation" in (w.get("reason") or "")]
+    assert label not in _labels(unmet), result
+
+
+def test_dedicated_dispatch_obligation_still_needs_work_evidence(
+    client, isolate_settings
+):
+    """A completed dispatch with declared classes but NO probe and NO finding
+    does not satisfy the obligation — declaring classes is self-attestation, and
+    the unit still owes durable evidence that the work happened (S7)."""
+    key = "2026-07-27-000002-noevidence"
+    eng_id = _seed_decisive_small_unit(client, isolate_settings, key)
+    state_manager.record_dispatch(
+        eng_id, agent_id="va-talker", agent_role="vulnerability-analyst",
+        task="cover the login surface", scope_host="auth.example.com",
+        scope_path_prefix="/login", vuln_classes="sqli,idor,auth-bypass",
+        status_value="completed",
+    )
+    state_manager.update_dispatch(eng_id, agent_id="va-talker",
+                                  status_value="completed",
+                                  completed_at="2026-07-27T12:00:00Z")
+
+    result = _block(eng_id)
+    assert ("auth.example.com", "/login") in _labels(result["blocking"]), result

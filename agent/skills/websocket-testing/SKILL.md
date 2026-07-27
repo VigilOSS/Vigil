@@ -128,7 +128,7 @@ vuln_class: websocket
 - WebSocket endpoint URL and protocol
 - Authentication mechanism (or lack thereof)
 - Vulnerability type and proof payload
-- Data exposed or action performed — confirming the WebSocket accepts an unauthorized message is not enough; you must show the **attacker outcome** (e.g., unauthenticated WebSocket connection returned real-time order data for all users, CSWSH PoC exfiltrated victim's session token and active trade positions to attacker server, SQLi payload in search message returned all usernames and email addresses from the database)
+- Data exposed or action performed — prove the attacker outcome (`agent/rules/hunting.md` §2), e.g., unauthenticated WebSocket connection returned real-time order data for all users, CSWSH PoC exfiltrated victim's session token and active trade positions to attacker server, SQLi payload in search message returned all usernames and email addresses from the database
 - CSWSH PoC if Origin not validated
 - Severity: Critical (data theft, RCE) to Medium (DoS, info leak)
 

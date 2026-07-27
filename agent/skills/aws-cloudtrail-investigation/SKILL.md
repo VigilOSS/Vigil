@@ -313,8 +313,8 @@ in the timeline; severity recompute per `triage.md` rule 2):
 | `cloudtrail:StopLogging` / `cloudtrail:DeleteTrail` / `cloudtrail:PutEventSelectors` (downgrading scope) | T1562.008 | Defense evasion — disable audit logging |
 | `guardduty:DeleteDetector` / `guardduty:UpdateDetector --no-enable` | T1562.001 | Disable cloud detection |
 | `config:DeleteConfigurationRecorder` / `config:StopConfigurationRecorder` | T1562.001 | Disable AWS Config |
-| `iam:ListUsers` / `iam:ListAccessKeys` / `iam:ListRoles` bursts | T1580 | Cloud infra discovery |
-| `organizations:ListAccounts` from an unknown role | T1538 + T1580 | Org-level discovery |
+| `iam:ListUsers` / `iam:ListAccessKeys` / `iam:ListRoles` / `sts:GetCallerIdentity` bursts | T1580 | Cloud infra discovery |
+| `organizations:ListAccounts` from an unknown role, or `ConsoleLogin` from a federated session with unusual IdP context | T1538 + T1580 | Org-level discovery / federated console-access anomaly |
 
 **Evidence.** Event-count rollup table registered as `--kind ir_evidence`
 (markdown with the SQL embedded), and an event-by-event timeline for
@@ -513,28 +513,15 @@ silently dropped.
 
 ## MITRE Technique Mapping
 
-The techniques below are the ones this skill is expected to recognize
-and assign on findings. Sub-technique IDs are used where applicable
-(`triage.md` rule 11).
-
-| Technique | Name | AWS signal |
-|-----------|------|------------|
-| `T1078.004` | Valid Accounts: Cloud Accounts | Long-term key / role abuse from a new ASN; assumed-role chain to an unknown federated source |
-| `T1098.001` | Account Manipulation: Additional Cloud Credentials | `iam:CreateAccessKey` on another user; `iam:CreateLoginProfile` (combined with T1136.003) |
-| `T1098` | Account Manipulation (broader) | `iam:PutUserPolicy` / `iam:AttachUserPolicy` / `iam:PutRolePolicy` / `iam:AttachRolePolicy` / `iam:UpdateAssumeRolePolicy` |
-| `T1136.003` | Create Account: Cloud Account | `iam:CreateUser`, `iam:CreateLoginProfile` |
-| `T1213.002` | Data from Information Repositories: SharePoint/S3 | `s3:GetObject` burst from new ASN against documented data buckets |
-| `T1485` | Data Destruction | `kms:ScheduleKeyDeletion`, `s3:DeleteObject` / `s3:DeleteBucket` against backup or production buckets |
-| `T1496` | Resource Hijacking | `ec2:RunInstances` with cryptomining-shape instance type (large GPU / many-CPU) in a never-used region |
-| `T1525` | Implant Internal Image | `lambda:UpdateFunctionCode`, `lambda:CreateFunction` with admin role, `ec2:RunInstances` from an attacker AMI |
-| `T1538` | Cloud Service Dashboard | `ConsoleLogin` from a federated session whose IdP context is unusual; `organizations:ListAccounts` |
-| `T1550.001` | Use Alternate Authentication Material: Application Access Token | `sts:GetFederationToken` forge from a stolen long-term key |
-| `T1552.001` | Unsecured Credentials: Credentials In Files | `secretsmanager:GetSecretValue` / `ssm:GetParameter` outside the role's baseline access pattern |
-| `T1552.005` | Unsecured Credentials: Cloud Instance Metadata API | `ec2RoleDelivery=1.0` (IMDSv1) on an instance whose ID is not in the legacy register |
-| `T1556` | Modify Authentication Process | `additionalEventData.MFAUsed=No` on a privileged action where policy would normally require MFA |
-| `T1562.001` | Impair Defenses: Disable or Modify Tools | `guardduty:DeleteDetector` / `UpdateDetector --no-enable`, `config:StopConfigurationRecorder` |
-| `T1562.008` | Impair Defenses: Disable Cloud Logs | `cloudtrail:StopLogging`, `cloudtrail:DeleteTrail`, `cloudtrail:PutEventSelectors` (narrowing scope) |
-| `T1580` | Cloud Infrastructure Discovery | `iam:ListUsers` / `iam:ListAccessKeys` / `iam:ListRoles` / `sts:GetCallerIdentity` bursts |
+Technique assignment happens inline, at the step that produces the signal —
+not in a separate lookup table. Step 1's identity decision tree assigns
+`T1552.005` (IMDSv1) and `T1556` (MFA-gap on a privileged action); Step 4's
+table above is the consolidated index for the control-plane techniques
+(`T1078.004`, `T1098`, `T1098.001`, `T1136.003`, `T1496`, `T1525`, `T1538`,
+`T1550.001`, `T1552.001`, `T1562.001`, `T1562.008`, `T1580`); Step 5 assigns
+`T1213.002` and `T1485` for data-plane impact, corroborated by Step 6's
+network pivot. Sub-technique IDs are used where applicable (`triage.md`
+rule 11).
 
 ## Known-benign register additions
 
@@ -706,8 +693,8 @@ a malformed dispatch the verifier rejects.
    vigil assess artifact mark-scratch <artifact-id>
    ```
 
-4. **Log the handoff entry.** Use the verb `vigil assess log` (the
-   legacy shorthand with a trailing `-entry` does not route).
+4. **Log the handoff entry.** Use the verb `vigil assess log` (see
+   Activity Log Convention above for the shorthand pitfall).
 
    ```bash
    vigil assess log <agent-name> "aws-cloudtrail-handoff" \

@@ -1,5 +1,6 @@
 ---
 description: Vendor exact-version triangulation — npm/pypi/maven publish-date probes, Sentry release-tag → git-SHA recipes, per-vendor mapping examples
+skill: osint-recon
 ---
 
 # Vendor Exact-version Fingerprint Probes

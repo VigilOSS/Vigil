@@ -2,6 +2,7 @@
 name: aws-iam-privesc
 description: Enumerate and exploit AWS IAM privilege escalation paths — dangerous policy combinations, role chaining, and credential abuse
 origin: Vigil
+vuln_class: bfla
 ---
 
 # AWS IAM Privilege Escalation
@@ -117,7 +118,7 @@ aws iam attach-user-policy --user-name backdoor --policy-arn arn:aws:iam::aws:po
 - Cross-account trust relationships
 - IMDS version and retrieved credentials
 - Persistence mechanisms established
-- Full command output for each successful escalation step — confirming an IAM permission exists is not enough; you must show the **attacker outcome** (e.g., `iam:CreatePolicyVersion` was used to attach `*:*` to the current user, and `aws s3 ls s3://prod-data-bucket` then returned 2,400 customer records; `sts:AssumeRole` escalated to the `Admin` role whose `get-caller-identity` confirms full account control; IMDS credentials for role `EC2InstanceRole` granted `s3:GetObject` on the production secrets bucket)
+- Full command output for each successful escalation step — prove the attacker outcome (`agent/rules/hunting.md` §2), e.g., `iam:CreatePolicyVersion` was used to attach `*:*` to the current user, and `aws s3 ls s3://prod-data-bucket` then returned 2,400 customer records; `sts:AssumeRole` escalated to the `Admin` role whose `get-caller-identity` confirms full account control; IMDS credentials for role `EC2InstanceRole` granted `s3:GetObject` on the production secrets bucket
 
 ## Kill Signals — Stop Testing When
 - get-caller-identity shows no IAM permissions (AccessDenied on all enumeration) → credentials may be expired or invalid, verify and move on

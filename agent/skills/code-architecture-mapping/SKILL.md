@@ -249,10 +249,16 @@ Using ctags + grep (supplemented by structural index when available):
    a. Read the function body
    b. Identify all function calls
    c. For each call: resolve to definition via ctags (grep '^<function>\t' tags)
-   d. Record edge: {caller: {function, file, line}, callee: {function, file, line}}
-   e. Note which arguments carry untrusted data (from slot-type annotations in Step 10)
-   f. Note if edge crosses a module boundary (from Step 6)
-   g. Recurse into callee (up to depth 3 from entry point)
+   d. Record the edge using the flat fields the operator spec and
+      `agent/phases/code-phase-1-classify-map.md` "Cross-module call graph" expect:
+      `caller_func`, `caller_file`, `caller_line`, `callee_func`, `callee_file`, `callee_line`,
+      `crosses_trust_boundary` (bool, from Step 6's module-boundary map), `untrusted_data_label`
+      (string naming which arguments carry untrusted data, from Step 10's slot-type annotations,
+      or `null`)
+   e. Recurse into the callee, tracing as deep as the chain actually runs — to a leaf function, a
+      security-relevant decision, a state transition, or a sink, not to a fixed depth. If you stop
+      before reaching one of those (context budget, unresolvable indirection), record where and
+      why in `audit_metadata` rather than silently truncating.
 
 2. **Reverse trace from critical functions and security-relevant operations**:
    For each critical/high file's exported functions:
@@ -260,27 +266,30 @@ Using ctags + grep (supplemented by structural index when available):
    b. Record reverse edges
    c. This identifies which entry points can reach each critical function
 
-3. **Build adjacency list**:
+3. **Build adjacency list** — one edge per entry, flat fields only:
    ```json
    {
      "edges": [
        {
-         "caller": {"function": "...", "file": "...", "line": N},
-         "callee": {"function": "...", "file": "...", "line": N},
-         "untrusted_args": ["arg1", "arg3"],
-         "crosses_module": true/false,
-         "edge_type": "direct|callback|vtable"
+         "caller_func": "handle", "caller_file": "daemon.c", "caller_line": 887,
+         "callee_func": "run_service", "callee_file": "daemon.c", "callee_line": 740,
+         "crosses_trust_boundary": false,
+         "untrusted_data_label": "client_addr, req_buf",
+         "edge_type": "direct"
        }
      ],
     "entry_points": [...],
     "critical_targets": [...]
    }
    ```
+   `edge_type` (`direct` / `callback` / `vtable`) is additive to the required flat fields above —
+   keep it, it is the only signal that distinguishes a resolved direct call from an indirect one
+   worth flagging as lower-confidence.
 
 4. **Mark indirect calls**:
    Function pointer calls, vtable dispatches, and callback invocations are
-   harder to resolve. Mark these as edge_type "callback" or "vtable" and
-   list the possible targets if determinable from type analysis.
+   harder to resolve. Set `edge_type` to `"callback"` or `"vtable"` and
+   list the possible targets in `untrusted_data_label` or a sibling note if determinable from type analysis.
 
 Record every ctags/grep lookup used in audit_metadata.
 

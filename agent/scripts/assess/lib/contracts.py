@@ -314,7 +314,6 @@ def validate_specialist_dispatch_contract(
     payload: Any,
     *,
     engagement_dir: str | None = None,
-    allow_no_skills: bool = False,
 ) -> tuple[list[str], list[str]]:
     """Validate a parsed specialist dispatch payload.
 
@@ -327,10 +326,12 @@ def validate_specialist_dispatch_contract(
     The engagement-wide ``scope_enforcement: bypass`` disables this target
     allow/deny gate just as it does at execution and standalone ingest.
 
-    L2-2 / L3-6: when ``allow_no_skills`` is set, a missing ``skills`` list is
-    downgraded from an error to a WARNING so ad-hoc roles have a real escape
-    valve (``vigil assess agent start --allow-no-skills``) rather than a hard
-    block on a self-attested signal.
+    A missing ``skills`` list is a WARNING, never an error. A specialist chooses
+    its skills from what it observes on the surface, so the honest skill list is
+    only known once the dispatch has run — requiring it up front would force the
+    operator to guess a vulnerability class before the hunt and cap the
+    specialist at that guess. The dispatch row records what the operator knew at
+    dispatch time; the specialist reports what it actually loaded in its handoff.
 
     Returns ``(errors, warnings)``.
     """
@@ -396,18 +397,12 @@ def validate_specialist_dispatch_contract(
 
     if role_name and role_name.lower() not in _DISPATCH_ROLES_WITHOUT_SKILLS:
         if not skills_list:
-            if allow_no_skills:
-                warnings.append(
-                    f"skills not set for role '{role_name}'; proceeding because "
-                    "--allow-no-skills was passed. The dispatch row will carry no "
-                    "skill audit — list skills from `vigil assess list-skills` when possible."
-                )
-            else:
-                errors.append(
-                    f"skills is required for role '{role_name}'; "
-                    "list at least one skill name from `vigil assess list-skills` "
-                    "(or pass --allow-no-skills for an ad-hoc role)"
-                )
+            warnings.append(
+                f"skills not set for role '{role_name}'; the dispatch row carries no "
+                "skill audit. Set --skills when you already know which skill applies; "
+                "otherwise the specialist selects one from the surface and names it in "
+                "its handoff."
+            )
 
     if skills_list:
         skills_root = _agent_skills_root()
@@ -3111,7 +3106,7 @@ def _dispatch_root_contract() -> CommandContract:
             "Dispatch state lives in the orchestrator backend. `agent start` logs a dispatch, "
             "`agent done` patches lifecycle directly, `agent handoff` writes a repeatable checkpoint, `agent close` consumes a ready/blocked handoff into closure, and `agent render-handoff` assembles the blob the next dispatch prompt pastes verbatim.",
             "`agent start` defaults a missing --dispatch-mode from the role (warn, not block) and accepts a newly-coined mode (advisory warn). "
-            "Pass --allow-no-skills to proceed for an ad-hoc role with no --skills (warn, not error), and --check-overlap to opt into the advisory in-progress-overlap scan.",
+            "--skills is optional: set it when the applicable skill is already known, otherwise the specialist selects one from the surface and names it in its handoff. Pass --check-overlap to opt into the advisory in-progress-overlap scan.",
             "`agent start` also lints --task for a prescriptive 'technique cage' — a step-by-step recipe that caps a specialist's depth (>=2 of: a numbered/bulleted step list, a run of imperative test-verbs, a pre-named vuln class). This is WARN-only and NEVER blocks the dispatch; the fix is to hand the specialist the measured coverage picture instead of a script via `vigil assess coverage --host <h> --for-dispatch` (paste the COVERAGE block) plus an open objective.",
             f"Verbs with their own contract entries: {', '.join(AGENT_VERBS)}.",
         ),

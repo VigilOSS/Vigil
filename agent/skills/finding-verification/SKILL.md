@@ -47,7 +47,7 @@ review:
   (chainable into a higher-severity outcome, or a disposition call close enough to the
   high/medium boundary that a wrong verdict matters). Run the full Methodology below.
 - **Tier 2 — cheap spot-check.** Every ordinary MEDIUM/LOW that isn't Tier 1. Do not skip these
-  in silence. Run the severity↔CVSS band audit (`agent/rules/hunting.md` §20 — `severity` vs.
+  in silence. Run the severity↔CVSS band audit (`agent/operator-core.md` "Mandatory Phase-Exit Passes" — `severity` vs.
   `details.cvss_score` band mismatch) plus a quick evidence-presence sanity check: is there a
   captured request/response or command output backing the claim, or is `evidence_type` marked
   `theoretical` without a `chain_required` rationale? This is a few-minute audit, not a re-run of
@@ -135,8 +135,9 @@ the corrected severity/CVSS if changed, and — for survivors — confirmation t
 was authored into `details`. End with the review-scope summary: HIGH/CRITICAL all dispositioned
 (Tier 1); which MEDIUMs were reviewed at Tier 1 and why; which ordinary MEDIUM/LOW findings
 received the Tier-2 spot-check and whether any were promoted to Tier 1 on a band mismatch or
-missing evidence; the kill rate (if >50%, flag that Phase-4 dispatch context may be producing
-speculative findings).
+missing evidence; and the disposition counts. If most kills failed on the same check, name that
+pattern — a systematic failure mode says the Phase-4 dispatch context is producing a predictable
+class of speculative finding, which the operator can fix upstream.
 
 ## Root-Cause Review Mode (Phase 5 → 6 exit)
 
@@ -148,6 +149,5 @@ root as the broadest attacker-controllable cause. See "Root-Cause Review Mode" i
 ## Extended Resources
 
 - `agent/agents/vulnerability-analyst.md` — 8-Question Gate, Four Validation Gates, Chain-Only List
-- `agent/references/finding-fp-and-severity-gate.md` — C1–C7 FP & severity gate
 - `agent/skills/blind-triage/SKILL.md` — the zero-context pre-submission gate that re-applies the overclaim catalog on the submission bytes (this skill is the in-context Phase-5 version)
 - `agent/skills/code-finding-verification/SKILL.md` — the source-only analog (five-check protocol)

@@ -1,5 +1,6 @@
 ---
 description: "Example: LDAP injection bug bounty submission with working POC"
+skill: report-generation
 category: Disclosure & Reporting Formats
 ---
 

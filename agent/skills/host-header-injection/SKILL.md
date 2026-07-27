@@ -128,7 +128,7 @@ printf "GET / HTTP/1.1\r\nHost: target.example\r\nConnection: keep-alive\r\n\r\n
 - Injection vector (Host header, X-Forwarded-Host, double Host, other override header)
 - Exact request that triggers the behavior (full curl command with headers)
 - Where the injected value appears (response body, Location header, email link, cached response), or — for blind Host-based SSRF — the matched probe<->callback pair from `vigil oob poll --client <name> --json`
-- Impact: password reset token theft, cache poisoning serving attacker resources, internal service access, admin panel bypass — confirming the Host value is reflected is not enough; you must show the **attacker outcome** (e.g., password reset link in victim's email points to attacker domain and token was captured, poisoned cache entry serves attacker script to victim browsers, internal admin panel is accessible without authentication)
+- Impact: password reset token theft, cache poisoning serving attacker resources, internal service access, admin panel bypass — prove the attacker outcome (`agent/rules/hunting.md` §2), e.g., password reset link in victim's email points to attacker domain and token was captured, poisoned cache entry serves attacker script to victim browsers, internal admin panel is accessible without authentication
 - Whether override headers bypass Host-locked protections
 - Full request/response pairs for reproducibility
 

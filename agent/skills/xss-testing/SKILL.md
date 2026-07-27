@@ -408,7 +408,7 @@ Stored XSS requires a two-phase test: inject, then find every location where the
 
 ## Proof of Concept: Impact Escalation
 
-`alert(1)` proves execution. Engagement reports need impact — you must show the attacker outcome, not just code execution.
+`alert(1)` proves execution. Engagement reports need impact — prove the attacker outcome (`agent/rules/hunting.md` §2), not just code execution.
 
 Mint a callback host for the exfil payload (`vigil oob mint --client <name> --technique blind-xss --probe-kind exfil`), substitute the EXACT host it prints (`$OOB_HOST` — it already embeds the client id; never hand-build it) below, and confirm the steal landed with `vigil oob poll --client <name>`.
 

@@ -1,6 +1,9 @@
 # Shared Subagent Constraints -- Code Analysis Mode
 
-Load this file first -- before your role-specific skill and before any source code work.
+Load this file as part of your Load First set -- together with your role file and
+`agent/shared-specialist-core.md` -- before any source code work. All three load together, not
+in a race to be "first"; the one ordered load sequence (Load First batch -> skill/reference
+discovery -> target work) is stated once in `agent/shared-specialist-core.md` "Load Sequence".
 These rules apply to every code analysis specialist agent regardless of role.
 
 > **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
@@ -51,22 +54,14 @@ this is the canonical consumer lookup rule for every code specialist.
 Source code is read directly from the local filesystem via host Bash or Claude Code tools.
 This is NOT target-facing network work -- `vigil assess kali` is not needed for reading source files.
 
-**When code analysis does reach for `vigil assess kali ...`** (for example, a fuzz campaign or
-binary-triage pass that runs a tool through the runtime), the same coverage-check
-rule as the web mode applies: every call carries `engagement_key`/`agent_name`/`phase`
-and runs land in `assessment_command_runs`. Treat that history as a coverage
-map — a record of what harnesses/corpora/sanitizer configs have already been
-run so your next campaign picks a variant that hasn't been tried. Search with
-an unscoped query first so you see every agent's and every phase's prior work
-— `vigil assess command-run list --q <keyword> --show-matches` — and narrow
-with `--agent-name` or `--phase` only if the broad result is overwhelming.
-The only campaign to skip is the identical binary + corpus + flags combination
-already run to completion; any variant (new sanitizer, new dictionary, new
-seed corpus, harness change) is new coverage. Before citing a prior run,
-fetch its preview with `vigil assess command-run get <id>` —
-`success=true` only means `return_code=0`, and a campaign that exited cleanly
-under its time budget but produced no crashes is not the same as one that
-exhausted the search space. Full coverage-vs-duplicate decision table:
+**When code analysis does reach for `vigil assess kali ...`** (a fuzz campaign or binary-triage
+pass that runs a tool through the runtime), the same coverage-map discipline from
+`agent/shared-constraints.md` §2b applies unchanged: search `command-run list --q <keyword>
+--show-matches` before probing, and fetch a candidate's preview with `command-run get <id>` before
+citing it — `success=true` only means `return_code=0`, not that the run answered your question.
+The code-specific reading of "new coverage": the only campaign to skip is the identical binary +
+corpus + flags combination already run to completion — a new sanitizer, dictionary, seed corpus,
+or harness change is new coverage even against the same target. Full decision table:
 `agent/references/runtime-guides/command-history-auditing.md`.
 
 **Available tools:**
@@ -107,7 +102,9 @@ canonical slug under a lock and prints it on stdout. Use that returned slug in h
 analysis rows, and follow-up commands. Hand-authoring `CH-001` / `CV-001` style slugs in
 parallel dispatches risks collisions.
 
-**Code finding prefixes:**
+**Code finding prefixes:** this table is the sole canonical source for code finding-ID prefixes —
+`agent/shared-specialist-core.md`'s prefix table is offensive-role-only despite its "Offensive/code
+roles" header, and does not list these.
 
 | Agent | Prefix | Example |
 |---|---|---|
@@ -117,7 +114,10 @@ parallel dispatches risks collisions.
 | `code-vuln-verifier` | `VF` | `VF-001` (spot-check only — verifier updates existing findings, not new ones) |
 | `code-fuzz-engineer` | `CF` | `CF-001` |
 
-**Title formula:** `[Bug Class] in [file:line or component] allows [attacker role] to [impact]`
+**Title formula:** the canonical formula owned by `agent/shared-specialist-core.md` ("Finding IDs
+and the `finding record` Contract") applies unchanged: `[Bug Class] in [endpoint] allows [attacker
+role] to [impact] [victim/scope]`. For code findings, `[endpoint]` is realized as `[file:line or
+component]` (e.g., `lib/url.c:547`).
 
 CVSS↔severity ranges and the matching-adjustment rule are in `agent/shared-specialist-core.md`
 ("Finding IDs and the `finding record` Contract"). A memory corruption primitive with
@@ -223,6 +223,11 @@ Coverage must be explicit, but write-up depth can be proportional:
 - Obviously mechanical helpers can use concise `clean` dispositions once you have verified they
   do not hide sinks, trust-boundary assumptions, or material error behavior.
 
+Proportional write-up is never a license to skip the read or the check (§7): every function,
+mechanical-looking or not, is read in full and checked against sinks/trust-boundaries/error paths
+before its disposition prose gets to be brief. What shortens for a verified-mechanical helper is
+the write-up, not the analysis behind it.
+
 Record dispositions via `vigil assess code-record analysis`.
 `finding` dispositions record durable finding state through `finding record`; `suspicious`,
 `clean`, and `needs-context` still record through `code-record analysis` so backend coverage knows
@@ -230,51 +235,54 @@ which functions were reviewed and why the queue can advance or re-dispatch.
 
 ---
 
-## 7. Anti-Rationalization Rules
+## 7. Read Before You Conclude
 
-Every code analysis agent must avoid these rationalizations. When you catch yourself
-thinking any of these, stop and apply the required action instead.
-
-| Rationalization | Why It Fails | Required Action |
-|---|---|---|
-| "I get the gist" | Gist-level misses edge cases | Read the code directly. Use structure-first triage, then line-by-line on risky or ambiguous spans |
-| "This function is simple" | Simple functions compose into complex bugs | Apply full analysis anyway |
-| "This looks safe" | Must verify, not assume | Trace every taint path to every sink |
-| "The guard seems sufficient" | Must verify on ALL paths | Check guard covers all branches |
-| "External call is probably fine" | External = potentially adversarial | Read the callee or model as hostile |
-| "I can skip this helper" | Helpers contain propagating assumptions | Trace full call chain |
-| "I don't see any issues" | Must document what was checked | List every pattern checked and why it does not apply |
+A verdict is only as good as the read behind it. Skimming for gist, assuming a simple-looking
+function stays simple once composed with others, trusting an unread external call or guard on
+faith, or calling a function "safe" without tracing its taint paths to their sinks — each of these
+substitutes an impression for a read. Before recording `clean` on anything — a whole function, a
+guard, a callee you decided not to open — read the code that verdict depends on and be able to
+name the specific line, type, or branch that makes the impression true. A `clean` verdict earns
+its keep by what it can point to, not by the absence of a bad feeling; "I don't see any issues"
+is not itself a disposition — name every pattern you checked and why it doesn't apply.
 
 Treat the entire call chain as one continuous execution flow. Never reset context between
 functions. A guard in function A does not protect function B unless B re-validates.
 
 ---
 
-## 8. Skills and References Are Methodology -- Required, Not Optional
+## 8. Skills Are Methodology; References Load By Signal
 
-**Step 1 -- Use the skill named in your dispatch payload, or run `vigil assess list-skills`**
-when you begin specialist work. The CLI walks `agent/skills/*/SKILL.md` frontmatter and prints
-each skill's compact description so you can pick the matching code-analysis skill without
-loading the full file. Load the chosen skill before doing any analysis.
+Your role's one always-applicable skill is MANDATORY in your Load First list — use the skill
+named in your dispatch payload, or run `vigil assess list-skills` if none was named, and load it
+before doing any analysis. That pairing does not change per dispatch.
 
-**Step 2 -- Read the skill's Extended Resources section.** Every code analysis skill lists
-specific reference files. Load them.
+Everything else in `agent/references/` is trigger-gated: load a specific reference when your
+reading surfaces the signal it matches, not as a blanket preload before you open a source file.
+Loading every plausible reference up front is the failure mode this section exists to prevent —
+under the old always-preload reading of this rule, a hunter dispatch spent ~109,000 tokens on
+skill + 23 CWE pattern files before opening a single source file.
 
-**Step 3 -- Load the CWE pattern references** from `agent/references/code-vuln-patterns/`
-matching the slot types and defect families in your dispatch context. The operator's
-slot-type to reference mapping table (in operator-core-code.md Phase 2) selects which
-files to include per dispatch.
+**CWE pattern references** from `agent/references/code-vuln-patterns/` are trigger-gated by slot
+type and code pattern: when your reading surfaces a signal (a parser over FILE-CONTENT, a crypto
+call, memory allocation with attacker-influenced size, an auth check, ...), load the matching
+file(s) yourself — list the directory or match filename to the observed signal. Do not load a
+file for a class the batch does not exhibit.
+
+**A skill's Extended Resources section is a menu, not a Step 2.** Read it when the skill's own
+procedure sends you to a specific reference, not as a blanket read-everything-first pass. A
+reference marked **(REQUIRED)** inside Extended Resources is required once that reference's
+trigger fires for this dispatch — before the finding/disposition it informs is recorded — not
+before you start reading.
 
 **References are not supplemental depth.** The `agent/references/code-vuln-patterns/` files contain:
 - "What SAST Already Catches (Skip These)" -- so you do not waste time on patterns static tools find
 - "What You're Hunting (LLM-Advantage Patterns)" -- the specific multi-function and semantic patterns only deep analysis can find
 - Language-specific idioms and real CVE examples that ground pattern matching in reality
 
-When a skill's Extended Resources section marks a reference as **(REQUIRED)**, you must load
-it before producing any findings or dispositions. Without it, your analysis lacks the pattern
-depth that distinguishes this pipeline from a static analysis tool.
-
-Only improvise after confirming the reference set is genuinely insufficient for the code under review.
+Reach for the matching reference rather than improvising the pattern when one exists for the code
+in front of you — it encodes CVE-grounded idioms and the SAST-blind-spot split you would otherwise
+have to rediscover per language.
 
 ---
 
@@ -342,41 +350,35 @@ Contract").
 
 The closing-sequence wrapper (resume-brief framing, unlinked-notes registration rule,
 `agent done`/`agent close` being operator-only, idempotent/checkpoint handoff framing, and the
-plan-state digest) is in `agent/shared-specialist-core.md`. This section adds only the
-code-family closing verb order below.
-
-Before your dispatch returns, run in this order:
-
-1. `vigil assess finding record <agent-name> <finding-json>` for each confirmed finding.
-2. `vigil assess code-record analysis <analysis-json>` for each queue item disposition, with
-   `queue_item_id`, `agent_name`, and `lease_token` from the fetched dispatch item.
-3. `vigil assess agent handoff --from-json <path>` — use the exact
-   `agent_id`, `agent_role`, and `phase` from the **Runtime Identity block** the
-   operator placed at the top of your dispatch prompt. The handoff row is keyed on
-   `agent_id`; using a different value creates an orphaned row the operator cannot render.
-   Set `handoff_status` to `ready` when the operator can close the dispatch, or
-   `blocked` when the objective could not complete.
-4. `vigil assess agent render-handoff <agent_id>` — self-check before exiting.
-   A 404 means the `agent_id` did not match the registered dispatch.
+plan-state digest) is in `agent/shared-specialist-core.md`. That wrapper applies to every code
+role; the exact numbered verb list is role-specific, not one universal sequence, because only
+`code-vuln-hunter` fetches and completes a queue item (`code-record analysis` /
+`code-dispatch done`) — `code-architect`, `code-variant-hunter`, `code-vuln-verifier`, and
+`code-fuzz-engineer` never hold a queue lease and have no `code-record analysis` step in their
+closing sequence. Every role's list is drawn from the same pool of backend writes this file
+documents (`finding record` §4, `code-record analysis` §6, `agent handoff` + `render-handoff`),
+instantiated with that role's own agent-name and ordering — see your role file's own `### Closing
+verbs` or `## Mandatory Closing Sequence` section for the exact sequence you run.
 
 ---
 
 ## 12. Coverage Integrity
 
-CWE coverage claims are cross-referenced against analysis-result rows at queue completion.
+The backend cross-references your `functions_analyzed` coverage claim against the actual
+analysis-result rows recorded for that queue item, and reports the comparison back as
+`coverage_integrity` on the `code-dispatch done` response.
 
-1. Record analysis results BEFORE
-   `code-dispatch done <item-id> <agent-name> <lease-token> <disposition> <coverage-json> [notes]`.
-   Result rows must exist when
-   the backend validates coverage claims.
-2. `functions_analyzed` in each coverage entry must be backed by result rows: at least
-   30% of claimed functions must have a distinct `function_name` in analysis results for
-   that queue item.
-3. Each file's coverage must reflect its specific functions, entry chains, and code
-   structure. Never copy-paste identical coverage arrays across files without per-file
-   analysis.
-4. Not-applicable entries (`disposition: "not_applicable"`) are exempt from backing
-   requirements.
+1. Record each function's analysis result via `code-record analysis` BEFORE calling
+   `code-dispatch done <item-id> <agent-name> <lease-token> <disposition> <coverage-json>
+   [notes]` — the backend derives the comparison from result rows that already exist at
+   completion time, not from the coverage JSON alone.
+2. A `functions_analyzed` count is only as informative as the distinct `function_name` values
+   behind it. The backend flags the claim as implausible when fewer than 30% of the claimed count
+   has a matching distinct-function result row for that queue item — write one result row per
+   function you actually dispose of, and the ratio takes care of itself.
+3. Each file's coverage should reflect that file's own functions, entry chains, and code
+   structure — assembled from this file's analysis, not adapted from another file's.
+4. Not-applicable entries (`disposition: "not_applicable"`) are exempt from the backing check.
 5. Use `analysis_effort` in per-file coverage detail as the trustworthy effort projection: it is
    derived from current nonsuperseded result rows, evidenced rows, distinct function names, and
    the structural-index function total rather than the submitted effort number alone.

@@ -121,9 +121,14 @@ Push-harder signals include:
 - A sibling route, method, or content-type behaves differently than the one you just tested — siblings are the fastest way to confirm or widen the finding
 - The response silently accepts an input shape the application shouldn't (alternate protocol, unexpected encoding, out-of-range value) without erroring — silent acceptance is almost never benign
 
-## 5. Exhaust the surface — rotate only when genuinely dry
+## 5. Exhaust the surface — depth over breadth, rotate only when genuinely dry
 
 Leave a surface only when it is genuinely dry: no meaningful routes, no privileged features, no object references, and no useful source intelligence after a *thorough* pass. "Slow" is not "dry" — do not rotate on a timer; rotate when you have actually exhausted the surface.
+
+One well-understood target is worth more than shallow passes over many: stay on it long enough to
+understand what the application actually values (its money-moving flow, its admin surface, its
+trust boundary) before moving to the next. A breadth-first sweep that touches everything once and
+nothing twice is exactly how the deep bug on the third surface gets missed.
 
 ## 5a. A human-reach determination is part of exhausting a surface
 
@@ -141,11 +146,18 @@ not the name — decides how you treat it.
 
 ## 6. Evidence beats volume
 
-Prefer a few decisive requests and exact proofs over broad noisy testing.
+A handful of decisive, exact requests that prove the primitive is stronger evidence than broad,
+repetitive testing across many inputs — once the first proof lands, reissuing it is noise, not
+rigor. This holds at the collection boundary too: once access to a data set is proven, one minimal
+sample is the whole of the evidence a finding needs. Pulling more records is not more proof, and
+the extra pull is itself the harm (`agent/shared-constraints.md` §4, "Proof-not-collection").
 
-## 7. Use skills before improvising
+## 7. Reach for the skill when the signal calls for it
 
-Load the most relevant skill first. Only improvise when the existing skill/reference set is genuinely insufficient.
+When a skill exists for the technique you're about to run, load it the moment the signal appears —
+it encodes harness specifics and calibration you cannot derive from general knowledge
+(`agent/shared-constraints.md` §3). This is trigger-gated, not a mandatory pre-work gate: you are
+not blocked on having pre-loaded every skill before starting.
 
 ## 8. Automation for recon, judgment for validation
 
@@ -153,7 +165,11 @@ Use automation to enumerate and classify. Use deliberate human-guided validation
 
 ## 9. The sibling rule
 
-When one route, method, or controller path is vulnerable, inspect its siblings before moving on.
+When one route, method, content-type, or controller path is vulnerable, its siblings sharing the
+same code path are the highest-probability next test — a vulnerable pattern is rarely unique to
+the one instance you happened to test first. Walk every sibling before moving to a new surface;
+this is what the Verify → Exploit variant/sibling pass (`agent/operator-core.md` Mandatory
+Phase-Exit Passes) checks for at phase exit.
 
 ## 10. Think in chains
 
@@ -161,15 +177,19 @@ Use bug A as a signal for B and C nearby; follow the cluster until it is genuine
 
 ## 11. Impact first
 
-Prioritize surfaces where broken auth, object reference drift, privileged writes, or trust-boundary confusion would matter.
+Prioritize surfaces where broken auth, object reference drift, privileged writes, or trust-boundary
+confusion would matter over surfaces where they wouldn't. This is not a style preference — these
+are the same families (`access-control`, `auth`, `injection`, `ssrf`, `file`) the depth ledger
+treats as BLOCK_HIGH (rule 25, below); weighting your own attention toward them here is the same
+judgment the terminal gate applies later, applied earlier when it's cheaper to act on.
 
-## 12. Depth over breadth
+## 13. Validate before writing — a report entry costs the same evidence bar as a finding
 
-One well-understood target or feature is worth more than shallow passes over many. Stay long enough to understand what the application actually values.
-
-## 13. Validate before writing
-
-Validate leads to reproducible, evidence-backed state before report drafting — a finding earns report space only when it is worth a human reader's time.
+Do not draft a finding, chain step, or remediation note from a lead that hasn't been pushed to a
+`tested`/`signal` probe-run verdict (§23) with recorded evidence. Writing the prose ahead of the
+evidence backfills confidence the testing never earned, and Phase 5's reviewer inherits the gap
+instead of catching it. A lead earns report space only after it clears the same bar rule 2 sets
+for a finding — proved attacker outcome, not existence alone.
 
 ## 14. Credentials require proof
 
@@ -265,34 +285,6 @@ When progress stalls, use this table to pick a concrete next action instead of g
 | The app is simple with few endpoints | Go deeper: test business logic, race conditions, multi-step workflow abuse, parameter pollution |
 | I confirmed a low-severity bug but can't chain it | Check if it enables a higher-impact primitive (open redirect -> OAuth theft, SSRF -> metadata, XSS -> admin panel) |
 | Tools are returning nothing useful | Stop automation, test manually. Read the JS source, map the API by hand, test one request at a time |
-
-## 18. Sub-Agent Dispatch Discipline
-
-> **Sub-agent dispatch discipline** (default-to-dispatch, inline only for
-> operator-scoped work, one-specialist/one-objective/one-skill-set): moved to
-> `agent/operator-core.md`'s "### Dispatch Discipline" section (under
-> "## Subagent Dispatch") — operator-only content, not a specialist read.
-
-## 19. Developer psychology heuristics
-
-> **Developer psychology heuristics** (feature-copy, flow-complexity, API
-> version drift, naming anomaly, error-response divergence, new-feature
-> window): moved to `agent/rules/mindsets/developer.md` — load it as your
-> generative lens for hypothesis generation.
-
-## 20. Severity-CVSS alignment audit before report
-
-> **Severity-CVSS alignment audit before report:** moved to
-> `agent/operator-core.md`'s "### Mandatory Phase-Exit Passes" section —
-> operator-only content, not a specialist read.
-
-## 21. Stale-text scrub before publishing
-
-> **Stale-text scrub before publishing:** moved to the "Stale-text scrub clean"
-> Definition-of-Done item in `agent/phases/phase-8-report.md`, with the
-> executable recipe under "### Stale-text scrub (runs before every QA pass)"
-> in `agent/skills/report-generation/SKILL.md` — operator/report-writer
-> content, not a specialist read.
 
 ## 22. Smallest probe that answers the question
 
@@ -433,7 +425,7 @@ may have been an `http=000` transport error (c); a "clean" may have been a statu
 never read the body (a); a "gated"/"not-present" may have been a WAF challenge page never
 re-rendered in a browser (d).
 
-## 23a. Aggregate-rate discipline — a shared egress IP sees the SUM of every concurrent dispatch (a sibling rule to §23; not that section's sub-clause 23(a))
+## 23a. Aggregate-rate discipline — a shared egress IP sees the SUM of every concurrent dispatch
 
 A WAF-fronted estate rate-limits (or hard-blocks) the shared runtime egress IP, not any single
 dispatch — four agents each issuing a "safe" 5 r/s look like one client doing 20 r/s at the

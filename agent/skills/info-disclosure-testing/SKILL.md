@@ -319,7 +319,7 @@ For each disclosure finding:
 - **Exact location** — URL, header name, response body offset, or file path
 - **What was disclosed** — the specific data, not just "sensitive information"
 - **Value tier** — Critical/High/Medium/Low per the tiers above
-- **Validation** — for credentials, did you verify they work? For internal architecture, does it reveal something the attacker could not otherwise discover? Confirming a file or endpoint is exposed is not enough — you must show the **attacker outcome** (e.g., the leaked database password authenticated against MySQL and returned all customer records, the exposed JWT signing secret was used to forge an admin token that accessed `/admin/users`, the actuator/heapdump contained cleartext AWS access keys that granted S3 read access on the production bucket)
+- **Validation** — for credentials, did you verify they work? For internal architecture, does it reveal something the attacker could not otherwise discover? Confirming a file or endpoint is exposed is not enough — prove the attacker outcome (`agent/rules/hunting.md` §2), e.g., the leaked database password authenticated against MySQL and returned all customer records, the exposed JWT signing secret was used to forge an admin token that accessed `/admin/users`, the actuator/heapdump contained cleartext AWS access keys that granted S3 read access on the production bucket
 - **Chain potential** — which other test classes does this disclosure feed? (e.g., actuator/mappings reveals hidden admin API -> test for auth bypass; .git repo reveals JWT secret -> forge tokens)
 
 Severity mapping:

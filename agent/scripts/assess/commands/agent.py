@@ -116,12 +116,6 @@ def register(subparsers) -> None:
     p.add_argument("--from-json", dest="from_json", default=None)
     p.add_argument("--allow-duplicate", dest="allow_duplicate", action="store_true")
     p.add_argument(
-        "--allow-no-skills",
-        dest="allow_no_skills",
-        action="store_true",
-        help="(start) Allow a specialist dispatch with no --skills; emits a WARN instead of erroring.",
-    )
-    p.add_argument(
         "--check-overlap",
         dest="check_overlap",
         action="store_true",

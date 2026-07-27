@@ -22,14 +22,20 @@ One order, so "load this file first" claims across the Load First set don't comp
 other:
 
 1. **Load First batch.** Read your role file's `## Load First` "MANDATORY" list in one pass —
-   this file, `agent/shared-constraints*.md`, the rules files, and the skill(s) your dispatch
-   names. These load together as one set; none of them is "first" ahead of the others.
-2. **Skill + reference discovery** (`agent/shared-constraints.md` §3) — immediately after the
-   Load First batch, run `vigil assess list-references` (add `--skill <name>` to filter) to find
-   and load the paired references for your named skill(s). `list-commands` / `list-skills` (see
-   "Command & Skill Discovery" below) are the same one-time "learn the shape of the surface"
-   pass — run them in this step, not as a separate later "first."
-3. **Target-facing work begins only after 1 and 2 are complete.**
+   this file, `agent/shared-constraints*.md`, `hunting.md`, `adversarial-mindset.md`, your
+   dispatch's mindset lens, and — for a role whose `## Load First` names one — the role's single
+   always-applicable methodology skill (`agent/shared-constraints.md` §3's MANDATORY exception,
+   e.g. `surface-collector` ↔ `surface-collection`). This is the methodology layer; these load
+   together as one set before any target-facing work, and none of them is "first" ahead of the
+   others.
+2. **Learn the shape of the surface, once.** Run `vigil assess list-commands` / `list-skills` /
+   `list-references` (see "Command & Skill Discovery" below) so you can recall the right category
+   later — a one-time orientation pass, not a mandate to read every skill/reference it lists.
+3. **Skills and references load on-signal, throughout the task — never a gate before target work.**
+   A skill named in your dispatch loads before you act on that signal; a skill you discover
+   mid-task because a signal appeared (a lead, an unfamiliar input shape, a new lens) loads then,
+   the same way (`agent/shared-constraints.md` §3). Target-facing work begins once step 1 is done
+   and is never blocked on having pre-loaded every skill or reference you might eventually need.
 
 ---
 

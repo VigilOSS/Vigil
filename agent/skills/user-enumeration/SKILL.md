@@ -354,7 +354,7 @@ generalisation of the two-request `diff` shown in §2–§5.
 - **Enumerable interface**: protocol, endpoint/address, parameter
 - **Observable difference**: what exactly changes (message, code, size, timing, structure)
 - **Valid vs invalid response**: exact diff or description
-- **Confirmed valid users**: any usernames/emails/phones confirmed to exist — confirming the endpoint is enumerable is not enough; you must show the **attacker outcome** (e.g., the password reset error "Email not registered" vs "Reset link sent" confirmed 8 valid email addresses from the company directory, and those addresses were used to successfully credential-stuff 2 accounts from the breach list; the timing oracle (valid user 230ms, invalid 18ms average) confirmed `admin@target.example` exists with no rate limiting, making brute-force of that account feasible in under 2 minutes at 100 req/s)
+- **Confirmed valid users**: any usernames/emails/phones confirmed to exist — prove the attacker outcome (`agent/rules/hunting.md` §2), e.g., the password reset error "Email not registered" vs "Reset link sent" confirmed 8 valid email addresses from the company directory, and those addresses were used to successfully credential-stuff 2 accounts from the breach list; the timing oracle (valid user 230ms, invalid 18ms average) confirmed `admin@target.example` exists with no rate limiting, making brute-force of that account feasible in under 2 minutes at 100 req/s
 - **Rate limiting**: whether the interface has brute-force protection
 - **Severity**: MEDIUM if enumerable + no rate limit, LOW if enumerable with rate limit
 

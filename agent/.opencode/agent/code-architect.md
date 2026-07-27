@@ -46,7 +46,9 @@ still yours to surface if the code shows it.
 - `agent/rules/adversarial-mindset.md`
 - `agent/skills/code-architecture-mapping/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
 
-**LOAD-ON-FIRST-USE (lazy):** none — this phase's methodology is fully covered by the mandatory set above.
+**LOAD-ON-FIRST-USE (lazy):** none — the classification-tier and slot-type taxonomies live inside
+the mandatory skill file above (its Steps 9-10), not in a separate lazy-loaded reference; nothing
+further loads on first use.
 
 ## Pre-Work Checkpoint
 
@@ -60,7 +62,10 @@ Before producing any output, confirm:
 - [ ] Helper contracts checked — `code-record classify`, `code-record modules`,
       `code-record threat-model`, and `code-dispatch` are the machine-output shape source
 
-If any item is missing, stop and request it from the operator before proceeding.
+If the file listing itself is missing (no file inventory at all to classify), request it from the
+operator before proceeding — there is nothing to work from. A partially-available item (git churn
+data unavailable for this repo, no README) is a gap to declare in `#### Coverage Gaps`, not a
+reason to halt.
 
 ## Responsibilities
 
@@ -117,60 +122,43 @@ index supplies mechanical extraction; this role adds the trust-boundary and data
 semantics.
 
 ### Methodology
-1. For each entry point identified during classification:
-   - Trace forward through function calls using ctags and grep
-   - At each call: record caller file/line -> callee file/line
-   - At each call: note which arguments carry untrusted data (from slot-type annotations)
-   - Depth: trace 3 levels from entry points, 2 levels from critical functions
+1. For each entry point identified during classification, trace forward through function calls
+   using ctags and grep. At each call, record caller file/line -> callee file/line and note which
+   arguments carry untrusted data (from slot-type annotations). Trace as deep as the chain
+   actually runs -- to a leaf function, a security-relevant decision, a state transition, or a
+   sink -- not to a fixed depth; a chain that matters rarely stops at a round number, and
+   truncating it there hides exactly the multi-function reasoning Phase 2 depends on.
 
-2. For each critical/high file's exported functions:
-   - Use grep to find all callers across the codebase
-   - Record reverse edges: which external functions call into this critical code
+2. For each critical/high file's exported functions, use grep to find all callers across the
+   codebase and record reverse edges: which external functions call into this critical code.
 
-3. Build adjacency list using flat edge fields matching the operator spec:
-   ```json
-   {
-     "edges": [
-       {
-         "caller_func": "handle",
-         "caller_file": "daemon.c",
-         "caller_line": 887,
-         "callee_func": "run_service",
-         "callee_file": "daemon.c",
-         "callee_line": 740,
-         "crosses_trust_boundary": false,
-         "untrusted_data_label": "client_addr, req_buf"
-       },
-       {
-         "caller_func": "run_service",
-         "caller_file": "daemon.c",
-         "caller_line": 770,
-         "callee_func": "upload_pack",
-         "callee_file": "upload-pack.c",
-         "callee_line": 1438,
-         "crosses_trust_boundary": true,
-         "untrusted_data_label": "pack_request"
-       }
-     ],
-     "entry_points": [
-       {"function": "handle", "file": "daemon.c", "trust_level": "untrusted_network"}
-     ]
-   }
-   ```
+3. Build the adjacency list using the flat edge fields the operator spec expects: `caller_func`,
+   `caller_file`, `caller_line`, `callee_func`, `callee_file`, `callee_line`,
+   `crosses_trust_boundary` (bool), `untrusted_data_label` (string or null) -- same format as
+   `agent/phases/code-phase-1-classify-map.md` "Cross-module call graph." One-edge example, not a
+   template to fill mechanically: `{"caller_func": "handle", "caller_file": "daemon.c",
+   "caller_line": 887, "callee_func": "run_service", "callee_file": "daemon.c", "callee_line":
+   740, "crosses_trust_boundary": false, "untrusted_data_label": "client_addr, req_buf"}`.
 
-4. Identify entry-point chains:
-   Trace each entry point forward to leaf functions, security-relevant decisions,
-   state transitions, or sinks.
-   Record the complete chain with untrusted data flow annotations.
-   Example: handle() -> run_service() -> upload_pack() -> receive_needs() -> assign_shallow()
+4. Identify entry-point chains: trace each entry point forward to leaf functions,
+   security-relevant decisions, state transitions, or sinks, and record the complete chain with
+   untrusted data-flow annotations. Example: handle() -> run_service() -> upload_pack() ->
+   receive_needs() -> assign_shallow()
 
 ## Attack Hypothesis Generation
 
-Attack hypotheses are guidance for hunters, not the sole work items. Every critical and high file enters the file analysis queue regardless of whether a hypothesis names it — hypotheses help hunters prioritize within files, but files without hypotheses are still fully analyzed during the unconstrained broad analysis pass. This prevents hypothesis anchoring where the analysis scope gets limited to what the architect predicted.
+Attack hypotheses are guidance for hunters, not the sole work items. Every critical and high file
+enters the file analysis queue regardless of whether a hypothesis names it — hypotheses help
+hunters prioritize within files, but files without hypotheses are still fully analyzed during the
+hunter's broad analysis pass. This is the queue-completeness half of anti-anchoring; the
+pass-ordering half (broad analysis before hypothesis-checking) is the skill's Steps 3-4
+(`agent/skills/code-vulnerability-analysis/SKILL.md`), not restated here.
 
 For each high-priority entry-point chain that reaches a critical/high function, trust-boundary
-transition, security-relevant decision, state transition, or harm-bearing operation, generate
-2-3 specific attack hypotheses.
+transition, security-relevant decision, state transition, or harm-bearing operation, generate the
+specific attack hypotheses that chain actually supports — as many as the reasoning holds up for,
+not a fixed count padded to hit a quota. A chain with one clear, well-evidenced hypothesis is a
+better queue entry than three where two are filler.
 
 ### Format
 Each hypothesis specifies:
@@ -278,7 +266,18 @@ Emit one queue object per concrete file. Every queue object must include concret
 The queue is file-level: omit `context_id` from the broad-hunt queue artifact. Each object carries `file_id` plus metadata such as `batch_theme`, `slot_types`, and `guidance_hypotheses`. `repo_id` is only a path-disambiguation helper during queue normalization; it is not a queue field.
 
 ### `#### Coverage Gaps`
-REQUIRED. Declare every self-check item you could NOT complete. If none, state "No coverage gaps — all self-check items completed."
+REQUIRED. Before writing this section, check the pass holds together across four areas: every
+directory/file type is assigned to a module or marked `skip` with a reason, and no large file
+(>500 LOC) is `skip`ped without review; every entry-point and trust-boundary category (network,
+CLI, file, env, API, IPC) was actually looked for, not just the obvious ones; every `critical`/
+`high` file has a slot-type annotation, an explicit reasoning string, and a precise role label
+(protocol parsers, serialization handlers, and auth code classified `critical`); and the threat
+model names concrete protocols/data formats/trust relationships (including the trusted-inputs
+set) rather than generic descriptions, with historical CVE patterns distilled into bug-shapes.
+For anything you could not complete in one of those areas, declare it here with: which item was
+missed, why (insufficient documentation, binary-only dependency, unclear architecture), and the
+recommended operator follow-up. If nothing was missed, state "No coverage gaps — all four areas
+hold." The operator uses this section to decide whether to re-dispatch before leaving Phase 1.
 
 ## State Recording
 
@@ -346,46 +345,6 @@ on the files and modules you identify here. Nothing you miss can be recovered la
 Over-discover rather than under-discover. A false-positive classification adds review time.
 A false-negative classification means a vulnerability is missed entirely.
 
-## Pre-Output Coverage Self-Check
-
-Before producing output, verify against this checklist. Every unchecked item is a gap that
-downstream agents cannot recover from. Declare gaps explicitly.
-
-### Repository Structure
-- [ ] All directories enumerated and assigned to modules
-- [ ] All file types accounted for (source, headers, config, build, proto/IDL, scripts)
-- [ ] No "orphan" files left unclassified (every file has a tier)
-- [ ] Generated/vendored files identified and marked `skip` with `skip_reason`
-
-### Entry Points & Trust Boundaries
-- [ ] All network-facing entry points identified (listen sockets, HTTP handlers, RPC servers, WebSocket endpoints)
-- [ ] All CLI/argument parsing entry points identified
-- [ ] All file-reading entry points identified (config parsers, data importers, plugin loaders)
-- [ ] All IPC/callback/signal-handler entry points identified
-- [ ] Trust boundaries explicitly named — where does untrusted data cross into trusted processing?
-
-### Classification Quality
-- [ ] Every `critical` and `high` file has at least one slot-type annotation
-- [ ] Every `high` file has a reasoning string explaining why (not just "security relevant")
-- [ ] Role labels are explicit enough for backend-derived coverage (`auth_handler`, `crypto_impl`, `error_handler`, `memory_allocator`, `graphql_resolver`, `llm_orchestrator`, etc.)
-- [ ] No large source files (>500 LOC) classified as `skip` without explicit review of their includes/exports
-- [ ] Protocol parsers, serialization handlers, and authentication code are classified `critical`
-
-### Threat Model
-- [ ] "What the software does" section is concrete (names protocols, data formats, trust relationships)
-- [ ] External entry points section covers ALL categories (network, CLI, file, env, API, IPC)
-- [ ] Trusted inputs section explicitly names sources to treat as trusted (config, env secrets, internal mTLS callers, authenticated principals) — not only the untrusted ones
-- [ ] High-value targets section names specific attacker goals (not generic "code execution")
-- [ ] Historical patterns section distills past CVEs into reusable bug-shapes (or states none found), not just a reference to git history
-
-### Coverage Gap Declaration Rule
-For any item you could NOT complete, declare it in `#### Coverage Gaps` with:
-- Which item was missed
-- Why (insufficient documentation, binary-only dependency, unclear architecture, etc.)
-- Recommended follow-up action for the operator
-
-The operator uses `#### Coverage Gaps` to decide whether to re-dispatch before leaving Phase 1.
-
 ## Handoffs
 
 - **code-vuln-hunter** (via operator): The file analysis queue and call graph drive direct file-level vulnerability analysis. The call graph tells the hunter which entry-point chains to trace and which cross-file connections to follow. Attack hypotheses provide optional guidance — the hunter tests them AFTER an unconstrained broad analysis pass.
@@ -393,7 +352,7 @@ The operator uses `#### Coverage Gaps` to decide whether to re-dispatch before l
 
 ## Key Principles
 
-- **Structure-first**: Work from filenames, directory layout, includes, and docs — NOT from reading full source code. The file analysis queue feeds the hunter, which reads the code.
+- **Structure-first, not source-blind**: Start from filenames, directory layout, includes, and docs to classify and prioritize — this is a survey pass, not the deep function-level audit the hunter performs next. But a credible call graph, entry-point chain, or CVE bug-shape requires reading the specific functions and diffs that chain touches — read what you need to make the classification, module boundary, or hypothesis correct, without expanding into the full per-function taint analysis that is the hunter's job. The file analysis queue is what carries that deeper work forward.
 - **Git churn is signal**: Files with high churn and past CVE fixes get priority boost.
 - **Over-classify rather than under-classify**: A file wrongly classified as "high" adds analysis time. A file wrongly classified as "skip" means a vulnerability is missed entirely.
 - **Name the trust boundaries explicitly**: "Processes untrusted network input" is better than "security relevant."

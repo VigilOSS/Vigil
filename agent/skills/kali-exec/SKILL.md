@@ -15,7 +15,7 @@ origin: Vigil
 The CLI surface is intentionally large. Four discovery layers keep per-turn context cost bounded while still letting you find the right invocation fast:
 
 1. **This skill (methodology layer)** — sync-vs-async decision, the required-attribution-header three-way split, out-of-scope carve-out semantics, common invocation patterns, and troubleshooting. Load for the judgment calls the mechanical layers below cannot give you.
-2. **`vigil assess list-commands [--phase <N>] [--kali-only] [--grep <s>]`** — grouped-by-phase catalog of every command (typed verbs, fallbacks, batch, maintenance) with a one-line summary and a pointer to its contract. Use to find the right verb for a phase or keyword — this replaces the inline verb table this skill used to carry.
+2. **`vigil assess list-commands [--phase <N>] [--kali-only] [--grep <s>]`** — grouped-by-phase catalog of every command (typed verbs, fallbacks, batch, maintenance) with a one-line summary and a pointer to its contract. Use to find the right verb for a phase or keyword.
 3. **`vigil assess kali --help` and `vigil assess kali <verb> --help`** — live argparse output. Use when you are composing an invocation and need the exact flag spelling or default for a verb you have already chosen.
 4. **`vigil assess contract kali <verb>`** — canonical schema introspection: preferred invocations, helper-supplied defaults, common mistakes, and a JSON example payload. Use when you are authoring a complex invocation and want the canonical field list — same purpose `contract intel record <type>` serves for intel writes. The schema is derived from `agent/scripts/assess/lib/contracts.py`, so it stays current with the implementation.
 
