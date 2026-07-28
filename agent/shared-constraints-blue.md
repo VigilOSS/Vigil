@@ -7,9 +7,9 @@ work. These rules apply to every blue specialist.
 
 ## Authorization
 
-Tenant data access is authorized per the engagement's scope
-(`scope.json:customer`, `platforms`, `tenant_reference_paths`). Read-only
-telemetry pulls are permitted within the declared tenant. WRITE-class actions
+Tenant data access is authorized by the dispatch's `customer`, `platforms`, and
+`tenant_reference_paths` context. Read-only telemetry pulls are permitted within that
+tenant. WRITE-class actions
 (containment, account state mutations, filter deletions) require an
 operator-approved `vigil blue propose-contain` record, audited operator
 execution via `vigil assess host-exec`, then operator recording with
@@ -19,10 +19,11 @@ execution via `vigil assess host-exec`, then operator recording with
 
 ## 1. Authorization scope — tenant, not host
 
-The unit of scope in blue mode is the **tenant**, not the host. `scope.json`
-carries `customer` (the customer slug), `platforms` (one or more platform tags),
-and `tenant_reference_paths[]` (the resolved paths to per-customer-per-platform
-reference markdown). Confirm before any tenant-facing command:
+The unit of scope in blue mode is the **tenant**, not the host. The operator and
+`vigil blue dispatch` inject `customer` (the customer slug), `platforms` (one or
+more platform tags), and `tenant_reference_paths[]` (resolved paths to
+per-customer-per-platform reference markdown). Confirm before any tenant-facing
+command:
 
 - The customer slug matches the engagement you were dispatched for
 - The platform you are about to query is listed in `platforms`
@@ -197,8 +198,8 @@ command output so the operator can preserve evidence and retry recording.
 
 Forbidden — bypasses audit pipeline: raw host Bash hitting tenant APIs,
 ad-hoc `curl` against admin REST endpoints, `gcloud` / `gam` invocations
-outside the wrapper. The host boundary is for coordination (scope.json
-reads, JSON parsing, payload construction), not tenant traffic.
+outside the wrapper. The host boundary is for coordination (local engagement
+metadata reads, JSON parsing, payload construction), not tenant traffic.
 
 `host-exec` is required for tenant-facing commands. If it is unavailable,
 return a blocked handoff with a `runtime_issues[]` entry; do not run the
@@ -223,8 +224,8 @@ No host-exec required (no tenant data): `jq` over a registered artifact,
   HEALTH, META, LOG-READ, OTHER}`.
 - **`--phase <enum>`** — one of the blue phases: `intake`, `triage`,
   `investigate`, `verify`, `respond`, `report`. Pass the phase the dispatch
-  was authorized for, NOT `scope.json.current_phase` (which is operator state
-  and may have moved on between phases).
+  was authorized for, not the mutable operator phase (which may have moved on
+  between phases).
 - **`--scope-host <slug>`** — set to the tenant / customer slug. Never an IP
   or hostname in blue mode.
 - **`--target-host <id>`** — set when the command narrows to a specific
@@ -252,8 +253,8 @@ Specifically:
 - A finding that depends on cross-tenant evidence escalates rather than
   inheriting the other tenant's artifacts directly
 
-The escalation path: open a separate engagement for the second tenant under
-its own scope.json and link via `intel-note` references on both sides.
+The escalation path: open a separate engagement for the second tenant and link
+via `intel-note` references on both sides.
 
 ---
 
@@ -341,10 +342,10 @@ Blue handoffs include the following fields beyond the cross-mode baseline:
   `details_json.mitre_techniques`; redundant on purpose so the handoff
   is self-contained.
 - **`tenant_ref_paths_consulted`** — array of tenant ref paths the dispatch
-  actually loaded. Distinct from `scope.json:tenant_reference_paths[]` (which
-  is all available refs); this field records which ones the specialist read.
+  actually loaded. Distinct from the dispatch's available `tenant_reference_paths[]`;
+  this field records which ones the specialist read.
 - **`cross_platform_correlation_notes`** — present and non-empty when
-  `scope.json:platforms` has more than one entry; one-paragraph summary of
+  the dispatch names more than one platform; one-paragraph summary of
   how identity, time window, and IOCs correlate across platforms.
 
 A handoff missing `evidence_refs` for a finding with claimed evidence is a
@@ -509,8 +510,8 @@ see the response, only the handoff row.
   resume-brief` before any continuation.
 - `agent/skills/alert-fp-verification/SKILL.md` — five-check protocol and the
   Multi-Perspective Voting Protocol for `escalated` dispositions.
-- `agent/references/tenants/<customer>-<platform>.md` — the tenant ref the
-  dispatch was scoped to; resolved into `scope.json:tenant_reference_paths[]`.
+- `agent/references/tenants/<customer>-<platform>.md` — the tenant ref injected
+  for this dispatch.
 - `agent/references/runtime-guides/handoff-schema.md` — canonical handoff JSON
   schema (cross-mode).
 - `agent/references/runtime-guides/command-history-auditing.md` — the coverage-

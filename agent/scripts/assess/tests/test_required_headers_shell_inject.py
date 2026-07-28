@@ -20,9 +20,7 @@ from __future__ import annotations
 import shlex
 
 import pytest
-
 from assess.lib import kali, kali_output
-
 
 HDR = {"X-Bug-Bounty": "vigiloss"}
 
@@ -236,7 +234,7 @@ def test_direct_non_injectable_still_warns() -> None:
     # wafw00f IS an HTTP-to-target tool but its ``-H``/``--headers`` flag reads a
     # FILE, not an inline ``Name: Value`` (verified: an inline value errors
     # "Headers file ... does not exist"), so it cannot carry the attribution
-    # header on the argv — it WARNs (and the Layer-2 backstop is its safety net).
+    # header on the argv — it warns without blocking execution.
     cmd = ["wafw00f", "https://example.com"]
     status = kali_output._apply_required_headers(cmd, "wafw00f", dict(HDR))
     assert status == "warned"

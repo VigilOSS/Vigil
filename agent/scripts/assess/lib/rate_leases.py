@@ -25,7 +25,7 @@ def aggregate_rate_reservation(
     execution_policy: dict[str, Any],
 ) -> float | None:
     """Return the rate this target-facing run must reserve, if configured."""
-    if not execution_policy.get("checked_targets") and not execution_policy.get("target_facing"):
+    if not execution_policy.get("target_facing"):
         return None
     scope_doc = scope_lib.load_scope(engagement_dir)
     aggregate_cap = scope_lib.aggregate_rate_limit(scope_doc)

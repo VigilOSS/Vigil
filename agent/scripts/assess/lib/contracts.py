@@ -136,18 +136,6 @@ _SPECIALIST_DISPATCH_REQUIRED_FIELDS: tuple[str, ...] = ()
 _DISPATCH_ROLES_WITHOUT_SKILLS: frozenset[str] = frozenset({"operator"})
 
 
-# Roles whose dispatches must target a host that is actually in scope. OSINT
-# and recon are intentionally NOT here: OSINT is permissible against
-# adjacent/related domains (cert chains, DNS history, GitHub mirrors), and
-# recon-specialist fingerprinting fires before scope-host is even meaningful.
-# Vulnerability-analyst and exploit-developer probe live targets, so their
-# scope_host must be in `scope.json` hosts (with wildcard semantics applied).
-_SCOPE_GATED_ROLES: frozenset[str] = frozenset({
-    "vulnerability-analyst",
-    "exploit-developer",
-})
-
-
 def _agent_skills_root() -> Path:
     """Resolve agent/skills/ relative to this file or VIGIL_REPO_ROOT.
 
@@ -312,19 +300,8 @@ def _detect_technique_cage(task: str) -> list[str]:
 
 def validate_specialist_dispatch_contract(
     payload: Any,
-    *,
-    engagement_dir: str | None = None,
 ) -> tuple[list[str], list[str]]:
     """Validate a parsed specialist dispatch payload.
-
-    When ``engagement_dir`` is provided, additionally check that ``scope_host``
-    is in the engagement's ``scope.json`` ``hosts`` for scope-gated roles
-    (``vulnerability-analyst``, ``exploit-developer``). This prevents the
-    operator-side mistake of dispatching active probing against a related-but-
-    out-of-scope domain that recon surfaced. OSINT and recon are NOT gated
-    because they legitimately reach adjacent/related domains during discovery.
-    The engagement-wide ``scope_enforcement: bypass`` disables this target
-    allow/deny gate just as it does at execution and standalone ingest.
 
     A missing ``skills`` list is a WARNING, never an error. A specialist chooses
     its skills from what it observes on the surface, so the honest skill list is
@@ -415,55 +392,6 @@ def validate_specialist_dispatch_contract(
                         "— typo or repo-relative path mismatch?"
                     )
 
-    # Scope-host gate for active-probing roles. Imported lazily so the
-    # contracts module stays importable in test/CI contexts that do not have
-    # an engagement directory layout. Missing scope.json silently skips the
-    # gate — other paths surface that error; the validator should not
-    # duplicate it. Malformed scope.json (exists but unparseable) warns.
-    if engagement_dir and role_name and role_name.lower() in _SCOPE_GATED_ROLES:
-        scope_host = payload.get("scope_host")
-        if isinstance(scope_host, str) and scope_host.strip():
-            scope_path = Path(engagement_dir) / "scope.json"
-            if scope_path.is_file():
-                try:
-                    from .scope import (
-                        host_admitted,
-                        host_in_scope,
-                        load_scope,
-                        out_of_scope_entries,
-                        scope_enforcement,
-                        scope_entries,
-                    )
-                    scope = load_scope(engagement_dir)
-                    entries = scope_entries(scope)
-                    deny = out_of_scope_entries(scope)
-                except (SystemExit, ValueError, OSError) as exc:
-                    warnings.append(f"scope_host gate skipped: {exc}")
-                else:
-                    probed_host = scope_host.strip()
-                    if (
-                        scope_enforcement(scope) != "bypass"
-                        and entries
-                        and not host_admitted(probed_host, entries, deny)
-                    ):
-                        if host_in_scope(probed_host, entries):
-                            # Host IS in the allowlist but is carved out by an
-                            # out_of_scope denylist entry — distinct, sharper error.
-                            errors.append(
-                                f"scope_host '{scope_host}' matches an out_of_scope "
-                                "carve-out in scope.json `out_of_scope` and must not "
-                                "be probed."
-                            )
-                        else:
-                            errors.append(
-                                f"scope_host '{scope_host}' is not in scope.json `hosts` "
-                                f"for role '{role_name}'. Active-probing dispatches "
-                                "(vulnerability-analyst, exploit-developer) must target a "
-                                "host that is explicitly in scope. If this is intentional "
-                                "(e.g. cert-chain pivot), reframe as recon/osint, or add "
-                                "the host to scope.json first."
-                            )
-
     # C4a: WARN-only technique-cage lint over the free-text task. NEVER appended
     # to `errors` — a prescriptive task is a depth smell, not an invalid dispatch.
     warnings.extend(_detect_technique_cage(str(payload.get("task") or "")))
@@ -523,8 +451,8 @@ KALI_VERBS: tuple[str, ...] = KALI_TARGET_VERBS + KALI_MAINT_VERBS
 
 _KALI_COMMON_NOTES: tuple[str, ...] = (
     "Every target-facing kali verb requires --technique, --intent, --probe-kind, --phase, and --timeout. The CLI rejects a call missing any of these before it reaches the backend.",
-    "Target inputs and target-list files are admitted through scope.json before execution. Passive sources and reachability controls require explicit typed destinations. A CURATED set of third-party research hosts (crt.sh, api.github.com, registry.npmjs.org, rubygems.org, pypi.org, web.archive.org, index.commoncrawl.org, urlscan.io, services.nvd.nist.gov, ...) is admitted WITHOUT scope.json membership for queries ABOUT the target: it records a `research` external destination, never a checked target, and never skips audit or the refusal path. A host that also matches scope.json - allow OR out_of_scope - or that the caller typed as a `target` destination obeys target-scope rules instead; anything off the list is refused exactly as before, and the refusal names the research path so an empty result is never read as a measurement. Extend the list in `assess.lib.scope.RESEARCH_HOSTS` (in code, deliberately not an operator flag). `scope_enforcement: bypass` overrides target allow/deny admission only; tool policy, audit, rate governance, and no-fire policy remain enforced.",
-    "When scope.json defines `rate_limit_aggregate_rps` (set at creation with `--aggregate-rate-limit`), target-facing runs reserve capacity after their pre-exec audit and before process launch, including commands whose target is supplied through a typed dynamic shell input. Use --rate-override-reason only for an authorized, durable exception.",
+    "scope.json `hosts` declares the original authorization roots. The CLI never filters or refuses outbound execution by host, URL, IP, out_of_scope, or off_limits_paths; staying inside the declared roots is the operator's and specialist's responsibility. Destination-independent controls remain: denied_tools, the declared-vs-actual tool check, audit, and rate governance. Program attribution headers are injected when supported and WARN rather than refusing when injection is unavailable.",
+    "When scope.json defines `rate_limit_aggregate_rps` (set at creation with `--aggregate-rate-limit`), target-facing runs reserve capacity after their pre-exec audit and before process launch, including commands whose target host is only assembled at runtime inside a shell script. Use --rate-override-reason only for an authorized, durable exception.",
     "--technique must be one of TECHNIQUE_ENUM: use HEALTH for runtime/tool inventory, META for operator-side metadata, LOG-READ for artifact reads, OTHER only when no specific class fits.",
     "--agent-name resolves from the flag, then $AGENT_NAME, $VIGIL_AGENT_NAME, then `operator`. Specialists must export AGENT_NAME in their wrapper or pass --agent-name <role>.",
     "--phase is REQUIRED — pass the phase the dispatch was authorized for, NOT scope.json.current_phase. Allowed (from kali_audit.ALLOWED_PHASES; the two half-phase tags recon-pivot and exploit-recon are the trailing entries): "
@@ -2504,16 +2432,16 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
         "tool-help httpx` before guessing — see references/tools/recon/httpx.md.",
     ),
     "katana": (
-        "Deep + scope-safe + disk-bounded by DEFAULT: `-d 5`, `-fs fqdn` (crawl only the exact seeded "
-        "hosts — never wander to out-of-scope sibling subdomains found in links), `-or -ob` (omit "
-        "body/raw so a deep crawl does not fill the disk), `-ef <static set>`, and JS endpoint crawling "
-        "+ jsluice extraction. Override each with one flag; `--keep-bodies` / `--include-static` undo "
-        "the disk/asset defaults for a bounded source pass.",
+        "Deep + disk-bounded by DEFAULT: `-d 5`, `-or -ob` (omit body/raw so a deep crawl does not "
+        "fill the disk), `-ef <static set>`, and JS endpoint crawling + jsluice extraction. The wrapper "
+        "does not force Katana field scope; pass `-fs` or `-cos` only when the crawl itself calls for an "
+        "explicit operator-authored restriction. `--keep-bodies` / `--include-static` undo the disk/asset "
+        "defaults for a bounded source pass.",
         "Rate is SAFE by default and decoupled from depth: `-rl 10`, hard-capped at 20 req/s (warn + "
         "clamp above; `--allow-fast-crawl` to exceed) and always clamped DOWN to the program rate "
         "ceiling. Go as deep as you like — politeness comes from the rate cap, not a shallow crawl.",
-        "Use `-fs rdn` ONLY when every seed root is itself a wildcard-scoped in-scope entry. Recover "
-        "wildcard breadth via subdomain-enum + passive gau, NOT by letting the active crawler roam.",
+        "Use `-fs fqdn` for exact-host traversal or `-fs rdn` for registered-domain traversal only "
+        "when that restriction is intentional; scope.json does not choose either value.",
         "A `--timeout` cut still yields usable output: katana streams routes to `-o` from line 1, so a "
         "timed-out deep crawl leaves partial-but-ingestible results on disk (`partial_results=true`).",
     ),
@@ -2564,8 +2492,8 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
     ),
     "browser": (
         "Playwright/system-Chromium workflow inside the runtime. Returns origin status, final DOM, screenshot, bounded console/network metadata, route candidates, and typed-step results as one JSON object.",
-        "Required attribution is installed before navigation and fails closed. --attribution-scope document-origin applies it to admitted document navigations and their same-origin requests so cross-origin SPA preflights are not poisoned; omitted cross-origin attribution origins are recorded.",
-        "Use --steps-file for at most 50 typed navigate/click/fill/wait/eval/assert actions. An assert with visible:false waits for the selector to become hidden; text is read only for contains/equals assertions. Every declared navigation is admitted before launch, while dynamic browser navigations are admitted and enrolled by the runtime scope/no-fire request router.",
+        "Required attribution is installed before navigation when configured; inability to inject it never refuses the browser run. --attribution-scope document-origin applies it to declared document origins and their same-origin requests so cross-origin SPA preflights are not poisoned; omitted cross-origin attribution origins are recorded.",
+        "Use --steps-file for at most 50 typed navigate/click/fill/wait/eval/assert actions. An assert with visible:false waits for the selector to become hidden; text is read only for contains/equals assertions. Declared URLs are syntax-validated before launch; dynamic browser navigations are never admitted or aborted by scope data.",
         "--har-out writes a metadata-only HAR. --capture-bodies is opt-in and stores bounded document/XHR/fetch bodies under --body-dir; --max-body-bytes caps each artifact.",
         "Identity headers/cookies are prepared explicitly for Playwright and the audit auth_context changes only when identity material was actually applied. Storage state is never taken implicitly from a credential record; opt in with an engagement-confined --storage-state JSON artifact plus a live, replayable --identity so authenticated state is never audited as anonymous.",
     ),
@@ -3285,13 +3213,15 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             name="agent start",
             summary=(
                 "Register a specialist dispatch in the backend audit ledger so the "
-                "row carries role, task, scope, requested model/reasoning, dispatch-mode, and the skills "
+                "row carries role, task, optional application-unit attribution, "
+                "requested model/reasoning, dispatch-mode, and the skills "
                 "the agent loaded."
             ),
             schema_name="backend DispatchCreate (POST /dispatches)",
             preferred_invocations=(
                 "vigil assess agent start --agent-id <id> --role <role> "
-                "--task \"...\" --scope-host <host> --model <name> --reasoning <level> "
+                "--task \"...\" [--application-unit-id <id>] "
+                "--model <name> --reasoning <level> "
                 "--dispatch-mode <mode> --skills \"<skill>[,<skill>...]\"",
                 "vigil assess agent start --from-json <payload.json>",
             ),
@@ -3299,8 +3229,9 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "--agent-id (unique per dispatch)",
                 "--role (specialist role; operator role is reserved for phase coordination)",
                 "--dispatch-mode (hypothesis-driven|item-iterating|deep-manual|variant-rotation)",
-                "--skills (comma-separated; required for non-operator roles)",
+                "--skills (comma-separated; optional — omitting it WARNs, never blocks)",
                 "--task (one-line objective)",
+                "--application-unit-id (optional concrete application-unit identity for depth attribution)",
             ),
             helper_defaults=(
                 ("status", "in-progress (set on insert)"),
@@ -3308,13 +3239,13 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 ("--allow-duplicate", "off — overlapping in-progress dispatches log a warning"),
             ),
             notes=(
-                "Specialist dispatches must include `skills`: the backend rejects them otherwise, and the CLI runs the same check locally before sending so typos surface early.",
+                "`skills` on a specialist dispatch is a WARNING when missing, never a rejection — neither the CLI nor the backend blocks on it. A specialist picks its skills from what it observes, so the honest list is often known only after the dispatch runs. Set it when the applicable skill is already clear; otherwise name it in the handoff.",
                 "Discover skill names with `vigil assess list-skills` — each value must match a directory under `agent/skills/<name>/`.",
                 "Pair with `agent done` when the dispatch finishes; rows left `in-progress` past the dispatch's actual lifetime corrupt dedup checks.",
             ),
             common_mistakes=(
                 ("role", "use --role for the agent command; the backend stores agent_role"),
-                ("operator role with --skills", "operator dispatches are exempt from the skills requirement; pass --skills only for specialist roles"),
+                ("operator role with --skills", "operator dispatches carry no skill audit at all; pass --skills only for specialist roles"),
                 ("--skills agent/skills/foo/SKILL.md", "pass the bare skill name (e.g. 'gau-triage'); the validator resolves it on disk"),
             ),
             examples=(
@@ -3322,7 +3253,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                     "command": (
                         "vigil assess agent start --agent-id va-7f3 "
                         "--role vulnerability-analyst --task 'review SSRF candidates' "
-                        "--scope-host api.example.com --model claude-opus-4-8 "
+                        "--application-unit-id 42 --model claude-opus-4-8 "
                         "--reasoning high --dispatch-mode item-iterating "
                         "--skills 'ssrf-testing,case-dispatching'"
                     ),

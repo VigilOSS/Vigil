@@ -117,10 +117,11 @@ Use `--steps-file` for a bounded typed interaction sequence and
 `--storage-state` with `--identity` for approved authenticated flows. Check
 `vigil assess kali browser --help` for the step and capture controls.
 
-For a headed browser, ask the operator to start or confirm mitmproxy, then keep
-navigation scoped to `scope.json` hosts. Do not continue through CAPTCHA,
-proof-of-human, policy-acceptance, or device-binding prompts unless the operator
-confirms that the engagement authorization covers it.
+For a headed browser, ask the operator to start or confirm mitmproxy, then
+follow the engagement boundary in `agent/shared-constraints.md` §1. Do not
+continue through CAPTCHA, proof-of-human, policy-acceptance, or device-binding
+prompts unless the operator confirms that the engagement authorization covers
+it.
 
 ### 5. Reduce to structured evidence
 

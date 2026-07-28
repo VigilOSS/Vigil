@@ -2853,7 +2853,7 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
                 agent_id TEXT NOT NULL,
                 agent_role TEXT NOT NULL,
                 task TEXT,
-                scope_host TEXT,
+                application_unit_id INTEGER REFERENCES assessment_application_units(id) ON DELETE SET NULL,
                 dispatched_at TEXT NOT NULL,
                 completed_at TEXT,
                 status TEXT NOT NULL,
@@ -2867,7 +2867,6 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
                 finding_slugs_json TEXT,
                 skills TEXT,
                 tier TEXT,
-                scope_path_prefix TEXT,
                 vuln_classes TEXT,
                 identity TEXT,
                 UNIQUE(engagement_id, agent_id)
@@ -2894,7 +2893,12 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
     # without a schema rebuild. Existing rows stay NULL.
     if dispatch_columns and "tier" not in dispatch_columns:
         connection.execute("ALTER TABLE assessment_dispatches ADD COLUMN tier TEXT")
-    for _col in ("scope_path_prefix", "vuln_classes", "identity"):
+    if dispatch_columns and "application_unit_id" not in dispatch_columns:
+        connection.execute(
+            "ALTER TABLE assessment_dispatches ADD COLUMN application_unit_id INTEGER "
+            "REFERENCES assessment_application_units(id) ON DELETE SET NULL"
+        )
+    for _col in ("vuln_classes", "identity"):
         if dispatch_columns and _col not in dispatch_columns:
             connection.execute(
                 f"ALTER TABLE assessment_dispatches ADD COLUMN {_col} TEXT"

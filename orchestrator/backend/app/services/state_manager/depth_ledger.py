@@ -16,7 +16,7 @@ INVARIANTS:
   * **CLASS COVERAGE COMES FROM EVIDENCE, NOT DECLARATIONS** (S7). Which classes
     a unit covered is decided by the ``attack_family`` on recorded probe_runs and
     coverage_items — what was demonstrably probed. A dispatch matches a unit only
-    by ``(scope_host, scope_path_prefix)`` containment plus ``status``; its
+    by its concrete ``application_unit_id`` plus ``status``; its
     self-declared ``vuln_classes``/``skills`` and its free-text ``task`` are never
     read as coverage, so no dispatch can satisfy a class it did not probe and the
     operator never has to name the vulnerability class before the hunt.
@@ -202,7 +202,7 @@ def depth_ledger(engagement_id: int) -> dict[str, Any]:
         )
         dispatches = _fetch_all(
             connection,
-            "SELECT id, agent_id, agent_role, scope_host, scope_path_prefix, vuln_classes, "
+            "SELECT id, agent_id, agent_role, application_unit_id, vuln_classes, "
             "skills, status, finding_slugs_json FROM assessment_dispatches WHERE engagement_id = ?",
             (eng_id,),
         )
@@ -569,8 +569,7 @@ def _unit_ledger(
             (missing_block if block_level == BLOCK_HIGH else missing_warn).append(miss_entry)
 
     dedicated = _dedicated_dispatch_satisfied(
-        host=host,
-        prefix=prefix,
+        unit_id=unit_id,
         dispatches=dispatches,
         unit_has_work_evidence=unit_has_work_evidence,
     )
@@ -834,21 +833,15 @@ def _coverage_maps_to_unit(
     return vid is not None and int(vid) in unit_variant_ids
 
 
-def _dispatch_contains_unit(
-    dispatch: dict[str, Any], host: str, prefix: str,
-) -> bool:
-    """(scope_host, scope_path_prefix) of the dispatch contains the unit."""
-    d_host = str(dispatch.get("scope_host") or "").strip().lower()
-    if not d_host or d_host != host:
-        return False
-    d_prefix = str(dispatch.get("scope_path_prefix") or "/").strip() or "/"
-    return _path_under_prefix(prefix, d_prefix)
+def _dispatch_targets_unit(dispatch: dict[str, Any], unit_id: int) -> bool:
+    """Return whether the dispatch names this concrete application unit."""
+    value = dispatch.get("application_unit_id")
+    return value is not None and int(value) == unit_id
 
 
 def _dedicated_dispatch_satisfied(
     *,
-    host: str,
-    prefix: str,
+    unit_id: int,
     dispatches: list[dict[str, Any]],
     unit_has_work_evidence: bool,
 ) -> bool:
@@ -856,14 +849,14 @@ def _dedicated_dispatch_satisfied(
 
     A dispatch QUALIFIES when:
       * ``status='completed'`` AND
-      * (scope_host, scope_path_prefix) contains the unit AND
+      * application_unit_id identifies the unit AND
       * ``unit_has_work_evidence`` — the unit has corroborating durable output
         (≥1 covering probe OR a recorded finding under it). ``status='completed'``
         ALONE, or accompanied only by a self-attested handoff, does NOT satisfy:
         the handoff ``summary``/``coverage_gaps`` are agent self-attestation and
         the doctrine forbids counting a self-attested-without-evidence signal
-        (else one completed dispatch with a broad ``scope_path_prefix`` + a bare
-        handoff would satisfy every unit on the host). Legitimate work the harness
+        (else one completed dispatch plus a bare handoff could satisfy a unit
+        without work). Legitimate work the harness
         missed is recovered via the recorded depth-deferral / ``--force --reason``
         valve, not by trusting free text.
 
@@ -886,7 +879,7 @@ def _dedicated_dispatch_satisfied(
         return False
     return any(
         str(d.get("status") or "").strip().lower() == "completed"
-        and _dispatch_contains_unit(d, host, prefix)
+        and _dispatch_targets_unit(d, unit_id)
         for d in dispatches
     )
 

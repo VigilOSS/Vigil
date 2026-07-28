@@ -124,25 +124,21 @@ marks a cell covering if any probe is `tested|signal`, and surfaces `observed_ht
 code. **This is the only consumer that reads the per-input-NAME `slot:name` grain — and it is purely
 advisory (resume orientation), never a gate.**
 
-### Dedicated-dispatch satisfaction (structured, never free-text — the other way a unit gets "touched")
+### Dedicated-dispatch satisfaction (structured assignment, evidence-owned coverage)
 
-A unit's `BLOCK_HIGH` families can also be satisfied by a **dedicated specialist dispatch**, not only by
-probes/coverage-items directly. `vigil assess agent start --scope-host <host> --scope-path-prefix
-<prefix> --vuln-classes <comma-list>` (`agent/scripts/assess/commands/agent.py`) records the dispatch's
-containment and vuln-class coverage as **structured columns** on `assessment_dispatches`
-(`scope_host`/`scope_path_prefix`/`vuln_classes`) — never the free-text `task` column, per the S7
-anti-self-attestation guard.
+A deep unit has a separate **dedicated specialist dispatch** obligation in addition to its class
+coverage. `vigil assess agent start --application-unit-id <id>` records the optional concrete unit
+identity on `assessment_dispatches`; the backend validates that the unit belongs to the same
+engagement and does not infer or admit host scope. `vuln_classes` remains optional intent metadata.
 
-`depth_ledger._dedicated_dispatch_satisfied` (`depth_ledger.py:~790`) resolves this: a dispatch
-QUALIFIES only when its `status='completed'` AND `(scope_host, scope_path_prefix)` contains the unit AND
-it carries **work evidence** — ≥1 covering probe (`result_status ∈ {tested, signal}`) or a recorded
-finding mapped to the unit. A dispatch's resolved classes come from its structured `vuln_classes` column,
-falling back to `skills` resolved through the canonical taxonomy — **never** the free-text `task`. A bare
-`status='completed'` with only a self-attested handoff summary does **not** qualify
-(`_dispatch_has_work_evidence`, `depth_ledger.py:~838`): the union of qualifying dispatches' resolved
-classes must cover every `BLOCK_HIGH` family the unit expects for `depth_satisfied` to be reachable via
-dispatch, and a qualifying dispatch also marks the unit `touched` even absent a directly-probed class.
-This mechanism already existed pre-ADR 0012; it is documented here as a current-state gap-fill.
+`depth_ledger._dedicated_dispatch_satisfied` (`depth_ledger.py:~842`) resolves this: a dispatch
+QUALIFIES only when its `status='completed'`, its `application_unit_id` names the unit, AND it carries
+**work evidence** — ≥1 covering probe (`result_status ∈ {tested, signal}`) or a recorded
+finding mapped to the unit. A bare `status='completed'` with only a self-attested handoff summary does
+**not** qualify. Class coverage is independent and evidence-owned: only recorded probe/coverage-item
+`attack_family` values clear `missing_block`; dispatch `vuln_classes`, `skills`, and free-text `task`
+are never read as coverage. `depth_satisfied` therefore requires both no evidence-backed
+`missing_block` families and a qualifying dedicated dispatch.
 
 ---
 
@@ -325,13 +321,13 @@ recon/discovery tools  ──►  classify_from_fields (inline, client-side, unc
           ADR 0012)
                 ▲
                 │  structured dispatch satisfaction (never free-text `task`, S7)
-        assessment_dispatches (scope_host, scope_path_prefix, vuln_classes)
-          ◄── `agent start --scope-host/--scope-path-prefix/--vuln-classes`
+        assessment_dispatches (application_unit_id; vuln_classes is metadata only)
+          ◄── `agent start --application-unit-id`
                 │
-                └─► depth_ledger._dedicated_dispatch_satisfied: status=completed AND scope contains
-                     the unit AND resolved classes cover every BLOCK_HIGH family AND ≥1 covering probe
-                     or finding under the unit (bare completed/handoff alone never counts) ──► feeds
-                     both `touched` and `depth_satisfied`
+                └─► depth_ledger._dedicated_dispatch_satisfied: status=completed AND unit id matches
+                     AND ≥1 covering probe or finding exists under the unit
+                     (bare completed/handoff alone never counts)
+                     class coverage remains probe/coverage-item evidence only
                 │
                 ▼
         terminal_depth_block ──► transition_phase.py  ═══►  THE ONE HARD DEPTH GATE (report/complete)

@@ -785,9 +785,7 @@ def _required_headers(engagement_dir: Path) -> dict[str, str]:
 #                  or is meaningless, so silently skip (never warn).
 #   * else       — HTTP-to-target tools whose header flag can't carry an inline
 #                  value (wafw00f's ``-H``/``--headers`` reads a FILE, not a
-#                  string) or an unknown tool: WARN (never block). The Layer-2
-#                  fail-closed backstop (:func:`required_header_attribution_gap`)
-#                  is the safety net that REFUSES an un-attributed in-scope run.
+#                  string) or an unknown tool: WARN (never block).
 #
 # This classifier + injector lives here (rather than in kali.py) so BOTH the
 # container path (kali.kali_exec) AND the audited host path (the recon
@@ -810,9 +808,8 @@ _REQUIRED_HEADER_INJECTABLE = frozenset(
 #   * arjun   ``--headers "K: V"`` — a SINGLE flag whose value is newline-joined
 #                  for multiple headers (a second ``--headers`` would clobber the
 #                  first under argparse store), so ``single_newline_block=True``.
-# wafw00f is deliberately ABSENT: its ``-H``/``--headers`` reads a FILE path, not
-# an inline string, so it can't carry an inline marker and relies on the Layer-2
-# backstop instead.
+# wafw00f is deliberately absent: its ``-H``/``--headers`` reads a file path, not
+# an inline string, so it cannot carry an inline marker.
 _REQUIRED_HEADER_FLAG_SPECS: dict[str, tuple[str, bool]] = {
     "whatweb": ("--header", False),
     "nikto": ("-Add-header", False),
@@ -831,9 +828,9 @@ _REQUIRED_HEADER_SKIP = frozenset(
         "puredns",
         # tlsx opens a raw TLS handshake to harvest cert SAN/CN/issuer fields;
         # like nmap it is an L4-L6 connect that carries NO HTTP request, so an
-        # HTTP attribution header cannot ride it. Skip (don't WARN, don't let the
-        # Layer-2 backstop REFUSE a legitimate TLS cert grab) — same posture as
-        # nmap/naabu/masscan, which also reach the target without speaking HTTP.
+        # HTTP attribution header cannot ride it. Skip without warning — same
+        # posture as nmap/naabu/masscan, which also reach the target without
+        # speaking HTTP.
         "tlsx",
     }
 )
@@ -1120,7 +1117,7 @@ def _apply_required_headers(
                         ``--headers``; see ``_REQUIRED_HEADER_FLAG_SPECS``).
       * ``"warned"``  — an HTTP-capable tool whose flag can't carry an inline
                         header (wafw00f) or an unknown tool; cmd is left untouched
-                        and the caller warns. The Layer-2 backstop is the net.
+                        and the caller warns without blocking execution.
 
     Idempotency: a header is skipped when an existing ``-H`` value already names
     it (case-insensitive on the header name, tolerating ``Name:`` and
@@ -1202,137 +1199,6 @@ def _apply_identity_headers(
         existing.add(name.lower())
         injected = True
     return "injected" if injected else "noop"
-
-
-# --------------------------------------------------------------------------- #
-# Layer 2 — DYNAMIC fail-closed attribution backstop (ADR 0010)
-# --------------------------------------------------------------------------- #
-#
-# Layer 1 injects the program attribution header into the curated set of
-# HTTP-to-target tools. Layer 2 needs NO per-tool header knowledge: after the
-# FINAL argv (and any shell-script text) is assembled, a command that REACHES an
-# in-scope host WITHOUT the configured marker is REFUSED rather than sent
-# un-attributed — a missing attribution header on a federal/managed program is a
-# ban-risk, not merely a reduced reward (the prior best-effort posture; see ADR
-# 0010 for the reversal). This catches every gap Layer 1 leaves: a ``bash -c
-# "curl <in-scope>"`` whose script could not be injected, an unknown/future tool,
-# and a tool whose flag can't carry an inline value (wafw00f).
-#
-# Local/non-target commands, passive skip-set tools (which query the archive/DNS,
-# not the in-scope host), and engagements with no ``required_headers`` are
-# unaffected — the gate is fail-OPEN for everything but un-attributed in-scope
-# traffic.
-
-
-def _command_reaches_in_scope_host(
-    cmd: list[str], allow_entries: list[dict[str, str]]
-) -> str:
-    """Return the first in-scope host the command's tokens reach, or ``""``.
-
-    Each argv element is shell-lexed (so a ``sh -c`` script's inner tokens and
-    quoted multi-token args are examined too) and every resulting word is run
-    through the scope host extractor; the first word that yields an in-scope host
-    wins. Purely lexical — no DNS/HTTP — so it is safe inside the exec gate.
-    """
-    from . import scope
-
-    if not allow_entries:
-        return ""
-    for arg in cmd:
-        try:
-            words = shlex.split(arg)
-        except ValueError:
-            words = arg.split()
-        if not words:
-            words = [arg]
-        for word in words:
-            host = scope.host_from_token(word)
-            if host and scope.host_in_scope(host, allow_entries):
-                return host
-    return ""
-
-
-def required_header_attribution_gap(
-    cmd: list[str],
-    tool_name: str,
-    headers: dict[str, str],
-    allow_entries: list[dict[str, str]],
-) -> str:
-    """Layer-2 fail-closed attribution backstop (ADR 0010).
-
-    Return a non-empty REFUSAL reason when ALL of:
-      * the engagement configured ``required_headers`` (``headers`` non-empty);
-      * the derived tool is NOT a passive/archive/DNS/L3-L4 skip-set tool (those
-        never send attributable HTTP to the in-scope target, so the in-scope
-        host token is merely their query subject, not a host they connect to);
-      * the assembled command REACHES an in-scope host; AND
-      * at least one required marker's ``Name: Value`` literal is ABSENT from the
-        command text.
-    Otherwise return ``""`` — the run proceeds. The reason names the missing
-    marker(s) so the caller can tell the operator exactly what to add.
-    """
-    if not headers:
-        return ""
-    if (tool_name or "").strip().lower() in _REQUIRED_HEADER_SKIP:
-        return ""
-    reached = _command_reaches_in_scope_host(cmd, allow_entries)
-    if not reached:
-        return ""
-    haystack = " ".join(cmd).lower()
-    # Match name:value tolerating the punctuation that legitimately sits between
-    # the marker name and its value across the ways a command carries the header:
-    #   * ``-H "X-Bug-Bounty: handle"``  → ``name: value`` (curl, a space)
-    #   * ``-H "X-Bug-Bounty:handle"``   → ``name:value``  (no space; Layer-1 is
-    #     name-only and does not re-canonicalize an operator's spacing)
-    #   * ``{"x-bug-bounty": "handle"}`` → ``name": "value`` (a tool that threads
-    #     its attribution header JSON-encoded into argv rather than as a ``-H``
-    #     flag — e.g. the ``browser`` verb hands its Playwright request router a
-    #     JSON execution plan containing the required header map). Without tolerating the
-    #     JSON key/value quoting the marker is PRESENT in the command yet the
-    #     backstop cannot see it and the run is falsely refused.
-    # The optional quote + whitespace on each side of the colon covers all three
-    # while staying purely lexical (ADR 0010): the name and value literals must
-    # still both appear adjacent, so this only ever recognizes a marker that is
-    # genuinely there — it never lets an un-attributed command through.
-    missing = [
-        f"{name}: {value}"
-        for name, value in headers.items()
-        if not re.search(
-            re.escape(name.lower()) + r'"?\s*:\s*"?' + re.escape(value.lower()),
-            haystack,
-        )
-    ]
-    if not missing:
-        return ""
-    markers = ", ".join(f"'{m}'" for m in missing)
-    return (
-        f"command reaches in-scope host '{reached}' but is missing required "
-        f"attribution header(s) {markers}"
-    )
-
-
-def _in_scope_allow_entries(engagement_dir: Path) -> list[dict[str, str]]:
-    """In-scope host allow-entries for the Layer-2 backstop, or ``[]`` when scope
-    is absent/unreadable (the backstop then degrades to a no-op rather than block
-    a run on a config error). Reads ``scope.json`` directly — it does NOT call
-    ``scope.load_scope`` so the hot exec path neither rewrites the scope file nor
-    pays its normalization cost on every command.
-    """
-    from . import scope
-
-    scope_path = engagement_dir / "scope.json"
-    if not scope_path.is_file():
-        return []
-    try:
-        data = json.loads(scope_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    if not isinstance(data, dict):
-        return []
-    try:
-        return scope.scope_entries(data)
-    except SystemExit:
-        return []
 
 
 def _auth_context(engagement_dir: Path) -> str:

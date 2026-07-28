@@ -76,7 +76,13 @@ def register(subparsers) -> None:
     p.add_argument("--role", dest="agent_role", default=None, help="Agent role for start/handoff.")
     p.add_argument("--agent-role", dest="agent_role_alias", default=None, help="Alias for --role.")
     p.add_argument("--task", dest="task", default=None)
-    p.add_argument("--scope-host", dest="scope_host", default=None)
+    p.add_argument(
+        "--application-unit-id",
+        dest="application_unit_id",
+        type=int,
+        default=None,
+        help="(start) Concrete application-unit id for depth attribution.",
+    )
     p.add_argument("--model", dest="dispatch_model", default=None)
     p.add_argument("--reasoning", dest="reasoning", default=None,
                    choices=("low", "medium", "high", "xhigh", "max"))
@@ -93,12 +99,6 @@ def register(subparsers) -> None:
         default=None,
         choices=("L1", "L2", "L3", "L4"),
         help="(start) Blue specialist tier label recorded on the dispatch row.",
-    )
-    p.add_argument(
-        "--scope-path-prefix",
-        dest="scope_path_prefix",
-        default=None,
-        help="(start) App-unit path-prefix this dispatch covers (pairs with --scope-host).",
     )
     p.add_argument(
         "--vuln-classes",

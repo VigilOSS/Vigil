@@ -1893,7 +1893,7 @@ def _recs(report: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _rec_for_host(report: dict[str, Any], host: str) -> dict[str, Any]:
-    matches = [r for r in _recs(report) if r["scope_host"] == host]
+    matches = [r for r in _recs(report) if r["host"] == host]
     assert matches, (host, _recs(report))
     return matches[0]
 
@@ -1924,10 +1924,10 @@ def test_auto_redispatch_enum_gap_recommends_recon(monkeypatch, tmp_path: Path, 
     assert rec["confidence"] == "high"
     assert rec["skills"] == ["web-recon", "subdomain-enumeration"]
     assert rec["parallel_role"] == "source-analyzer"
-    # The ready-to-run command line must encode the role/scope-host/mode/skills.
+    # The ready-to-run command encodes execution intent, not scope authorization.
     assert "vigil assess agent start" in rec["command"]
     assert "--role recon-specialist" in rec["command"]
-    assert "--scope-host target.example" in rec["command"]
+    assert "--scope-host" not in rec["command"]
     assert "--dispatch-mode hypothesis-driven" in rec["command"]
     assert "--skills web-recon,subdomain-enumeration" in rec["command"]
     # Task skeleton names the host + stage.
@@ -1967,9 +1967,7 @@ def test_auto_redispatch_collection_gap_recommends_surface_collector(
 
 
 def test_auto_redispatch_consumption_dominant_idor(monkeypatch, tmp_path: Path, capsys) -> None:
-    """A consumption gap whose dominant pending bucket is idor recommends the
-    vulnerability-analyst + idor-testing(+split-brain-idor), correct scope-host,
-    and item-iterating mode, at confidence=high."""
+    """A dominant IDOR gap recommends the matching role, skills, and mode."""
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
@@ -2006,9 +2004,9 @@ def test_auto_redispatch_consumption_dominant_idor(monkeypatch, tmp_path: Path, 
     assert rec["confidence"] == "high"
     assert rec["dominant_bucket"] == "idor"
     assert rec["skills"] == ["idor-testing", "split-brain-idor"]
-    assert rec["scope_host"] == "target.example"
+    assert rec["host"] == "target.example"
     assert "--role vulnerability-analyst" in rec["command"]
-    assert "--scope-host target.example" in rec["command"]
+    assert "--scope-host" not in rec["command"]
     assert "--skills idor-testing,split-brain-idor" in rec["command"]
     # Task skeleton names host + dominant cluster + pending count.
     assert "target.example" in rec["task_skeleton"]
@@ -2141,8 +2139,7 @@ def test_auto_redispatch_generic_dominant_bucket_is_low_confidence(
 def test_auto_redispatch_dedup_suppresses_when_prior_dispatch_exists(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
-    """A recommendation is suppressed when a prior dispatch already covers the
-    same (role, scope_host)."""
+    """A recommendation is suppressed on an exact active role/task duplicate."""
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
@@ -2158,7 +2155,11 @@ def test_auto_redispatch_dedup_suppresses_when_prior_dispatch_exists(
         {
             "agent_id": "va-001",
             "agent_role": "vulnerability-analyst",
-            "scope_host": "target.example",
+            "task": (
+                "Test target.example: 1 untested pending item(s), dominant cluster "
+                "'idor'. Validate the surface, produce durable evidence, defer "
+                "the rest with a reason."
+            ),
             "status": "in-progress",
         }
     ]
@@ -2178,12 +2179,43 @@ def test_auto_redispatch_dedup_suppresses_when_prior_dispatch_exists(
     report = json.loads(capsys.readouterr().out)
     block = _redispatch(report)
     # No live recommendation for target.example — it was suppressed.
-    assert not any(r["scope_host"] == "target.example" for r in block["recommendations"])
+    assert not any(r["host"] == "target.example" for r in block["recommendations"])
     suppressed = block["suppressed"]
     assert len(suppressed) == 1
-    assert suppressed[0]["scope_host"] == "target.example"
+    assert suppressed[0]["host"] == "target.example"
     assert suppressed[0]["role"] == "vulnerability-analyst"
     assert "va-001" in suppressed[0]["reason"]
+
+
+def test_auto_redispatch_command_does_not_pass_scope_authorization(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    work_items = [
+        _work_item(
+            queue_key="idor:0",
+            url="https://target.example/api/profile/0",
+            url_path="/api/profile",
+            status="pending",
+            query_params='{"user": "5"}',
+        ),
+    ]
+
+    with pytest.raises(SystemExit):
+        _run(
+            monkeypatch,
+            eng,
+            services=[{"endpoint": "target.example", "state": "up"}],
+            surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
+            require_stage="consumption",
+            auto_redispatch=True,
+            work_items=work_items,
+        )
+
+    recommendation = _rec_for_host(json.loads(capsys.readouterr().out), "target.example")
+    assert "--scope-host" not in recommendation["command"]
 
 
 @pytest.mark.parametrize("terminal_status", ["completed", "failed", "aborted", "blocked"])
@@ -2211,12 +2243,16 @@ def test_auto_redispatch_terminal_prior_dispatch_does_not_suppress_retry(
         ),
     ]
 
-    # The only prior dispatch for this (role, host) already terminated.
+    # The only identical prior dispatch already terminated.
     dispatches = [
         {
             "agent_id": "va-terminal",
             "agent_role": "vulnerability-analyst",
-            "scope_host": "target.example",
+            "task": (
+                "Test target.example: 1 untested pending item(s), dominant cluster "
+                "'idor'. Validate the surface, produce durable evidence, defer "
+                "the rest with a reason."
+            ),
             "status": terminal_status,
         }
     ]
@@ -2269,7 +2305,11 @@ def test_auto_redispatch_active_prior_dispatch_without_agent_id_suppresses(
         {
             "id": "dispatch-42",
             "agent_role": "vulnerability-analyst",
-            "scope_host": "target.example",
+            "task": (
+                "Test target.example: 1 untested pending item(s), dominant cluster "
+                "'idor'. Validate the surface, produce durable evidence, defer "
+                "the rest with a reason."
+            ),
             "status": "in-progress",
         }
     ]
@@ -2288,10 +2328,10 @@ def test_auto_redispatch_active_prior_dispatch_without_agent_id_suppresses(
 
     report = json.loads(capsys.readouterr().out)
     block = _redispatch(report)
-    assert not any(r["scope_host"] == "target.example" for r in block["recommendations"])
+    assert not any(r["host"] == "target.example" for r in block["recommendations"])
     suppressed = block["suppressed"]
     assert len(suppressed) == 1
-    assert suppressed[0]["scope_host"] == "target.example"
+    assert suppressed[0]["host"] == "target.example"
     # The id-only fallback is reflected in the reason string.
     assert "dispatch-42" in suppressed[0]["reason"]
 
@@ -2326,7 +2366,7 @@ def test_auto_redispatch_dedup_degrades_gracefully_on_backend_error(
     report = json.loads(capsys.readouterr().out)
     block = _redispatch(report)
     # Recommendation still emitted (not deduped) ...
-    assert any(r["scope_host"] == "target.example" for r in block["recommendations"])
+    assert any(r["host"] == "target.example" for r in block["recommendations"])
     # ... with a note that dedup degraded.
     assert any("dedup degraded" in note for note in block["notes"])
 
@@ -2519,7 +2559,7 @@ def test_auto_redispatch_human_output_is_recommendation_only(
     out = capsys.readouterr().out
     assert "RECOMMENDATION-ONLY" in out
     assert "vigil assess agent start --role recon-specialist" in out
-    assert "--scope-host target.example" in out
+    assert "--scope-host" not in out
     # The parallel-role note and the task skeleton are both present.
     assert "source-analyzer" in out
     assert "task:" in out
@@ -2626,7 +2666,7 @@ def test_auto_redispatch_consumption_no_mapped_bucket_omits_skills(
     # The command must omit --skills when there is nothing to recommend.
     assert "--skills" not in rec["command"]
     assert "--role vulnerability-analyst" in rec["command"]
-    assert "--scope-host target.example" in rec["command"]
+    assert "--scope-host" not in rec["command"]
 
 
 

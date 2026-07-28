@@ -165,7 +165,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help=(
             "For every scope entry that FAILS the phase stage gate, emit a "
-            "ready-to-run next-dispatch RECOMMENDATION (role + scope-host + "
+            "ready-to-run next-dispatch RECOMMENDATION (role + host context + "
             "dispatch-mode + skills). Never fires a dispatch. Only meaningful on "
             "phases with a stage gate (recon/collect/consume)."
         ),

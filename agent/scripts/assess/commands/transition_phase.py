@@ -13,6 +13,7 @@ import sys
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import Config, load_config
+from assess.lib.scope import mutate_scope
 
 
 WEB_PHASES = [
@@ -201,14 +202,12 @@ def run(args) -> None:
         for b in hard:
             print(f"  - [{b['kind']}] {b['detail']}", file=sys.stderr)
 
-    scope[phase_key] = target_phase
-    if track == "blue" and target_phase == "complete":
-        scope["status"] = "completed"
-    tmp_path = scope_path + ".tmp"
-    with open(tmp_path, "w") as f:
-        json.dump(scope, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-    os.replace(tmp_path, scope_path)
+    def update(latest_scope):
+        latest_scope[phase_key] = target_phase
+        if track == "blue" and target_phase == "complete":
+            latest_scope["status"] = "completed"
+
+    mutate_scope(engagement_dir, update)
 
     print(f"Phase transitioned ({track}): {current_phase or '(none)'} -> {target_phase}")
 

@@ -523,6 +523,46 @@ def test_scope_filter_drops_out_of_scope_hosts_between_stages(tmp_path):
     assert kept == ["good.example.com"]
 
 
+def test_scope_filter_records_only_confirmed_wildcard_children_as_inventory(tmp_path):
+    _write_scope(
+        tmp_path,
+        ["*.example.com", "literal.test"],
+        out_of_scope=["blocked.example.com"],
+    )
+    scope_path = tmp_path / "scope.json"
+    scope_doc = json.loads(scope_path.read_text(encoding="utf-8"))
+    scope_doc["discovered_hosts"] = ["z.example.com", "API.EXAMPLE.COM."]
+    scope_path.write_text(json.dumps(scope_doc), encoding="utf-8")
+
+    dns = tmp_path / "scans" / "dns-discovery"
+    dns.mkdir(parents=True, exist_ok=True)
+    resolved = dns / "resolved_hosts.txt"
+    resolved.write_text(
+        "\n".join(
+            (
+                "api.example.com",
+                "new.example.com",
+                "example.com",
+                "blocked.example.com",
+                "literal.test",
+                "unrelated.test",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    recon._apply_scope_filter(_cfg(tmp_path), resolved)
+
+    updated = json.loads(scope_path.read_text(encoding="utf-8"))
+    assert updated["hosts"] == ["*.example.com", "literal.test"]
+    assert updated["discovered_hosts"] == [
+        "api.example.com",
+        "new.example.com",
+        "z.example.com",
+    ]
+
+
 def test_scope_filter_passes_through_when_all_in_scope(tmp_path):
     _write_scope(tmp_path, ["*.example.com"])
     dns = tmp_path / "scans" / "dns-discovery"
@@ -532,6 +572,30 @@ def test_scope_filter_passes_through_when_all_in_scope(tmp_path):
 
     out = recon._apply_scope_filter(_cfg(tmp_path), resolved)
     assert out == resolved  # nothing dropped → original path returned
+    updated = json.loads((tmp_path / "scope.json").read_text(encoding="utf-8"))
+    assert updated["discovered_hosts"] == ["a.example.com", "b.example.com"]
+
+
+def test_scope_filter_inventory_failure_warns_without_dropping_coverage(
+    monkeypatch, tmp_path, capsys
+):
+    _write_scope(tmp_path, ["*.example.com"])
+    dns = tmp_path / "scans" / "dns-discovery"
+    dns.mkdir(parents=True, exist_ok=True)
+    resolved = dns / "resolved_hosts.txt"
+    resolved.write_text("a.example.com\n", encoding="utf-8")
+
+    def fail_inventory(*_args, **_kwargs):
+        raise OSError("scope.json is temporarily unavailable")
+
+    monkeypatch.setattr(recon.scope, "record_discovered_hosts", fail_inventory)
+
+    out = recon._apply_scope_filter(_cfg(tmp_path), resolved)
+
+    assert out == resolved
+    stderr = capsys.readouterr().err
+    assert "WARN" in stderr
+    assert "discovered_hosts" in stderr
 
 
 def test_scope_filter_global_bypass_keeps_all_hosts_and_stamps_metadata(tmp_path):

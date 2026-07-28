@@ -3141,7 +3141,7 @@ class DispatchCreate(BaseModel):
     agent_id: str = Field(min_length=1, max_length=256)
     agent_role: str = Field(min_length=1, max_length=128)
     task: str | None = Field(default=None, max_length=4096)
-    scope_host: str | None = Field(default=None, max_length=512)
+    application_unit_id: int | None = Field(default=None, gt=0)
     dispatched_at: str | None = Field(default=None, max_length=64)
     status: _DISPATCH_STATUS = "in-progress"
     model: str | None = Field(default=None, max_length=128)
@@ -3161,7 +3161,6 @@ class DispatchCreate(BaseModel):
     finding_slugs: list[str] | None = None
     skills: str | None = Field(default=None, max_length=4096)
     tier: Literal["L1", "L2", "L3", "L4"] | None = None
-    scope_path_prefix: str | None = Field(default=None, max_length=512)
     vuln_classes: str | None = Field(default=None, max_length=2048)
     identity: str | None = Field(default=None, max_length=128)
 
@@ -3460,7 +3459,7 @@ async def create_dispatch(engagement_key: str, request: DispatchCreate) -> dict[
             agent_id=request.agent_id,
             agent_role=request.agent_role,
             task=request.task,
-            scope_host=request.scope_host,
+            application_unit_id=request.application_unit_id,
             dispatched_at=request.dispatched_at,
             status_value=request.status,
             model=request.model,
@@ -3473,7 +3472,6 @@ async def create_dispatch(engagement_key: str, request: DispatchCreate) -> dict[
             finding_slugs=request.finding_slugs,
             skills=request.skills,
             tier=request.tier,
-            scope_path_prefix=request.scope_path_prefix,
             vuln_classes=request.vuln_classes,
             identity=request.identity,
         )

@@ -31,7 +31,7 @@ before normalization. See "Iteration-mode (dispatch_mode) Declaration" in `agent
 - `agent/rules/resume.md` — universal resume hydration; `vigil assess resume-brief --finding <slug>` before any continuation
 - `agent/shared-constraints-blue.md` — tenant scope, read-only-by-default, artifact-index chain of custody, UTC, look-back, host-exec audit pipeline, confidence labels, dispatch-handoff conventions
 - `agent/skills/alert-triage/SKILL.md` — the alert normalization schema, the platform-skill-routing table, the mechanical-noise FP register format, the L1→L2 handoff contract
-- **Every tenant ref named in `scope.json:tenant_reference_paths[]`.** The tenant ref carries the known-benign register that gates every auto-close decision. Missing tenant ref → halt with a `blocked` handoff naming the path.
+- **Every tenant ref injected in the dispatch's `tenant_reference_paths[]`.** The tenant ref carries the known-benign register that gates every auto-close decision. Missing tenant ref → halt with a `blocked` handoff naming the path.
 
 **LOAD-ON-FIRST-USE (lazy):**
 
@@ -43,7 +43,7 @@ Before classifying any alert, verify:
 
 - [ ] `agent/rules/triage.md` and `agent/shared-constraints-blue.md` loaded
 - [ ] `agent/skills/alert-triage/SKILL.md` loaded — the normalization schema and platform-routing table are active
-- [ ] Every path in `scope.json:tenant_reference_paths[]` exists on disk and is loaded; the customer slug in scope.json matches the engagement you were dispatched for
+- [ ] Every injected tenant ref in Load First exists and is loaded; the injected customer slug matches the dispatch
 - [ ] The dispatch payload includes the alert body (pasted text, alert id, or artifact id) and the platform it came from
 - [ ] You ran `vigil assess resume-brief --finding <slug-if-any>` (or unscoped if this is a fresh paste) to surface any prior dispatches against this same actor / target / IOC. Duplicate L1 triage on the same alert is the most common L1 failure mode.
 
@@ -64,9 +64,9 @@ the platform is in scope for this customer.
 
 ## Inputs
 
-- `scope.json` — `customer`, `platforms`, `tenant_reference_paths[]`, optional `alert_metadata`
+- Injected blue dispatch context and the alert body or registered alert artifact
 - The alert body — pasted text, an alert id, or a previously registered `alert_intake` artifact
-- The tenant ref(s) — paths named in `tenant_reference_paths[]`; load each one in full before classifying
+- The tenant ref(s) injected in Load First; load each one in full before classifying
 
 ## Outputs
 
@@ -144,7 +144,7 @@ blue-specific fields:
 | `evidence_refs` | Artifact IDs from `assessment_artifacts.id` — typically the operator-registered alert-intake artifact ID and the registered tenant-ref-citation artifact ID (when one was produced). NEVER local filesystem paths. |
 | `coverage_gaps` | One-line strings naming the open questions L2 must close (e.g., "no IP geolocation pulled — L2 must enrich", "actor email lookup not run", "proxy retention does not cover the alert window") |
 | `mitre_techniques` | Array of MITRE ATT&CK technique IDs guessed from the alert payload; matches `details.mitre_techniques` on the draft finding |
-| `tenant_ref_paths_consulted` | Array of tenant-ref paths you actually loaded — distinct from `scope.json:tenant_reference_paths[]` (which is "available") |
+| `tenant_ref_paths_consulted` | Array of tenant-ref paths you actually loaded |
 | `next_steps` | Names the downstream skill, the exact `vigil blue dispatch` command for L2, and the evidence-bar hint |
 | `handoff_status` | `ready` when normalized + dispatchable, `blocked` when a tenant ref is missing or the platform is out of scope |
 

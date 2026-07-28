@@ -116,8 +116,8 @@ def _assigned_agent_for_row(row: Any) -> str | None:
     return None
 
 
-def _work_scope_admission(engagement: Any) -> tuple[list[str], list[str]] | None:
-    """(allow, deny) scope-host patterns for ``engagement`` or None (fail OPEN).
+def _work_scope_filter(engagement: Any) -> tuple[list[str], list[str]] | None:
+    """(allow, deny) host-set filter for ``engagement`` or None (fail OPEN).
 
     Lazy import of the coverage scope reader avoids the coverage<->work_buffer
     module import cycle (coverage imports ``_derive_work_item`` /
@@ -129,14 +129,15 @@ def _work_scope_admission(engagement: Any) -> tuple[list[str], list[str]] | None
     return _engagement_scope_admission(engagement)
 
 
-def _row_host_out_of_scope(host: Any, scope: tuple[list[str], list[str]] | None) -> bool:
-    """True only when ``scope`` is KNOWN and ``host`` is non-empty and NOT admitted.
+def _row_host_filtered_out(host: Any, scope: tuple[list[str], list[str]] | None) -> bool:
+    """True only when the filter is known and a non-empty host is not retained.
 
-    I-07 dispatch guard: an admitted-but-not-owned co-tenant ``pending`` row
+    I-07 dataset shaping: an observed-but-not-owned co-tenant ``pending`` row
     (``otherchurch.acme-portal.example`` under a specific-host allowlist, or a host
     named in ``out_of_scope``) is excluded from every claim projection — the SAME
-    admission ``web_uncovered_high_route_hosts`` applies. A row with an EMPTY host
-    fails OPEN (kept): scope excludes KNOWN-foreign hosts, it never requires one.
+    predicate ``web_uncovered_high_route_hosts`` applies. A row with an EMPTY
+    host fails OPEN (kept): shaping excludes KNOWN-foreign rows, it never requires
+    a host and never rejects a specialist dispatch.
     """
     if scope is None:
         return False
@@ -650,9 +651,9 @@ def _stamp_liveness_sql() -> str:
 def fetch_work_items(engagement_id: int, *, type_val: str, limit: int, agent: str) -> dict[str, Any]:
     """Atomically claim up to ``limit`` pending items of a type for ``agent``."""
     engagement = _engagement_or_404(engagement_id)
-    scope = _work_scope_admission(engagement)
+    scope = _work_scope_filter(engagement)
     with _common.get_connection() as connection:
-        # I-07: exclude admitted-but-not-owned co-tenant / out-of-scope pending
+        # I-07: exclude observed-but-not-owned co-tenant / out-of-scope pending
         # rows from the claim. Out-of-scope rows are RARE, so the excluded set is
         # usually empty and the claim SQL is unchanged (fast path). The candidate
         # read and the claim run on the same re-entrant connection; the UPDATE
@@ -666,7 +667,11 @@ def fetch_work_items(engagement_id: int, *, type_val: str, limit: int, agent: st
                 "WHERE engagement_id = ? AND status = 'pending' AND type = ?",
                 (engagement.id, type_val),
             ).fetchall()
-            excluded = [r["id"] for r in candidates if _row_host_out_of_scope(r["host"], scope)]
+            excluded = [
+                row["id"]
+                for row in candidates
+                if _row_host_filtered_out(row["host"], scope)
+            ]
             if excluded:
                 exclude_sql = f" AND id NOT IN ({','.join('?' * len(excluded))})"
                 exclude_params = tuple(excluded)
@@ -703,7 +708,7 @@ def fetch_work_items_by_priority(engagement_id: int, *, limit: int, agent: str) 
     must never make a pending coverage obligation unreachable.
     """
     engagement = _engagement_or_404(engagement_id)
-    scope = _work_scope_admission(engagement)  # I-07 dispatch scope guard
+    scope = _work_scope_filter(engagement)
     agent = (agent or "auto").strip()
     auto_route = agent.lower() in {"auto", "routed", "route"}
     allowed_types = _ROUTED_TYPES if auto_route else _agent_route(agent)
@@ -725,8 +730,8 @@ def fetch_work_items_by_priority(engagement_id: int, *, limit: int, agent: str) 
         ).fetchall()
         claimed: list[dict[str, Any]] = []
         for row in candidates:
-            if _row_host_out_of_scope(row["host"], scope):
-                continue  # I-07: never dispatch an out-of-scope / co-tenant host
+            if _row_host_filtered_out(row["host"], scope):
+                continue
             row_agent = _assigned_agent_for_row(row) if auto_route else agent
             if not row_agent:
                 continue
@@ -792,7 +797,7 @@ def fetch_work_items_by_unit(
     so already-active units yield smaller follow-on batches.
     """
     engagement = _engagement_or_404(engagement_id)
-    scope = _work_scope_admission(engagement)  # I-07 dispatch scope guard
+    scope = _work_scope_filter(engagement)
     normalized_agent = (agent or "auto").strip()
     auto_route = normalized_agent.lower() in {"auto", "routed", "route"}
     allowed_types = _ROUTED_TYPES if auto_route else _agent_route(normalized_agent)
@@ -893,8 +898,8 @@ def fetch_work_items_by_unit(
         stamp = _stamp_liveness_sql()
         claimed: list[dict[str, Any]] = []
         for candidate in candidates:
-            if _row_host_out_of_scope(candidate["host"], scope):
-                continue  # I-07: never dispatch an out-of-scope / co-tenant host
+            if _row_host_filtered_out(candidate["host"], scope):
+                continue
             row_agent = _assigned_agent_for_row(candidate) if auto_route else normalized_agent
             if not row_agent:
                 continue

@@ -192,8 +192,8 @@ CWE-style vocabulary and does not apply to IR findings.
 ## 12. Tenant-ref first — missing tenant ref halts the dispatch
 
 Before any platform CLI command runs (GAM, gcloud, az, splunk, crowdstrike,
-defender, etc.), the dispatched specialist loads the tenant ref path(s) from
-`scope.json:tenant_reference_paths[]`. If the tenant ref is missing, the dispatch
+defender, etc.), the dispatched specialist loads every tenant ref path injected
+in the dispatch. If a tenant ref is missing, the dispatch
 halts and the specialist returns a `blocked` handoff naming the missing path. Do
 not improvise platform calls without the tenant ref — that is the file that tells
 you which tool config, which admin email, which DWD scopes, and which known-benign

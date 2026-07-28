@@ -25,7 +25,7 @@ The operator's audit trail. One row per dispatched specialist agent.
 | `agent_id` | string (PK) | Operator-assigned at `vigil assess agent start` time. Must match the spawned specialist's runtime identity (`AGENT_NAME` / wrapper label). |
 | `agent_role` | string | `recon-specialist` / `vulnerability-analyst` / etc. |
 | `task` | string | One-paragraph dispatch objective. |
-| `scope_host` | string | The host the dispatch operated against (or `multi` for multi-host). |
+| `application_unit_id` | positive integer (optional) | Concrete application unit assigned to a dedicated lane; validated against the current engagement. |
 | `dispatched_at` | ISO datetime | Set on agent start (`POST /dispatches`). |
 | `completed_at` | ISO datetime | Set on `vigil assess agent done` when status moves to a terminal value. |
 | `status` | enum | `in-progress` / `completed` / `failed` / `aborted` / `blocked`. |
@@ -46,7 +46,6 @@ vigil assess agent start \
     --agent-id recon_a3f9 \
     --agent-role recon-specialist \
     --task "Phase 1 wildcard subdomain enum + recon on saas.acme.example" \
-    --scope-host saas.acme.example \
     --model claude-opus-4-7 \
     --reasoning high \
     --dispatch-mode hypothesis-driven \
@@ -65,10 +64,12 @@ vigil assess agent list --task-q "wildcard subdomain"
 vigil assess agent get recon_a3f9
 ```
 
-The contract fields (`requested_model`/`actual_model`, `requested_reasoning`/`actual_reasoning`, `dispatch_mode`, `skills`) capture the dispatch
-shape alongside the audit fields. Report-writer and later operators read these
-to audit not only what was dispatched but also the dispatch configuration. Legacy
-JSON keys `model` / `reasoning` on `POST /dispatches` still populate the requested columns.
+The contract fields (`application_unit_id`, `requested_model`/`actual_model`,
+`requested_reasoning`/`actual_reasoning`, `dispatch_mode`, `skills`) capture the
+dispatch shape alongside the audit fields. Report-writer and later operators
+read these to audit not only what was dispatched but also the dispatch
+configuration. Legacy JSON keys `model` / `reasoning` on `POST /dispatches`
+still populate the requested columns.
 
 ## Contract Schema
 
@@ -76,6 +77,7 @@ The contract fields recorded on every `vigil assess agent start` / `POST /dispat
 
 | Field | Type | Values |
 |---|---|---|
+| `application_unit_id` | positive integer (optional) | Concrete application unit for depth attribution; must belong to the current engagement. |
 | `dispatch_mode` | string | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` / `swarm` (see "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`) |
 | `skills` | string | Comma-separated skill names loaded by the specialist; required for non-operator roles. |
 | `requested_model` | string (optional) | Intended model id from the operator |
@@ -178,7 +180,7 @@ before advancing.
   pulls finding metadata from the findings table and artifact state from disk.
 - **Decision audit.** Vendor-SaaS scope and egress-reputation decisions are
   cross-dispatch state — the dispatcher needs them when choosing the next
-  dispatch's scope shape.
+  dispatch objective.
 
 ## Continuing work across dispatches
 
@@ -198,7 +200,7 @@ next-step list is always emitted.
 ```markdown
 #### Handoff from exploit-developer dispatch exp_g8h3
 - **Prior task:** RCE chain: phpMyAdmin → template injection → webshell
-- **Scope host:** target.example
+- **Application unit:** 42
 - **Phase:** exploit (status: completed)
 - **Summary:** Chained EX-001 (auth-bypass) → EX-002 (RCE) into authenticated webshell on app.target.example; full chain recorded; one credential captured.
 - **Findings recorded:**
