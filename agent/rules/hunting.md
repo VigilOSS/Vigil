@@ -3,9 +3,10 @@
 These rules are always active across the engagement. They are intentionally compact, but they are
 strict: breaking them lowers finding quality.
 
-## 1. Read scope before target work
+## 1. Resolve the engagement boundary before target work
 
-Confirm the exact in-scope hosts, scope mode, exploit policy, and auth state before making target-facing decisions.
+Apply `agent/shared-constraints.md` §1; it owns the engagement boundary and the
+state that must be resolved before target-facing decisions.
 
 ## 2. No theoretical findings — prove the attacker outcome, not just the vulnerability
 
@@ -563,8 +564,8 @@ refusal, a zero-byte result, a parse error, or an empty match set is a fact abou
 fact about the target — and it arrives looking exactly like a clean negative. Before recording any
 "nothing there," establish that the probe reached the target and did the thing you asked.
 
-The failure is expensive because it is confident and it compounds: a scope layer that refuses a
-research host returns zero bytes, and "nothing exposed on their GitHub" enters the record as a
+The failure is expensive because it is confident and it compounds: a rate-limited API that silently
+drops your request returns zero bytes, and "nothing exposed on their GitHub" enters the record as a
 finding-grade negative that later work inherits without re-deriving.
 
 Two habits catch it:

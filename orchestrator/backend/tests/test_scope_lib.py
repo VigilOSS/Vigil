@@ -10,7 +10,10 @@ Loaded in-process via importlib so the suite stays hermetic (no FastAPI).
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -81,6 +84,55 @@ def test_single_label_host_matches_itself():
     entries = scope.scope_entries({"hosts": ["intranet"]})
     assert scope.host_in_scope("intranet", entries)
     assert not scope.host_in_scope("other", entries)
+
+
+def test_discovered_hosts_inventory_does_not_expand_scope_entries():
+    entries = scope.scope_entries(
+        {
+            "hosts": ["*.example.com"],
+            "discovered_hosts": ["api.example.com", "unrelated.test"],
+        }
+    )
+
+    assert [entry["scope_entry"] for entry in entries] == ["*.example.com"]
+    assert not scope.host_in_scope("unrelated.test", entries)
+
+
+def test_scope_mutations_are_serialized_without_losing_fields(tmp_path):
+    scope_path = tmp_path / "scope.json"
+    scope_path.write_text(
+        '{"engagement_type":"web","hosts":["*.example.com"]}',
+        encoding="utf-8",
+    )
+    first_inside = threading.Event()
+    release_first = threading.Event()
+
+    def add_inventory(doc):
+        first_inside.set()
+        assert release_first.wait(timeout=2)
+        doc["discovered_hosts"] = ["api.example.com"]
+        return True
+
+    def add_approval(doc):
+        doc["exploit_review_state"] = "approved"
+        return True
+
+    first = threading.Thread(target=scope.mutate_scope, args=(str(tmp_path), add_inventory))
+    second = threading.Thread(target=scope.mutate_scope, args=(str(tmp_path), add_approval))
+    first.start()
+    assert first_inside.wait(timeout=2)
+    second.start()
+    time.sleep(0.05)
+    assert second.is_alive()
+    release_first.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    updated = json.loads(scope_path.read_text(encoding="utf-8"))
+    assert updated["discovered_hosts"] == ["api.example.com"]
+    assert updated["exploit_review_state"] == "approved"
 
 
 def test_free_text_token_parsing_still_rejects_bare_single_label():

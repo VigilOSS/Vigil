@@ -94,6 +94,14 @@ def _block(eng_id):
     return state_manager.terminal_depth_block(eng_id)
 
 
+def _unit_id_for(engagement_id: int, host: str, prefix: str) -> int:
+    state_manager.score_application_units(engagement_id)
+    for unit in state_manager.list_application_units(engagement_id):
+        if unit["host"] == host and unit["path_prefix"] == prefix:
+            return int(unit["id"])
+    raise AssertionError(f"no application unit for {host}{prefix}")
+
+
 def _labels(units):
     return {(u["unit"]["host"], u["unit"]["path_prefix"]) for u in units}
 
@@ -433,14 +441,15 @@ def test_class_specific_covering_probe_clears_class_block(client, isolate_settin
 def test_self_attested_handoff_does_not_downgrade_block(client, isolate_settings):
     """A completed dispatch covering the unit plus ONLY a bare handoff summary
     (no covering probe, no finding) must NOT mark the unit 'touched' — the
-    decisive unit stays in `blocking`. A self-attested handoff with a broad
-    scope_path_prefix must not be able to defeat the one hard block (S7)."""
+    decisive unit stays in `blocking`. A self-attested handoff cannot defeat
+    the one hard block (S7)."""
     key = "2026-06-09-210011-handoff"
     eng_id = _seed_decisive_small_unit(client, isolate_settings, key)
+    unit_id = _unit_id_for(eng_id, "auth.example.com", "/login")
     state_manager.record_dispatch(
         eng_id, agent_id="va-x", agent_role="vulnerability-analyst",
-        task="review the login area", scope_host="auth.example.com",
-        scope_path_prefix="/", vuln_classes="idor", status_value="completed",
+        task="review the login area", application_unit_id=unit_id,
+        vuln_classes="idor", status_value="completed",
     )
     state_manager.update_dispatch(eng_id, agent_id="va-x", status_value="completed",
                                   completed_at="2026-06-09T12:00:00Z")
@@ -486,10 +495,11 @@ def test_undeclared_vuln_classes_clear_the_dedicated_dispatch_obligation(
     """
     key = "2026-07-27-000001-undeclared"
     eng_id = _seed_decisive_small_unit(client, isolate_settings, key)
+    unit_id = _unit_id_for(eng_id, "auth.example.com", "/login")
     state_manager.record_dispatch(
         eng_id, agent_id="va-undeclared", agent_role="vulnerability-analyst",
         task="hunt the login surface; prove any attacker outcome you find",
-        scope_host="auth.example.com", scope_path_prefix="/login",
+        application_unit_id=unit_id,
         status_value="completed",
     )
     state_manager.update_dispatch(eng_id, agent_id="va-undeclared",
@@ -513,10 +523,11 @@ def test_dedicated_dispatch_obligation_still_needs_work_evidence(
     the unit still owes durable evidence that the work happened (S7)."""
     key = "2026-07-27-000002-noevidence"
     eng_id = _seed_decisive_small_unit(client, isolate_settings, key)
+    unit_id = _unit_id_for(eng_id, "auth.example.com", "/login")
     state_manager.record_dispatch(
         eng_id, agent_id="va-talker", agent_role="vulnerability-analyst",
-        task="cover the login surface", scope_host="auth.example.com",
-        scope_path_prefix="/login", vuln_classes="sqli,idor,auth-bypass",
+        task="cover the login surface", application_unit_id=unit_id,
+        vuln_classes="sqli,idor,auth-bypass",
         status_value="completed",
     )
     state_manager.update_dispatch(eng_id, agent_id="va-talker",

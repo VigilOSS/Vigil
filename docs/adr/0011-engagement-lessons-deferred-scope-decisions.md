@@ -6,8 +6,8 @@
 ## Context
 
 This ADR records three related decisions that originated in engagement review:
-keep route-count coverage advisory, enforce authored path-level no-fire rules,
-and keep high-rate mass scanners out of the default runtime.
+keep route-count coverage advisory, the former authored path-level no-fire
+policy, and keep high-rate mass scanners out of the default runtime.
 
 The common thread is the project's standing bias, set in ADR 0001: **harness over
 gate, and do not build enforcement on a signal you cannot yet trust or a violation
@@ -41,14 +41,22 @@ pressure the LLM marks routes covered, mass-defers, or `--force`s past it.
 The per-host-verdict / unreviewed-unauth WARNs remain as advisory signal the
 operator reads, not as a block.
 
-### 2. Authored path-level no-fire policy is enforced fail-closed
+### 2. Authored path-level no-fire policy (superseded)
+
+> **Superseded (2026-07-28):** the fail-closed decision below is historical.
+> `off_limits_paths` no longer refuses Kali, browser, or proxied requests and no
+> longer generates automatic Katana exclusions. Explicit operator-supplied
+> crawler exclusions remain available. Host/wildcard allow-deny matching
+> survives where it shapes collected datasets, proxy flow ownership, and
+> coverage accounting, but never as outbound or dispatch admission.
 
 `scope.json.off_limits_paths` is now a durable, explicitly authored ROE input.
-`agent/scripts/assess/lib/scope.py` rejects matching direct tool requests, and
-`agent/scripts/proxy_addon.py` returns a recorded synthetic 451 before an
-intercepted request is sent upstream. Malformed authored policy fails closed for
-the affected engagement. Host and wildcard allow/deny rules still apply first,
-with deny-wins semantics.
+`agent/scripts/assess/lib/scope.py` refuses a command whose requested http(s)
+URLs match one, and `agent/scripts/proxy_addon.py` returns a recorded synthetic
+451 before an intercepted request is sent upstream. Malformed authored policy
+fails closed for the affected engagement. The path block is independent of host
+matching: it names specific URL paths the program put off limits, so it applies
+to any command or proxied request that reaches one.
 
 This is deliberately narrower than inferring path restrictions from findings or
 content. Only operator-authored scope policy can create the path block.
@@ -71,7 +79,8 @@ default — the same posture the plan records for any high-risk capability.
 
 ## Consequences
 
-- Route-count coverage remains advisory, while explicit path ROE is load-bearing.
+- Route-count coverage remains advisory; explicit path ROE is guidance rather
+  than an execution gate.
 - A future need that `nmap-scan` cannot meet is the only trigger for revisiting the
   mass-scanner decision.
 - The masscan/naabu deferral keeps the runtime's default scanning posture
@@ -91,6 +100,6 @@ default — the same posture the plan records for any high-risk capability.
 ## Relationship to other items
 
 - Reaffirms **ADR 0001** (coverage/depth as a harness, not a gate) for decision #1.
-- Decision #2 follows **ADR 0009** (operator/specialist division of labor) and
-  **ADR 0010** (fail-closed attribution) in making explicit, durable ROE
-  load-bearing without inventing authorization from observations.
+- Decision #2 followed **ADR 0009** (operator/specialist division of labor) and
+  **ADR 0010** (fail-closed attribution); both fail-closed execution decisions
+  are retained here only as history after the 2026-07-28 pass-through change.

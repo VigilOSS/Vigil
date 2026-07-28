@@ -53,7 +53,7 @@ than launching it.
 
 **LOAD-ON-FIRST-USE (lazy):**
 
-- `agent/skills/subdomain-enumeration/SKILL.md` — when `scope.json` has wildcard (`*.domain`) hosts needing enumeration judgment, before judging recon-job completeness (Step 1 below). Owns the `vigil assess recon` staged composition, resolver/wildcard/budget knobs, and the bound rules that tell you whether coverage is complete or stopped early.
+- `agent/skills/subdomain-enumeration/SKILL.md` — when the dispatch includes wildcard (`*.domain`) roots needing enumeration judgment, before judging recon-job completeness (Step 1 below). Owns the `vigil assess recon` staged composition, resolver/wildcard/budget knobs, and the bound rules that tell you whether coverage is complete or stopped early.
 - `agent/references/recon/rate-calibration.md` — before issuing any bounded probe. The per-target rate table you calibrate against.
 - `agent/skills/port-scanning/SKILL.md` — when you run the per-host nmap step (carries the per-host port-data presence assertion).
 - `agent/skills/nuclei-scanning/SKILL.md` — when you run the reactive nuclei sweep.
@@ -66,7 +66,7 @@ than launching it.
 Before any work, verify — resolve anything unchecked before work starts:
 
 - [ ] Loaded `agent/shared-constraints.md` (incl. the §2 no-long-blocking rule)
-- [ ] Read `scope.json`: in-scope hosts + active `exploit_policy`
+- [ ] Have the injected authorization roots and derived host inventory needed to judge recon coverage
 - [ ] Have the dispatch context (target, phase, objective, prior findings)
 - [ ] **Read the recon-job state first** — `vigil assess recon-status [--job-id N]` (per-stage state, counts, failures/partials/WARNs) and the artifacts under `scans/dns-discovery/`, `scans/web-discovery/`, `scans/recon/`. This is your starting picture.
 - [ ] Checked command history as a coverage map before probing — see `agent/shared-constraints.md` §2b.
@@ -120,7 +120,7 @@ self-check" below before you write either one.
 
 ## Trust Boundary Checkpoints
 
-- [ ] **Vendor-SaaS hosts adjudicated.** Any host whose CNAME/rDNS/banner/HTTP fingerprint matches a vendor-managed SaaS platform is surfaced to the operator with a `scope_decision` row: `vigil assess agent decision --kind scope_decision --host <host> --vendor <vendor> --choice pending --surfaced-to-user`. Literal `scope.json` hosts skip the warning.
+- [ ] **Vendor-SaaS hosts adjudicated.** Any host whose CNAME/rDNS/banner/HTTP fingerprint matches a vendor-managed SaaS platform is surfaced to the operator with a `scope_decision` row: `vigil assess agent decision --kind scope_decision --host <host> --vendor <vendor> --choice pending --surfaced-to-user`. Hosts the operator identifies as literal authorization roots skip the warning.
 - [ ] **Egress reputation** verdict reviewed (job web stage / `web-recon` Step 0b). If a host cluster is blackholed (`egress_block_pct > 50`), confirm the `egress_decision` row + the `scans/egress_blocked_hosts.txt` deferral, and flag it as a coverage gap — not a target verdict.
 
 ## Pre-Output Coverage Self-Check
@@ -204,7 +204,7 @@ Inputs to consult:
 - `vigil assess check-phase-readiness --phase recon --by-host` — per-host gate output if available
 
 Emit one line per gap (host + missing outcome):
-- [ ] Every `scope.json` host has ≥1 live service row OR an explicit `coverage_deferral`
+- [ ] Every literal or `discovered_hosts` inventory host has ≥1 live service row OR an explicit `coverage_deferral`
 - [ ] Every host has a WAF tier classified (intel tech-component, or `coverage_deferral` with reason)
 - [ ] Wildcard expansion produced ≥1 subdomain or an explicit defer reason
 - [ ] No host has 0 surfaces AND 0 work-buffer items AND no defer reason

@@ -142,11 +142,7 @@ def test_start_job_wrapper_and_started_at(monkeypatch, tmp_path):
         engagement_dir=tmp_path,
         container_name="vigil",
         config=_cfg(tmp_path),
-        execution_policy={
-            "scope_enforcement": "enforce",
-            "scope_bypassed": False,
-            "checked_targets": ["example.com"],
-        },
+        execution_policy={"target_facing": True},
     )
 
     wrapped_shell = captured["argv"][-1]
@@ -200,11 +196,7 @@ def test_start_job_acquires_rate_lease_before_dtach_and_persists_token(
         engagement_dir=tmp_path,
         container_name="vigil",
         config=_cfg(tmp_path),
-        execution_policy={
-            "scope_enforcement": "enforce",
-            "scope_bypassed": False,
-            "checked_targets": ["example.com"],
-        },
+        execution_policy={"target_facing": True},
     )
 
     assert events.index("lease") < events.index("spawn")
@@ -249,18 +241,12 @@ def test_start_job_creates_command_audit_before_linked_job_and_spawn(
             "timeout_seconds_requested": 60,
             "scope_version": "scope-v1",
             "auth_context": "anonymous",
-            "scope_enforcement": "enforce",
-            "scope_bypassed": False,
-            "checked_targets": ["example.com"],
+            "target_facing": True,
         },
         engagement_dir=tmp_path,
         container_name="vigil",
         config=_cfg(tmp_path),
-        execution_policy={
-            "scope_enforcement": "enforce",
-            "scope_bypassed": False,
-            "checked_targets": ["example.com"],
-        },
+        execution_policy={"target_facing": True},
     )
 
     assert events[:3] == ["post:command-runs", "post:jobs", "spawn"]

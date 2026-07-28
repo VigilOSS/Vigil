@@ -16,7 +16,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pytest
-
 from assess.lib import auth, identity, kali
 
 
@@ -358,6 +357,7 @@ def test_classify_liveness_mirror_parity_with_cli() -> None:
         sys.path.insert(0, str(repo_src))
 
     from assess.commands import auth_status
+
     from vigil_cli import auth as cli_auth
 
     cases = [
@@ -511,7 +511,7 @@ def test_scoped_alias_is_propagated_to_command_and_browser_resolution(
 
     monkeypatch.setattr(kali, "resolve_identity", resolve)
     cmd = ["curl", "https://app.example.com/account"]
-    auth_context, _gap = kali.prepare_execution_command(
+    auth_context = kali.prepare_execution_command(
         cmd,
         tool_name="curl",
         engagement_dir=tmp_path,
@@ -560,7 +560,7 @@ def test_stale_identity_is_replayed_with_a_warning_not_refused(
     )
 
     cmd = ["curl", "https://app.example.com/account"]
-    auth_context, _gap = kali.prepare_execution_command(
+    auth_context = kali.prepare_execution_command(
         cmd, tool_name="curl", engagement_dir=tmp_path, identity="member"
     )
 
@@ -603,7 +603,7 @@ def test_liveness_probe_may_replay_a_probe_dead_identity(
     )
 
     cmd = ["curl", "https://app.example.com/account"]
-    auth_context, _gap = kali.prepare_execution_command(
+    auth_context = kali.prepare_execution_command(
         cmd,
         tool_name="curl",
         engagement_dir=tmp_path,
@@ -711,7 +711,7 @@ def test_liveness_probe_may_re_test_any_flagged_state(monkeypatch, tmp_path) -> 
     )
 
     cmd = ["curl", "https://app.example.com/account"]
-    auth_context, _gap = kali.prepare_execution_command(
+    auth_context = kali.prepare_execution_command(
         cmd,
         tool_name="curl",
         engagement_dir=tmp_path,

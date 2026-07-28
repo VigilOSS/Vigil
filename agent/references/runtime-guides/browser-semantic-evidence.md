@@ -42,7 +42,7 @@ This matches the major tool ecosystems:
   <https://chromedevtools.github.io/devtools-protocol/tot/Network/>
 
 The shipped typed path is `vigil assess kali browser`; it owns Playwright
-execution, scope admission, attribution, and bounded evidence capture. This
+execution, attribution, and bounded evidence capture. This
 reference focuses on engagement decisions and evidence requirements.
 
 ## When to use browser mode
@@ -148,8 +148,8 @@ deterministic, bounded browser evidence. It can capture:
 - final URL, HTTP status, title, and DOM length;
 - a bounded request/response event list with method, URL, resource type,
   response status, and header names;
-- in-scope route candidates plus explicit records of blocked out-of-scope
-  requests and origins where required attribution was omitted;
+- route candidates observed on the page, plus origins where required
+  attribution was omitted;
 - bounded console and page-error events;
 - screenshot, DOM, and optional metadata-only HAR artifacts;
 - optional bounded document/XHR/fetch body artifacts.
@@ -203,10 +203,10 @@ measurement instrument, not just a crawler:
 - Burp/ZAP-style proxy history is needed as a durable request corpus.
 
 This is still target-facing work. Start mitmproxy through `vigil mitmproxy`,
-keep the browser scoped to the engagement hosts, and register useful captures or
-derived artifacts. If a challenge asks for CAPTCHA, proof-of-human, device
-binding, or policy acceptance not covered by the engagement authorization, stop
-and ask the operator.
+follow the engagement boundary in `agent/shared-constraints.md` §1, and register
+useful captures or derived artifacts. If a challenge asks for CAPTCHA,
+proof-of-human, device binding, or policy acceptance not covered by the
+engagement authorization, stop and ask the operator.
 
 ## When browser mode is the wrong tool
 
@@ -221,7 +221,8 @@ Do not use browser mode for:
   create uncontrolled duplicate actions;
 - cases where service workers or cache would mask server behavior unless the
   test explicitly controls cache state;
-- third-party URLs loaded by the page but outside `scope.json`;
+- third-party interaction outside the engagement boundary owned by
+  `agent/shared-constraints.md` §1;
 - CAPTCHA or anti-bot bypass attempts without explicit program approval.
 
 ## Evidence contract

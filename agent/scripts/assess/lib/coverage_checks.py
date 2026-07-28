@@ -652,7 +652,7 @@ def _build_recommendation(
     mode = _ROLE_TO_MODE.get(role, "item-iterating")
     parallel_role = _STAGE_PARALLEL_ROLE.get(stage)
 
-    command = _format_start_command(role=role, scope_host=host, mode=mode, skills=skills)
+    command = _format_start_command(role=role, mode=mode, skills=skills)
     task_skeleton = _format_task_skeleton(
         host=host,
         stage=stage,
@@ -663,7 +663,7 @@ def _build_recommendation(
 
     return {
         "scope_entry": entry["scope_entry"],
-        "scope_host": host,
+        "host": host,
         "stage": stage,
         "role": role,
         "parallel_role": parallel_role,
@@ -682,14 +682,12 @@ def _build_recommendation(
 def _format_start_command(
     *,
     role: str,
-    scope_host: str,
     mode: str,
     skills: list[str],
 ) -> str:
     parts = [
         "vigil assess agent start",
         f"--role {role}",
-        f"--scope-host {scope_host}",
         f"--dispatch-mode {mode}",
     ]
     if skills:
@@ -751,16 +749,16 @@ def build_redispatch_block(
             entry=entry, stage=stage, client=client, skills_root=skills_root,
             deny_entries=deny_entries,
         )
-        key = (rec["role"], rec["scope_host"])
+        key = _dispatch_dedup_key(rec["role"], rec["task_skeleton"])
         if key in prior_index:
             suppressed.append(
                 {
-                    "scope_host": rec["scope_host"],
+                    "host": rec["host"],
                     "role": rec["role"],
                     "stage": rec["stage"],
                     "reason": (
                         f"prior dispatch already exists for role={rec['role']} "
-                        f"scope_host={rec['scope_host']} "
+                        "with the same task "
                         f"(agent_id={prior_index[key]})"
                     ),
                 }
@@ -802,17 +800,24 @@ def build_redispatch_block(
     }
 
 
+def _dispatch_dedup_key(role: Any, task: Any) -> tuple[str, str]:
+    return (
+        str(role or "").strip(),
+        " ".join(str(task or "").strip().lower().split()),
+    )
+
+
 def _index_prior_dispatches(rows: list[dict[str, Any]]) -> dict[tuple[str, str], str]:
-    """Map ``(role, scope_host) -> agent_id`` for prior dispatch rows."""
+    """Map exact ``(role, normalized task)`` pairs to prior dispatch ids."""
     index: dict[tuple[str, str], str] = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
         role = str(row.get("agent_role") or row.get("role") or "").strip()
-        scope_host = host_from_token(str(row.get("scope_host") or ""))
-        if not role or not scope_host:
+        task = str(row.get("task") or "").strip()
+        if not role or not task:
             continue
-        key = (role, scope_host)
+        key = _dispatch_dedup_key(role, task)
         if key not in index:
             index[key] = str(row.get("agent_id") or row.get("id") or "")
     return index
@@ -1604,7 +1609,7 @@ def render_redispatch_section(block: dict[str, Any]) -> list[str]:
         return lines
     for rec in recommendations:
         lines.append(
-            f"  - {rec['scope_host']} [{rec['stage']} gap] "
+            f"  - {rec['host']} [{rec['stage']} gap] "
             f"confidence={rec['confidence']} role={rec['role']}"
         )
         lines.append(f"      {rec['command']}")
@@ -1695,13 +1700,25 @@ def compute_coverage_state(
     return COVERAGE_STATE_UNCOVERED
 
 
-def dispatched_hosts_from_rows(rows: list[dict[str, Any]]) -> dict[str, list[str]]:
-    """Map dispatch rows to ``{host: [roles]}`` (a "dedicated lane" per host)."""
+def dispatched_hosts_from_rows(
+    rows: list[dict[str, Any]],
+    application_units: list[dict[str, Any]],
+) -> dict[str, list[str]]:
+    """Map unit-attributed dispatch rows to ``{host: [roles]}`` lanes."""
+    unit_hosts = {
+        int(unit["id"]): host_from_token(str(unit.get("host") or ""))
+        for unit in application_units
+        if isinstance(unit, dict) and unit.get("id") is not None
+    }
     out: dict[str, list[str]] = {}
     for row in rows or []:
         if not isinstance(row, dict):
             continue
-        host = host_from_token(str(row.get("scope_host") or ""))
+        unit_id = row.get("application_unit_id")
+        try:
+            host = unit_hosts.get(int(unit_id)) if unit_id is not None else None
+        except (TypeError, ValueError):
+            host = None
         if not host:
             continue
         role = str(row.get("agent_role") or row.get("role") or "").strip()

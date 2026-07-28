@@ -5,9 +5,9 @@ operator's durable memory for findings, intel, dispatch handoffs, null results, 
 coverage. Skipping it causes duplicate dispatches, repeated probes, lost kill rationale, and
 stale phase decisions.
 
-Apply this rule after locating the engagement directory and reading `scope.json` when any of these
-are true:
-- `scope.json` shows `status: in_progress`
+Apply this rule after locating the engagement directory when any of these are
+true:
+- The engagement is in progress
 - The current phase is past initialization
 - Findings, dispatch rows, activity entries, or command runs may already exist
 - You are unsure whether the engagement is fresh

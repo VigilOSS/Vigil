@@ -37,11 +37,13 @@ to "prove" a finding — one minimal sample is the evidence (§4).
 
 ---
 
-## 1. Confirm Scope Before Any Target Work
+## 1. Resolve Engagement State Before Any Target Work
 
-Read `scope.json` before making target-facing decisions. Confirm:
+Stay within the original authorization roots in `scope.json` and record confirmed hosts covered by an original wildcard under `discovered_hosts`; scope shapes collected coverage, but tooling never uses it to refuse an outbound request or specialist dispatch.
 
-- In-scope hosts from the `hosts` array (includes `*.domain` entries for subdomain enum)
+Use the engagement context the operator injected before making target-facing
+decisions. Resolve:
+
 - `exploit_policy` value — `pause` (default) or `selected` require `exploit_review_state=approved`
   plus a non-empty `approved_targets` list, set once via `exploit approve`, before exploitation
   proceeds (`pause` and `selected` are mechanically identical); `full_send` bypasses that review
@@ -71,16 +73,11 @@ Read `scope.json` before making target-facing decisions. Confirm:
     | No signature match, or a transport error | `unknown` | Never a false verdict — stays `unknown` rather than guessing |
 
 `exploit_policy` governs *exploitation*, and it is resolved once **before** dispatch — not a
-per-action approval you re-request mid-task. The invariants that hold regardless of its value: stay
-within the in-scope hosts above, honor the program's ROE, and make no persistent or destructive
-change to the target's or a third party's state without operator approval — changes to
-operator-owned infrastructure, or to our own test data (accounts or artifacts we created), are
-fine. §2d's human-reach preflight is the one gate that survives every `exploit_policy` value and
-still applies per-action.
-
-### Reachability Is Not Scope
-
-The Kali runtime is shared infrastructure, so it may be able to route to hosts that are NOT your target — other engagements' services, neighbouring Docker/internal subnets, or the host itself. Only the hosts in this engagement's `scope.json` are in scope. Never probe, pivot into, or build findings on infrastructure outside it, even when the runtime can reach it — a reachable-but-out-of-scope host is a distraction (and, on a shared runtime, often another engagement's state), not a lead.
+per-action approval you re-request mid-task. Regardless of its value, honor the engagement boundary
+above and the program's ROE, and make no persistent or destructive change to the target's or a third
+party's state without operator approval — changes to operator-owned infrastructure, or to our own
+test data (accounts or artifacts we created), are fine. §2d's human-reach preflight is the one gate
+that survives every `exploit_policy` value and still applies per-action.
 
 ---
 
@@ -179,8 +176,8 @@ above).
 
 Two judgment points that the mechanical layers can't give you: derive `--technique` from the
 skill you loaded (`ssrf-testing` → `SSRF`, `sqli-testing` → `SQLI`; `HEALTH` for runtime/tool
-inventory), and pass `--phase` for the phase the **dispatch was authorized for**, NOT
-`scope.json.current_phase` — engagements routinely operate between phases.
+inventory), and pass `--phase` for the phase the **dispatch was authorized for**, not
+the mutable engagement phase — engagements routinely operate between phases.
 
 Full flag-by-flag purpose, the enum values for `--technique`/`--probe-kind`/`--phase`, and the
 assessment-binding/`--agent-name` attribution rules live in
@@ -825,7 +822,10 @@ roles that do.
 | Custom scripts/exploits | tools/ |
 | Background PIDs | pids/ |
 
-Root: `scope.json`, `report.md`, and the transient worker buffer only. Credentials, activity log, and intel live in the orchestrator backend — query via `vigil auth status`, `vigil assess fetch activity-entries`, and `vigil assess intel list`.
+Keep engagement-control metadata, `report.md`, and the transient worker buffer at
+the engagement root only. Credentials, activity log, and intel live in the
+orchestrator backend — query via `vigil auth status`, `vigil assess fetch
+activity-entries`, and `vigil assess intel list`.
 
 ---
 

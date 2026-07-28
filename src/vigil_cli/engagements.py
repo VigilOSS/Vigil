@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Iterator, Protocol
 from urllib.parse import urlparse
 
 from . import docker
@@ -751,19 +755,61 @@ def _emit_bootstrap_scope_summary(scope: dict[str, object]) -> None:
     print(f"[vigil] scope: {len(raw_hosts)} entries", file=sys.stderr)
 
 
-def _load_engagement_scope(install_root: Path, key: str) -> tuple[Path, dict[str, Any]]:
-    """Resolve an engagement's scope.json by key for in-place mutation."""
+def _engagement_scope_path(install_root: Path, key: str) -> Path:
+    """Resolve an engagement's scope.json by key."""
     eng_dir = engagements_root(install_root) / key
     scope_path = eng_dir / "scope.json"
     if not scope_path.is_file():
         raise SystemExit(f"engagement '{key}' not found (no scope.json at {scope_path}).")
-    scope = _read_json(scope_path)
-    if str(scope.get("engagement_type") or "") not in _HTTP_TARGET_TYPES:
-        raise SystemExit(
-            f"engagement '{key}' is type '{scope.get('engagement_type')}'; required "
-            "headers / out-of-scope apply only to HTTP-target engagements."
-        )
-    return scope_path, scope
+    return scope_path
+
+
+@contextmanager
+def _scope_file_lock(scope_path: Path) -> Iterator[None]:
+    """Use the same lock path as assess-side scope.json writers."""
+    lock_path = scope_path.parent / ".locks" / "scope-json.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def mutate_scope_file(
+    scope_path: Path,
+    mutator: Callable[[dict[str, Any]], object],
+) -> dict[str, Any]:
+    """Apply an in-place scope.json mutation under the shared writer lock."""
+    with _scope_file_lock(scope_path):
+        try:
+            scope = json.loads(scope_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"could not read scope.json at {scope_path}: {exc}") from exc
+        if not isinstance(scope, dict):
+            raise SystemExit(f"scope.json at {scope_path} is not a JSON object.")
+        mutator(scope)
+        _write_json_atomic(scope_path, scope)
+    return scope
+
+
+def _mutate_http_scope(
+    install_root: Path,
+    key: str,
+    mutator: Callable[[dict[str, Any]], object],
+) -> dict[str, Any]:
+    scope_path = _engagement_scope_path(install_root, key)
+
+    def checked_mutation(scope: dict[str, Any]) -> None:
+        if str(scope.get("engagement_type") or "") not in _HTTP_TARGET_TYPES:
+            raise SystemExit(
+                f"engagement '{key}' is type '{scope.get('engagement_type')}'; required "
+                "headers / out-of-scope apply only to HTTP-target engagements."
+            )
+        mutator(scope)
+
+    return mutate_scope_file(scope_path, checked_mutation)
 
 
 def set_engagement_header(install_root: Path, key: str, header: str) -> dict[str, str]:
@@ -774,29 +820,32 @@ def set_engagement_header(install_root: Path, key: str, header: str) -> dict[str
     name, value = name.strip(), value.strip()
     if not name:
         raise SystemExit(f"header '{header}' has an empty header name.")
-    scope_path, scope = _load_engagement_scope(install_root, key)
-    headers = scope.get("required_headers")
-    if not isinstance(headers, dict):
-        headers = {}
-    headers[name] = value
-    scope["required_headers"] = headers
-    _write_json(scope_path, scope)
-    return headers
+    def update(scope: dict[str, Any]) -> None:
+        headers = scope.get("required_headers")
+        if not isinstance(headers, dict):
+            headers = {}
+        headers[name] = value
+        scope["required_headers"] = headers
+
+    scope = _mutate_http_scope(install_root, key, update)
+    return dict(scope["required_headers"])
 
 
 def unset_engagement_header(install_root: Path, key: str, name: str) -> dict[str, str]:
     """Remove a `required_headers` entry from an existing engagement."""
-    scope_path, scope = _load_engagement_scope(install_root, key)
+    def update(scope: dict[str, Any]) -> None:
+        headers = scope.get("required_headers")
+        if not isinstance(headers, dict) or name not in headers:
+            raise SystemExit(f"engagement '{key}' has no required header '{name}'.")
+        del headers[name]
+        if headers:
+            scope["required_headers"] = headers
+        else:
+            scope.pop("required_headers", None)
+
+    scope = _mutate_http_scope(install_root, key, update)
     headers = scope.get("required_headers")
-    if not isinstance(headers, dict) or name not in headers:
-        raise SystemExit(f"engagement '{key}' has no required header '{name}'.")
-    del headers[name]
-    if headers:
-        scope["required_headers"] = headers
-    else:
-        scope.pop("required_headers", None)
-    _write_json(scope_path, scope)
-    return headers if isinstance(headers, dict) else {}
+    return dict(headers) if isinstance(headers, dict) else {}
 
 
 def add_out_of_scope(install_root: Path, key: str, entries: list[str]) -> list[str]:
@@ -804,33 +853,34 @@ def add_out_of_scope(install_root: Path, key: str, entries: list[str]) -> list[s
     new_entries = resolve_out_of_scope(entries)
     if not new_entries:
         raise SystemExit("no valid --out-of-scope entries given.")
-    scope_path, scope = _load_engagement_scope(install_root, key)
-    current = scope.get("out_of_scope")
-    if not isinstance(current, list):
-        current = []
-    merged = list(current)
-    for entry in new_entries:
-        if entry not in merged:
-            merged.append(entry)
-    scope["out_of_scope"] = merged
-    _write_json(scope_path, scope)
-    return merged
+    def update(scope: dict[str, Any]) -> None:
+        current = scope.get("out_of_scope")
+        merged = list(current) if isinstance(current, list) else []
+        for entry in new_entries:
+            if entry not in merged:
+                merged.append(entry)
+        scope["out_of_scope"] = merged
+
+    scope = _mutate_http_scope(install_root, key, update)
+    return list(scope["out_of_scope"])
 
 
 def remove_out_of_scope(install_root: Path, key: str, entry: str) -> list[str]:
     """Remove an out-of-scope carve-out from an existing engagement."""
     target = entry.strip().lower()
-    scope_path, scope = _load_engagement_scope(install_root, key)
-    current = scope.get("out_of_scope")
-    if not isinstance(current, list) or target not in current:
-        raise SystemExit(f"engagement '{key}' has no out-of-scope entry '{entry}'.")
-    remaining = [item for item in current if item != target]
-    if remaining:
-        scope["out_of_scope"] = remaining
-    else:
-        scope.pop("out_of_scope", None)
-    _write_json(scope_path, scope)
-    return remaining
+    def update(scope: dict[str, Any]) -> None:
+        current = scope.get("out_of_scope")
+        if not isinstance(current, list) or target not in current:
+            raise SystemExit(f"engagement '{key}' has no out-of-scope entry '{entry}'.")
+        remaining = [item for item in current if item != target]
+        if remaining:
+            scope["out_of_scope"] = remaining
+        else:
+            scope.pop("out_of_scope", None)
+
+    scope = _mutate_http_scope(install_root, key, update)
+    remaining = scope.get("out_of_scope")
+    return list(remaining) if isinstance(remaining, list) else []
 
 
 def list_engagements(install_root: Path) -> list[EngagementRow]:
@@ -1058,6 +1108,26 @@ def start_engagement(install_root: Path, engagement_dir: Path, client: str, extr
 
 def _write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _write_json_atomic(path: Path, payload: object) -> None:
+    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp_path = Path(tmp_name)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+            tmp_file.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def _read_json(path: Path) -> dict[str, object]:

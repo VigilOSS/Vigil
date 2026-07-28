@@ -91,11 +91,7 @@ def test_cluster_blackholed_records_decision(monkeypatch, tmp_path, capsys):
     assert recorded["decision"]["payload"]["blocked_pct"] == 100
     assert sorted(recorded["decision"]["payload"]["blackholed_hosts"]) == ["a.example.com", "b.example.com"]
     assert (tmp_path / "blocked.txt").read_text().split() == ["a.example.com", "b.example.com"]
-    assert [(item.value, item.role) for item in recorded["exec_kwargs"]["destinations"]] == [
-        ("example.com", "control"),
-        ("a.example.com", "target"),
-        ("b.example.com", "target"),
-    ]
+    assert "destinations" not in recorded["exec_kwargs"]
 
 
 def test_control_failure_records_nothing(monkeypatch, tmp_path, capsys):

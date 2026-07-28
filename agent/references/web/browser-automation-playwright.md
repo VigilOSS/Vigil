@@ -212,8 +212,8 @@ node agent/scripts/browser/playwright-login.js
 
 ## Authorization + stop conditions
 
-This is target-facing, authenticated work. Stay inside `scope.json`. Stop and ask
-the operator when:
+This is target-facing, authenticated work. Follow the engagement boundary in
+`agent/shared-constraints.md` §1. Stop and ask the operator when:
 
 - a CAPTCHA / proof-of-human / device-binding / policy-acceptance prompt appears
   that the engagement authorization does not cover;

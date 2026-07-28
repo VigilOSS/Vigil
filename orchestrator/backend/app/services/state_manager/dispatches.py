@@ -30,6 +30,10 @@ def _require_terminal_dispatch_status(value: str | None) -> str | None:
 
 def _serialize_dispatch(row) -> dict[str, Any]:
     data = dict(row)
+    # Old engagement databases may retain these retired columns. They are not
+    # part of the dispatch contract and must not leak back into current rows.
+    data.pop("scope_host", None)
+    data.pop("scope_path_prefix", None)
     for col in ("finding_slugs_json",):
         raw = data.pop(col, None) or ""
         key = col[: -len("_json")]
@@ -48,7 +52,7 @@ def record_dispatch(
     agent_id: str,
     agent_role: str,
     task: str | None = None,
-    scope_host: str | None = None,
+    application_unit_id: int | None = None,
     dispatched_at: str | None = None,
     status_value: str = DispatchStatus.IN_PROGRESS,
     model: str | None = None,
@@ -61,7 +65,6 @@ def record_dispatch(
     finding_slugs: list[str] | None = None,
     skills: str | None = None,
     tier: str | None = None,
-    scope_path_prefix: str | None = None,
     vuln_classes: str | None = None,
     identity: str | None = None,
 ) -> dict[str, Any]:
@@ -73,13 +76,26 @@ def record_dispatch(
     findings_json = json.dumps(list(finding_slugs)) if finding_slugs is not None else None
     skills_value = (skills or "").strip() or None
     tier_value = (tier or "").strip() or None
-    scope_path_prefix_value = (scope_path_prefix or "").strip() or None
     vuln_classes_value = (vuln_classes or "").strip() or None
     identity_value = (identity or "").strip() or None
     requested_model_value = requested_model if requested_model is not None else model
     requested_reasoning_value = requested_reasoning if requested_reasoning is not None else reasoning
     with _common.get_connection() as connection:
         _ensure_finding_slugs_exist(connection, engagement.id, finding_slugs)
+        if application_unit_id is not None:
+            unit = connection.execute(
+                "SELECT id FROM assessment_application_units "
+                "WHERE id = ? AND engagement_id = ?",
+                (application_unit_id, engagement.id),
+            ).fetchone()
+            if unit is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"application_unit_id={application_unit_id} does not identify "
+                        "an application unit in this engagement"
+                    ),
+                )
         existing = connection.execute(
             "SELECT id FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
             (engagement.id, agent_id),
@@ -92,19 +108,19 @@ def record_dispatch(
         cursor = connection.execute(
             """
             INSERT INTO assessment_dispatches (
-                engagement_id, agent_id, agent_role, task, scope_host,
+                engagement_id, agent_id, agent_role, task, application_unit_id,
                 dispatched_at, status, model, reasoning,
                 requested_model, actual_model, requested_reasoning, actual_reasoning,
                 dispatch_mode, finding_slugs_json, skills, tier,
-                scope_path_prefix, vuln_classes, identity
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                vuln_classes, identity
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 engagement.id,
                 agent_id,
                 agent_role,
                 task,
-                scope_host,
+                application_unit_id,
                 dispatched_value,
                 status_value,
                 requested_model_value,
@@ -117,7 +133,6 @@ def record_dispatch(
                 findings_json,
                 skills_value,
                 tier_value,
-                scope_path_prefix_value,
                 vuln_classes_value,
                 identity_value,
             ),

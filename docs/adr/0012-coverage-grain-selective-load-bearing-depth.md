@@ -74,12 +74,12 @@ the already-computed per-class signal selectively load-bearing — narrowly, for
 computed on every `depth_ledger()` call; the only change is whether one narrow, high-stakes slice of units
 gets to treat it as load-bearing instead of decorative. Widening the *scope* of an already-trusted signal
 is a calibration; trusting a *new, softer* signal would be the principle ADR 0001 actually defends, and
-this decision does not do that. **ADR 0010 is the in-repo precedent for this shape of move**: it took a
-signal already durable and non-self-attested (a required-header marker's literal presence in an assembled
-command) and made it selectively fail-closed — narrowly, only for engagements that configured
-`required_headers`, only for commands reaching an in-scope host, fail-open everywhere else. This decision
-applies the same pattern to depth: narrow the hard consequence to where the signal is durable and the
-stakes are highest, and leave the rest of the harness advisory.
+this decision does not do that. **ADR 0010 was the historical in-repo precedent for this shape of
+move**: it took a signal already durable and non-self-attested (a required-header marker's literal
+presence in an assembled command) and made it selectively fail-closed. That outbound gate was later
+superseded for a separate architectural reason — scope data no longer admits execution — but the
+calibration principle used here remains: narrow a hard consequence to where the signal is durable and
+the stakes are highest, and leave the rest of the harness advisory.
 
 ## The ADR 0009 per-input anchoring boundary
 
@@ -130,8 +130,9 @@ transition gate) WHAT is still uncovered, never HOW to cover it.
   default, class-level for decisive units on `BLOCK_HIGH` classes."
 - **Reaffirms ADR 0011 decision #1** (the route-count gate stays rejected) — a different gate shape,
   operating per-class on already-durable signal rather than a route tally.
-- **Cites ADR 0010** as the precedent for selective fail-closed enforcement on a narrow, high-stakes,
-  already-durable signal.
+- **Cites ADR 0010 historically** for selective fail-closed enforcement on a
+  narrow, high-stakes, already-durable signal; ADR 0010's outbound gate is no
+  longer active.
 - **Resolves an open question under ADR 0009**: coverage state (incl. per-class, per-identity) is
   operator-injectable; hypotheses are not — this ADR's gate is built from the former only.
 - Implemented by `depth_ledger.py` / `transition_phase.py` and

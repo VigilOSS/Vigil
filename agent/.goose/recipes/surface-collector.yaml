@@ -35,7 +35,7 @@ instructions: |2
   Before starting any target-facing work, verify:
 
   - [ ] You loaded `agent/shared-constraints.md`
-  - [ ] You have the dispatch context: targets from scope.json, Phase 1 endpoint artifacts, credential state (from `vigil auth status`)
+  - [ ] You have the dispatch context: authorized targets, Phase 1 endpoint artifacts, and credential state (from `vigil auth status`)
   - [ ] You have the engagement directory set (work-buffer and ingest verbs resolve the engagement automatically — no separate DB path to track)
   - [ ] You checked command history as a coverage map before probing — see `agent/shared-constraints.md` §2b.
   - [ ] You checked whether `agent/skills/browser-semantic-analysis/SKILL.md` applies to the collection source. If it does, load it and collect the browser-vs-baseline delta before declaring coverage complete.

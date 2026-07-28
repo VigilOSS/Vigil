@@ -23,12 +23,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from assess.commands import kali_browser as kb
 from assess.lib import contracts
 from assess.lib.client import AssessError
 from assess.lib.kali_output import KaliResult
-
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -425,7 +423,7 @@ def test_load_steps_enforces_step_cap(tmp_path):
         kb._load_steps(path)
 
 
-def test_run_threads_document_origin_and_steps_and_destinations(tmp_path, monkeypatch):
+def test_run_threads_document_origin_and_steps(tmp_path, monkeypatch):
     steps_file = tmp_path / "steps.json"
     steps_file.write_text(
         json.dumps(
@@ -451,9 +449,8 @@ def test_run_threads_document_origin_and_steps_and_destinations(tmp_path, monkey
     assert config["har_out"] == "scans/browser/run.har"
     assert config["capture_bodies"] is True
     assert config["max_body_bytes"] == 4096
-    assert [d.value for d in cap["kwargs"]["destinations"]] == [
-        "https://api.example.com/login", "https://api.example.com/account"
-    ]
+    assert "destinations" not in cap["kwargs"]
+    assert "no_fire_regex" not in config
 
 
 def test_document_origin_driver_records_omitted_cross_origin_attribution():
@@ -465,15 +462,20 @@ def test_document_origin_driver_records_omitted_cross_origin_attribution():
     assert "required attribution routing failed" in kb._BROWSER_DRIVER
 
 
-def test_driver_applies_scope_and_no_fire_policy_to_every_network_request():
+def test_driver_never_aborts_a_network_request_from_scope_policy():
     route_body = kb._BROWSER_DRIVER.split("def route_request(route, request):", 1)[1].split(
         "def capture_failure", 1
     )[0]
-    assert "reason = blocked_request(request.url, cfg)" in route_body
-    assert route_body.index("reason = blocked_request") < route_body.index(
-        "request.is_navigation_request()"
-    )
-    assert 'route.abort("blockedbyclient")' in route_body
+    assert "blocked_request" not in kb._BROWSER_DRIVER
+    assert "route.abort" not in route_body
+    assert "route.continue_" in route_body
+
+
+def test_driver_does_not_filter_navigations_by_scope():
+    assert "host_allowed" not in kb._BROWSER_DRIVER
+    assert "scope_entries" not in kb._BROWSER_DRIVER
+    assert "scope_enforcement" not in kb._BROWSER_DRIVER
+    assert "no_fire_regex" not in kb._BROWSER_DRIVER
 
 
 def test_driver_never_sends_identity_headers_to_future_cross_host_navigation():
@@ -485,12 +487,11 @@ def test_driver_never_sends_identity_headers_to_future_cross_host_navigation():
     assert "if request_origin in document_origins:" not in route_body
 
 
-def test_document_navigation_enrolls_origin_for_attribution_after_scope_admission():
+def test_document_navigation_enrolls_origin_for_attribution():
     route_body = kb._BROWSER_DRIVER.split("def route_request(route, request):", 1)[1].split(
         "def capture_failure", 1
     )[0]
     navigation_check = route_body.index("request.is_navigation_request()")
-    assert route_body.index("reason = blocked_request") < navigation_check
     assert "document_origins.add(request_origin)" in route_body[navigation_check:]
 
 

@@ -139,7 +139,7 @@ def test_aggregate_rate_reserves_target_facing_indeterminate_command(
         str(tmp_path),
         ["sh", "-c", 'curl "https://$host/"'],
         "curl",
-        {"checked_targets": [], "target_facing": True},
+        {"target_facing": True},
     )
 
     assert reserved == 9

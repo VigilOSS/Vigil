@@ -1,10 +1,22 @@
+"""Pre-execution engagement policy for `vigil assess kali` and `host-exec`.
+
+There is deliberately NO destination filtering: the CLI never refuses a command
+for the host it names. `scope.json` `hosts` declares what the engagement is
+authorized against and staying inside it is the operator's and the specialist's
+job. What these tests pin is the policy that survives, because it does not
+require guessing a destination out of an argv — the engagement tool denylist,
+the declared-vs-actual tool check, and the `target_facing` signal aggregate rate
+governance reserves against. `off_limits_paths` remains engagement guidance and
+must never become an outbound-request veto.
+"""
+
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
 import pytest
-
 
 SCRIPTS = Path(__file__).resolve().parents[3] / "agent" / "scripts"
 if str(SCRIPTS) not in sys.path:
@@ -16,106 +28,113 @@ from assess.lib import scope  # noqa: E402
 def _engagement(tmp_path: Path, doc: dict) -> Path:
     eng = tmp_path / "eng-key"
     eng.mkdir()
-    (eng / "scope.json").write_text(__import__("json").dumps(doc), encoding="utf-8")
+    (eng / "scope.json").write_text(json.dumps(doc), encoding="utf-8")
     return eng
 
 
-def test_execution_policy_rejects_direct_out_of_scope_target(tmp_path: Path) -> None:
-    eng = _engagement(tmp_path, {"hosts": ["*.example.test"]})
-
-    with pytest.raises(scope.ScopePolicyError, match="outside engagement scope.*evil.test"):
-        scope.enforce_execution_policy(
-            ["nmap", "-sV", "evil.test"], tool_name="nmap", engagement_dir=eng
-        )
+# ---------------------------------------------------------------------------
+# No destination filtering
+# ---------------------------------------------------------------------------
 
 
-def test_execution_policy_checks_every_target_in_container_list_file(tmp_path: Path) -> None:
-    eng = _engagement(tmp_path, {"hosts": ["*.example.test"]})
-    targets = eng / "targets.txt"
-    targets.write_text("api.example.test\nevil.test\n", encoding="utf-8")
-
-    with pytest.raises(scope.ScopePolicyError, match="evil.test"):
-        scope.enforce_execution_policy(
-            ["nuclei", "-l", "/engagements/eng-key/targets.txt"],
-            tool_name="nuclei",
-            engagement_dir=eng,
-            engagement_key="eng-key",
-        )
-
-
-def test_execution_policy_global_bypass_allows_direct_and_list_targets(tmp_path: Path) -> None:
-    eng = _engagement(
-        tmp_path,
-        {"hosts": ["example.test"], "scope_enforcement": "bypass"},
-    )
-    targets = eng / "targets.txt"
-    targets.write_text("evil.test\n", encoding="utf-8")
+@pytest.mark.parametrize(
+    ("tool_name", "command"),
+    [
+        ("nmap", ["nmap", "-sV", "evil.test"]),
+        ("nuclei", ["nuclei", "-u", "https://evil.test"]),
+        ("httpx", ["httpx", "-u", "https://evil.test"]),
+        ("curl", ["curl", "https://evil.test/anything"]),
+        ("wafw00f", ["wafw00f", "https://evil.test"]),
+        ("ffuf", ["ffuf", "-u", "https://evil.test/FUZZ"]),
+        ("sqlmap", ["sqlmap", "-u", "https://evil.test/?id=1"]),
+        ("subfinder", ["subfinder", "-d", "evil.test"]),
+        ("gau", ["gau", "evil.test"]),
+        ("python3", ["python3", "-c", "import urllib.request", "https://evil.test"]),
+        ("sh", ["sh", "-c", "curl -sS https://evil.test/"]),
+        ("custom-tool", ["custom-tool", "https://evil.test"]),
+    ],
+)
+def test_command_naming_an_undeclared_host_is_not_refused(
+    tmp_path: Path, tool_name: str, command: list[str]
+) -> None:
+    eng = _engagement(tmp_path, {"hosts": ["allowed.test"]})
 
     result = scope.enforce_execution_policy(
-        ["nuclei", "-l", str(targets)],
-        tool_name="nuclei",
+        command, tool_name=tool_name, engagement_dir=eng
+    )
+
+    assert "policy_refusal" not in result
+
+
+def test_command_naming_an_out_of_scope_carve_out_is_not_refused(tmp_path: Path) -> None:
+    eng = _engagement(
+        tmp_path,
+        {"hosts": ["*.example.test"], "out_of_scope": ["excluded.example.test"]},
+    )
+
+    scope.enforce_execution_policy(
+        ["curl", "https://excluded.example.test/"],
+        tool_name="curl",
         engagement_dir=eng,
     )
 
-    assert result == {
-        "scope_enforcement": "bypass",
-        "scope_bypassed": True,
-        "checked_targets": ["evil.test"],
-    }
 
-
-def test_execution_policy_no_fire_blocks_direct_url_even_during_scope_bypass(
+def test_target_cidr_wider_than_the_declared_network_is_not_refused(
     tmp_path: Path,
 ) -> None:
-    eng = _engagement(
-        tmp_path,
-        {
-            "hosts": ["example.test"],
-            "scope_enforcement": "bypass",
-            "off_limits_paths": ["/api/send-email"],
-        },
+    eng = _engagement(tmp_path, {"hosts": ["10.0.0.0/24"]})
+
+    scope.enforce_execution_policy(
+        ["nmap", "10.0.0.0/16"], tool_name="nmap", engagement_dir=eng
     )
 
-    with pytest.raises(scope.ScopePolicyError, match="no-fire.*api/send-email"):
-        scope.enforce_execution_policy(
-            ["curl", "https://evil.test/api/send-email"],
-            tool_name="curl",
-            engagement_dir=eng,
-        )
 
+def test_unreadable_target_list_does_not_block_the_run(tmp_path: Path) -> None:
+    """A list file the CLI cannot inspect is not a reason to refuse.
 
-def test_execution_policy_no_fire_checks_every_url_in_target_list(
-    tmp_path: Path,
-) -> None:
-    eng = _engagement(
-        tmp_path,
-        {
-            "hosts": ["example.test"],
-            "off_limits_paths": ["/account/create"],
-        },
-    )
-    targets = eng / "targets.txt"
-    targets.write_text(
-        "https://example.test/safe\nhttps://example.test/account/create\n",
-        encoding="utf-8",
+    Inspecting it only ever served target admission; nothing reads it now, so a
+    missing path is the tool's problem to report, not a pre-exec refusal.
+    """
+    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
+
+    scope.enforce_execution_policy(
+        ["httpx", "-l", "/engagements/eng-key/missing.txt"],
+        tool_name="httpx",
+        engagement_dir=eng,
     )
 
-    with pytest.raises(scope.ScopePolicyError, match="no-fire.*account/create"):
-        scope.enforce_execution_policy(
-            ["nuclei", "-l", str(targets)],
-            tool_name="nuclei",
-            engagement_dir=eng,
-        )
+
+def test_dynamic_shell_target_needs_no_declaration(tmp_path: Path) -> None:
+    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
+
+    result = scope.enforce_execution_policy(
+        ["sh", "-c", 'curl -sS "https://$host/health"'],
+        tool_name="curl",
+        engagement_dir=eng,
+    )
+
+    assert result["target_facing"] is True
 
 
-def test_execution_policy_denied_tool_is_blocked_even_during_scope_bypass(tmp_path: Path) -> None:
+def test_ambiguous_launcher_form_does_not_block_the_run(tmp_path: Path) -> None:
+    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
+
+    scope.enforce_execution_policy(
+        ["sudo", "--mystery-option", "nuclei", "-u", "https://example.test"],
+        tool_name="sudo",
+        engagement_dir=eng,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Engagement tool policy (survives — it refuses on the TOOL, not the host)
+# ---------------------------------------------------------------------------
+
+
+def test_execution_policy_denied_tool_is_blocked(tmp_path: Path) -> None:
     eng = _engagement(
         tmp_path,
-        {
-            "hosts": ["example.test"],
-            "scope_enforcement": "bypass",
-            "denied_tools": ["nuclei"],
-        },
+        {"hosts": ["example.test"], "denied_tools": ["nuclei"]},
     )
 
     with pytest.raises(scope.ScopePolicyError, match="tool 'nuclei'.*denied"):
@@ -143,17 +162,44 @@ def test_execution_policy_reads_nested_denied_tool_policy(tmp_path: Path) -> Non
         )
 
 
-@pytest.mark.parametrize(
-    "scope_doc",
-    [
-        {"hosts": ["example.test"], "tool_policy": ["nuclei"]},
-        {"hosts": "example.test"},
-    ],
-)
-def test_execution_policy_normalizes_malformed_scope_to_auditable_refusal(
-    tmp_path: Path, scope_doc: dict
+def test_scope_enforcement_bypass_grants_nothing_at_execution(
+    tmp_path: Path,
 ) -> None:
-    eng = _engagement(tmp_path, scope_doc)
+    """`scope_enforcement: bypass` toggles host-set SHAPING, nothing else.
+
+    It is read by host-set shaping and proxy flow ownership. At execution it
+    grants no authority at all, so tool policy refuses exactly as it does
+    without it. `off_limits_paths` is advisory at this boundary.
+    """
+    eng = _engagement(
+        tmp_path,
+        {
+            "hosts": ["example.test"],
+            "scope_enforcement": "bypass",
+            "denied_tools": ["nuclei"],
+            "off_limits_paths": ["/admin/delete"],
+        },
+    )
+
+    with pytest.raises(scope.ScopePolicyError, match="tool 'nuclei'.*denied"):
+        scope.enforce_execution_policy(
+            ["nuclei", "-u", "https://example.test"],
+            tool_name="nuclei",
+            engagement_dir=eng,
+        )
+
+    result = scope.enforce_execution_policy(
+        ["curl", "https://example.test/admin/delete"],
+        tool_name="curl",
+        engagement_dir=eng,
+    )
+    assert result["target_facing"] is True
+
+
+def test_execution_policy_normalizes_malformed_tool_policy_to_auditable_refusal(
+    tmp_path: Path,
+) -> None:
+    eng = _engagement(tmp_path, {"hosts": ["example.test"], "tool_policy": ["nuclei"]})
 
     with pytest.raises(scope.ScopePolicyError, match="scope.json"):
         scope.enforce_execution_policy(
@@ -180,206 +226,6 @@ def test_execution_policy_checks_actual_executable_when_declared_name_differs(
             tool_name="not-curl",
             engagement_dir=eng,
         )
-
-
-def test_execution_policy_uses_actual_executable_to_find_bare_target(
-    tmp_path: Path,
-) -> None:
-    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
-
-    with pytest.raises(scope.ScopePolicyError, match="evil.test"):
-        scope.enforce_execution_policy(
-            ["/usr/bin/curl", "evil.test"],
-            tool_name="misdeclared-tool",
-            engagement_dir=eng,
-        )
-
-
-@pytest.mark.parametrize(
-    ("tool_name", "command"),
-    [
-        ("nmap", ["nmap", "-iL", "{list}"]),
-        ("subfinder", ["subfinder", "-dL", "{list}"]),
-        ("bbot", ["bbot", "-tL", "{list}"]),
-        ("alterx", ["alterx", "-l", "{list}"]),
-    ],
-)
-def test_execution_policy_checks_every_typed_target_list_variant(
-    tmp_path: Path, tool_name: str, command: list[str]
-) -> None:
-    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
-    targets = eng / "targets.txt"
-    targets.write_text("example.test\nevil.test\n", encoding="utf-8")
-    resolved = [
-        token.format(list=str(targets)) if token == "{list}" else token
-        for token in command
-    ]
-
-    with pytest.raises(scope.ScopePolicyError, match="evil.test"):
-        scope.enforce_execution_policy(
-            resolved,
-            tool_name=tool_name,
-            engagement_dir=eng,
-        )
-
-
-def test_execution_policy_checks_cero_shell_piped_target_list(tmp_path: Path) -> None:
-    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
-    targets = eng / "targets.txt"
-    targets.write_text("example.test\nevil.test\n", encoding="utf-8")
-
-    with pytest.raises(scope.ScopePolicyError, match="evil.test"):
-        scope.enforce_execution_policy(
-            ["sh", "-c", f"cat {targets} | cero"],
-            tool_name="cero",
-            engagement_dir=eng,
-        )
-
-
-def test_execution_policy_rejects_target_cidr_wider_than_allowed_network(
-    tmp_path: Path,
-) -> None:
-    eng = _engagement(tmp_path, {"hosts": ["10.0.0.0/24"]})
-
-    with pytest.raises(scope.ScopePolicyError, match="10.0.0.0/16"):
-        scope.enforce_execution_policy(
-            ["nmap", "10.0.0.0/16"],
-            tool_name="nmap",
-            engagement_dir=eng,
-        )
-
-
-def test_execution_policy_allows_target_cidr_contained_by_allowed_network(
-    tmp_path: Path,
-) -> None:
-    eng = _engagement(tmp_path, {"hosts": ["10.0.0.0/24"]})
-
-    result = scope.enforce_execution_policy(
-        ["nmap", "10.0.0.0/25"],
-        tool_name="nmap",
-        engagement_dir=eng,
-    )
-
-    assert result["checked_targets"] == ["10.0.0.0/25"]
-
-
-def test_execution_policy_fails_closed_when_target_list_cannot_be_inspected(tmp_path: Path) -> None:
-    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
-
-    with pytest.raises(scope.ScopePolicyError, match="cannot inspect target list"):
-        scope.enforce_execution_policy(
-            ["httpx", "-l", "/engagements/eng-key/missing.txt"],
-            tool_name="httpx",
-            engagement_dir=eng,
-            engagement_key="eng-key",
-        )
-
-
-def test_execution_policy_records_enforced_mode_for_in_scope_command(tmp_path: Path) -> None:
-    eng = _engagement(tmp_path, {"hosts": ["*.example.test"]})
-
-    result = scope.enforce_execution_policy(
-        ["curl", "https://api.example.test/v1"],
-        tool_name="curl",
-        engagement_dir=eng,
-    )
-
-    assert result == {
-        "scope_enforcement": "enforce",
-        "scope_bypassed": False,
-        "checked_targets": ["api.example.test"],
-    }
-
-
-def test_execution_policy_does_not_treat_dotted_non_target_values_as_targets(
-    tmp_path: Path,
-) -> None:
-    eng = _engagement(tmp_path, {"hosts": ["api.example.test"]})
-
-    result = scope.enforce_execution_policy(
-        [
-            "nuclei",
-            "-u",
-            "https://api.example.test",
-            "-t",
-            "custom.template.yaml",
-            "-H",
-            "Origin: https://vendor.example",
-        ],
-        tool_name="nuclei",
-        engagement_dir=eng,
-    )
-
-    assert result["checked_targets"] == ["api.example.test"]
-
-
-@pytest.mark.parametrize(
-    ("tool_name", "command"),
-    [
-        ("nmap", ["nmap", "-sV", "evil.test"]),
-        ("nuclei", ["nuclei", "-u", "https://evil.test"]),
-        ("httpx", ["httpx", "-u", "https://evil.test"]),
-        ("wafw00f", ["wafw00f", "https://evil.test"]),
-        ("ffuf", ["ffuf", "-u", "https://evil.test/FUZZ"]),
-        ("sqlmap", ["sqlmap", "-u", "https://evil.test/?id=1"]),
-        ("subfinder", ["subfinder", "-d", "evil.test"]),
-        ("puredns", ["puredns", "bruteforce", "/words.txt", "evil.test"]),
-        ("nikto", ["nikto", "-h", "https://evil.test"]),
-        ("katana", ["katana", "-u", "https://evil.test"]),
-        ("gau", ["gau", "evil.test"]),
-        ("arjun", ["arjun", "-u", "https://evil.test"]),
-        ("whatweb", ["whatweb", "https://evil.test"]),
-        ("cero", ["cero", "-d", "evil.test"]),
-        ("alterx", ["alterx", "-d", "evil.test"]),
-        ("asnmap", ["asnmap", "-d", "evil.test"]),
-        ("bbot", ["bbot", "-t", "evil.test"]),
-        ("browser", ["python3", "-c", "driver", "https://evil.test"]),
-        ("tlsx", ["tlsx", "-u", "evil.test"]),
-        ("dalfox", ["dalfox", "url", "https://evil.test"]),
-        ("robots", ["httpx", "-u", "https://evil.test/robots.txt"]),
-        ("exec", ["custom-tool", "https://evil.test"]),
-    ],
-)
-def test_every_direct_target_verb_has_an_admission_position(
-    tmp_path: Path, tool_name: str, command: list[str]
-) -> None:
-    eng = _engagement(tmp_path, {"hosts": ["allowed.test"]})
-
-    with pytest.raises(scope.ScopePolicyError, match="evil.test"):
-        scope.enforce_execution_policy(
-            command,
-            tool_name=(command[0] if tool_name in {"robots", "exec"} else tool_name),
-            engagement_dir=eng,
-        )
-
-
-def test_execution_policy_allows_only_explicitly_typed_passive_destination(
-    tmp_path: Path,
-) -> None:
-    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
-    # Deliberately NOT a curated research host: an arbitrary passive-looking
-    # service stays typed-or-refused, which is the invariant this test protects.
-    command = ["curl", "https://passive-intel.test/?q=%25.example.test&output=json"]
-
-    with pytest.raises(scope.ScopePolicyError, match="passive-intel.test"):
-        scope.enforce_execution_policy(
-            command, tool_name="curl", engagement_dir=eng
-        )
-
-    result = scope.enforce_execution_policy(
-        command,
-        tool_name="curl",
-        engagement_dir=eng,
-        destinations=(
-            scope.ExecutionDestination("passive-intel.test", "passive_source"),
-        ),
-    )
-
-    assert result["checked_targets"] == []
-    assert result["external_destinations"] == [
-        {"host": "passive-intel.test", "role": "passive_source"}
-    ]
-    assert result["target_facing"] is False
 
 
 def test_execution_policy_checks_denied_tools_in_every_shell_pipeline_stage(
@@ -513,34 +359,7 @@ def test_host_declared_tool_consistency_resolves_transparent_launchers(
         require_declared_tool=True,
     )
 
-    assert result["checked_targets"] == ["example.test"]
-
-
-def test_ambiguous_launcher_form_fails_closed_for_typed_target(
-    tmp_path: Path,
-) -> None:
-    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
-
-    with pytest.raises(scope.ScopePolicyError, match="ambiguous.*launcher"):
-        scope.enforce_execution_policy(
-            ["sudo", "--mystery-option", "nuclei", "-u", "https://example.test"],
-            tool_name="sudo",
-            engagement_dir=eng,
-            destinations=(scope.ExecutionDestination("example.test", "target"),),
-        )
-
-
-def test_ambiguous_launcher_form_fails_closed_for_literal_target(
-    tmp_path: Path,
-) -> None:
-    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
-
-    with pytest.raises(scope.ScopePolicyError, match="ambiguous.*launcher"):
-        scope.enforce_execution_policy(
-            ["sudo", "--mystery-option", "nuclei", "-u", "https://example.test"],
-            tool_name="sudo",
-            engagement_dir=eng,
-        )
+    assert result["target_facing"] is True
 
 
 def test_execution_policy_rejects_contradictory_declared_host_tool(
@@ -557,459 +376,139 @@ def test_execution_policy_rejects_contradictory_declared_host_tool(
         )
 
 
-def test_execution_policy_dynamic_target_shell_requires_typed_destinations(
-    tmp_path: Path,
-) -> None:
-    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
-    command = ["sh", "-c", 'curl -sS "https://$host/health"']
-
-    with pytest.raises(scope.ScopePolicyError, match="dynamic target.*typed destination"):
-        scope.enforce_execution_policy(
-            command, tool_name="curl", engagement_dir=eng
-        )
-
-    result = scope.enforce_execution_policy(
-        command,
-        tool_name="curl",
-        engagement_dir=eng,
-        destinations=(scope.ExecutionDestination("example.test", "target"),),
-    )
-
-    assert result["checked_targets"] == ["example.test"]
-    assert result["target_facing"] is True
-
-
-def test_literal_shell_host_with_dynamic_path_needs_no_redundant_destination(
-    tmp_path: Path,
-) -> None:
-    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
-
-    result = scope.enforce_execution_policy(
-        ["bash", "-lc", 'path=/health; curl -sS "https://example.test$path"'],
-        tool_name="curl",
-        engagement_dir=eng,
-    )
-
-    assert result["checked_targets"] == ["example.test"]
-    assert result["target_facing"] is True
-
-
-def test_literal_shell_target_does_not_hide_a_second_dynamic_target(
-    tmp_path: Path,
-) -> None:
-    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
-
-    with pytest.raises(scope.ScopePolicyError, match="dynamic target.*typed destination"):
-        scope.enforce_execution_policy(
-            [
-                "bash",
-                "-lc",
-                'curl -sS "https://example.test/health" "$other_target"',
-            ],
-            tool_name="curl",
-            engagement_dir=eng,
-        )
-
-
-def test_shell_payload_variable_is_not_mistaken_for_a_target(
-    tmp_path: Path,
-) -> None:
-    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
-
-    result = scope.enforce_execution_policy(
-        [
-            "bash",
-            "-lc",
-            'curl -sS -d "$payload" "https://example.test/submit"',
-        ],
-        tool_name="curl",
-        engagement_dir=eng,
-    )
-
-    assert result["checked_targets"] == ["example.test"]
-
-
-def test_typed_destination_does_not_bypass_determinable_shell_no_fire_path(
-    tmp_path: Path,
-) -> None:
-    eng = _engagement(
-        tmp_path,
-        {"hosts": ["example.test"], "off_limits_paths": ["/admin/delete"]},
-    )
-    command = [
-        "sh",
-        "-c",
-        'host=example.test; path=/admin/delete; curl -sS "https://$host$path"',
-    ]
-
-    with pytest.raises(scope.ScopePolicyError, match="no-fire.*admin/delete"):
-        scope.enforce_execution_policy(
-            command,
-            tool_name="curl",
-            engagement_dir=eng,
-            destinations=(scope.ExecutionDestination("example.test", "target"),),
-        )
-
-
-def test_typed_destination_fails_closed_for_unresolved_shell_target_path(
-    tmp_path: Path,
-) -> None:
-    eng = _engagement(
-        tmp_path,
-        {"hosts": ["example.test"], "off_limits_paths": ["/admin/*"]},
-    )
-
-    with pytest.raises(scope.ScopePolicyError, match="unresolved.*no-fire"):
-        scope.enforce_execution_policy(
-            ["sh", "-c", 'curl -sS "https://example.test$path"'],
-            tool_name="curl",
-            engagement_dir=eng,
-            destinations=(scope.ExecutionDestination("example.test", "target"),),
-        )
-
-
-def test_typed_destination_does_not_bypass_encoded_no_fire_path(tmp_path: Path) -> None:
-    eng = _engagement(
-        tmp_path,
-        {"hosts": ["example.test"], "off_limits_paths": ["/admin/delete"]},
-    )
-
-    with pytest.raises(scope.ScopePolicyError, match="no-fire.*admin%252Fdelete"):
-        scope.enforce_execution_policy(
-            ["curl", "https://example.test/admin%252Fdelete"],
-            tool_name="curl",
-            engagement_dir=eng,
-            destinations=(scope.ExecutionDestination("example.test", "target"),),
-        )
-
-
-def test_typed_passive_source_with_dynamic_query_is_not_subject_to_no_fire(
-    tmp_path: Path,
-) -> None:
-    eng = _engagement(
-        tmp_path,
-        {"hosts": ["example.test"], "off_limits_paths": ["/admin/*"]},
-    )
-
-    result = scope.enforce_execution_policy(
-        ["sh", "-c", 'domain=example.test; curl "https://crt.sh/?q=$domain"'],
-        tool_name="curl",
-        engagement_dir=eng,
-        destinations=(scope.ExecutionDestination("crt.sh", "passive_source"),),
-    )
-
-    assert result["checked_targets"] == []
-    assert result["external_destinations"] == [
-        {"host": "crt.sh", "role": "passive_source"}
-    ]
-    assert result["target_facing"] is False
-
-
-def test_typed_control_destination_with_dynamic_path_is_not_subject_to_no_fire(
-    tmp_path: Path,
-) -> None:
-    eng = _engagement(
-        tmp_path,
-        {"hosts": ["example.test"], "off_limits_paths": ["/callback/*"]},
-    )
-
-    result = scope.enforce_execution_policy(
-        ["sh", "-c", 'curl "https://oob.test/callback/$token"'],
-        tool_name="curl",
-        engagement_dir=eng,
-        destinations=(scope.ExecutionDestination("oob.test", "control"),),
-    )
-
-    assert result["checked_targets"] == []
-    assert result["target_facing"] is False
-
-
-def test_typed_target_dynamic_query_keeps_static_path_no_fire_check(
-    tmp_path: Path,
-) -> None:
-    eng = _engagement(
-        tmp_path,
-        {"hosts": ["example.test"], "off_limits_paths": ["/admin/*"]},
-    )
-
-    result = scope.enforce_execution_policy(
-        ["sh", "-c", 'curl "https://example.test/search?q=$term"'],
-        tool_name="curl",
-        engagement_dir=eng,
-        destinations=(scope.ExecutionDestination("example.test", "target"),),
-    )
-
-    assert result["checked_targets"] == ["example.test"]
-
-
-def test_typed_target_dynamic_path_fails_closed_when_no_fire_is_configured(
-    tmp_path: Path,
-) -> None:
-    eng = _engagement(
-        tmp_path,
-        {"hosts": ["example.test"], "off_limits_paths": ["/admin/*"]},
-    )
-
-    with pytest.raises(scope.ScopePolicyError, match="unresolved.*no-fire"):
-        scope.enforce_execution_policy(
-            ["sh", "-c", 'curl "https://example.test/$path"'],
-            tool_name="curl",
-            engagement_dir=eng,
-            destinations=(scope.ExecutionDestination("example.test", "target"),),
-        )
-
-
-def test_conflicting_typed_roles_for_same_normalized_host_are_rejected(
-    tmp_path: Path,
-) -> None:
-    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
-
-    with pytest.raises(scope.ScopePolicyError, match="conflicting.*example.test"):
-        scope.enforce_execution_policy(
-            ["curl", "https://example.test/health"],
-            tool_name="curl",
-            engagement_dir=eng,
-            destinations=(
-                scope.ExecutionDestination("https://EXAMPLE.test/", "target"),
-                scope.ExecutionDestination("example.test", "control"),
-            ),
-        )
-
-
-def test_execution_policy_notes_are_bounded_hashed_and_sampled() -> None:
-    policy = {
-        "scope_enforcement": "enforce",
-        "scope_bypassed": False,
-        "target_facing": True,
-        "checked_targets": [f"host-{index:04d}.example.test" for index in range(1000)],
-    }
-
-    notes = scope.execution_policy_notes(policy)
-    decoded = __import__("json").loads(notes)
-
-    assert len(notes.encode("utf-8")) < 4096
-    assert decoded["checked_target_count"] == 1000
-    assert len(decoded["checked_targets_sha256"]) == 64
-    assert 0 < len(decoded["checked_targets_sample"]) < 1000
-    assert "checked_targets" not in decoded
-
-
 # ---------------------------------------------------------------------------
-# Curated research-host admission
-#
-# Reachability is not scope, and the target gate must keep refusing anything that
-# is not the engagement's estate. But the third-party services we query ABOUT the
-# target (GitHub, npm, RubyGems, crt.sh, Wayback, CommonCrawl, urlscan, NVD) were
-# refused too, so an entire OSINT dispatch returned zero bytes and the emptiness
-# was read as a measurement. These tests pin the admission AND its four guards.
+# `off_limits_paths` is guidance, never an outbound-request veto.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    "url",
+    "command",
     [
-        "https://api.github.com/search/code?q=example.test",
-        "https://registry.npmjs.org/-/v1/search?text=example.test",
-        "https://crt.sh/?q=%25.example.test&output=json",
-        "https://web.archive.org/cdx/search/cdx?url=example.test",
+        pytest.param(
+            ["curl", "https://example.test/api/send-email"],
+            id="direct-url",
+        ),
+        pytest.param(
+            ["curl", "https://example.test/admin%252Fdelete"],
+            id="encoded-path",
+        ),
+        pytest.param(
+            [
+                "sh",
+                "-c",
+                'host=example.test; path=/admin/delete; curl -sS "https://$host$path"',
+            ],
+            id="shell-variables",
+        ),
+        pytest.param(
+            ["nuclei", "-u=https://example.test/admin/delete"],
+            id="attached-flag",
+        ),
+        pytest.param(
+            ["gobuster", "dir", "-u", "https://example.test/admin/delete"],
+            id="unrecognised-tool",
+        ),
     ],
 )
-def test_curated_research_host_is_admitted_without_typing(
-    tmp_path: Path, url: str
+def test_off_limits_paths_never_refuse_an_outbound_command(
+    tmp_path: Path, command: list[str]
 ) -> None:
-    eng = _engagement(tmp_path, {"hosts": ["*.example.test"]})
-
-    result = scope.enforce_execution_policy(
-        ["curl", "-sS", url], tool_name="curl", engagement_dir=eng
-    )
-
-    host = scope.host_from_token(url)
-    # Admitted, but NEVER counted as a target: a research query is not an
-    # engagement target and must not consume target rate governance.
-    assert result["checked_targets"] == []
-    assert result["target_facing"] is False
-    # The audit path is not bypassed — only the target-scope predicate is.
-    assert {"host": host, "role": "research"} in result["external_destinations"]
-
-
-def test_research_admission_still_records_an_auditable_destination(
-    tmp_path: Path,
-) -> None:
-    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
-
-    result = scope.enforce_execution_policy(
-        ["curl", "-sS", "https://urlscan.io/api/v1/search/?q=example.test"],
-        tool_name="curl",
-        engagement_dir=eng,
-    )
-    notes = __import__("json").loads(scope.execution_policy_notes(result))
-
-    assert notes["external_destination_count"] == 1
-    assert notes["external_destinations_sample"] == [
-        {"host": "urlscan.io", "role": "research"}
-    ]
-
-
-def test_out_of_scope_non_research_host_is_still_refused(tmp_path: Path) -> None:
-    """NEGATIVE: research admission must not widen the gate for anything else."""
-    eng = _engagement(tmp_path, {"hosts": ["*.example.test"]})
-
-    with pytest.raises(scope.ScopePolicyError, match="outside engagement scope.*evil.test"):
-        scope.enforce_execution_policy(
-            ["curl", "-sS", "https://evil.test/?q=example.test"],
-            tool_name="curl",
-            engagement_dir=eng,
-        )
-
-
-def test_research_lookalike_host_is_refused_and_names_the_research_path(
-    tmp_path: Path,
-) -> None:
-    """A passive lookup at an UNLISTED intel service is refused — and says so.
-
-    The zero-byte result of a refusal is otherwise indistinguishable from a
-    genuine 'nothing found', which is exactly how the original OSINT dispatch was
-    misread.
-    """
-    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
-
-    with pytest.raises(scope.ScopePolicyError) as excinfo:
-        scope.enforce_execution_policy(
-            ["curl", "-sS", "https://api.shodan.io/shodan/host/search?query=example.test"],
-            tool_name="curl",
-            engagement_dir=eng,
-        )
-
-    message = str(excinfo.value)
-    assert "REFUSED" in message
-    assert "research-host allowlist" in message
-    assert "crt.sh" in message  # the curated set is named, so the fix is actionable
-
-
-def test_research_host_in_the_target_estate_obeys_target_scope_rules(
-    tmp_path: Path,
-) -> None:
-    """NEGATIVE: scope.json always wins over the research allowlist.
-
-    `github.com` is curated research infrastructure, but if the engagement carves
-    it OUT of scope the research path must not admit it — otherwise the allowlist
-    becomes a side door onto the estate under assessment.
-    """
     eng = _engagement(
         tmp_path,
-        {"hosts": ["*.github.com", "example.test"], "out_of_scope": ["github.com"]},
+        {
+            "hosts": ["example.test"],
+            "off_limits_paths": ["/api/send-email", "/admin/delete"],
+        },
     )
-
-    with pytest.raises(scope.ScopePolicyError, match="outside engagement scope.*github.com"):
-        scope.enforce_execution_policy(
-            ["curl", "-sS", "https://github.com/example"],
-            tool_name="curl",
-            engagement_dir=eng,
-        )
-
-
-def test_in_scope_research_host_is_treated_as_a_target_not_a_research_query(
-    tmp_path: Path,
-) -> None:
-    """An in-scope research host stays a TARGET: rate + no-fire must still apply."""
-    eng = _engagement(tmp_path, {"hosts": ["api.github.com"]})
 
     result = scope.enforce_execution_policy(
-        ["curl", "-sS", "https://api.github.com/meta"],
-        tool_name="curl",
+        command,
+        tool_name=command[0],
         engagement_dir=eng,
     )
-
-    assert result["checked_targets"] == ["api.github.com"]
-    assert "external_destinations" not in result
+    assert result["target_facing"] is True
 
 
-def test_typed_research_destination_rejects_a_non_curated_host(tmp_path: Path) -> None:
-    """NEGATIVE: the typed role is curated, never a pass-through.
-
-    `passive_source` admits whatever host it is handed; `research` must not, or it
-    becomes precisely the arbitrary out-of-scope probe the scope rule prevents.
-    """
-    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
-
-    with pytest.raises(scope.ScopePolicyError, match="curated research-host allowlist"):
-        scope.enforce_execution_policy(
-            ["curl", "-sS", "https://evil.test/collect"],
-            tool_name="curl",
-            engagement_dir=eng,
-            destinations=(scope.ExecutionDestination("evil.test", "research"),),
-        )
-
-
-def test_typed_research_destination_rejects_a_host_in_the_target_estate(
-    tmp_path: Path,
-) -> None:
-    """NEGATIVE: the typed research role cannot be aimed at the engagement's estate."""
-    eng = _engagement(tmp_path, {"hosts": ["api.github.com"]})
-
-    with pytest.raises(scope.ScopePolicyError, match="own target estate"):
-        scope.enforce_execution_policy(
-            ["curl", "-sS", "https://api.github.com/meta"],
-            tool_name="curl",
-            engagement_dir=eng,
-            destinations=(
-                scope.ExecutionDestination("api.github.com", "research"),
-            ),
-        )
-
-
-def test_typed_research_destination_skips_no_fire_like_a_passive_source(
+def test_off_limits_paths_inside_a_target_list_are_not_read_or_refused(
     tmp_path: Path,
 ) -> None:
     eng = _engagement(
         tmp_path,
-        {"hosts": ["example.test"], "off_limits_paths": ["/admin/*"]},
+        {"hosts": ["example.test"], "off_limits_paths": ["/admin/delete"]},
+    )
+    targets = tmp_path / "urls.txt"
+    targets.write_text(
+        "https://example.test/admin/delete\nhttps://example.test/ok\n",
+        encoding="utf-8",
     )
 
     result = scope.enforce_execution_policy(
-        ["sh", "-c", 'domain=example.test; curl "https://crt.sh/?q=$domain"'],
-        tool_name="curl",
+        ["nuclei", "-l", str(targets)],
+        tool_name="nuclei",
         engagement_dir=eng,
-        destinations=(scope.ExecutionDestination("crt.sh", "research"),),
     )
 
-    assert result["checked_targets"] == []
-    assert result["external_destinations"] == [{"host": "crt.sh", "role": "research"}]
-    assert result["target_facing"] is False
+    assert result["target_facing"] is True
 
 
-def test_research_host_lookalike_subdomain_is_not_admitted(tmp_path: Path) -> None:
-    """NEGATIVE: matching is exact, so an attacker-controlled lookalike is refused."""
+# ---------------------------------------------------------------------------
+# `target_facing` — the rate-governance signal
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        (["curl", "https://example.test/"], True),
+        (["nmap", "-sV", "example.test"], True),
+        (["sh", "-c", "httpx -l hosts.txt"], True),
+        (["python3", "script.py", "https://example.test/"], True),
+        (["jq", ".", "results.json"], False),
+        (["cat", "/engagements/eng-key/scans/out.txt"], False),
+    ],
+)
+def test_target_facing_marks_runs_that_put_traffic_on_the_wire(
+    tmp_path: Path, command: list[str], expected: bool
+) -> None:
     eng = _engagement(tmp_path, {"hosts": ["example.test"]})
 
-    with pytest.raises(
-        scope.ScopePolicyError, match="outside engagement scope.*api.github.com.evil.test"
-    ):
-        scope.enforce_execution_policy(
-            ["curl", "-sS", "https://api.github.com.evil.test/x"],
-            tool_name="curl",
-            engagement_dir=eng,
-        )
+    result = scope.enforce_execution_policy(
+        command, tool_name=command[0], engagement_dir=eng
+    )
+
+    assert result["target_facing"] is expected
 
 
-def test_explicit_target_typing_outranks_the_research_allowlist(tmp_path: Path) -> None:
-    """NEGATIVE: a caller that declared a TARGET is never re-read as research.
+def test_target_facing_honours_a_declared_tool_its_argv_hides(
+    tmp_path: Path,
+) -> None:
+    """`kali browser` drives a real browser at the target under an opaque argv.
 
-    `kali browser` types every navigation URL as a target. If a name on the research
-    allowlist could silently downgrade that declaration, an explicit target
-    destination would quietly stop being scope-checked.
+    Its argv is `python3 -c <driver> <json-plan>`: the executable is not
+    target-facing and the plan's URLs are inside a JSON blob, so nothing lexical
+    marks the run. Without the DECLARED tool name it would drive Chromium at the
+    estate outside the engagement's aggregate rate budget.
     """
     eng = _engagement(tmp_path, {"hosts": ["example.test"]})
+    plan = json.dumps({"url": "https://example.test/dashboard"})
 
-    with pytest.raises(scope.ScopePolicyError) as excinfo:
-        scope.enforce_execution_policy(
-            ["curl", "-sS", "https://api.github.com/meta"],
-            tool_name="curl",
-            engagement_dir=eng,
-            destinations=(scope.ExecutionDestination("api.github.com", "target"),),
-        )
+    result = scope.enforce_execution_policy(
+        ["python3", "-c", "<driver source>", plan],
+        tool_name="browser",
+        engagement_dir=eng,
+    )
 
-    message = str(excinfo.value)
-    assert "outside engagement scope: api.github.com" in message
-    # The refusal is accurate about WHY the research path did not apply.
-    assert "declared it as a TARGET destination" in message
+    assert result["target_facing"] is True
+
+
+def test_execution_policy_notes_bound_and_hash_a_long_refusal() -> None:
+    reason = "refusing denied tool " + ("x" * 4000)
+    policy = {"target_facing": True, "policy_refusal": reason}
+
+    notes = scope.execution_policy_notes(policy)
+    decoded = json.loads(notes)
+
+    assert len(notes.encode("utf-8")) < 4096
+    assert len(decoded["policy_refusal"]) == 1024
+    assert len(decoded["policy_refusal_sha256"]) == 64
+    assert decoded["target_facing"] is True

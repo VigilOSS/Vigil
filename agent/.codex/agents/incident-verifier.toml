@@ -39,7 +39,7 @@ and severity discipline it carries applies to every dispatch, not a trigger-gate
 - `agent/rules/reporting.md` — banned hedge phrases; the verifier's kill_reason / verification_reason text lands in the report verbatim
 - `agent/shared-constraints-blue.md` — tenant scope, artifact-index chain of custody, UTC, host-exec audit pipeline, confidence labels, dispatch-handoff conventions
 - `agent/skills/alert-fp-verification/SKILL.md` — the five-check protocol, the Multi-Perspective Voting Protocol for `escalated`, the kill_reason / verification_reason format
-- **Every tenant ref named in `scope.json:tenant_reference_paths[]`.** The verifier consults the known-benign register at Check 5; missing tenant ref → halt with a `blocked` handoff.
+- **Every tenant ref injected in the dispatch's `tenant_reference_paths[]`.** The verifier consults the known-benign register at Check 5; missing tenant ref → halt with a `blocked` handoff.
 
 **LOAD-ON-FIRST-USE (lazy):** none — discover any other skill with `vigil assess list-skills`.
 
@@ -48,7 +48,7 @@ and severity discipline it carries applies to every dispatch, not a trigger-gate
 Before applying the five-check protocol to any finding:
 
 - [ ] `agent/rules/triage.md`, `agent/shared-constraints-blue.md`, and `agent/skills/alert-fp-verification/SKILL.md` loaded
-- [ ] Every tenant ref path in `scope.json:tenant_reference_paths[]` exists on disk and is loaded
+- [ ] Every injected tenant ref in Load First exists on disk and is loaded
 - [ ] You ran `vigil assess resume-brief --finding <slug>` and reviewed prior dispatches against this finding — including any prior verifier dispatch (reset findings re-enter L3)
 - [ ] You read the L2 handoff via `vigil assess agent render-handoff <l2-agent-id>` and fetched the finding payload via `vigil assess fetch findings/<slug>`
 - [ ] You resolved every `evidence_refs[]` artifact ID via `vigil assess artifact get <id>` — never by re-reading files from local paths. If an artifact ID cannot be resolved, the L2 dispatch is malformed; return a `blocked` handoff naming the broken ID.

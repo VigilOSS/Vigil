@@ -103,7 +103,15 @@ A non-HTTP raw tool that the program still requires tagging on is the operator's
 
 ## Out-of-scope carve-outs (`out_of_scope` denylist)
 
-`scope.json` `hosts` wildcards (`*.example.com`) match the apex and **every** subdomain, which over-includes a program's specific OOS carve-outs. The `out_of_scope` list expresses exceptions: a host is admitted IFF it matches an in-scope entry AND matches **no** `out_of_scope` entry (the denylist wins). It is enforced at `scope filter`, the dispatch scope_host gate, spec ingestion, and proxy routing/capture. Add carve-outs at create (`--out-of-scope appointments.acme-regional.example --out-of-scope "*.mobile.acme-net.example"`) or later (`vigil engagement add-oos <key> <host…>` / `remove-oos`). A dispatch whose `scope_host` matches a carve-out is rejected with a distinct "out_of_scope carve-out" error — reframe as recon or remove the carve-out, never probe it.
+`scope.json` `hosts` wildcards (`*.example.com`) match the apex and **every** subdomain, which
+over-includes a program's specific OOS carve-outs. The `out_of_scope` list expresses exceptions: a
+host is admitted to collected coverage IFF it matches an original root AND matches **no**
+`out_of_scope` entry (the denylist wins). Recon, `scope filter`, spec/endpoint ingestion, the work
+buffer, and proxy capture attribution use that admission result to keep unrelated data out of the
+engagement. Add carve-outs at create (`--out-of-scope appointments.acme-regional.example --out-of-scope
+"*.mobile.acme-net.example"`) or later (`vigil engagement add-oos <key> <host…>` / `remove-oos`). Execution
+and dispatch admission are not destination filters; the shared boundary rule remains
+`agent/shared-constraints.md` §1.
 
 ## Phase tags (including half-phase tags)
 

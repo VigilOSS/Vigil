@@ -40,8 +40,9 @@ gau makes **zero requests to the target** — it queries third-party archives
   in scope. That is acceptable for passive collection precisely because gau issues
   no target traffic — the collected corpus is filtered to scope at ingestion/triage
   (`vigil assess scope filter`, work-buffer classification) **before** any active
-  tool probes it. Do **not** relax active-crawler scoping (katana `-fs fqdn`) on
-  the strength of this — the passive/active distinction is the whole point.
+  tool probes it. Choose Katana's explicit `-fs fqdn` traversal when the active
+  crawl must remain on exact seeds; passive breadth is not a reason to make the
+  active crawler follow sibling hosts.
   - For roots where the program carves out specific OOS subdomains (e.g.
     `*.acme-regional.example` in scope but `appointments.acme-regional.example` out), still feed
     the root to gau for breadth; the carve-out is enforced when the active phase

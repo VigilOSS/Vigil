@@ -49,7 +49,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from assess.commands import host_exec
-from assess.commands.kali_dnsx import DNSX_PROFILES, RESOLVER_PROFILES, resolution_failures
+from assess.commands.kali_dnsx import (
+    DNSX_PROFILES,
+    RESOLVER_PROFILES,
+    resolution_failures,
+)
+from assess.lib import runtime_route
+from assess.lib import scope as scope_lib
 from assess.lib.client import AssessError
 from assess.lib.config import load_config
 from assess.lib.discovery import (
@@ -61,7 +67,6 @@ from assess.lib.discovery import (
 from assess.lib.kali import kali_exec
 from assess.lib.kali_output import _apply_required_headers, _required_headers
 from assess.lib.locking import network_heavy_lock
-from assess.lib import runtime_route, scope as scope_lib
 
 _DEFAULT_WORDLIST = "/usr/share/wordlists/SecLists/Discovery/DNS/subdomains-top1million-110000.txt"
 
@@ -380,7 +385,7 @@ def _host_dispatch(cmd, *, intent, tool_name, technique, phase, timeout, engagem
     return SimpleNamespace(return_code=rc)
 
 
-def _exec(args, cmd, intent, tool_name, *, route="container", destinations=()):
+def _exec(args, cmd, intent, tool_name, *, route="container"):
     """Run a stage in-container (kali_exec) or on the host (host-exec), per *route*.
 
     The CR-16/CR-21 output-stall watchdog is applied separately by
@@ -396,7 +401,6 @@ def _exec(args, cmd, intent, tool_name, *, route="container", destinations=()):
         res = kali_exec(
             cmd, technique="RECON", intent=intent, probe_kind="fingerprint", phase="recon",
             timeout=int(args.stage_timeout), engagement_dir=args.engagement_dir, tool_name=tool_name,
-            destinations=tuple(destinations),
         )
     if getattr(res, "return_code", 0) not in (0, None):
         print(f"dns-discovery: {tool_name} exited {res.return_code}; continuing with partial output.", file=sys.stderr)
@@ -993,12 +997,8 @@ def _discover_once(args, cfg, apexes: list[str], seed_hosts: set[str],
         if not args.no_ct:
             ct_host, ct_container = _paths(cfg, "subs_ct.txt")
             _exec(args, ["sh", "-c", _crt_sh_script(apexes, ct_container)],
-                  "dns-discovery: certificate-transparency harvest (crt.sh)", "crt.sh", route="container",
-                  # `research`, not `passive_source`: the research role is validated
-                  # against the curated allowlist in scope.py, so this typed
-                  # destination cannot be edited into a blanket bypass for an
-                  # arbitrary out-of-scope host.
-                  destinations=(scope_lib.ExecutionDestination("crt.sh", "research"),))
+                  "dns-discovery: certificate-transparency harvest (crt.sh)", "crt.sh",
+                  route="container")
             produced.append(ct_host)
 
         # OPT-IN axes (CR-6) — only when explicitly enabled; never default-on.
@@ -1301,6 +1301,7 @@ def run(args) -> None:
     resolved_host, _ = _paths(cfg, "resolved_hosts.txt")
     if resolved_all:
         resolved_host.write_text("\n".join(sorted(resolved_all)) + "\n", encoding="utf-8")
+        _record_discovered_hosts(cfg.engagement_dir, sorted(resolved_all))
     else:
         resolved_host.write_text("", encoding="utf-8")
         _promote_generation(
@@ -1321,6 +1322,17 @@ def run(args) -> None:
     canonical_resolved = _canonical_path(cfg, "resolved_hosts.txt")
     print(f"dns-discovery: done. {len(resolved_all)} resolved hosts -> {canonical_resolved}\n"
           f"  Next: vigil assess web-discovery {canonical_resolved}", file=sys.stderr)
+
+
+def _record_discovered_hosts(engagement_dir: str, candidates: list[str]) -> None:
+    """Best-effort derived inventory; bookkeeping never aborts discovery."""
+    try:
+        scope_lib.record_discovered_hosts(engagement_dir, candidates)
+    except (OSError, ValueError, SystemExit) as exc:
+        print(
+            f"WARN: could not update scope.json discovered_hosts inventory: {exc}",
+            file=sys.stderr,
+        )
 
 
 def _select_parent_targets(

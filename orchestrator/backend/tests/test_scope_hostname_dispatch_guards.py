@@ -347,7 +347,7 @@ def test_rescore_prunes_now_out_of_scope_unit(client, isolate_settings) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# I-07 — work-buffer dispatch scope guard
+# I-07 — work-buffer host-set shaping before claims
 # --------------------------------------------------------------------------- #
 def _bulk_pending(eng_id: int, *, host: str, path_id: str, priority: int, queue: str) -> None:
     state_manager.record_work_items_bulk(
@@ -444,9 +444,9 @@ def test_fetch_by_unit_skips_out_of_scope_candidate(client, isolate_settings) ->
     assert "evil.other.io" not in claimed_hosts
 
 
-def test_no_scope_allowlist_fails_open_for_dispatch(client, isolate_settings) -> None:
+def test_no_scope_allowlist_fails_open_for_work_claims(client, isolate_settings) -> None:
     """When scope has no allowlist, ``_engagement_scope_admission`` is None and the
-    dispatch guard fails OPEN — every routable row is still claimable."""
+    work-set filter fails OPEN — every routable row is still claimable."""
     key = "2026-07-24-000000-i07-wb-failopen"
     eng = isolate_settings["engagements_dir"] / key
     (eng / "sessions").mkdir(parents=True, exist_ok=True)

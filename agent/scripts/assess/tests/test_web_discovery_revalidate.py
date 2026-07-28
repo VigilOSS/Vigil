@@ -13,7 +13,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from assess.commands import web_discovery
 
 
@@ -171,9 +170,10 @@ def test_katana_carries_omit_response_and_body_flags(monkeypatch, tmp_path):
     # I-4: -or (omit response) + -ob (omit body) keep the crawl off disk.
     assert "-or" in katana_runs[0]
     assert "-ob" in katana_runs[0]
+    assert "-fs" not in katana_runs[0]
 
 
-def test_katana_injects_scope_no_fire_crawl_exclusions(monkeypatch, tmp_path):
+def test_katana_does_not_inject_scope_derived_crawl_exclusions(monkeypatch, tmp_path):
     _scope(tmp_path, off_limits_paths=["/api/send-email", "/account/*"])
     hosts_file = _hosts_file(tmp_path, ["live.example.com"])
     captured: list[list[str]] = []
@@ -191,9 +191,7 @@ def test_katana_injects_scope_no_fire_crawl_exclusions(monkeypatch, tmp_path):
     web_discovery.run(_args(tmp_path, hosts_file, runtime="container", no_crawl=False))
 
     katana = next(cmd for cmd in captured if cmd[0] == "katana")
-    exclusion = katana[katana.index("-cos") + 1]
-    assert "send\\-email" in exclusion
-    assert "account" in exclusion
+    assert "-cos" not in katana
 
 
 def test_rate_cap_clamps_httpx_and_katana(monkeypatch, tmp_path):
@@ -236,9 +234,10 @@ def test_rate_cap_unset_injects_safe_crawl_default(monkeypatch, tmp_path):
     assert "-rl" in katana_runs[0]
     assert katana_runs[0][katana_runs[0].index("-rl") + 1] == "10"
     assert katana_runs[0][katana_runs[0].index("-rlm") + 1] == "600"  # 10*60
-    # JS-aware + scope-safe + deep crawl defaults are baked in.
+    # JS-aware + deep crawl defaults are baked in without a scope-derived
+    # outbound crawl restriction.
     assert "-jsl" in katana_runs[0]
-    assert katana_runs[0][katana_runs[0].index("-fs") + 1] == "fqdn"
+    assert "-fs" not in katana_runs[0]
     assert katana_runs[0][katana_runs[0].index("-d") + 1] == "4"  # fleet-crawl depth default
 
 
@@ -377,7 +376,7 @@ def test_standalone_web_discovery_drops_oos_from_mixed_input(monkeypatch, tmp_pa
     _scope(tmp_path, hosts=["*.example.com"], out_of_scope=["bad.example.com"])
     hosts_file = _hosts_file(
         tmp_path,
-        ["good.example.com", "bad.example.com", "evil.test"],
+        ["good.example.com", "dead.example.com", "bad.example.com", "evil.test"],
     )
     captured: list[list[str]] = []
     _install_seams(
@@ -397,13 +396,15 @@ def test_standalone_web_discovery_drops_oos_from_mixed_input(monkeypatch, tmp_pa
 
     assert (
         tmp_path / "scans" / "web-discovery" / "denoised_hosts.txt"
-    ).read_text().split() == ["good.example.com"]
+    ).read_text().split() == ["dead.example.com", "good.example.com"]
     metadata = json.loads(
         (tmp_path / "scans" / "web-discovery" / "scope-filter.meta.json").read_text()
     )
-    assert metadata["input_count"] == 3
-    assert metadata["kept_count"] == 1
+    assert metadata["input_count"] == 4
+    assert metadata["kept_count"] == 2
     assert metadata["dropped_count"] == 2
+    scope_doc = json.loads((tmp_path / "scope.json").read_text())
+    assert scope_doc["discovered_hosts"] == ["good.example.com"]
 
 
 def test_standalone_web_discovery_drops_descendant_of_exact_apex(monkeypatch, tmp_path):

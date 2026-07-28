@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from assess.lib import scope as scope_lib
 from assess.lib.client import AssessError
 from assess.lib.config import resolve_engagement_dir
 from assess.lib.kali import (
@@ -20,7 +19,6 @@ from assess.lib.kali import (
     prepare_browser_identity_material,
 )
 from assess.lib.kali_output import _required_headers
-
 
 _MAX_STEPS = 50
 _MAX_STEP_TIMEOUT_MS = 120_000
@@ -37,7 +35,7 @@ _STEP_KEYS = {
 
 # Runs under the runtime image's system Python. The complete execution plan is one
 # JSON argv value, avoiding shell interpolation and keeping every target URL
-# available to the host-side admission gate before Chromium starts.
+# visible in the audited argv before Chromium starts.
 _BROWSER_DRIVER = r'''
 import hashlib, json, os, re, sys, time
 from urllib.parse import urlsplit
@@ -58,37 +56,6 @@ def origin(raw):
     port = parsed.port
     default = (parsed.scheme == "https" and port == 443) or (parsed.scheme == "http" and port == 80)
     return "%s://%s%s" % (parsed.scheme.lower(), parsed.hostname.lower(), "" if not port or default else ":%d" % port)
-
-def host_allowed(host, entries):
-    host = (host or "").lower().rstrip(".")
-    for entry in entries:
-        kind = entry.get("entry_kind")
-        value = str(entry.get("host") or "").lower().rstrip(".")
-        if kind == "wildcard" and (host == value or host.endswith("." + value)):
-            return True
-        if kind in ("bare_host", "url") and host == value:
-            return True
-        if kind == "cidr":
-            try:
-                import ipaddress
-                if ipaddress.ip_address(host) in ipaddress.ip_network(value, strict=False):
-                    return True
-            except ValueError:
-                pass
-    return False
-
-def blocked_request(raw, cfg):
-    parsed = urlsplit(raw)
-    host = (parsed.hostname or "").lower().rstrip(".")
-    if cfg.get("scope_enforcement") != "bypass":
-        if not host_allowed(host, cfg.get("scope_entries") or []):
-            return "out-of-scope navigation host"
-        if host_allowed(host, cfg.get("out_of_scope_entries") or []):
-            return "explicitly out-of-scope navigation host"
-    no_fire_regex = cfg.get("no_fire_regex") or ""
-    if no_fire_regex and re.search(no_fire_regex, raw, re.IGNORECASE):
-        return "off-limits navigation path"
-    return ""
 
 raw = sys.argv[1] if len(sys.argv) > 1 else ""
 try:
@@ -167,11 +134,6 @@ def on_response(response):
         result.setdefault("body_warnings", []).append({"url": response.url, "error": repr(exc)})
 
 def route_request(route, request):
-    reason = blocked_request(request.url, cfg)
-    if reason:
-        result.setdefault("blocked_requests", []).append({"url": request.url, "reason": reason})
-        route.abort("blockedbyclient")
-        return
     headers = dict(request.headers)
     headers.update(operator_headers)
     request_origin = origin(request.url)
@@ -443,21 +405,11 @@ def _resolve_required_headers(args) -> dict[str, str]:
     return _required_headers(Path(eng_dir))
 
 
-def _scope_config(args) -> tuple[dict[str, Any], Path | None]:
+def _engagement_dir(args) -> Path | None:
     try:
-        eng_dir = Path(resolve_engagement_dir(getattr(args, "engagement_dir", None)))
-        scope = scope_lib.load_scope(str(eng_dir))
-    except (SystemExit, OSError, ValueError, json.JSONDecodeError):
-        return ({"scope_entries": [], "out_of_scope_entries": [], "no_fire_regex": "", "scope_enforcement": "enforce"}, None)
-    return (
-        {
-            "scope_entries": scope_lib.scope_entries(scope),
-            "out_of_scope_entries": scope_lib.out_of_scope_entries(scope),
-            "no_fire_regex": scope_lib.no_fire.crawl_exclusion_regex(scope),
-            "scope_enforcement": scope_lib.scope_enforcement(scope),
-        },
-        eng_dir,
-    )
+        return Path(resolve_engagement_dir(getattr(args, "engagement_dir", None)))
+    except (SystemExit, OSError, ValueError):
+        return None
 
 
 def _origin(url: str) -> str:
@@ -480,8 +432,6 @@ def run(args) -> None:
         raise AssessError("browser --max-body-bytes must be between 1 and 10485760")
     steps_path = str(getattr(args, "steps_file", "") or "").strip()
     steps = _load_steps(Path(steps_path).expanduser()) if steps_path else []
-    navigation_urls = [url] + [str(step["url"]) for step in steps if step["action"] == "navigate"]
-    destinations = tuple(scope_lib.ExecutionDestination(value, "target") for value in navigation_urls)
 
     required_headers = _resolve_required_headers(args)
     operator_headers = _parse_header_args(getattr(args, "extra_headers", []) or [])
@@ -493,7 +443,7 @@ def run(args) -> None:
         if name.lower() not in required_header_names
     }
 
-    scope_config, eng_dir = _scope_config(args)
+    eng_dir = _engagement_dir(args)
     storage_state = _load_storage_state(
         str(getattr(args, "storage_state", "") or ""), eng_dir
     )
@@ -549,7 +499,6 @@ def run(args) -> None:
         "capture_bodies": bool(getattr(args, "capture_bodies", False)),
         "body_dir": body_dir,
         "max_body_bytes": max_body_bytes,
-        **scope_config,
     }
     print(f"browser: Playwright workflow {url} -> screenshot={screenshot} dom={dom_out}", file=sys.stderr)
     cmd = ["python3", "-c", _BROWSER_DRIVER, json.dumps(config, sort_keys=True, separators=(",", ":"))]
@@ -558,5 +507,5 @@ def run(args) -> None:
     # injection cannot reach Chromium and would only duplicate/warn.
     kwargs["identity"] = None
     kwargs["prepared_auth_context"] = prepared_auth_context
-    result = kali_exec(cmd, tool_name="browser", destinations=destinations, **kwargs)
+    result = kali_exec(cmd, tool_name="browser", **kwargs)
     emit_result(result)

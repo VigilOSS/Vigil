@@ -30,7 +30,7 @@ needing 5–15 platform pulls. See "Iteration-mode (dispatch_mode) Declaration" 
 - `agent/rules/adversarial-mindset.md` — the lens through which alerts get re-read after audit pulls land
 - `agent/rules/resume.md` — universal resume hydration
 - `agent/shared-constraints-blue.md` — tenant scope, read-only-by-default, artifact-index chain of custody, UTC, look-back, host-exec audit pipeline, confidence labels, dispatch-handoff conventions
-- **Every tenant ref named in `scope.json:tenant_reference_paths[]`.** Missing tenant ref → halt with a `blocked` handoff naming the path.
+- **Every tenant ref injected in the dispatch's `tenant_reference_paths[]`.** Missing tenant ref → halt with a `blocked` handoff naming the path.
 
 **LOAD-ON-FIRST-USE (lazy):**
 
@@ -51,7 +51,7 @@ Before any tenant-facing pull:
 
 - [ ] `agent/rules/triage.md`, `agent/rules/ir-evidence.md`, and `agent/shared-constraints-blue.md` loaded
 - [ ] The platform skill named in the dispatch is loaded — exactly one. Multiple platform skills in one dispatch is a dispatch-mode violation; halt and return a `blocked` handoff naming the conflict.
-- [ ] Every tenant ref path in `scope.json:tenant_reference_paths[]` exists on disk and is loaded; customer slug matches the dispatch
+- [ ] Every injected tenant ref in Load First exists and is loaded; customer slug matches the dispatch
 - [ ] You ran `vigil assess resume-brief --finding <slug>` and reviewed prior dispatches against this actor / target / IOC. Resume-brief surfaces parallel investigations the L1 dispatch may not have known about.
 - [ ] You read the L1 handoff via `vigil assess agent render-handoff <l1-agent-id>` — NOT by re-reading the L1 dispatch's response text. The handoff row is canonical.
 - [ ] You confirmed `host-exec` is available. If not, return a blocked handoff and name the missing audit path in `runtime_issues`; do not run tenant-facing commands outside `host-exec`.
@@ -73,7 +73,7 @@ promoted finding's narrative fields) — not a precondition of this checkpoint.
 ## Inputs
 
 - L1 handoff JSON (read via `vigil assess agent render-handoff <l1-agent-id>`)
-- `scope.json` — `customer`, `platforms`, `tenant_reference_paths[]`
+- Injected blue dispatch context
 - The tenant ref(s) — load in full
 - The platform skill named in the dispatch
 - Any operator-attached resume-brief block
@@ -146,7 +146,7 @@ re-do the comparison and earns a `coverage_gaps` entry.
 
 ## Cross-Platform Correlation (multi-platform incidents)
 
-When `scope.json:platforms.length > 1`, the L2 handoff's
+When the dispatch names more than one platform, the L2 handoff's
 `cross_platform_correlation_notes` field is **mandatory and non-empty**. The
 paragraph documents:
 

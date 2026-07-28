@@ -12,6 +12,7 @@ from pathlib import Path
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.scope import mutate_scope
 
 
 LANG_MAP = {
@@ -730,17 +731,20 @@ def run(args) -> None:
         scope_path = os.path.join(eng_dir, 'scope.json')
         if os.path.isfile(scope_path):
             try:
-                with open(scope_path, 'r', encoding='utf-8') as f:
-                    scope = json.load(f)
-                source_repos = scope.get('source_repos', [])
-                repo_entry = {'repo_id': repo_id, 'name': repo_name, 'path': repo_path, 'language': args.language or ''}
-                # Avoid duplicates by repo_id
-                if not any(r.get('repo_id') == repo_id for r in source_repos):
-                    source_repos.append(repo_entry)
-                scope['source_repos'] = source_repos
-                with open(scope_path, 'w', encoding='utf-8') as f:
-                    json.dump(scope, f, indent=2, ensure_ascii=False)
-            except (json.JSONDecodeError, OSError) as e:
+                def update(scope):
+                    source_repos = scope.get('source_repos', [])
+                    repo_entry = {
+                        'repo_id': repo_id,
+                        'name': repo_name,
+                        'path': repo_path,
+                        'language': args.language or '',
+                    }
+                    if not any(r.get('repo_id') == repo_id for r in source_repos):
+                        source_repos.append(repo_entry)
+                    scope['source_repos'] = source_repos
+
+                mutate_scope(eng_dir, update)
+            except (json.JSONDecodeError, OSError, SystemExit) as e:
                 print(f"Warning: could not update scope.json with source_repos: {e}", file=sys.stderr)
 
     # Print summary

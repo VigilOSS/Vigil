@@ -1,11 +1,36 @@
 from __future__ import annotations
 
+import argparse
 from types import SimpleNamespace
 
 from assess.commands import kali_katana
 
 
-def test_typed_katana_merges_authored_and_scope_no_fire_exclusions(
+def test_typed_katana_has_no_automatic_field_scope() -> None:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers()
+    kali_katana.register(subparsers)
+
+    args = parser.parse_args(
+        [
+            "katana",
+            "--technique",
+            "DISCOVERY",
+            "--intent",
+            "crawl target",
+            "--probe-kind",
+            "fingerprint",
+            "--phase",
+            "recon",
+            "--timeout",
+            "30",
+        ]
+    )
+
+    assert args.field_scope == ""
+
+
+def test_typed_katana_keeps_only_explicit_crawl_exclusion(
     monkeypatch, tmp_path
 ) -> None:
     (tmp_path / "scope.json").write_text(
@@ -50,5 +75,4 @@ def test_typed_katana_merges_authored_and_scope_no_fire_exclusions(
 
     cmd = captured[0]
     value = cmd[cmd.index("-cos") + 1]
-    assert "authored-regex" in value
-    assert "notify" in value
+    assert value == "authored-regex"

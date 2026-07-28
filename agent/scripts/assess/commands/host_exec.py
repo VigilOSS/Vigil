@@ -21,13 +21,12 @@ from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
+from assess.lib import host_processes
+from assess.lib import scope as scope_lib
 from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import load_config
-from assess.lib import scope as scope_lib
-from assess.lib import host_processes
 from assess.lib.kali import prepare_execution_command
 from assess.lib.rate_leases import aggregate_rate_reservation, target_rate_lease
-
 
 # Conservative destructive-token list. Operators must pass --allow-destructive
 # to bypass. Tokens are matched as substrings in the joined argv after stripping
@@ -528,28 +527,17 @@ def run(args) -> None:
 
     auth_context = "anonymous"
     try:
-        auth_context, attribution_gap = prepare_execution_command(
+        auth_context = prepare_execution_command(
             argv,
             tool_name=args.tool.strip(),
             engagement_dir=Path(cfg.engagement_dir),
             identity=getattr(args, "identity", None),
             identity_scope=getattr(args, "identity_scope", "") or "",
         )
-        if attribution_gap:
-            raise scope_lib.ScopePolicyError(attribution_gap)
         execution_policy = scope_lib.enforce_execution_policy(
             argv,
             tool_name=args.tool.strip(),
             engagement_dir=cfg.engagement_dir,
-            engagement_key=cfg.engagement_key,
-            explicit_targets=tuple(
-                target
-                for target in (
-                    (args.target_host or "").strip(),
-                    (args.scope_host or "").strip(),
-                )
-                if scope_lib.host_from_token(target)
-            ),
             require_declared_tool=True,
         )
     except scope_lib.ScopePolicyError as exc:
