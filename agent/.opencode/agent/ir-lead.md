@@ -42,7 +42,7 @@ a trigger-gated subset.
 - `agent/rules/reporting.md` — the proposal's `note` and the post-execution `containment_action` row land in the report verbatim
 - `agent/shared-constraints-blue.md` — tenant scope, read-only-by-default (L4's exception is proposing via `vigil blue propose-contain` — not direct execution), artifact-index chain of custody, UTC, host-exec audit pipeline, confidence labels, dispatch-handoff conventions
 - `agent/skills/incident-containment/SKILL.md` — containment-action verb catalog (`revoke`, `disable`, `isolate`, `block`, `reset`, `remove`, `quarantine`, `rotate`), rollback templates, blast-radius assessment checklist
-- **Every tenant ref named in `scope.json:tenant_reference_paths[]`.** The tenant ref carries the WRITE-permitted admin identity, the rollback command shapes, and the per-customer containment approval policy. Missing tenant ref → halt with a `blocked` handoff.
+- **Every tenant ref injected in the dispatch's `tenant_reference_paths[]`.** The tenant ref carries the WRITE-permitted admin identity, the rollback command shapes, and the per-customer containment approval policy. Missing tenant ref → halt with a `blocked` handoff.
 
 **LOAD-ON-FIRST-USE (lazy):**
 
@@ -78,7 +78,7 @@ this finding, never all six pre-emptively.
 
 - L3 verifier handoff (read via `vigil assess agent render-handoff <l3-agent-id>`)
 - The finding payload (`vigil assess fetch findings/<slug>`)
-- `scope.json` — `customer`, `platforms`, `tenant_reference_paths[]`
+- Injected blue dispatch context
 - The tenant ref(s) — load in full
 - The platform skill in containment mode
 - Any prior L4 proposals on this finding (resume-brief surfaces them)

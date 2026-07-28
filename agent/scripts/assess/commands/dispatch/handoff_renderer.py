@@ -29,7 +29,7 @@ def _render_handoff(args, extra: list[str]) -> None:
     assessment_dispatch_handoffs). The handoff payload provides
     summary / coverage gaps / next steps / runtime issues / working artifacts
     / open questions / extras; the dispatch row provides metadata (role,
-    task, scope_host, dispatched_at, status). 404 on the
+    task, application_unit_id, dispatched_at, status). 404 on the
     handoff exits 2; 404 on the dispatch row is non-fatal — the renderer
     still produces output from the handoff.
     """
@@ -71,14 +71,14 @@ def _render_handoff(args, extra: list[str]) -> None:
         if dispatch is not None:
             role = str(dispatch.get("agent_role") or handoff.get("agent_role") or "<unknown role>")
             task = str(dispatch.get("task") or "<unrecorded task>")
-            scope_host = dispatch.get("scope_host") or ""
+            application_unit_id = dispatch.get("application_unit_id")
             dispatched_at = dispatch.get("dispatched_at") or ""
             dispatch_status = dispatch.get("status") or ""
             skills = str(dispatch.get("skills") or "")
         else:
             role = str(handoff.get("agent_role") or "<unknown role>")
             task = "<unrecorded task>"
-            scope_host = ""
+            application_unit_id = None
             dispatched_at = handoff.get("created_at") or ""
             dispatch_status = "(dispatch row missing)"
             skills = ""
@@ -181,7 +181,7 @@ def _render_handoff(args, extra: list[str]) -> None:
         agent_id=agent_id,
         role=role,
         task=task,
-        scope_host=scope_host,
+        application_unit_id=application_unit_id,
         dispatched_at=dispatched_at,
         status=dispatch_status,
         skills=skills,
@@ -211,7 +211,7 @@ def _render_handoff_blob(
     agent_id: str,
     role: str,
     task: str,
-    scope_host: str,
+    application_unit_id: object,
     dispatched_at: str,
     status: str,
     skills: str,
@@ -244,7 +244,7 @@ def _render_handoff_blob(
     head = [
         f"#### Handoff from {role} dispatch {agent_id}",
         f"- **Prior task:** {task}",
-        f"- **Scope host:** {scope_host or '(none recorded)'}",
+        f"- **Application unit:** {application_unit_id or '(none recorded)'}",
         f"- **Dispatched at:** {dispatched_at or '(unknown)'} (status: {status or 'unknown'})",
         _handoff_provenance_line(handoff_status, handoff_version, handoff_written_at),
     ]

@@ -13,6 +13,7 @@ A distinctly-named module so it does not collide with test_discovery_pipelines.p
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -377,6 +378,10 @@ def test_operator_resolver_override_is_respected(monkeypatch, tmp_path):
 def test_convergence_stops_after_two_zero_net_new(monkeypatch, tmp_path):
     dns = _load("dns_ut_converge", "agent/scripts/assess/commands/dns_discovery.py")
     monkeypatch.setattr(dns, "load_config", lambda flag: _cfg(tmp_path))
+    (tmp_path / "scope.json").write_text(
+        '{"engagement_type":"web","hosts":["*.example.com"]}',
+        encoding="utf-8",
+    )
 
     # Pass 1 finds 2 hosts; later passes find nothing new → converge after 2 zeros.
     passes = {"n": 0}
@@ -402,6 +407,8 @@ def test_convergence_stops_after_two_zero_net_new(monkeypatch, tmp_path):
     assert passes["n"] == 3
     resolved = (tmp_path / "scans" / "dns-discovery" / "resolved_hosts.txt").read_text()
     assert "a.example.com" in resolved and "b.example.com" in resolved
+    scope_doc = json.loads((tmp_path / "scope.json").read_text())
+    assert scope_doc["discovered_hosts"] == ["a.example.com", "b.example.com"]
 
 
 def test_no_converge_runs_single_pass(monkeypatch, tmp_path):

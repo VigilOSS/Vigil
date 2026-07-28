@@ -307,6 +307,7 @@ def _apply_scope_filter(cfg, resolved: Path) -> Path:
     raw_lines = resolved.read_text(encoding="utf-8", errors="replace").splitlines()
     kept, metadata = scope.filter_recon_targets(scope_doc, raw_lines)
     _write_json_atomic(_recon_dir(cfg) / "scope-filter.meta.json", metadata)
+    _record_discovered_hosts(cfg, kept)
     dropped = int(metadata["dropped_count"])
     if dropped == 0:
         # Everything already in scope — no need to fork a separate file.
@@ -316,6 +317,17 @@ def _apply_scope_filter(cfg, resolved: Path) -> Path:
     print(f"recon: scope filter kept {len(kept)} / {len(kept) + dropped} resolved hosts "
           f"({dropped} out-of-scope/unscoped dropped before web-discovery).", file=sys.stderr)
     return out
+
+
+def _record_discovered_hosts(cfg, candidates: list[str]) -> None:
+    """Best-effort derived inventory; bookkeeping never aborts recon coverage."""
+    try:
+        scope.record_discovered_hosts(str(cfg.engagement_dir), candidates)
+    except (OSError, ValueError, SystemExit) as exc:
+        print(
+            f"WARN: could not update scope.json discovered_hosts inventory: {exc}",
+            file=sys.stderr,
+        )
 
 
 def _run_web(args, cfg) -> int:

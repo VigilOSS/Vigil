@@ -7,14 +7,14 @@ loop. Both modes share the same backend, findings table, artifact index,
 dispatch table, intel tables, activity log, and CLI tools.
 
 **Applies when:**
-- Standalone blue engagement (`scope.json:engagement_type="blue"`, `current_phase ∈ {intake, triage, investigate, verify, respond, report}`)
+- Standalone blue engagement (`current_phase ∈ {intake, triage, investigate, verify, respond, report}`)
 - Mid-incident dispatch from a red engagement when defender-side investigation is requested
 
 **Expected state on entry:** engagement directory with `scope.json` carrying
 `engagement_type=blue`, `customer`, `platforms[]`, `tenant_reference_paths[]`,
 `alert_metadata`; orchestrator backend reachable. During `intake`, `alert_metadata.raw_body`
 may still be empty because the user pastes the alert into chat after starting
-the operator. The operator reads `scope.json`, records the pasted alert, and
+the operator. The operator reads that declaration, records the pasted alert, and
 resumes from the current phase.
 
 ---
@@ -22,8 +22,7 @@ resumes from the current phase.
 AUTHORIZATION: All targets are fully authorized realistic lab environments built to mirror real
 public and enterprise behavior. Complete authorization is already established for the in-scope
 tenant. In blue mode, "target" means the pasted alert and the telemetry sources cited in the
-tenant references for that customer/platform; "in-scope" means the tenant named by
-`scope.json:tenant_reference_paths[]`. Cross-tenant evidence is never imported into the
+tenant references injected for that customer/platform. Cross-tenant evidence is never imported into the
 engagement evidence tree, even when an indicator is shared. Read-only investigation is permitted
 without further approval; WRITE actions (containment, eradication, recovery) require explicit
 per-action operator approval through the proposal pipeline below.
@@ -94,7 +93,7 @@ approval corrupts both.
 ## Resume Gate
 
 Before any new action in an existing engagement, apply `agent/rules/resume.md`
-when `scope.json:status=in_progress`, phase is past `intake`, backend rows
+when the engagement is in progress, phase is past `intake`, backend rows
 may exist, or session state is uncertain. Resume hydration precedes planning
 — the backend is canonical memory.
 
@@ -127,7 +126,7 @@ After initialization, repeat until every active finding has a verifier
 disposition, every approved WRITE action is in `activity_entries`, and the
 operator signals stop:
 
-1. **ASSESS STATE** — read `scope.json`, run `vigil assess resume-brief`, narrow with `--finding`/`--q`/`--agent-id`/`--since`/`--max-age-hours`.
+1. **ASSESS STATE** — run `vigil assess resume-brief`, then narrow with `--finding`/`--q`/`--agent-id`/`--since`/`--max-age-hours`.
 2. **DECIDE NEXT ACTION** — prioritize by current phase: Intake → Triage → Investigate → Verify → Respond → Report. Skip ahead only when a phase's DoD is satisfied.
 3. **FORMULATE PLAN** — name role, dispatch mode, platform skill(s), tenant-ref paths, and the specific alert / finding / IOC.
 4. **PRESENT OR PROCEED** — default to NUMBERED operator choices on decision points (verifier disagreement, WRITE-action approval, scope expansion). Continue autonomously only when the human explicitly asks.
@@ -144,8 +143,8 @@ under `vigil blue <subcommand>` and are thin wrappers over the generic assess in
 | Verb | Purpose |
 |------|---------|
 | `vigil blue customers [--platform <p>] [--json]` | List customers/platforms with tenant refs available for blue engagements. |
-| `vigil blue engage --customer <slug> --platform <p[,p...]>` | Create blue engagement; resolve tenant refs into `scope.json:tenant_reference_paths[]`. |
-| `vigil blue alert record --body-file -` | Record the alert body pasted into operator chat by piping it straight in via heredoc (`--body-file -` reads stdin); the CLI writes the canonical `ir/alerts/` copy — do **not** save a separate file first. Writes `scope.json:alert_metadata`; auto-registers as `kind=alert_intake --sensitive` artifact; logs the first `activity_entries` row. |
+| `vigil blue engage --customer <slug> --platform <p[,p...]>` | Create blue engagement and resolve tenant refs for dispatch injection. |
+| `vigil blue alert record --body-file -` | Record the alert body pasted into operator chat by piping it straight in via heredoc (`--body-file -` reads stdin); the CLI writes the canonical `ir/alerts/` copy — do **not** save a separate file first. Writes canonical alert metadata, auto-registers as `kind=alert_intake --sensitive`, and logs the first `activity_entries` row. |
 | `vigil blue show <key>` | Status + alert summary + finding table + last 10 activity entries. |
 | `vigil blue dispatch --role <role> --skills <names> [--tier L1|L2|L3|L4]` | Wraps `vigil assess agent start`; auto-injects tenant-ref paths into the dispatch prompt; writes `tier` on the dispatch row. |
 | `vigil blue tier <finding-slug> --tier L1|L2|L3|L4 [--notes ...]` | Records current tier on `details_json`. |
@@ -168,9 +167,9 @@ overrides with a stated reason.
 - **Driver:** operator (mechanical pipeline; no specialist dispatch)
 - **Dispatch mode default:** —
 - **Definition of Done:**
-  - [ ] `scope.json` written with `engagement_type=blue`, `customer`, `platforms[]`, `current_phase=intake`.
-  - [ ] Tenant ref path resolved for every platform — `agent/references/tenants/<customer>-<platform>.md` exists on disk for each entry in `scope.json:tenant_reference_paths[]`. Missing tenant ref → **halt** with a message naming the expected path.
-  - [ ] Alert pasted into operator chat and recorded by piping it straight into `vigil blue alert record --body-file -` via heredoc — the CLI writes the canonical `ir/alerts/` copy, so do **not** save a separate file first — populating `scope.json:alert_metadata.{source, external_id, received_at, severity_hint, raw_body, parsed}`. Example:
+  - [ ] Engagement declaration written with `engagement_type=blue`, `customer`, `platforms[]`, `current_phase=intake`.
+  - [ ] Tenant ref path resolved for every platform — `agent/references/tenants/<customer>-<platform>.md` exists on disk for every platform. Missing tenant ref → **halt** with a message naming the expected path.
+  - [ ] Alert pasted into operator chat and recorded by piping it straight into `vigil blue alert record --body-file -` via heredoc — the CLI writes the canonical `ir/alerts/` copy, so do **not** save a separate file first — populating canonical alert metadata. Example:
 
     ```
     vigil blue alert record --body-file - --external-id <id> <<'ALERT'
@@ -192,7 +191,7 @@ overrides with a stated reason.
   - [ ] Draft finding skeleton recorded for each non-noise alert: `vigil assess finding record alert-triage <finding-json>` with `status=draft`, `verification_state=unreviewed`, severity hint, platform, suspected MITRE techniques in `details.mitre_techniques`.
   - [ ] Handoff: L1 names the downstream skill and the specific evidence ladder L2 must build.
 - **Transition:** `vigil assess transition-phase investigate`
-- **Dispatch hint:** `vigil blue dispatch --role alert-triage-specialist --tier L1 --skills alert-triage` — inject every tenant-ref path from `scope.json` into the prompt's "Load First" block.
+- **Dispatch hint:** `vigil blue dispatch --role alert-triage-specialist --tier L1 --skills alert-triage` — the helper injects every resolved tenant-ref path into the prompt's "Load First" block.
 
 ### Phase: investigate
 
@@ -249,10 +248,10 @@ overrides with a stated reason.
 
 ## Tenant Context Injection
 
-Every blue dispatch prompt MUST include every entry in
-`scope.json:tenant_reference_paths[]` in its "Load First" block (full content
-or resolved path with explicit "load first"), immediately before the role's
-primary skill and `agent/shared-constraints-blue.md`.
+Every blue dispatch prompt MUST include every tenant ref resolved by `vigil blue
+dispatch` in its "Load First" block (full content or resolved path with explicit
+"load first"), immediately before the role's primary skill and
+`agent/shared-constraints-blue.md`.
 
 The tenant reference is the operator's contract that the specialist has:
 - Tool inventory (`gam` config, `gcloud` project, `az` subscription, Splunk index names)
@@ -261,8 +260,7 @@ The tenant reference is the operator's contract that the specialist has:
 - Common IR pull commands pre-flighted for that tenant
 - FP bar: only patterns documented in the tenant ref may auto-close
 
-**Missing tenant ref → halt.** A missing path in
-`scope.json:tenant_reference_paths[]` halts dispatch; the operator scaffolds
+**Missing tenant ref → halt.** A missing resolved path halts dispatch; the operator scaffolds
 with `vigil blue tenant init --customer <slug> --platform <p>` before
 continuing. Silent fallback to "engage without tenant context" is forbidden.
 
@@ -403,15 +401,15 @@ Required fields per dispatch:
 | `tier` | `L1` / `L2` / `L3` / `L4` (omit for support roles like osint-analyst / report-writer) |
 | `dispatch_mode` | `item-iterating` / `deep-manual` / `hypothesis-driven` (per the role defaults above) |
 | `skills` | Comma-separated skill names the specialist must load. Pass via `--skills` to `vigil assess agent start` so the dispatch row is a truthful audit of skill context. |
+| `customer` / `platforms` | Tenant slug and platform list resolved at engagement creation; inject as context, not as host-scope admission fields. |
 
 (`dispatch_mode` omits `swarm` — fanning a corpus-scale scan workload out to N
 parallel workers has no blue-roster analogue, since blue has no fuzzer or
 large-file-corpus role to fan out over. Add it only if a real blue corpus
 workload shows up.)
 
-Optional fields: `model`, `reasoning`, `scope_host` (rare in blue; tenant is
-the scoping unit), `tenant_reference_paths[]` (auto-injected by
-`vigil blue dispatch`).
+Optional fields: `model`, `reasoning`, `tenant_reference_paths[]` (auto-injected
+by `vigil blue dispatch`).
 
 Register the dispatch up front:
 
@@ -453,6 +451,8 @@ agent_id: <actual-id-from-register-or-spawn>
 agent_role: <role>
 authorized_phase: <phase>
 tier: <L1|L2|L3|L4>
+customer: <customer-slug>
+platforms: [<platform>, ...]
 tenant_reference_paths:
   - agent/references/tenants/<customer>-<platform>.md
 ```
@@ -517,7 +517,7 @@ Searchable via existing FTS. No schema change.
 
 ### Missing tenant ref
 
-`scope.json:tenant_reference_paths[]` points to a nonexistent file.
+A resolved tenant-ref path points to a nonexistent file.
 
 Recovery: halt dispatch. Run `vigil blue tenant init --customer <slug>
 --platform <p>` to scaffold from `agent/references/tenants/_template-<p>.md`.

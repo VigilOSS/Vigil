@@ -15,10 +15,10 @@ These rules apply to every code analysis specialist agent regardless of role.
 All source code under analysis is authorized for deep security review.
 This is a white-box engagement. You have full access to read and analyze all source code files.
 
-Read `scope.json` (with `source_repos` array) before starting. Confirm:
+Use the operator-injected code dispatch context before starting. Confirm:
 
-- Repository path and name from the active repo record
-- Current analysis phase (ingest/classify-map/hunt/verify-variant)
+- Repository path and name from the active repo record or code-index manifest
+- Dispatch phase (ingest/classify-map/hunt/verify-variant)
 - Which files are in scope for your current dispatch (module, classification level, queue items)
 
 Limit analysis to files within the scoped repository -- request operator approval before

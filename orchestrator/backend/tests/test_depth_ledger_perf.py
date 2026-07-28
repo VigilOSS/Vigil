@@ -40,12 +40,17 @@ def _probe(pid: int, uid: int = 1, host: str = "app.example.com") -> dict:
     }
 
 
-def _dispatch(did: int, host: str = "app.example.com", prefix: str = "/api") -> dict:
+def _dispatch(did: int, unit_id: int = 1) -> dict:
     return {
         "id": did, "agent_id": f"agent-{did}", "agent_role": "vulnerability-analyst",
-        "scope_host": host, "scope_path_prefix": prefix, "vuln_classes": "sqli",
+        "application_unit_id": unit_id, "vuln_classes": "sqli",
         "skills": "", "status": "completed", "finding_slugs_json": "[]",
     }
+
+
+def test_dispatch_unit_match_uses_concrete_application_unit_identity():
+    assert depth_ledger._dispatch_targets_unit(_dispatch(1, unit_id=7), 7) is True
+    assert depth_ledger._dispatch_targets_unit(_dispatch(1, unit_id=7), 8) is False
 
 
 def _count_probe_maps(monkeypatch, *, probes: list, dispatches: list) -> tuple[int, dict]:

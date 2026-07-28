@@ -72,13 +72,13 @@ def _val_after(cmd: list[str], flag: str) -> str:
 
 # ── katana defaults ────────────────────────────────────────────────────────
 
-def test_katana_bakes_in_deep_safe_defaults(monkeypatch):
+def test_katana_bakes_in_deep_rate_and_disk_defaults_without_scope_filter(monkeypatch):
     captured = _capture_kali_exec(monkeypatch, "assess.commands.kali_katana")
     cli = _import("assess.cli")
     cli.main(["kali", "katana", "-u", "https://x.example", *_AUDIT])
     cmd = captured["cmd"]
     assert _val_after(cmd, "-d") == "5"          # deep by default
-    assert _val_after(cmd, "-fs") == "fqdn"      # scope-safe by default
+    assert "-fs" not in cmd                      # never scope-filter outbound crawl
     assert _val_after(cmd, "-rl") == "10"        # politely rated by default
     assert _val_after(cmd, "-c") == "5"
     assert "-or" in cmd and "-ob" in cmd         # disk-bounded by default

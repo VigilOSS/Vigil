@@ -1,18 +1,20 @@
 """Scope parsing — replaces lib/scope.sh for Python callers."""
 from __future__ import annotations
 
-import ipaddress
+import fcntl
 import hashlib
+import ipaddress
 import json
+import os
 import re
 import shlex
+import stat
 import sys
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Literal, NamedTuple
+from typing import Any, Callable, Iterator
 from urllib.parse import urlsplit
-
-from assess.lib import no_fire
-
 
 # ---------------------------------------------------------------------------
 # Vendor-SaaS heuristics
@@ -60,7 +62,7 @@ def host_is_vendor_saas(host: str | None) -> str | None:
     Pattern matching is strict-subdomain on the hostname (CNAME / rDNS shape)
     and is purely lexical — no DNS resolution, HTTP probing, or backend
     lookup happens at call time, so the function is safe to invoke inside
-    scope filters and admission gates. A bare ``salesforce.com`` apex is
+    scope filters and coverage accounting. A bare ``salesforce.com`` apex is
     never a customer asset; only ``<tenant>.salesforce.com`` and similar
     subdomains return a vendor label.
 
@@ -86,91 +88,59 @@ _DNS_LABEL_RE = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$", re.IGNORECASE)
 
 _warned_scope_keys: set[str] = set()
 
-_TARGET_LIST_FLAGS = frozenset(
-    {
-        "-dL",
-        "-iL",
-        "-l",
-        "-list",
-        "-tL",
-        "--list",
-        "--input-file",
-        "--targets-file",
-        "--url-file",
-        "-i",
-    }
-)
-
-_LIST_TARGET_TOOLS = frozenset(
-    {
-        "alterx",
-        "arjun",
-        "asnmap",
-        "bbot",
-        "dnsx",
-        "httpx",
-        "katana",
-        "naabu",
-        "nmap",
-        "nuclei",
-        "subfinder",
-        "tlsx",
-    }
-)
-
-_TARGET_VALUE_FLAGS: dict[str, frozenset[str]] = {
-    "alterx": frozenset({"-d", "--domain"}),
-    "arjun": frozenset({"-u"}),
-    "asnmap": frozenset({"-d"}),
-    "bbot": frozenset({"-t", "--target"}),
-    "cero": frozenset({"-d", "--domain"}),
-    "ffuf": frozenset({"-u", "--url"}),
-    "httpx": frozenset({"-u", "--url", "-target"}),
-    "katana": frozenset({"-u", "--url", "-target"}),
-    "nikto": frozenset({"-h", "--host"}),
-    "nuclei": frozenset({"-u", "--target", "-target"}),
-    "sqlmap": frozenset({"-u", "--url"}),
-    "subfinder": frozenset({"-d", "--domain"}),
-    "tlsx": frozenset({"-u"}),
-}
-
-_POSITIONAL_TARGET_TOOLS = frozenset(
-    {"cero", "curl", "gau", "nmap", "wafw00f", "whatweb", "wget"}
-)
-
 _SHELL_BINARIES = frozenset({"sh", "bash", "dash", "zsh"})
-_SHELL_BOUNDARIES = frozenset({"|", "||", "&&", ";", "&", "(", ")"})
-_SHELL_CONTROL_WORDS = frozenset(
-    {"if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac", "in"}
-)
+
+# Executables that put requests on the wire against whatever they are pointed at.
+# This is a TOOL classifier, NOT a destination filter: its only consumer is
+# aggregate rate governance, which needs to know whether a run will generate
+# target traffic and therefore must reserve rate capacity. It admits nothing and
+# refuses nothing.
+#
+# ``browser`` is not an executable — it is the tool name ``kali browser``
+# declares. Its argv is ``python3 -c <driver> <json-plan>``, so neither the
+# executable nor the plan's URLs are visible as argv words, and without the
+# declared name a Playwright run would drive a real browser against the target
+# outside the engagement's aggregate rate budget.
 _TARGET_FACING_TOOLS = frozenset(
     {
-        "arjun", "bbot", "cero", "curl", "dalfox", "dnsx", "ffuf", "httpx",
-        "katana", "naabu", "nikto", "nmap", "nuclei", "puredns", "sqlmap",
-        "subfinder", "tlsx", "wafw00f", "whatweb", "wget",
+        "arjun", "bbot", "browser", "cero", "curl", "dalfox", "dnsx", "ffuf",
+        "httpx", "katana", "naabu", "nikto", "nmap", "nuclei", "puredns",
+        "sqlmap", "subfinder", "tlsx", "wafw00f", "whatweb", "wget",
     }
 )
 
-_NON_TARGET_VALUE_FLAGS = frozenset(
+# Executables that cannot put a request on the wire — they read, write, filter or
+# print text. The request classifier skips their argv so writing or grepping a
+# URL does not consume aggregate target-rate capacity.
+#
+# Deliberately small and literal. It is a skip-list, not an allowlist, so an
+# unknown or future HTTP tool carrying a URL is still classified as
+# target-facing. Launchers (env/sudo/timeout/…) are not here: they are unwrapped
+# to their child by :func:`_unwrap_launcher_argv`.
+_NON_REQUESTING_HEADS = frozenset(
     {
-        "-H",
-        "-header",
-        "--header",
-        "-o",
-        "--output",
-        "-t",
-        "-tags",
-        "-exclude-tags",
-        "-etags",
-        "-w",
-        "--wordlist",
-        "-A",
-        "--user-agent",
+        "echo", "printf", "cat", "tee", "grep", "egrep", "fgrep", "rg", "sed",
+        "awk", "cut", "sort", "uniq", "wc", "head", "tail", "tr", "jq", "yq",
+        "comm", "paste", "rev", "basename", "dirname", "true", "false",
+    }
+)
+
+# Option flags whose value is something other than a URL the command requests —
+# headers, output paths, wordlists, request bodies, credentials. Keeping those
+# values out of the request classifier avoids reserving aggregate target-rate
+# capacity for an inert URL in a header or body.
+_NON_REQUEST_VALUE_FLAGS = frozenset(
+    {
+        "-H", "-header", "--header", "-o", "--output", "-t", "-tags",
+        "-exclude-tags", "-etags", "-w", "--wordlist", "-A", "--user-agent",
         "--resolve",
     }
 )
 
-_TOOL_NON_TARGET_VALUE_FLAGS: dict[str, frozenset[str]] = {
+# Per-tool additions to the above. Kept tool-scoped because the same short flag
+# means different things to different tools: ``-u`` is credentials to curl but
+# the target URL to nuclei/httpx/ffuf/sqlmap.
+_TOOL_NON_REQUEST_VALUE_FLAGS: dict[str, frozenset[str]] = {
     "curl": frozenset(
         {
             "-X", "--request", "-d", "--data", "--data-raw", "--data-binary",
@@ -187,239 +157,18 @@ _TOOL_NON_TARGET_VALUE_FLAGS: dict[str, frozenset[str]] = {
 }
 
 
-# CURATED third-party research/intelligence infrastructure.
-#
-# Reachability is not scope, and the target-admission gate below exists to keep it
-# that way: a host the engagement did not authorize is refused, full stop. That
-# rule is correct and load-bearing for the TARGET ESTATE — but it was also
-# refusing the third-party services we query *about* the target. Asking GitHub
-# whether the target's source leaked, asking crt.sh which certificates name it, or
-# asking the Wayback CDX which URLs it used to serve does not touch the target at
-# all; the request lands on someone else's public API. Refusing those returned
-# zero bytes, and a whole OSINT dispatch's empty output was then read as "nothing
-# is exposed" when it was a tool artifact.
-#
-# This is a CURATED, in-code allowlist and deliberately NOT an operator-supplied
-# pass-through: a `--research <host>` flag would be exactly the arbitrary
-# out-of-scope probe the scope rule exists to prevent. Extend it HERE, with hosts
-# that are genuinely third-party research infrastructure.
-#
-# Matching is EXACT on the normalized host — never by suffix — so a lookalike
-# (`api.github.com.evil.test`, `crt.sh.attacker.test`) can never ride in on a
-# listed name. A host that also appears in the engagement's own scope.json is
-# NEVER admitted through this path: target-scope rules win (see
-# :func:`enforce_execution_policy`), so this can never become a side door onto the
-# estate under assessment.
-RESEARCH_HOSTS: frozenset[str] = frozenset(
-    {
-        # Certificate transparency
-        "crt.sh",
-        # Source hosting / code search
-        "api.github.com",
-        "github.com",
-        "gist.github.com",
-        "raw.githubusercontent.com",
-        "objects.githubusercontent.com",
-        "codeload.github.com",
-        # Package registries
-        "registry.npmjs.org",
-        "www.npmjs.com",
-        "rubygems.org",
-        "index.rubygems.org",
-        "pypi.org",
-        "files.pythonhosted.org",
-        # Web archives / crawl indexes
-        "web.archive.org",
-        "archive.org",
-        "index.commoncrawl.org",
-        "data.commoncrawl.org",
-        # Scan / vulnerability intelligence
-        "urlscan.io",
-        "nvd.nist.gov",
-        "services.nvd.nist.gov",
-    }
-)
-
-# Domain families whose hosts LOOK like research infrastructure without being on
-# the curated allowlist. This list grants NOTHING — it only shapes the refusal
-# message, so an operator who runs a passive lookup against an unlisted
-# intelligence service is told the run was REFUSED (and why) instead of reading a
-# zero-byte result as a measurement.
-_RESEARCH_LIKE_SUFFIXES: tuple[str, ...] = (
-    "crt.sh",
-    "github.com",
-    "githubusercontent.com",
-    # NOT github.io: that is user-published content, so a target's own Pages site
-    # would be mislabelled "research infrastructure" in its refusal.
-    "npmjs.org",
-    "npmjs.com",
-    "rubygems.org",
-    "pypi.org",
-    "pythonhosted.org",
-    "archive.org",
-    "commoncrawl.org",
-    "urlscan.io",
-    "nist.gov",
-    "shodan.io",
-    "censys.io",
-    "securitytrails.com",
-    "virustotal.com",
-    "alienvault.com",
-    "hackertarget.example",
-    "dnsdumpster.com",
-    "builtwith.com",
-    "binaryedge.io",
-    "fofa.info",
-    "zoomeye.org",
-    "certspotter.com",
-    "sslmate.com",
-)
-
-# Every role an :class:`ExecutionDestination` may declare. ``target`` is the only
-# one the scope allowlist admits; the other three name destinations that are not
-# the target estate at all.
-EXECUTION_DESTINATION_ROLES: tuple[str, ...] = (
-    "target",
-    "passive_source",
-    "control",
-    "research",
-)
-
-# Roles whose hosts are, by construction, not the engagement's targets: they are
-# skipped by target admission and by the no-fire path checks (which describe the
-# TARGET's off-limits paths, not a third party's API routes).
-_NON_TARGET_ROLES: frozenset[str] = frozenset(
-    {"passive_source", "control", "research"}
-)
-
-
 class ScopePolicyError(RuntimeError):
-    """Raised before execution when engagement target/tool policy rejects a run."""
-
-
-class ExecutionDestination(NamedTuple):
-    """One explicitly classified network destination in an execution plan.
-
-    ``research`` differs from ``passive_source`` in exactly one way, and it is the
-    important one: ``passive_source`` admits whatever host the caller names (a
-    blanket bypass), while ``research`` is validated against :data:`RESEARCH_HOSTS`
-    and refuses anything else. Prefer ``research`` for third-party intelligence
-    lookups so a typo — or a future edit — cannot silently turn the typed
-    destination into an unauthorized probe.
-    """
-
-    value: str
-    role: Literal["target", "passive_source", "control", "research"] = "target"
-
-
-def is_research_host(host: str | None) -> bool:
-    """True when ``host`` is on the curated third-party research allowlist."""
-    if not host:
-        return False
-    return _normalize_host_for_match(host) in RESEARCH_HOSTS
-
-
-def looks_like_research_host(host: str | None) -> bool:
-    """True when ``host`` belongs to a domain family that reads as research infra.
-
-    Advisory only — it grants no admission. See :data:`_RESEARCH_LIKE_SUFFIXES`.
-    """
-    normalized = _normalize_host_for_match(host or "")
-    if not normalized:
-        return False
-    return any(
-        normalized == suffix or normalized.endswith("." + suffix)
-        for suffix in _RESEARCH_LIKE_SUFFIXES
-    )
-
-
-def research_allowlist_hint(limit: int = 10) -> str:
-    """A short, stable rendering of the curated research allowlist for messages."""
-    hosts = sorted(RESEARCH_HOSTS)
-    shown = ", ".join(hosts[:limit])
-    if len(hosts) > limit:
-        shown += f", … ({len(hosts)} total)"
-    return shown
-
-
-def _out_of_scope_refusal(
-    host: str, reason: str, *, matched_scope_entry: bool = False
-) -> str:
-    """The target-admission refusal text, annotated when research infra is involved.
-
-    A zero-byte result from a refused OSINT lookup is indistinguishable from a
-    genuine "nothing found" unless the refusal says so out loud. When the refused
-    host reads as research infrastructure, the message names the research-host path
-    and exactly why it did not apply here.
-    """
-    message = f"refusing target outside engagement scope: {host} ({reason})"
-    if is_research_host(host) and matched_scope_entry:
-        return (
-            message
-            + f". NOTE: {host} is on the curated research-host allowlist, but it also "
-            "matches this engagement's scope.json, so target-scope rules win — the "
-            "research path can never admit a host in the engagement's own estate. "
-            "Query it as a target (or not at all)."
-        )
-    if is_research_host(host):
-        return (
-            message
-            + f". NOTE: {host} is on the curated research-host allowlist, but this run "
-            "declared it as a TARGET destination, and an explicit target declaration is "
-            "always honoured. Drop the typed target destination to query it as research "
-            "infrastructure."
-        )
-    if looks_like_research_host(host):
-        return (
-            message
-            + f". NOTE: {host} looks like third-party research infrastructure, but it "
-            "is not on the curated research-host allowlist, so this run was REFUSED "
-            "and produced nothing — do not read an empty result here as a "
-            f"measurement. Admitted research hosts: {research_allowlist_hint()}. "
-            "Add the host to assess.lib.scope.RESEARCH_HOSTS if it is genuinely "
-            "third-party infrastructure queried ABOUT the target."
-        )
-    return message
+    """Raised before execution when engagement tool policy rejects a run."""
 
 
 def execution_policy_notes(policy: dict[str, Any]) -> str:
     """Serialize an audit-safe summary below the command-run 4096-byte limit."""
     summarized = dict(policy)
-    checked = sorted(
-        {str(value).strip() for value in summarized.pop("checked_targets", []) if str(value).strip()}
-    )
-    if checked:
-        encoded = json.dumps(checked, ensure_ascii=True, separators=(",", ":"))
-        summarized["checked_target_count"] = len(checked)
-        summarized["checked_targets_sha256"] = hashlib.sha256(encoded.encode()).hexdigest()
-        summarized["checked_targets_sample"] = checked[:16]
-    external = summarized.pop("external_destinations", [])
-    if external:
-        normalized_external = sorted(
-            (
-                {
-                    "host": str(item.get("host") or "").strip(),
-                    "role": str(item.get("role") or "").strip(),
-                }
-                for item in external
-                if isinstance(item, dict) and str(item.get("host") or "").strip()
-            ),
-            key=lambda item: (item["role"], item["host"]),
-        )
-        encoded = json.dumps(normalized_external, ensure_ascii=True, separators=(",", ":"))
-        summarized["external_destination_count"] = len(normalized_external)
-        summarized["external_destinations_sha256"] = hashlib.sha256(encoded.encode()).hexdigest()
-        summarized["external_destinations_sample"] = normalized_external[:16]
     refusal = str(summarized.get("policy_refusal") or "")
     if len(refusal) > 1024:
         summarized["policy_refusal"] = refusal[:1024]
         summarized["policy_refusal_sha256"] = hashlib.sha256(refusal.encode()).hexdigest()
-    rendered = json.dumps(summarized, ensure_ascii=True, separators=(",", ":"))
-    if len(rendered.encode("utf-8")) >= 4096:
-        summarized.pop("checked_targets_sample", None)
-        summarized.pop("external_destinations_sample", None)
-        rendered = json.dumps(summarized, ensure_ascii=True, separators=(",", ":"))
-    return rendered
+    return json.dumps(summarized, ensure_ascii=True, separators=(",", ":"))
 
 
 def _is_dns_label(token: str) -> bool:
@@ -504,13 +253,52 @@ def normalize_scope_payload(scope: dict[str, Any]) -> tuple[dict[str, Any], bool
     return scope, changed
 
 
+def _read_scope_file(scope_path: Path, engagement_dir: str) -> dict[str, Any]:
+    try:
+        scope = json.loads(scope_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"scope.json is not valid JSON in {engagement_dir}") from exc
+    if not isinstance(scope, dict):
+        raise SystemExit(f"scope.json is not a JSON object in {engagement_dir}")
+    return scope
+
+
+@contextmanager
+def _scope_lock(scope_path: Path) -> Iterator[None]:
+    """Serialize every in-repository scope.json read-modify-write operation."""
+    lock_path = scope_path.parent / ".locks" / "scope-json.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def _write_scope_file(scope_path: Path, scope: dict[str, Any]) -> None:
-    tmp_path = scope_path.with_name("scope.tmp.json")
-    tmp_path.write_text(
-        json.dumps(scope, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    """Replace scope.json from a unique same-directory temporary file."""
+    mode = stat.S_IMODE(scope_path.stat().st_mode) if scope_path.exists() else 0o600
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=".scope.",
+        suffix=".tmp",
+        dir=scope_path.parent,
     )
-    tmp_path.rename(scope_path)
+    tmp_path = Path(tmp_name)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+            tmp_file.write(json.dumps(scope, indent=2, sort_keys=True) + "\n")
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+        os.replace(tmp_path, scope_path)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def load_scope(engagement_dir: str, *, persist_migration: bool = True) -> dict[str, Any]:
@@ -526,21 +314,73 @@ def load_scope(engagement_dir: str, *, persist_migration: bool = True) -> dict[s
     scope_path = Path(engagement_dir) / "scope.json"
     if not scope_path.is_file():
         raise SystemExit(f"scope.json not found in {engagement_dir}")
-    scope = json.loads(scope_path.read_text(encoding="utf-8"))
-    if not isinstance(scope, dict):
-        raise SystemExit(f"scope.json is not a JSON object in {engagement_dir}")
+    scope = _read_scope_file(scope_path, engagement_dir)
     scope, changed = normalize_scope_payload(scope)
     if changed and persist_migration:
-        _write_scope_file(scope_path, scope)
+        # The initial read happened without a lock. Re-read after acquiring the
+        # shared writer lock so migration cannot overwrite a concurrent update.
+        with _scope_lock(scope_path):
+            scope = _read_scope_file(scope_path, engagement_dir)
+            scope, changed = normalize_scope_payload(scope)
+            if changed:
+                _write_scope_file(scope_path, scope)
     return scope
 
 
-def save_scope(engagement_dir: str, scope: dict[str, Any]) -> None:
-    """Atomically write scope.json."""
+def mutate_scope(
+    engagement_dir: str,
+    mutator: Callable[[dict[str, Any]], object],
+) -> dict[str, Any]:
+    """Apply an in-place scope mutation without losing concurrent updates."""
     scope_path = Path(engagement_dir) / "scope.json"
-    normalized, _ = normalize_scope_payload(dict(scope))
-    normalized.pop("approved_findings", None)
-    _write_scope_file(scope_path, normalized)
+    if not scope_path.is_file():
+        raise SystemExit(f"scope.json not found in {engagement_dir}")
+    with _scope_lock(scope_path):
+        scope = _read_scope_file(scope_path, engagement_dir)
+        scope, _ = normalize_scope_payload(scope)
+        before = json.dumps(scope, sort_keys=True, separators=(",", ":"))
+        mutator(scope)
+        scope, _ = normalize_scope_payload(scope)
+        scope.pop("approved_findings", None)
+        after = json.dumps(scope, sort_keys=True, separators=(",", ":"))
+        if after != before:
+            _write_scope_file(scope_path, scope)
+    return scope
+
+
+def record_discovered_hosts(engagement_dir: str, candidates: list[str]) -> None:
+    """Merge confirmed strict wildcard children into derived scope inventory."""
+
+    def merge(scope: dict[str, Any]) -> None:
+        allow_entries = scope_entries(scope)
+        deny_entries = out_of_scope_entries(scope)
+        wildcard_entries = [
+            entry for entry in allow_entries if entry["entry_kind"] == "wildcard"
+        ]
+
+        def inventory_host(raw: object) -> str:
+            if not isinstance(raw, str):
+                return ""
+            host = host_from_token(raw)
+            if not host or not host_admitted(host, allow_entries, deny_entries):
+                return ""
+            if not any(host.endswith("." + entry["host"]) for entry in wildcard_entries):
+                return ""
+            return host
+
+        existing = scope.get("discovered_hosts")
+        existing_values = existing if isinstance(existing, list) else []
+        discovered = sorted(
+            host
+            for host in {
+                inventory_host(raw) for raw in [*existing_values, *candidates]
+            }
+            if host
+        )
+        if discovered or "discovered_hosts" in scope:
+            scope["discovered_hosts"] = discovered
+
+    mutate_scope(engagement_dir, merge)
 
 
 def scope_entries(scope: dict[str, Any]) -> list[dict[str, str]]:
@@ -588,12 +428,20 @@ def out_of_scope_entries(scope: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def scope_enforcement(scope: dict[str, Any]) -> str:
-    """Return the engagement-wide target-admission mode.
+    """Return the engagement-wide host-shaping mode.
 
-    Enforcement is the safe default for new and legacy engagements.  The only
-    value that disables admission checks is the exact, durable
-    ``scope_enforcement: \"bypass\"`` setting in ``scope.json``; unknown values
-    deliberately fall back to enforcement so a typo cannot widen authorization.
+    This governs the surfaces that SHAPE a discovered host set rather than
+    refuse an operator's command: the recon pipeline's filter over enumerated
+    hosts, the standalone-ingest gate, and the shared proxy's decision about
+    which engagement owns a captured flow. ``bypass`` says "do not drop hosts
+    that scope.json does not list" — useful when the declared estate is broader
+    than the file. It grants NOTHING at execution time; ``vigil assess kali``
+    does not filter by destination at all.
+
+    Shaping is the default for new and legacy engagements. The only value that
+    turns it off is the exact, durable ``scope_enforcement: \"bypass\"`` setting
+    in ``scope.json``; unknown values deliberately fall back to shaping so a
+    typo cannot silently widen an enumerated host set.
     """
     value = scope.get("scope_enforcement", "enforce")
     return "bypass" if isinstance(value, str) and value.strip().lower() == "bypass" else "enforce"
@@ -921,11 +769,14 @@ def host_admitted(
     allow_entries: list[dict[str, str]],
     deny_entries: list[dict[str, str]],
 ) -> bool:
-    """Return True IFF ``host`` matches the allowlist AND no denylist entry.
+    """Return True IFF ``host`` matches ``hosts`` AND no ``out_of_scope`` entry.
 
     The denylist wins: a host covered by an in-scope wildcard but matching an
-    ``out_of_scope`` carve-out is rejected. This is the single admission
-    primitive every scope-matching surface must call.
+    ``out_of_scope`` carve-out is not declared. This is the single matching
+    primitive every scope-reading surface must call, so recon shaping, coverage
+    accounting, and the read-only ``scope explain`` oracle all answer the same
+    question the same way. It is a predicate over what ``scope.json`` declares —
+    it does not gate execution.
     """
     return host_in_scope(host, allow_entries) and not host_in_scope(host, deny_entries)
 
@@ -1007,12 +858,14 @@ def explain_target(
 
 
 def target_admission(scope: dict[str, Any], token: str) -> dict[str, Any]:
-    """Return the canonical admission verdict for one target token.
+    """Return the declared-scope verdict for one host/URL/CIDR token.
 
-    This is the policy-bearing front door for execution callers. Matching stays
-    single-sourced in :func:`explain_target`; this layer only applies the one
-    engagement-wide bypass and makes that choice explicit in the verdict so
-    command audit can preserve it.
+    Used by the surfaces that SHAPE a host set — :func:`filter_recon_targets`
+    and the dns-discovery parent selector — never to gate an operator's command.
+    Matching stays single-sourced in :func:`explain_target`; this layer adds the
+    CIDR-token case (a ``10.0.0.0/24`` argument is a network, not a host) and
+    applies the engagement-wide ``scope_enforcement`` mode, making that choice
+    explicit in the verdict.
     """
     allow_entries = scope_entries(scope)
     deny_entries = out_of_scope_entries(scope)
@@ -1076,38 +929,6 @@ def target_admission(scope: dict[str, Any], token: str) -> dict[str, Any]:
         verdict["admitted"] = True
         verdict["reason"] = "admitted by engagement-wide global scope bypass"
     return verdict
-
-
-def _host_list_path(raw: str, engagement_dir: Path, engagement_key: str) -> Path:
-    container_prefix = f"/engagements/{engagement_key}/"
-    if raw.startswith(container_prefix):
-        return engagement_dir / raw[len(container_prefix):]
-    path = Path(raw).expanduser()
-    return path if path.is_absolute() else engagement_dir / path
-
-
-def _target_tokens_from_file(path: Path) -> list[str]:
-    tokens: list[str] = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        value = line.strip()
-        if not value:
-            continue
-        if value.startswith("{"):
-            try:
-                record = json.loads(value)
-            except json.JSONDecodeError:
-                record = None
-            if isinstance(record, dict):
-                value = str(
-                    record.get("url")
-                    or record.get("endpoint")
-                    or record.get("host")
-                    or record.get("target")
-                    or ""
-                ).strip()
-        if value:
-            tokens.append(value)
-    return tokens
 
 
 _LAUNCHERS = frozenset(
@@ -1364,24 +1185,14 @@ def _unwrap_launcher_argv(cmd: list[str]) -> list[str]:
     return current
 
 
-def _has_dynamic_target_shell(cmd: list[str], tools: set[str]) -> bool:
-    if not cmd or Path(str(cmd[0])).name.lower() not in _SHELL_BINARIES:
-        return False
-    scripts = [
-        str(cmd[index + 1])
-        for index, token in enumerate(cmd[:-1])
-        if token.startswith("-") and token.endswith("c")
-    ]
-    return any(
-        "$" in script and bool(tools & _TARGET_FACING_TOOLS)
-        for script in scripts
-    )
-
-
-_SHELL_VARIABLE = re.compile(r"\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)\}|(?P<plain>[A-Za-z_][A-Za-z0-9_]*))")
+_SHELL_VARIABLE = re.compile(
+    r"\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)\}|(?P<plain>[A-Za-z_][A-Za-z0-9_]*))"
+)
 
 
 def _expand_shell_token(token: str, assignments: dict[str, str]) -> str:
+    """Substitute known ``NAME=value`` assignments into one shell word."""
+
     def replace(match: re.Match[str]) -> str:
         name = match.group("braced") or match.group("plain") or ""
         return assignments.get(name, match.group(0))
@@ -1389,201 +1200,80 @@ def _expand_shell_token(token: str, assignments: dict[str, str]) -> str:
     return _SHELL_VARIABLE.sub(replace, token)
 
 
-def _shell_target_tokens(
-    cmd: list[str], *, engagement_dir: Path, engagement_key: str
-) -> tuple[list[str], set[str]]:
-    """Resolve shell targets and identify URLs with unresolved path components."""
-    if not cmd or Path(str(cmd[0])).name.lower() not in _SHELL_BINARIES:
-        return [], set()
-    scripts = [
-        str(cmd[index + 1])
-        for index, token in enumerate(cmd[:-1])
-        if token.startswith("-") and token.endswith("c")
-    ]
-    candidates: list[str] = []
-    unresolved_paths: set[str] = set()
-    for script in scripts:
-        try:
-            lexer = shlex.shlex(script, posix=True, punctuation_chars="|;&()")
-            lexer.whitespace_split = True
-            lexer.commenters = ""
-            words = list(lexer)
-        except ValueError:
-            return candidates, set(candidates)
-        assignments: dict[str, str] = {}
-        segment: list[str] = []
+def _shell_request_urls(script: str, *, depth: int) -> list[str]:
+    """Collect requested URLs from a ``sh -c`` script body.
 
-        def inspect_segment() -> None:
-            if not segment:
-                return
-            expanded: list[str] = []
-            for word in segment:
-                if "=" in word and word.split("=", 1)[0].isidentifier():
-                    name, value = word.split("=", 1)
-                    assignments[name] = _expand_shell_token(value, assignments)
-                    continue
-                expanded.append(_expand_shell_token(word, assignments))
-            if not expanded:
-                return
-            tool = Path(expanded[0]).name.lower()
-            if tool not in _TARGET_FACING_TOOLS:
-                return
-            found = _command_target_tokens(
-                expanded,
-                tool_name=tool,
-                engagement_dir=engagement_dir,
-                engagement_key=engagement_key,
-            )
-            target_flags = _TARGET_VALUE_FLAGS.get(tool, frozenset())
-            non_target_flags = (
-                _NON_TARGET_VALUE_FLAGS
-                | _TOOL_NON_TARGET_VALUE_FLAGS.get(tool, frozenset())
-            )
-            for index, value in enumerate(expanded[1:], start=1):
-                if not _SHELL_VARIABLE.search(value):
-                    continue
-                previous = expanded[index - 1]
-                if previous in non_target_flags:
-                    continue
-                if previous in target_flags or tool in _POSITIONAL_TARGET_TOOLS:
-                    if value not in found:
-                        found.append(value)
-            candidates.extend(found)
-            for value in found:
-                try:
-                    parsed = urlsplit(value)
-                    path = parsed.path
-                    netloc = parsed.netloc
-                except ValueError:
-                    path = value
-                    netloc = ""
-                host_is_single_variable = bool(
-                    re.fullmatch(
-                        r"\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)",
-                        netloc,
-                    )
-                )
-                if _SHELL_VARIABLE.search(path) or (
-                    _SHELL_VARIABLE.search(netloc) and not host_is_single_variable
-                ):
-                    unresolved_paths.add(value)
+    Leading ``NAME=value`` assignments are tracked and substituted so a URL
+    assembled from shell variables still marks the run target-facing. An unset
+    variable stays literal and simply fails URL classification.
 
-        for word in words:
-            if word in _SHELL_BOUNDARIES or (
-                word and set(word) <= {"|", ";", "&", "(", ")"}
+    Comment text is dropped. :func:`_shell_command_segments` deliberately keeps
+    ``#`` inert (so a commented-out executable is still visible to the TOOL
+    denylist, which must over-count), but a URL written in a comment is not a
+    URL the command requests.
+    """
+    segments, _ = _shell_command_segments(script)
+    assignments: dict[str, str] = {}
+    urls: list[str] = []
+    for segment in segments:
+        expanded: list[str] = []
+        for word in segment:
+            if word.startswith("#"):
+                # Comment word (checked pre-expansion: a variable that expands
+                # to `#...` is an argument to the shell, not a comment).
+                break
+            value = _expand_shell_token(word, assignments)
+            if not expanded and "=" in value and value.split("=", 1)[0].isidentifier():
+                # Shell assignment prefix (`FOO=bar cmd ...`) — record, don't run.
+                name, _, assigned = value.partition("=")
+                assignments[name] = assigned
+                continue
+            expanded.append(value)
+        if expanded:
+            urls.extend(_request_urls(expanded, depth=depth + 1))
+    return urls
+
+
+def _request_urls(cmd: list[str], *, depth: int = 0) -> list[str]:
+    """Return the http(s) URLs this command asks for.
+
+    Purely lexical and deliberately shallow: every argv word — plus the words
+    inside a ``sh -c`` script body and an attached ``--flag=<url>`` value — that
+    is an http(s) URL, minus the values of flags that carry something other than
+    a requested URL (:data:`_NON_REQUEST_VALUE_FLAGS`) and minus commands that
+    cannot request anything (:data:`_NON_REQUESTING_HEADS`).
+
+    Nothing here decides whether a destination is authorized. Its only consumer
+    is aggregate rate classification.
+    """
+    if depth > 8:
+        return []
+    words = _unwrap_launcher_argv([str(token) for token in cmd])
+    head = Path(words[0]).name.lower() if words else ""
+    if head in _NON_REQUESTING_HEADS:
+        return []
+    is_shell = head in _SHELL_BINARIES
+    skip_flags = _NON_REQUEST_VALUE_FLAGS | _TOOL_NON_REQUEST_VALUE_FLAGS.get(
+        head, frozenset()
+    )
+    urls: list[str] = []
+    previous = ""
+    for word in words:
+        if previous in skip_flags:
+            previous = word
+            continue
+        if word.startswith(("http://", "https://")):
+            urls.append(word)
+        elif word.startswith("-") and "=" in word:
+            flag, _, attached = word.partition("=")
+            if flag not in skip_flags and attached.startswith(
+                ("http://", "https://")
             ):
-                inspect_segment()
-                segment = []
-            else:
-                segment.append(word)
-        inspect_segment()
-    return candidates, unresolved_paths
-
-
-def _command_target_tokens(
-    cmd: list[str], *, tool_name: str, engagement_dir: Path, engagement_key: str
-) -> list[str]:
-    """Extract direct and list-backed target tokens from an execution argv."""
-    candidates: list[str] = []
-    tool = Path(tool_name or (cmd[0] if cmd else "")).name.lower()
-    target_flags = _TARGET_VALUE_FLAGS.get(tool, frozenset())
-    index = 1
-    while index < len(cmd):
-        token = str(cmd[index]).strip()
-        previous = str(cmd[index - 1]).strip() if index else ""
-        # Attached option value (Go/pflag-style): `-u=https://x`, `--list=t.txt`,
-        # `-l=targets.txt`. These arrive as ONE token, so the space-separated
-        # `previous in <flags>` checks below never see the flag — split it here so
-        # an attached target/list value is still admitted for scope enforcement.
-        if token.startswith("-") and "=" in token:
-            flag, _, attached = token.partition("=")
-            if tool in _LIST_TARGET_TOOLS and flag in _TARGET_LIST_FLAGS:
-                path = _host_list_path(attached, engagement_dir, engagement_key)
-                if not path.is_file():
-                    raise ScopePolicyError(
-                        f"cannot inspect target list before execution: {attached}"
-                    )
-                candidates.extend(_target_tokens_from_file(path))
-                index += 1
-                continue
-            if flag in target_flags:
-                candidates.append(attached)
-                index += 1
-                continue
-        if tool in _LIST_TARGET_TOOLS and previous in _TARGET_LIST_FLAGS:
-            path = _host_list_path(token, engagement_dir, engagement_key)
-            if not path.is_file():
-                raise ScopePolicyError(f"cannot inspect target list before execution: {token}")
-            candidates.extend(_target_tokens_from_file(path))
-            index += 1
-            continue
-        if previous in target_flags:
-            candidates.append(token)
-            index += 1
-            continue
-        if tool == "puredns" and len(cmd) > 3 and cmd[1] == "bruteforce" and index == 3:
-            candidates.append(token)
-            index += 1
-            continue
-        if tool == "puredns" and len(cmd) > 2 and cmd[1] == "resolve" and index == 2:
-            path = _host_list_path(token, engagement_dir, engagement_key)
-            if not path.is_file():
-                raise ScopePolicyError(f"cannot inspect target list before execution: {token}")
-            candidates.extend(_target_tokens_from_file(path))
-            index += 1
-            continue
-        if tool == "dalfox" and len(cmd) > 2 and cmd[1] in {"url", "file"} and index == 2:
-            if cmd[1] == "url":
-                candidates.append(token)
-            else:
-                path = _host_list_path(token, engagement_dir, engagement_key)
-                if not path.is_file():
-                    raise ScopePolicyError(f"cannot inspect target list before execution: {token}")
-                candidates.extend(_target_tokens_from_file(path))
-            index += 1
-            continue
-        # Shell wrappers hide the real argv in one script string. Recursively
-        # inspect it so `bash -c 'curl https://target'` cannot evade admission.
-        if previous.startswith("-") and previous.endswith("c") and cmd and Path(str(cmd[0])).name in _SHELL_BINARIES:
-            try:
-                inner = shlex.split(token)
-            except ValueError:
-                inner = []
-            if tool == "cero" and len(inner) >= 2 and Path(inner[0]).name == "cat":
-                path = _host_list_path(inner[1], engagement_dir, engagement_key)
-                if not path.is_file():
-                    raise ScopePolicyError(
-                        f"cannot inspect target list before execution: {inner[1]}"
-                    )
-                candidates.extend(_target_tokens_from_file(path))
-            if inner:
-                candidates.extend(
-                    _command_target_tokens(
-                        inner,
-                        tool_name=Path(inner[0]).name if inner else "",
-                        engagement_dir=engagement_dir,
-                        engagement_key=engagement_key,
-                    )
-                )
-            index += 1
-            continue
-        if (
-            previous not in _NON_TARGET_VALUE_FLAGS
-            and not token.startswith("-")
-            and token.startswith(("http://", "https://"))
-        ):
-            candidates.append(token)
-            index += 1
-            continue
-        if (
-            tool in _POSITIONAL_TARGET_TOOLS
-            and previous not in _NON_TARGET_VALUE_FLAGS
-            and not token.startswith("-")
-            and host_from_token(token)
-        ):
-            candidates.append(token)
-        index += 1
-    return candidates
+                urls.append(attached)
+        elif is_shell and previous.startswith("-") and previous.endswith("c"):
+            urls.extend(_shell_request_urls(word, depth=depth))
+        previous = word
+    return urls
 
 
 def enforce_execution_policy(
@@ -1591,29 +1281,36 @@ def enforce_execution_policy(
     *,
     tool_name: str,
     engagement_dir: str | Path,
-    engagement_key: str | None = None,
-    explicit_targets: list[str] | tuple[str, ...] = (),
-    destinations: tuple[ExecutionDestination, ...] = (),
     require_declared_tool: bool = False,
 ) -> dict[str, Any]:
-    """Apply engagement-wide tool and target admission before any process starts.
+    """Apply engagement-wide tool policy before any process starts.
 
-    The return value is deliberately audit-ready. Every execution lane can store
-    the same enforcement/bypass marker without reinterpreting ``scope.json``.
+    There is deliberately NO destination filtering here: this function never
+    refuses a command for the host it names. Which hosts the engagement is
+    authorized against is declared in ``scope.json`` ``hosts``, and staying
+    inside that declaration is the operator's and the specialist's
+    responsibility — it is not a decision that can be made by reading hostnames
+    out of an argv, where a hand-rolled ``curl`` or ``python3 -c`` reaches
+    exactly as far as ``nmap`` and neither is distinguishable from a benign
+    fetch.
+
+    What is enforced is the engagement policy that does not require guessing a
+    destination: the ``denied_tools`` list and the declared-vs-actual tool
+    check. ``off_limits_paths`` is operator guidance, never an execution veto.
+
+    The return value is audit-ready. ``target_facing`` tells the caller's rate
+    governance whether this run will put traffic on the wire — true when the
+    declared or observed tool is target-facing, or when the argv asks for an
+    http(s) URL.
     """
     eng_dir = Path(engagement_dir).expanduser().resolve()
-    key = str(engagement_key or eng_dir.name).strip()
-    if not key:
-        raise ScopePolicyError("engagement key is empty")
     try:
         scope_doc = load_scope(str(eng_dir))
     except (OSError, json.JSONDecodeError, SystemExit) as exc:
         raise ScopePolicyError(f"cannot load scope policy before execution: {exc}") from exc
 
     normalized_tool = Path(str(tool_name or (cmd[0] if cmd else ""))).name.strip().lower()
-    observed_tools, tool_analysis_ambiguous = _argv_tool_analysis(
-        [str(token) for token in cmd]
-    )
+    observed_tools, _ = _argv_tool_analysis([str(token) for token in cmd])
     policy_tools = set(observed_tools)
     policy_tools.add(normalized_tool)
     if require_declared_tool and normalized_tool not in observed_tools:
@@ -1631,255 +1328,27 @@ def enforce_execution_policy(
             f"tool '{blocked_tool}' is denied by engagement scope policy"
         )
 
-    # Pre-machine-scope engagement fixtures/files used ``hostname`` alone.
-    # They cannot be interpreted as an allowlist without silently changing
-    # exact-vs-wildcard authorization, so preserve their legacy behavior. Every
-    # engagement created by the supported CLI has an explicit ``hosts`` list.
-    target_gate_configured = "hosts" in scope_doc
-    try:
-        scope_allow_entries = scope_entries(scope_doc)
-        scope_deny_entries = out_of_scope_entries(scope_doc)
-    except SystemExit as exc:
-        raise ScopePolicyError(str(exc)) from exc
-    typed_destinations: list[tuple[str, str]] = []
-    for destination in destinations:
-        if destination.role not in EXECUTION_DESTINATION_ROLES:
-            raise ScopePolicyError(f"unknown execution destination role: {destination.role}")
-        host = host_from_token(destination.value)
-        if not host:
-            raise ScopePolicyError(
-                f"typed execution destination is not a resolvable host: {destination.value}"
-            )
-        if destination.role == "research":
-            # The whole point of the role: unlike ``passive_source`` it is NOT a
-            # blanket bypass for whatever host the caller names.
-            if not is_research_host(host):
-                raise ScopePolicyError(
-                    f"refusing research destination {host}: it is not on the curated "
-                    f"research-host allowlist ({research_allowlist_hint()}). The research "
-                    "role admits ONLY curated third-party intelligence infrastructure "
-                    "queried ABOUT the target; it is not a pass-through for arbitrary "
-                    "out-of-scope hosts."
-                )
-            # Target-scope rules win on any overlap, so the research path can never
-            # be used to reach a host in the engagement's own estate (where no-fire,
-            # rate governance and admission must all apply).
-            if host_in_scope(host, scope_allow_entries) or host_in_scope(
-                host, scope_deny_entries
-            ):
-                raise ScopePolicyError(
-                    f"refusing research destination {host}: it is part of this "
-                    "engagement's own target estate (scope.json), so target-scope rules "
-                    "win — declare it as a 'target' destination so admission, no-fire, "
-                    "and rate governance all apply."
-                )
-        typed_destinations.append((host, destination.role))
-    typed_by_host: dict[str, str] = {}
-    for host, role in typed_destinations:
-        previous_role = typed_by_host.get(host)
-        if previous_role is not None and previous_role != role:
-            raise ScopePolicyError(
-                f"conflicting typed destination roles for {host}: "
-                f"{previous_role!r} and {role!r}"
-            )
-        typed_by_host[host] = role
-    if tool_analysis_ambiguous and any(
-        role == "target" for _, role in typed_destinations
-    ):
-        raise ScopePolicyError(
-            "ambiguous executable launcher form for a target-facing command; "
-            "use supported launcher options or invoke the tool directly"
-        )
-    dynamic_target_shell = _has_dynamic_target_shell(cmd, observed_tools)
+    request_urls = _request_urls([str(token) for token in cmd])
 
-    raw_targets = list(explicit_targets)
-    raw_targets.extend(
-        destination.value
-        for destination in destinations
-        if destination.role == "target"
-    )
-    if target_gate_configured:
-        inspection_cmd = _unwrap_launcher_argv(cmd)
-        actual_tool = (
-            Path(str(inspection_cmd[0])).name.strip().lower()
-            if inspection_cmd
-            else ""
-        )
-        # Shell script bodies need assignment-aware parsing below. Treating the
-        # whole `bash -lc` argv as if it were direct curl argv captures literal
-        # `$path` text as part of the hostname and falsely rejects an otherwise
-        # literal, admitted host.
-        if actual_tool not in _SHELL_BINARIES:
-            raw_targets.extend(
-                _command_target_tokens(
-                    inspection_cmd,
-                    tool_name=normalized_tool,
-                    engagement_dir=eng_dir,
-                    engagement_key=key,
-                )
-            )
-            if actual_tool and actual_tool != normalized_tool:
-                raw_targets.extend(
-                    _command_target_tokens(
-                        inspection_cmd,
-                        tool_name=actual_tool,
-                        engagement_dir=eng_dir,
-                        engagement_key=key,
-                    )
-                )
-        elif normalized_tool == "cero":
-            # cero consumes a piped `cat <target-list>`; its existing
-            # pre-exec list inspection is intentionally shell-aware.
-            raw_targets.extend(
-                _command_target_tokens(
-                    inspection_cmd,
-                    tool_name=normalized_tool,
-                    engagement_dir=eng_dir,
-                    engagement_key=key,
-                )
-            )
-    shell_targets, unresolved_shell_paths = _shell_target_tokens(
-        cmd,
-        engagement_dir=eng_dir,
-        engagement_key=key,
-    )
-    if (
-        dynamic_target_shell
-        and not typed_destinations
-        and (
-            not shell_targets
-            or any(not host_from_token(token) for token in shell_targets)
-        )
-    ):
-        raise ScopePolicyError(
-            "dynamic target host in shell command cannot be resolved before "
-            "execution; provide an explicit typed destination"
-        )
-    raw_targets.extend(shell_targets)
-    if tool_analysis_ambiguous and any(
-        (host := host_from_token(token))
-        and typed_by_host.get(host) not in _NON_TARGET_ROLES
-        for token in raw_targets
-    ):
-        raise ScopePolicyError(
-            "ambiguous executable launcher form for a target-facing command; "
-            "use supported launcher options or invoke the tool directly"
-        )
-    try:
-        no_fire_patterns = no_fire.patterns(scope_doc)
-    except no_fire.NoFirePolicyError as exc:
-        raise ScopePolicyError(str(exc)) from exc
-    if no_fire_patterns:
-        for token in unresolved_shell_paths:
-            host = host_from_token(token)
-            if host and typed_by_host.get(host) in _NON_TARGET_ROLES:
-                continue
-            raise ScopePolicyError(
-                "unresolved shell target URL path may match no-fire paths; typed "
-                "target destinations authorize hosts only, never unresolved paths"
-            )
-    for token in raw_targets:
-        token_host = host_from_token(token)
-        if token_host and typed_by_host.get(token_host) in _NON_TARGET_ROLES:
-            continue
-        try:
-            blocked_pattern = no_fire.match_url(scope_doc, token)
-        except no_fire.NoFirePolicyError as exc:
-            raise ScopePolicyError(str(exc)) from exc
-        if blocked_pattern:
-            raise ScopePolicyError(
-                f"refusing no-fire URL {token!r}; matched off_limits_paths pattern "
-                f"{blocked_pattern!r}"
-            )
-    checked_hosts: list[str] = []
-    research_hosts: list[str] = []
-    external_destinations: list[dict[str, str]] = []
-    for host, role in typed_destinations:
-        if role != "target" and {"host": host, "role": role} not in external_destinations:
-            external_destinations.append({"host": host, "role": role})
-    bypassed = False
-    for token in raw_targets:
-        try:
-            verdict = target_admission(scope_doc, token)
-        except SystemExit as exc:
-            raise ScopePolicyError(str(exc)) from exc
-        host = verdict.get("host")
-        if not host:
-            continue
-        host = str(host)
-        if typed_by_host.get(host) in _NON_TARGET_ROLES:
-            continue
-        matched_scope_entry = (
-            verdict.get("allow_entry") is not None
-            or verdict.get("deny_entry") is not None
-        )
-        # Curated third-party research infrastructure, admitted WITHOUT being
-        # counted as a target — and only when the engagement's scope.json says
-        # nothing at all about the host. `allow_entry`/`deny_entry` come straight
-        # from the admission verdict, so any overlap with the target estate (in
-        # scope OR explicitly carved out) falls through to the target rules below:
-        # target-scope always wins. A caller that explicitly TYPED the host as a
-        # target is likewise never re-read as research — an explicit declaration of
-        # intent outranks a name on a list. The host is still audited, as a
-        # `research` external destination: only the target-scope predicate is
-        # skipped, never the audit path.
-        if (
-            target_gate_configured
-            and not verdict["admitted"]
-            and not matched_scope_entry
-            and typed_by_host.get(host) != "target"
-            and is_research_host(host)
-        ):
-            if host not in research_hosts:
-                research_hosts.append(host)
-            entry = {"host": host, "role": "research"}
-            if entry not in external_destinations:
-                external_destinations.append(entry)
-            continue
-        if host not in checked_hosts:
-            checked_hosts.append(host)
-        if not target_gate_configured:
-            continue
-        bypassed = bypassed or bool(verdict.get("bypassed"))
-        if not verdict["admitted"]:
-            raise ScopePolicyError(
-                _out_of_scope_refusal(
-                    host,
-                    str(verdict["reason"]),
-                    matched_scope_entry=matched_scope_entry,
-                )
-            )
-
-    target_facing = bool(checked_hosts) or any(
-        role == "target" for _, role in typed_destinations
-    )
-    if (
-        not typed_destinations
-        and not research_hosts
-        and observed_tools & _TARGET_FACING_TOOLS
-    ):
-        target_facing = True
-    result: dict[str, Any] = {
-        "scope_enforcement": scope_enforcement(scope_doc),
-        "scope_bypassed": bypassed,
-        "checked_targets": checked_hosts,
+    # ``policy_tools`` — not ``observed_tools`` — so a caller that DECLARES a
+    # target-facing tool whose argv hides it (``kali browser``, whose argv is
+    # ``python3 -c <driver> <json-plan>``) still reserves aggregate rate. The
+    # declared name is supplied by the caller, not guessed from argv.
+    return {
+        "target_facing": bool(policy_tools & _TARGET_FACING_TOOLS)
+        or bool(request_urls),
     }
-    if external_destinations:
-        result["external_destinations"] = external_destinations
-    if (
-        typed_destinations
-        or research_hosts
-        or dynamic_target_shell
-        or (not checked_hosts and target_facing)
-    ):
-        result["target_facing"] = target_facing
-    return result
 
 
 def filter_recon_targets(
     scope_doc: dict[str, Any], targets: list[str]
 ) -> tuple[list[str], dict[str, Any]]:
-    """Apply the shared host-admission policy to a recon target collection."""
+    """Shape a recon-discovered host set down to what ``scope.json`` declares.
+
+    This filters an ENUMERATED list before it is probed or ingested — wildcard
+    expansion routinely surfaces hosts the program carved out. It is not a gate
+    on anything the operator asked for by name.
+    """
     values = [str(value).strip() for value in targets if str(value).strip()]
     enforcement = scope_enforcement(scope_doc)
     allow = scope_entries(scope_doc)

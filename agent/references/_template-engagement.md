@@ -35,7 +35,7 @@ category: Engagement Setup
 ```
 # List every in-scope apex domain, wildcard, IP range, or asset class.
 # Mirror what is registered in scope.json — this section is human-readable context;
-# scope.json is the machine-enforced gate.
+# scope.json is the canonical declaration of what this engagement is authorized to touch.
 
 *.example.com
 api.example.com
@@ -52,7 +52,11 @@ Scope notes (cloud regions, mobile apps, API versions, etc.):
 ```
 # List every explicit OOS carve-out. These are registered with:
 #   vigil engagement add-oos <key> <host-or-path>
-# and enforced automatically by scope filter, dispatch scope_host gate, and proxy.
+# HOST carve-outs shape the surfaces that read scope.json: the recon/ingest host
+# filters, work-buffer admission, and proxy capture ownership. PATH carve-outs
+# belong in the human-readable Off-Limits Paths section below. Neither host nor
+# path metadata is a network-request or specialist-dispatch admission control;
+# the canonical engagement-boundary rule is agent/shared-constraints.md §1.
 
 appointments.example.com       # third-party scheduling SaaS
 *.cdn-vendor.net               # CDN infrastructure — not in scope
@@ -134,10 +138,11 @@ the program may revoke scope on violation.
 [FILL: additional no-fire paths]
 ```
 
-Mirror the finalized list into `scope.json` as `off_limits_paths` (a JSON array
-of `/path`, globbed `/path/*`, or absolute URL patterns). That machine-owned
-field is what direct/list execution admission, Katana crawl exclusions, and the
-shared proxy enforce; this prose section remains the human-readable ROE.
+If the engagement schema mirrors this list into `scope.json.off_limits_paths`
+(a JSON array of `/path`, globbed `/path/*`, or absolute URL patterns), treat
+that field as descriptive ROE metadata. Kali execution, browser navigation,
+Katana defaults, and the shared proxy do not translate it into outbound-request
+refusal.
 
 If a test path you want to probe is adjacent to one of the above (e.g., testing
 `/api/send-notification` vs. `/api/send-email`), raise a `scope_decision` before proceeding
@@ -236,7 +241,6 @@ holding-area mechanism):
 
 - **Do not bypass the rate cap** (§3 above). The program monitors request volume by IP and
   researcher handle.
-- **Do not probe OOS hosts** even if they share infrastructure with in-scope hosts.
 - **Do not use destructive operations** (`DELETE`, `PATCH` on production data) without
   explicit written approval from the program.
 - **Deconfliction header is mandatory** on all in-scope HTTP traffic (§2 above). Missing

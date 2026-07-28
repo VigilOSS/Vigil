@@ -35,13 +35,13 @@ from urllib.parse import urlsplit
 
 from assess.commands import host_exec, ingest_endpoints
 from assess.commands.ingest_httpx import ingest_httpx_results
+from assess.lib import runtime_route, scope
 from assess.lib.client import AssessmentClient
 from assess.lib.config import anchor_engagement_relative, load_config
 from assess.lib.discovery import denoise_hosts
 from assess.lib.kali import kali_exec, resolve_crawl_rate_limit
 from assess.lib.kali_output import _apply_required_headers, _required_headers
 from assess.lib.locking import network_heavy_lock
-from assess.lib import no_fire, runtime_route, scope
 
 # CR-5 — bulk httpx concurrency ceiling on macOS Docker Desktop. Every distinct
 # destination IP is NAT-tracked by the host userspace proxy (com.docker.backend),
@@ -640,6 +640,17 @@ def _merge_liveness(primary: Path, extra: Path) -> int:
     return recovered
 
 
+def _record_discovered_hosts(engagement_dir: str, candidates: list[str]) -> None:
+    """Best-effort derived inventory; bookkeeping never aborts discovery."""
+    try:
+        scope.record_discovered_hosts(engagement_dir, candidates)
+    except (OSError, ValueError, SystemExit) as exc:
+        print(
+            f"WARN: could not update scope.json discovered_hosts inventory: {exc}",
+            file=sys.stderr,
+        )
+
+
 def run(args) -> None:
     _apply_arg_defaults(args)
     cfg = load_config(args.engagement_dir)
@@ -790,6 +801,12 @@ def run(args) -> None:
     # The entire default+revalidation generation is now accepted. Promote once
     # so a failed optional pass can never expose a mixed/partial canonical file.
     run_live_host.replace(live_host)
+    confirmed_hosts = [
+        host
+        for value in _extract_live_urls(live_host)
+        if (host := scope.host_from_token(value))
+    ]
+    _record_discovered_hosts(args.engagement_dir, confirmed_hosts)
     run_denoised_host.replace(denoised_host)
     run_reval_in_host.replace(reval_in_host)
     run_scope_meta, _ = _run_paths(cfg, run_uuid, "scope-filter.meta.json")
@@ -854,12 +871,10 @@ def run(args) -> None:
             # only needs the discovered URL graph here; bodies are fetched
             # selectively downstream by gau-secrets / js-mining).
             # `-jsl` adds jsluice endpoint extraction (real coverage, not just the
-            # link graph); `-fs fqdn` keeps the active crawler on the exact seeded
-            # in-scope hosts (it never probes an out-of-scope sibling subdomain it
-            # finds in a link). `-or -ob` already omit body/raw to bound disk.
+            # link graph). `-or -ob` already omit body/raw to bound disk.
             katana_cmd = [
                 "katana", "-list", run_seed_container, "-jc", "-jsl",
-                "-d", str(args.katana_depth), "-fs", "fqdn",
+                "-d", str(args.katana_depth),
                 "-or", "-ob",
                 "-jsonl", "-silent", "-o", run_katana_container,
             ]
@@ -872,18 +887,6 @@ def run(args) -> None:
                 args.katana_rate, rate_cap=rate_cap, warn=_warn,
             )
             katana_cmd.extend(["-rl", str(katana_rl), "-rlm", str(katana_rl * 60)])
-            try:
-                scope_doc = scope.load_scope(args.engagement_dir)
-                no_fire_regex = no_fire.crawl_exclusion_regex(scope_doc)
-            except SystemExit:
-                # In-process compatibility callers may provide a synthetic cfg
-                # without a scope file; real CLI resolution already requires it.
-                no_fire_regex = ""
-            except no_fire.NoFirePolicyError as exc:
-                print(f"web-discovery: invalid no-fire policy: {exc}", file=sys.stderr)
-                sys.exit(1)
-            if no_fire_regex:
-                katana_cmd.extend(["-cos", no_fire_regex])
             if args.katana_extra_args:
                 katana_cmd.extend(shlex.split(args.katana_extra_args))
             crawl_started = time.monotonic()

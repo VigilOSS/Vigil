@@ -648,7 +648,7 @@ def test_request_hook_noop_when_engagement_has_no_required_headers(tmp_path: Pat
     assert dict(req.headers) == {}
 
 
-def test_request_hook_synthesizes_block_for_no_fire_url_without_upstream_send(
+def test_request_hook_does_not_block_an_off_limits_path(
     tmp_path: Path,
 ) -> None:
     module = _load_proxy_addon_module()
@@ -670,13 +670,12 @@ def test_request_hook_synthesizes_block_for_no_fire_url_without_upstream_send(
 
     collector.request(flow)
 
-    assert flow.response is not None
-    assert flow.response.status_code == 451
-    assert flow.response.headers.get("X-Vigil-No-Fire") == "blocked"
-    assert b"off_limits_paths" in flow.response.get_content()
+    assert flow.response is None
 
 
-def test_request_hook_global_bypass_still_blocks_no_fire_url(tmp_path: Path) -> None:
+def test_request_hook_global_bypass_does_not_block_an_off_limits_path(
+    tmp_path: Path,
+) -> None:
     module = _load_proxy_addon_module()
     root = tmp_path / "engagements"
     root.mkdir()
@@ -698,12 +697,10 @@ def test_request_hook_global_bypass_still_blocks_no_fire_url(tmp_path: Path) -> 
 
     collector.request(flow)
 
-    assert flow.response is not None
-    assert flow.response.status_code == 451
-    assert flow.response.headers.get("X-Vigil-No-Fire") == "blocked"
+    assert flow.response is None
 
 
-def test_request_hook_no_fire_is_host_scoped_for_absolute_patterns(tmp_path: Path) -> None:
+def test_request_hook_ignores_absolute_off_limits_patterns(tmp_path: Path) -> None:
     module = _load_proxy_addon_module()
     root = tmp_path / "engagements"
     root.mkdir()
@@ -723,7 +720,7 @@ def test_request_hook_no_fire_is_host_scoped_for_absolute_patterns(tmp_path: Pat
     assert flow.response is None
 
 
-def test_request_hook_excessive_encoding_fails_closed_with_synthetic_response(
+def test_request_hook_does_not_block_an_encoded_off_limits_path(
     tmp_path: Path,
 ) -> None:
     module = _load_proxy_addon_module()
@@ -745,8 +742,7 @@ def test_request_hook_excessive_encoding_fails_closed_with_synthetic_response(
 
     collector.request(flow)
 
-    assert flow.response.status_code == 451
-    assert flow.response.headers.get("X-Vigil-No-Fire") == "blocked"
+    assert flow.response is None
 
 
 def test_filesystem_registry_parses_required_headers(tmp_path: Path) -> None:

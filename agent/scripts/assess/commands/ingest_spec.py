@@ -302,16 +302,17 @@ def run(args) -> None:
     count = 0
     skipped = 0
 
-    # Scope admission gate (defense-in-depth). Every operation in this spec shares
-    # one base host, so a single check suffices. A spec that declares an ABSOLUTE
-    # `servers`/`host` url (used as-is by _resolve_base_url) bypasses the
+    # Ingest-time scope filter (defense-in-depth). This shapes what enters the
+    # work buffer as probeable work — it is NOT an execution gate, and nothing
+    # here refuses a command the operator typed. Every operation in this spec
+    # shares one base host, so a single check suffices. A spec that declares an
+    # ABSOLUTE `servers`/`host` url (used as-is by _resolve_base_url) bypasses the
     # _engagement_fallback_base scope check — so an out-of-scope spec host would
-    # otherwise ingest every operation as probeable work. Reachability is not
-    # scope (shared-constraints §1): refuse the whole spec. Composes with the
-    # relative/empty-base refusal below — spec_host is "" for a relative base, so
-    # this check is skipped and that case falls through to the existing handler.
-    # Inactive when scope.json has no allowlist or enables the global bypass
-    # (see scope.ingest_scope_filter).
+    # otherwise seed every operation as work the engagement is not authorized for.
+    # Composes with the relative/empty-base refusal below — spec_host is "" for a
+    # relative base, so this check is skipped and that case falls through to the
+    # existing handler. Inactive when scope.json has no allowlist or enables the
+    # global bypass (see scope.ingest_scope_filter).
     scope_allow, scope_deny, scope_filter_active = ingest_scope_filter(eng_dir)
     spec_host = (urlparse(base_url).hostname or "").rstrip(".").lower()
     if (
@@ -322,8 +323,8 @@ def run(args) -> None:
         _warn(
             f"spec base host '{spec_host}' is out of scope (no scope.json allowlist "
             f"match, or matched an out_of_scope carve-out). Refusing to ingest any of "
-            f"this spec's {len(paths)} path(s) — reachability is not scope. Add the "
-            f"host to scope.json and re-run, or fetch a spec whose servers url is in scope."
+            f"this spec's {len(paths)} path(s) as probeable work. Add the host to "
+            f"scope.json and re-run, or fetch a spec whose servers url is in scope."
         )
         print(
             f"[ingest] Ingested 0 endpoints from spec (version {spec_version}); "

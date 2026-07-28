@@ -237,13 +237,15 @@ The proxy runs `mitmdump` with `proxy_addon.py`, which:
   all in-progress engagements (synced from the orchestrator, with a filesystem
   `scope.json` scan as fallback) and routes each captured flow to the
   best-matching engagement **by hostname** — literal scope hosts beat wildcards
-  and narrower wildcards beat broader ones. Under normal enforcement, an
-  `out_of_scope` carve-out (host, URL, or CIDR) drops the flow. When no hostname
-  pattern claims a host, the addon consults `<engagements_root>/.active` and binds
-  the flow only if that selected engagement declares `scope_enforcement: bypass`;
-  the bypass admits both allow- and deny-misses. A normal hostname owner always
-  wins over this fallback, so a selected bypass engagement cannot steal another
-  engagement's traffic.
+  and narrower wildcards beat broader ones. Under normal capture routing, an
+  `out_of_scope` carve-out (host, URL, or CIDR) leaves the flow unowned for
+  engagement capture. When no hostname pattern claims a host, the addon consults
+  `<engagements_root>/.active` and binds the flow only if that selected
+  engagement declares `scope_enforcement: bypass`; the bypass admits both allow-
+  and deny-misses for capture. A normal hostname owner always wins over this
+  fallback, so a selected bypass engagement cannot steal another engagement's
+  traffic. This ownership decision never blocks the proxied request or replaces
+  its upstream response.
 - **Injects program-mandated attribution headers on outbound in-scope
   requests.** For an engagement whose `scope.json` declares `required_headers`
   (e.g. a BugCrowd program that mandates `X-Bug-Bounty: <handle>`), the addon
@@ -253,9 +255,10 @@ The proxy runs `mitmdump` with `proxy_addon.py`, which:
   through FoxyProxy ROE-compliant** without you setting the header per request.
   It is gated by the same engagement binding as capture, including the selected
   global-bypass fallback, and is non-destructive — a header the client already
-  set is never overwritten. No-fire paths remain blocked under bypass.
-  Engagements without `required_headers` are unaffected. Run `vigil mitmproxy
-  routes` to see which headers each engagement will inject.
+  set is never overwritten. Scope/path metadata never synthesizes a proxy
+  response or blocks the upstream request. Engagements without
+  `required_headers` are unaffected. Run `vigil mitmproxy routes` to see which
+  headers each engagement will inject.
 - Filters noise (analytics, CDNs, tracking pixels)
 - Classifies requests by type (API, form, page, JS, GraphQL, WebSocket, etc.)
 - Detects login flows and POSTs captured session material to the backend credential store, which derives the identity name from the capture's session-anchor material so distinct logins append rather than overwrite (see "Multi-Identity Capture" above)

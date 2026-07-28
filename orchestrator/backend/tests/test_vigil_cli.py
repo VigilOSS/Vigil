@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -61,7 +61,11 @@ def _write_blue_scope(eng_dir: Path) -> None:
 def test_engagement_create_web_writes_scope_launchers_and_list_entry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from vigil_cli.engagements import CreateEngagementOptions, create_engagement, list_engagements
+    from vigil_cli.engagements import (
+        CreateEngagementOptions,
+        create_engagement,
+        list_engagements,
+    )
 
     _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
@@ -249,7 +253,11 @@ def test_engagement_create_footer_suppresses_hints_when_services_running(
 def test_engagement_create_android_uses_artifact_only_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from vigil_cli.engagements import CreateEngagementOptions, create_engagement, list_engagements
+    from vigil_cli.engagements import (
+        CreateEngagementOptions,
+        create_engagement,
+        list_engagements,
+    )
 
     _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
@@ -1130,7 +1138,11 @@ def test_prompt_choice_reprompts_on_invalid_then_accepts(
 def test_plan_engagement_scope_matches_created_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from vigil_cli.engagements import CreateEngagementOptions, create_engagement, plan_engagement
+    from vigil_cli.engagements import (
+        CreateEngagementOptions,
+        create_engagement,
+        plan_engagement,
+    )
 
     _isolate_orchestrator_url(monkeypatch)
     install_root = tmp_path / "install"
@@ -3074,8 +3086,8 @@ def test_auth_edit_without_identity_writes_back_to_the_active_identity(
 
 def test_auth_select_selector_overrides_current_engagement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from vigil_cli import auth as auth_module
-    from vigil_cli import main as main_module
     from vigil_cli import engagements
+    from vigil_cli import main as main_module
 
     install_root = tmp_path / "install"
     root = install_root / "agent" / "engagements"
@@ -3231,7 +3243,12 @@ def test_backup_create_and_list_uses_sqlite_backup(tmp_path: Path, capsys: pytes
     ["VIGIL_DATA_DIR", "REDTEAM_ORCHESTRATOR_DATA_DIR"],
 )
 def test_backup_helpers_use_backend_data_dir_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env_name: str) -> None:
-    from vigil_cli.backup import create_backup, list_backups, live_database, restore_backup
+    from vigil_cli.backup import (
+        create_backup,
+        list_backups,
+        live_database,
+        restore_backup,
+    )
 
     install_root = tmp_path / "install"
     default_data = install_root / "orchestrator" / "backend" / "data"
@@ -6992,7 +7009,7 @@ def test_host_exec_uses_agent_name_env_for_audit_payload(
         module,
         "prepare_execution_command",
         lambda argv, **kwargs: (
-            prepared.append((list(argv), kwargs.get("identity"))) or ("member", "")
+            prepared.append((list(argv), kwargs.get("identity"))) or "member"
         ),
     )
     (tmp_path / "scope.json").write_text(json.dumps({"hosts": []}), encoding="utf-8")
@@ -8673,7 +8690,7 @@ def test_supersede_intel_to_existing_rejects_payload_client_side(
     assert "mutually exclusive" in capsys.readouterr().err
 
 
-def _validate_dispatch_contract(payload: dict, *, engagement_dir=None):
+def _validate_dispatch_contract(payload: dict):
     """Call the dispatch-contract validator lib directly.
 
     The former `vigil assess validate-dispatch-contract` CLI verb (a thin
@@ -8684,7 +8701,7 @@ def _validate_dispatch_contract(payload: dict, *, engagement_dir=None):
     _load_assess_main()  # ensures agent/scripts is on sys.path
     from assess.lib.contracts import validate_specialist_dispatch_contract
 
-    return validate_specialist_dispatch_contract(payload, engagement_dir=engagement_dir)
+    return validate_specialist_dispatch_contract(payload)
 
 
 def test_validate_dispatch_contract_accepts_minimal_payload() -> None:
@@ -9142,7 +9159,7 @@ def test_render_handoff_emits_known_fields_for_existing_agent_id(
         "agent_id": "AGENT-EX-1",
         "agent_role": "vulnerability-analyst",
         "task": "Validate IDOR on /api/users/{id}",
-        "scope_host": "target.example",
+        "application_unit_id": 41,
         "dispatched_at": "2026-04-27T10:00:00Z",
         "status": "completed",
     }
@@ -9169,7 +9186,7 @@ def test_render_handoff_emits_known_fields_for_existing_agent_id(
     out = capsys.readouterr().out
     assert "#### Handoff from vulnerability-analyst dispatch AGENT-EX-1" in out
     assert "Validate IDOR on /api/users/{id}" in out
-    assert "target.example" in out
+    assert "**Application unit:** 41" in out
     assert "Validated IDOR on /api/users/{id}" in out  # summary
     assert "Confidence:** high" in out
     assert "`VA-001` — IDOR write on user profile [severity=high]" in out
@@ -9231,7 +9248,7 @@ def test_render_handoff_truncates_at_max_lines(
         "agent_id": "AGENT-MANY-FINDINGS",
         "agent_role": "vulnerability-analyst",
         "task": "deep IDOR sweep across 20 endpoints",
-        "scope_host": "target.example",
+        "application_unit_id": 51,
         "dispatched_at": "2026-04-27T11:00:00Z",
         "status": "completed",
     }
@@ -9283,7 +9300,7 @@ def test_render_handoff_missing_slug_distinct_from_fetch_error(
         "agent_id": "AGENT-DROP",
         "agent_role": "vulnerability-analyst",
         "task": "slug-drop test",
-        "scope_host": "target.example",
+        "application_unit_id": 52,
         "dispatched_at": "2026-04-27T12:00:00Z",
         "status": "completed",
     }
@@ -9780,7 +9797,7 @@ def _run_dispatch_verb(monkeypatch, action: str, *, extra=None, **flags):
         "agent_id": None,
         "agent_role": None,
         "task": None,
-        "scope_host": None,
+        "application_unit_id": None,
         "dispatch_model": None,
         "reasoning": None,
         "dispatch_mode_arg": None,
@@ -9829,7 +9846,7 @@ def _dispatch_args(action: str, *, db_path: str | None = None, extra=None, **fla
         "agent_id": None,
         "agent_role": None,
         "task": None,
-        "scope_host": None,
+        "application_unit_id": None,
         "dispatch_model": None,
         "reasoning": None,
         "dispatch_mode_arg": None,
@@ -10133,7 +10150,7 @@ def test_dispatch_register_warns_on_structured_overlap(
     assert fake.recorded[0]["agent_id"] == "AG-NEW"
 
 
-def test_dispatch_register_does_not_warn_for_shared_host_mode_only(
+def test_dispatch_register_does_not_warn_for_shared_unit_mode_only(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     module = _load_dispatch_module()
@@ -10143,7 +10160,7 @@ def test_dispatch_register_does_not_warn_for_shared_host_mode_only(
         "agent_id": "AG-OLD",
         "agent_role": "vulnerability-analyst",
         "status": "in-progress",
-        "scope_host": "app.example.test",
+        "application_unit_id": 7,
         "dispatch_mode": "hypothesis-driven",
         "task": "Review password reset flows",
     }
@@ -10166,7 +10183,7 @@ def test_dispatch_register_does_not_warn_for_shared_host_mode_only(
             "register",
             agent_id="AG-NEW",
             agent_role="vulnerability-analyst",
-            scope_host="app.example.test",
+            application_unit_id=7,
             dispatch_mode_arg="hypothesis-driven",
             task="Review account deletion flows",
             skills="idor-testing",
@@ -10306,7 +10323,7 @@ def test_dispatch_list_emits_jsonl(
     module.agent._list_dispatches(SimpleNamespace(
         db_path="list", action="", extra=[], reason="", by="status",
         max_lines=40, include_evidence=False, engagement_dir=None,
-        agent_id=None, agent_role=None, task=None, scope_host=None,
+        agent_id=None, agent_role=None, task=None, application_unit_id=None,
         dispatch_model=None, reasoning=None,
         dispatch_mode_arg=None,
         from_json=None, dispatch_status=None, completed_at=None, finding_slugs=None,
@@ -10496,7 +10513,7 @@ def test_dispatch_record_handoff_is_idempotent_for_repeat_calls(
             "agent_id": None,
             "agent_role": None,
             "task": None,
-            "scope_host": None,
+            "application_unit_id": None,
             "dispatch_model": None,
             "reasoning": None,
             "dispatch_mode_arg": None,
@@ -10838,100 +10855,95 @@ def test_assess_config_aith_config_wins_over_install_env(
 
 
 # ---------------------------------------------------------------------------
-# C7 — scope_host validation in dispatch contract
+# Dispatch contract has no target-scope admission
 # ---------------------------------------------------------------------------
 
 
-def _make_engagement_dir_with_scope(tmp_path: Path, hosts: list[str]) -> Path:
-    eng_dir = tmp_path / "eng"
-    eng_dir.mkdir(parents=True, exist_ok=True)
-    (eng_dir / "scope.json").write_text(
-        json.dumps({"hosts": hosts, "status": "in_progress"}),
-        encoding="utf-8",
-    )
-    return eng_dir
-
-
-def test_validate_dispatch_blocks_out_of_scope_vuln_analyst(tmp_path: Path) -> None:
-    """C7: vulnerability-analyst dispatching against an out-of-scope host must
-    fail the contract validator with a clear error referencing scope.json."""
-    from assess.lib.contracts import validate_specialist_dispatch_contract
-
-    eng_dir = _make_engagement_dir_with_scope(tmp_path, ["app.example.test"])
-    payload = {
-        "agent_id": "va-1",
-        "agent_role": "vulnerability-analyst",
-        "task": "Probe IDOR",
-        "scope_host": "evil-attacker.test",
-        "dispatch_mode": "item-iterating",
-        "skills": "idor-testing",
-    }
-    errors, _warnings = validate_specialist_dispatch_contract(
-        payload, engagement_dir=str(eng_dir)
-    )
-    assert any("not in scope.json" in e for e in errors), errors
-
-
-def test_validate_dispatch_allows_in_scope_exploit_developer(tmp_path: Path) -> None:
-    """C7: exploit-developer dispatching against a host that IS in scope must
-    pass the scope gate (no scope-related errors)."""
-    from assess.lib.contracts import validate_specialist_dispatch_contract
-
-    eng_dir = _make_engagement_dir_with_scope(tmp_path, ["app.example.test"])
-    payload = {
-        "agent_id": "exp-1",
-        "agent_role": "exploit-developer",
-        "task": "Chain IDOR + token reuse",
-        "scope_host": "app.example.test",
-        "dispatch_mode": "deep-manual",
-        "skills": "idor-testing",
-    }
-    errors, _warnings = validate_specialist_dispatch_contract(
-        payload, engagement_dir=str(eng_dir)
-    )
-    assert not any("not in scope.json" in e for e in errors), errors
-
-
-def test_validate_dispatch_allows_recon_against_adjacent_host(tmp_path: Path) -> None:
-    """C7: recon and osint are NOT scope-gated because they legitimately
-    reach adjacent/related hosts during discovery (cert chains, DNS history,
-    GitHub mirrors). recon-specialist with an out-of-scope scope_host must
-    pass the scope gate (the skills-required check still applies separately)."""
-    from assess.lib.contracts import validate_specialist_dispatch_contract
-
-    eng_dir = _make_engagement_dir_with_scope(tmp_path, ["app.example.test"])
-    payload = {
-        "agent_id": "recon-1",
-        "agent_role": "recon-specialist",
-        "task": "Cert-chain pivot recon",
-        "scope_host": "related.example.test",
-        "dispatch_mode": "hypothesis-driven",
-        "skills": "web-recon",
-    }
-    errors, _warnings = validate_specialist_dispatch_contract(
-        payload, engagement_dir=str(eng_dir)
-    )
-    assert not any("not in scope.json" in e for e in errors), errors
-
-
-def test_validate_dispatch_skips_scope_check_when_engagement_dir_omitted(
-    tmp_path: Path,
-) -> None:
-    """C7: callers that do not pass engagement_dir keep the prior behavior —
-    no scope check fires. Keeps the validator usable for unit tests + stdin
-    linting where the engagement context is not available."""
+def test_validate_dispatch_allows_vuln_analyst_without_scope() -> None:
+    """A vulnerability analyst receives an objective, not a scope declaration."""
     from assess.lib.contracts import validate_specialist_dispatch_contract
 
     payload = {
         "agent_id": "va-1",
         "agent_role": "vulnerability-analyst",
         "task": "Probe IDOR",
-        "scope_host": "anywhere.test",
         "dispatch_mode": "item-iterating",
         "skills": "idor-testing",
     }
     errors, _warnings = validate_specialist_dispatch_contract(payload)
-    assert not any("scope" in e.lower() for e in errors), errors
+    assert errors == []
+
+
+def test_agent_start_payload_uses_application_unit_without_loading_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A red dispatch is attributed to a concrete unit, never authorized by scope."""
+    module = _load_dispatch_module()
+
+    def _scope_load_is_a_bug(*_args, **_kwargs):
+        raise AssertionError("agent start must not load engagement scope")
+
+    monkeypatch.setattr(module.agent, "load_config", _scope_load_is_a_bug)
+    payload = module._build_register_payload(
+        _dispatch_args(
+            "register",
+            agent_id="va-unit-1",
+            agent_role="vulnerability-analyst",
+            dispatch_mode_arg="item-iterating",
+            task="Deep pass over application unit 41",
+            skills="idor-testing",
+            application_unit_id=41,
+        )
+    )
+    assert payload["application_unit_id"] == 41
+    assert "scope_host" not in payload
+    assert "scope_path_prefix" not in payload
+
+
+def test_validate_dispatch_allows_exploit_developer_without_scope() -> None:
+    """Exploit-developer dispatch admission is independent of target scope."""
+    from assess.lib.contracts import validate_specialist_dispatch_contract
+
+    payload = {
+        "agent_id": "exp-1",
+        "agent_role": "exploit-developer",
+        "task": "Chain IDOR + token reuse",
+        "dispatch_mode": "deep-manual",
+        "skills": "idor-testing",
+    }
+    errors, _warnings = validate_specialist_dispatch_contract(payload)
+    assert errors == []
+
+
+def test_validate_dispatch_allows_recon_without_scope() -> None:
+    """Recon dispatches use their task objective without a target-scope field."""
+    from assess.lib.contracts import validate_specialist_dispatch_contract
+
+    payload = {
+        "agent_id": "recon-1",
+        "agent_role": "recon-specialist",
+        "task": "Cert-chain pivot recon",
+        "dispatch_mode": "hypothesis-driven",
+        "skills": "web-recon",
+    }
+    errors, _warnings = validate_specialist_dispatch_contract(payload)
+    assert errors == []
+
+
+def test_validate_dispatch_accepts_application_unit_metadata() -> None:
+    """Concrete depth attribution is valid optional dispatch metadata."""
+    from assess.lib.contracts import validate_specialist_dispatch_contract
+
+    payload = {
+        "agent_id": "va-1",
+        "agent_role": "vulnerability-analyst",
+        "task": "Probe IDOR",
+        "application_unit_id": 17,
+        "dispatch_mode": "item-iterating",
+        "skills": "idor-testing",
+    }
+    errors, _warnings = validate_specialist_dispatch_contract(payload)
+    assert errors == []
 
 
 def test_validate_dispatch_flags_technique_cage_warn_only() -> None:
@@ -11148,30 +11160,22 @@ def test_validate_dispatch_missing_skills_is_a_warning_not_an_error() -> None:
     assert any("skills not set" in w for w in warnings), warnings
 
 
-def test_validate_dispatch_malformed_scope_warns_not_silently_skipped(
-    tmp_path: Path,
-) -> None:
-    """L2-3: a malformed scope.json must WARN (naming the failure), never
-    silently disable the scope-host gate."""
+def test_validate_dispatch_has_no_engagement_file_dependency() -> None:
+    """Dispatch validation is a pure payload contract."""
     from assess.lib.contracts import validate_specialist_dispatch_contract
 
-    eng_dir = tmp_path / "eng"
-    eng_dir.mkdir(parents=True, exist_ok=True)
-    (eng_dir / "scope.json").write_text("{not valid json", encoding="utf-8")
     payload = {
         "agent_id": "va-1",
         "agent_role": "vulnerability-analyst",
-        "scope_host": "app.example.test",
         "dispatch_mode": "item-iterating",
         "skills": "idor-testing",
     }
-    errors, warnings = validate_specialist_dispatch_contract(
-        payload, engagement_dir=str(eng_dir)
-    )
-    assert any("scope_host gate skipped" in w for w in warnings), warnings
+    errors, warnings = validate_specialist_dispatch_contract(payload)
+    assert errors == []
+    assert not any("scope" in warning.lower() for warning in warnings)
 
 
-# Item 11 — scope_host rejection telemetry (audits the C7 gate)
+# Scope-rejection telemetry retired with target-scope dispatch admission
 
 
 def _load_auth_status_module():
@@ -11503,13 +11507,10 @@ def test_assessment_client_list_all_decisions_strips_caller_limit_offset() -> No
     assert "offset=999" not in captured[0]
 
 
-def test_scope_rejection_writes_dispatch_decision_row(
+def test_agent_start_does_not_write_scope_rejection_decision(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Item 11: when the C7 scope_host gate rejects a vulnerability-analyst
-    dispatch, a `kind='scope_rejection'` decision row is written so the
-    rejection is queryable post-engagement. Telemetry is best-effort —
-    failures don't block the original error."""
+    """Scope metadata cannot reject a dispatch or emit rejection telemetry."""
     eng_dir = tmp_path / "eng"
     eng_dir.mkdir(parents=True, exist_ok=True)
     (eng_dir / "scope.json").write_text(
@@ -11549,32 +11550,22 @@ def test_scope_rejection_writes_dispatch_decision_row(
         ),
     )
 
-    with pytest.raises(SystemExit) as excinfo:
-        module._build_register_payload(
-            _dispatch_args(
-                "register",
-                agent_id="va-rej-1",
-                agent_role="vulnerability-analyst",
-                scope_host="evil-attacker.test",
-                dispatch_mode_arg="item-iterating",
-                task="probe IDOR",
-                skills="idor-testing",
-                engagement_dir=str(eng_dir),
-            )
+    payload = module._build_register_payload(
+        _dispatch_args(
+            "register",
+            agent_id="va-rej-1",
+            agent_role="vulnerability-analyst",
+            application_unit_id=19,
+            dispatch_mode_arg="item-iterating",
+            task="probe IDOR",
+            skills="idor-testing",
+            engagement_dir=str(eng_dir),
         )
-    assert excinfo.value.code == 1
+    )
     err = capsys.readouterr().err
-    assert "not in scope.json" in err
-    # Exactly one telemetry row, with the rejected host + role + scope entries
-    assert len(recorded_decisions) == 1
-    row = recorded_decisions[0]
-    assert row["kind"] == "scope_rejection"
-    assert row["surfaced_to_user"] is True
-    payload = row["payload"]
-    assert payload["host"] == "evil-attacker.test"
-    assert payload["role"] == "vulnerability-analyst"
-    assert payload["scope_entries"] == ["app.example.test"]
-    assert "not in scope.json" in payload["reason"]
+    assert "scope" not in err.lower()
+    assert payload["application_unit_id"] == 19
+    assert recorded_decisions == []
 
 
 # Shared-VM preflight: refuse/warn when the runtime tier oversubscribes the VM.
@@ -11616,6 +11607,7 @@ def _preflight_install_root(tmp_path: Path) -> Path:
 
 def test_runtime_start_refuses_when_tier_exceeds_vm(tmp_path, monkeypatch):
     import json as _json
+
     from vigil_cli.runtime import RuntimeOptions, start_runtime
 
     monkeypatch.setenv("VIGIL_RUNTIME_MEMORY_GB", "8")
@@ -11633,6 +11625,7 @@ def test_runtime_start_refuses_when_tier_exceeds_vm(tmp_path, monkeypatch):
 
 def test_runtime_start_preflights_before_removing_existing_container(tmp_path, monkeypatch):
     import json as _json
+
     from vigil_cli.docker import DockerResult
     from vigil_cli.runtime import RuntimeOptions, start_runtime
 
@@ -11665,6 +11658,7 @@ def test_runtime_start_preflights_before_removing_existing_container(tmp_path, m
 
 def test_runtime_start_allow_oversubscribe_bypasses_refusal(tmp_path, monkeypatch):
     import json as _json
+
     from vigil_cli.runtime import RuntimeOptions, start_runtime
 
     monkeypatch.setenv("VIGIL_RUNTIME_MEMORY_GB", "8")
@@ -11682,6 +11676,7 @@ def test_runtime_start_allow_oversubscribe_bypasses_refusal(tmp_path, monkeypatc
 
 def test_runtime_start_warns_with_cotenants_but_proceeds(tmp_path, monkeypatch, capsys):
     import json as _json
+
     from vigil_cli.runtime import RuntimeOptions, start_runtime
 
     monkeypatch.setenv("VIGIL_RUNTIME_MEMORY_GB", "8")

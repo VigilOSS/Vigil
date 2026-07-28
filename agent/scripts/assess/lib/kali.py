@@ -40,12 +40,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
+from . import kali_resolve, vuln_taxonomy
 from . import scope as scope_lib
-from . import vuln_taxonomy
-from .client import AssessError, AssessmentClient, default_runtime_container
-from .config import Config, load_config
-from .identity import host_cookie_hosts, host_cookies_for, resolve_identity
-from .rate_leases import aggregate_rate_reservation, target_rate_lease
 
 # Re-exports — keep this block ordered by source module so the public surface
 # is grep-friendly. Tests patch a number of these via the legacy
@@ -57,9 +53,12 @@ from .audit_enums import (
     normalize_probe_kind,
     normalize_technique,
 )
+from .client import AssessError, AssessmentClient, default_runtime_container
+from .config import Config, load_config
+from .identity import host_cookie_hosts, host_cookies_for, resolve_identity
 from .kali_audit import (
-    ALLOWED_PHASES,
     _INTENT_MAX_LEN,
+    ALLOWED_PHASES,
     _extract_target_anchor,
     _extract_target_host,
     _patch_finalize,
@@ -93,7 +92,6 @@ from .kali_output import (
     _auth_context,
     _engagement_type,
     _existing_header_names,
-    _in_scope_allow_entries,
     _peak_rss_kilobytes_to_bytes,
     _read_proc_peak_rss,
     _read_safely,
@@ -104,9 +102,7 @@ from .kali_output import (
     detect_waf_challenge,
     extract_probe_response_headers,
     is_http_prober,
-    required_header_attribution_gap,
 )
-from . import kali_resolve
 from .kali_runtime_exec import (
     _build_docker_exec,
     _check_container_running,
@@ -124,7 +120,7 @@ from .kali_tool_naming import (
     _scan_inner_for_first_exec,
     _split_inner_pipeline_stages,
 )
-
+from .rate_leases import aggregate_rate_reservation, target_rate_lease
 
 # Test-mode override: when set, skips both audit POST and `docker exec` so
 # argparse round-trip tests don't require a live backend or container. The
@@ -727,11 +723,12 @@ def prepare_execution_command(
     nuclei_oob_explicit: bool = False,
     prepared_auth_context: str | None = None,
     identity_probe: bool = False,
-) -> tuple[str, str]:
+) -> str:
     """Apply shared identity, attribution, and OOB preparation for sync/jobs.
 
-    Returns ``(auth_context, attribution_gap)``. The caller owns how a gap is
-    surfaced, but must refuse before audit/spawn when the second value is set.
+    Returns the audit ``auth_context``. Program-required attribution headers are
+    injected when the tool supports them; an unsupported shape emits a warning
+    and still runs.
 
     ``identity_probe=True`` is reserved for the AUTH liveness probe
     (``auth status --probe``): it may replay a ``dead`` identity, because a
@@ -744,9 +741,10 @@ def prepare_execution_command(
     if required:
         status = _apply_required_headers(cmd, tool_name, required)
         if status == "warned":
+            header_names = ", ".join(sorted(required))
             print(
                 "warning: program-required attribution headers could not be "
-                f"injected into tool '{tool_name}'.",
+                f"injected into tool '{tool_name}' ({header_names}); continuing.",
                 file=sys.stderr,
             )
     if identity is not None:
@@ -774,13 +772,7 @@ def prepare_execution_command(
                 f"{identity_refusal_detail(str(identity), material)}."
             )
 
-    if required:
-        gap = required_header_attribution_gap(
-            cmd, tool_name, required, _in_scope_allow_entries(engagement_dir)
-        )
-        if gap:
-            return auth_context, gap
-    return auth_context, ""
+    return auth_context
 
 
 # Program-mandated attribution-header classifier + injector
@@ -815,17 +807,7 @@ def _audit_execution_policy_refusal(
     reason: str,
 ) -> None:
     """Best-effort durable evidence for a policy-denied, never-started run."""
-    try:
-        scope_doc = scope_lib.load_scope(str(eng_dir))
-        enforcement = scope_lib.scope_enforcement(scope_doc)
-    except (OSError, ValueError, SystemExit):
-        enforcement = "enforce"
-    policy = {
-        "scope_enforcement": enforcement,
-        "scope_bypassed": False,
-        "checked_targets": [],
-        "policy_refusal": reason,
-    }
+    policy = {"policy_refusal": reason}
     client = AssessmentClient(cfg.base_url, eng_key)
     try:
         row = _post_pre_exec_row(
@@ -894,7 +876,6 @@ def kali_exec(
     identity_scope: str = "",
     identity_probe: bool = False,
     rate_override_reason: str = "",
-    destinations: tuple[scope_lib.ExecutionDestination, ...] = (),
     nuclei_oob_explicit: bool = False,
     prepared_auth_context: str | None = None,
 ) -> KaliResult:
@@ -960,7 +941,7 @@ def kali_exec(
 
     derived_tool_name = tool_name or _derive_tool_name(cmd)
     try:
-        auth_context, attribution_gap = prepare_execution_command(
+        auth_context = prepare_execution_command(
             cmd,
             tool_name=derived_tool_name,
             engagement_dir=eng_dir,
@@ -974,8 +955,6 @@ def kali_exec(
             cmd,
             tool_name=derived_tool_name,
             engagement_dir=eng_dir,
-            engagement_key=eng_key,
-            destinations=destinations,
         )
     except scope_lib.ScopePolicyError as exc:
         _audit_execution_policy_refusal(
@@ -1002,31 +981,6 @@ def kali_exec(
         raise AssessError(str(exc)) from exc
 
     _check_container_running(container_name)
-
-    if attribution_gap:
-        refusal = (
-            f"RUNTIME ERROR: refusing to run — {attribution_gap}. Program-required "
-            "attribution headers must ride every in-scope HTTP request "
-            "(missing attribution is a ban-risk on federal/managed programs). "
-            "Add the marker the tool's own way (curl/httpx -H, whatweb "
-            "--header, nikto -Add-header, arjun --headers) or call curl "
-            "directly instead of wrapping it in bash -c, then re-run."
-        )
-        print(refusal, file=sys.stderr)
-        return KaliResult(
-            run_id=None,
-            status="refused",
-            return_code=None,
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
-            duration_ms=int((time.monotonic() - started_monotonic) * 1000),
-            peak_rss_bytes=None,
-            stdout_preview="",
-            stderr_preview=refusal,
-            timed_out=False,
-            partial_results=False,
-            resolved_argv=list(cmd),
-        )
 
     # CR-36 — host-resolve + --resolve IP-pin. On macOS Docker Desktop the
     # container resolver flaps (I-013), so a container HTTP probe can return
@@ -1603,7 +1557,6 @@ __all__ = [
     "_auth_context",
     "_engagement_type",
     "_existing_header_names",
-    "_in_scope_allow_entries",
     "_peak_rss_kilobytes_to_bytes",
     "_read_proc_peak_rss",
     "_read_safely",
@@ -1614,7 +1567,6 @@ __all__ = [
     "detect_waf_challenge",
     "extract_probe_response_headers",
     "is_http_prober",
-    "required_header_attribution_gap",
     # Runtime exec + kill cascade (from kali_runtime_exec)
     "_build_docker_exec",
     "_check_container_running",

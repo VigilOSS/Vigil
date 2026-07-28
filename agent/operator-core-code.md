@@ -3,11 +3,11 @@
 This file replaces the web-focused core loop from `operator-core.md` for code-analysis
 engagements (same backend, findings table, and CLI tools).
 
-**Applies to:** a standalone code engagement (`scope.json` has `engagement_type: "code"`), or
+**Applies to:** a standalone code engagement selected by the parent routing gate, or
 mid-engagement when source code is obtained (exposed `.git`, source maps, backup download) —
 code analysis then runs in parallel with ongoing web testing. Create with `vigil engagement create
---type code <name> --repo <path>`. On entry, read `scope.json` to determine the current phase and
-resume from there.
+--type code <name> --repo <path>`. On entry, use `vigil assess resume-brief` and the guarded
+transition helpers to determine the current phase and resume from there.
 
 **`ENGAGEMENT.md`** (see `agent/operator-core.md`, "Engagement Program Brief") is **LIVE-TESTING
 ROE** — mandatory headers, rate caps, no-fire endpoints, deconfliction, exfiltration limits. For a
@@ -76,7 +76,7 @@ Read top-to-bottom once at code-engagement start; after that, jump to the sectio
 ## Resume Gate -- Code Analysis Mode
 
 Before taking a new code-analysis action in an existing engagement, apply `agent/rules/resume.md`
-when `scope.json` shows `status: in_progress`, `code-scope.json` or `source_repos` already exists,
+when the engagement is in progress, code ingestion is already initialized,
 the phase is past ingest, backend rows may already exist, or the session state is uncertain. Then
 run the code-specific coverage and queue checks in "Session Resumption" below. Resume hydration
 comes before planning because code findings, queue ownership, CWE effort, dispatch handoffs, and
@@ -98,7 +98,7 @@ gates. This is a cue, not a gate: trigger a re-anchor when the cadence slips —
 drift signal is repeated `needs-context` returns on the same file, or hunter dispatches
 returning clean with declining effort scores across successive batches.
 
-1. **ASSESS STATE** -- Read `code-scope.json` (or `scope.json` with `source_repos`). For resumed engagements, run `vigil assess resume-brief` from `agent/rules/resume.md` before planning; use `--finding`, `--q`, `--agent-id`, `--since <iso>` (deltas since the last brief), or `--max-age-hours <N>` (override the per-role stale threshold — 48h default for code-architect/code-vuln-hunter/code-variant-hunter/code-vuln-verifier, 72h for code-fuzz-engineer). Run the coverage and CWE-matrix checks from "Session Resumption" below (same commands, same Phase 2B/gate semantics — not repeated here).
+1. **ASSESS STATE** -- Run `vigil assess resume-brief` and inspect the active repository/index records before planning; narrow with `--finding`, `--q`, `--agent-id`, `--since <iso>` (deltas since the last brief), or `--max-age-hours <N>` (override the per-role stale threshold — 48h default for code-architect/code-vuln-hunter/code-variant-hunter/code-vuln-verifier, 72h for code-fuzz-engineer). Run the coverage and CWE-matrix checks from "Session Resumption" below (same commands, same Phase 2B/gate semantics — not repeated here).
 2. **DECIDE NEXT ACTION** -- Prioritize by current phase. In Phases 0-1, prioritize breadth (get all files classified, call graph complete, structural index generated). In Phase 2A, analyze critical files first using the file analysis queue priority order. In Phase 2B, close CWE effort gaps on critical/high files before proceeding. In Phase 3, drive precise FP elimination on all findings — kills require counter-evidence as rigorous as the original finding. Coverage gaps drive decisions.
 3. **FORMULATE PLAN** -- Select agent, skill, file batch, and applicable vulnerability classes. Batch size must stay small enough that source code remains the primary context — Phase 2's context budget rule (`code-phase-2-hunt.md`) is the operative check: if structural index, call-graph, and threat-model content in the dispatch outweighs the source files under review, compress before dispatching, not after. Use adaptive batching by module, entry-chain cluster, or trust-boundary/behavior family instead of a fixed-size handoff. When unrelated queue items are ready at the same time, split them into multiple independent hunter dispatches so broad hunt parallelizes across modules instead of serializing on fetch order. Verify against the Pre-Dispatch Checklist (under "Dispatch Context Template" below) before every dispatch.
 4. **PRESENT OR PROCEED** -- Default to CLI-first human steering with NUMBERED choices. Continue autonomously only when explicitly authorized.

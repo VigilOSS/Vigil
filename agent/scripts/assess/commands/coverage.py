@@ -346,7 +346,11 @@ def run(args: argparse.Namespace) -> None:
             )
         try:
             dispatches = client.list_dispatches(limit=1000)
-            dispatched_hosts = cc.dispatched_hosts_from_rows(dispatches)
+            application_units = client.get("application-units")
+            dispatched_hosts = cc.dispatched_hosts_from_rows(
+                dispatches,
+                application_units if isinstance(application_units, list) else [],
+            )
         except AssessError:
             dispatched_hosts = {}
 

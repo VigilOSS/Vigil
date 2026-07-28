@@ -45,7 +45,7 @@ Read top-to-bottom once at engagement start; after that, jump to the section you
 | Reactively, as signals appear | Reactive Nuclei on URL Discovery, Credential Auto-Use, Kali Execution |
 | After the RECORD FINDINGS/SURFACES core-loop steps | Finding and Intel Recording |
 | When source code is in scope | Source Code Analysis Mode |
-| When `scope.json` has wildcard hosts | Subdomain Enumeration |
+| When the engagement declares wildcard hosts | Subdomain Enumeration |
 | Always | Communication, Handoff Reference |
 
 ## Shared Kali Runtime
@@ -58,8 +58,6 @@ vigil assess kali --help     # smoke-test discovery; lists available verbs
 ```
 
 This runtime is shared infrastructure, not per-engagement state. Multiple engagement directories may exist within a single install. `vigil assess kali` execs into this single container regardless of which engagement is active — assessment state binds to the launched session/CWD (or an explicit `--engagement-dir`), while `${ENGAGEMENT_DIR}` supplies artifact paths and every call carries its audit flags.
-
-**Reachability is not scope** — only `scope.json` hosts are in scope; never probe, pivot into, or build findings on reachable-but-out-of-scope infrastructure (other engagements, neighbouring subnets, the host), even when the shared runtime can route to it. (Full rule in `shared-constraints.md §1`.)
 
 **Image drift — recreate the runtime after every rebuild.** `vigil runtime start` compares the running container's image ID against the configured image tag and refuses to continue when they diverge. Whenever you rebuild the runtime image or upgrade the installed image, run `vigil runtime restart` so the container picks up the new image and current `/engagements` bind mount. No engagement data moves; only the container is replaced.
 
@@ -89,7 +87,7 @@ Per-engagement ROE instances — specific no-fire paths, notifying endpoints, re
 ## Resume Gate
 
 Before taking a new action in an existing engagement, apply `agent/rules/resume.md` when
-`scope.json` shows `status: in_progress`, the phase is past initialization, backend rows may
+the engagement is in progress, the phase is past initialization, backend rows may
 already exist, or the session state is uncertain. Resume hydration comes before planning because
 backend state is the canonical memory for prior findings, intel, operator decisions, null results,
 dispatch handoffs, and command coverage.
@@ -129,8 +127,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
 **Scope the re-read to Phases 1-6 (Recon through Exploit)** — see "Phase Index" above (Report-phase scoping) for the rule and its lifting gate; it applies to this re-anchor cue too.
 
 1. **ASSESS STATE**
-   - Read `scope.json`.
-   - For resumed engagements, run `vigil assess resume-brief` (see `agent/rules/resume.md`) before planning.
+   - Run `vigil assess resume-brief` (see `agent/rules/resume.md`) before planning a resumed engagement; for a fresh engagement, use the declaration already loaded by the routing gate.
    - Narrow the brief with `--finding`, `--q`, `--agent-id`, `--since <iso>` (what's new since the last brief), or `--max-age-hours <N>` (override the per-role stale threshold; default 24h, 48h for exploit-developer/report-writer/code-*, 72h for code-fuzz-engineer).
    - Drill down only with the commands the brief points to: `command-run get`, `artifact search/get`, `agent render-handoff`, `finding list`, `intel list`.
    - Findings live in the backend; `vigil assess export findings` writes a local export on demand for archival.
@@ -161,7 +158,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
 
    **You are the orchestrator brain: your job is to dispatch the specialists who run the probes, write the analysis, and form the vulnerability hypotheses — each carries the skill context and methodology depth the operator seat deliberately keeps out.** Spot the coverage gaps and cross-surface seams a specialist can't see from inside one dispatch, route the right specialist with the right surface, rules, and context, and let it form the attack hypotheses. Your edge is the cross-dispatch view, not authoring the bug. An operator who starts running `curl`/`nmap`/`sqlmap` directly has failed the division of labor — every probe the operator runs is a probe a specialist with the correct skill context did not run, and the resulting analysis is shallower than what the specialist would have produced. The Operator-executed exceptions below are the small set of mechanical pipeline steps that intentionally bypass dispatch; everything else is specialist work.
 
-   **Standing dispatch constraint.** The only permissible constraints on a specialist dispatch are hard program ROE: no DoS/stress testing, no destructive writes to the target's or a third party's state without operator approval (our own test data — accounts or artifacts we created — is fine), required deconfliction headers, confirmed-in-scope targets, and the human-reach live-fire budget/gate (`agent/shared-constraints.md` §2d — do not fire past an open `human_reach_decision` or an exhausted 1-3 budget). Methodological restraints — no-enumerate, app-handed-only data, a pre-named bug, or a prescriptive technique cage — are self-imposed limits that cost real severity: a less-constrained specialist consistently out-finds a constrained one. Dispatch with the surface, the hard ROE, and an open objective; the specialist forms its own hypotheses. (Open-objective dispatch mechanics and lens-level/mindset dispatch framing both live in the Depth Doctrine / Per-Domain VA Fan-Out section of `agent/phases/phase-4-consume-test.md` — "Phased mindset flow" and "Dispatch one mindset lens per specialist".)
+   **Standing dispatch constraint.** The only permissible constraints on a specialist dispatch are the engagement boundary in `agent/shared-constraints.md` §1, hard program ROE (no DoS/stress testing, no destructive writes to the target's or a third party's state without operator approval; our own test data — accounts or artifacts we created — is fine), required deconfliction headers, and the human-reach live-fire budget/gate (`agent/shared-constraints.md` §2d — do not fire past an open `human_reach_decision` or an exhausted 1-3 budget). Methodological restraints — no-enumerate, app-handed-only data, a pre-named bug, or a prescriptive technique cage — are self-imposed limits that cost real severity: a less-constrained specialist consistently out-finds a constrained one. Dispatch with the surface, the hard ROE, and an open objective; the specialist forms its own hypotheses. (Open-objective dispatch mechanics and lens-level/mindset dispatch framing both live in the Depth Doctrine / Per-Domain VA Fan-Out section of `agent/phases/phase-4-consume-test.md` — "Phased mindset flow" and "Dispatch one mindset lens per specialist".)
 
    **Operator-executed exceptions.** Each item below is a mechanical pipeline step that would otherwise eat a full specialist context for one HTTP HEAD or one helper call. All run via `vigil assess kali` or `vigil assess` helpers — never host-side — and none of them is analysis:
 
@@ -347,16 +344,15 @@ Optional fields:
 |---|---|
 | `model` | `claude-opus-4-8` / `claude-sonnet-4-6` / `gpt-5.6` / etc. (per the default-model policy in the Core Loop) |
 | `reasoning` | `low` / `medium` / `high` / `xhigh` / `max` (`max` is Claude-only; Codex caps at `xhigh`) |
-| `scope_host` | target host for this dispatch |
-| `scope_path_prefix` | (`--scope-path-prefix` on `agent start`) the app-unit path-prefix this dispatch covers, paired with `scope_host`. Set it on a Phase-4 DEEP dispatch targeting a `deep_required` unit — it is one half of the `(scope_host, scope_path_prefix)` containment check the depth ledger uses to credit a **dedicated dispatch** against that unit. |
-| `vuln_classes` | (`--vuln-classes` on `agent start`) OPTIONAL comma-list of canonical vuln classes (`vigil assess list-skills --json` / vuln-taxonomy) labeling what this dispatch actually covered, filled in after the fact — never a precondition. The depth ledger's dedicated-dispatch check reads `(scope_host, scope_path_prefix)` containment plus completion status and probe/finding evidence; it never reads a dispatch's self-declared `vuln_classes` as coverage, so leaving the field unset costs nothing structurally. That check itself is ADVISORY (feeds the EV-ranked ledger, never blocks) — the terminal hard blocks (`depth_unsatisfied_units`, `depth_uncovered_classes` below) are driven entirely by recorded probe/coverage-item evidence, independent of this field. |
+| `application_unit_id` | (`--application-unit-id` on `agent start`) positive id of the concrete application unit this dispatch targets. Set it on a Phase-4 DEEP dispatch aimed at a `deep_required` unit when the depth ledger should credit that dedicated lane; omit it for multi-unit or non-app-unit work. The backend verifies that a supplied id belongs to this engagement. |
+| `vuln_classes` | (`--vuln-classes` on `agent start`) OPTIONAL comma-list of canonical vuln classes (`vigil assess list-skills --json` / vuln-taxonomy) labeling what this dispatch actually covered, filled in after the fact — never a precondition. The depth ledger's dedicated-dispatch check reads `application_unit_id` plus completion status and probe/finding evidence; it never reads a dispatch's self-declared `vuln_classes` as coverage, so leaving the field unset costs nothing structurally. That check itself is ADVISORY (feeds the EV-ranked ledger, never blocks) — the terminal hard blocks (`depth_unsatisfied_units`, `depth_uncovered_classes` below) are driven entirely by recorded probe/coverage-item evidence, independent of this field. |
 
 When the operator launches a specialist, register the dispatch up front:
 
 ```bash
 vigil assess agent start \
     --agent-id <id> --role <role> \
-    --task "..." --scope-host <host> \
+    --task "..." \
     --model <name> --reasoning <level> --dispatch-mode <mode> \
     --skills "<skill-name>[,<skill-name>...]"
 ```
@@ -448,7 +444,6 @@ Before every dispatch, verify. Items tagged **RESUME-only** are continuity / pri
 - [ ] **(RESUME-only)** Activity log checked for a duplicate dispatch — `vigil assess fetch activity-entries` (the canonical DEDUP rule; see "DEDUP" below)
 - [ ] **(RESUME-only)** Command history checked — `vigil assess command-run list --q <keyword> --show-matches` reviewed for prior runs that map coverage. Default to an unscoped fuzzy search so finding aliases and adjacent command metadata are included; narrow with exact filters only after the broad result is overwhelming. Before telling a specialist to reuse a prior run, confirm its preview actually answers the current question — "Kali Command Audit" below owns the full `command-run get` reading discipline
 - [ ] Parallelism decision made (independent → parallel, dependent → sequential)
-- [ ] For `vulnerability-analyst` and `exploit-developer` dispatches: `--scope-host` confirmed against `scope.json` `hosts` (with wildcard semantics). Adjacent-but-out-of-scope hosts surfaced during OSINT/recon are NOT in scope for active probing — reframe as recon or add the host to scope first. The CLI validator enforces this, but stating it in the dispatch context catches operator mistakes earlier.
 
 DEDUP (canonical rule): Before any dispatch where prior work may exist, check the activity log (`vigil assess fetch activity-entries`) — re-dispatching the same agent for the same objective wastes a full context window and risks duplicate findings. This is the single canonical DEDUP rule; the dispatch-table check (Cross-Dispatch Continuity, `vigil assess agent list --task-q`) is the same intent on the dispatches table. A fresh first dispatch has nothing to dedup against.
 PARALLEL: Independent tasks → parallel. Dependent → sequential.
@@ -652,7 +647,7 @@ When source code is available (cloned repo, exposed `.git`, decompiled source, b
 
 ## Subdomain Enumeration
 
-Runs as Phase 1a (see `agent/phases/phase-1-recon.md`) when `scope.json` `hosts` has `*.domain` entries — as the operator-owned `vigil assess recon` job (poll `vigil assess recon-status`), not a specialist dispatch. `agent/skills/subdomain-enumeration/SKILL.md` and `agent/references/subdomain-enumeration.md` are the completeness / prioritization references the recon-specialist uses to assess the job's output.
+Runs as Phase 1a (see `agent/phases/phase-1-recon.md`) when the engagement declares `*.domain` roots — as the operator-owned `vigil assess recon` job (poll `vigil assess recon-status`), not a specialist dispatch. `agent/skills/subdomain-enumeration/SKILL.md` and `agent/references/subdomain-enumeration.md` are the completeness / prioritization references the recon-specialist uses to assess the job's output.
 
 ## Communication
 

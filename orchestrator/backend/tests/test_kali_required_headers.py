@@ -13,8 +13,7 @@ those headers at the single ``kali_exec`` chokepoint via a four-way classifier:
     skip (no leak of the handle to web.archive.org / DNS APIs).
   * else (wafw00f/httprobe/unknown) → WARN (never block); cmd unchanged. wafw00f's
     ``-H``/``--headers`` reads a FILE not an inline string, and httprobe has no
-    header flag at all, so neither can carry the marker inline — the Layer-2
-    fail-closed backstop (ADR 0010) refuses an un-attributed in-scope run instead.
+    header flag at all, so neither can carry the marker inline.
 
 These tests cover the pure ``_apply_required_headers`` classifier and the
 ``_required_headers`` scope reader. The full ``kali_exec`` wiring (audit argv,
@@ -31,7 +30,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "agent" / "scripts"))
 
 from assess.lib import kali  # noqa: E402
-
 
 # -- _apply_required_headers (pure classifier) ------------------------------
 
@@ -77,9 +75,9 @@ def test_skip_tools_unchanged(tool):
 
 # wafw00f (its ``-H``/``--headers`` reads a FILE, not an inline string), httprobe
 # (sends HTTP to the target but has NO header flag) and any unknown tool must WARN:
-# none can carry the marker inline, so Layer 1 leaves the cmd untouched and the
-# Layer-2 backstop refuses the un-attributed in-scope run. (whatweb/nikto/arjun
-# used to land here but now inject via their own flag — see the FLAG-MAP test.)
+# none can carry the marker inline, so the command is left untouched and its
+# caller warns without blocking. (whatweb/nikto/arjun used to land here but now
+# inject via their own flag — see the FLAG-MAP test.)
 @pytest.mark.parametrize("tool", ["wafw00f", "httprobe", "some-unknown-tool"])
 def test_non_injectable_http_tools_warn_unchanged(tool):
     cmd = [tool, "https://target.example"]

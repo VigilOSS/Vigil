@@ -28,14 +28,15 @@ from .engagements import (
     current_engagement_path,
     export_pdf,
     list_engagements,
+    mutate_scope_file,
     plan_engagement,
     print_shell_cd_init,
     remove_out_of_scope,
+    resolve_aggregate_rate_limit,
     resolve_current_engagement,
     resolve_engagement_path,
     resolve_out_of_scope,
     resolve_rate_limit,
-    resolve_aggregate_rate_limit,
     resolve_required_headers,
     set_active_engagement,
     set_engagement_header,
@@ -1282,9 +1283,7 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
     elif command == "archive":
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
         scope_path = path / "scope.json"
-        scope = json.loads(scope_path.read_text(encoding="utf-8"))
-        scope["status"] = "archived"
-        scope_path.write_text(json.dumps(scope, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        mutate_scope_file(scope_path, lambda scope: scope.__setitem__("status", "archived"))
         print(path)
     elif command == "export":
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)

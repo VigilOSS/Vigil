@@ -28,7 +28,7 @@ not to replace target validation.
 **LOAD-ON-FIRST-USE (lazy):**
 
 - `agent/skills/osint-recon/SKILL.md` — load as your first action for red OSINT work; its `## Extended Resources` names the paired references (for any other skill, run `vigil assess list-skills`).
-- **Blue Incident Mode bundle** — when the dispatch task or `scope.json:engagement_type` says this is a blue/incident-response engagement, load `agent/shared-constraints-blue.md`, `agent/rules/triage.md`, `agent/rules/ir-evidence.md`, and `agent/skills/ioc-enrichment/SKILL.md` INSTEAD of the red hunting/skill set above. Use blue IOC enrichment and backend intel/link helpers; do not apply red attacker-outcome proof language to defender-side IOC context. Treat CVE/exploit-developer routing (below) as red-only unless the operator explicitly asks for product-vulnerability context on a blue dispatch. Normal blue outputs: IOC intel rows, `finding link --intel` attachments, and a handoff naming confidence, source reputation, and remaining enrichment gaps.
+- **Blue Incident Mode bundle** — when the dispatch names blue/incident-response mode, load `agent/shared-constraints-blue.md`, `agent/rules/triage.md`, `agent/rules/ir-evidence.md`, and `agent/skills/ioc-enrichment/SKILL.md` INSTEAD of the red hunting/skill set above. Use blue IOC enrichment and backend intel/link helpers; do not apply red attacker-outcome proof language to defender-side IOC context. Treat CVE/exploit-developer routing (below) as red-only unless the operator explicitly asks for product-vulnerability context on a blue dispatch. Normal blue outputs: IOC intel rows, `finding link --intel` attachments, and a handoff naming confidence, source reputation, and remaining enrichment gaps.
 
 ## Pre-Work Checkpoint
 

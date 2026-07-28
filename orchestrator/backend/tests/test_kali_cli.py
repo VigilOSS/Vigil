@@ -1089,23 +1089,61 @@ def test_kali_exec_writes_pre_exec_row_then_finalizes(monkeypatch, fake_engageme
     assert patch_payload["timed_out"] is False
 
 
-def test_kali_exec_rejects_out_of_scope_target_before_container_and_audits_refusal(
+def test_kali_exec_runs_a_command_naming_an_undeclared_host_and_audits_it(
     monkeypatch, fake_engagement
 ):
+    """The CLI never refuses a command for the host it names.
+
+    `scope.json` declares what the engagement is authorized against; keeping to
+    it is the operator's and the specialist's job, not an argv check. The audit
+    row is still written either way, which is what makes the run reviewable.
+    """
     kali = _setup_fake_config(monkeypatch, fake_engagement)
     (fake_engagement / "scope.json").write_text(
         json.dumps({"hosts": ["allowed.example"]}), encoding="utf-8"
     )
     fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda _name: None)
+    monkeypatch.setattr(kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0))
+
+    result = kali.kali_exec(
+        ["curl", "https://unrelated.example/private"],
+        technique="RECON",
+        intent="host the engagement never declared",
+        probe_kind="fingerprint",
+        phase="recon",
+        timeout=60,
+        engagement_dir=fake_engagement,
+        tool_name="curl",
+    )
+
+    assert result.return_code == 0
+    assert fake_client.posts[0][1]["status"] == "running"
+    assert "unrelated.example" in fake_client.posts[0][1]["command"]
+    notes = json.loads(fake_client.posts[0][1]["notes"])
+    assert notes == {"target_facing": True}
+
+
+def test_kali_exec_refuses_a_denied_tool_before_container_and_audits_refusal(
+    monkeypatch, fake_engagement
+):
+    """Engagement TOOL policy still refuses, and the refusal is still audited."""
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+    (fake_engagement / "scope.json").write_text(
+        json.dumps({"hosts": ["allowed.example"], "denied_tools": ["curl"]}),
+        encoding="utf-8",
+    )
+    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
     container_checks = []
     monkeypatch.setattr(kali, "_check_container_running", container_checks.append)
 
-    with pytest.raises(kali.AssessError, match="outside engagement scope.*evil.example"):
+    with pytest.raises(kali.AssessError, match="tool 'curl'.*denied"):
         kali.kali_exec(
-            ["curl", "https://evil.example/private"],
+            ["curl", "https://allowed.example/private"],
             technique="RECON",
-            intent="must never leave scope",
+            intent="denied tool must not run",
             probe_kind="fingerprint",
             phase="recon",
             timeout=60,
@@ -1117,43 +1155,10 @@ def test_kali_exec_rejects_out_of_scope_target_before_container_and_audits_refus
     assert len(fake_client.posts) == 1
     assert fake_client.posts[0][1]["status"] == "running"
     notes = json.loads(fake_client.posts[0][1]["notes"])
-    assert "outside engagement scope" in notes["policy_refusal"]
+    assert "denied" in notes["policy_refusal"]
     assert len(fake_client.patches) == 1
     assert fake_client.patches[0][1]["status"] == "failed"
     assert fake_client.patches[0][1]["return_code"] is None
-
-
-def test_kali_exec_global_scope_bypass_is_recorded_in_pre_exec_audit(
-    monkeypatch, fake_engagement
-):
-    kali = _setup_fake_config(monkeypatch, fake_engagement)
-    (fake_engagement / "scope.json").write_text(
-        json.dumps({"hosts": ["allowed.example"], "scope_enforcement": "bypass"}),
-        encoding="utf-8",
-    )
-    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
-    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali, "_check_container_running", lambda _name: None)
-    monkeypatch.setattr(kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0))
-
-    result = kali.kali_exec(
-        ["curl", "https://evil.example/private"],
-        technique="RECON",
-        intent="authorized unrestricted engagement",
-        probe_kind="fingerprint",
-        phase="recon",
-        timeout=60,
-        engagement_dir=fake_engagement,
-        tool_name="curl",
-    )
-
-    assert result.return_code == 0
-    notes = json.loads(fake_client.posts[0][1]["notes"])
-    assert notes["scope_enforcement"] == "bypass"
-    assert notes["scope_bypassed"] is True
-    assert notes["checked_target_count"] == 1
-    assert notes["checked_targets_sample"] == ["evil.example"]
-    assert len(notes["checked_targets_sha256"]) == 64
 
 
 def test_kali_exec_acquires_aggregate_rate_lease_after_audit_before_process(
@@ -3118,7 +3123,8 @@ def test_kali_job_start_uses_shared_identity_header_and_oob_preparation(
 def test_kali_job_start_applies_scope_policy_before_spawning(monkeypatch, fake_engagement):
     mod = _import("assess.commands.kali_job")
     (fake_engagement / "scope.json").write_text(
-        json.dumps({"hosts": ["allowed.example"]}), encoding="utf-8"
+        json.dumps({"hosts": ["allowed.example"], "denied_tools": ["nuclei"]}),
+        encoding="utf-8",
     )
     monkeypatch.setattr(
         mod,
@@ -3152,7 +3158,7 @@ def test_kali_job_start_applies_scope_policy_before_spawning(monkeypatch, fake_e
         parent_command_run_id=None,
     )
 
-    with pytest.raises(mod.AssessError, match="outside engagement scope.*evil.example"):
+    with pytest.raises(mod.AssessError, match="tool 'nuclei'.*denied"):
         mod._run_start(args)
 
     assert len(refusals) == 1
@@ -3186,49 +3192,6 @@ def test_kali_job_start_rejects_caller_owned_parent_command_run(
 
     with pytest.raises(mod.AssessError, match="system-owned"):
         mod._run_start(args)
-
-
-def test_kali_job_start_records_global_bypass_in_job_audit_metadata(
-    monkeypatch, fake_engagement
-):
-    mod = _import("assess.commands.kali_job")
-    (fake_engagement / "scope.json").write_text(
-        json.dumps({"hosts": ["allowed.example"], "scope_enforcement": "bypass"}),
-        encoding="utf-8",
-    )
-    cfg = SimpleNamespace(
-        base_url="http://127.0.0.1:18000",
-        engagement_dir=str(fake_engagement),
-        engagement_key=fake_engagement.name,
-    )
-    monkeypatch.setattr(mod, "_load_job_config", lambda _args: cfg)
-    captured = {}
-
-    def fake_start_job(cmd, *, audit_meta, **kwargs):
-        captured["audit_meta"] = dict(audit_meta)
-        return {"id": 9, "status": "running"}
-
-    monkeypatch.setattr(mod, "start_job", fake_start_job)
-    args = SimpleNamespace(
-        technique="RECON",
-        intent="background sweep",
-        probe_kind="fingerprint",
-        phase="recon",
-        timeout=60,
-        destructive=False,
-        agent_name="recon-specialist",
-        target_host="evil.example",
-        engagement_dir=str(fake_engagement),
-        command=["nuclei", "-u", "https://evil.example"],
-        container_name="vigil",
-        parent_command_run_id=None,
-    )
-
-    mod._run_start(args)
-
-    assert captured["audit_meta"]["scope_enforcement"] == "bypass"
-    assert captured["audit_meta"]["scope_bypassed"] is True
-    assert captured["audit_meta"]["checked_targets"] == ["evil.example"]
 
 
 def test_kali_job_start_declares_effective_aggregate_rate(monkeypatch, fake_engagement):
@@ -3289,11 +3252,7 @@ def test_kali_job_start_derives_inner_shell_tool_for_policy(monkeypatch, fake_en
 
     def enforce(command, *, tool_name, **kwargs):
         observed["tool_name"] = tool_name
-        return {
-            "scope_enforcement": "enforce",
-            "scope_bypassed": False,
-            "checked_targets": [],
-        }
+        return {"target_facing": False}
 
     monkeypatch.setattr(mod.scope_lib, "enforce_execution_policy", enforce)
     monkeypatch.setattr(
@@ -5762,19 +5721,19 @@ def test_kali_identity_shell_wrapper_injects_and_stamps(monkeypatch, fake_engage
 def test_prepared_auth_context_is_opt_in_and_never_accepts_anonymous(fake_engagement):
     kali = importlib.import_module("assess.lib.kali")
     cmd = ["node", "/opt/vigil/browser_driver.js"]
-    context, gap = kali.prepare_execution_command(
+    context = kali.prepare_execution_command(
         cmd,
         tool_name="browser",
         engagement_dir=fake_engagement,
         prepared_auth_context="member",
     )
-    assert (context, gap) == ("member", "")
+    assert context == "member"
     assert kali.prepare_execution_command(
         list(cmd),
         tool_name="browser",
         engagement_dir=fake_engagement,
         prepared_auth_context="anonymous",
-    )[0] == "anonymous"
+    ) == "anonymous"
 
 
 def test_probe_emit_shell_wrapped_curl_parses_inner_url(monkeypatch, fake_engagement):

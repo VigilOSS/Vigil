@@ -128,6 +128,25 @@ def _host_row(host: str, *, waf: bool = False) -> dict:
     }
 
 
+def test_dispatch_host_lanes_resolve_concrete_application_units():
+    dispatches = [
+        {
+            "agent_id": "va-1",
+            "agent_role": "vulnerability-analyst",
+            "application_unit_id": 7,
+        },
+        {
+            "agent_id": "va-unattributed",
+            "agent_role": "vulnerability-analyst",
+            "application_unit_id": None,
+        },
+    ]
+    units = [{"id": 7, "host": "app.example.com", "path_prefix": "/api"}]
+    assert cc.dispatched_hosts_from_rows(dispatches, units) == {
+        "app.example.com": ["vulnerability-analyst"]
+    }
+
+
 # --------------------------------------------------------------------------- #
 # load_route_stats_by_host
 # --------------------------------------------------------------------------- #
@@ -415,6 +434,8 @@ class FakeClient:
         self.calls.append(endpoint)
         if endpoint == "coverage-readiness/by-host":
             return self._per_host_payload
+        if endpoint == "application-units":
+            return []
         raise AssertionError(f"unexpected endpoint {endpoint}")
 
     def list_dispatches(self, **filters):

@@ -30,7 +30,7 @@ You are a batch agent — you consume the full engagement state and produce a si
 - `agent/references/submission-format.md` — default per-finding submission mode (bugcrowd/hackerone/direct). Author each section against it and pass its pre-submission checklist — the same reference covers all three platforms (`--platform direct` is the Bugcrowd-style structure with VRT/H1-only fields dropped). Run `vigil assess export submission <slug> --platform <p> --draft` first; it renders `submission.md` FROM the finding's own fields and consolidates everything you author the body FROM into ONE "OPERATOR DETAILS — NOT FOR SUBMISSION" reference section — so there is nothing else to load before that call. See "Per-Finding Dispatch" below for the lighter context load this mode uses instead of the full mandatory set.
 - `agent/references/disclosure-email-format.md` — email disclosure mode: a separate output (`disclosure.txt`, not `export submission`'s `submission.md`) for a vendor/CERT audience.
 - `agent/references/reply-format.md` — reply mode: operator dispatches a reply to a program/company on an already-submitted finding (typically after `submission_status=needs_info`, but also to push new proof to any open submission). Use the same lighter "Per-Finding Dispatch" context load as submission mode plus `vigil assess fetch findings/<slug>` (carries `details.replies`, `submission_status`, and the finding's proof). See "Reply mode" under Operating Modes and the reply closing verbs under Mandatory Closing Sequence.
-- **Blue Incident Mode bundle** — if the dispatch task, `scope.json:engagement_type`, or template path
+- **Blue Incident Mode bundle** — if the dispatch mode or template path
   says this is a blue/incident-response report, load these INSTEAD of the red-only set above:
   `agent/shared-constraints-blue.md`, `agent/rules/triage.md`, `agent/rules/ir-evidence.md`,
   `agent/skills/report-generation/SKILL.md`, `agent/skills/report-generation/templates/blue.md`. For
@@ -277,7 +277,7 @@ Same closing-sequence wrapper as submission mode (see above).
 1. Write `report.md` with the structure below.
 2. Run the consolidated pre-submission / report QA checklist (`agent/skills/report-generation/SKILL.md` "Post-Generation Self-Review" → `agent/references/submission-format.md`).
 3. In review-and-fix QA mode, run the QA checklist and fix report-local issues.
-4. In publish mode, emit `report.generated`, mark included findings `reported`, update `scope.json` phase to `complete`.
+4. In publish mode, emit `report.generated`, mark included findings `reported`, and let the operator complete the guarded phase transition.
 5. `vigil assess agent handoff --from-json <path>` — working artifact `report.md`; extras `qa_status`, `findings_in_report`.
 6. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 

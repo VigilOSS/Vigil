@@ -6,8 +6,11 @@ read-modify-write management helpers, and the argparse end-to-end dry-run path.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -172,6 +175,35 @@ def test_add_and_remove_oos_roundtrip(tmp_path):
     assert merged == ["a.t.com", "*.m.t.com"]
     assert json.loads((eng / "scope.json").read_text())["out_of_scope"] == ["a.t.com", "*.m.t.com"]
     assert remove_out_of_scope(tmp_path, "eng1", "a.t.com") == ["*.m.t.com"]
+
+
+def test_scope_management_waits_for_shared_scope_json_lock(tmp_path):
+    from vigil_cli.engagements import set_engagement_header
+
+    eng = _make_engagement(tmp_path)
+    lock_path = eng / ".locks" / "scope-json.lock"
+    lock_path.parent.mkdir(parents=True)
+    entered = threading.Event()
+    completed = threading.Event()
+
+    def write_header():
+        entered.set()
+        set_engagement_header(tmp_path, "eng1", "X-Test: value")
+        completed.set()
+
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        writer = threading.Thread(target=write_header)
+        writer.start()
+        assert entered.wait(timeout=2)
+        time.sleep(0.05)
+        assert not completed.is_set()
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    writer.join(timeout=2)
+    assert completed.is_set()
+    updated = json.loads((eng / "scope.json").read_text())
+    assert updated["required_headers"] == {"X-Test": "value"}
 
 
 def test_management_rejects_non_http_engagement(tmp_path):

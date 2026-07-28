@@ -40,7 +40,7 @@ the rendered DOM + the captured origin status reflect the **real** application.
 - `--page-timeout <s>` — per-page load + explicit-wait timeout in seconds (default `30`).
 - `--settle <s>` — extra settle wait after load when no `--wait-selector` is given (default `2`).
 - `--attribution-scope all|document-origin` — `all` preserves the historical global
-  header behavior; `document-origin` applies program attribution to admitted document
+  header behavior; `document-origin` applies program attribution to the top-level document's
   navigations and their same-origin requests, preventing cross-origin CORS preflight failures.
 - `--steps-file <json>` — up to 50 typed `navigate`, `click`, `fill`, `wait`, `eval`, or
   `assert` steps. Unknown actions/fields, non-HTTP navigation, and excessive timeouts fail
@@ -53,11 +53,11 @@ the rendered DOM + the captured origin status reflect the **real** application.
 - `--capture-bodies --body-dir <path> --max-body-bytes <n>` — opt-in bounded capture of
   document/XHR/fetch response bodies.
 
-Required attribution routing is installed before the first navigation and fails closed.
-Every declared navigation goes through host-side target admission; click-driven/dynamic
-navigations remain guarded by the runtime scope/no-fire router. The global
-`scope_enforcement: bypass` setting is honored. Failed steps write owned screenshot/DOM
-artifacts and return non-zero rather than being mistaken for completed coverage.
+Required attribution routing is installed before the first navigation when matching metadata is
+available. Missing or inapplicable attribution metadata does not refuse the browser run. Scope and
+path metadata never abort a navigation; the specialist owns the engagement boundary in
+`agent/shared-constraints.md` §1. Failed typed steps still write owned screenshot/DOM artifacts and
+return non-zero rather than being mistaken for completed coverage.
 
 ## Invocation
 

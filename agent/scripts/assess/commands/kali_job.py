@@ -14,18 +14,18 @@ from __future__ import annotations
 import json
 import sys
 import uuid
-
 from pathlib import Path
 
+from assess.lib import scope as scope_lib
+from assess.lib.audit_enums import normalize_technique
 from assess.lib.client import AssessError, default_runtime_container
 from assess.lib.config import load_config
-from assess.lib.audit_enums import normalize_technique
 from assess.lib.kali import (
+    _INTENT_MAX_LEN,
     ALLOWED_PHASES,
     PROBE_KIND_ENUM,
     TECHNIQUE_ENUM,
     ScopedErrorParser,
-    _INTENT_MAX_LEN,
     _audit_execution_policy_refusal,
     _resolve_agent_name,
     _scope_version,
@@ -33,11 +33,16 @@ from assess.lib.kali import (
     prepare_execution_command,
 )
 from assess.lib.kali_audit import _enum_reject_message
-from assess.lib.kali_jobs import job_list, job_status, job_stop, job_tail, reap_jobs, start_job
-from assess.lib.rate_leases import aggregate_rate_reservation
+from assess.lib.kali_jobs import (
+    job_list,
+    job_status,
+    job_stop,
+    job_tail,
+    reap_jobs,
+    start_job,
+)
 from assess.lib.kali_tool_naming import _derive_tool_name
-from assess.lib import scope as scope_lib
-
+from assess.lib.rate_leases import aggregate_rate_reservation
 
 _DEFAULT_JOB_TIMEOUT_SECONDS = 24 * 60 * 60  # 24h hard cap parity with `kali exec` budgets
 
@@ -209,7 +214,7 @@ def _run_start(args) -> None:
             "--parent-command-run-id is system-owned for async jobs and cannot be supplied"
         )
     try:
-        auth_context, attribution_gap = prepare_execution_command(
+        auth_context = prepare_execution_command(
             command,
             tool_name=derived_tool_name,
             engagement_dir=engagement_dir,
@@ -217,14 +222,10 @@ def _run_start(args) -> None:
             identity_scope=getattr(args, "identity_scope", "") or "",
             prepared_auth_context=getattr(args, "prepared_auth_context", None),
         )
-        if attribution_gap:
-            raise scope_lib.ScopePolicyError(attribution_gap)
         execution_policy = scope_lib.enforce_execution_policy(
             command,
             tool_name=derived_tool_name,
             engagement_dir=engagement_dir,
-            engagement_key=cfg.engagement_key,
-            explicit_targets=([args.target_host] if args.target_host else []),
         )
     except scope_lib.ScopePolicyError as exc:
         run_uuid = uuid.uuid4().hex

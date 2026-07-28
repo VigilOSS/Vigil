@@ -15,7 +15,7 @@ origin: Vigil
 - **Phase 1a (first-class) when scope.json `hosts` contains `*.domain` entries** — the **operator** runs the spine as the `vigil assess recon` job before the 1b recon+source pass; a specialist loads this skill to **assess** that job's output (bound rules, stop reasons, completeness) and recommend re-runs, not to execute the phases itself.
 - After finding references to subdomains in JS/HTML source code.
 
-> **Register out-of-scope carve-outs in `scope.json` `out_of_scope` before enumerating.** Wildcard expansion surfaces hosts the program excluded (telecom-PTR space, vendor apexes, carved-out subdomains). The `vigil assess recon` pipeline scope-filters the resolved set between the dns and web stages, so authoring the deny-list up front keeps bulk liveness/crawl off out-of-scope hosts. A carve-out added mid-run only applies on the next `--resume`.
+> **Register out-of-scope carve-outs in `scope.json` `out_of_scope` before enumerating.** Wildcard expansion surfaces hosts the program excluded (telecom-PTR space, vendor apexes, carved-out subdomains). The `vigil assess recon` pipeline scope-filters the resolved set between the dns and web stages, merges confirmed admitted wildcard children into the derived `discovered_hosts` inventory, then sends only the admitted set to bulk liveness/crawl. A carve-out added mid-run only applies on the next `--resume`.
 
 ## Tooling preflight
 
