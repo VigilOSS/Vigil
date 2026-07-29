@@ -89,14 +89,14 @@ Output: prioritized findings (HIGH/MEDIUM/LOW), test commands, FUZZER_NEEDED sig
 2. Queue live findings for Phase 5 Verify, not exploitation. Verification decides which findings become confirmed, downgraded, killed, or chain-required before exploit work is spent.
 3. When a finding is real only as part of a chain, keep it in the normal finding table and set `details.chain_required`, `details.chain_rationale`, and `details.required_followup` via `finding record`'s JSON payload or `vigil assess finding update <slug> --details-inline '{"chain_required": true, "chain_rationale": "...", "required_followup": ["..."]}'`
 4. FUZZER_NEEDED → dispatch fuzzer within Phase 4 — **bring `agent/skills/parameter-fuzzing/SKILL.md` or `agent/skills/directory-fuzzing/SKILL.md`**, feed results back through vuln-analyst
-5. Mark work-buffer batch done: `vigil assess work-buffer "$DB" done "id1,id2,..."`
+5. Mark work-buffer batch done: `vigil assess work-buffer done 101 102 103`
 6. Continue the Phase 4 consumption loop (steps b–f in `agent/phases/phase-4-consume-test.md`)
 
 ### FUZZER
 
 Output: discovered paths, valid parameters, anomalous responses, confirmed findings
 
-1. New paths/endpoints → ingest into backend coverage state via `vigil assess ingest endpoints`
+1. New paths/endpoints → ingest into backend coverage state via `vigil assess ingest endpoints <source>`
 2. Anomalous responses → dispatch vuln-analyst for analysis within Phase 4
 3. Confirmed findings (e.g., valid credentials) → durable findings directly via `vigil assess finding record`
 
@@ -138,7 +138,7 @@ Output: backend intel-table updates via `intel record` (technology, CVE, breach,
 1. Read Intelligence Assessment section
 2. HIGH-value CVE + PoC match → record via `vigil assess intel record cve <json-file>` and dispatch exploit-developer to **validate** against the live target — **name the matching skill (discoverable via `vigil assess list-skills`) so the operator includes it in the dispatch**. Promote to a finding only after exploit-developer confirms exploitability — version-only CVE matches are intel, not findings, because backported patches and disabled modules routinely invalidate version-only matches.
 3. Breached credentials with target-specific proof → record finding + credential via `vigil assess post credentials` + dispatch exploit-developer to test access
-4. Historical endpoints → ingest into backend coverage state via `vigil assess ingest endpoints`
+4. Historical endpoints → ingest into backend coverage state via `vigil assess ingest endpoints <source>`
 5. MEDIUM/LOW intel without target proof → keep in backend intel tables via `intel record` only — do not promote to findings
 
 ## Phase 8 (REPORT)

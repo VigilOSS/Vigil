@@ -57,10 +57,10 @@ Each iteration:
     vigil assess work-buffer fetch-by-priority 10 source-analyzer-2
 
 4. On subagent return:
-   - Done: vigil assess work-buffer done "id1,id2,..."
+   - Done: vigil assess work-buffer done 101 102 103
    - New endpoints: feed them back through `vigil assess ingest endpoints <source>` or `vigil assess ingest spec <spec-file>` — those paths run inline classification so the new rows enter the priority queue with scores immediately
    - Findings: write structured finding state with `vigil assess finding record`
-   - Errors: vigil assess work-buffer error "id1,id2,..."
+   - Errors: vigil assess work-buffer error 101 102 103
 5. pending=0 and producers stopped → report completion
 6. Otherwise → loop back to step 1
 ```
@@ -206,8 +206,8 @@ Selection is by `--cluster` (the work buffer's `cluster_key`) or `--queue-key`; 
 ```bash
 vigil assess work-buffer stats
 vigil assess work-buffer fetch <type> <limit> <agent_name>
-vigil assess work-buffer done "id1,id2,id3"
-vigil assess work-buffer error "id1,id2,id3"
+vigil assess work-buffer done 101 102 103
+vigil assess work-buffer error 101 102 103
 vigil assess work-buffer reset-stale <minutes>
 echo '{"url":"...","method":"GET","type":"api","auth_context":"anonymous"}' | vigil assess work-buffer requeue
 echo '{"url":"https://target.example/api/search","method":"GET","type":"api","auth_context":"anonymous","request_variant_id":42,"coverage_item_id":77,"queue_key":"variant:42:api"}' | vigil assess work-buffer requeue

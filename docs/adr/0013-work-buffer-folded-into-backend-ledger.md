@@ -2,6 +2,9 @@
 
 - Status: Accepted
 - Date: 2026-07-08
+- Update: The transitional legacy-buffer migrator described in the original
+  decision was retired in the 2026-07 CLI consolidation. Current CLI and prompt
+  surfaces accept only backend-backed commands with no local database path.
 
 ## Context
 
@@ -74,33 +77,26 @@ transaction as the observation/coverage-item write it already performs — no du
    `link-surface-work-items`, `arjun-select`, `arjun-sweep`. The work-buffer `migrate` **action**
    (a schema-migration no-op left over from early SQLite-schema churn) is also removed — the
    backend owns its own schema via `init_db()`, so there is nothing left for a per-engagement
-   action to migrate. (This is unrelated to item 5's new top-level `migrate-work-buffer`
-   *command*, which does a different job — see below.)
+   action to migrate.
 4. **The proxy no longer writes SQLite.** `agent/scripts/proxy_addon.py` posts the request-observation
    to the backend exactly as every other producer does; the backend's server-side derivation
    (item 2) produces the `assessment_work_items` row from that POST. The addon's local-DB seam
    (`db_path = entry.root / "cases.db"`, the long-held-connection WAL-checkpoint caution, the
    `db_init()`/`db_insert_work_item()` calls) is removed.
-5. **A one-time migration preserves existing buffer data.** `vigil assess migrate-work-buffer`
-   (`agent/scripts/assess/commands/migrate_work_buffer.py`) opens each engagement's legacy
-   `cases.db` **READ-ONLY** — the single deliberate remaining reader of the file, via its own
-   `sqlite3` connection rather than the (retired) `assess.lib.db` helpers — and replays every
-   `work_items` row through the idempotent `work-items/bulk` UPSERT (keyed on
-   `(engagement_id, queue_key)`). It verifies the backend's post-migration row count matches the
-   source count and only THEN archives the source by **renaming** it to `cases.db.migrated` (never
-   deletes). `--dry-run` counts without writing or archiving; `--all` sweeps every engagement under
-   the engagements root; `--keep-source` skips the archive step after a verified migration. A count
-   mismatch aborts the archive and leaves the source untouched for review. Re-running is a no-op
-   (the UPSERT key makes replays idempotent, and an already-archived file drops out of the
-   `*/cases.db` glob).
+5. **The cutover used a one-time verified migration.** During the ADR 0013
+   rollout, a transitional reader replayed legacy `work_items` rows through
+   the idempotent `work-items/bulk` UPSERT, verified the backend count, and
+   archived rather than deleted the source. That reader and its CLI command
+   were removed after the cutover; current operators do not supply or migrate
+   a local work-buffer file.
 6. **`cases.db` / `agent/scripts/schema.sql` / the proxy-local-SQLite path are retired.** The
    local-DB helpers in `agent/scripts/assess/lib/db.py` that existed solely to create, migrate, and
    write a per-engagement `cases.db` (`db_init`, `_apply_work_items_per_host_view`,
    `_apply_work_items_priority_migration`, `db_insert_work_item`,
    `db_insert_out_of_scope_work_item`) and the `_init_cases_db` bootstrap seam in
-   `src/vigil_cli/engagements.py` go with the file they served. `migrate-work-buffer` (item 5) does
-   not import any of this — it is the one remaining reader, and it talks to the raw legacy file
-   directly.
+   `src/vigil_cli/engagements.py` go with the file they served. The
+   transitional reader in item 5 was later removed as part of the CLI
+   consolidation.
 7. **Previously-`cases.db`-only producers now route through the backend.** Before this decision,
    `ingest-arjun` wrote to the local file **only** (`docs/data-flow.md` §2 flagged it as "none —
    local `cases.db` only"), and out-of-scope/egress-skip rows were local-only terminal states. Both
@@ -119,9 +115,10 @@ transaction as the observation/coverage-item write it already performs — no du
 - **HTTP-only callers can now participate.** A dispatched subagent or any caller with only an
   `AssessmentClient` — no local filesystem handle to the engagement directory — can read and write
   the work buffer directly, which was previously impossible without a local file.
-- **No backfill loss.** `migrate-work-buffer`'s verified-count-then-archive-never-delete design means
-  an in-progress engagement's existing triage state survives the cutover; an operator resuming an
-  in-flight engagement runs it once before continuing to dispatch off the work buffer.
+- **No cutover backfill loss.** The transitional migration's
+  verified-count-then-archive-never-delete design preserved in-progress
+  triage state while ADR 0013 rolled out. That migration path is no longer a
+  current operator action.
 - **Classification logic is untouched.** `classify_buckets.py`'s taxonomy, weights, and
   `INERT_TYPES` are unaffected — this decision is purely about where the derived row lands, not
   what computes it.
@@ -163,7 +160,8 @@ transaction as the observation/coverage-item write it already performs — no du
   `agent/scripts/assess/commands/work_buffer.py` + `dispatch/work_items.py`,
   `ingest_endpoints.py`, `ingest_candidates.py`, `ingest_spec.py`, `ingest_arjun.py`,
   `classify_work.py`, `list_clusters.py`, `link_surface_work_items.py`, `arjun_select.py`,
-  `arjun_sweep.py`, and the one-time `migrate_work_buffer.py`. Retired:
+  `arjun_sweep.py`. Retired:
   `agent/scripts/schema.sql`, the local-DB seam in `agent/scripts/assess/lib/db.py`,
   `src/vigil_cli/engagements.py`'s `_init_cases_db`, and the local-write path in
-  `agent/scripts/proxy_addon.py`.
+  `agent/scripts/proxy_addon.py`, plus the transitional migration command used
+  during the ADR 0013 cutover.
