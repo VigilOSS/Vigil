@@ -262,7 +262,7 @@ finding:
 
 ```bash
 vigil assess finding link <finding-slug> --intel <intel-id> \
-  --note "IP <ip> recorded as DNS record intel; reputation supports adversarial classification"
+  --reason "IP <ip> recorded as DNS record intel; reputation supports adversarial classification"
 ```
 
 `--intel` may be repeated to attach multiple intel ids in one call.

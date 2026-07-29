@@ -93,7 +93,7 @@ Prefer Arjun through the audited verb so the run is recorded AND its findings fl
 ```bash
 # (a) GATE the target list from the buffer (live + dynamic + template-deduped + param-poor).
 #     On an engagement with no liveness ledger, add --include-unknown.
-vigil assess arjun-select "$DB" -o "$DIR/scans/arjun/targets.txt" --param-poor-only --max-per-host 5
+vigil assess arjun-select -o "$DIR/scans/arjun/targets.txt" --param-poor-only --max-per-host 5
 
 # (b) BOUNDED first pass — arjun-select wrote a per-method list (targets.txt.GET / .POST / .JSON /
 #     .XML); `kali arjun -i` takes ONE global -m, so run one bounded pass per method-list present so
@@ -120,10 +120,12 @@ vigil assess kali arjun -u "https://TARGET/high-value" --passive --stable --rate
 
 # (d) FOLD findings back in — discovered params re-route the endpoint (file=->gf:lfi, url=->gf:ssrf,
 #     id=->gf:sqli/idor) and stamp a triage_rationale that names `kali sqlmap` for DB-class params:
-vigil assess ingest arjun "$DB" /engagements/$ENGAGEMENT_KEY/scans/arjun/<target>/<hash>.json
+vigil assess ingest arjun /engagements/$ENGAGEMENT_KEY/scans/arjun/<target>/<hash>.json
 ```
 
-Use raw `arjun -u …` only for a one-off manual check; the verb path is what feeds Phase 4. Full reference: `agent/references/tools/recon/arjun.md`.
+Use `vigil assess kali arjun -u …` only for a one-off manual check; the audited
+verb path is what feeds Phase 4. Full reference:
+`agent/references/tools/recon/arjun.md`.
 
 ### 9. Historical Parameter Mining
 ```bash

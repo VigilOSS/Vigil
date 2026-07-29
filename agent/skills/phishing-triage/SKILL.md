@@ -707,7 +707,7 @@ Run these four steps in order before returning the handoff JSON:
 
    ```bash
    vigil assess finding link <finding-slug> --intel <intel-id> \
-     --note "URL <url> recorded as adversarial via urlscan + VT"
+     --reason "URL <url> recorded as adversarial via urlscan + VT"
    ```
 
    Repeat `--intel <intel-id>` in one invocation to attach several rows.
