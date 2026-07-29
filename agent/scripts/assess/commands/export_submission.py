@@ -76,6 +76,21 @@ context JSON), for the report-writer to author Evidence FROM. Linked runs are
 sourced ONLY from explicit ``finding-links`` (``target_kind="command_run"``) —
 never a fuzzy command search.
 
+THE REPRODUCTION IS TRANSCRIBED, NOT INFERRED. ``details.repro_runs`` names the
+command runs that actually produced ``details.steps_to_reproduce``, in step order,
+and this command fetches each row and renders its REAL argv under OPERATOR DETAILS.
+That is the difference between a reproduction and a plausible narrative: a reader
+can diff every claimed step against the audit row behind it. The runs are a
+separate block from the linked-evidence runs above because they answer a different
+question — "what proves the finding" versus "what reproduces it" — and a finding
+routinely has one without the other. Nothing here GATES: authored steps with no
+``repro_runs`` behind them, and declared ids that do not resolve, are both reported
+as (non-blocking) ``advisories``. A run fetch can fail for reasons that say nothing
+about the finding — a transient backend error resolves to the same signal as a
+fabricated id — so refusing on it would let infrastructure block the publish of a
+correct, verified finding. The unresolved ids are named in the render, on stderr,
+and in the context JSON (``repro_runs_unresolved``); the report-writer decides.
+
 The generated ``submission.md`` is registered as a finding-linked artifact
 (``kind="submission"``); the finding's ``submission_status`` is never written
 (omitting the field preserves it).
@@ -525,6 +540,68 @@ def _linked_command_runs(client, slug: str) -> list[dict]:
     return runs
 
 
+def _repro_runs(client, finding: dict) -> tuple[list[dict], list[str]]:
+    """The command runs the finding DECLARES as its reproduction, in step order.
+
+    Sourced from ``details.repro_runs`` — an ordered array of command-run ids the
+    recording agent wrote while running the reproduction. Kept separate from
+    :func:`_linked_command_runs` (explicit ``finding-links``) because the two make
+    different claims: a linked run is evidence the finding is real, a repro run is
+    the audit row behind one authored step. A finding commonly has one and not the
+    other, and collapsing them would let evidence links masquerade as a verified
+    reproduction.
+
+    Returns ``(rows, unresolved)``. ``unresolved`` names every declared entry that
+    is malformed or fetches no run — a claim about what was executed that the audit
+    log does not support. The caller ADVISES on it rather than refusing: this
+    function cannot tell a fabricated id from a run row that is momentarily
+    unreachable, and treating the second as the first would let a backend hiccup
+    block the publish of a finished finding.
+
+    BOTH lists stay in the author's declared order, deduped. Parsing and fetching
+    happen in ONE pass for exactly that reason: splitting them would group every
+    malformed entry ahead of every failed fetch, and a reader lining the unresolved
+    ids up against the steps they belong to would be reading the wrong step.
+    """
+    declared = detail_value(finding, "repro_runs", [])
+    if not isinstance(declared, list):
+        # A non-list here is a schema violation that ``finding record`` /
+        # ``finding update`` already reject; treat it as an unusable claim rather
+        # than silently rendering nothing.
+        return [], [f"{declared!r} (details.repro_runs must be an array of run ids)"]
+
+    runs: list[dict] = []
+    unresolved: list[str] = []
+    seen: set[int] = set()
+    for entry in declared:
+        run_id: int | None = None
+        if isinstance(entry, bool):
+            run_id = None
+        elif isinstance(entry, int):
+            run_id = entry
+        elif isinstance(entry, str) and entry.strip().isdigit():
+            run_id = int(entry.strip())
+        if run_id is None:
+            unresolved.append(f"{entry!r} (not a command-run id)")
+            continue
+        if run_id in seen:
+            continue
+        seen.add(run_id)
+        try:
+            row = client.get(f"command-runs/{run_id}")
+        except AssessError as exc:
+            # Carry the backend's own reason rather than asserting "no such run":
+            # a 404 and a transient failure are different problems, and naming the
+            # wrong one sends the report-writer to edit a finding that is correct.
+            unresolved.append(f"{run_id} (does not resolve: {exc})")
+            continue
+        if isinstance(row, dict):
+            runs.append(row)
+        else:
+            unresolved.append(f"{run_id} (unexpected response shape)")
+    return runs, unresolved
+
+
 def _section(title: str, body: list[str]) -> list[str]:
     """A stable ``### `` body section (copy-paste block)."""
     return [f"### {title}", "", *body, ""]
@@ -655,10 +732,37 @@ def _notes_reference_lines(finding: dict) -> list[str]:
     return ["**Investigation notes** (working record — mine for detail, do not paste verbatim):", "", notes, ""]
 
 
+def _command_run_lines(rows: list[dict], header_label: str) -> list[str]:
+    """One ``- **<label>**`` bullet per run, with the row's real command fenced.
+
+    Shared by the linked-evidence and reproduction blocks so the two render
+    identically — the same audit row must not look like two different things
+    depending on which claim cited it.
+    """
+    lines: list[str] = []
+    for row in rows:
+        command = _nonempty(row.get("command"))
+        intent = _nonempty(row.get("intent"))
+        rc = row.get("return_code")
+        rc_str = "" if rc is None else f" (rc={rc})"
+        header = f"- **{header_label}{rc_str}**" + (f" — {intent}" if intent else "") + ":"
+        if not command:
+            # The operator cited this run deliberately, so it is listed even with
+            # no command string: dropping the row hides a citation they made,
+            # while naming it as empty tells them the citation needs fixing.
+            lines += [f"{header} (no command recorded on this run)", ""]
+            continue
+        fence = _fence_for(command)
+        lines += [header, f"{fence}\n{command}\n{fence}", ""]
+    return lines
+
+
 def _operator_details_block(
     finding: dict,
     resolved: dict,
     linked_runs: list[dict],
+    repro_runs: list[dict],
+    repro_unresolved: list[str],
     hygiene_warnings: list[str],
     advisories: list[str],
     draft: bool,
@@ -730,20 +834,36 @@ def _operator_details_block(
             "`vigil assess command-run list` to find more):",
             "",
         ]
-        for row in linked_runs:
-            command = _nonempty(row.get("command"))
-            intent = _nonempty(row.get("intent"))
-            rc = row.get("return_code")
-            rc_str = "" if rc is None else f" (rc={rc})"
-            header = f"- **Run{rc_str}**" + (f" — {intent}" if intent else "") + ":"
-            if not command:
-                # The operator linked this run deliberately, so it is listed even
-                # with no command string: dropping the row hides a link they made,
-                # while naming it as empty tells them the link needs fixing.
-                lines += [f"{header} (no command recorded on this run)", ""]
-                continue
-            fence = _fence_for(command)
-            lines += [header, f"{fence}\n{command}\n{fence}", ""]
+        lines += _command_run_lines(linked_runs, "Run")
+
+    # The reproduction's own audit trail, in the author's declared step order. It
+    # is the check on Steps to Reproduce: transcribe the argv below rather than
+    # paraphrasing the step, and a step with no run under it was never executed.
+    if repro_runs or repro_unresolved:
+        lines += [
+            "**Reproduction runs** (`details.repro_runs`, in step order — the argv "
+            "that actually produced Steps to Reproduce; transcribe from these, do "
+            "not paraphrase):",
+            "",
+        ]
+        lines += _command_run_lines(repro_runs, "Step run")
+        # Named here, where the missing argv would have been, rather than only in
+        # the advisories block — the report-writer is reading this section to
+        # transcribe a step, and needs to see that one of them has nothing under it.
+        for entry in repro_unresolved:
+            lines += [
+                f"- **Unresolved** — `details.repro_runs` cites {entry}. No audit "
+                "row stands behind the step attributed to it; correct the id at the "
+                "finding rather than writing that step from the prose.",
+                "",
+            ]
+    elif resolved["steps"] and draft:
+        lines += [
+            "[NEEDS: details.repro_runs — the command-run ids behind these steps "
+            "(`vigil assess command-run list --q \"<url/param/payload>\"`), so the "
+            "reproduction can be diffed against what was actually executed]",
+            "",
+        ]
 
     # Freeform investigation notes go last — the largest reference block.
     lines += _notes_reference_lines(finding)
@@ -799,6 +919,8 @@ def _render_markdown(
     resolved: dict,
     platform: str,
     linked_runs: list[dict],
+    repro_runs: list[dict],
+    repro_unresolved: list[str],
     draft: bool,
     hygiene_warnings: list[str],
     required_headers: dict[str, str],
@@ -850,7 +972,14 @@ def _render_markdown(
     # --- single OPERATOR DETAILS reference section below the second divider --
     # (never pasted; the report-writer authors the body sections FROM it).
     lines += _operator_details_block(
-        finding, resolved, linked_runs, hygiene_warnings, advisories, draft
+        finding,
+        resolved,
+        linked_runs,
+        repro_runs,
+        repro_unresolved,
+        hygiene_warnings,
+        advisories,
+        draft,
     )
 
     text = "\n".join(lines).rstrip()
@@ -863,6 +992,8 @@ def _build_context(
     draft: bool,
     resolved: dict,
     linked_runs: list[dict],
+    repro_runs: list[dict],
+    repro_unresolved: list[str],
     submission_rel: str,
     hygiene_warnings: list[str],
     readiness_blockers: list[dict],
@@ -899,6 +1030,12 @@ def _build_context(
         # everything the backend knows about the run it is writing Evidence from,
         # so any projection here would decide for it which fields are proof.
         "linked_command_runs": list(linked_runs),
+        # The audit trail behind Steps to Reproduce, in the author's declared step
+        # order, whole rows for the same reason as above. ``repro_runs_unresolved``
+        # names declared ids that fetched nothing — a claimed step with no run
+        # behind it. Reported, never gated on (see ``_repro_runs``).
+        "repro_runs": list(repro_runs),
+        "repro_runs_unresolved": list(repro_unresolved),
         "hygiene_warnings": hygiene_warnings,
         "advisories": advisories,
         "readiness_blockers": readiness_blockers,
@@ -966,7 +1103,11 @@ def run(args) -> None:
             raise AssessError(f"export submission: unexpected response fetching finding {slug!r}")
 
         linked_runs = _linked_command_runs(client, slug)
-        internal_ids = _internal_ids(finding, linked_runs)
+        repro_runs, repro_unresolved = _repro_runs(client, finding)
+        # Repro-run rows carry the same class of backend-assigned UUIDs as linked
+        # runs, so they feed the same hygiene scan — a run id that leaked into the
+        # pasteable body must be flagged regardless of which claim cited the run.
+        internal_ids = _internal_ids(finding, [*linked_runs, *repro_runs])
         durable_evidence = _durable_evidence(
             client,
             finding,
@@ -986,7 +1127,9 @@ def run(args) -> None:
 
         # Final mode refuses to write an incomplete submission.
         # Raised BEFORE any file write or artifact POST — a gated finding leaves
-        # no partial artifacts behind.
+        # no partial artifacts behind. Repro-run state is deliberately NOT part of
+        # this gate: see ``_repro_runs`` — an unreachable run row and a fabricated
+        # id are indistinguishable here, so both are advised on below.
         if not draft and (resolved["missing"] or readiness_blockers or readiness_error):
             blockers = [
                 f"{item.get('kind', 'readiness')}: {item.get('detail', '')}".rstrip(": ")
@@ -1015,6 +1158,8 @@ def run(args) -> None:
             resolved,
             platform,
             linked_runs,
+            repro_runs,
+            repro_unresolved,
             draft,
             [],
             required_headers,
@@ -1025,6 +1170,29 @@ def run(args) -> None:
         )
         # Prose advisories are surfaced, never gated on: only leaks fail closed.
         advisories = title_advisories(resolved["title"])
+        # Both repro-run conditions advise. Refusing on either would gate a publish
+        # on something that is not a fact about the document: an absent repro_runs
+        # is every finding recorded before the field existed, and an unresolved id
+        # can be a backend hiccup as easily as an invented run.
+        for entry in repro_unresolved:
+            advisories.append(
+                f"details.repro_runs cites {entry} — no audit row stands behind the "
+                "step attributed to it. Confirm the id with `vigil assess command-run "
+                "list` and correct it at the finding; do not write that step from the "
+                "prose."
+            )
+        # Authored steps with nothing behind them: the steps may well be right, but
+        # nobody can tell them apart from a reconstruction, and that ambiguity is
+        # what burns a triage round. Suppressed when ids WERE declared and failed —
+        # there the actionable message is "fix these ids", not "add some".
+        if resolved["steps"] and not repro_runs and not repro_unresolved:
+            advisories.append(
+                "steps_to_reproduce is authored but details.repro_runs is empty — no "
+                "command run stands behind these steps, so the reproduction cannot be "
+                "diffed against what was actually executed. Find the runs with "
+                '`vigil assess command-run list --q "<url/param/payload>"` and record '
+                "their ids in step order."
+            )
         if not draft and hygiene_warnings:
             raise AssessError(
                 f"export submission: cannot render a FINAL {platform} submission for {slug!r} "
@@ -1045,6 +1213,8 @@ def run(args) -> None:
             resolved,
             platform,
             linked_runs,
+            repro_runs,
+            repro_unresolved,
             draft,
             hygiene_warnings,
             required_headers,
@@ -1056,6 +1226,8 @@ def run(args) -> None:
             draft,
             resolved,
             linked_runs,
+            repro_runs,
+            repro_unresolved,
             submission_rel or str(submission_md),
             hygiene_warnings,
             readiness_blockers,
@@ -1146,6 +1318,8 @@ def run(args) -> None:
             "has_content_proof": resolved["has_content_proof"],
             "has_durable_proof": resolved["has_durable_proof"],
             "linked_command_runs": len(linked_runs),
+            "repro_runs": len(repro_runs),
+            "repro_runs_unresolved": repro_unresolved,
             "artifact_registered": artifact_registered,
             "hygiene_warnings": hygiene_warnings,
             "advisories": advisories,

@@ -30,7 +30,11 @@ renders each section FROM the finding's own fields — `summary` (Summary), `det
 `details.impact` (Impact), `remediation`/`details.remediation` (Remediation) — and consolidates the
 finding metadata, any hygiene warnings, the structured proof, and every linked command run into ONE
 "OPERATOR DETAILS — NOT FOR SUBMISSION" reference section below the second `---` (present in both
-draft and final, always below the never-paste line). You AUTHOR each section, then write it back to
+draft and final, always below the never-paste line). That reference section also carries
+**Reproduction runs** — the real argv of the command runs named in `details.repro_runs`, in step
+order — which is what you check Steps to Reproduce against: you EDIT the specialist's recorded
+steps, you never author them from nothing, because you cannot run probes and an assembled
+reproduction is a narrative rather than a transcript. You AUTHOR each section, then write it back to
 the finding with `vigil assess finding update <slug> --payload-file <path.json>` (the default write
 path — see `agent/skills/report-generation/SKILL.md` "Submission-First Closeout" step 3 for the
 payload shape; reserve `--details-inline` for a short value with nothing a shell would mangle), and
