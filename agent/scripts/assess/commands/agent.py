@@ -606,6 +606,10 @@ def _start(args) -> None:
                 f"agent_id: {row.get('agent_id')}",
                 f"agent_role: {row.get('agent_role')}",
                 "authorized_phase: <set-by-operator>",
+                "",
+                "## Next action",
+                "This command records the dispatch only; it does not spawn or launch the specialist.",
+                "Launch the specialist in your client and pass it the Runtime Identity block above.",
             ]
         )
     )

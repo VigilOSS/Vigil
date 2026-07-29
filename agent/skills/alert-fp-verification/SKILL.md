@@ -60,7 +60,7 @@ investigator's annotations are inputs, never trusted on their own.
   read its content (raw log JSON, timeline markdown, IOC dump). Always
   resolve evidence by artifact ID; never by local path. A local path is
   not citable across dispatches.
-- `vigil assess artifact search "<query>"` — locate corroborating
+- `vigil assess artifact search --q "<query>"` — locate corroborating
   artifacts in the engagement's artifact index — sibling pulls in the
   same actor's session, prior verifications of the same actor, change
   tickets, on-call calendar exports.

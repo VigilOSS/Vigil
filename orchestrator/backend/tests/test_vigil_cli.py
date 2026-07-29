@@ -6938,7 +6938,7 @@ def test_link_finding_intel_preserves_details_json_related_intel_ids(
             root_cause_slug=None,
             sibling_order=None,
             root_cause_effect="eliminates_finding",
-            note="link intel",
+                reason_text="link intel",
             source_name="operator",
             provenance_inline=None,
             clear_root_cause=False,
