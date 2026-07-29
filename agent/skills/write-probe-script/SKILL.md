@@ -280,7 +280,7 @@ vigil assess artifact register scripts/traversal_diff.py \
 ```
 
 The validated script is now an indexed artifact: discoverable via
-`vigil assess artifact search traversal`, replayable next engagement, and linked as
+`vigil assess artifact search --q traversal`, replayable next engagement, and linked as
 evidence on `LFI-001`.
 
 ## The iterate-and-validate loop

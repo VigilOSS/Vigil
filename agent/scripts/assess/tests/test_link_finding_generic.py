@@ -76,7 +76,7 @@ def test_generic_unblocked_by_posts_to_links(tmp_path, monkeypatch, capsys):
             "--link-kind", "unblocked_by",
             "--target-kind", "finding",
             "--target-ref", "VA-071",
-            "--note", "VA-071 yields the admin session",
+            "--reason", "VA-071 yields the admin session",
         ],
         str(tmp_path),
     )
@@ -93,6 +93,46 @@ def test_generic_unblocked_by_posts_to_links(tmp_path, monkeypatch, capsys):
     assert payload["notes"] == "VA-071 yields the admin session"
 
 
+def test_generic_link_uses_reason_as_the_only_relationship_explanation_flag(
+    tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        [
+            "link", "VA-070",
+            "--link-kind", "related",
+            "--target-kind", "finding",
+            "--target-ref", "VA-071",
+            "--reason", "Both findings exercise the same missing authorization check.",
+        ],
+        str(tmp_path),
+    )
+
+    link_finding.run(args)
+    capsys.readouterr()
+
+    assert fake.posts[0][1]["notes"] == (
+        "Both findings exercise the same missing authorization check."
+    )
+
+
+def test_generic_link_rejects_removed_note_flag_with_reason_guidance(capsys):
+    with pytest.raises(SystemExit) as exc:
+        _parser().parse_args(
+            [
+                "link", "VA-070",
+                "--link-kind", "related",
+                "--target-kind", "finding",
+                "--target-ref", "VA-071",
+                "--note", "old shape",
+            ]
+        )
+
+    assert exc.value.code == 2
+    assert "--reason" in capsys.readouterr().err
+
+
 def test_generic_unblocks_blocked_technique_posts_to_links(tmp_path, monkeypatch, capsys):
     """The finding-side unblock of a blocked TECHNIQUE: the unblocking finding is
     the link subject, target_kind=blocked_technique, target_ref=<technique_key>.
@@ -106,7 +146,7 @@ def test_generic_unblocks_blocked_technique_posts_to_links(tmp_path, monkeypatch
             "--link-kind", "unblocks",
             "--target-kind", "blocked_technique",
             "--target-ref", "bfla:host:api-example-com",
-            "--note", "org-admin account provisioned; role-grant endpoint now reachable",
+            "--reason", "org-admin account provisioned; role-grant endpoint now reachable",
         ],
         str(tmp_path),
     )
@@ -217,7 +257,7 @@ def test_generic_link_can_be_retargeted_by_id(
             "finding",
             "--target-ref",
             "VA-072",
-            "--note",
+            "--reason",
             "Corrected relationship.",
         ],
         str(tmp_path),

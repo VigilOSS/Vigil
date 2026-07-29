@@ -28,6 +28,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNTIME_FULL_DOCKERFILE = REPO_ROOT / "agent" / "docker" / "runtime-full" / "Dockerfile"
+RUNTIME_LIGHTWEIGHT_DOCKERFILE = (
+    REPO_ROOT / "agent" / "docker" / "runtime-lightweight" / "Dockerfile"
+)
 RUNTIME_FULL_EXTERNAL_INSTALLER = (
     REPO_ROOT / "agent" / "docker" / "runtime-full" / "install-external-tools.sh"
 )
@@ -62,6 +65,7 @@ SUBDOMAIN_ENUM_BINARIES = (
 # enumerator cloned at a pinned tag with a /usr/local/bin/cloud_enum wrapper (its
 # pyproject does not package the fuzz wordlist as data, so it is NOT pip-installed).
 CLOUD_EXPOSURE_TOOLS = (
+    "aws",
     "cloud_enum",
     "s3scanner",
 )
@@ -146,6 +150,12 @@ def _dockerfile_has_install_line(text: str, binary: str) -> bool:
     # jwt_tool is cloned (not go/pip/pipx-installed) and exposed via a wrapper —
     # accept the git clone of its repo as the install line.
     if binary == "jwt_tool" and "jwt_tool.git" in text:
+        return True
+    if (
+        binary == "aws"
+        and "awscli-exe-linux-${aws_arch}-${AWS_CLI_VERSION}.zip" in text
+        and "/tmp/aws/install" in text
+    ):
         return True
     return False
 
@@ -259,6 +269,16 @@ def test_runtime_full_dockerfile_declares_cloud_exposure_tools():
         f"{missing}. The cloud-exposure SKILL preflights these for bucket enumeration and "
         "S3-takeover claimability screening."
     )
+
+
+def test_runtime_images_pin_install_and_smoke_test_aws_cli_v2():
+    """Both runtime variants must expose the same pinned AWS CLI v2 command."""
+    for dockerfile in (RUNTIME_FULL_DOCKERFILE, RUNTIME_LIGHTWEIGHT_DOCKERFILE):
+        text = dockerfile.read_text(encoding="utf-8")
+        assert re.search(r"ARG AWS_CLI_VERSION=\d+\.\d+\.\d+", text), dockerfile
+        assert "awscli-exe-linux-${aws_arch}-${AWS_CLI_VERSION}.zip" in text, dockerfile
+        assert "/tmp/aws/install" in text, dockerfile
+        assert "aws --version" in text, dockerfile
 
 
 def test_external_installer_validates_preloaded_go_tools(tmp_path):
