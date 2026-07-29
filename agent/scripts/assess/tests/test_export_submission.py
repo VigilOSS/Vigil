@@ -846,6 +846,140 @@ def test_linked_runs_are_reference_not_evidence(tmp_path, monkeypatch, capsys):
     assert not any(g.startswith("command-runs?") for g in fake.gets)
 
 
+# -- repro runs: the audit trail behind Steps to Reproduce --------------------
+
+def test_repro_runs_render_real_argv_separately_from_linked_runs(
+    tmp_path, monkeypatch, capsys
+):
+    """`details.repro_runs` renders the argv that actually produced the steps.
+
+    Kept in its own block, and sourced independently of the evidence links, because
+    the two claims differ: a linked run is evidence the finding is real, a repro run
+    is the audit row behind one authored step. Rendering the row's REAL command is
+    the whole point — it is what lets a reader diff a claimed step against what ran
+    instead of trusting a paraphrase.
+    """
+    links = [{"finding_slug": "VA-047", "target_kind": "command_run", "target_id": 5}]
+    command_runs = {
+        5: {"id": 5, "command": "curl -sk https://app.example.com/orders/1002", "intent": "evidence", "return_code": 0},
+        # Declared in step order and NOT linked as evidence — the two sets are
+        # independent, so a repro run must render without an evidence link.
+        11: {"id": 11, "command": "curl -sk -b 'session=member_a' https://app.example.com/login", "intent": "auth as member A", "return_code": 0},
+        12: {"id": 12, "command": "curl -sk -b 'session=member_a' https://app.example.com/orders/1001", "intent": "read B's order", "return_code": 0},
+    }
+    details = _complete_details(repro_runs=[11, "12"])
+    fake = _FakeClient(_finding(details=details), links=links, command_runs=command_runs)
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+    export_submission.run(args)
+    capsys.readouterr()
+
+    body = _submission_path(tmp_path).read_text()
+    ref_idx = body.index("## OPERATOR DETAILS")
+    reference = body[ref_idx:]
+    # A separate block from the linked-evidence runs, with the real argv in it.
+    assert "**Reproduction runs**" in reference
+    assert "**Linked command runs**" in reference
+    assert "curl -sk -b 'session=member_a' https://app.example.com/login" in reference
+    assert "curl -sk -b 'session=member_a' https://app.example.com/orders/1001" in reference
+    # Never above the paste boundary — this is reference, like every other run.
+    assert "session=member_a" not in body[:ref_idx]
+
+    context = _context(tmp_path)
+    assert [r["id"] for r in context["repro_runs"]] == [11, 12]  # declared order
+    assert context["repro_runs_unresolved"] == []
+    # A string id is accepted and resolved the same as an integer one.
+    assert "command-runs/11" in fake.gets and "command-runs/12" in fake.gets
+    # Steps ARE backed, so no "no command run stands behind these steps" advisory.
+    assert not any("repro_runs is empty" in a for a in context["advisories"])
+
+
+def test_authored_steps_without_repro_runs_advise_but_never_block(
+    tmp_path, monkeypatch, capsys
+):
+    """Unbacked steps are an advisory, not a refusal.
+
+    The steps may well be right; the problem is that nobody can tell them apart
+    from a reconstruction. Blocking here would gate every finding recorded before
+    the field existed, so the render says so and publishes.
+    """
+    fake = _FakeClient(_finding(details=_complete_details()))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+    export_submission.run(args)
+    captured = capsys.readouterr()
+
+    assert _submission_path(tmp_path).exists()  # final mode still publishes
+    context = _context(tmp_path)
+    assert any("repro_runs is empty" in a for a in context["advisories"])
+    assert "ADVISORY" in captured.err
+    # An advisory is an opinion, never a hygiene warning (those fail closed).
+    assert not any("repro_runs" in w for w in context["hygiene_warnings"])
+    assert context["repro_runs"] == []
+
+
+def test_draft_marks_missing_repro_runs_with_a_needs_marker(tmp_path, monkeypatch, capsys):
+    """A draft names the gap where the runs would have rendered."""
+    fake = _FakeClient(_finding(details=_complete_details()))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path))
+    export_submission.run(args)
+    capsys.readouterr()
+
+    body = _submission_path(tmp_path).read_text()
+    assert "[NEEDS: details.repro_runs" in body
+    # Below the never-paste divider with the rest of the reference material.
+    assert body.index("[NEEDS: details.repro_runs") > body.index("## OPERATOR DETAILS")
+
+
+@pytest.mark.parametrize("draft", [True, False])
+def test_unresolved_repro_runs_advise_but_never_block(tmp_path, monkeypatch, capsys, draft):
+    """A declared run the audit log cannot produce is reported, not refused.
+
+    It IS the failure this field exists to catch — a step attributed to a run that
+    never happened — but the export cannot tell that case apart from a run row that
+    is momentarily unreachable, and refusing on the ambiguity would let a backend
+    hiccup block the publish of a finished, verified finding. So it advises, in both
+    modes, and the report-writer decides. Draft and final are asserted together
+    because the whole point is that they behave the same here.
+    """
+    command_runs = {11: {"id": 11, "command": "curl -sk https://app.example.com/login", "return_code": 0}}
+    details = _complete_details(repro_runs=[11, 99, "not-an-id"])
+    fake = _FakeClient(_finding(details=details), command_runs=command_runs)
+    _install(monkeypatch, tmp_path, fake)
+    argv = ["submission", "VA-047", "--platform", "bugcrowd"] + (["--draft"] if draft else [])
+    export_submission.run(_parse(argv, str(tmp_path)))
+    captured = capsys.readouterr()
+
+    # Published either way — nothing about repro runs fails a final export closed.
+    assert _submission_path(tmp_path).exists()
+    context = _context(tmp_path)
+    assert "ADVISORY" in captured.err
+    assert any("details.repro_runs cites 99" in a for a in context["advisories"])
+    assert any("details.repro_runs cites 'not-an-id'" in a for a in context["advisories"])
+    # Advisories are opinions; a hygiene warning is a fact that DOES fail closed.
+    # Keeping these apart is what makes the non-blocking behaviour reliable.
+    assert not any("repro_runs" in w for w in context["hygiene_warnings"])
+    # The backend's own reason is carried through, not replaced by a guess at it —
+    # "does not resolve" covers both a 404 and a transient failure honestly.
+    assert context["repro_runs_unresolved"] == [
+        "99 (does not resolve: HTTP 404: command-run 99 not found)",
+        "'not-an-id' (not a command-run id)",
+    ]
+
+    body = _submission_path(tmp_path).read_text()
+    # The runs that DID resolve still render — one bad id does not blank the block.
+    assert "curl -sk https://app.example.com/login" in body
+    # ...and the bad ids are named where the missing argv would have been, not only
+    # in the advisories block, because that is where the report-writer is reading.
+    reference = body[body.index("## OPERATOR DETAILS"):]
+    assert "**Unresolved** — `details.repro_runs` cites 99" in reference
+    # An unresolved claim suppresses the "nothing stands behind these steps"
+    # advisory: the finding's problem is a wrong id, not an absent one, and saying
+    # both would point the report-writer at two different fixes.
+    assert not any("repro_runs is empty" in a for a in context["advisories"])
+
+
 def test_submission_outputs_render_proof_verbatim(tmp_path, monkeypatch, capsys):
     """Nothing is masked on the way out — the render is faithful to the finding.
 
@@ -1209,13 +1343,17 @@ def test_title_word_count_advises_but_never_blocks(
     assert not any("max 12" in w for w in context["hygiene_warnings"])
 
     body = _submission_path(tmp_path).read_text()
+    title_advisories = [a for a in context["advisories"] if "max 12" in a]
     if expect_advisory:
-        assert any("max 12" in a for a in context["advisories"])
+        assert title_advisories
         assert "ADVISORY" in captured.err
         assert "**Advisories** (non-blocking — your call):" in body
     else:
-        assert context["advisories"] == []
-        assert "**Advisories**" not in body
+        # Scoped to the TITLE advisory: this finding also has no `repro_runs`, which
+        # earns its own advisory (see the repro-runs tests below). Asserting the
+        # whole list were empty would make this title test fail on any unrelated
+        # advisory the command learns to emit.
+        assert title_advisories == []
 
 
 # -- overwrite guard ----------------------------------------------------------

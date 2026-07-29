@@ -131,7 +131,7 @@ never rendered.
 
 1. **Confirm proof readiness.** Before drafting, check the finding against "Proof Standard by
    Finding Class" below and the CVSS↔severity / missing-field checks in "Pre-Report Validation"
-   (checks 3-5). A finding that fails these is not ready to draft — send it back to the operator
+   (checks 3-6). A finding that fails these is not ready to draft — send it back to the operator
    rather than drafting around the gap.
 2. **Scaffold.** Run:
    ```bash
@@ -166,6 +166,11 @@ never rendered.
    added — write it as ONE string carrying your own `1.`/`2.`/… numbering (a list of strings still
    renders, one paragraph per item, but only a single block lets you control the numbers that later
    prose cross-references — see `agent/references/submission-format.md` "Structure").
+   **You EDIT the specialist's recorded steps; you do not author them from nothing.** Reformat and
+   renumber against the "Reproduction runs" argv in OPERATOR DETAILS (`details.repro_runs`), which
+   is the audit row behind each step — if a step and its run disagree, the run is right. An absent
+   or unbindable reproduction is Pre-Report Validation check 5: `QA BLOCKED`, not a drafting
+   problem you can solve.
 
    **Write via `--payload-file`, the default write path.** Evidence in particular routinely contains
    single quotes, double quotes, newlines, and backtick fences that corrupt `--details-inline`'s
@@ -342,7 +347,8 @@ Before generating the report body, run these checks against the backend data. If
 2. **Root-cause consolidation check:** use `vigil assess finding report --mode final --json` and `vigil assess check-phase-readiness --phase report` to confirm intentional root/sibling groups are already represented. If two reportable findings still share the same vulnerable component or configuration and are not grouped, stop and ask the operator to run `vigil assess finding link` or merge them. Apply the BugCrowd/HackerOne standard: one root cause, one submission.
 3. **CVSS↔severity mismatch:** verify each finding's `cvss_score` falls within its `severity` range (critical 9.0–10.0, high 7.0–8.9, medium 4.0–6.9, low 0.1–3.9, info 0.0). Flag any mismatches.
 4. **Missing required fields:** flag findings where `evidence`, `impact`, `steps_to_reproduce`, or `remediation` are empty or absent.
-5. **Required information per finding:** verify every included finding carries: target/feature/affected asset; bug class and exact endpoint or component; request method or triggering action; attacker context (and victim context for cross-user issues); exact request, sequence, or reproduction steps; exact response or artifact proving impact; data exposed, state changed, or access gained; severity rationale and CVSS factors where the report uses CVSS; recommended fix or control that failed.
+5. **Unbacked or unbindable reproduction:** flag any finding whose `steps_to_reproduce` carries no `repro_runs` behind it, or whose steps contain unbound `<PLACEHOLDER>` values (or one placeholder reused across different objects). **Stop and flag — never reconstruct the steps from handoffs, chain narratives, or the finding's prose.** You cannot run probes, so what you would assemble is a plausible narrative, not a transcript; it will read as followable to everyone downstream, including the blind triage, and only the specialist that held the session can supply the real thing. `export submission` names the same gaps as advisories — nothing backing the steps, or a declared run id that does not resolve — plus a `[NEEDS: details.repro_runs]` marker in a draft. None of them block a publish, so this check is where they get acted on.
+6. **Required information per finding:** verify every included finding carries: target/feature/affected asset; bug class and exact endpoint or component; request method or triggering action; attacker context (and victim context for cross-user issues); exact request, sequence, or reproduction steps; exact response or artifact proving impact; data exposed, state changed, or access gained; severity rationale and CVSS factors where the report uses CVSS; recommended fix or control that failed.
 
 Only proceed to report generation after validation passes or the operator resolves flagged issues.
 

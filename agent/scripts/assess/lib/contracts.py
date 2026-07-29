@@ -579,6 +579,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Omit top-level lifecycle fields unless you are intentionally overriding a helper default. The CLI fills workflow_status, verification_state, verification_disposition, and provenance — supply only the fields shown in the examples.",
             "Code-specific detail fields are valid: details.entry_point, details.sink, details.taint_path, details.guards_evaluated, details.slot_type, details.variant_of, details.original_pattern.",
             "details.poc_code holds exploit scripts; details.poc_request / details.poc_response hold a structured HTTP request/response pair.",
+            "details.steps_to_reproduce is written FROM WHAT YOU ACTUALLY RAN, with concrete values (the real session cookie, the real object id, the real payload) — redaction is the report-writer's job at submission time, and an unbound placeholder (or one placeholder reused across different objects) makes the reproduction unfollowable by construction. details.repro_runs carries the command-run ids behind those steps, in step order: `export submission` renders their real argv, and a step with no run id behind it was imagined, not executed.",
             "details.references is an array of strings for CVE links, advisories, or related docs.",
             "Set details.chain_required/details.chain_rationale/details.required_followup when the finding is concrete but only becomes exploitation-worthy as part of a larger chain. Specialists own these via finding record/finding update; verification reviews but does not own them.",
             "Blocked-attempt convention (schema-validated under details): when a technique is proven-shaped but walled off by missing provisioning, set details.block_reason (short why), details.unblock_requirements {kind, description, requested_from}, and details.attempts_summary (what was already tried). These keys are validated by finding-record.schema.json under details (additionalProperties=false); only `kind` carries a documented vocabulary (account|line|device|credential|access) — that vocabulary is a convention, NOT a JSON-Schema-enforced enum. A blocked finding stays OUT of the report; record the wall with `vigil assess block-technique` and, once a finding/chain satisfies it, connect them from the finding side with `vigil assess finding link <unblocking-finding-slug> --link-kind unblocks --target-kind blocked_technique --target-ref <technique_key>`.",
@@ -621,6 +622,7 @@ _CONTRACTS: dict[str, CommandContract] = {
                         "Send GET /search?q=test'+AND+1=1--+-",
                         "Observe normal search results returned",
                     ],
+                    "repro_runs": [56052, 56054],
                     "poc_request": {
                         "method": "GET",
                         "url": "https://target.example/search?q=test'+AND+1=1--+-",
@@ -1706,6 +1708,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         notes=(
             "The submission-first replacement for the retired red/code report.md path. Final requires a verified confirmed/downgraded report candidate; authored Summary, Steps to Reproduce, Evidence, Impact, and Remediation; complete platform fields; a contained evidence_ref artifact linked to that finding, indexed, and present on disk now; and no target-specific report-readiness blocker or hygiene warning. Inline PoC remains supporting content, not durable proof.",
             "Command evidence comes ONLY from explicit finding-links (target_kind=command_run) plus evidence_ref/poc_* — no fuzzy command search. Run a targeted `command-run list --q <url/param>` to find and link the reproducing command first.",
+            "details.repro_runs (the command-run ids behind steps_to_reproduce, in step order) renders as a separate 'Reproduction runs' block under OPERATOR DETAILS with each row's REAL argv, so the reproduction is transcribed rather than paraphrased — a step with no run behind it was imagined, not executed. Nothing here gates a publish: authored steps with no repro_runs, and a declared id that does not resolve, are both ADVISORIES (an unreachable run row is indistinguishable from an invented one, so refusing would let a backend hiccup block a finished finding), and a draft additionally marks an absent set with [NEEDS: details.repro_runs]. Unresolved ids are named in the render, on stderr, and in the context JSON as repro_runs_unresolved.",
             "Final output must stay inside the engagement and artifact registration must succeed. The export never sets submission_status. Draft mode surfaces internal UUID / absolute-path / cases.db hygiene diagnostics; final mode blocks until clean.",
         ),
     ),

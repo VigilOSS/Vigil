@@ -29,8 +29,8 @@ The operator's audit trail. One row per dispatched specialist agent.
 | `dispatched_at` | ISO datetime | Set on agent start (`POST /dispatches`). |
 | `completed_at` | ISO datetime | Set on `vigil assess agent done` when status moves to a terminal value. |
 | `status` | enum | `in-progress` / `completed` / `failed` / `aborted` / `blocked`. |
-| `model` | string | Canonical copy of requested model used for legacy readers (mirrors requested when only one side was supplied). |
-| `reasoning` | string | Same role as `model` for reasoning level (`low` / `medium` / `high`). |
+| `model` | string | Denormalized copy of the requested model for compact dispatch projections. |
+| `reasoning` | string | Denormalized requested reasoning level (`low` / `medium` / `high`). |
 | `requested_model` | string | Operator-requested model id (`claude-opus-4-7`, …). |
 | `actual_model` | string | Model that actually executed when it differs from the request. |
 | `requested_reasoning` | string | Requested reasoning level. |
@@ -41,15 +41,18 @@ The operator's audit trail. One row per dispatched specialist agent.
 ### CLI
 
 ```bash
-# Register a dispatch (operator does this when they launch a specialist).
+# Register a dispatch. This writes the audit row; it does not launch a specialist.
 vigil assess agent start \
     --agent-id recon_a3f9 \
-    --agent-role recon-specialist \
+    --role recon-specialist \
     --task "Phase 1 wildcard subdomain enum + recon on saas.acme.example" \
     --model claude-opus-4-7 \
     --reasoning high \
     --dispatch-mode hypothesis-driven \
     --skills subdomain-enumeration,web-recon
+
+# Then launch the specialist with the client-native agent tool and pass it
+# the Runtime Identity block printed by `agent start`.
 
 # Update status when the dispatch returns.
 vigil assess agent done recon_a3f9 \
@@ -68,8 +71,7 @@ The contract fields (`application_unit_id`, `requested_model`/`actual_model`,
 `requested_reasoning`/`actual_reasoning`, `dispatch_mode`, `skills`) capture the
 dispatch shape alongside the audit fields. Report-writer and later operators
 read these to audit not only what was dispatched but also the dispatch
-configuration. Legacy JSON keys `model` / `reasoning` on `POST /dispatches`
-still populate the requested columns.
+configuration.
 
 ## Contract Schema
 
@@ -84,8 +86,6 @@ The contract fields recorded on every `vigil assess agent start` / `POST /dispat
 | `actual_model` | string (optional) | Model that actually executed |
 | `requested_reasoning` | string (optional) | Intended reasoning level (`low` / `medium` / `high`) |
 | `actual_reasoning` | string (optional) | Actual reasoning tier when recorded |
-| `model` | string (optional) | Legacy alias for requested model on POST |
-| `reasoning` | string (optional) | Legacy alias for requested reasoning on POST |
 
 ## Table 2 — `assessment_dispatch_handoffs`
 

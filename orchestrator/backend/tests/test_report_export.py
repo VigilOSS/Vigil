@@ -260,6 +260,61 @@ def test_report_findings_coerce_string_steps_to_list(client, isolate_settings):
     ]
 
 
+def test_report_findings_project_repro_runs_alongside_steps(client, isolate_settings):
+    # The command-run ids behind the steps travel with them, coerced the same way,
+    # so a report renderer can show what backs each reproduction without re-parsing
+    # details_json. Integer ids stringify rather than being dropped.
+    _seed(client, isolate_settings)
+    payload = _finding("VA-051", "Finding with backed steps")
+    payload["details"]["repro_runs"] = [56052, "56054"]
+    _add_finding(client, payload)
+
+    resp = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-findings?mode=draft"
+    )
+    assert resp.status_code == 200, resp.text
+    rec = next(r for r in resp.json()["standalone"] if r["slug"] == "VA-051")
+    assert rec["repro_runs"] == ["56052", "56054"]
+
+
+def test_readiness_advises_on_steps_with_no_repro_runs(client, isolate_settings):
+    """Unbacked reproduction steps advise; they never block.
+
+    The empty-``steps_to_reproduce`` blocker already stops a finding carrying no
+    reproduction at all. This one says something weaker but distinct: the steps
+    exist and nothing stands behind them, so nobody can tell a transcript from a
+    reconstruction. Gating on it would block every finding recorded before
+    ``repro_runs`` existed, so it stays an advisory — and the engagement must still
+    read as ready.
+    """
+    _seed(client, isolate_settings)
+    # The shared ``_finding`` helper carries a deliberately mismatched
+    # cvss_score/vector (its own gate is tested elsewhere); correct it here so the
+    # only thing separating these two findings is ``repro_runs``.
+    unbacked = _finding("VA-060", "Steps with nothing behind them", severity="critical")
+    unbacked["details"]["cvss_score"] = 9.1
+    _add_finding(client, unbacked)
+    backed = _finding("VA-061", "Steps with runs behind them", severity="critical")
+    backed["details"]["cvss_score"] = 9.1
+    backed["details"]["repro_runs"] = [56052]
+    _add_finding(client, backed)
+
+    resp = client.get(f"/engagements/{ENGAGEMENT_KEY}/assessment/report-readiness")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    advisories = [
+        a for a in body["advisories"] if a.get("kind") == "finding_repro_runs_missing"
+    ]
+    assert [a["slug"] for a in advisories] == ["VA-060"]
+    assert "repro_runs" in advisories[0]["detail"]
+    # Advisory only — it appears in no blocker and does not flip readiness.
+    assert not any(
+        b.get("kind") == "finding_repro_runs_missing" for b in body["blockers"]
+    )
+    assert body["ready"] is True, body["blockers"]
+
+
 def test_report_export_final_mode_blocked_when_not_ready(
     client, isolate_settings, fake_template
 ):

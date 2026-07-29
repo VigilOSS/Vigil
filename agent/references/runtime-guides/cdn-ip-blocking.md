@@ -132,7 +132,7 @@ file to subsequent ingestion runs:
 ```bash
 vigil assess ingest endpoints \
   --egress-blocked-hosts "$DIR/scans/egress_blocked_hosts.txt" \
-  "$DB" katana < "$DIR/scans/katana.txt"
+  katana < "$DIR/scans/katana.txt"
 ```
 
 URLs to those hosts defer with `cluster_key=deferred:egress-blocked` instead

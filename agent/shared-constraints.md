@@ -530,12 +530,24 @@ Run `vigil assess contract finding record` for the canonical field list and exam
   "cvss_score": 9.1,
   "remediation": "Parameterize all SQL queries; use prepared statements",
   "steps_to_reproduce": ["Step 1...", "Step 2..."],
+  "repro_runs": [56052, 56054],
   "request_method": "POST",
   "cwe_id": "CWE-89"
 }
 ```
 
 This keeps CVSS queryable from the API and gives report-writer structured data to format.
+
+**The reproduction is yours to record, not the report-writer's to infer.** Write
+`steps_to_reproduce` from what you actually ran, with concrete values (the real session cookie,
+the real object id, the real payload) — you hold the live session and the exact argv, and nobody
+downstream can recover them. `repro_runs` carries the `command-run` ids behind those steps, in step
+order (`vigil assess command-run list --q "<url/param/payload>"` finds ids you did not note);
+`export submission` renders their real argv and reports an id that does not resolve. **A step with
+no run id behind it was imagined, not executed.** Do not sanitize as you write: credentials and
+local state are self-owned (see "Credentials and Local State Are Self-Owned"), redaction is the
+report-writer's job at submission time, and an unbound placeholder — or one placeholder reused
+across different objects — makes the reproduction unfollowable by construction.
 
 When a finding is only reportable as part of a chain, keep it in the same finding lifecycle and
 set chain metadata in `details` during `finding record` (as part of the finding JSON payload), or on

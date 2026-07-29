@@ -58,7 +58,7 @@ Register the contract alongside the prompt (`operator-core.md` § Specialist Dis
 
 ```bash
 vigil assess agent start \
-    --agent-id <agent_id> --agent-role <role> \
+    --agent-id <agent_id> --role <role> \
     --task "<one-paragraph outcome objective>" \
     --model <name> --reasoning <level> --dispatch-mode <mode> \
     --skills "<skill-name>[,<skill-name>...]"
@@ -165,7 +165,7 @@ result wanted, not the boundary of the hunt.
 
 ```bash
 vigil assess agent start \
-    --agent-id va-idor-b7c2 --agent-role vulnerability-analyst \
+    --agent-id va-idor-b7c2 --role vulnerability-analyst \
     --task "Deep IDOR/BAC pass on orders+invoices, cross-identity replay user_a/user_b" \
     --application-unit-id 42 \
     --model claude-opus-4-8 --reasoning high --dispatch-mode item-iterating \
@@ -239,7 +239,7 @@ are `exploit-developer.md`'s own doctrine — this template does not restate the
 
 ```bash
 vigil assess agent start \
-    --agent-id ex-chain-d4e1 --agent-role exploit-developer \
+    --agent-id ex-chain-d4e1 --role exploit-developer \
     --task "Chain-construction pass: admin SSO auth-bypass -> orders IDOR, full endpoint map self-served" \
     --model claude-opus-4-8 --reasoning high --dispatch-mode deep-manual \
     --skills "exploit-playbook-authoring"

@@ -327,6 +327,28 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                     "detail": f"missing structured fields: {', '.join(missing_fields)}",
                 }
             )
+        # Reproduction steps with no audit row behind them. ADVISORY, not a
+        # blocker: the empty-``steps_to_reproduce`` blocker above already stops a
+        # finding that carries no reproduction at all, while this one says the
+        # steps cannot be told apart from a reconstruction — real, but not worth
+        # gating every finding recorded before ``repro_runs`` existed. It fires
+        # only where there is something to back up.
+        if not is_blue and details.get("steps_to_reproduce") and not details.get("repro_runs"):
+            advisories.append(
+                {
+                    "kind": "finding_repro_runs_missing",
+                    "slug": slug,
+                    "title": title,
+                    "detail": (
+                        f"finding {slug} has authored steps_to_reproduce but no "
+                        "details.repro_runs, so no command run stands behind the steps and "
+                        "nobody can diff them against what was actually executed. Find the "
+                        'runs with `vigil assess command-run list --q "<url/param/payload>"` '
+                        f"and record their ids in step order: `vigil assess finding update {slug} "
+                        "--details-inline '{\"repro_runs\": [<run_id>, ...]}'`."
+                    ),
+                }
+            )
         cvss_score = details.get("cvss_score")
         cvss_vector = details.get("cvss_vector")
         severity = str(row.get("severity", "")).lower()
@@ -790,6 +812,9 @@ def _report_record(record: dict[str, Any], report_id: str) -> dict[str, Any]:
     item["cvss_score"] = details.get("cvss_score")
     item["remediation"] = details.get("remediation", "")
     item["steps_to_reproduce"] = _as_string_list(details.get("steps_to_reproduce"))
+    # The command-run ids behind those steps, projected alongside them so a report
+    # renderer can show what backs each reproduction without re-parsing details_json.
+    item["repro_runs"] = _as_string_list(details.get("repro_runs"))
     item["cwe_id"] = details.get("cwe_id", "")
     item["owasp_category"] = details.get("owasp_category", "")
     item["impact"] = details.get("impact", item.get("summary", ""))
@@ -865,8 +890,9 @@ def list_report_findings(engagement_id: int, *, mode: str = "draft") -> list[dic
     Excludes merged and false-positive findings, orders by severity (critical
     first), and extracts structured fields from the ``details_json`` blob so
     the report-writer has them at the top level without manual JSON parsing:
-    CVSS, remediation, steps_to_reproduce, CWE, OWASP, impact, evidence,
-    entry_point, sink, poc_code, poc_request, poc_response, and references.
+    CVSS, remediation, steps_to_reproduce, repro_runs, CWE, OWASP, impact,
+    evidence, entry_point, sink, poc_code, poc_request, poc_response, and
+    references.
     """
     return _report_finding_records(engagement_id, mode=mode)
 

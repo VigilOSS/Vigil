@@ -196,9 +196,15 @@ count is a ceiling.)
 This gate's conclusions are not scratch notes — the verifier writes them into the finding's durable
 `details` so the report-writer only formats: the corrected `cvss_vector`/`cvss_score`, the
 `evidence` (the exact fields + the two-context / read-back proof), the `impact` (the one-sentence
-attacker outcome from C5's gut-check), the `remediation`, and — when C7 was material to the
-disposition — the exact vendor doc URL/line cited and, if found, the precedent disclosure it was
-compared against. See the "Four Validation Gates" (Gate 3) in `agent/agents/vulnerability-analyst.md`.
+attacker outcome from C5's gut-check), the `remediation`, the `steps_to_reproduce` with its
+`repro_runs`, and — when C7 was material to the disposition — the exact vendor doc URL/line cited
+and, if found, the precedent disclosure it was compared against. See the "Four Validation Gates"
+(Gate 3) in `agent/agents/vulnerability-analyst.md`.
+
+`steps_to_reproduce` is written from what you actually ran, with concrete values, and each step
+carries the `command-run` id behind it in `repro_runs` — **a step with no run id behind it was
+imagined, not executed.** The report-writer cannot run probes, so an unrecorded reproduction is one
+it can only infer; redaction of those concrete values is its job at submission time, not yours.
 
 ## Related
 
