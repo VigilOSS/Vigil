@@ -166,7 +166,17 @@ _FINDING_DETAIL_PROPERTIES = {
     "steps_to_reproduce": {
         "type": ["string", "array"],
         "items": {"type": "string"},
-        "description": "Ordered reproduction steps, starting from initial access state and ending at impact observation. Preferred form is ONE string holding the whole block with your own numbering — renderers emit it verbatim, and prose elsewhere in the submission that cites a step number only resolves against numbers you wrote. A list of strings is also accepted, one action per string.",
+        "description": "Ordered reproduction steps, starting from initial access state and ending at impact observation. Write them FROM WHAT YOU ACTUALLY RAN, with concrete values (the real session cookie, the real object id, the real payload) — an unbound placeholder is a step nobody can follow, and reusing one placeholder across different objects corrupts the sequence. Redaction is the report-writer's job at submission time. Preferred form is ONE string holding the whole block with your own numbering — renderers emit it verbatim, and prose elsewhere in the submission that cites a step number only resolves against numbers you wrote. A list of strings is also accepted, one action per string.",
+    },
+    # The anti-inference device for ``steps_to_reproduce``: the audit rows that
+    # actually produced the reproduction. Without it, "write accurate steps" is an
+    # instruction with no verification — a reviewer cannot diff a claimed step
+    # against what was executed, and a plausible narrative is indistinguishable
+    # from a transcript.
+    "repro_runs": {
+        "type": "array",
+        "items": {"type": ["string", "integer"]},
+        "description": "Command-run ids (from `vigil assess command-run list`) that actually produced this reproduction, in step order. A step with no run id behind it was imagined, not executed. `export submission` fetches each row and renders its real argv under OPERATOR DETAILS, so the reproduction is transcribed rather than paraphrased. An id that does not resolve is reported as an advisory, never a refusal — an unreachable run row and an invented one look identical from there.",
     },
     "attack_scenario": {
         "type": "string",

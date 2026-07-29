@@ -44,6 +44,7 @@ Before writing anything, verify:
 
 - [ ] You loaded `agent/shared-constraints.md` for red submissions/reports or `agent/shared-constraints-blue.md` for blue reports
 - [ ] You reviewed the Proof Standard by Finding Class in `agent/skills/report-generation/SKILL.md` (this one section, even in the lighter submission dispatch) — every finding must meet its class-specific evidence bar before inclusion
+- [ ] The finding carries a reproduction you can EDIT rather than invent: a non-empty `details.steps_to_reproduce` with `details.repro_runs` behind it and no unbound placeholders. If not, return `QA BLOCKED` naming the gap — you cannot run probes, so a reproduction assembled from handoffs is a narrative, not a transcript (Closing Sequence step 1)
 - [ ] You have the dispatch context (engagement directory, phase, any operator instructions on report scope, which mode you were dispatched in)
 
 If any item is unchecked, resolve it before writing. The mode-specific set — `submission-format.md`
@@ -165,7 +166,7 @@ directives for this agent:
 - **Stay human:** write to the target's own engineer, not to a scoring system — see "Voice" below
 - **Demonstrated, not claimed:** write only the impact the Evidence block literally shows — see "Demonstrated vs Potential Impact" below
 
-Required information checklist: see Pre-Report Validation check 5 in `agent/skills/report-generation/SKILL.md`.
+Required information checklist: see Pre-Report Validation check 6 in `agent/skills/report-generation/SKILL.md`.
 
 ## Voice
 
@@ -203,7 +204,7 @@ render format is `agent/references/submission-format.md` "Structure".
 | Section | Finding field | Notes |
 |---|---|---|
 | Summary | `summary` | Impact-first paragraph — bug class, endpoint, and auth context folded in |
-| Steps to Reproduce | `details.steps_to_reproduce` | One string carrying your own `1.`/`2.`/… numbering — the renderer adds none |
+| Steps to Reproduce | `details.steps_to_reproduce` | One string carrying your own `1.`/`2.`/… numbering — the renderer adds none. You EDIT the specialist's recorded steps against the "Reproduction runs" argv in OPERATOR DETAILS (`details.repro_runs`); you never author them from nothing — see Closing Sequence step 1 |
 | Evidence | `details.evidence` | Annotated proof; genuine third-party PII partial-masked, self-owned/synthetic data shown in full (submission-format.md "PII redaction") |
 | Attack Scenario (optional) | `details.attack_scenario` | Realistic adversary + starting access + action, ending at first compromise — no scope counts (those belong to Impact) |
 | Impact | `details.impact` | Consequence + blast radius, quantified — don't re-describe the actor or steps |
@@ -242,7 +243,7 @@ the internal-report verbs only when the operator explicitly dispatched that mode
 
 ### Closing verbs (submission mode — default)
 
-1. **Confirm proof readiness** against "Proof Standard by Finding Class" and "Pre-Report Validation" checks 3-5 in `agent/skills/report-generation/SKILL.md`; hand back to the operator (see Handoffs) instead of drafting around a gap.
+1. **Confirm proof readiness** against "Proof Standard by Finding Class" and "Pre-Report Validation" checks 3-6 in `agent/skills/report-generation/SKILL.md`; hand back to the operator (see Handoffs) instead of drafting around a gap. **`details.steps_to_reproduce` empty, or carrying no `details.repro_runs` behind it, is one of those gaps — return `QA BLOCKED` and name it.** Do NOT reconstruct steps from handoffs, chain narratives, or the finding's prose: you cannot run probes, so anything you assemble that way is a plausible narrative rather than a transcript, and it will read as a followable reproduction to everyone downstream including the blind triage. Only the specialist that held the session can supply it. The same applies to a reproduction full of unbound `<PLACEHOLDER>` values, or one placeholder reused across different objects — binding those is not an editing job, it is state you do not have.
 2. **Scaffold** — `vigil assess export submission <slug> --platform <bugcrowd|hackerone|direct> --draft`. Marks any missing proof-critical field with `[NEEDS: ...]`.
 3. **Author each stable section** (see Default Finding Structure above), resolving every `[NEEDS: ...]` marker with real backend-sourced content, then write it back with `vigil assess finding update <slug> --payload-file <path.json>` (a written file, never `--details-inline`, for content carrying quotes/newlines — `--payload-file` requires `expected_row_version`). Build Evidence from the OPERATOR DETAILS reference section's structured proof plus a targeted `vigil assess command-run list --q "<the finding's url/param/header/value>"`; link any reproducing run the linked set missed with `vigil assess finding link <slug> --link-kind evidence --target-kind command_run --target-id <run_id>`. Full authoring procedure and the payload shape: `agent/skills/report-generation/SKILL.md` "Submission-First Closeout" steps 1-3.
 4. **Checklist/QA (Pass 1)** — re-render (`export submission <slug> --platform <same> --draft --overwrite`) and run the pre-submission checklist in `agent/references/submission-format.md`, including every `hygiene_warnings` entry `export submission` reported. Fix gaps at the finding (step 3) and re-render — a fix made only in `submission.md` is lost on the next render. Return `QA PASS` or `QA BLOCKED` with the exact gap.

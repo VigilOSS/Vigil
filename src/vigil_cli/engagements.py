@@ -1402,6 +1402,12 @@ def _render_finding_report(record: dict, *, group: dict | None = None) -> str:
         # finding's steps identically: each authored item verbatim, numbering left
         # to the author.
         lines.extend(_finding_render().step_lines(steps))
+        # The audit rows behind those steps, named right under them — same reason
+        # as ``render_finding``: without them a reader cannot tell a transcript
+        # from a reconstruction.
+        repro_runs = _string_list(record.get("repro_runs"))
+        if repro_runs:
+            lines.extend(["", f"Repro runs: {', '.join(repro_runs)}"])
     remediation = record.get("remediation") or ""
     if remediation:
         lines.extend(["", "## Remediation", "", str(remediation)])

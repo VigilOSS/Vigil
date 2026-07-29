@@ -316,6 +316,15 @@ def render_finding(finding: dict, *, include_root_cause_group: bool = False) -> 
         lines.append("")
         lines.append("**Steps to Reproduce:**")
         lines.extend(step_lines(steps))
+        # The audit rows behind those steps, named right under them. Ids only —
+        # this renderer has no client to fetch argv with (``export submission``
+        # does that) — but a reader can pull each run and diff the claimed step
+        # against what ran, and their ABSENCE is itself the signal that nothing
+        # can.
+        repro_runs = string_list(detail_value(finding, "repro_runs", []))
+        if repro_runs:
+            lines.append("")
+            lines.append(f"**Repro runs**: {', '.join(repro_runs)}")
     if poc_code:
         lines.append("")
         lines.append("**PoC Code:**")
