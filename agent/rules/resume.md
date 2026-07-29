@@ -39,7 +39,7 @@ drill-down commands it prints for exact evidence:
 
 ```bash
 vigil assess command-run get <id>
-vigil assess artifact search <query>
+vigil assess artifact search --q <query>
 vigil assess artifact get <id>
 vigil assess agent render-handoff <agent-id>
 vigil assess check-phase-readiness --phase report   # advisory (red engagements): open CVEs/leads + dangling finding links + report blockers

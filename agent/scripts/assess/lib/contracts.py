@@ -698,7 +698,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         preferred_invocations=(
             "vigil assess finding link <sibling-slug> --root-cause <root-slug> --effect eliminates_finding",
             "vigil assess finding link <sib1> <sib2> <sib3> --root-cause <root-slug>",
-            "vigil assess finding link <sibling-slug> --root-cause <root-slug> --effect eliminates_attack_path --note 'Root removes this exploit chain; residual XXE remains.'",
+            "vigil assess finding link <sibling-slug> --root-cause <root-slug> --effect eliminates_attack_path --reason 'Root removes this exploit chain; residual XXE remains.'",
             "vigil assess finding link <sibling-slug> --clear-root-cause",
             "vigil assess finding link <blocked-slug> --link-kind unblocked_by --target-kind finding --target-ref <unblocking-slug>",
             "vigil assess finding link <slug> --link-id 123 --target-ref <corrected-slug>",
@@ -709,7 +709,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         author_supplied_fields=(
             "finding_slug",
-            "root_cause mode: root_cause_slug, root_cause_effect, note",
+            "root_cause mode: root_cause_slug, root_cause_effect, --reason",
             "generic mode: --link-kind, --target-kind, and --target-id or --target-ref",
             "generic update mode: --link-id plus fields to patch, --retire, or --reactivate",
         ),
@@ -940,7 +940,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Register, refresh, search, fetch, or scratch-mark indexed engagement-local artifact metadata.",
         schema_name="assessment_artifacts table + /assessment/artifacts endpoints",
         preferred_invocations=(
-            "vigil assess artifact search VA-047",
+            "vigil assess artifact search --q VA-047",
             "vigil assess artifact search --finding VA-047",
             "vigil assess artifact get <id>",
             "vigil assess artifact register notes/foo.md --kind note --finding VA-047",
@@ -953,9 +953,9 @@ _CONTRACTS: dict[str, CommandContract] = {
             "subcommand: search | get | register | mark-scratch | unmark-scratch",
             "register: <path> (positional, required)",
             "get: <artifact_id> (positional int, required)",
-            "search: [query...] (positional, optional free-text)",
+            "search: --q <query> (optional free-text)",
             "register: --finding / --kind / --agent-id / --command-run-id / --sensitive",
-            "search: --finding / --limit / --offset",
+            "search: --q / --finding / --kind / --limit / --offset",
             "mark-scratch / unmark-scratch: <target> (id or path) or --under <prefix>",
         ),
         notes=(
@@ -3025,17 +3025,21 @@ def _dispatch_root_contract() -> CommandContract:
             "vigil assess agent reconcile-stale --dry-run",
             "vigil assess agent list [--filter-role <role>] [--status <status>]",
             "vigil assess agent render-handoff <agent-id>",
-            "vigil assess work-buffer <db_path> stats|fetch|done|...",
         ),
         author_supplied_fields=(
             "<action> (e.g. start, done, handoff, render-handoff, decision, ...)",
             "action-specific positional args",
         ),
         notes=(
-            "Work-buffer actions live under `vigil assess work-buffer <db_path> ...`; "
-            "agent lifecycle actions never take a cases.db path.",
+            "Agent lifecycle and work-buffer operations are separate backend-backed command "
+            "families. Work-buffer uses `vigil assess work-buffer <action>` and never takes "
+            "a local database path.",
             "Dispatch state lives in the orchestrator backend. `agent start` logs a dispatch, "
-            "`agent done` patches lifecycle directly, `agent handoff` writes a repeatable checkpoint, `agent close` consumes a ready/blocked handoff into closure, and `agent render-handoff` assembles the blob the next dispatch prompt pastes verbatim.",
+            "but does not spawn a specialist. Launch the specialist in the active client using "
+            "the Runtime Identity block printed by `agent start`. `agent done` patches lifecycle "
+            "directly, `agent handoff` writes a repeatable checkpoint, `agent close` consumes a "
+            "ready/blocked handoff into closure, and `agent render-handoff` assembles the blob the "
+            "next dispatch prompt pastes verbatim.",
             "`agent start` defaults a missing --dispatch-mode from the role (warn, not block) and accepts a newly-coined mode (advisory warn). "
             "--skills is optional: set it when the applicable skill is already known, otherwise the specialist selects one from the surface and names it in its handoff. Pass --check-overlap to opt into the advisory in-progress-overlap scan.",
             "`agent start` also lints --task for a prescriptive 'technique cage' — a step-by-step recipe that caps a specialist's depth (>=2 of: a numbered/bulleted step list, a run of imperative test-verbs, a pre-named vuln class). This is WARN-only and NEVER blocks the dispatch; the fix is to hand the specialist the measured coverage picture instead of a script via `vigil assess coverage --host <h> --for-dispatch` (paste the COVERAGE block) plus an open objective.",
@@ -3049,10 +3053,10 @@ def _dispatch_root_contract() -> CommandContract:
                 "from durable state so the prompt stays small",
             ),
             (
-                "stale local DB syntax",
-                "backend dispatch actions use `vigil assess agent handoff ...`; "
-                "`vigil assess work-buffer cases.db handoff ...` is rejected so handoffs "
-                "cannot land on the wrong state surface",
+                "mixing agent and work-buffer actions",
+                "use `vigil assess agent <action>` for lifecycle/handoffs and "
+                "`vigil assess work-buffer <action>` for queued assessment work; neither "
+                "accepts a local database path",
             ),
             (
                 "defer-items <ids> with stale id list",
@@ -3239,6 +3243,9 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 ("--allow-duplicate", "off — overlapping in-progress dispatches log a warning"),
             ),
             notes=(
+                "This command only writes the backend dispatch row; it does not spawn or "
+                "launch the specialist. After it succeeds, launch the specialist in the active "
+                "client and pass the printed Runtime Identity block.",
                 "`skills` on a specialist dispatch is a WARNING when missing, never a rejection — neither the CLI nor the backend blocks on it. A specialist picks its skills from what it observes, so the honest list is often known only after the dispatch runs. Set it when the applicable skill is already clear; otherwise name it in the handoff.",
                 "Discover skill names with `vigil assess list-skills` — each value must match a directory under `agent/skills/<name>/`.",
                 "Pair with `agent done` when the dispatch finishes; rows left `in-progress` past the dispatch's actual lifetime corrupt dedup checks.",

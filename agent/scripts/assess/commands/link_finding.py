@@ -17,6 +17,16 @@ from assess.lib.json_inputs import parse_optional_inline_json
 _ROOT_CAUSE_LINK_KIND = "root_cause"
 
 
+class _RemovedNoteAction(argparse.Action):
+    """Point old callers at the one canonical explanation flag."""
+
+    def __call__(self, parser, namespace, values, option_string=None) -> None:
+        parser.error(
+            "finding link: --note was removed; use --reason "
+            "\"<one-sentence relationship rationale>\""
+        )
+
+
 def register(subparsers) -> None:
     p = subparsers.add_parser(
         "link",
@@ -40,7 +50,17 @@ def register(subparsers) -> None:
         default="eliminates_finding",
         help="Whether fixing the root fully resolves the finding or only this attack path",
     )
-    p.add_argument("--note", default=None, help="One-sentence relationship note (root-cause and generic modes)")
+    p.add_argument(
+        "--reason",
+        dest="reason_text",
+        default=None,
+        help="One-sentence relationship rationale (root-cause, intel, and generic modes)",
+    )
+    p.add_argument(
+        "--note",
+        action=_RemovedNoteAction,
+        help=argparse.SUPPRESS,
+    )
     p.add_argument("--source-name", default="operator")
     p.add_argument("--provenance-inline", help="Inline JSON object merged into link provenance")
     p.add_argument("--clear-root-cause", action="store_true", help="Remove the root-cause link from this finding")
@@ -289,14 +309,14 @@ def run(args) -> None:
         "target_kind": target_kind,
         "target_id": target_id,
         "target_ref": target_ref,
-        "notes": args.note or "",
+        "notes": args.reason_text or "",
         "provenance": provenance,
     } if generic_selected else None
     root_cause_payload = {
         "root_cause_slug": args.root_cause_slug,
         "sibling_order": args.sibling_order,
         "root_cause_effect": args.root_cause_effect,
-        "note": args.note or "",
+        "note": args.reason_text or "",
         "source_name": args.source_name,
         "provenance": provenance,
     }
@@ -308,8 +328,8 @@ def run(args) -> None:
             link_update_payload["target_id"] = args.target_id
         if args.target_ref is not None:
             link_update_payload["target_ref"] = args.target_ref
-        if args.note is not None:
-            link_update_payload["notes"] = args.note
+        if args.reason_text is not None:
+            link_update_payload["notes"] = args.reason_text
         if args.provenance_inline is not None:
             link_update_payload["provenance"] = provenance
         if getattr(args, "retire", False):
@@ -332,7 +352,12 @@ def run(args) -> None:
         for slug in slugs:
             try:
                 if intel_ids:
-                    result = _link_intel(client, slug, intel_ids, args.note or "")
+                    result = _link_intel(
+                        client,
+                        slug,
+                        intel_ids,
+                        args.reason_text or "",
+                    )
                 elif link_update_selected:
                     result = client.patch(
                         f"findings/{slug}/links/{args.link_id}",

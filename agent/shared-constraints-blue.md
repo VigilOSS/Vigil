@@ -448,7 +448,7 @@ artifact IDs) for drill-down through:
 ```bash
 vigil assess command-run get <id>
 vigil assess artifact get <id>
-vigil assess artifact search <query>
+vigil assess artifact search --q <query>
 vigil assess agent render-handoff <agent-id>
 vigil assess fetch findings/<slug>
 ```

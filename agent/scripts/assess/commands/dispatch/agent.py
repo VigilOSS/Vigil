@@ -26,11 +26,9 @@ from assess.commands.dispatch._shared import (
 )
 
 
-# Actions that don't need a cases.db (work-buffer SQLite). When the first
-# positional arg matches one of these names, we treat it as the action and
-# leave db_path empty rather than forcing the operator to pass a useless path.
-# These hit the orchestrator backend (not the work buffer). The operator-facing
-# CLI maps them to ``vigil assess agent start|done|list|get|handoff|decision|...``.
+# Backend dispatch actions. The operator-facing CLI maps these to
+# ``vigil assess agent start|done|list|get|handoff|decision|...``; no local
+# database path is part of that public contract.
 _DBLESS_ACTIONS = (
     "render-handoff",
     "register",

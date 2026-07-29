@@ -434,7 +434,7 @@ emits the canonical schema and an example):
 Verbs **not** covered (skip the contract round-trip — they are read-only or
 have no payload to validate): `fetch`, `list-skills`, `work-buffer clusters`,
 `command-run list`, `command-run get`, `check-phase-readiness`,
-`scope filter`, `work-buffer <db> stats|peek|fetch|done`,
+`scope filter`, `work-buffer stats|peek|fetch|done`,
 `dispatch list`, `dispatch get`. Reading the contract for these adds
 latency without preventing any error class.
 

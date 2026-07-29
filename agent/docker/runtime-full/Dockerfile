@@ -372,6 +372,33 @@ RUN if [ "$PRELOADED_TOOLS" != "1" ]; then \
       apt-get clean && rm -rf /var/lib/apt/lists/*; \
     fi
 
+# AWS CLI v2 is installed from AWS's versioned bundled installer instead of a
+# distribution package: Kali rolling does not currently publish an awscli
+# candidate, and the bundled binary avoids host/runtime Python ABI drift.
+ARG AWS_CLI_VERSION=2.36.10
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) \
+        aws_arch=x86_64; \
+        aws_sha256=f6bf7f19f584a1b32b50217f357f2a5877204cf6f703fec8036cd774932383dd \
+        ;; \
+      arm64) \
+        aws_arch=aarch64; \
+        aws_sha256=8435364a5a09004a644340131c720e081823023f9c69d5fd15f9bc650fb662fc \
+        ;; \
+      *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL $CURL_RETRY_FLAGS \
+      "https://awscli.amazonaws.com/awscli-exe-linux-${aws_arch}-${AWS_CLI_VERSION}.zip" \
+      -o /tmp/awscliv2.zip; \
+    echo "${aws_sha256}  /tmp/awscliv2.zip" | sha256sum -c -; \
+    unzip -q /tmp/awscliv2.zip -d /tmp; \
+    /tmp/aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli; \
+    aws --version; \
+    rm -rf /tmp/aws /tmp/awscliv2.zip
+LABEL vigil.install-versions="${INSTALL_VERSION_STAMP}-awscli-${AWS_CLI_VERSION}"
+
 RUN mkdir -p /opt/mcp-tools /data
 COPY docker/callback_listener.py /opt/mcp-tools/callback_listener.py
 COPY docker/start-callback.sh /usr/local/bin/start-callback
@@ -379,7 +406,7 @@ RUN chmod +x /usr/local/bin/start-callback
 RUN printf '%s\n' 'export PATH="/opt/Responder:/opt/offsec-venv/bin:/opt/mitmproxy-venv/bin:/opt/pwncat-venv/bin:$PATH"' > /etc/profile.d/vigil-path.sh
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD command -v dtach >/dev/null && command -v katana >/dev/null && command -v trufflehog >/dev/null && command -v gf >/dev/null && command -v jsluice >/dev/null && command -v arjun >/dev/null && command -v xmllint >/dev/null && command -v apkeep >/dev/null && command -v apktool >/dev/null && command -v jadx >/dev/null && command -v adb >/dev/null && command -v bundletool >/dev/null && command -v apksigner >/dev/null && command -v aapt >/dev/null && command -v curl_chrome116 >/dev/null && command -v jwt_tool >/dev/null && command -v pdftotext >/dev/null || exit 1
+  CMD command -v dtach >/dev/null && command -v katana >/dev/null && command -v trufflehog >/dev/null && command -v gf >/dev/null && command -v jsluice >/dev/null && command -v arjun >/dev/null && command -v xmllint >/dev/null && command -v apkeep >/dev/null && command -v apktool >/dev/null && command -v jadx >/dev/null && command -v adb >/dev/null && command -v bundletool >/dev/null && command -v apksigner >/dev/null && command -v aapt >/dev/null && command -v curl_chrome116 >/dev/null && command -v jwt_tool >/dev/null && command -v pdftotext >/dev/null && command -v aws >/dev/null || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["bash", "-lc", "mkdir -p /data && exec sleep infinity"]
