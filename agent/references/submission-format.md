@@ -32,9 +32,11 @@ finding metadata, any hygiene warnings, the structured proof, and every linked c
 "OPERATOR DETAILS — NOT FOR SUBMISSION" reference section below the second `---` (present in both
 draft and final, always below the never-paste line). That reference section also carries
 **Reproduction runs** — the real argv of the command runs named in `details.repro_runs`, in step
-order — which is what you check Steps to Reproduce against: you EDIT the specialist's recorded
-steps, you never author them from nothing, because you cannot run probes and an assembled
-reproduction is a narrative rather than a transcript. You AUTHOR each section, then write it back to
+order — which is what you check Steps to Reproduce against. The full edit-authority rule (what you
+may change and what you may never invent) is stated once in `agent/agents/report-writer.md`
+Mandatory Closing Sequence step 1; in short, every command, argv, and response value must trace to
+one of those runs, and outside that boundary you author nothing, because you cannot run probes and
+an assembled reproduction is a narrative rather than a transcript. You AUTHOR each section, then write it back to
 the finding with `vigil assess finding update <slug> --payload-file <path.json>` (the default write
 path — see `agent/skills/report-generation/SKILL.md` "Submission-First Closeout" step 3 for the
 payload shape; reserve `--details-inline` for a short value with nothing a shell would mangle), and
@@ -118,7 +120,9 @@ not a placeholder.
 
 **VRT:** [Platform taxonomy category path]   (HackerOne: **Weakness:** CWE-[nnn]; omitted for direct)
 
-**Severity:** [P1-P4]
+**Severity:** [the finding's severity word — CRITICAL / HIGH / MEDIUM / LOW / INFO. The renderer
+emits this from the finding on every platform; a Bugcrowd P1-P4 priority, where the program wants
+one, goes in the `VRT:` line's taxonomy path, not here]
 
 **CVSS:** CVSS:3.1/[vector] ([score])
 
@@ -133,20 +137,42 @@ not a placeholder.
 ---
 
 ### Summary
-[2-4 sentences. First sentence = attacker outcome. Then the code fault. Then what the POC proves.]
+[2-4 sentences. First sentence = attacker outcome. Then the code fault. Then what the POC proves.
+Optionally followed by a bold `**Exploit flow**` marker and an ordered list of 3-5 plain sentences,
+no commands, giving a triager the mechanism before Steps' commands start — inside this same
+`summary` string, no separate field.]
 
 ### Steps to Reproduce
 [One authored block, numbered by you (`1.`, `2.`, …) and rendered exactly as written — the renderer
 adds no numbering or marker of its own, so your numbers are what a triager reads and what any later
-cross-reference in the submission ("follow the redirect from step 4") resolves against. One action
-per step, no narrative between steps. Include the run command or inline requests — whichever form
-the PoC takes.]
+cross-reference in the submission ("follow the redirect from step 4") resolves against. Prefix each
+step with the acting identity (`[attacker]` / `[administrator]` / `[server]` / `[both]`, or
+the finding's own role names; compound form like `[administrator, browser]` for a context switch).
+Read the identity off the step's own request — which session, token, or header the argv carries — and
+run `vigil assess command-run get <id>` for a step whose actor the argv does not make obvious.
+One action per step, no narrative between
+steps. Controls, edge cases, alternate endpoints, and source-code analysis do not appear here;
+cleanup does, but only when the reproduction mutates state the triager will also mutate (revert plus
+read-back is credibility evidence on a live target) — it is noise when the reproduction is read-only.
+A step's expected result is a `**Expect:**` line belonging to that step — at column 0 on the line
+after the step's closing fence, matching the fence itself, since platform markdown renderers vary in
+how they treat a fence indented inside a list item. Step-local, and distinct from `details.pass_if` (the
+one-line criterion for the whole reproduction, rendered in the operational header). Include the run command or inline requests
+— whichever form the PoC takes.]
 
 ### Evidence
-[AUTHORED proof, not a raw command dump. Author it from the OPERATOR DETAILS section's structured
-proof and linked command runs plus a targeted `vigil assess command-run list --q
-<finding's url/param/header/uri>` for reproducing runs the linked set missed. Annotate the critical
-lines with <-- proof markers.
+[AUTHORED proof, not a raw command dump — proof the steps cannot show. Six categories, the first
+mandatory and the rest as the finding warrants: the decisive artifact (the bytes proving what a
+step's `**Expect:**` line can only assert — the leaked record, the crash report, the returned
+credential); root cause (source, config, or bundle excerpt); negative controls that prove the causal
+claim; post-exploitation boundaries (what the attacker still could not do); minimum privilege
+required to reach the sink; and environment facts load-bearing for Impact or Remediation.
+**The shape follows the number of proof obligations, not a template** — one fenced block for a
+finding with one thing to prove, a labelled block per category when there are several
+(`**Cross-tenant read.**` … or `#### ` sub-headings once the blocks run long). Author it from the OPERATOR DETAILS
+section's structured proof and linked command runs plus a targeted `vigil assess command-run list
+--q <finding's url/param/header/uri>` for reproducing runs the linked set missed. Annotate the
+critical lines with <-- proof markers.
 Truncated to only the lines that matter. No full tool dumps.
 Genuine third-party PII must be partial-masked; self-owned/synthetic data is shown in full — see "PII redaction" below.
 This is stored back on the finding as `details.evidence`; the raw output stays in `scans/`.]
@@ -176,10 +202,12 @@ mask and author Evidence from, and every linked command run. The pasteable body 
 
 ## Steps to Reproduce vs Evidence
 
-**Steps to Reproduce owns the action** — what was sent, in order, no output. **Evidence owns the
-result** — the response bytes that prove it, truncated to what matters and `<-- proof`-annotated.
-When a step's request and Evidence's request are identical, don't retype it: reference the step
-("the response to step 3") and show only the outcome (reporting.md Rules 15, 21).
+**A step's verification outcome is inline in the step** — a short `**Expect:**` line right after
+the request (`grant -> 200`, a required marker), not a separate section. **Evidence carries only
+proof the steps cannot show**: the six-category taxonomy under "Evidence" in "Structure" above —
+never a request or result a step's `**Expect:**` line already carries (reporting.md Rule 21). The
+decisive artifact is the exception that proves the rule: a step asserts what its response showed,
+and Evidence carries the bytes that prove the assertion.
 
 ## Attack Scenario vs Impact
 
@@ -187,7 +215,8 @@ When a step's request and Evidence's request are identical, don't retype it: ref
 compromise; never quantifies scope. **Impact owns severity** — consequence and blast radius,
 quantified by shape/count; never re-describes the actor or the steps. The scope/"how many" sentence
 lives only in Impact. Attack Scenario is optional — drop it whenever Steps to Reproduce plus Impact
-already make reachability obvious (reporting.md Rule 15).
+already make reachability obvious (reporting.md Rule 15), and omit it outright whenever the Summary
+carries an Exploit flow, since the two would carry the same sequence twice.
 
 ## PoC block
 
@@ -298,14 +327,17 @@ target-facing proof.
 These are ceilings, not targets. A one-sentence Summary that lands the attacker outcome is a complete
 Summary — using the full ceiling on every finding is a sign the prose is padded to look thorough, not
 that it is thorough. Write the fact in as little space as it needs, then stop; only cut when a section
-runs past its ceiling below.
+runs past its ceiling below. The sentence-length row follows ASD-STE100 (Simplified Technical
+English), the maintenance-documentation standard that caps prose at similar lengths for the same
+followability reason.
 
 | Section | Ceiling |
 |---|---|
 | Title | 12 words, single clause |
-| Summary | 4 sentences |
-| Steps to Reproduce | One sentence per step, no narrative between steps |
-| Evidence | 5-15 lines per request/response pair; annotate the proof line, don't retype a request already shown in Steps to Reproduce |
+| Any single sentence | 25 words (20 in Steps to Reproduce) |
+| Summary | ≤4 sentences + optional 3-5 step Exploit flow |
+| Steps to Reproduce | One sentence per step, no narrative between steps; ≤10 steps, one action per step |
+| Evidence | ≤15 lines of content per fenced block; annotate the proof line, and carry only proof the steps cannot show |
 | Attack Scenario | 3 sentences |
 | Impact | 2 sentences |
 | Remediation | 3 items |
@@ -395,8 +427,7 @@ Where a row's rationale is a reporting rule it cites the rule (`agent/rules/repo
 
 ### Proof & evidence
 
-- [ ] **[both]** Evidence is authored, annotated proof — not a raw tool dump; each request/response is truncated to the 5-15 lines that prove the finding, with the critical line bolded or `<-- proof`-annotated so a reviewer finds it in seconds (reporting.md Rule 13)
-- [ ] **[submission]** Evidence does not retype a request Steps to Reproduce already shows — it references the step and carries only the response/outcome ("Steps to Reproduce vs Evidence" above; reporting.md Rule 21)
+- [ ] **[both]** Evidence is authored, annotated proof — not a raw tool dump; each fenced block is truncated to only the lines that prove the finding (≤15 lines of content per block in a submission; reporting.md Rule 10 owns the internal report's own ceiling), with the critical line bolded or `<-- proof`-annotated so a reviewer finds it in seconds (reporting.md Rule 13)
 - [ ] **[both]** Title and summary claim no reach, read, or impact beyond what the Evidence block literally shows — read them once as a blind triager would before publish, pre-empting the blind-triage lens rather than waiting for it to catch overclaim
 - [ ] **[both]** A reachable-but-not-fully-exploited finding scores CVSS on the demonstrated outcome only — there is a single `cvss_vector` field, not a separate score for the further reach a defender should still fix; name that further reach in `remediation` or one caveat sentence in `impact`, never as a second CVSS vector, and never in the title or summary
 - [ ] **[submission]** For any finding with claimed CVSS ≥ 8.0 (critical-severity), `agent/skills/disclosure-deployment-shape-check/SKILL.md`'s eight-category audit ran and passed before send — it catches the deployment-shape overstatement class (allocator dependence, build-flag gates, claim-vs-evidence fidelity, vendor-distro variation) that source-only verification does not, because those facts live in the runtime deployment, not the code. The audit memo lives at `tools/analysis-state/disclosure-shape-check-<slug>.md`.
@@ -423,7 +454,7 @@ Where a row's rationale is a reporting rule it cites the rule (`agent/rules/repo
 - [ ] **[both]** No banned filler phrases (`Furthermore`, `It is worth noting`, `During the course of our assessment`, `robust`, `comprehensive`, …) (reporting.md Rule 11)
 - [ ] **[both]** Active voice throughout — the subject acts (reporting.md Rule 12)
 - [ ] **[both]** Every sentence is load-bearing — if removing it does not reduce the reader's understanding, cut it (reporting.md Rule 15)
-- [ ] **[submission]** No "Defender-positive", "Dead ends", "Negative findings", or "What was ruled out" section or sub-section anywhere in the submission (reporting.md Rule 20)
+- [ ] **[submission]** No "Defender-positive", "Dead ends", "Negative findings", or "What was ruled out" section or sub-section anywhere in the submission — a control that proves the causal claim (a safe branch escaping the same bytes, a pre-exploitation capability baseline) is corroborating proof in Evidence, not a dead end (reporting.md Rule 20)
 - [ ] **[submission]** No probe counts, request volumes, or percentile latencies appear anywhere in the submission body (reporting.md Rule 20)
 - [ ] **[submission]** Deconfliction (if present) is ≤3 lines — researcher ID, source IP, UTC time window — no per-phase breakdowns, marker-string lists, or rate pledges (reporting.md Rule 20)
 - [ ] **[submission]** Attack scenario uses a realistic adversary class, not a cartoonish persona ("student in a dorm room", "script kiddie") — 3 sentences maximum (reporting.md Rule 20)
@@ -431,9 +462,9 @@ Where a row's rationale is a reporting rule it cites the rule (`agent/rules/repo
 - [ ] **[submission]** The word "submission" does not appear in the body prose — use "finding" or "report" (reporting.md Rule 20)
 - [ ] **[submission]** CWE, CVSS, or VRT that appear in header fields are not restated or justified inside body prose (reporting.md Rule 20)
 - [ ] **[submission]** Related findings (if present) are one sentence each at the end of the submission, not multi-paragraph cross-references (reporting.md Rule 20)
-- [ ] **[submission]** No em-dash appears more than once per paragraph; replace surplus em-dashes with a period, comma, or parentheses (reporting.md Rule 20)
-- [ ] **[submission]** Contractions appear where natural (doesn't, it's, I've, won't) — the prose is not uniformly formal (reporting.md Rule 20)
-- [ ] **[submission]** At least one sentence carries a first-person observation or hunch ("I traced the failure to…") — not uniform third-person narration. External submissions only; the internal `report.md` stays impersonal (reporting.md Rule 20)
+- [ ] **[submission]** No em-dash appears more than once per paragraph; replace surplus em-dashes with a period, comma, or parentheses
+- [ ] **[submission]** Contractions appear where natural (doesn't, it's, I've, won't) — the prose is not uniformly formal
+- [ ] **[submission]** If a genuine first-person observation, hunch, or unresolved gap exists, it is stated in your own voice ("I traced the failure to…") rather than flattened into third-person narration — one is usually there on a real finding, but do not manufacture one to fill this row (reporting.md Rules 15, 20). External submissions only; the internal `report.md` stays impersonal
 - [ ] **[both]** No load-bearing fact (the actor's access level, the auth-bypass claim, a specific field value) is stated or proven more than once across Summary, a step preamble, Attack Scenario, and Evidence — each fact has exactly one home, and every other mention references it instead of re-asserting it (reporting.md Rule 21)
 - [ ] **[submission]** Actions the operator personally performed are narrated in first person ("I submitted…", "I filed…"), not third-person/passive ("a human filed…", "it was observed…") (reporting.md Rule 20)
 - [ ] **[submission]** A genuine gap or unresolved edge case, if one exists, is named plainly in the operator's own voice rather than omitted or hedged into a fully-solved matrix — and stays accurate about what still holds (reporting.md Rule 20)

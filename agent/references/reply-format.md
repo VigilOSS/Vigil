@@ -35,7 +35,7 @@ A section that exceeds its budget needs to be cut, not wrapped — same rule as
 |---|---|
 | Salutation | ≤1 line, optional |
 | Reply body | ≤6 sentences / ≤2 short paragraphs |
-| New evidence | 5-15 `<-- proof`-annotated lines (PII rules: submission-format.md "PII redaction") |
+| New evidence | ≤15 lines of content per fenced block, `<-- proof`-annotated (PII rules: submission-format.md "PII redaction") |
 | Attachment pointer | the `**Run:**` / `**Pass if:**` block (submission-format.md "PoC block"), only when the new evidence needs one |
 
 ## Do
@@ -75,7 +75,7 @@ The reply subset of `submission-format.md`'s pre-submission checklist. Run befor
 - [ ] Body ≤6 sentences, leads with the new proof or the answer, not a restatement of the ask
 - [ ] No Summary/Impact/CVSS/VRT restatement anywhere in the body
 - [ ] No internal identifiers — finding slug, engagement path, `vigil assess` breadcrumbs, `cases.db` references (submission-format.md "No internal identifiers")
-- [ ] New evidence, if any: third-party PII partial-masked, self-owned/synthetic shown in full, truncated to 5-15 proof lines (submission-format.md "PII redaction")
+- [ ] New evidence, if any: third-party PII partial-masked, self-owned/synthetic shown in full, each fenced block truncated to the ≤15 lines that prove the point (submission-format.md "PII redaction")
 - [ ] No probe counts, telemetry, or ruled-out-variant narration (reporting.md Rule 20)
 - [ ] Contractions present, first person, not uniformly formal (reporting.md Rule 20)
 - [ ] If the prior reply was flagged AI-generated, this one is shorter and rougher, not longer

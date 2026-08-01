@@ -91,6 +91,17 @@ fabricated id — so refusing on it would let infrastructure block the publish o
 correct, verified finding. The unresolved ids are named in the render, on stderr,
 and in the context JSON (``repro_runs_unresolved``); the report-writer decides.
 
+THE REHEARSAL IS ADVISED ON HERE, not at the phase transition. The Phase-8
+reproduction rehearsal — an agent that EXECUTES the steps from a cold start — is
+the only check that can catch a step whose removal takes state a later step needs,
+which is the defect a trim can introduce; this command reads its ``repro_rehearsal``
+decision rows and advises when none is recorded, when the newest one did not follow,
+or when it checked a run ``details.repro_runs`` no longer declares. Export is the
+right place because the trim happens HERE, while the report-writer is reading, and
+a rehearsal re-dispatched at engagement close is the same work at its most
+expensive. It never blocks, and an unreachable backend degrades to a stderr WARN
+with no advisory (see ``_repro_rehearsal_decisions``).
+
 The generated ``submission.md`` is registered as a finding-linked artifact
 (``kind="submission"``); the finding's ``submission_status`` is never written
 (omitting the field preserves it).
@@ -127,6 +138,8 @@ from assess.lib.finding_render import (
     engagement_relative as _engagement_relative,
     hygiene_warnings as _hygiene_warnings,
     poc_lines as _poc_lines,
+    prose_advisories,
+    repro_rehearsal_advisories,
     step_lines,
     string_list,
     title_advisories,
@@ -134,6 +147,9 @@ from assess.lib.finding_render import (
 from assess.lib.scope import rate_caps_for_dir
 
 _PLATFORMS = ("bugcrowd", "hackerone", "direct")
+# The decision kind the Phase-8 reproduction rehearsal stamps
+# (``agent/phases/phase-8-report.md``), read here to ADVISE — never to gate.
+_REHEARSAL_DECISION_KIND = "repro_rehearsal"
 _PLATFORM_LABEL = {"bugcrowd": "Bugcrowd", "hackerone": "HackerOne", "direct": "Direct disclosure"}
 _REPORTABLE_STATUSES = {
     "active",
@@ -600,6 +616,37 @@ def _repro_runs(client, finding: dict) -> tuple[list[dict], list[str]]:
         else:
             unresolved.append(f"{run_id} (unexpected response shape)")
     return runs, unresolved
+
+
+def _repro_rehearsal_decisions(client) -> tuple[list[dict], str]:
+    """The engagement's ``kind='repro_rehearsal'`` decision rows, or a reason.
+
+    ONE filtered read — the same shape ``transition_phase._blind_triage_blockers``
+    uses for ``blind_triage_verdict``: the kind is filtered SERVER-side and the
+    page size is the endpoint's maximum, so a long engagement cannot push an older
+    rehearsal behind the default ``limit=100``. Per-slug filtering is left to
+    :func:`repro_rehearsal_advisories` because the endpoint has no slug parameter
+    (the finding slug lives inside the row's JSON payload).
+
+    The cost is deliberately kept to one round trip because export runs REPEATEDLY
+    — it is the report-writer's author -> write-back -> re-render loop, not a
+    once-per-finding command — and it is skipped entirely for a finding with no
+    authored steps (see the call site), where there is no reproduction to rehearse.
+
+    FAILS SOFT, returning ``([], reason)``. An unreachable backend says nothing
+    about whether the rehearsal happened, and the two outcomes it would otherwise
+    collapse into one another — "no rehearsal on record" and "could not ask" — have
+    opposite fixes. The caller reports the reason and emits NO advisory, so a
+    backend hiccup can neither block an export nor assert something false about the
+    finding.
+    """
+    try:
+        rows = client.get(f"dispatch-decisions?kind={_REHEARSAL_DECISION_KIND}&limit=1000")
+    except AssessError as exc:
+        return [], f"repro-rehearsal decisions unavailable: {exc}"
+    if not isinstance(rows, list):
+        return [], "dispatch-decisions returned an unexpected response"
+    return [row for row in rows if isinstance(row, dict)], ""
 
 
 def _section(title: str, body: list[str]) -> list[str]:
@@ -1170,6 +1217,11 @@ def run(args) -> None:
         )
         # Prose advisories are surfaced, never gated on: only leaks fail closed.
         advisories = title_advisories(resolved["title"])
+        # Length/shape advice about the body, measured on the SAME scan render the
+        # hygiene gate reads (no warnings or advisories woven in yet, so nothing
+        # measures the tool's own text) and confined to the pasteable body, so the
+        # never-paste OPERATOR DETAILS proof is never counted as submission prose.
+        advisories += prose_advisories(scan_markdown, steps=resolved["steps"])
         # Both repro-run conditions advise. Refusing on either would gate a publish
         # on something that is not a fact about the document: an absent repro_runs
         # is every finding recorded before the field existed, and an unresolved id
@@ -1193,6 +1245,30 @@ def run(args) -> None:
                 '`vigil assess command-run list --q "<url/param/payload>"` and record '
                 "their ids in step order."
             )
+        # The rehearsal state behind those steps. Export is where this lands rather
+        # than the phase transition because export is where the trim that invalidates
+        # a rehearsal actually happens and where the report-writer is reading, so the
+        # signal arrives while it is still cheap to act on — at engagement close,
+        # re-dispatching a rehearsal is at its most expensive. It ADVISES for the
+        # same reason the repro-run checks above do: a missing rehearsal is a fact
+        # about process, not about the document, and refusing on it would let the
+        # tool hold a finished, verified finding hostage to a decision row.
+        if resolved["steps"]:
+            rehearsal_decisions, rehearsal_error = _repro_rehearsal_decisions(client)
+            if rehearsal_error:
+                # Reported where the other reference-fetch failures go, and NOT as
+                # an advisory: "could not ask" is not "no rehearsal on record".
+                print(
+                    f"WARN export submission: {rehearsal_error}; the repro-rehearsal "
+                    "advisory is not evaluated for this render",
+                    file=sys.stderr,
+                )
+            else:
+                advisories += repro_rehearsal_advisories(
+                    rehearsal_decisions,
+                    slug,
+                    repro_run_ids=detail_value(finding, "repro_runs", []),
+                )
         if not draft and hygiene_warnings:
             raise AssessError(
                 f"export submission: cannot render a FINAL {platform} submission for {slug!r} "
