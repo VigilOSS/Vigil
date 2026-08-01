@@ -176,6 +176,12 @@ Preferred pattern: subject-verb-object. The endpoint does X. The attacker sends 
 |---|---|
 | `robust` · `comprehensive` · `seamless` · `crucial` · `admirably honest` · `the crux of the matter` | Name what the thing does instead of rating it |
 
+**Meta-commentary → state the fact.** A distinct class from the filler above: the writer narrating its own reporting decisions instead of reporting.
+
+| Instead of | Write |
+|---|---|
+| `read this as` · `that bounds` · `I would rather report` · `to be clear about what I am not claiming` | (delete — add nothing) |
+
 **External submissions → focus on the finding, not the researcher.**
 
 Compliance is assumed. Restating it implies uncertainty:
@@ -203,7 +209,7 @@ Passive voice is acceptable only when the actor is genuinely unknown or irreleva
 
 **Request block:** Full HTTP request in a fenced code block immediately after the step instruction. Annotate injected payloads or manipulated parameters with inline comments if the critical part is not obvious.
 
-**Response block:** Immediately below the request (or, for external submissions, in the Evidence section — see "Placement" below), truncate to the 5-15 lines that prove the finding. Bold or annotate the specific data that constitutes the proof — the leaked PII field, the unauthorized record, the injected output. 10 lines that show the proof beat 200 lines that bury it.
+**Response block:** Immediately below the request (in an external submission the step's own outcome is a short `**Expect:**` line inside that step, and only proof the steps cannot show reaches Evidence — see "Placement" below), truncate to only the lines that prove the finding — Rule 10 above sets the internal `report.md` ceiling; `agent/references/submission-format.md` "Section budgets" sets the submission Evidence ceiling. Bold or annotate the specific data that constitutes the proof — the leaked PII field, the unauthorized record, the injected output. 10 lines that show the proof beat 200 lines that bury it.
 
 **Highlighting:** Use `**bold**` or `← proof` / `<-- proof` annotations to draw the eye to the critical line in response blocks. A reviewer should find the proof in under 3 seconds.
 
@@ -212,7 +218,7 @@ Passive voice is acceptable only when the actor is genuinely unknown or irreleva
 **Placement differs by format — do not mix them:**
 
 - **Internal `report.md` (legacy):** evidence lives inside the Steps to Reproduce step that produces it — no separate Evidence section. See "Report Structure (Legacy Internal Report)" in the report-generation skill.
-- **External submissions:** evidence lives in its own `### Evidence` section, separate from Steps to Reproduce — see `agent/references/submission-format.md` "Structure" and "Steps to Reproduce vs Evidence." Reference the producing step ("the response to step 3") rather than re-pasting its request a second time — see Rule 21.
+- **External submissions:** evidence lives in its own `### Evidence` section, separate from Steps to Reproduce — see `agent/references/submission-format.md` "Structure" and "Steps to Reproduce vs Evidence." A step's own outcome is inline in that step's `**Expect:**` line, not here — Evidence carries only proof the steps cannot show, so nothing in it is a second copy of what a step already proved (Rule 21).
 
 ## 14. Remediation must be specific
 
@@ -308,7 +314,7 @@ These sections are engagement-internal — strip them from client-facing deliver
 
 External submissions (bug bounty, disclosure email) are read by humans. The patterns below signal automated authorship and undermine credibility. The full gate checklist lives in `agent/references/submission-format.md`.
 
-**Report what you found, not what you ruled out.** The submission covers the vulnerability. If a negative result is genuinely material, state it in one sentence without a probe count — sections cataloguing failed attack variants ("Defender-positive", "Dead ends", "Negative findings") signal automated enumeration.
+**Report what you found, not what you ruled out.** The submission covers the vulnerability. If a negative result is genuinely material, state it in one sentence without a probe count — sections cataloguing failed attack variants ("Defender-positive", "Dead ends", "Negative findings") signal automated enumeration. A control that proves the causal claim — a safe branch escaping the same bytes, a pre-exploitation capability baseline — is corroborating proof, not a ruled-out variant; Rule 21 covers what to keep and how to place it.
 
 **Keep telemetry internal.** Request volumes, per-phase timing, percentile latencies, and per-node distribution are operational state. One UTC date range covers the time window if the reviewer needs it.
 
@@ -340,7 +346,7 @@ External submissions (bug bounty, disclosure email) are read by humans. The patt
 
 State and prove each load-bearing fact in exactly one place, then let the rest of the finding rely on it. Re-asserting the same claim in the Summary, again in a step's preamble, and again in the Attack Scenario — or re-pasting a step's request/response verbatim under a separate Evidence heading — is one of the most recognizable agent-authored tells: the model re-establishes a claim wherever a section could carry it, where a human states it once and trusts the reader to carry it forward. Give each fact one home — usually the step whose request/response proves it — and let everything else reference that home instead of restating it.
 
-- **Sections:** don't re-paste bytes a step already showed. Evidence exists to carry the annotated proof pulled from a step's response, not to retype the request a second time (see submission-format.md "Steps to Reproduce vs Evidence") — reference the step instead of repeating it. If the Attack Scenario just re-narrates the Summary and Steps, cut it or reduce it to the one sentence that adds a new adversary or starting-access detail (submission-format.md already allows dropping Attack Scenario entirely for this reason).
+- **Sections:** don't re-paste bytes a step already showed. A step's own outcome belongs inline in that step, not in Evidence — Evidence carries only proof the steps cannot show (see submission-format.md "Steps to Reproduce vs Evidence" for the taxonomy). If the Attack Scenario just re-narrates the Summary and Steps, cut it, reduce it to the one sentence that adds a new adversary or starting-access detail, or omit it outright when the Summary carries an Exploit flow (submission-format.md already drops Attack Scenario for this reason).
 - **Qualifiers:** state each precondition once, where it's proven — don't repeat the same adjective phrase on every actor mention. `an anonymous visitor holding no account, session, or token, in a logged-out browser, clearing only Turnstile` → `an anonymous visitor` on every mention after the first.
 - **Annotations:** gloss a response line once. `login_identifier:null` — the field name carries the rest; never repeat the same gloss in a second section.
 

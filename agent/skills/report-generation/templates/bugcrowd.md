@@ -42,20 +42,24 @@ that's the normal report-writer entrypoint.
 ---
 
 ### Summary
-[2-4 sentences. Attacker outcome first, then the fault, then what the PoC proves.]
+[2-4 sentences. Attacker outcome first, then the fault, then what the PoC proves. Optionally followed
+by a `**Exploit flow**` marker + a 3-5 item ordered list of plain sentences, no commands, same string.]
 
 ### Steps to Reproduce
-[Numbered. One action per step. No narrative between steps.]
+[Numbered, ≤10 steps, no narrative between them. Prefix each step with the acting identity
+(`[attacker]`/`[administrator]`/`[server]`/`[both]`); one action per step, its outcome on a `**Expect:**` line.]
 
 ### Evidence
-[AUTHORED from the OPERATOR DETAILS section's structured proof + linked runs + a targeted
+[AUTHORED, and only proof the steps cannot show — root cause, negative controls, post-exploitation
+boundaries, minimum privilege, load-bearing environment facts. From the OPERATOR DETAILS section's structured proof + linked runs + a targeted
 `command-run list` search, third-party PII partial-masked only (self-owned/synthetic data shown
 in full — see submission-format.md "PII redaction"), truncated to the proof lines, annotated with
 <-- proof markers. Stored back on the finding as `details.evidence`; the raw output stays in `scans/`.]
 
 ### Attack Scenario
 [2-3 sentences. Realistic adversary class + starting access + action, ending at first compromise —
-no scope counts (those go in Impact). Optional: drop it when Steps + Impact already show reachability.]
+no scope counts (those go in Impact). Optional: drop it when Steps + Impact already show
+reachability, and omit it outright whenever the Summary carries an Exploit flow.]
 
 ### Impact
 [1-2 sentences. Consequence + blast radius, quantified by shape/count. Don't re-describe the actor or

@@ -166,11 +166,14 @@ never rendered.
    added — write it as ONE string carrying your own `1.`/`2.`/… numbering (a list of strings still
    renders, one paragraph per item, but only a single block lets you control the numbers that later
    prose cross-references — see `agent/references/submission-format.md` "Structure").
-   **You EDIT the specialist's recorded steps; you do not author them from nothing.** Reformat and
-   renumber against the "Reproduction runs" argv in OPERATOR DETAILS (`details.repro_runs`), which
-   is the audit row behind each step — if a step and its run disagree, the run is right. An absent
-   or unbindable reproduction is Pre-Report Validation check 5: `QA BLOCKED`, not a drafting
-   problem you can solve.
+   **Your edit authority is the fabrication boundary, not "edit only":** every command, argv, and
+   response value must trace to a `details.repro_runs` id (the "Reproduction runs" argv in OPERATOR
+   DETAILS) — if a step and its run disagree, the run is right. Within that boundary you may
+   renumber, reword, merge, label, add expected-result lines, and drop steps; see
+   `agent/agents/report-writer.md` Mandatory Closing Sequence step 1 for the authoritative rule.
+   Dropping a step re-triggers repro rehearsal before publish (`agent/phases/phase-8-report.md`
+   "Repro rehearsal"). An absent or unbindable reproduction is Pre-Report Validation check 5:
+   `QA BLOCKED`, not a drafting problem you can solve.
 
    **Write via `--payload-file`, the default write path.** Evidence in particular routinely contains
    single quotes, double quotes, newlines, and backtick fences that corrupt `--details-inline`'s

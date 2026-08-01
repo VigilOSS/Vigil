@@ -4,7 +4,7 @@ skill: report-generation
 category: Disclosure & Reporting Formats
 ---
 
-**Title:** LDAP Filter Injection in AD Password Rotation Plugin allows vault record editor to take over any AD account
+**Title:** LDAP injection in AD rotation plugin lets vault editors hijack any account
 
 **VRT:** Server-Side Injection > LDAP Injection
 
@@ -17,23 +17,29 @@ category: Disclosure & Reporting Formats
 
 ### Summary
 
-An attacker with edit access to a shared credential record changes the `login` field and takes over any Active Directory account during the next password rotation. The AD rotation plugin interpolates the login field directly into the LDAP search filter without escaping: `f'(&(objectClass=user)(sAMAccountName={name}))'`. The `escape_filter_chars()` function from `ldap3` is already used elsewhere in the same codebase but was not applied here. The attached POC calls the installed rotation function and captures the LDAP filters it constructs.
+An attacker with edit access to a shared credential record changes the `login` field. That single edit takes over any Active Directory account at the next scheduled rotation. The AD rotation plugin interpolates the login field directly into the LDAP search filter without escaping: `f'(&(objectClass=user)(sAMAccountName={name}))'`. The attached POC calls the installed rotation function and captures the LDAP filters it constructs.
+
+**Exploit flow**
+1. A contractor or other user with edit access to a shared AD rotation credential record changes the `login` field to include LDAP filter metacharacters.
+2. The scheduled password rotation job builds an LDAP search filter directly from that field with no escaping.
+3. The injected metacharacters redirect the filter to resolve the administrator's DN instead of the intended account.
+4. The rotation job changes the administrator's password and writes the new value to the vault record.
+5. The attacker reads the new password from the vault record and logs into the domain controller with full administrator privileges.
 
 ### Steps to Reproduce
 
-1. Run the POC against the installed package:
+1. [attacker] Run the offline POC against the installed package:
 ```
 python3 poc-ldap-injection.py
 ```
-2. Observe test cases calling the installed `rotate()` function.
-3. Each captured filter shows unescaped LDAP metacharacters (`*`, `(`, `)`, `|`, `!`) passing through.
-4. The DN_HIJACK payload resolves the administrator's DN instead of the intended user. `modify_password` then changes the administrator's password.
+**Expect:** every captured filter shows unescaped LDAP metacharacters; the DN_HIJACK case resolves the administrator's DN and changes their password. Full output in Evidence.
 
-For end-to-end on a live AD environment:
-5. Create a credential record with the AD rotation plugin, a valid AD host, and valid bind credentials.
-6. Set the login field to `DOMAIN\administrator)(!(sAMAccountName=jsmith)`.
-7. Run the rotation command.
-8. The administrator's password is changed and stored in the vault record.
+For end-to-end reproduction on a live AD environment:
+
+2. [attacker] Create a credential record with the AD rotation plugin, a valid AD host, and valid bind credentials.
+3. [attacker] Set the login field to `DOMAIN\administrator)(!(sAMAccountName=jsmith)`.
+4. [server] Run the scheduled rotation.
+**Expect:** the administrator's password changes and the new value is stored in the vault record.
 
 ### Evidence
 
@@ -54,11 +60,7 @@ For end-to-end on a live AD environment:
   [INJECTION CONFIRMED] Binary oracle: result count reveals if email starts with admin@
 ```
 
-All filters captured from the installed `rotate()` function.
-
-### Attack Scenario
-
-A contractor with shared access to an AD rotation record edits the login field to inject LDAP metacharacters. The next scheduled rotation changes the domain administrator's password instead of the intended user's. The contractor reads the credential record and logs into the domain controller with full admin privileges.
+All filters captured from the installed `rotate()` function. The `escape_filter_chars()` function from `ldap3` is already used elsewhere in the same codebase but was not applied here.
 
 ### Impact
 

