@@ -37,7 +37,7 @@ row above empty.
 
 **Weakness:** CWE-[nnn]: [name]
 
-**Severity:** [Critical/High/Medium/Low]
+**Severity:** [CRITICAL/HIGH/MEDIUM/LOW]
 
 **CVSS:** CVSS:3.1/[vector] ([score])
 

@@ -8,7 +8,9 @@ category: Disclosure & Reporting Formats
 
 **Weakness:** CWE-918: Server-Side Request Forgery (SSRF)
 
-**Severity:** High — CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:N (7.1)
+**Severity:** HIGH
+
+**CVSS:** CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:N (7.1)
 
 **Run:** `python3 poc-ssrf-webhook.py`
 **Pass if:** the script prints the stolen `AccessKeyId`/`SecretAccessKey` pair

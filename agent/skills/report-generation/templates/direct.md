@@ -37,7 +37,7 @@ No platform-taxonomy row — `direct` is the one platform where the strict gate 
 ```
 **Title:** [Bug Class] in [exact component] allows [attacker role] to [impact]
 
-**Severity:** [Critical/High/Medium/Low]
+**Severity:** [CRITICAL/HIGH/MEDIUM/LOW]
 
 **CVSS:** CVSS:3.1/[vector] ([score])
 

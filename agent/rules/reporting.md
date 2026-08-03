@@ -272,7 +272,7 @@ Common patterns that require consolidation:
 - Credential exposure as a direct consequence of an auth bypass on the same system
 - Multiple unauthenticated routes on the same API when the root cause is a single missing-auth control
 
-### Cross-finding dedup pass — pick a lead, flag dup-risk siblings
+### Cross-finding dedup pass — pick a lead, flag dup-risk siblings (operator-run, not part of a per-finding dispatch)
 
 Consolidation (above) collapses findings into one. The other axis is **which findings a program
 will treat as duplicates of each other even when you file them separately.** Blind pre-submission
