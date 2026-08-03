@@ -1700,6 +1700,12 @@ def _words(count: int) -> str:
     return "The tenant " + " ".join(["reads"] * (count - 3)) + " everything."
 
 
+def _tagged_words(tag: str, count: int) -> str:
+    """`_words`, but distinguishable by its opening word, for quote-identity tests."""
+    assert count >= 3
+    return f"{tag} tenant " + " ".join(["reads"] * (count - 3)) + " everything."
+
+
 def _advisories(**kwargs) -> list[str]:
     return export_submission.prose_advisories(_body(**kwargs))
 
@@ -1715,9 +1721,10 @@ def test_sentence_length_advises_at_the_word_budget(count, expect):
     assert bool(hits) is expect
     if expect:
         assert hits == [
-            "1 sentence runs over 25 words (longest 26, in Summary). Long sentences "
-            "are the most common reason a triager re-reads a submission — consider "
-            "splitting them."
+            '1 sentence runs over 25 words (longest 26, in Summary: "The tenant '
+            'reads reads reads reads reads reads…"). Long sentences are the most '
+            "common reason a triager re-reads a submission — consider splitting "
+            "them."
         ]
 
 
@@ -1732,6 +1739,78 @@ def test_steps_carry_the_tighter_sentence_budget(count, expect):
     steps_hits = _only(advisories, "over 20 words in Steps to Reproduce")
     assert bool(steps_hits) is expect
     assert _only(advisories, "over 25 words") == []
+
+
+def test_steps_length_advisory_also_carries_the_quote():
+    """The Steps-to-Reproduce advisory names its sentence the same way the
+    general one does — the two message shapes are kept consistent."""
+    advisories = _advisories(steps_to_reproduce=f"1. {_words(21)}")
+    hits = _only(advisories, "over 20 words in Steps to Reproduce")
+    assert hits == [
+        "1 sentence runs over 20 words in Steps to Reproduce (longest 21: "
+        '"The tenant reads reads reads reads reads reads…"). A step that has '
+        "to be re-read is a step a triager can execute wrong — consider "
+        "splitting them."
+    ]
+
+
+def test_length_advisory_quotes_the_longest_offender():
+    """Two sentences trip the same advisory; the quote names the one already
+    picked out by "longest N" — not merely the first or the last one found."""
+    shorter = _tagged_words("Alpha", 26)
+    longer = _tagged_words("Bravo", 30)
+    hits = _only(_advisories(summary=f"{shorter} {longer}"), "over 25 words")
+    assert hits == [
+        "2 sentences run over 25 words (longest 30, in Summary: "
+        '"Bravo tenant reads reads reads reads reads reads…"). Long sentences '
+        "are the most common reason a triager re-reads a submission — consider "
+        "splitting them."
+    ]
+    assert "Alpha" not in hits[0]
+
+
+def test_length_advisory_quote_keeps_exactly_the_word_budget():
+    """The quote is capped to exactly 8 words, not 7 or 9 — the same off-by-one
+    a hand-rolled slice is easiest to get wrong."""
+    sentence = " ".join(f"word{i:02d}" for i in range(1, 27)) + "."
+    hits = _only(_advisories(summary=sentence), "over 25 words")
+    assert hits
+    quoted = hits[0].split('"')[1]
+    assert quoted == "word01 word02 word03 word04 word05 word06 word07 word08…"
+
+
+def test_length_advisory_quote_respects_the_character_ceiling():
+    """A quote made of few but very long words can blow the character budget
+    while still inside the 8-word cap — the same shape an inline code span
+    produces, since `_word_count` treats it as one word. The character ceiling
+    is the backstop."""
+    long_words = " ".join(f"identifier-block-{i:03d}-extra-long" for i in range(8))
+    filler = " ".join(["padding"] * 20)
+    sentence = f"{long_words} {filler} tail."
+    hits = _only(_advisories(summary=sentence), "over 25 words")
+    assert hits
+    quoted = hits[0].split('"')[1]
+    assert quoted.endswith("…")
+    assert len(quoted) <= 71  # 70-char budget plus the ellipsis character
+
+
+def test_length_advisory_quote_neutralizes_backticks_and_pipes():
+    """A quoted fragment must never smuggle a stray backtick, pipe, or newline
+    into the OPERATOR DETAILS bullet it renders inside — any of the three could
+    corrupt the block (an unterminated fence, a stray table row, or a line that
+    escapes the `- ` list item entirely)."""
+    sentence = (
+        "Run `curl -s https://app.example.com/a|b -o out.json` and then read the "
+        "response body twice before moving on to the next step in the flow "
+        + " ".join(["more"] * 8)
+        + "."
+    )
+    hits = _only(_advisories(summary=sentence), "over 25 words")
+    assert hits
+    assert "`" not in hits[0]
+    assert "|" not in hits[0]
+    assert "\n" not in hits[0]
+    assert "'curl" in hits[0]  # the backtick is swapped, not merely dropped
 
 
 @pytest.mark.parametrize(

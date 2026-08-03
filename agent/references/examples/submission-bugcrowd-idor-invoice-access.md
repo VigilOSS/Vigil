@@ -8,7 +8,9 @@ category: Disclosure & Reporting Formats
 
 **VRT:** Broken Access Control > Insecure Direct Object Reference (IDOR)
 
-**Severity:** P2 (High) — CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N (6.5)
+**Severity:** MEDIUM
+
+**CVSS:** CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N (6.5)
 
 ---
 
@@ -54,7 +56,7 @@ A competitor or disgruntled customer works from an ordinary paid account with no
 
 ### Impact
 
-Every tenant's billing data — contact details and negotiated line-item pricing — is readable across the platform. The ID space is sequential and unsalted, so exposure isn't limited to adjacent accounts: it covers the full customer base in one enumerable range.
+Every tenant's billing data (contact details and negotiated line-item pricing) is readable across the platform. The ID space is sequential and unsalted, so exposure isn't limited to adjacent accounts: it covers the full customer base in one enumerable range.
 
 ### Remediation
 

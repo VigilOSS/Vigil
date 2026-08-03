@@ -6,7 +6,9 @@ category: Disclosure & Reporting Formats
 
 **Title:** SQL injection in customer portal login allows unauthenticated database read
 
-**Severity:** Critical — CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N (9.1)
+**Severity:** CRITICAL
+
+**CVSS:** CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N (9.1)
 
 ---
 

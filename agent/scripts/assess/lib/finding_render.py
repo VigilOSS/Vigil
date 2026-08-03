@@ -517,6 +517,9 @@ def title_advisories(title: str) -> list[str]:
 _SENTENCE_WORD_BUDGET = 25
 _STEPS_SENTENCE_WORD_BUDGET = 20
 _STEP_COUNT_BUDGET = 10
+# Sizing the sentence quote in the length advisory (see :func:`_quote`).
+_QUOTE_WORD_BUDGET = 8
+_QUOTE_CHAR_BUDGET = 70
 _EVIDENCE_BLOCK_LINE_BUDGET = 15
 _REMEDIATION_ITEM_BUDGET = 3
 # Sections whose ceiling is a sentence count, with the trailing clause each one
@@ -924,6 +927,28 @@ def _tail_range(noun: str, budget: int, total: int, clause: tuple[str, str]) -> 
     return f"{noun}s {budget + 1}-{total} {clause[1]}"
 
 
+def _quote(sentence: str) -> str:
+    """A short, embeddable excerpt naming the sentence a length advisory points at.
+
+    Whitespace is collapsed first, so a sentence that wraps multiple source lines
+    cannot inject a bare newline into the single OPERATOR DETAILS bullet the quote
+    renders inside — that would break the fragment out of its ``- `` list item.
+    Backticks and pipes are swapped out too, since either can make the excerpt read
+    as a fence or a table cell it never was. Truncation is capped by BOTH words and
+    characters: an inline-code span counts as ONE word to :func:`_word_count`, so an
+    ``_QUOTE_WORD_BUDGET``-word quote can still run long in raw characters when one
+    of those words is an opaque command line — the character cap is the backstop.
+    """
+    flat = " ".join(sentence.split()).replace("`", "'").replace("|", "/")
+    words = flat.split(" ")
+    quote = " ".join(words[:_QUOTE_WORD_BUDGET])
+    truncated = len(words) > _QUOTE_WORD_BUDGET
+    if len(quote) > _QUOTE_CHAR_BUDGET:
+        quote = quote[:_QUOTE_CHAR_BUDGET].rstrip()
+        truncated = True
+    return f"{quote}…" if truncated else quote
+
+
 def prose_advisories(
     text: str,
     *,
@@ -963,9 +988,12 @@ def prose_advisories(
 
     # 1. Sentence length. Steps are partitioned out rather than double-counted:
     #    a Steps sentence is measured against 20 and reported in the Steps
-    #    advisory only, so no sentence appears in two advisories at once.
-    over_general: list[tuple[int, str]] = []
-    over_steps: list[int] = []
+    #    advisory only, so no sentence appears in two advisories at once. The
+    #    sentence text rides along so the message can quote the longest offender —
+    #    the one it already names by word count — rather than just pointing at a
+    #    section and leaving the author to hunt for it.
+    over_general: list[tuple[int, str, str]] = []
+    over_steps: list[tuple[int, str]] = []
     for name, lines in sections:
         in_steps = name == _STEPS_SECTION
         budget = _STEPS_SENTENCE_WORD_BUDGET if in_steps else _SENTENCE_WORD_BUDGET
@@ -975,25 +1003,27 @@ def prose_advisories(
                 if words <= budget:
                     continue
                 if in_steps:
-                    over_steps.append(words)
+                    over_steps.append((words, sentence))
                 else:
-                    over_general.append((words, name))
+                    over_general.append((words, name, sentence))
     if over_general:
         count = len(over_general)
-        longest, where = max(over_general, key=lambda item: item[0])
+        longest, where, sentence = max(over_general, key=lambda item: item[0])
         verb = "sentence runs" if count == 1 else "sentences run"
         advisories.append(
             f"{count} {verb} over {_SENTENCE_WORD_BUDGET} words (longest {longest}, "
-            f"in {where}). Long sentences are the most common reason a triager "
-            "re-reads a submission — consider splitting them."
+            f'in {where}: "{_quote(sentence)}"). Long sentences are the most common '
+            "reason a triager re-reads a submission — consider splitting them."
         )
     if over_steps:
         count = len(over_steps)
+        longest, sentence = max(over_steps, key=lambda item: item[0])
         verb = "sentence runs" if count == 1 else "sentences run"
         advisories.append(
             f"{count} {verb} over {_STEPS_SENTENCE_WORD_BUDGET} words in "
-            f"{_STEPS_SECTION} (longest {max(over_steps)}). A step that has to be "
-            "re-read is a step a triager can execute wrong — consider splitting them."
+            f'{_STEPS_SECTION} (longest {longest}: "{_quote(sentence)}"). A step '
+            "that has to be re-read is a step a triager can execute wrong — "
+            "consider splitting them."
         )
 
     section_lines = {name: lines for name, lines in sections}

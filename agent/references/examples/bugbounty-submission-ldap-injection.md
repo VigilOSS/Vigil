@@ -8,7 +8,9 @@ category: Disclosure & Reporting Formats
 
 **VRT:** Server-Side Injection > LDAP Injection
 
-**Severity:** P2 (High)
+**Severity:** HIGH
+
+**CVSS:** CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N (8.1)
 
 **Run:** `python3 poc-ldap-injection.py`
 **Pass if:** every `[INJECTION CONFIRMED]` line prints
@@ -60,7 +62,7 @@ For end-to-end reproduction on a live AD environment:
   [INJECTION CONFIRMED] Binary oracle: result count reveals if email starts with admin@
 ```
 
-All filters captured from the installed `rotate()` function. The `escape_filter_chars()` function from `ldap3` is already used elsewhere in the same codebase but was not applied here.
+All filters captured from the installed `rotate()` function. I noticed `escape_filter_chars()` from `ldap3` is already used elsewhere in the same codebase but wasn't applied here.
 
 ### Impact
 
