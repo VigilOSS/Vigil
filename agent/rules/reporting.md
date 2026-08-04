@@ -181,6 +181,7 @@ Preferred pattern: subject-verb-object. The endpoint does X. The attacker sends 
 | Instead of | Write |
 |---|---|
 | `read this as` · `that bounds` · `I would rather report` · `to be clear about what I am not claiming` | (delete — add nothing) |
+| `Earlier revisions of this report carried...` · `An earlier pass measured this on... and wrongly concluded...` | State the current, correct fact only — a report has no drafts and an investigation has no history, only a finding |
 
 **External submissions → focus on the finding, not the researcher.**
 

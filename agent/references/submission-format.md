@@ -336,7 +336,7 @@ followability reason.
 | Title | 12 words, single clause |
 | Any single sentence | 25 words (20 in Steps to Reproduce) |
 | Summary | ≤4 sentences + optional 3-5 step Exploit flow |
-| Steps to Reproduce | One sentence per step, no narrative between steps; ≤10 steps, one action per step |
+| Steps to Reproduce | One sentence per step, no narrative between steps; ≤10 steps for most findings, one action per step |
 | Evidence | ≤15 lines of content per fenced block; annotate the proof line, and carry only proof the steps cannot show |
 | Attack Scenario | 3 sentences |
 | Impact | 2 sentences |
@@ -345,6 +345,12 @@ followability reason.
 | Deconfliction (if required by program) | 3 lines: researcher ID, source IP, UTC time window |
 
 Sections not in this table (Chain Potential, Defender-positive, Probe Coverage, Architectural Analysis, Fix Validation steps) do not exist in external submissions. If content belongs in one of those categories, it belongs in the internal `report.md`, not the submission.
+
+A chain genuinely requiring more identities or stages may exceed the 10-step guideline — see the
+`[long]` exemplar in "Examples" below, where every one of 16 steps is load-bearing. That is the
+exception, not permission to pad: a finding that needs more space because it restates controls,
+narrates methodology, or re-proves an already-established fact is still over budget, per reporting.md
+Rule 21.
 
 **This table is the sole owner of external-submission section length.** `agent/rules/reporting.md`
 Rule 10 owns the internal `report.md`'s separate, non-conflicting ceilings for
@@ -452,6 +458,7 @@ Where a row's rationale is a reporting rule it cites the rule (`agent/rules/repo
 - [ ] **[both]** The opening does not echo the title — sentence 1 adds the proof, victim scope, or attacker outcome the title does not carry (reporting.md Rule 11)
 - [ ] **[both]** No vulnerability-class definitions — the audience knows XSS/SQLi/IDOR/SSRF; jump to the specifics (reporting.md Rule 11)
 - [ ] **[both]** No banned filler phrases (`Furthermore`, `It is worth noting`, `During the course of our assessment`, `robust`, `comprehensive`, …) (reporting.md Rule 11)
+- [ ] **[both]** No narration of the report's own revision history or an earlier investigative pass being wrong (`Earlier revisions of this report carried...`, `An earlier pass... wrongly concluded...`) — state the current, correct fact only (reporting.md Rule 11)
 - [ ] **[both]** Active voice throughout — the subject acts (reporting.md Rule 12)
 - [ ] **[both]** Every sentence is load-bearing — if removing it does not reduce the reader's understanding, cut it (reporting.md Rule 15)
 - [ ] **[submission]** No "Defender-positive", "Dead ends", "Negative findings", or "What was ruled out" section or sub-section anywhere in the submission — a control that proves the causal claim (a safe branch escaping the same bytes, a pre-exploitation capability baseline) is corroborating proof in Evidence, not a dead end (reporting.md Rule 20)
@@ -471,9 +478,17 @@ Where a row's rationale is a reporting rule it cites the rule (`agent/rules/repo
 
 ## Examples
 
-- `agent/references/examples/submission-bugcrowd-idor-invoice-access.md` — Bugcrowd IDOR (VRT category, inline request/response proof)
-- `agent/references/examples/submission-hackerone-ssrf-webhook.md` — HackerOne SSRF (CWE weakness, `poc_code` proof)
-- `agent/references/examples/submission-direct-sql-injection-login.md` — Direct disclosure SQL injection (no platform-specific fields)
-- `agent/references/examples/bugbounty-submission-ldap-injection.md` — LDAP injection with a working PoC
-- `agent/references/examples/submission-direct-buffer-overflow-fuzz.md` — Direct disclosure memory-safety/buffer-overflow from a fuzzing campaign (reachable from `agent/phases/code-phase-4-fuzz.md`)
-- `agent/references/examples/submission-hackerone-race-wallet-withdrawal.md` — HackerOne race condition (CWE-362, impossible end-state proof, compound `[attacker, concurrent]` actor label)
+Each entry is tagged **[short/medium/long]** by complexity — pick the tier that matches the finding
+you're writing, not just the vuln class. A short reference miscalibrates a report-writer facing a
+genuinely multi-step chain: it has no model for how many steps or Evidence blocks are legitimate, and
+tends to either under-write (missing proof) or over-write (padding). Reach for **[medium]** or
+**[long]** whenever Steps to Reproduce needs more than 3-4 steps or Evidence needs more than one block.
+
+- `agent/references/examples/submission-bugcrowd-idor-invoice-access.md` — **[short]** Bugcrowd IDOR (VRT category, inline request/response proof)
+- `agent/references/examples/submission-hackerone-ssrf-webhook.md` — **[short]** HackerOne SSRF (CWE weakness, `poc_code` proof)
+- `agent/references/examples/submission-direct-sql-injection-login.md` — **[short]** Direct disclosure SQL injection (no platform-specific fields)
+- `agent/references/examples/bugbounty-submission-ldap-injection.md` — **[short]** LDAP injection with a working PoC
+- `agent/references/examples/submission-direct-buffer-overflow-fuzz.md` — **[short]** Direct disclosure memory-safety/buffer-overflow from a fuzzing campaign (reachable from `agent/phases/code-phase-4-fuzz.md`)
+- `agent/references/examples/submission-hackerone-race-wallet-withdrawal.md` — **[short]** HackerOne race condition (CWE-362, impossible end-state proof, compound `[attacker, concurrent]` actor label)
+- `agent/references/examples/submission-bugcrowd-missing-auth-shared-report-bucket.md` — **[medium]** Bugcrowd missing authentication (VRT category, 9 steps, cross-account read of a shared storage bucket via an unauthenticated render endpoint)
+- `agent/references/examples/submission-hackerone-authz-shared-widget-query-override.md` — **[long]** HackerOne incorrect authorization (CWE-863, 16 steps, 5-block Evidence section, a shared-dashboard-widget query override that runs under the creator's permission instead of the requester's)

@@ -21,7 +21,7 @@ A customer of the billing platform reads any other tenant's invoice PDF by chang
 ### Steps to Reproduce
 
 1. [attacker] Log in as a normal customer (Tenant A) and open any invoice to capture its ID, e.g. `41207`.
-2. [attacker] Request the tenant's own invoice as a control:
+2. [attacker] Request the tenant's own invoice, to fix the baseline response shape:
 ```
 curl -s -H "Authorization: Bearer $TENANT_A_TOKEN" \
   https://billing.example.com/api/v2/invoices/41207/pdf -o own-invoice.pdf

@@ -29,7 +29,7 @@ An authenticated wallet holder withdraws more money than the account holds by fi
 curl -s https://pay.example.com/api/v3/wallet/balance -H "Authorization: Bearer $TOKEN"
 ```
 **Expect:** `{"balance_cents": 5000, "currency": "USD"}`
-2. [attacker] Withdraw the full balance once, as a control:
+2. [attacker] Withdraw the full balance once by itself, before testing concurrency:
 ```
 curl -s -X POST https://pay.example.com/api/v3/wallet/withdraw \
   -H "Authorization: Bearer $TOKEN" -d "amount_cents=5000"
@@ -65,7 +65,7 @@ A wallet cannot legitimately hold `-5000`; the balance check exists to prevent e
 
 **Serialized check works; concurrent check doesn't.** Step 2's solo withdrawal correctly zeroed the balance, and a solo withdrawal against a `0` balance separately returns `402 insufficient_funds`. The check itself is correct; it only fails when two requests race it, because it reads the balance before either write commits.
 
-I first suspected a missing idempotency key. Neither request carries a client-supplied token, though — this isn't an idempotency gap, it's a timing race in the balance check itself.
+Neither withdrawal request carries a client-supplied idempotency token, which rules out a deduplication gap — the balance check itself has no lock between read and write.
 
 **Minimum privilege.** Both withdrawal requests used the attacker's own authenticated session — no admin, support, or elevated role.
 
