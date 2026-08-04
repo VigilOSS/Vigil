@@ -6,7 +6,7 @@ category: Disclosure & Reporting Formats
 
 **Title:** Missing auth in report-render endpoint lets anonymous users read other customers' PDFs
 
-**VRT:** Broken Access Control > Missing Authorization
+**VRT:** Broken Access Control (BAC) > Insecure Direct Object References (IDOR) > View Sensitive Information(Iterable Object Identifiers)
 
 **Severity:** HIGH
 
@@ -87,7 +87,9 @@ $ pdftotext out3.pdf -
 CUSTOMERB-INVOICE-TOTAL-4820.75                                   <-- Customer B's own report, read by Customer A's session with zero credentials
 ```
 
-**Where the key comes from.** Every render, including a customer's own normal in-product report download, redirects the browser through this same endpoint with `bucket`/`object_key` plainly in the querystring. Any way that URL becomes visible to someone else — a forwarded link, browser history, a shared screenshot, a proxy log — hands over durable read access. That access is independent of the short-lived presigned URL the endpoint also returns alongside it.
+**Where the key comes from.** Every render, including a customer's own normal in-product report download, redirects the browser through this same endpoint with `bucket`/`object_key` plainly in the querystring. Any way that URL becomes visible to someone else — a forwarded link, browser history, a shared screenshot — hands over durable read access. That access is independent of the short-lived presigned URL the endpoint also returns alongside it.
+
+**On the VRT leaf.** `object_key` is a UUID, which VRT's own IDOR fork treats as the low-severity "Complex" branch (P4) by default. The harvest chain above changes that: it hands the identifier to any caller through ordinary use, not something to guess or brute-force. That's the Iterable leaf claimed above. It's also why this sits at HIGH rather than the P3/Medium a bare complex-identifier IDOR would default to. Nothing here is gated behind a session, unlike the P3 pattern, which assumes an authenticated caller walking IDs.
 
 **Minimum privilege.** Both trial accounts are ordinary free self-registrations with no elevated role, and the actual cross-customer read in steps 8-9 carried no credential at all.
 
@@ -101,4 +103,4 @@ Any caller who obtains a rendered-report key, from a forwarded link, browser his
 
 ### Remediation
 
-Require the caller to own the report before the `bucket`/`object_key` path serves it. Resolve the object server-side from a report ID scoped to the caller's account, and drop the caller-supplied `bucket`/`object_key` parameters from the request contract entirely. As defense-in-depth, scope the render service's storage credential to the reports it just generated, not a bucket-wide read grant. That way a regression in the ownership check can't reopen the same exposure.
+Require the caller to own the report before the `bucket`/`object_key` path serves it. Resolve the object server-side from a report ID scoped to the caller's account, dropping the caller-supplied `bucket`/`object_key` parameters entirely. As defense-in-depth, scope the render service's storage credential to the reports it just generated, not a bucket-wide read grant. That way a regression in the ownership check can't reopen the same exposure.
