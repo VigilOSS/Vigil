@@ -25,7 +25,7 @@ An unauthenticated visitor to the customer portal's login form bypasses login an
 
 ### Steps to Reproduce
 
-1. [attacker] Send a normal login attempt as a control, to confirm the baseline failure message:
+1. [attacker] Send a normal login attempt to capture the baseline failure message:
 ```
 curl -s -X POST https://portal.example.com/login \
   -d "username=nobody&password=wrong"
