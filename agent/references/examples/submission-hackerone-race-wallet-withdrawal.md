@@ -67,6 +67,8 @@ A wallet cannot legitimately hold `-5000`; the balance check exists to prevent e
 
 Neither withdrawal request carries a client-supplied idempotency token, which rules out a deduplication gap — the balance check itself has no lock between read and write.
 
+**Why `AC:L`.** Winning the race needs nothing beyond firing two ordinary requests at once — no precise timing window, no retries, no special client. That reliability is what keeps this at `AC:L` rather than the `AC:H` a narrower race would need.
+
 **Minimum privilege.** Both withdrawal requests used the attacker's own authenticated session — no admin, support, or elevated role.
 
 ### Impact

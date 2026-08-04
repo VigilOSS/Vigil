@@ -188,5 +188,5 @@ A Payroll-denied viewer reads any department's totals by editing one query param
 
 ### Remediation
 
-1. Re-authorize every widget-data request, including `params` overrides, against the requesting user's own Payroll permission rather than the stored creator's — an override that changes what gets queried is a new authorization decision, not a re-read of an already-approved one. Drop the `params` override entirely and move department/timeframe scoping into the widget's own stored configuration, set once by whoever is authorized to set it.
-2. As defense-in-depth, log every widget-data request whose effective query differs from the widget's stored configuration, so an override like this one surfaces in review before a client reports it.
+1. Re-authorize every widget-data request, including `params` overrides, against the requesting user's own Payroll permission, not the stored creator's. An override that changes what gets queried is a new authorization decision, not a re-read of an already-approved one. Drop the `params` override entirely, and move department/timeframe scoping into the widget's own stored configuration, set once by whoever is authorized to set it.
+2. As defense-in-depth, log every request whose effective query differs from the stored configuration, so an override like this surfaces before a client reports it.

