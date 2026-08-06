@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-
 from assess.lib.schema_validation import collect_validation_errors, load_schema
 
 # ---------------------------------------------------------------------------
@@ -48,6 +47,47 @@ def test_finding_record_schema_example_bof_validates():
     payload = _load("finding_bof.json")
     errors = collect_validation_errors(payload, schema)
     assert errors == [], f"Unexpected errors: {errors}"
+
+
+def test_finding_record_file_location_requires_snapshot_binding():
+    schema = load_schema("finding-record.schema.json")
+    payload = _load("finding_bof.json")
+    payload["provenance"].pop("code_snapshot", None)
+
+    errors = collect_validation_errors(payload, schema)
+
+    assert any("provenance.code_snapshot is required" in error for error in errors)
+
+
+def test_finding_record_file_location_rejects_null_snapshot_binding():
+    schema = load_schema("finding-record.schema.json")
+    payload = _load("finding_bof.json")
+    payload["provenance"]["code_snapshot"] = None
+
+    errors = collect_validation_errors(payload, schema)
+
+    assert any("provenance.code_snapshot must be an object" in error for error in errors)
+
+
+def test_finding_record_whitespace_prefixed_file_location_requires_snapshot_binding():
+    schema = load_schema("finding-record.schema.json")
+    payload = _load("finding_bof.json")
+    payload["canonical_location"] = "  file:src/parser.c:41"
+    payload["provenance"].pop("code_snapshot", None)
+
+    errors = collect_validation_errors(payload, schema)
+
+    assert any("provenance.code_snapshot is required" in error for error in errors)
+
+
+def test_finding_record_snapshot_digest_must_be_lowercase_sha256():
+    schema = load_schema("finding-record.schema.json")
+    payload = _load("finding_bof.json")
+    payload["provenance"]["code_snapshot"]["source_manifest_digest"] = "A" * 64
+
+    errors = collect_validation_errors(payload, schema)
+
+    assert any("source_manifest_digest" in error and "pattern" in error for error in errors)
 
 
 def test_finding_record_xss_validates():
