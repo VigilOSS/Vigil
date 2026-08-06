@@ -35,7 +35,15 @@
     "root_cause_key": "",
     "auth_context": "anonymous",
     "source_name": "vulnerability-analyst",
-    "provenance": {"agent_name": "vulnerability-analyst"},
+    "provenance": {
+      "agent_name": "vulnerability-analyst",
+      "code_snapshot": {
+        "repo_id": 1,
+        "repo_generation": 1,
+        "source_manifest_digest": "31870221d79b5e3695caac77e804c44dd08439f609b02d14111d31ebf0a10f29"
+      }
+    },
+    "evidence_type": "code-inferred",
     "links": []
   },
   {
@@ -72,7 +80,15 @@
     "root_cause_key": "",
     "auth_context": "anonymous",
     "source_name": "vulnerability-analyst",
-    "provenance": {"agent_name": "vulnerability-analyst"},
+    "provenance": {
+      "agent_name": "vulnerability-analyst",
+      "code_snapshot": {
+        "repo_id": 1,
+        "repo_generation": 1,
+        "source_manifest_digest": "31870221d79b5e3695caac77e804c44dd08439f609b02d14111d31ebf0a10f29"
+      }
+    },
+    "evidence_type": "network-confirmed",
     "links": []
   }
 ]
