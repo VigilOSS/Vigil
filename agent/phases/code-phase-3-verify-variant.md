@@ -22,19 +22,26 @@ simultaneously on independent objectives:
 Both agents run in parallel because their work is independent: the verifier evaluates existing
 findings, while the variant hunter scans for new instances of confirmed patterns.
 
-**Coverage gate** -- must pass before proceeding:
+**Hard transition readiness** -- must pass before proceeding:
 ```bash
-vigil assess code-coverage --require-gate-pass
-# Must show: all critical files analyzed, all high files analyzed, no needs-context, no pending triggers
+vigil assess code-coverage --require-transition-ready verify-variant
+# Must show current sealed source/index/threat identity, every admitted file accounted for,
+# no needs-context, no pending work/triggers, and no structural uncovered-file blocker.
 ```
 
-If the gate fails, resolve remaining items before proceeding:
+If readiness fails, resolve remaining items before proceeding:
 - `needs-context` items: dispatch additional file batches to Phase 2 with targeted context
-- Unanalyzed critical files: dispatch to Phase 2 (hunt) first
+- Unaccounted admitted files: dispatch to Phase 2 (hunt), or record an evidence-based skip there
 - Pending cross-file triggers: requeue and analyze the target files before verification
-- CWE effort gaps on critical files: run Phase 2B re-dispatch loop
-- The gate must pass before proceeding -- unresolved items become permanently invisible to
+- Missing/stale source, structural index, or threat model: return to the owning Phase 0/1 step;
+  identity blockers are not replaceable with a prose summary
+- The readiness gate must pass before proceeding -- unresolved items become permanently invisible to
   the report
+
+Review quality remains a separate advisory signal. Run `vigil assess code-coverage --cwe-matrix`
+and route meaningful CWE-effort warnings through the Phase 2B re-dispatch loop;
+`--require-gate-pass` is the optional strict exit-code form for that quality loop, not phase
+authorization.
 
 #### Agent A: Verification
 
@@ -43,12 +50,16 @@ Dispatch `code-vuln-verifier` with `agent/skills/code-finding-verification/SKILL
 Provide:
 - All confirmed findings from Phase 2 (suspicious findings must be resolved by hunters
   before Phase 3 — see Phase 2 exit gate)
-- Source code paths for each finding (the canonical file locations)
+- The current Code Source Identity block, its matching structural-index manifest, and canonical
+  file locations; verification reads the sealed snapshot and records/rebinds findings to that exact
+  generation
 - CWE pattern references matching each finding's defect family
 - Build system configuration for compile-time flag evaluation (Makefiles, CMakeLists,
   configure scripts, feature flags)
-- Threat model: `tools/analysis-state/threat-model.json` (trust boundaries for reachability
-  tracing and severity grounding) — Agent B gets this below; the verifier needs it too
+- Complete current threat-model envelope from `vigil assess fetch
+  "code/threat-model/<repo-id>"` (module product-surface profile, reachability basis, caller
+  control, and trust boundaries for severity); require `current: true` and matching source
+  identity. A clipped summary is supplemental only
 - Instruction: run the FP & severity-downgrade gate (`agent/references/finding-fp-and-severity-gate.md`,
   C1–C7) on each finding, then author the report-ready story into `details`, before recording
   confirmed/downgraded
@@ -65,7 +76,10 @@ The verifier:
 - Traces the full entry-to-sink path for each finding, reading source directly
 - Evaluates whether guards actually prevent the claimed attack
 - Checks compile-time flags that might disable the vulnerable path
-- Checks whether the function is reachable from an external entry point
+- Applies `shared-constraints-code.md` §5 target-kind reachability: runtime entry for an
+  application/service; supported public API sequence for a library/framework; shipped input for a
+  CLI; registered host contract for a plugin/extension. Missing consumer context constrains
+  attacker impact/severity rather than erasing a concrete supported-path defect
 - Produces a disposition for each finding: confirmed, downgraded (with new severity),
   or killed (with detailed reasoning)
 
@@ -81,13 +95,40 @@ directive.
 
 Dispatch `code-variant-hunter` with `agent/skills/code-variant-analysis/SKILL.md`.
 
+Before registering the dispatch, freeze the Phase 2 parent findings into one canonical sorted slug
+list. Register that exact list on the dispatch and retain the numeric backend row ID printed by the
+command:
+
+```bash
+vigil assess agent start --agent-id <agent-id> --role code-variant-hunter \
+  --code-repo-id <repo-id> \
+  --task "Scan assigned files for variants of the frozen Phase 2 parent set" \
+  --dispatch-mode hypothesis-driven --skills code-variant-analysis \
+  --finding-slugs CH-001,CH-004
+```
+
+The specialist's dispatch context must include both values exactly as registered:
+
+```text
+## Variant Receipt Authority
+variant_dispatch_id: <numeric id returned by agent start>
+parent_finding_slugs: [CH-001, CH-004]  # canonical sorted dispatch set
+```
+
 Provide:
-- Confirmed findings with their abstract bug patterns (CWE, taint path shape, guard
-  failure type, code pattern signature)
-- Candidate file list: same language, classification `medium` or above
+- Every finding in the dispatch-registered `parent_finding_slugs` set, with its abstract bug
+  pattern (CWE, taint-flow or operation/state/lifetime shape, guard failure type, code signature)
+- The current Code Source Identity block and its matching structural-index manifest; a prior
+  generation or summary cannot substitute for the bound index
+- Candidate file list: every admitted same-language file plus any cross-language wrapper,
+  configuration, template, generated implementation, or build path structurally capable of the
+  same source/control/sink or operation/state/failing-use pattern, with each current numeric `file_id`, repo-relative path, and
+  `file_sha256`. Classification orders work but never removes a plausible variant from eligibility
 - CWE pattern references from `agent/references/code-vuln-patterns/` matching each
   finding's CWE
-- Threat model summary (trust boundaries for quick reachability checks)
+- Current threat-model envelope from `vigil assess fetch "code/threat-model/<repo-id>"`, with
+  `current: true` and generation/digest equality; include a clipped trust-boundary summary only as
+  supplemental navigation context
 
 The variant hunter:
 - Extracts the abstract pattern from each confirmed finding
@@ -97,15 +138,21 @@ The variant hunter:
 
 **Parallel dispatch**: Agent A and Agent B are dispatched simultaneously. They have no
 data dependency on each other -- the verifier works from the Phase 2 finding list, and the
-variant hunter works from confirmed findings plus the codebase.
+variant hunter works from the dispatch-frozen parent set plus the codebase. The verifier may change
+live finding dispositions while the scan runs; Agent B repeats that same registered sorted parent
+set in every receipt because rebuilding it from live state would detach the scan from its dispatch.
 
-#### Multi-Perspective Voting
+#### Evidence Adjudication
 
 If the verifier and variant hunter produce conflicting assessments of a finding (one
 confirms, the other produces evidence against), dispatch a third agent with both
-perspectives and the source code. The third agent evaluates both arguments against the
-code and produces a reasoned disposition. Majority vote (2 of 3) determines the final
-disposition.
+perspectives, the current Code Source Identity/matching structural index, the complete current
+threat-model envelope, and the sealed source paths. The third agent evaluates both arguments
+against the code and produces a reasoned disposition. Evidence strength determines the outcome:
+a complete source-to-sink trace, falsifiable guard analysis, or controlled runtime proof outweighs
+unsupported confidence or two correlated opinions. If the conflict remains unresolved, record
+`finding verify --disposition disputed` and retain both arguments; never convert uncertainty into
+a false-positive kill by vote count.
 
 This should be rare -- the verifier evaluates existing findings while the variant hunter
 scans for new ones. Conflicts arise only when the variant hunter finds evidence that
@@ -123,6 +170,11 @@ If the verifier's clean-file spot-check discovers a missed vulnerability:
 ```bash
 # Record verification results (updates existing findings)
 vigil assess finding verify <slug> --disposition <verdict> --reason "<rationale>"
+# Rebind a stale/unbound finding only after independently reviewing the current sealed bytes.
+# Substitute the current Code Source Identity values in this exact provenance shape.
+vigil assess finding verify <slug> --disposition confirmed --reason "Re-reviewed current sealed source" \
+  --source-name code-vuln-verifier \
+  --provenance-inline '{"code_snapshot":{"repo_id":7,"repo_generation":3,"source_manifest_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}'
 # Or pass the dedicated false-positive disposition when you already have the kill rationale
 vigil assess finding verify <slug> --disposition false_positive --reason "<kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
 # Batch-kill several FPs that share one root rationale (same payload/flags applied to every slug)
@@ -131,7 +183,15 @@ vigil assess finding verify <slug1> <slug2> <slug3> --disposition false_positive
 vigil assess finding update <slug> --reason "<why the prior verdict no longer holds>" --status draft
 # Record variant findings (new findings)
 vigil assess finding record code-variant-hunter <variant-finding-json>
+# Record one durable completion receipt for every assigned candidate file, including clean files.
+# Each payload repeats variant_dispatch_id and the exact registered parent_finding_slugs set.
+vigil assess contract code-record variant-check
+vigil assess code-record variant-check <per-file-receipt-json>
 ```
+
+Every new variant/spot-check file finding must follow `vigil assess contract finding record`,
+including `provenance.code_snapshot` copied from the current Code Source Identity block. Generic
+`finding update` cannot bind or rebind it.
 
 **D4 killed-finding re-mint guard:** Agent A (killing FPs) and Agent B (minting variants) run in
 parallel on overlapping files, so Agent B may `finding record` a candidate at a file the verifier
@@ -162,18 +222,37 @@ vigil assess finding merge <source-slug> <target-slug> "<reason>"
 ```
 
 **Phase 3 exit:**
+
+First reconcile the assigned candidate file list against the backend receipts returned by
+`code-record variant-check`. Every assigned file needs one current receipt; scan-result prose and a
+handoff table do not substitute for this durable row. On resume, fetch the current rows with
+`vigil assess fetch "code/variant-checks?repo_id=<repo-id>"`.
+
+Next read only `agent/phases/code-phase-4-fuzz.md` **Pre-entry applicability decision**. Use its
+bounded criteria and current findings/files/fuzzer inventory to persist one current-generation
+`required` or `not_required` decision before asking whether Phase 4 entry is ready. This ordering
+is load-bearing: readiness validates the receipt, so calling it before recording the receipt
+deadlocks the transition. A codebase with no eligible target still records `not_required`; an
+absent decision is not a skip.
+
 ```bash
+vigil assess contract code-record fuzz-decision
+vigil assess code-record fuzz-decision <decision-json-file>
+
+vigil assess code-coverage --require-transition-ready fuzz
 vigil assess transition-phase fuzz
 ```
 
 Exit: All findings verified. Variant scan complete. If most of the verifier's kills lean on
 circumstantial reasoning rather than code evidence at the hunter's rigor bar (the same check as
 above), that pattern is the signal that Phase 2 hunter dispatch context (CWE pattern references,
-threat model) needs tightening before the next batch. Transition to Phase 4 (Fuzz) if the codebase
-is C/C++ with memory-safety targets, otherwise skip directly to report.
+threat model) needs tightening before the next batch. A `required` decision enters Phase 4 to run
+campaigns. A `not_required` receipt enters the same lifecycle but skips compiler/fuzzer dispatch
+and proceeds to terminal submission closeout; it does not bypass closeout or completion readiness.
 
 ---
 
 Phase index (path → purpose) lives in `agent/operator-core-code.md` under "Phase Index". Prior:
 `agent/phases/code-phase-2-hunt.md`. Next: `agent/phases/code-phase-4-fuzz.md` (conditional; skip
-directly to report when the codebase has no C/C++ memory-safety targets — see that doc's entry gate).
+campaign work through a current `not_required` receipt when the codebase has no eligible
+memory-safety target; see that doc's bounded pre-entry section).

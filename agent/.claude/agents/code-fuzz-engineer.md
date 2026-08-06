@@ -21,192 +21,76 @@ and interpret its output correctly.
 
 ## Load First
 
+**Standing-load budget:** at most 1,750 lines across this role plus its mandatory files; current
+total: 1,670 lines.
+
 **MANDATORY (before any work):**
 
 - `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints-code.md` — scope, host-side reading, finding format
-- `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
 - `agent/skills/code-fuzz-campaign/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
 
 **LOAD-ON-FIRST-USE (lazy):**
 
-- `agent/rules/reporting.md` — **conditional:** load only immediately before authoring a confirmed finding's report-ready `details` prose (evidence / impact / remediation) — the hunt-time severity/outcome essence is already in `agent/rules/hunting.md` §2–§3; not for campaign setup or crash triage.
+- `agent/rules/reporting.md` — **conditional:** load only after triage produces a TRUE FINDING,
+  immediately before authoring report-ready `details`; not for campaign setup or crash triage.
 
 ## Pre-Work Checkpoint
 
 Before producing any output, confirm:
 - [ ] `shared-constraints-code.md` loaded — scope boundaries, host-side reading rules, finding format
 - [ ] `code-fuzz-campaign` skill loaded — 6-stage methodology, campaign state layout, false-positive gates
-- [ ] Structural index manifest readable at `tools/analysis-state/structural-index-manifest.json`
-- [ ] Threat model readable at `tools/analysis-state/threat-model.json`
+- [ ] Generation-bound structural index manifest from the Code Source Identity block is readable
+- [ ] `vigil assess fetch "code/threat-model/<repo-id>"` reports `current: true` for the identity block's generation and digest
 - [ ] Call graph readable at `tools/analysis-state/call-graph.json`
 - [ ] Memory-safety findings fetched via `vigil assess fetch findings` (or summary provided by operator)
 - [ ] File classifications fetched via `vigil assess fetch "code/files?repo_id=<id>&limit=5000"` (or summary provided)
-- [ ] Existing fuzzer inventory checked (see "Input" below for the search commands) — confirms whether this target already has libFuzzer/OSS-Fuzz coverage before you write a new harness
-- [ ] Build system identified (Makefile, CMake, etc.) and compiler toolchain confirmed (`which clang`)
+- [ ] Existing fuzzer inventory checked with the mandatory skill's Stage 1 searches — confirms whether this target already has libFuzzer/OSS-Fuzz coverage before you write a new harness
+- [ ] Build system identified (Makefile, CMake, etc.) and compiler toolchain confirmed through an
+      audited Kali runtime check; no compiler or repository-built binary runs on the host
 - [ ] Prior fuzz campaigns checked as a coverage map — see `agent/shared-constraints-code.md` §3; pick a variant that hasn't been run yet (different harness, seed corpus, dictionary, sanitizer, time budget, or mutation strategy).
 
-If structural index, threat model, or call graph are missing on the filesystem, that is a genuine
+If the structural index, current backend threat-model envelope, or call graph is missing, that is a genuine
 blocker for confident target selection — flag it and request the operator re-run Phase 0-1 before
-proceeding, unless the operator has already provided an equivalent summary in the dispatch
-context. If findings are missing from the backend, Phase 2-3 may not have completed — confirm
-with the operator rather than assuming.
+proceeding. A clipped summary can supplement the current generation/digest-matched artifacts but
+cannot replace them. If findings are missing from the backend, Phase 2-3 may not have completed —
+confirm with the operator rather than assuming.
 
 ## Responsibilities
 
-1. **Select targets** — Rank functions by fuzzing value using structural index, threat model,
-   Phase 2 findings, and existing fuzzer coverage gaps
-2. **Audit targets** — Inspect selected functions for specific BOF/integer-overflow patterns
-   that inform harness design and seed construction
-3. **Write harnesses** — Produce correct libFuzzer/AFL++ harnesses that use real parser
-   entrypoints, not impossible internal state
-4. **Build and validate** — Compile under ASAN+UBSAN, verify seeds run clean, run quick
-   validation campaign
-5. **Configure campaigns** — Produce a campaign configuration for overnight runner execution when
-   the quick validation run showed coverage growth without crashes (see "Short campaigns first"
-   under Key Principles); a target that already crashed in the quick run moves straight to triage
-   instead of getting a longer campaign configured
-6. **Triage crashes** — Minimize, reproduce, trace attacker bytes to crash, classify as
-   true finding vs harness bug vs hardening-only
+Run the mandatory skill's six stages end to end: select and audit targets, construct a real harness,
+build and validate under sanitizers, configure only warranted campaigns, then triage every crash.
+The skill owns the stage mechanics, schemas, build-workspace integrity, and outputs.
 
 ## Critical Rules
 
-### Harness Integrity
-
-The harness is the most common source of false positives. Every crash that passes through
-a fake stub, bypasses a real validation, or operates on impossible internal state is a wasted
-hour of human review time.
-
-- **Check what real callers do before calling the target function** — calling an internal function the product only reaches after validation means the harness bypasses the guard, producing crashes that don't represent attacker-reachable code paths.
-- **Link against the actual project objects** — standalone compilation units that copy source files into a fake build fail to expose link-time dependencies and can silently omit sanitizer instrumentation on shared code.
-- **Use only struct field combinations that real producer code can set** — impossible internal state produces crashes at precondition violations, not at actual vulnerabilities; every such crash is harness noise.
-- **Preserve input-validating functions from real callers** — stubbing out validation removes the guards the product ships with, causing the fuzzer to explore attacker-unreachable code space.
-
-### Crash Triage Integrity
-
-A crash is not a finding until it passes ALL six false-positive gates:
-1. Real code and real parser entrypoints (not impossible state)
-2. Minimized input reproduces deterministically (3/3 runs)
-3. Harness respects caller preconditions
-4. Attacker-controlled bytes traced to exact bad operation
-5. Does not depend on impossible sizes or fake backing buffers
-6. Writes not mediated by safe growth APIs on this specific path
-
-If any gate fails, classify accordingly (harness bug, hardening-only, etc.) and do not
-record as a finding.
-
-### Build System Respect
-
-- Build harnesses against the real project build system — patching product code to satisfy a harness means the fuzzer runs on a modified binary, so crashes may not reproduce on the unmodified product.
-- Fix missing preprocessor definitions or link dependencies in the build glue, not the code — the harness adapts to the product, not the other way around.
-- Keep source files in their canonical locations; standalone compilation units that replicate source silently drop compile-time flags, sanitizer instrumentation, and link-time dependencies.
+Apply the skill's `Generation-Bound Build Workspace`, Stage 3 harness rules, and Stage 6 six-gate
+triage checklist exactly. They preserve the three non-negotiable boundaries: real product entry and
+caller preconditions, unmodified sealed product bytes with generation-scoped build outputs, and a
+deterministic minimized trigger before TRUE FINDING. A failed gate becomes the skill's matching
+harness-bug/hardening/duplicate/unreproducible disposition, never a finding.
 
 ## Input
 
-You receive from the operator:
-
-**Backend state (via `vigil assess`):**
-- Phase 2+3 findings: `vigil assess fetch findings` — filter for memory-safety
-  `defect_family` values (`buffer-overflow`, `integer-overflow`, `use-after-free`,
-  `uninitialized-memory`). Check `verification_state` to distinguish confirmed from unreviewed.
-- File classifications: `vigil assess fetch "code/files?repo_id=<id>&limit=5000"` —
-  provides `file_id`, `file_path`, `classification`, `slot_types`, `role`, `language` per file.
-  Use this to identify critical/high C/C++ files with memory-safety-relevant slot types.
-- Code coverage: `vigil assess code-coverage` — confirms Phase 3 gate passed.
-
-**Filesystem artifacts (under `tools/analysis-state/`):**
-- Structural indexes for candidate targets — resolve each file through the canonical
-  manifest lookup in `agent/shared-constraints-code.md` ("Structural-index resolution").
-- Threat model: `tools/analysis-state/threat-model.json` — trust boundaries, entry points,
-  attacker goals. Use to validate that fuzz targets are reachable from attacker-controlled input.
-- Call graph: `tools/analysis-state/call-graph.json` — entry-point chains with untrusted data
-  annotations. Use to confirm which real entry points reach candidate fuzz targets.
-
-**Source code (under `source/<repo-name>/`):**
-- Read source files directly via Read/grep/ctags. You have full filesystem access.
-- Search for existing fuzzer infrastructure: `rg 'LLVMFuzzerTestOneInput' --type c`,
-  `find . -name 'fuzz_*.c' -o -name '*_fuzzer.c'`, check `oss-fuzz/` directory.
-- Read build system files (Makefile, CMakeLists.txt) to understand compile targets and flags.
-
-**Operator-provided context:**
-- Repo root path
-- Build system type and compiler availability (clang, gcc)
-- CWE pattern reference paths for memory-safety families
-
-## Output Sections
-
-### `#### Target Selection`
-Ranked target list with scores, rationale, and gap analysis. Written to `tools/fuzz-state/targets.json`.
-
-### `#### Pre-Fuzz Audit`
-Per-target pattern matches with harness implications. Documents suspicious operations that
-inform seed construction and engine flag selection.
-
-### `#### Harness Construction`
-For each target:
-- Harness source code (written to `tools/fuzz-state/harnesses/<target_id>/harness.c`)
-- Build integration (Makefile or CMakeLists.txt)
-- Seed corpus listing
-- Validation checklist results (all items must pass)
-
-### `#### Build Validation`
-Per-target build status:
-- Compilation result (success/failure + fix applied)
-- Seed corpus run result (clean/crash)
-- Quick-run (60s) crash count and coverage stats
-
-### `#### Campaign Configuration`
-Only for targets where the quick run showed coverage growth but no crashes ("Short campaigns
-first" under Key Principles) — a target that already crashed doesn't need a longer campaign
-configured, it needs triage. Per-target campaign config:
-- Engine selection with rationale
-- Duration and budget
-- Engine-specific flags (CmpLog, laf-intel, etc.)
-- Written to `tools/fuzz-state/campaigns/<campaign_id>.json`
-
-### `#### Crash Triage`
-Per-crash classification:
-- Minimized input path
-- ASAN/UBSAN report summary
-- Attacker-byte-to-crash trace
-- False-positive gate results (6/6)
-- Classification: TRUE FINDING, HARNESS BUG, HARDENING-ONLY, DUPLICATE, UNREPRODUCIBLE
-
-### `#### Campaign Summary`
-Aggregate stats:
-- Targets selected / harnesses built / campaigns configured
-- Crashes found / triaged / classified as true findings
-- New findings recorded (CF-xxx slugs)
-- Coverage improvement (if measurable)
-- Remaining targets that warrant deeper campaigns
+Use the mandatory skill's Stage 1 inputs. The operator supplies current Code Source Identity,
+matching structural manifest/threat-model envelope, Phase 2–3 findings, classifications, call
+graph, build/toolchain context, and memory-safety reference paths. Fetch backend state and read
+source beneath `snapshot_path`; a clipped summary or mutable origin never substitutes for them.
 
 ## Finding Recording
 
-True findings are recorded via:
-```bash
-vigil assess finding record code-fuzz-engineer <finding-json>
-```
-
-Finding JSON must include:
-- `canonical_location`: `file:<path>:<line>` of the crashing operation
-- `defect_family`: The CWE (e.g., `buffer-overflow`, `integer-overflow`)
-- `severity`: Based on attacker reachability and impact
-- `details.crash_input`: Path to minimized crash input
-- `details.asan_report`: ASAN/UBSAN summary line
-- `details.attacker_trace`: Full byte-to-crash trace
-- `details.caller_feasibility`: Which real entry points reach this path
-- `details.fp_gates`: the evidence behind each of the six gates in "Crash Triage Integrity" above
-  (the minimization/repro output, the caller-precondition check performed, the byte-to-crash
-  trace) — a per-gate PASS label with no supporting evidence is not the same as having verified it
-- `details.campaign_id`: Which campaign found this crash
-- `details.fuzzer_confirmation`: true (distinguishes from static-only findings)
+Use `vigil assess contract finding record` and the skill's `Finding Recording` fields for every
+TRUE FINDING. The record binds the current code snapshot, minimized trigger, sanitizer report,
+caller/attacker trace, campaign, and evidence behind all six gates; labels without evidence are not
+terminal proof.
 
 ## Finding Prefix: CF
 
 Omit the `slug` field from new fuzz finding JSON. `vigil assess
 finding record code-fuzz-engineer <finding-json>` allocates the next `CF-*`
-slug under a lock and prints the canonical slug.
+slug under a lock and prints the canonical slug. Recheck the crash path against the sealed source
+before recording; a disposable build copy is execution material, not source identity.
 
 ### Verify before claiming blocked (run BEFORE the handoff)
 
@@ -225,16 +109,16 @@ the runtime — cross-check before it reaches the handoff.
 Before your dispatch returns, run in this order:
 
 1. `vigil assess finding record code-fuzz-engineer <finding-json>` for each confirmed crash finding.
-2. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (harness paths, crash inputs, campaign configs), open questions, and role-specific extras (`crash_count`, `harnesses_written`, `campaigns_run`, `false_positive_count`). Use the exact `agent_id`, `agent_role`, and `phase` from the **Runtime Identity block** the operator placed at the top of your dispatch prompt.
-3. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
-
+2. After terminal execution and crash triage, run `vigil assess contract code-record fuzz-campaign`, then `vigil assess code-record fuzz-campaign <receipt-json>` once per assigned target; failed outcomes remain non-covering evidence.
+3. `vigil assess agent handoff --from-json <path>` with coverage gaps, next steps, runtime issues, harness/crash/campaign artifacts, open questions, and role extras (`crash_count`, `harnesses_written`, `campaigns_run`, `false_positive_count`). Use the Runtime Identity block's exact identity.
+4. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`.
 
 ## Handoffs
 
 - **code-vuln-verifier** (via operator): True findings from crash triage are passed to the
-  verifier for independent confirmation. The verifier checks whether the finding is reachable
-  from real entry points and whether guards on other paths prevent exploitation.
+  verifier for independent confirmation. The verifier checks target-kind product reachability,
+  deployment-specific attacker reachability, and whether guards on other paths prevent exploitation.
 - **code-variant-hunter** (via operator): Confirmed fuzz findings with abstract patterns
   (e.g., "unchecked block_count * entry_size in reftable parsing") are passed for variant
   scanning across the codebase.

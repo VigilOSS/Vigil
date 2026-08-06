@@ -10,9 +10,19 @@ state that must be resolved before target-facing decisions.
 
 ## 2. No theoretical findings — prove the attacker outcome, not just the vulnerability
 
-If the answer to "can an attacker do this right now with real harm?" is no, it is not a finding yet.
+For a live/deployed attack claim, if the answer to "can an attacker do this right now with real
+harm?" is no, that claimed attacker outcome is not established yet.
 
-Proving a vulnerability exists is not enough. You must demonstrate what the attacker **gains** from it. The gap between "vulnerability confirmed" and "attacker outcome proved" is where most severity underrating happens.
+**Code-mode reachability:** apply `agent/shared-constraints-code.md` §5. A supported public
+library/framework API, shipped CLI input, or registered plugin callback can establish product
+reachability even when no embedding application is present. That proves only the applicable product
+path: retain the concrete defect, then constrain attacker claims and severity to the consumer/host
+context actually evidenced. The broken security invariant and plausible harmful outcome still need
+proof, and generic caller-selected capability alone still grants no net-new attacker power.
+
+For live/deployed claims, proving a vulnerability exists is not enough: demonstrate what the
+attacker **gains** from it. The gap between "vulnerability confirmed" and "attacker outcome
+proved" is where most severity inflation happens.
 
 **Existence proof (insufficient alone) — examples, not exhaustive:**
 - "TLS validation is disabled" — so what?
@@ -26,11 +36,19 @@ Proving a vulnerability exists is not enough. You must demonstrate what the atta
 - "SSRF to 169.254.169.254 returns IAM credentials → credentials grant s3:ListBucket on production bucket"
 - "Session token replayed from a different IP returns 200 with authenticated user data — no IP binding"
 
-The pattern applies to every vulnerability class: confirm the primitive exists, then demonstrate the attacker outcome it enables.
+For live/deployed claims, the pattern applies to every vulnerability class: confirm the primitive,
+then demonstrate the attacker outcome it enables. For code-mode supported-product defects, the §5
+rule above governs instead: prove the broken security invariant and feasible harm, while keeping an
+unevidenced consumer-specific attacker outcome out of the claim.
 
 When you capture credentials, tokens, or keys — **use them**. Extract the token, replay it, show what it unlocks. If replay fails, say why (expiry, IP binding, CSRF token required) and mark the finding CHAIN REQUIRED with the specific gap.
 
 A strong-but-unproven finding is parked, not dropped: hold it with `evidence_type=theoretical` + `chain_required=true` at `verification_disposition=pending_runtime_proof` (see `agent/operator-core.md`), and review the holding area with `vigil assess finding list --holding`. It stays out of the report until a runtime pass proves it.
+
+A deterministic code-mode proof through a supported product path is not "unproven" merely because
+an embedding consumer is unavailable. Record the bounded intrinsic defect under
+`shared-constraints-code.md` §5; park it only when the invariant failure or feasible harm is itself
+still unproved.
 
 **Recording a finding is not grading it.** A finding at `verification_state=unreviewed` is an **open question**, not a graded N/A — the lifecycle default means "not yet judged," not "judged harmless." Do not assert "no P2 here" / "this surface is clean" while any unauth or medium-plus finding is still `unreviewed`: an unreviewed finding is exactly what a clean-bill-of-health claim is supposed to have already resolved. Drive it to a verifier disposition before you grade the surface.
 
@@ -189,8 +207,10 @@ judgment the terminal gate applies later, applied earlier when it's cheaper to a
 Do not draft a finding, chain step, or remediation note from a lead that hasn't been pushed to a
 `tested`/`signal` probe-run verdict (§23) with recorded evidence. Writing the prose ahead of the
 evidence backfills confidence the testing never earned, and Phase 5's reviewer inherits the gap
-instead of catching it. A lead earns report space only after it clears the same bar rule 2 sets
-for a finding — proved attacker outcome, not existence alone.
+instead of catching it. A live/deployed lead earns report space only after it clears rule 2's
+proved-attacker-outcome bar. A code-mode finding clears the corresponding bar with a supported
+product path, concrete invariant failure, feasible harmful outcome, and bounded consumer-impact
+claim under `shared-constraints-code.md` §5.
 
 ## 14. Credentials require proof
 
