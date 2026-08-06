@@ -35,6 +35,12 @@ two-context/read-back mechanics in C1–C4 here); the *impact/overclaim* half �
 both tracks run it. This is why a real, fully-reproduced source injection can still be correctly
 closed as no-impact: the five-check protocol answers "is it real?", never "is it net-new?"
 
+For code-mode library/framework findings, apply `agent/shared-constraints-code.md` §5 before this
+impact half. A supported public API path can establish a real product defect without an in-repo
+consumer; missing consumer/deployment evidence limits the proven actor, asset, CVSS metrics, and
+severity rather than erasing the defect. In C5, "attacker" means the supported caller/consumer
+threat model actually evidenced; do not invent remote or cross-tenant reach from an unknown host.
+
 This file is the codified home of the recurring FP/overclaim catalog — when a new overclaim pattern
 recurs across engagements, land it here (as a kill/downgrade trigger below or a per-metric C-check),
 so the verifier and the pre-submission blind gate share one bar. The late, zero-context counterpart
@@ -167,7 +173,9 @@ not-reproducible, stacked preconditions, third-party/out-of-scope, 200-but-rejec
 > **No-PoC guard:** "theoretical/no-PoC" means kill when the primitive is *disproven*, not when a
 > runtime PoC merely wasn't built. A structurally sound finding that only lacks runtime
 > demonstration is parked at `evidence_type=theoretical` + `chain_required=true` (`hunting.md §2`),
-> not killed.
+> not killed. In code mode, an executable valid supported-API driver is runtime proof of the
+> intrinsic product invariant; a missing embedding application is consumer-impact context, not a
+> reason to demote that proof back to theoretical.
 
 ## Disposition & severity ladder
 
@@ -196,7 +204,8 @@ count is a ceiling.)
 This gate's conclusions are not scratch notes — the verifier writes them into the finding's durable
 `details` so the report-writer only formats: the corrected `cvss_vector`/`cvss_score`, the
 `evidence` (the exact fields + the two-context / read-back proof), the `impact` (the one-sentence
-attacker outcome from C5's gut-check), the `remediation`, the `steps_to_reproduce` with its
+attacker outcome from C5's gut-check, or bounded intrinsic product outcome plus missing consumer
+context), the `remediation`, the `steps_to_reproduce` with its
 `repro_runs`, and — when C7 was material to the disposition — the exact vendor doc URL/line cited
 and, if found, the precedent disclosure it was compared against. See the "Four Validation Gates"
 (Gate 3) in `agent/agents/vulnerability-analyst.md`.
