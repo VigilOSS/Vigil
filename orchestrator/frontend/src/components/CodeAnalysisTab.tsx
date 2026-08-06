@@ -5,6 +5,7 @@ import type {
   CodeCoverage,
   CodeModule,
   CodeQueueStats,
+  CodeReadiness,
   CodeRepo,
 } from "../lib/api";
 
@@ -12,78 +13,37 @@ import type {
 
 const CODE_PHASES = [
   { key: "ingest", label: "Ingest + Index" },
-  { key: "classify", label: "Classify + Map" },
+  { key: "classify-map", label: "Classify + Map" },
   { key: "hunt", label: "Hunt" },
-  { key: "verify", label: "Verify + Variant" },
+  { key: "verify-variant", label: "Verify + Variant" },
+  { key: "fuzz", label: "Fuzz" },
 ] as const;
 
 type PhaseKey = (typeof CODE_PHASES)[number]["key"];
 
-const STATUS_TO_PHASE: Record<string, PhaseKey> = {
-  ingested: "ingest",
-  classified: "classify",
-  context_built: "classify",
-  queued: "hunt",
-  in_progress: "hunt",
-  analyzed: "verify",
-  variant_done: "verify",
-  verified: "verify",
-  complete: "verify",
-};
-
-function resolvePhase(
-  repos: CodeRepo[],
-  queueStats: CodeQueueStats | null,
-  coverage: CodeCoverage | null,
-  results: CodeAnalysisResult[],
-): PhaseKey {
-  if (repos.length === 0) return "ingest";
-  let best: PhaseKey = "ingest";
-  const order: PhaseKey[] = ["ingest", "classify", "hunt", "verify"];
-
-  for (const repo of repos) {
-    const phase = STATUS_TO_PHASE[repo.analysis_status] ?? "ingest";
-    if (order.indexOf(phase) > order.indexOf(best)) best = phase;
-  }
-
-  if (coverage && coverage.total_files > 0 && order.indexOf(best) < order.indexOf("classify")) {
-    best = "classify";
-  }
-
-  const activeQueueItems =
-    (queueStats?.processing ?? 0) +
-    (queueStats?.pending ?? 0) +
-    (coverage?.confidence.active_queue_items ?? 0) +
-    (coverage?.confidence.unresolved_needs_context ?? 0);
-  const queuedOrInProgressFiles =
-    (coverage?.by_status.queued ?? 0) +
-    (coverage?.by_status.in_progress ?? 0) +
-    (coverage?.by_status.needs_context ?? 0);
-  if ((activeQueueItems > 0 || queuedOrInProgressFiles > 0) && order.indexOf(best) < order.indexOf("hunt")) {
-    best = "hunt";
-  }
-
-  const analyzedFiles =
-    (coverage?.by_status.analyzed ?? 0) +
-    (coverage?.by_status.done ?? 0) +
-    Object.values(coverage?.by_classification ?? {}).reduce((sum, entry) => sum + entry.analyzed, 0);
-  if ((results.length > 0 || analyzedFiles > 0) && order.indexOf(best) < order.indexOf("verify")) {
-    best = "verify";
-  }
-
-  if (coverage && !coverage.gate.passed && order.indexOf(best) >= order.indexOf("verify")) {
-    best = "hunt";
-  }
-  return best;
-}
-
-function phaseState(phase: PhaseKey, current: PhaseKey): "completed" | "active" | "pending" {
-  const order: PhaseKey[] = ["ingest", "classify", "hunt", "verify"];
+function phaseState(phase: PhaseKey, persistedPhase: string): "completed" | "active" | "pending" {
+  const order = CODE_PHASES.map((entry) => entry.key);
   const pi = order.indexOf(phase);
-  const ci = order.indexOf(current);
+  if (persistedPhase === "complete") return "completed";
+  const ci = order.indexOf(persistedPhase as PhaseKey);
+  if (ci < 0) return "pending";
   if (pi < ci) return "completed";
   if (pi === ci) return "active";
   return "pending";
+}
+
+function reviewQuality(coverage: CodeCoverage | null): { passed: boolean; warnings: string[] } | null {
+  const effortWarnings = coverage?.gate.effort_warnings;
+  const integrity = coverage?.gate.coverage_integrity;
+  if (!Array.isArray(effortWarnings) || !Array.isArray(integrity)) return null;
+
+  const warnings = [...effortWarnings];
+  for (const item of integrity) {
+    for (const warning of item.warnings ?? []) {
+      warnings.push(`${item.file_path ?? "unknown file"}: ${warning}`);
+    }
+  }
+  return { passed: warnings.length === 0, warnings: [...new Set(warnings)] };
 }
 
 // ── Search tokenizer ────────────────────────────────────
@@ -174,10 +134,13 @@ const IconClose = () => (
 // ── Main component ──────────────────────────────────────
 
 type CodeAnalysisTabProps = {
+  persistedPhase: string;
+  loadError: string | null;
   repos: CodeRepo[];
   modules: CodeModule[];
   queueStats: CodeQueueStats | null;
   coverage: CodeCoverage | null;
+  readiness: CodeReadiness | null;
   results: CodeAnalysisResult[];
 };
 
@@ -191,13 +154,16 @@ const DISPOSITION_ORDER = ["finding", "suspicious", "needs_context", "clean", "s
 const CONFIDENCE_ORDER = ["high", "medium", "low"];
 
 export function CodeAnalysisTab({
+  persistedPhase,
+  loadError,
   repos,
   modules,
   queueStats,
   coverage,
+  readiness,
   results,
 }: CodeAnalysisTabProps) {
-  const currentPhase = resolvePhase(repos, queueStats, coverage, results);
+  const fallbackQuality = reviewQuality(coverage);
   const [expandedModules, setExpandedModules] = useState<Set<number>>(new Set());
   const [expandedResults, setExpandedResults] = useState<Set<number>>(new Set());
   const [resultPage, setResultPage] = useState(0);
@@ -354,18 +320,6 @@ export function CodeAnalysisTab({
     workflowFilters.size +
     (query ? 1 : 0);
 
-  const hasData = repos.length > 0;
-
-  if (!hasData) {
-    return (
-      <section className="panel">
-        <p className="meta-text">
-          No code repositories ingested yet. Run <code>vigil assess code-ingest</code> to start code analysis.
-        </p>
-      </section>
-    );
-  }
-
   return (
     <>
       {/* Phase pipeline */}
@@ -375,7 +329,7 @@ export function CodeAnalysisTab({
         </div>
         <div className="code-phase-pipeline">
           {CODE_PHASES.map((phase) => {
-            const state = phaseState(phase.key, currentPhase);
+            const state = phaseState(phase.key, persistedPhase);
             return (
               <div key={phase.key} className={`code-phase-step code-phase-${state}`}>
                 <div className="code-phase-indicator">
@@ -386,6 +340,7 @@ export function CodeAnalysisTab({
             );
           })}
         </div>
+        <p className="meta-text">Persisted phase: {persistedPhase.replace(/-/g, " ")}</p>
       </section>
 
       {/* Repository overview */}
@@ -393,9 +348,33 @@ export function CodeAnalysisTab({
         <div className="panel-header">
           <h2>Repositories</h2>
         </div>
+        {loadError && (
+          <p className="error-text" role="alert">
+            {loadError}
+          </p>
+        )}
         <div className="code-repos-grid">
-          {repos.map((repo) => (
-            <article key={repo.id} className="code-repo-card">
+          {repos.length === 0 && !loadError && (
+            <p className="meta-text">
+              No code repositories ingested yet. Run <code>vigil assess code-ingest</code> to start code analysis.
+            </p>
+          )}
+          {repos.map((repo) => {
+            const degraded = repo.structural_analysis_status_counts.degraded ?? 0;
+            const unsupported = repo.structural_analysis_status_counts.unsupported ?? 0;
+            const truncated = repo.structural_artifact_truncated_files;
+            const hasStructuralDebt = degraded > 0 || unsupported > 0 || truncated > 0;
+            const degradedOrTruncatedPaths = [
+              ...new Set([
+                ...repo.structural_degraded_file_paths,
+                ...repo.structural_artifact_truncated_file_paths,
+              ]),
+            ].sort();
+            return (
+            <article
+              key={repo.id}
+              className={`code-repo-card${hasStructuralDebt ? " code-repo-has-debt" : ""}`}
+            >
               <div className="code-repo-header">
                 <strong>{repo.name}</strong>
                 <span className={`badge code-status-${repo.analysis_status}`}>
@@ -416,8 +395,45 @@ export function CodeAnalysisTab({
                   <span className="meta-text">language</span>
                 </div>
               </div>
+              <p className="meta-text">
+                Generation {repo.active_generation} · snapshot {repo.source_snapshot_quality}
+                {repo.source_manifest_digest ? ` · ${repo.source_manifest_digest.slice(0, 12)}` : ""}
+              </p>
+              {hasStructuralDebt && (
+                <div className="code-structural-debt" role="status">
+                  <strong>Structural coverage debt</strong>
+                  <span>
+                    {degraded} degraded · {unsupported} unsupported · {truncated} truncated
+                  </span>
+                  <p>
+                    {readiness?.transition_ready
+                      ? "Completion readiness is READY; structural limitations remain recorded for auditability."
+                      : readiness
+                        ? "Check Completion readiness blockers for any outstanding direct-review requirement."
+                        : "Completion readiness is unavailable; inspect the file inventory before treating debt as reviewed."}
+                  </p>
+                  {unsupported > 0 && (
+                    <p>Unsupported paths are not included below; inspect the code file inventory/API.</p>
+                  )}
+                  {degradedOrTruncatedPaths.length > 0 && (
+                    <details>
+                      <summary>
+                        {degradedOrTruncatedPaths.length} degraded/truncated affected path
+                        {degradedOrTruncatedPaths.length === 1 ? "" : "s"}
+                      </summary>
+                      <ul>
+                        {degradedOrTruncatedPaths.slice(0, 20).map((path) => <li key={path}><code>{path}</code></li>)}
+                        {degradedOrTruncatedPaths.length > 20 && (
+                          <li>+ {degradedOrTruncatedPaths.length - 20} more degraded/truncated paths</li>
+                        )}
+                      </ul>
+                    </details>
+                  )}
+                </div>
+              )}
             </article>
-          ))}
+            );
+          })}
         </div>
       </section>
 
@@ -486,62 +502,87 @@ export function CodeAnalysisTab({
       </section>
 
       {/* File classification + coverage */}
-      {coverage && (
+      {(coverage || readiness) && (
         <section className="engagement-grid">
-          <article className="panel">
-            <p className="eyebrow">File Classification</p>
-            <div className="code-classification-grid">
-              {["critical", "high", "medium", "low", "skip"].map((cls) => {
-                const data = coverage.by_classification[cls];
-                if (!data) return null;
-                return (
-                  <div key={cls} className="code-classification-row">
-                    <span className={`badge severity-${cls === "skip" ? "info" : cls}`}>{cls}</span>
-                    <span className="code-classification-count">{data.count}</span>
-                    <span className="meta-text">
-                      {data.analyzed}/{data.count} analyzed
-                    </span>
+          {coverage && (
+            <article className="panel">
+              <p className="eyebrow">File Classification</p>
+              <div className="code-classification-grid">
+                {["critical", "high", "medium", "low", "skip"].map((cls) => {
+                  const data = coverage.by_classification[cls];
+                  if (!data) return null;
+                  return (
+                    <div key={cls} className="code-classification-row">
+                      <span className={`badge severity-${cls === "skip" ? "info" : cls}`}>{cls}</span>
+                      <span className="code-classification-count">{data.count}</span>
+                      <span className="meta-text">
+                        {data.analyzed}/{data.count} analyzed
+                      </span>
+                    </div>
+                  );
+                })}
+                {(coverage.by_status.unclassified ?? 0) > 0 && (
+                  <div className="code-classification-row">
+                    <span className="badge">unclassified</span>
+                    <span className="code-classification-count">{coverage.by_status.unclassified}</span>
+                    <span className="meta-text">awaiting Phase 1</span>
                   </div>
-                );
-              })}
-              {(coverage.by_status.unclassified ?? 0) > 0 && (
-                <div className="code-classification-row">
-                  <span className="badge">unclassified</span>
-                  <span className="code-classification-count">{coverage.by_status.unclassified}</span>
-                  <span className="meta-text">awaiting Phase 1</span>
-                </div>
-              )}
-            </div>
-
-          </article>
+                )}
+              </div>
+            </article>
+          )}
 
           <article className="panel">
-            <p className="eyebrow">Coverage Gate</p>
+            <p className="eyebrow">Analysis Gates</p>
             <div className="code-gate-status">
-              <span className={`code-gate-badge ${coverage.gate.passed ? "code-gate-pass" : "code-gate-fail"}`}>
-                {coverage.gate.passed ? "PASS" : "FAIL"}
+              <p className="meta-text">Completion readiness</p>
+              <span className={`code-gate-badge ${readiness ? (readiness.transition_ready ? "code-gate-pass" : "code-gate-fail") : ""}`}>
+                {readiness ? (readiness.transition_ready ? "READY" : "BLOCKED") : "UNKNOWN"}
               </span>
-              {coverage.gate.reasons.length > 0 && (
+              {readiness && readiness.blockers.length > 0 && (
                 <ul className="code-gate-reasons">
-                  {coverage.gate.reasons.map((reason, i) => (
-                    <li key={i} className="meta-text">{reason}</li>
+                  {readiness.blockers.map((blocker, i) => (
+                    <li key={`${blocker.code}-${i}`} className="meta-text">
+                      [{blocker.code}] {blocker.message}
+                      {!blocker.overrideable ? " (integrity; non-overrideable)" : ""}
+                    </li>
                   ))}
                 </ul>
               )}
+
+              <p className="meta-text" style={{ marginTop: "16px" }}>Review quality</p>
+              {(() => {
+                const quality = readiness?.quality_gate ?? fallbackQuality;
+                const warnings = quality?.warnings ?? [];
+                return (
+                  <>
+                    <span className={`code-gate-badge ${quality ? (quality.passed ? "code-gate-pass" : "code-gate-fail") : ""}`}>
+                      {quality ? (quality.passed ? "PASS" : "NEEDS ATTENTION") : "UNKNOWN"}
+                    </span>
+                    {warnings.length > 0 && (
+                      <ul className="code-gate-reasons">
+                        {warnings.map((warning, i) => (
+                          <li key={i} className="meta-text">{warning}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </>
+                );
+              })()}
             </div>
 
             {/* Confidence metrics */}
-            <div className="code-confidence">
+            {coverage && <div className="code-confidence">
               <p className="eyebrow" style={{ marginTop: "16px" }}>Confidence</p>
               <div className="code-fn-stats">
                 <span>Critical: {coverage.confidence.critical_coverage_pct.toFixed(0)}%</span>
                 <span>High: {coverage.confidence.high_coverage_pct.toFixed(0)}%</span>
                 <span>LOC analyzed: {coverage.confidence.overall_loc_analyzed.toLocaleString()}</span>
               </div>
-            </div>
+            </div>}
 
             {/* Findings summary */}
-            {coverage.findings_summary.total_code_findings > 0 && (
+            {coverage && coverage.findings_summary.total_code_findings > 0 && (
               <div className="code-findings-summary">
                 <p className="eyebrow" style={{ marginTop: "16px" }}>Code Findings</p>
                 <div className="code-fn-stats">

@@ -376,6 +376,7 @@ export type Derived = {
   merged_into_slug?: string | null;
   notes?: string;
   evidence_ref?: string;
+  code_snapshot_status?: "current" | "stale" | "unbound" | "not_applicable";
   // derived
   details: FindingDetails;
   provenance: FindingProvenance | null;
@@ -431,6 +432,7 @@ function buildSearchCorpus(d: Omit<Derived, "searchCorpus">): string {
     d.root_cause_slug,
     d.root_cause_effect,
     d.root_cause_note,
+    d.code_snapshot_status,
     d.poc_code,
     d.entry_point,
     d.sink,
@@ -877,6 +879,7 @@ export function FindingsTab({
         merged_into_slug: isDetail(f) ? f.merged_into_slug ?? null : undefined,
         notes: isDetail(f) ? f.notes : undefined,
         evidence_ref: isDetail(f) ? f.evidence_ref : undefined,
+        code_snapshot_status: isDetail(f) ? f.code_snapshot_status : undefined,
         details,
         provenance,
         links,
@@ -1759,6 +1762,11 @@ function RootCauseGroupCard({
         </div>
         <div className="group-card-metrics">
           <span className={`badge severity-${group.highestSeverity}`}>{group.highestSeverity}</span>
+          {group.root.code_snapshot_status && group.root.code_snapshot_status !== "not_applicable" && (
+            <span className={`pill pill-source-${group.root.code_snapshot_status}`}>
+              source {group.root.code_snapshot_status}
+            </span>
+          )}
           <span className="tag root">{group.siblings.length} siblings</span>
           {residualCount > 0 && <span className="tag chain">{residualCount} residual paths</span>}
         </div>
@@ -1801,6 +1809,11 @@ function FindingMiniRow({
         {d.root_cause_note && <span className="meta-text">{d.root_cause_note}</span>}
       </span>
       {d.root_cause_effect === "eliminates_attack_path" && <span className="tag chain">Residual path</span>}
+      {d.code_snapshot_status && d.code_snapshot_status !== "not_applicable" && (
+        <span className={`pill pill-source-${d.code_snapshot_status}`}>
+          source {d.code_snapshot_status}
+        </span>
+      )}
       <span className={`pill pill-${d.workflow_status}`}>{d.workflowLabel}</span>
       {hasSubmissionStatus(d.submission_status) && (
         <span
@@ -2062,6 +2075,14 @@ function Drawer({
               {d.verificationLabel}
             </span>
           )}
+          {d.code_snapshot_status && d.code_snapshot_status !== "not_applicable" && (
+            <span
+              className={`pill pill-source-${d.code_snapshot_status}`}
+              title="Binding to the repository generation currently under review"
+            >
+              source {d.code_snapshot_status}
+            </span>
+          )}
           {hasSubmissionStatus(d.submission_status) && (
             <span
               className={`pill submission-pill submission-${d.submission_status}`}
@@ -2211,6 +2232,15 @@ function OverviewPane({ d, proseMode, toast }: { d: Derived; proseMode: ProseMod
             <KV k="Merged into" v={d.merged_into_slug} mono />
           )}
           <KV k="Evidence ref" v={d.evidence_ref} mono />
+          <KV k="Source binding" v={d.code_snapshot_status} />
+          <KV k="Source repo" v={d.provenance?.code_snapshot?.repo_id} mono />
+          <KV k="Source generation" v={d.provenance?.code_snapshot?.repo_generation} mono />
+          <KV
+            k="Source manifest"
+            v={d.provenance?.code_snapshot?.source_manifest_digest}
+            mono
+            toast={toast}
+          />
         </div>
       </div>
       {(d.chain_required !== undefined || d.chain_rationale) && (
