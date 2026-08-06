@@ -75,6 +75,11 @@ vigil assess command-run list --tool-bin httpx --success
 # Runs that timed out (prior coverage likely incomplete)
 vigil assess command-run list --timed-out
 
+# Output that must not silently count as trustworthy evidence. Resume/sweep
+# warnings point here when their bounded row-id sample omits additional rows;
+# paginate with --offset 1000, 2000, ... until the result is empty.
+vigil assess command-run list --output-attention --json --limit 1000
+
 # Fetch one run with previews and artifact refs
 vigil assess command-run get 142
 ```
@@ -89,7 +94,9 @@ vigil assess command-run get 142
 | Same tool, same target, `return_code != 0` | Same objective | **Investigate stderr first.** Re-run only once you know why it failed. |
 | Same tool, different target, success | New target | **Run it.** The audit layer does not correlate by target — there's no `target_host` column — so prior runs against other targets tell you nothing about this one. |
 | Same tool and target, success, but before an auth change | Now authenticated | **Run it.** Auth context changed; prior coverage doesn't map. |
-| Same tool, same target, suppressed output (`output_retention_status=suppressed`) | Need raw bytes | **Re-run with a narrower/quieter configuration.** Only the SHA256 was kept; the prior output is not recoverable. |
+| Same tool, same target, inline output with `output_retention_status=suppressed` | Need raw bytes | **Re-run with a narrower/quieter configuration.** Inline raw bytes were discarded; only the byte count and SHA256 remain. |
+| Same tool, same target, host output with `output_retention_status=suppression_pending` or `suppression_deferred` | Need raw bytes | **Do not treat the run as cleanly retained or erased.** The bytes are excluded from artifact search, but the private `scans/host-exec` spill may still contain them. `--require-audit` fails until isolation-backed cleanup can prove erasure. |
+| Host output with `output_retention_status=untrusted` or `integrity_failure` | Any coverage decision | **Do not use it as evidence.** The process could not be quiesced or the verified snapshot changed. Re-run after resolving the process/integrity failure. |
 
 ## Data Volume — Default to the Lightweight Listing
 
@@ -117,7 +124,10 @@ introspection.
 
 ## Interpreting Key Fields
 
-- `output_retention_status`: `retained` (preview + full bytes in DB), `artifact` (preview in DB, full bytes in artifact file — fetch via `stdout_artifact_ref`/`stderr_artifact_ref`), `suppressed` (preview dropped by retention policy; `stdout_sha256` still uniquely identifies the output), `empty` (tool produced no output on that stream).
+- `output_retention_status`: `retained` (bounded preview retained), `artifact` (bounded preview plus a descriptor-verified snapshot at `stdout_artifact_ref`/`stderr_artifact_ref`), `suppressed` (one-shot inline bytes were discarded), `suppression_pending` (logical suppression committed but post-commit validation did not finish), `suppression_deferred` (logically suppressed and blocked from artifact indexing, while raw 0600 spill bytes may remain), `untrusted` (a host process group could not be quiesced, so no output hash or artifact was claimed), `integrity_failure` (a retained snapshot failed its post-commit identity/content check), or `empty`.
+- `output_cleanup_status` / `output_cleanup_warning`: physical-cleanup truth for host spills. `deferred` is not success: raw bytes may remain in the private host-exec directory, and `--require-audit` exits nonzero. `pending` is a crash-recoverable transaction state owned by an exact duplicate terminal PATCH and by `vigil assess kali sweep-orphans` (also run by `resume-brief`); `warning` is terminal and requires operator attention.
+- `output_integrity_status` / `output_integrity_warning`: snapshot publication truth. Trust an artifact ref only when this is `verified`. `pending` has the same deterministic PATCH/sweep recovery owner; `warning` is a terminal audit failure.
+- `output_recovery_observed_at`: backend-owned recovery baseline. New finalizations stamp it in the same transaction as terminal state; migrated terminal-pending rows stamp the time the upgraded backend first observes them, which deliberately starts a fresh grace period without pretending to know their historical commit time. Reconciliation ages pending work only from this field, never client-supplied `completed_at` or process `started_at`.
 - `stdout_preview_chars` / `stderr_preview_chars`: the size of the preview the backend holds for this run. Lightweight listings omit the text but expose this so a caller can decide whether `command-run get` is worth a follow-up call.
 - `stdout_suppression_reason` / `stderr_suppression_reason`: populated when retention policy skipped the preview (for example `static-asset-filter` for grep'd URL lists, `binary-dump` for xxd/hexdump). The command and the hash are still recorded, so a coverage check by command text still succeeds.
 - `timed_out`: the command exceeded its tool timeout. `return_code` will be `-1`. Treat coverage as incomplete.

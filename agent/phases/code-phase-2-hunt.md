@@ -5,8 +5,8 @@
 synthesis), and re-read it on a method re-anchor or when the sub-phase changes (2A → 2B → 2C → 2D).
 It carries the full 2A Broad Hunt (queue setup, fetch loop, dispatch fields, batch framing), 2B CWE
 Coverage Review (effort matrix, CWE-directed re-dispatch), 2C Adversarial Depth Pass, 2D
-System-Level Synthesis Pass (seam manifest, seam-scaled dispatch, reduce pass), and every sub-phase
-exit gate. Cross-phase machinery — the Core Loop, the Phased mindset flow (code) (which sets
+System-Level Synthesis Pass (seam manifest, seam-scaled dispatch, reduce pass), and each sub-phase
+completion/readiness check. Cross-phase machinery — the Core Loop, the Phased mindset flow (code) (which sets
 `code-vuln-hunter`'s `hunt_scope`/lens per sub-phase), the Agent Roster, and the Dispatch Context
 Template / Pre-Dispatch Checklist — stays in `agent/operator-core-code.md`; this doc does not
 restate it.
@@ -15,13 +15,20 @@ restate it.
 
 Operator-orchestrated. This is the most expensive phase -- use Opus.
 
-Phase 2 has two sub-phases: **2A (Broad Hunt)** discovers vulnerabilities through comprehensive
-file-level analysis, and **2B (CWE Coverage Review)** closes effort gaps on critical/high files
-to ensure thorough coverage across all applicable vulnerability classes.
+Phase 2 has four sub-phases: **2A (Broad Hunt)** discovers vulnerabilities through comprehensive
+file-level analysis of every admitted file, **2B (CWE Coverage Review)** closes effort gaps on critical/high files,
+**2C (Adversarial Depth)** independently rereads the highest-risk files, and **2D (System-Level
+Synthesis)** hunts cross-module seams and chains.
 
-Hunters read actual source files directly from the filesystem, navigating with the structural
-index (when available), call graph excerpts, and attack hypotheses as guidance. They have full
-filesystem access to trace beyond the provided file batch when needed.
+Every Phase 2 dispatch carries the current Code Source Identity, its matching structural-index
+manifest, and the complete backend threat-model envelope only when `current: true` and its
+generation/digest match that identity. A clipped threat summary is supplemental navigation, never
+a substitute for this bound tuple. If any member is missing or stale, return to its Phase 0/1 owner
+before dispatch.
+
+Hunters read actual source files directly from the sealed `snapshot_path`, navigating with the
+bound structural index, call graph excerpts, and attack hypotheses as guidance. They have full
+sealed-source access to trace beyond the provided file batch when needed.
 
 Adaptive batching is part of the method, not a convenience:
 - Default to 1 logical module or 1-3 tightly related files per hunter dispatch
@@ -51,10 +58,18 @@ vigil assess code-dispatch stats
 ```
 
 Broad-hunt queue items are file-level only (no `context_id`). Each item carries `file_id` and
-`file_path` plus `priority` (mapped from classification `analysis_priority`), `batch_theme`,
+`file_path` plus `priority` (exactly equal to classification `analysis_priority` under the
+architecture-mapping skill's `Priority Scoring` contract), `batch_theme`,
 `slot_types`, and `guidance_hypotheses`. `code-dispatch queue` normalizes the artifact before
 posting -- include both `file_id` and `file_path` so the queue stays human-readable and the
 normalizer can resolve either one; `repo_id` is a disambiguation helper only, not a queue field.
+Priority is required: the CLI rejects missing/out-of-range values rather than defaulting or
+clamping them, and the backend rejects the whole batch before mutation if any value differs from
+the file's current `analysis_priority`. Reanalysis uses the same exact-priority invariant.
+The backend owns initial-queue idempotency per file/current generation: a retry inserts missing
+rows, safely refreshes only unleased pending metadata, reports identical active work, and refuses
+to mutate a live lease or terminal evidence. Review the printed per-file outcomes; the CLI exits
+nonzero after rendering any conflict.
 
 **Fetch loop:**
 ```bash
@@ -81,7 +96,8 @@ one oversized mixed batch to a single agent.
 
 **Dispatch `code-vuln-hunter`** with `agent/skills/code-vulnerability-analysis/SKILL.md` and:
 
-- **File paths** -- from the fetched queue items; the hunter reads them directly from the filesystem.
+- **File paths** -- from the fetched queue items; resolve every relative path beneath the current
+  Code Source Identity `snapshot_path`, never beneath the mutable origin.
 - **Batch theme** -- the logical module grouping, so files in the batch share cross-file context.
 - **Slot types** -- the slot type annotations for each file from Phase 1 classification.
 - **Applicable vulnerability classes** -- pass the backend-computed `applicable_vuln_classes` list
@@ -89,21 +105,28 @@ one oversized mixed batch to a single agent.
   from the canonical taxonomy `agent/scripts/assess/lib/vuln_taxonomy.py`); do not hand-copy a
   slot->class table, it drifts from the backend. This is a coverage floor, not a ceiling -- every
   named class gets an effort score, and anything else the reading surfaces is still the hunter's
-  to flag.
+  to flag. For every C/C++ file, sanity-check that the list includes `error-handling` and
+  `algorithmic-dos`: cleanup/partial-I/O failures and attacker-controlled CPU, allocation,
+  retry, or retention are baseline review surfaces, not optional memory-safety extras. A missing
+  baseline family is a dispatch-input defect to repair before review, not permission to omit it.
 - **Guidance hypotheses** -- labeled "check AFTER broad analysis." The skill's Steps 3-4 already
   define why the first pass runs unconstrained by these hypotheses and checks them second (not
   re-derived here); "unconstrained" means not pre-anchored to the architect's guesses, not exempt
   from the applicable-classes floor above.
 - **Structural index** -- the manifest path plus relevant per-file index paths from
-  `tools/analysis-state/structural-index/` (run `vigil assess code-index` first if missing). The
+  the Code Source Identity block (return to Phase 0 for a generation-bound rebuild if missing). The
   function map is the completeness anchor (`agent/shared-constraints-code.md` §2); sinks, exports,
   and import targets stay advisory navigation, not a scope limiter.
 - **Call graph excerpt** -- the relevant entry chain plus the artifact path to
   `tools/analysis-state/call-graph.json`; inline only edges that change this dispatch's reasoning.
-- **Threat model summary** -- trust boundaries, entry points, high-value targets, and **trusted
-  inputs** (operator-owned config, env secrets, internal mTLS/IAM callers, authenticated
+- **Current threat-model envelope plus a clipped summary** -- fetch
+  `code/threat-model/<repo-id>`, require `current: true` and generation/digest equality with Code
+  Source Identity, then summarize the product surface profile and evidence, target-kind entry
+  points, product-reachability versus attacker-control status, trust boundaries, high-value targets,
+  and **trusted inputs** (operator-owned config, env secrets, internal mTLS/IAM callers, authenticated
   principals -- sources the hunter should NOT treat as attacker-controlled, and the single biggest
-  false-positive suppressor). A 3-8 bullet summary, not the full Phase 1 artifact.
+  false-positive suppressor). Pass the complete bound envelope and add a 3-8 bullet summary for
+  orientation; do not replace the envelope with those bullets.
 - **Root-cause candidate capture** -- ask the hunter to put shared utilities/guards it suspects
   cause several findings in handoff `extras.root_cause_candidates`, for the Phase 4 grouping pass.
 - **CWE pattern references** -- trigger-gated, not pre-loaded: when a slot type or code pattern in
@@ -113,8 +136,9 @@ one oversized mixed batch to a single agent.
   `crypto-misuse.md`). Pass the directory path in the dispatch context, not a pre-selected file
   list -- preloading every plausible file for a mixed batch is what blows the context budget below.
 - **Effort score is a judgment, not a target to hit.** Per-family thresholds (critical 70, high 50)
-  are a WARN at `transition-phase`; the operator enforces them after the fact with `vigil assess
-  code-coverage --require-gate-pass`. Tell the hunter the goal -- examine every applicable class to
+  remain advisory at `transition-phase`; inspect them with `vigil assess code-coverage --cwe-matrix`
+  or use `--require-gate-pass` only when a strict shell signal helps drive a quality-remediation
+  loop. Tell the hunter the goal -- examine every applicable class to
   the depth the file's role warrants -- not the number: the structural cross-check
   (`agent/shared-constraints-code.md` §12) catches an inflated score without matching depth
   regardless of what's submitted.
@@ -122,15 +146,16 @@ one oversized mixed batch to a single agent.
   chains:
 
 > These source files sit on the traced path from [entry points] through [function chains] to a
-> privileged operation or a trust-boundary crossing -- that reachability, not a prior finding, is
-> why this batch was selected. Static analysis tools do not reason across function boundaries, so
+> security-relevant decision, state transition, harm-bearing operation, or trust-boundary crossing
+> -- that target-kind product reachability, not a prior finding, is why this batch was selected.
+> Static analysis tools do not reason across function boundaries, so
 > their blind spots are exactly the multi-function reasoning chains, error-handling paths, integer
 > arithmetic, and protocol edge cases this pass should weigh most heavily. A batch that holds up
 > under that scrutiny is a valid result -- report it clean with the reasoning that ruled each
 > pattern out, not a forced finding.
 
-**Full filesystem access** (`agent/shared-constraints-code.md` §3) applies here as everywhere --
-the file batch is a starting point, not a cage.
+**Full sealed-source access** (`agent/shared-constraints-code.md` §3) applies here as everywhere --
+the file batch is a starting point, not a cage, while the mutable origin is never an analysis root.
 
 **Context budget rule**: every field above stays sized to help the hunter navigate, not to
 outweigh the source files -- compress structural index / call graph / threat model content before
@@ -142,7 +167,7 @@ vigil assess contract code-record analysis   # confirm the shape if the payload 
 vigil assess code-record analysis <analysis-json>   # cwe_coverage + cross_file_triggers
 
 # Preview the completion payload before committing queue history when unsure:
-vigil assess code-dispatch done <item-id> <agent-name> <lease-token> <clean|finding|suspicious> <cwe-coverage-json> ["notes"] --dry-run
+vigil assess code-dispatch done <item-id> <agent-name> <lease-token> <clean|finding|suspicious|skipped> <cwe-coverage-json> ["notes"] --dry-run [--skip-reason <reason>]
 
 # cwe-coverage-json is a file path, not inline JSON -- write the bare array (shape:
 # agent/skills/code-vulnerability-analysis/SKILL.md "CWE Coverage") to a temp file first:
@@ -150,20 +175,24 @@ cat > /tmp/cwe_<item-id>.json <<'JSON'
 [{"family": "buffer-overflow", "effort": 85, "functions_analyzed": 12, "entry_chains_traced": 3, "total_entry_chains": 3, "notes": "Traced all applicable parser entry chains"}]
 JSON
 
-vigil assess code-dispatch done <item-id> <agent-name> <lease-token> <clean|finding|suspicious> /tmp/cwe_<item-id>.json ["notes"]
+vigil assess code-dispatch done <item-id> <agent-name> <lease-token> <clean|finding|suspicious|skipped> /tmp/cwe_<item-id>.json ["notes"] [--skip-reason <reason>]
 vigil assess finding record code-vuln-hunter <finding-json>
 vigil assess code-dispatch requeue-triggers <triggers-json>   # if analysis returned cross_file_triggers
 vigil assess code-dispatch reset-stale 10   # before fetching the next batch
 ```
 
-Use `code-dispatch done` with `clean`, `finding`, or `suspicious` -- the queue history is only
-useful if every completion records a valid disposition and a complete `cwe_coverage` array (the
-bare JSON array, not wrapped in an object) instead of a half-formed backend 422. Include one entry
-per `applicable_vuln_classes` value, with explicit zero-effort gap entries for anything unexamined.
+Use `code-dispatch done` with `clean`, `finding`, `suspicious`, or an explicit `skipped` plus
+`--skip-reason` -- the queue history is only useful if every admitted file receives a terminal,
+attributable disposition. An analyzed completion records a complete `cwe_coverage` array (the bare
+JSON array, not wrapped in an object) instead of a half-formed backend 422. Include one entry per
+`applicable_vuln_classes` value, with explicit zero-effort gap entries for anything unexamined.
 Record the analysis result before closeout: `finding`/`suspicious` require a current result with
 inline `evidence` or an `evidence_ref`; `clean` requires non-empty family coverage and review
-notes. Per-file detail derives from result rows, evidenced rows, and distinct-function effort, so a
-submitted effort number alone is not proof of work.
+notes. If the worker directly read a degraded/unsupported/truncated file to discharge Structural
+Coverage Debt, close it through that normal result path; never label completed semantic review as
+`skipped`, because skip records intentionally unreviewed material and cannot clear the debt
+(`shared-constraints-code.md` §2). Per-file detail derives from result rows, evidenced rows, and
+distinct-function effort, so a submitted effort number alone is not proof of work.
 
 **Handling needs-context returns:** Check what's missing and why. If the hunter could have
 self-resolved it via filesystem access, note that as a process gap for future dispatches. If the
@@ -183,8 +212,8 @@ discoveries and more issues likely remain.
 **Repeat** the fetch-dispatch-done loop until the queue is drained.
 
 **Phase 2A exit gate -- ALL of the following must be true:**
-- [ ] All critical/high files from the file analysis queue analyzed at least once
-- [ ] No unresolved `needs-context` items on critical/high files
+- [ ] Every admitted-file queue row is analyzed or explicitly closed `skipped` with a reason
+- [ ] No unresolved `needs-context` item remains at any classification tier
 - [ ] All cross-file triggers processed (target files queued or already completed)
 - [ ] Coverage stats checked: `vigil assess code-coverage`
 
@@ -199,19 +228,34 @@ vigil assess code-coverage --cwe-matrix
 Shows, per critical/high file: expected classes from `SLOT_VULN_CLASSES`, current effort per class,
 threshold flags (`!` = below threshold), and a structural cross-check (self-reported
 `functions_analyzed` against the structural index's actual function count -- a gap suggests the
-hunter skipped functions needing a disposition). If every critical/high file meets threshold and no
-cross-file triggers are pending, go to Phase 3.
+hunter skipped functions needing a disposition). These scores steer review depth; they do not
+authorize or block a phase transition. If no warning represents a material gap, record that
+judgment and continue to 2C/2D. Pending cross-file triggers remain a separate structural-readiness
+blocker regardless of the quality score.
 
 Otherwise: process any pending cross-file triggers first (`vigil assess code-coverage`, `vigil
 assess code-dispatch reset-stale 10`) -- a trigger may add a file that closes a gap class, shrinking
 the re-dispatch scope. Then group the remaining files by which classes are below threshold and
 dispatch `code-vuln-hunter` in CWE-Directed Re-Analysis Mode:
 
+Before dispatch, write the selected files to a queue artifact and create an explicit reasoned
+attempt. Never resubmit them through the initial `queue` verb:
+
+```bash
+vigil assess code-dispatch reanalyze \
+  "$DIR/tools/analysis-state/phase-2b-reanalysis-queue.json" \
+  "Phase 2B CWE effort gaps: <families and prior gap>"
+```
+
+`reanalyze` requires the prior row to be complete, links the new row to that predecessor, and
+refuses active/error/needs-context rows without changing them. Fetch the new leases normally.
+
 ```json
 {"cwe_directives": ["path-traversal", "injection"], "prior_effort": {"path-traversal": {"effort": 25, "functions_analyzed": 1, "notes": "checked main handler only"}, "injection": {"effort": 40, "functions_analyzed": 3, "notes": "basic sink check"}}, "target_effort": 70, "entry_chains_to_trace": ["handleUpload -> FileUtils.copyFile -> FileOutputStream.write"], "cwe_pattern_refs": ["agent/references/code-vuln-patterns/injection.md", "agent/references/code-vuln-patterns/web-app-injection.md"]}
 ```
 
-Include the same structural index, call graph excerpt, and threat model summary as Phase 2A. The
+Include the same current Code Source Identity, matching structural index, call graph excerpt, and
+complete current threat-model envelope as Phase 2A; its clipped summary remains supplemental. The
 hunter reads the file in full, focuses on the directed classes, and raises effort toward the
 target. On return, record and close out exactly as in Phase 2A's "On return" above (`code-record
 analysis`, `code-dispatch done` with the updated `cwe_coverage` -- the backend uses a max-effort
@@ -225,11 +269,16 @@ frames has no injection surface); and stop re-dispatching a given file/class onc
 would plausibly add nothing new -- that judgment, not a round count, is what decides diminishing
 returns. Document whichever reason applies and proceed.
 
-**Phase 2B exit gate -- ALL of the following must be true:**
-- [ ] All critical/high files meet the tier thresholds shown by `code-coverage --cwe-matrix` on every applicable vulnerability class, or carry a documented exclusion
-- [ ] Medium files received best-effort review (no blocking gate)
-- [ ] No pending cross-file triggers
-- [ ] Every entry chain on a critical file that reaches a privileged operation or an untrusted input boundary has been traced to a guard or to a sink -- name any chain you could not trace and why (blocked on missing code, genuinely out of scope, or a chain the call graph never resolved)
+**Phase 2B quality-review completion (advisory):**
+- [ ] Inspect the matrix and either re-dispatch each meaningful critical/high gap or document why
+      another pass would not add evidence; a target score is not itself transition authority
+- [ ] Every medium/low row received review and every `skip` row has an explicit, evidence-based reason;
+      classification priority never makes a lower-tier admitted file vanish
+- [ ] Route and clear any pending cross-file triggers because transition readiness blocks on them
+      independently of this quality review
+- [ ] Trace every entry chain on a critical file that reaches a privileged operation or an
+      untrusted input boundary to a guard or sink where possible; name any unresolved chain and why
+      (missing code, genuinely out of scope, or unresolved call graph)
 
 **Suspicious finding resolution:** Before leaving Phase 2, resolve every `suspicious` finding by
 re-dispatching the hunter with the documented gap as targeted context, until it reaches `confirmed`
@@ -237,9 +286,12 @@ re-dispatching the hunter with the documented gap as targeted context, until it 
 findings to the verifier -- its job is FP elimination on confirmed findings, not investigation of
 incomplete ones.
 
-**Phase 2 exit:** 2A, 2B, 2C, and 2D gates all hold, and no unresolved suspicious findings remain.
+**Phase 2 exit:** 2A structural closure, the 2B advisory quality review, and the 2C/2D completion
+work are done, with no unresolved suspicious findings. The executable structural/lifecycle gate
+below alone authorizes the transition; a 2B quality warning remains steering, not a blocker.
 
 ```bash
+vigil assess code-coverage --require-transition-ready verify-variant
 vigil assess transition-phase verify-variant
 ```
 
@@ -261,13 +313,17 @@ codebase and threat model -- what an adversary would actually target, not a gene
 
 **Dispatch rules:**
 - Use `deep-manual` mode (not item-iterating)
+- Materialize the selected file set as a queue artifact, then run `vigil assess code-dispatch
+  reanalyze <artifact> "Phase 2C independent adversarial reread"`; fetch and preserve those new
+  leases. An accidental second `queue` call is not a depth mechanism and conflicts with terminal
+  evidence.
 - Do NOT include prior findings from Phase 2A in the dispatch context — the hunter must approach
   fresh without anchoring on existing findings. This holds even when a file was selected for 2C
   because of its Phase 2A finding density: that density is the operator's selection criterion for
   choosing the file, not content the hunter receives — passing it through would recreate the
   anchoring the fresh pass exists to avoid.
-- Include: structural index, call graph, threat model, CWE patterns, but NOT the list of
-  already-found issues
+- Include: current Code Source Identity, its matching structural index, the complete current
+  threat-model envelope, call graph, and CWE patterns, but NOT the list of already-found issues
 - Dispatch objective: "Find High/Critical vulnerabilities in these files. Ignore coverage metrics.
   Focus on semantic fail-opens, logic bugs, and design flaws."
 - If this pass independently re-surfaces a Phase 2A finding, that is convergent evidence the
@@ -289,8 +345,8 @@ invisible to any file-batch dispatch by construction, so they get a dedicated pa
 **The unit of synthesis is a seam, not "the whole codebase."** On a large repo (Git, libcurl, a
 kernel) the full call graph + finding set never fits one context, and a single synthesis agent
 would skim and miss exactly the cross-module bugs this pass exists to find. Enumerate bounded seams
-and fan out one focused agent per seam. Tokens and wall-clock are not the constraint here — coverage
-is (`agent/rules/hunting.md` §16); scale the agent count to the seam count.
+and fan out one focused agent per seam. Tokens and wall-clock do not narrow the eligible seam set;
+scale the agent count to the seam count and retain explicit debt when execution is interrupted.
 
 **Step 1 — Build the seam manifest** (operator-mechanical, from artifacts already on disk). Derive
 two seam classes and write each to `tools/analysis-state/seams/<seam_id>.json` plus a flat
@@ -307,7 +363,8 @@ two seam classes and write each to `tools/analysis-state/seams/<seam_id>.json` p
 
 **Step 2 — Scale the dispatch to the seam count.** For a few seams (the manifest fits one focused
 context), dispatch ONE `code-vuln-hunter` in `deep-manual` mode with the whole seam manifest, the
-cross-module call graph, the threat model (trust boundaries + trusted inputs), and the module map.
+current Code Source Identity and matching structural index, the complete current threat-model
+envelope (trust boundaries + trusted inputs), the cross-module call graph, and the module map.
 At Git/libcurl scale, fan out with `vigil assess agent start-swarm --role code-vuln-hunter
 --items-file tools/analysis-state/seams.txt --batch-size 1-3 --skills code-vulnerability-analysis
 --task "system-level synthesis: <objective>"`, one specialist per worker row. Keep batch-size small
@@ -323,7 +380,13 @@ Reason across the seam; do not re-audit individual files."
 chains (A→B→C) form by joining seam outputs that share a module. Collect all candidate chains and
 dispatch a consolidation pass (`code-vuln-hunter` or `exploit-developer`) to hunt the joins. If the
 candidate set is large, partition the reduce by subsystem — one reduce agent per subsystem touching
-many seams — a tree, not a single reduce.
+many seams — a tree, not a single reduce. Carry the same current Code Source Identity, matching
+structural index, and complete current threat-model envelope into every reduce dispatch.
+
+Every synthesis or reduce dispatch that records file analysis rows first creates explicit
+reasoned reanalysis queue items for its anchoring files with `code-dispatch reanalyze`, then fetches
+their leases. If the seam manifest is empty, record that evidence-backed no-candidate result rather
+than creating queue work or a synthetic finding.
 
 Record findings normally. This pass does not need to satisfy CWE coverage thresholds; it produces
 findings, not coverage closure.

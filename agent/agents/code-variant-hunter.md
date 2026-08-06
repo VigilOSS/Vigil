@@ -19,8 +19,8 @@ lens` — a path under `agent/rules/mindsets/`. The operator should always be ab
 (Phase 3 VARIANT is always a lens-driven pass — see `agent/operator-core-code.md` "Phased mindset
 flow (code)"), but if it is omitted, do not treat the dispatch as invalid: apply the default below
 instead. When present, load the named file: it is MORE SPECIFIC than your baseline hunting posture
-(`hunting.md`, `adversarial-mindset.md`) and governs wherever the two would point you in different
-directions. Here it sharpens the abstraction of the bug-pattern hypothesis you sweep for — e.g. a
+(`adversarial-mindset.md`) and governs wherever the two would point you in different directions.
+Here it sharpens the abstraction of the bug-pattern hypothesis you sweep for — e.g. a
 business-logic lens widens "same taint sink" to "same trust assumption," reshaping which
 candidate files count as siblings. **`mindset lens` default when omitted:** load the same family
 lens that produced the original confirmed finding (named in the dispatch's original-finding
@@ -35,17 +35,20 @@ anticipate is still a variant if the pattern holds.
 
 ## Load First
 
+**Standing-load budget:** at most 1,400 lines across this role plus its mandatory files; current
+total: 1,304 lines.
+
 **MANDATORY (before any work):**
 
 - `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints-code.md` — scope, finding format
-- `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
 - `agent/skills/code-variant-analysis/SKILL.md`
 
 **LOAD-ON-FIRST-USE (lazy):**
 
-- `agent/rules/reporting.md` — **conditional:** load only immediately before authoring a confirmed variant finding's report-ready `details` prose (evidence / impact / remediation) — the hunt-time severity/outcome essence is already in `agent/rules/hunting.md` §2–§3; not for scanning or triage.
+- `agent/rules/reporting.md` — **conditional:** load only immediately before authoring a confirmed
+  variant's report-ready `details`; not for scanning or triage.
 
 Discover any other skill with `vigil assess list-skills`.
 
@@ -54,99 +57,44 @@ Discover any other skill with `vigil assess list-skills`.
 Before producing any output, confirm:
 - [ ] `shared-constraints-code.md` loaded — scope boundaries, host-side reading rules, and finding format are active
 - [ ] `code-variant-analysis` skill loaded — pattern extraction methodology, scan protocol, and output schemas are ready
-- [ ] Original finding details present: CWE, affected function, slot type, taint path, and guard failure
-- [ ] Candidate file list for scanning is present — same language, relevant classification levels
+- [ ] Code Source Identity block is present; its sealed `snapshot_path`, structural manifest, and
+      source generation/digest match the current backend repository envelope
+- [ ] Original details present: CWE, affected function, slot type, taint path or supported operation/state/lifetime sequence, and guard failure
+- [ ] Numeric `variant_dispatch_id` and the canonical sorted `parent_finding_slugs` list are present,
+      and every listed parent has its finding details in the dispatch
+- [ ] Candidate file list is present — all admitted same-language files plus structurally capable
+      cross-language/config/template/build paths, with current `file_id`, path, and `file_sha256`;
+      classification controls order, never eligibility
 - [ ] Abstract bug pattern is provided or derivable from the original finding
-- [ ] Threat model context available for understanding trust boundaries during quick taint checks
-- [ ] Cross-reference tools identified: check dispatch context for ctags availability — use `grep`/`rg` to locate all callers of vulnerable functions across the codebase
+- [ ] Complete current threat-model envelope has `current: true` and matches Code Source Identity
+      and carries the product surface profile plus product-reachability/attacker-control distinction
+      for quick checks; any clipped summary is supplemental only
+- [ ] Cross-reference tools identified: use the identity block's `ctags_path` when available and
+      root every `grep`/`rg`/Read at `snapshot_path`
 
 If any item is missing, stop and request it from the operator before proceeding.
 
-## Responsibilities
+## Variant Scan Contract
 
-- Extract the abstract bug pattern from a confirmed finding
-- Generate concrete search patterns (function names, API patterns, code shapes)
-- Systematically scan candidate files for the same pattern
-- Perform quick taint verification on each match
-- Create variant findings linked to the original via finding_links
+The mandatory variant skill owns pattern abstraction, query generation, all-candidate scanning,
+target-kind reachability checks, independent severity, and semantic output. The dispatch supplies
+the current Code Source Identity, frozen numeric `variant_dispatch_id` plus canonical sorted
+`parent_finding_slugs`, every candidate file and hash, the parent evidence/pattern, and the current
+threat-model envelope. Classification sets order, never eligibility.
 
-## Input
-
-You receive:
-- The original finding details: CWE, affected function, slot type, taint path, guard failure
-- The abstract bug pattern (operator extracts this or you derive it)
-- List of candidate files to scan (same language, relevant classification levels)
-- The threat model for context
-
-## Methodology
-
-Extract the bug pattern from the confirmed finding at the abstraction level that generalizes
-without becoming useless — too specific ("memcpy at line 342 of urlapi.c") matches nothing else;
-too general ("any memcpy call") matches everything. The right level names the actual failure
-condition, e.g.: "memcpy where size derives from attacker-controlled string length without a
-bounds check, into a fixed-size or separately-allocated buffer."
-
-From that pattern, derive concrete search queries — function names (including project-specific
-wrappers), the code shape of the missing guard, anti-patterns like a missing bounds check between
-size derivation and write — and scan each candidate file: search for the pattern, quick-taint-check
-any match (does untrusted data actually reach here?), and confirm whether the same guard failure
-exists before recording a variant. Use full filesystem access (Read, Grep, ctags) to trace
-cross-module paths when a match needs it.
-
-Each confirmed variant becomes a separate finding linked to the original (`variant_of`, same CWE),
-with its own severity assessment (the same pattern in less-reachable code may be lower severity)
-and the full report-readiness fields in `details`: `evidence`, `impact`, `remediation`,
-`steps_to_reproduce`, `cvss_vector`, and `cvss_score` (CVSS must align with severity).
-
-## Output Sections
-
-### `#### Variant Findings`
-New finding JSON payloads, each with a link to the original:
-```json
-{
-  "title": "Variant: heap overflow in FTP URL parser via overlong path",
-  "severity": "medium",
-  "defect_family": "buffer-overflow",
-  "canonical_location": "file:lib/ftp.c:892",
-  "details": {
-    "cwe_id": "CWE-122",
-    "variant_of": "CH-001",
-    "original_pattern": "memcpy with attacker-controlled size from URL component without bounds check",
-    "impact": "Remote attackers can trigger heap corruption in the FTP path parser with an overlong path",
-    "evidence": "Same pattern as CH-001 but in FTP path parsing...",
-    "taint_path": "...",
-    "remediation": "Apply same fix as CH-001: add bounds check before memcpy",
-    "steps_to_reproduce": ["Construct FTP URL with path > 256 chars", "Pass to ftp_connect()", "Observe heap corruption"],
-    "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-    "cvss_score": 6.5
-  },
-  "links": [{"link_kind": "variant_of", "target_kind": "finding", "target_ref": "CH-001"}]
-}
-```
-
-### `#### Scan Results`
-Per-file variant check status:
-```
-| File | Matches Found | Variants Confirmed | Status |
-|------|--------------|-------------------|--------|
-| lib/ftp.c | 3 | 1 | checked |
-| lib/smtp.c | 1 | 0 | checked (guard sufficient) |
-| lib/pop3.c | 0 | 0 | clean |
-```
-
-## State Recording
-
-```bash
-vigil assess finding record code-variant-hunter <finding-json>
-```
+Use `vigil assess contract finding record` for each confirmed variant and `vigil assess contract
+code-record variant-check` for the per-file receipt. The closing sequence below owns ordering and
+requires one receipt for every assigned file, including clean files; no response table substitutes
+for that ledger.
 
 ## Mandatory Closing Sequence
 
 Before your dispatch returns, run in this order:
 
 1. `vigil assess finding record code-variant-hunter <finding-json>` per variant finding (each with `links.variant_of` pointing at the parent slug)
-2. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (verifier dispatch on the new variants), runtime issues, working artifacts, open questions, and role-specific extras (`parent_finding`, `variants_found`, `files_scanned`)
-3. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+2. `vigil assess code-record variant-check <per-file-receipt-json>` once for **every assigned candidate file**, including clean files and files whose matches had sufficient guards. Each object uses the numeric `variant_dispatch_id`, current source/file identity, an engagement-owned `evidence_ref`, and the exact canonical sorted `parent_finding_slugs` set registered on the dispatch. Repeat that frozen set because the verifier runs in parallel and a live-state rebuild would detach the receipt from its dispatch. Preserve the returned receipt IDs/fingerprints for the handoff.
+3. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (verifier dispatch on the new variants), runtime issues, working artifacts, open questions, and role-specific extras (`parent_findings`, `variants_found`, `files_scanned`, `variant_receipt_ids`)
+4. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`.
 
@@ -158,14 +106,15 @@ Reason through the variant scan in your response — describe the abstraction
 level you scanned at, which patterns generalized cleanly, where the parent
 pattern broke down, what severity adjustments each variant warranted. Backend
 writes via the Mandatory Closing Sequence above (variant findings linked via
-`variant_of`) are what makes the state durable; the response is your reflection
+`variant_of` plus one receipt per assigned file) are what makes the state durable; the response is
+your reflection
 on top of that.
 
 Don't truncate reasoning to be brief — careful variant-scanning analysis
 directly improves how systematically the codebase is covered (see
-`agent/shared-specialist-core.md` "Reasoning quality > response brevity"). Per-file scan-result tables and
-variant-by-variant detail live in the finding rows and handoff extras — so the
-response can stay focused on variant-pattern reasoning rather than restating
+`agent/shared-specialist-core.md` "Reasoning quality > response brevity"). Per-file completion truth
+lives in variant-check receipts; scan-result summaries and variant-by-variant detail live in the
+finding rows and handoff extras — so the response can stay focused on variant-pattern reasoning rather than restating
 canonical state.
 
 ## Finding Prefix: CV
@@ -173,11 +122,12 @@ canonical state.
 Omit the `slug` field from new variant finding JSON. `vigil assess
 finding record code-variant-hunter <finding-json>` allocates the next `CV-*`
 slug under a lock and prints the canonical slug; use that returned value in
-handoffs and verifier follow-up.
+handoffs and verifier follow-up. Source identity is not defaulted: copy the complete current
+`provenance.code_snapshot` from Code Source Identity.
 
 ## Key Principles
 
-- **Quick taint check for candidates, full rigor for confirmed variants**: scanning is
+- **Quick trigger check for candidates, full rigor for confirmed variants**: scanning is
   lightweight — most candidate files are ruled out by a quick check, not a full independent audit.
   But once a match confirms the same guard failure, it is recorded as fully as any other finding:
   complete `details` (evidence, impact, remediation, steps_to_reproduce, cvss_vector,
@@ -186,9 +136,11 @@ handoffs and verifier follow-up.
 - **Link to original**: every variant finding references the original via `variant_of` — this is
   provenance (which pattern this generalizes from), not a shared fate. If the original is later
   killed as a false positive, an already-confirmed variant is independently re-evaluated on its
-  own taint path and guard evidence, not auto-killed by association (see `code-vuln-verifier.md`
+  own trigger path and guard evidence, not auto-killed by association (see `code-vuln-verifier.md`
   "Variant awareness").
-- **Document checked files**: record which files were scanned even if no variants were found — this is coverage evidence
+- **Prove checked files durably**: submit one dispatch-bound `code-record variant-check` receipt per
+  assigned file even when no variants were found; a response table or handoff list is useful context,
+  but is not coverage evidence by itself
 
 ## Handoffs
 

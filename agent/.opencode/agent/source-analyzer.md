@@ -33,7 +33,9 @@ checks, input handling, config-driven behavior), not a flat inventory of the bun
 **MANDATORY (before any work):**
 
 - `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
-- `agent/shared-constraints.md` — scope, `vigil assess kali` rule, finding IDs, rule reminders
+- Exactly one mode constraint bundle, selected from the dispatch before reading source:
+  - **Code track** — when the dispatch includes Code Source Identity or explicitly names code-track work, load `agent/shared-constraints-code.md` instead of the web bundle.
+  - **Web track** — otherwise load `agent/shared-constraints.md`. Do not preload both bundles.
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
 - `agent/skills/source-analysis/SKILL.md` — this role's one always-applicable methodology skill: every dispatch analyzes client-side source, so it is not a per-signal choice. (For any other skill, run `vigil assess list-skills` to discover it.)
@@ -45,10 +47,12 @@ checks, input handling, config-driven behavior), not a flat inventory of the bun
 
 ## Pre-Work Checkpoint
 
-Before starting any target-facing work, confirm you have:
+Before starting any analysis, confirm you have:
 
-- [ ] Loaded `agent/shared-constraints.md`
-- [ ] The dispatch context (target URL, phase, task objective, prior findings)
+- [ ] Loaded exactly one mode constraint bundle: code for a Code Source Identity/code-track dispatch, web otherwise
+- [ ] The dispatch context (target URL for web, or repository identity for code; phase, task objective, prior findings)
+- [ ] For code track: Code Source Identity matches the active backend repo; sealed snapshot and structural manifest are generation-bound; ctags is either equally bound or `unavailable`; Structural Coverage Debt names every affected file or is confirmed absent; and the complete threat-model envelope is `current: true` with the same generation/digest
+- [ ] For code track: reads stay beneath `snapshot_path`, and every `file:` finding copies `repo_id`, `repo_generation`, and `source_manifest_digest` into `provenance.code_snapshot` per `vigil assess contract finding record`
 - [ ] The backend write paths for what you discover: requestable endpoints go through `vigil assess ingest endpoints source-analysis`, durable surface candidates go through `vigil assess record-surface ...`, and confirmed findings go through `vigil assess finding record ...`
 - [ ] Checked whether `agent/skills/browser-semantic-analysis/SKILL.md` applies (see Dispatch Mindset / Modern SPA Analysis below); if it does, load it and hand off or run an audited browser-semantic pass rather than declaring the route set complete
 
@@ -83,6 +87,11 @@ instead of declaring the route set complete.
 
 ## Required Behavior
 
+- **Code-track boundary:** A dispatch carrying Code Source Identity is static-only. Apply the
+  source-analysis skill only to source parsing and extraction beneath `snapshot_path`; put any
+  browser, probe, endpoint-validation, or other target-facing follow-up in the handoff for a
+  separately registered web-track dispatch that loads `agent/shared-constraints.md` and explicit
+  target scope before execution. End the code dispatch before any target-facing command.
 - Extract every API path, route, key-like string, and internal URL as a surface candidate — a false positive costs one validation request in Phase 4; a route you never extracted is invisible to the whole engagement. Organize what you hand off by attackable meaning (which routes are load-bearing, which secrets are live), not as a flat inventory dump.
 - Distinguish between inferred routes and directly evidenced requestable endpoints
 - Promote only concrete evidence into durable findings; keep weaker leads as hypotheses for follow-up

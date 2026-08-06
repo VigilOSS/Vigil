@@ -7,6 +7,11 @@ vuln_class: injection, web-app-injection, web-app-auth, web-app-data-exposure, d
 
 # Code Variant Analysis
 
+Together with `agent/shared-constraints-code.md` §5, this skill owns the code sibling rule:
+abstract the proven guard failure, account for every generation-bound candidate, verify each
+instance semantically, assess its own impact, and check composable chains. The web hunting rules
+are not required for variant completeness.
+
 ## When to Activate
 
 - Phase 3 of code analysis pipeline. Runs after vulnerability analysis has produced confirmed findings or suspicious patterns.
@@ -20,8 +25,15 @@ vuln_class: injection, web-app-injection, web-app-auth, web-app-data-exposure, d
 - `Glob` — locate files by naming or extension pattern
 
 Cross-reference tools:
-- **ctags index** — `grep '^<symbol>\t' <repo>/tags` to find definitions of vulnerable functions and their wrappers
+- **ctags index** — `grep '^<symbol>\t' <ctags_path>` using the generation-bound Code Source Identity path
 - **rg** — find every call site of a vulnerable function across the entire codebase, trace incoming calls to identify all code paths that reach a vulnerable pattern
+
+## Required Dispatch Inputs
+
+The operator supplies the current Code Source Identity, its matching structural-index manifest,
+and the complete backend threat-model envelope only when `current: true` and its generation/digest
+match that identity. It also supplies the original finding/pattern and relevant call-graph context.
+A clipped threat summary is supplemental and never substitutes for the bound envelope.
 
 ## Methodology
 
@@ -34,8 +46,8 @@ From the confirmed finding, derive a search pattern at the right level of abstra
 
 **Abstraction process:**
 1. Start with the concrete bug: exact function, exact variable, exact line
-2. Identify the structural elements: what makes this a bug? (untrusted input reaches sink without guard)
-3. Generalize the structural elements: replace specific names with categories (any memcpy-like function, any untrusted-derived size, any missing bounds check)
+2. Identify the structural elements: either an untrusted-input flow reaches a sink without its guard, or a valid operation/state/lifetime sequence breaks a security invariant
+3. Generalize those elements: replace names with categories such as memcpy-like sink/untrusted size/missing bound, or borrowed lifetime/persistent handle/missing state reset
 4. Preserve the distinguishing constraint: the specific reason the guard is missing or insufficient
 
 **Example abstraction levels:**
@@ -88,7 +100,13 @@ rg "malloc.*strlen" --type c -A5
 For each candidate file identified by search queries:
 
 1. **Read the candidate function** in full, including enough surrounding context to understand the call chain
-2. **Quick taint check**: Does untrusted data (from any slot type) reach this instance of the pattern? If no untrusted data is involved, skip — this is not a variant.
+2. **Quick target-kind reachability check**: Apply `agent/shared-constraints-code.md` §5. For an
+   application, trace the actor-controlled slot input. For a library/framework, a supported public
+   API and valid invocation/state sequence can establish the same intrinsic bug variant even when
+   consumer source is absent; retain the consumer gap for impact grading. Use the shipped CLI input
+   or registered plugin host contract for those surfaces. Skip only when no applicable product path
+   exists, the trigger violates a documented precondition, or the value/state is genuinely trusted
+   for the claim being tested.
 3. **Guard assessment**: Are the guards present? Are they correct? Apply the same guard evaluation criteria from the vulnerability analysis protocol:
    - Right variable?
    - Right type?
@@ -109,7 +127,7 @@ Link Kind: variant_of
 File: [path]:[start_line]-[end_line]
 Function: [name]
 Severity: [own severity assessment — variants may be more or less severe than the original]
-Taint Path: [entry] -> ... -> [sink]
+Trigger Path: [taint flow OR supported operation/state/lifetime sequence]
 Guard Failure: [same structural issue as original, or a different specific failure]
 Impact: [concrete impact for THIS instance — may differ from original]
 Evidence: [code snippet]
@@ -119,6 +137,10 @@ Evidence: [code snippet]
 - **More severe** than the original (e.g., reachable from a more exposed entry point, larger overflow, in a more privileged context)
 - **Less severe** (e.g., partially guarded, reachable only from authenticated context, smaller impact)
 - **Same severity** (structurally identical exposure)
+
+Product reachability and attacker reachability remain separate during this assessment. Missing
+consumer/host context caps a supported-path variant's attacker claim and severity; generic
+caller-selected capability or correctness-only behavior still fails the shared net-new/impact gate.
 
 ## Abstraction Level Guide
 
@@ -217,7 +239,9 @@ Process candidate files in this order:
 3. **Same slot type** — files with the same slot-type annotation across other modules
 4. **Same sink type** — files using the same sink function anywhere in the codebase
 
-This ordering maximizes the chance of finding variants early, since code proximity correlates with pattern similarity.
+This is scheduling, not eligibility. Sweep every assigned admitted file that can instantiate,
+route, configure, or reach the pattern—including low-priority files and cross-language/declarative
+siblings—and record a receipt even when a quick check rules it out.
 
 ## Output Format
 
@@ -227,12 +251,19 @@ For each variant scan, produce:
 3. **Candidates Examined**: count of files/functions read and assessed
 4. **Confirmed Variants**: full finding records with `variant_of` links
 5. **False Positives**: count with brief reasoning (e.g., "12 instances properly guarded by upstream bounds check in `validate_input()`")
-6. **Coverage Assessment**: estimate of what percentage of the codebase was scanned for this pattern
+6. **Per-File Evidence**: one engagement-owned evidence artifact per assigned candidate file,
+   including clean files, ready for the role's dispatch-bound `code-record variant-check` step
+7. **Coverage Assessment**: exact assigned-file completion plus any unassigned search-space gap;
+   keep the file ledger authoritative and treat any percentage estimate as supplemental
+
+Receipt payload shape and closing order belong to `vigil assess contract code-record variant-check`
+and the `code-variant-hunter` role prompt; use those executable owners instead of copying the schema
+into this skill.
 
 ## Extended Resources
 
 - Original finding details (provided in dispatch context) — the concrete bug that seeds the variant search
 - Architecture map from Phase 1 — file classifications and module groupings for systematic scanning
 - Call graph from Phase 1 — cross-module call chains for tracing untrusted data flow during quick taint checks
-- Full filesystem access — read source files directly for pattern matching and taint verification
+- Full sealed-source access — read source files beneath `snapshot_path` for pattern matching and taint verification
 - **CWE pattern reference (REQUIRED)** — load the `agent/references/code-vuln-patterns/*.md` file matching the original finding's CWE. The pattern taxonomy, language-specific idioms, and "What You're Hunting" sections define what a variant looks like for this bug class. Without this, variant scanning degrades to grep-for-similar-syntax rather than hunting the underlying pattern.
