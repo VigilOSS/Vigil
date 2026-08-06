@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import re
 import shlex
 import sqlite3
+import stat
 import uuid
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from fastapi import HTTPException, status
 
+from .. import artifact_index
 from ..events import _engagement_or_404
 from ..search import (
     fts_escape as _fts_escape_shared,
@@ -31,16 +35,19 @@ from ._common import (
 )
 
 
-
 # ── Command-run audit ───────────────────────────────────────────────
 
 _DEFAULT_PREVIEW_BYTES = 65_536
+_MAX_PREVIEW_BYTES = 65_536
 
-_DEFAULT_RETENTION_CONFIG = Path(__file__).resolve().parents[2] / "config" / "command_run_retention.json"
+_DEFAULT_RETENTION_CONFIG = (
+    Path(__file__).resolve().parents[2] / "config" / "command_run_retention.json"
+)
 
 _RUN_UUID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 _ARTIFACT_LABEL_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+
 
 @lru_cache(maxsize=1)
 def _retention_config() -> dict[str, Any]:
@@ -60,6 +67,7 @@ def _retention_config() -> dict[str, Any]:
         preview = _DEFAULT_PREVIEW_BYTES
     if preview <= 0:
         preview = _DEFAULT_PREVIEW_BYTES
+    preview = min(preview, _MAX_PREVIEW_BYTES)
     patterns: list[dict[str, Any]] = []
     for entry in data.get("suppress_patterns") or []:
         if not isinstance(entry, dict):
@@ -80,6 +88,7 @@ def _retention_config() -> dict[str, Any]:
         )
     return {"preview_bytes": preview, "suppress_patterns": patterns}
 
+
 def _match_suppress_rule(command: str, tool_name: str) -> dict[str, Any] | None:
     config = _retention_config()
     for rule in config["suppress_patterns"]:
@@ -88,6 +97,7 @@ def _match_suppress_rule(command: str, tool_name: str) -> dict[str, Any] | None:
         if rule["regex"].search(command):
             return rule
     return None
+
 
 def _apply_output_retention(
     stream_bytes: bytes,
@@ -123,6 +133,586 @@ def _apply_output_retention(
     result["artifact_ref"] = artifact_ref
     result["status"] = "artifact"
     return result
+
+
+def _roll_up_output_retention_status(
+    stdout_retention: dict[str, Any],
+    stderr_retention: dict[str, Any],
+) -> str:
+    statuses = {stdout_retention["status"], stderr_retention["status"]}
+    if "artifact" in statuses:
+        return "artifact"
+    if "suppressed" in statuses and "retained" not in statuses:
+        return "suppressed"
+    if "retained" in statuses:
+        return "retained"
+    return "empty"
+
+
+def _resolve_host_exec_spill_path(
+    engagement_root: str,
+    *,
+    run_uuid: str,
+    stream: str,
+    path_value: str | None,
+) -> Path | None:
+    if not str(path_value or "").strip():
+        return None
+    raw_root = Path(os.path.abspath(Path(engagement_root).expanduser()))
+    root = Path(engagement_root).expanduser().resolve()
+    raw_path = Path(str(path_value)).expanduser()
+    unresolved = raw_path if raw_path.is_absolute() else root / raw_path
+    suffix = "out" if stream == "stdout" else "err"
+    expected_dir = root / "scans" / "host-exec"
+    raw_expected_dir = raw_root / "scans" / "host-exec"
+    expected_name = f"{run_uuid}.{suffix}"
+    normalized = Path(os.path.abspath(unresolved))
+    if normalized.name != expected_name or normalized.parent not in {
+        raw_expected_dir,
+        expected_dir,
+    }:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"host-exec {stream}_path must be inside the engagement's "
+                f"scans/host-exec directory and match run_uuid={run_uuid!r}"
+            ),
+        )
+    return expected_dir / expected_name
+
+
+def _open_host_exec_output_directory(engagement_root: str) -> int:
+    root = Path(engagement_root).expanduser().resolve()
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    opened_directories: list[int] = []
+    try:
+        root_fd = os.open(root, directory_flags)
+        opened_directories.append(root_fd)
+        scans_fd = os.open("scans", directory_flags, dir_fd=root_fd)
+        opened_directories.append(scans_fd)
+        output_fd = os.open("host-exec", directory_flags, dir_fd=scans_fd)
+        output_metadata = os.fstat(output_fd)
+        if stat.S_IMODE(output_metadata.st_mode) & 0o077:
+            os.close(output_fd)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="host-exec output directory must be private (mode 0700)",
+            )
+        return output_fd
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="recorded host-exec output directory is missing",
+        ) from exc
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+            detail = "host-exec output directory must not traverse a symlink"
+        else:
+            detail = "host-exec output directory could not be opened safely"
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=detail,
+        ) from exc
+    finally:
+        for descriptor in reversed(opened_directories):
+            os.close(descriptor)
+
+
+def _open_host_exec_spill(
+    engagement_root: str,
+    path: Path,
+) -> tuple[int, int]:
+    """Open one canonical spill through no-follow directory descriptors."""
+    file_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    output_fd = _open_host_exec_output_directory(engagement_root)
+    try:
+        return os.open(path.name, file_flags, dir_fd=output_fd), output_fd
+    except FileNotFoundError as exc:
+        os.close(output_fd)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"recorded host-exec output spill is missing: {path}",
+        ) from exc
+    except OSError as exc:
+        os.close(output_fd)
+        if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+            detail = f"host-exec output spill must not traverse a symlink: {path}"
+        else:
+            detail = f"host-exec output spill could not be opened safely: {path}"
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=detail,
+        ) from exc
+
+
+def _capture_host_exec_spill_identity(
+    engagement_root: str,
+    path: Path,
+) -> tuple[int, int]:
+    """Bind a pre-created host spill to the audit row before execution."""
+    file_descriptor, directory_descriptor = _open_host_exec_spill(
+        engagement_root,
+        path,
+    )
+    try:
+        metadata = os.fstat(file_descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"host-exec output spill must reference a regular file: {path}",
+            )
+        if stat.S_IMODE(metadata.st_mode) & 0o077:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"host-exec output spill must be private (mode 0600): {path}",
+            )
+        return int(metadata.st_dev), int(metadata.st_ino)
+    finally:
+        os.close(file_descriptor)
+        os.close(directory_descriptor)
+
+
+def _same_file(left: os.stat_result, right: os.stat_result) -> bool:
+    return left.st_dev == right.st_dev and left.st_ino == right.st_ino
+
+
+def _close_retention_descriptors(retentions: list[dict[str, Any]]) -> None:
+    for retention in retentions:
+        for key in ("file_descriptor", "directory_descriptor"):
+            descriptor = retention.pop(key, None)
+            if descriptor is not None:
+                try:
+                    os.close(int(descriptor))
+                except OSError:
+                    pass
+
+
+def _cleanup_suppressed_host_exec_spills(
+    spills: list[tuple[Path, dict[str, Any]]],
+) -> str:
+    """Validate suppressed spills without destructively mutating their inodes.
+
+    Neither an nlink check followed by ``ftruncate`` nor an identity check
+    followed by ``unlink`` is atomic. A same-UID process can add a hardlink or
+    replace the directory entry in between and turn cleanup into destruction of
+    unrelated data. Suppression is therefore logical (metadata/index removal),
+    while physical erasure remains explicitly ``deferred`` until spills live in
+    a stronger isolation boundary.
+    """
+    if not spills:
+        return ""
+    try:
+        for path, retention in spills:
+            descriptor = int(retention["file_descriptor"])
+            descriptor_stat = os.fstat(descriptor)
+            current = os.stat(
+                path.name,
+                dir_fd=int(retention["directory_descriptor"]),
+                follow_symlinks=False,
+            )
+            expected = retention["stat_result"]
+            if (
+                not stat.S_ISREG(current.st_mode)
+                or not stat.S_ISREG(descriptor_stat.st_mode)
+                or not _same_file(current, expected)
+                or not _same_file(descriptor_stat, expected)
+            ):
+                return f"suppression cleanup skipped: output spill changed before cleanup: {path}"
+            if descriptor_stat.st_nlink != 1:
+                return (
+                    "suppression cleanup skipped: output spill has a hardlink "
+                    f"and cannot be safely truncated: {path}"
+                )
+
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            digest = hashlib.sha256()
+            size = 0
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                size += len(chunk)
+            observed_hash = digest.hexdigest() if size else ""
+            if size != int(retention["bytes"]) or observed_hash != str(
+                retention["sha256"]
+            ):
+                return (
+                    "suppression cleanup skipped: output spill content changed "
+                    f"before cleanup: {path}"
+                )
+    except (FileNotFoundError, OSError) as exc:
+        return f"suppression cleanup skipped before destructive work: {exc}"
+
+    return ""
+
+
+def _open_command_run_artifact_directory(engagement_root: str) -> int:
+    root = Path(engagement_root).expanduser().resolve()
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    root_fd = os.open(root, directory_flags)
+    scans_fd: int | None = None
+    try:
+        scans_fd = os.open("scans", directory_flags, dir_fd=root_fd)
+        try:
+            os.mkdir("command-runs", mode=0o700, dir_fd=scans_fd)
+        except FileExistsError:
+            pass
+        return os.open("command-runs", directory_flags, dir_fd=scans_fd)
+    finally:
+        if scans_fd is not None:
+            os.close(scans_fd)
+        os.close(root_fd)
+
+
+def _write_all(descriptor: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("short write while publishing command output")
+        view = view[written:]
+
+
+def _publish_verified_command_output(
+    engagement_root: str,
+    *,
+    run_uuid: str,
+    stream: str,
+    retention: dict[str, Any],
+) -> dict[str, Any]:
+    """Copy a hash-pinned spill fd to a dedicated, read-only artifact.
+
+    The mutable producer pathname is never published as the retained artifact.
+    Copying from the still-open verified descriptor closes the hash/path swap
+    window; a second digest over the copy rejects concurrent inode mutation.
+    """
+    directory_descriptor = _open_command_run_artifact_directory(engagement_root)
+    name = f"{run_uuid}.{stream}.log"
+    temporary_name = f".{name}.{uuid.uuid4().hex}.tmp"
+    create_flags = (
+        os.O_RDWR
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    read_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    file_descriptor: int | None = None
+    try:
+        file_descriptor = os.open(
+            temporary_name,
+            create_flags,
+            0o600,
+            dir_fd=directory_descriptor,
+        )
+        source_descriptor = int(retention["file_descriptor"])
+        os.lseek(source_descriptor, 0, os.SEEK_SET)
+        digest = hashlib.sha256()
+        copied = 0
+        while True:
+            chunk = os.read(source_descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            _write_all(file_descriptor, chunk)
+            digest.update(chunk)
+            copied += len(chunk)
+        expected_hash = str(retention["sha256"])
+        copied_hash = digest.hexdigest() if copied else ""
+        if copied != int(retention["bytes"]) or copied_hash != expected_hash:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="host-exec output changed while publishing its verified artifact",
+            )
+        os.fchmod(file_descriptor, 0o400)
+        os.fsync(file_descriptor)
+        try:
+            os.link(
+                temporary_name,
+                name,
+                src_dir_fd=directory_descriptor,
+                dst_dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+            os.fsync(directory_descriptor)
+        except FileExistsError:
+            os.close(file_descriptor)
+            file_descriptor = None
+            try:
+                existing_descriptor = os.open(
+                    name,
+                    read_flags,
+                    dir_fd=directory_descriptor,
+                )
+            except OSError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="verified command output path is already occupied",
+                ) from exc
+            try:
+                existing_stat = os.fstat(existing_descriptor)
+                if not stat.S_ISREG(existing_stat.st_mode):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="verified command output path is already occupied",
+                    )
+                if existing_stat.st_size != int(retention["bytes"]):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="verified command output path contains different evidence",
+                    )
+                os.lseek(existing_descriptor, 0, os.SEEK_SET)
+                existing_digest = hashlib.sha256()
+                existing_size = 0
+                while True:
+                    chunk = os.read(existing_descriptor, 1024 * 1024)
+                    if not chunk:
+                        break
+                    existing_digest.update(chunk)
+                    existing_size += len(chunk)
+                    if existing_size > int(retention["bytes"]):
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail="verified command output path contains different evidence",
+                        )
+                existing_hash = existing_digest.hexdigest() if existing_size else ""
+                if (
+                    existing_size != int(retention["bytes"])
+                    or existing_hash != str(retention["sha256"])
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="verified command output path contains different evidence",
+                    )
+                file_descriptor = existing_descriptor
+            except BaseException:
+                os.close(existing_descriptor)
+                raise
+        temporary_unlinked = False
+        try:
+            os.unlink(temporary_name, dir_fd=directory_descriptor)
+            temporary_unlinked = True
+        except OSError:
+            # The random temporary link is not authoritative and never blocks
+            # retry. A later maintenance sweep may remove it.
+            pass
+        if temporary_unlinked:
+            os.fsync(directory_descriptor)
+        metadata = os.fstat(file_descriptor)
+        return {
+            "path": Path(engagement_root).expanduser().resolve()
+            / "scans"
+            / "command-runs"
+            / name,
+            "name": name,
+            "file_descriptor": file_descriptor,
+            "directory_descriptor": directory_descriptor,
+            "stat_result": metadata,
+            "stream": stream,
+        }
+    except BaseException as exc:
+        if file_descriptor is not None:
+            os.close(file_descriptor)
+        os.close(directory_descriptor)
+        if isinstance(exc, FileExistsError):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="verified command output path is already occupied",
+            ) from exc
+        raise
+
+
+def _discard_published_outputs(outputs: list[dict[str, Any]]) -> None:
+    """Release publication ownership without deleting mutable pathnames.
+
+    A snapshot created before a failed DB transaction is an adoptable orphan:
+    the next finalization retry verifies and reuses it by hash and inode.
+    """
+    for output in outputs:
+        for key in ("file_descriptor", "directory_descriptor"):
+            descriptor = output.pop(key, None)
+            if descriptor is not None:
+                try:
+                    os.close(int(descriptor))
+                except OSError:
+                    pass
+
+
+def _close_published_outputs(outputs: list[dict[str, Any]]) -> None:
+    for output in outputs:
+        for key in ("file_descriptor", "directory_descriptor"):
+            descriptor = output.pop(key, None)
+            if descriptor is not None:
+                try:
+                    os.close(int(descriptor))
+                except OSError:
+                    pass
+
+
+def _apply_finalize_preview_retention(
+    preview: str | None,
+    *,
+    suppression_reason: str,
+    preview_bytes: int,
+) -> dict[str, Any]:
+    """Retain the bounded finalize preview when no spill file exists."""
+    raw = str(preview or "").encode("utf-8", errors="replace")[:preview_bytes]
+    text = raw.decode("utf-8", errors="ignore")
+    result: dict[str, Any] = {
+        "sha256": hashlib.sha256(raw).hexdigest() if raw else "",
+        "bytes": len(raw),
+        "preview": "",
+        "suppression_reason": "",
+        "artifact_ref": "",
+        "status": "empty",
+    }
+    if not raw:
+        return result
+    if suppression_reason:
+        result["suppression_reason"] = suppression_reason
+        result["status"] = "suppressed"
+        return result
+    result["preview"] = text
+    result["status"] = "retained"
+    return result
+
+
+def _apply_host_exec_spill_retention(
+    path: Path | None,
+    *,
+    engagement_root: str,
+    suppression_reason: str,
+    preview_bytes: int,
+    fallback_preview: str | None,
+    expected_identity: tuple[int, int] | None = None,
+) -> dict[str, Any]:
+    """Derive bounded command-run retention metadata from a local spill file.
+
+    Host execution writes complete streams directly beneath the engagement
+    root. The backend reads those files in chunks so the finalize request and
+    process memory never contain an unbounded output body. Descriptors remain
+    open through the terminal transaction so later publication/cleanup acts on
+    exactly the inode that was hashed.
+    """
+    if path is None:
+        return _apply_finalize_preview_retention(
+            fallback_preview,
+            suppression_reason=suppression_reason,
+            preview_bytes=preview_bytes,
+        )
+
+    digest = hashlib.sha256()
+    size = 0
+    preview = bytearray()
+    file_descriptor, directory_descriptor = _open_host_exec_spill(
+        engagement_root,
+        path,
+    )
+    try:
+        initial_stat = os.fstat(file_descriptor)
+        if not stat.S_ISREG(initial_stat.st_mode):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"host-exec output spill must reference a regular file: {path}",
+            )
+        if stat.S_IMODE(initial_stat.st_mode) & 0o077:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"host-exec output spill is no longer private: {path}",
+            )
+        if expected_identity is not None and (
+            int(initial_stat.st_dev), int(initial_stat.st_ino)
+        ) != expected_identity:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"host-exec output spill identity changed after pre-exec audit: {path}",
+            )
+        os.lseek(file_descriptor, 0, os.SEEK_SET)
+        while True:
+            chunk = os.read(file_descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            size += len(chunk)
+            if len(preview) < preview_bytes:
+                preview.extend(chunk[: preview_bytes - len(preview)])
+        final_stat = os.fstat(file_descriptor)
+        if (
+            initial_stat.st_size != final_stat.st_size
+            or initial_stat.st_mtime_ns != final_stat.st_mtime_ns
+            or size != final_stat.st_size
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"host-exec output spill changed during finalization: {path}",
+            )
+    except HTTPException:
+        os.close(file_descriptor)
+        os.close(directory_descriptor)
+        raise
+    except OSError as exc:
+        os.close(file_descriptor)
+        os.close(directory_descriptor)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"host-exec output spill could not be read: {path}",
+        ) from exc
+
+    result: dict[str, Any] = {
+        "sha256": digest.hexdigest() if size else "",
+        "bytes": size,
+        "preview": "",
+        "suppression_reason": "",
+        "artifact_ref": "",
+        "status": "empty",
+        "sample_bytes": bytes(preview),
+        "stat_result": final_stat,
+        "file_descriptor": file_descriptor,
+        "directory_descriptor": directory_descriptor,
+        "source": "spill",
+    }
+    if size == 0:
+        fallback = _apply_finalize_preview_retention(
+            fallback_preview,
+            suppression_reason=suppression_reason,
+            preview_bytes=preview_bytes,
+        )
+        if fallback["bytes"]:
+            result.update(fallback)
+            result["source"] = "preview"
+            result["sample_bytes"] = str(fallback_preview or "").encode(
+                "utf-8", errors="replace"
+            )[:preview_bytes]
+        return result
+    if suppression_reason:
+        result["suppression_reason"] = suppression_reason
+        result["status"] = "suppressed"
+        return result
+    result["preview"] = bytes(preview).decode("utf-8", errors="ignore")
+    result["status"] = "artifact"
+    return result
+
 
 def _write_command_run_artifact(
     engagement_artifact_dir: str | None,
@@ -164,20 +754,13 @@ def _write_command_run_artifact(
 
     return _write
 
-def _ensure_command_run_uuid_available(run_uuid: str) -> None:
-    with _common.get_connection() as connection:
-        row = connection.execute(
-            "SELECT id FROM assessment_command_runs WHERE run_uuid = ?",
-            (run_uuid,),
-        ).fetchone()
-    if row:
-        _raise_duplicate_command_run_uuid()
 
 def _raise_duplicate_command_run_uuid() -> None:
     raise HTTPException(
         status_code=status.HTTP_409_CONFLICT,
         detail="command-run run_uuid already exists",
     )
+
 
 def _normalize_run_uuid(value: str) -> str:
     run_uuid = str(value or "").strip()
@@ -187,6 +770,22 @@ def _normalize_run_uuid(value: str) -> str:
             detail="run_uuid must contain only letters, numbers, underscores, or hyphens",
         )
     return run_uuid
+
+
+def _host_exec_replay_matches(
+    row: sqlite3.Row,
+    expected_fields: dict[str, Any] | None,
+) -> bool:
+    return expected_fields is not None and all(
+        row[field] == value for field, value in expected_fields.items()
+    )
+
+
+def _serialize_host_exec_replay(row: sqlite3.Row) -> dict[str, Any]:
+    serialized = _serialize_command_run(row, include_output=True)
+    serialized["idempotent_replay"] = True
+    return serialized
+
 
 _SHELL_TOOL_WRAPPERS = {"bash", "dash", "ksh", "sh", "zsh"}
 
@@ -235,6 +834,7 @@ _SHELL_PREAMBLE_BUILTINS = {
     "unset",
 }
 
+
 def _shell_tokens(command: str) -> list[str]:
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
@@ -243,11 +843,13 @@ def _shell_tokens(command: str) -> list[str]:
     except ValueError:
         return command.split()
 
+
 def _is_env_assignment(token: str) -> bool:
     if "=" not in token:
         return False
     name, _value = token.split("=", 1)
     return bool(name) and name.replace("_", "").isalnum()
+
 
 def _strip_wrapper_options(wrapper: str, tokens: list[str]) -> list[str]:
     remaining = list(tokens)
@@ -263,9 +865,14 @@ def _strip_wrapper_options(wrapper: str, tokens: list[str]) -> list[str]:
         option_name = option.split("=", 1)[0]
         if option_name in options_with_arg and "=" not in option and remaining:
             remaining.pop(0)
-    if wrapper in {"timeout", "gtimeout"} and remaining and _TIMEOUT_DURATION_RE.fullmatch(remaining[0]):
+    if (
+        wrapper in {"timeout", "gtimeout"}
+        and remaining
+        and _TIMEOUT_DURATION_RE.fullmatch(remaining[0])
+    ):
         remaining.pop(0)
     return remaining
+
 
 def _derive_tool_bin_from_tokens(tokens: list[str], *, depth: int = 0) -> str:
     if depth > 4:
@@ -299,6 +906,7 @@ def _derive_tool_bin_from_tokens(tokens: list[str], *, depth: int = 0) -> str:
         return bare.split(";", 1)[0].split("|", 1)[0].strip() or bare
     return ""
 
+
 def _is_shell_command_string_flag(arg: str) -> bool:
     if not arg.startswith("-"):
         return False
@@ -307,13 +915,19 @@ def _is_shell_command_string_flag(arg: str) -> bool:
     if not arg.startswith("-") or arg.startswith("--"):
         return False
     short_flags = arg[1:]
-    return bool(short_flags) and short_flags.endswith("c") and set(short_flags) <= {"l", "i", "s", "r", "c"}
+    return (
+        bool(short_flags)
+        and short_flags.endswith("c")
+        and set(short_flags) <= {"l", "i", "s", "r", "c"}
+    )
+
 
 def _skip_shell_preamble_tokens(tokens: list[str]) -> list[str] | None:
     for idx, token in enumerate(tokens):
         if token in _SHELL_COMMAND_SEPARATORS:
             return tokens[idx + 1 :]
     return None
+
 
 def _derive_tool_bin(command: str, argv: list[str] | None) -> str:
     """Return the first executable token of the command. The route-derived
@@ -329,6 +943,7 @@ def _derive_tool_bin(command: str, argv: list[str] | None) -> str:
         return ""
     derived = _derive_tool_bin_from_tokens(_shell_tokens(text))
     return derived or text.split()[0]
+
 
 def _resolve_artifact_dir(engagement, override: str | None) -> str | None:
     root = getattr(engagement, "engagement_root", "") or ""
@@ -352,7 +967,9 @@ def _resolve_artifact_dir(engagement, override: str | None) -> str | None:
         return str(candidate)
     return str(engagement_root / "scans" / "command-runs")
 
+
 _DEFAULT_DEDUP_WINDOW_SECONDS = 30
+
 
 def _dedup_window_seconds() -> int:
     raw = os.environ.get("KALI_AUDIT_DEDUP_WINDOW_SECONDS", "")
@@ -364,6 +981,7 @@ def _dedup_window_seconds() -> int:
         return _DEFAULT_DEDUP_WINDOW_SECONDS
     return max(value, 0)
 
+
 def _find_dedup_predecessor(
     connection: sqlite3.Connection,
     *,
@@ -374,9 +992,7 @@ def _find_dedup_predecessor(
 ) -> int | None:
     if window_seconds <= 0:
         return None
-    cutoff = (
-        f"datetime('now', '-{int(window_seconds)} seconds')"
-    )
+    cutoff = f"datetime('now', '-{int(window_seconds)} seconds')"
     row = connection.execute(
         f"""
         SELECT id FROM assessment_command_runs
@@ -393,6 +1009,7 @@ def _find_dedup_predecessor(
     if row is None:
         return None
     return int(row[0])
+
 
 def record_command_run(
     engagement_id: int,
@@ -425,6 +1042,10 @@ def record_command_run(
     status: str | None = None,
     stdout_path: str | None = None,
     stderr_path: str | None = None,
+    stdout_spill_device: int | None = None,
+    stdout_spill_inode: int | None = None,
+    stderr_spill_device: int | None = None,
+    stderr_spill_inode: int | None = None,
     peak_rss_bytes: int | None = None,
     cpu_user_seconds: float | None = None,
     cpu_system_seconds: float | None = None,
@@ -435,8 +1056,20 @@ def record_command_run(
     timeout_seconds_requested: int | None = None,
     finding_id: int | None = None,
     force: bool = False,
+    _host_exec_contract: bool = False,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+
+    if route == "host_exec" and not _host_exec_contract:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="route='host_exec' requires the dedicated host-exec service contract",
+        )
+    if _host_exec_contract and route != "host_exec":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="the host-exec service contract requires route='host_exec'",
+        )
 
     if not (phase or "").strip():
         raise HTTPException(
@@ -445,11 +1078,15 @@ def record_command_run(
         )
 
     run_uuid = _normalize_run_uuid(run_uuid or uuid.uuid4().hex)
-    _ensure_command_run_uuid_available(run_uuid)
-    command_hash = command_hash or hashlib.sha256(command.encode("utf-8", errors="replace")).hexdigest()
+    command_hash = (
+        command_hash
+        or hashlib.sha256(command.encode("utf-8", errors="replace")).hexdigest()
+    )
     tool_bin = _derive_tool_bin(command, argv)
 
-    effective_success = bool(success) if success is not None else (return_code == 0 and not timed_out)
+    effective_success = (
+        bool(success) if success is not None else (return_code == 0 and not timed_out)
+    )
 
     config = _retention_config()
     preview_bytes = int(config["preview_bytes"])
@@ -460,8 +1097,16 @@ def record_command_run(
     effective_artifact_dir = _resolve_artifact_dir(engagement, engagement_artifact_dir)
     artifact_writer = _write_command_run_artifact(effective_artifact_dir, run_uuid)
 
-    stdout_raw = stdout.encode("utf-8", errors="replace") if isinstance(stdout, str) else bytes(stdout or b"")
-    stderr_raw = stderr.encode("utf-8", errors="replace") if isinstance(stderr, str) else bytes(stderr or b"")
+    stdout_raw = (
+        stdout.encode("utf-8", errors="replace")
+        if isinstance(stdout, str)
+        else bytes(stdout or b"")
+    )
+    stderr_raw = (
+        stderr.encode("utf-8", errors="replace")
+        if isinstance(stderr, str)
+        else bytes(stderr or b"")
+    )
 
     stdout_retention = _apply_output_retention(
         stdout_raw,
@@ -481,16 +1126,7 @@ def record_command_run(
     stdout_sha256 = stdout_sha256 or stdout_retention["sha256"]
     stderr_sha256 = stderr_sha256 or stderr_retention["sha256"]
 
-    # Row-level retention status rolls up stream statuses.
-    statuses = {stdout_retention["status"], stderr_retention["status"]}
-    if "artifact" in statuses:
-        row_status = "artifact"
-    elif "suppressed" in statuses and "retained" not in statuses:
-        row_status = "suppressed"
-    elif "retained" in statuses:
-        row_status = "retained"
-    else:
-        row_status = "empty"
+    row_status = _roll_up_output_retention_status(stdout_retention, stderr_retention)
 
     # Normalise the four command-metadata fields. Validation is intentionally
     # soft — the API/runtime layer follows the `audit_source` precedent and
@@ -529,9 +1165,103 @@ def record_command_run(
         timed_out=timed_out,
         success=success,
     )
+    output_recovery_observed_at = (
+        datetime.now(timezone.utc).isoformat()
+        if status_value in _FINALIZE_TERMINAL_STATUSES
+        else None
+    )
     argv_json_value = json.dumps(list(argv) if argv else [], ensure_ascii=False)
 
+    stdout_spill_identity: tuple[int, int] | None = None
+    stderr_spill_identity: tuple[int, int] | None = None
+    if _host_exec_contract and status_value == "running":
+        resolved_stdout = _resolve_host_exec_spill_path(
+            engagement.engagement_root,
+            run_uuid=run_uuid,
+            stream="stdout",
+            path_value=stdout_path,
+        )
+        resolved_stderr = _resolve_host_exec_spill_path(
+            engagement.engagement_root,
+            run_uuid=run_uuid,
+            stream="stderr",
+            path_value=stderr_path,
+        )
+        if resolved_stdout is None or resolved_stderr is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="host-exec pre-exec records require both output spills",
+            )
+        stdout_spill_identity = _capture_host_exec_spill_identity(
+            engagement.engagement_root,
+            resolved_stdout,
+        )
+        stderr_spill_identity = _capture_host_exec_spill_identity(
+            engagement.engagement_root,
+            resolved_stderr,
+        )
+        claimed_stdout_identity = (stdout_spill_device, stdout_spill_inode)
+        claimed_stderr_identity = (stderr_spill_device, stderr_spill_inode)
+        if claimed_stdout_identity != stdout_spill_identity:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="stdout spill identity changed before pre-exec audit",
+            )
+        if claimed_stderr_identity != stderr_spill_identity:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="stderr spill identity changed before pre-exec audit",
+            )
+
+    expected_replay_fields: dict[str, Any] | None = None
+    if _host_exec_contract and status_value == "running":
+        # ``argv_json`` is the executable identity. ``command`` and its hash are
+        # derived display/search fields: different argv boundaries can render
+        # the same text, and display repair must not invalidate an exact replay.
+        expected_replay_fields = {
+            "engagement_id": engagement.id,
+            "argv_json": argv_json_value,
+            "tool_name": tool_name,
+            "route": route,
+            "agent_name": agent_name,
+            "phase": phase,
+            "audit_source": audit_source or "header",
+            "status": status_value,
+            "return_code": return_code,
+            "timed_out": 1 if timed_out else 0,
+            "success": 1 if effective_success else 0,
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "duration_ms": int(duration_ms or 0),
+            "notes": notes,
+            "technique": technique_value,
+            "intent": intent_value,
+            "probe_kind": probe_kind_value,
+            "destructive": destructive_value,
+            "stdout_path": stdout_path,
+            "stderr_path": stderr_path,
+            "stdout_spill_device": stdout_spill_identity[0],
+            "stdout_spill_inode": stdout_spill_identity[1],
+            "stderr_spill_device": stderr_spill_identity[0],
+            "stderr_spill_inode": stderr_spill_identity[1],
+            "working_dir": working_dir,
+            "scope_version": scope_version,
+            "auth_context": auth_context,
+            "target_host": (target_host or "").strip(),
+            "timeout_seconds_requested": timeout_seconds_requested,
+            "finding_id": finding_id,
+        }
+
     with _common.get_connection() as connection:
+        existing_run = connection.execute(
+            "SELECT * FROM assessment_command_runs WHERE run_uuid = ?",
+            (run_uuid,),
+        ).fetchone()
+        if existing_run is not None:
+            if not _host_exec_replay_matches(existing_run, expected_replay_fields):
+                _raise_duplicate_command_run_uuid()
+            return _serialize_host_exec_replay(existing_run)
+
         # Validate the optional finding linkage up front so a typo'd id is a
         # clean 404 rather than a raw FK IntegrityError (foreign_keys is ON).
         if finding_id is not None:
@@ -580,7 +1310,7 @@ def record_command_run(
                     engagement_id, run_uuid, command, argv_json, tool_name, tool_bin, route,
                     agent_name, phase, audit_source, status,
                     return_code, timed_out, success,
-                    started_at, completed_at, duration_ms,
+                    started_at, completed_at, output_recovery_observed_at, duration_ms,
                     command_hash, stdout_sha256, stderr_sha256,
                     stdout_preview, stderr_preview, output_retention_status,
                     stdout_suppression_reason, stderr_suppression_reason,
@@ -588,18 +1318,21 @@ def record_command_run(
                     stdout_bytes, stderr_bytes, notes,
                     technique, intent, probe_kind, destructive,
                     stdout_path, stderr_path,
+                    stdout_spill_device, stdout_spill_inode,
+                    stderr_spill_device, stderr_spill_inode,
                     peak_rss_bytes, cpu_user_seconds, cpu_system_seconds,
                     working_dir, scope_version, auth_context, target_host,
                     superseded_by_id, timeout_seconds_requested, finding_id
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?,
-                    ?, ?, ?,
+                    ?, ?, ?, ?,
                     ?, ?, ?,
                     ?, ?, ?,
                     ?, ?, ?,
                     ?, ?,
                     ?, ?,
+                    ?, ?, ?, ?,
                     ?, ?, ?,
                     ?, ?, ?, ?,
                     ?, ?,
@@ -625,6 +1358,7 @@ def record_command_run(
                     1 if effective_success else 0,
                     started_at,
                     completed_at,
+                    output_recovery_observed_at,
                     int(duration_ms or 0),
                     command_hash,
                     stdout_sha256,
@@ -645,6 +1379,10 @@ def record_command_run(
                     destructive_value,
                     stdout_path,
                     stderr_path,
+                    stdout_spill_identity[0] if stdout_spill_identity else None,
+                    stdout_spill_identity[1] if stdout_spill_identity else None,
+                    stderr_spill_identity[0] if stderr_spill_identity else None,
+                    stderr_spill_identity[1] if stderr_spill_identity else None,
                     peak_rss_bytes,
                     cpu_user_seconds,
                     cpu_system_seconds,
@@ -663,6 +1401,15 @@ def record_command_run(
                     str(stdout_retention["artifact_ref"] or ""),
                     str(stderr_retention["artifact_ref"] or ""),
                 )
+                existing_run = connection.execute(
+                    "SELECT * FROM assessment_command_runs WHERE run_uuid = ?",
+                    (run_uuid,),
+                ).fetchone()
+                if existing_run is not None and _host_exec_replay_matches(
+                    existing_run,
+                    expected_replay_fields,
+                ):
+                    return _serialize_host_exec_replay(existing_run)
                 _raise_duplicate_command_run_uuid()
             raise
         row = connection.execute(
@@ -678,12 +1425,15 @@ def record_command_run(
         # predecessor row to check its status.
         if superseded_by_id is not None:
             serialized["dedup_predecessor_id"] = superseded_by_id
-    for artifact_ref in (
+    artifact_refs = [
         serialized.get("stdout_artifact_ref"),
         serialized.get("stderr_artifact_ref"),
-        serialized.get("stdout_path"),
-        serialized.get("stderr_path"),
-    ):
+    ]
+    if route != "host_exec":
+        artifact_refs.extend(
+            (serialized.get("stdout_path"), serialized.get("stderr_path"))
+        )
+    for artifact_ref in artifact_refs:
         _common._register_artifact_reference(
             engagement.id,
             str(artifact_ref or ""),
@@ -692,6 +1442,7 @@ def record_command_run(
             producer_agent_role=agent_name,
         )
     return serialized
+
 
 def _infer_command_run_status(
     status_value: str | None,
@@ -713,8 +1464,198 @@ def _infer_command_run_status(
         return "failed"
     return "running"
 
+
 # Status membership sets are now sourced from the CommandRunStatus enum in
 # _common (imported above under their original private names).
+
+
+def _recover_pending_host_output(
+    connection: sqlite3.Connection,
+    *,
+    engagement: Any,
+    row: sqlite3.Row,
+) -> dict[str, Any]:
+    """Finish post-commit host-output work after a worker interruption."""
+    command_run_id = int(row["id"])
+    engagement_root = Path(engagement.engagement_root).expanduser().resolve()
+
+    if str(row["output_integrity_status"] or "") == "pending":
+        failures: list[tuple[str, str, str]] = []
+        verified_count = 0
+        for stream in ("stdout", "stderr"):
+            relative_path = (
+                f"scans/command-runs/{row['run_uuid']}.{stream}.log"
+            )
+            artifact = connection.execute(
+                """
+                SELECT * FROM assessment_artifacts
+                WHERE engagement_id = ? AND relative_path = ?
+                """,
+                (engagement.id, relative_path),
+            ).fetchone()
+            if artifact is None:
+                if str(row[f"{stream}_artifact_ref"] or ""):
+                    failures.append((stream, relative_path, "artifact row is missing"))
+                continue
+            try:
+                if (
+                    artifact["verified_device"] is None
+                    or artifact["verified_inode"] is None
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="verified identity metadata is incomplete",
+                    )
+                artifact_index._verified_snapshot_payload(
+                    engagement_root,
+                    relative_path,
+                    expected_device=int(artifact["verified_device"]),
+                    expected_inode=int(artifact["verified_inode"]),
+                    expected_size=int(artifact["size_bytes"] or 0),
+                    expected_sha256=str(artifact["sha256"] or ""),
+                )
+                verified_count += 1
+                connection.execute(
+                    """
+                    UPDATE assessment_artifacts
+                    SET present = 1, integrity_status = 'verified',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (int(artifact["id"]),),
+                )
+            except HTTPException as exc:
+                failures.append((stream, relative_path, str(exc.detail)))
+            except Exception as exc:
+                failures.append(
+                    (stream, relative_path, f"snapshot verification failed: {exc}")
+                )
+
+        if failures or verified_count == 0:
+            if verified_count == 0 and not failures:
+                failures.append(("output", "", "no published artifact was found"))
+            for stream, relative_path, _detail in failures:
+                if relative_path:
+                    connection.execute(
+                        """
+                        UPDATE assessment_artifacts
+                        SET present = 0, integrity_status = 'mismatch',
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE engagement_id = ? AND relative_path = ?
+                        """,
+                        (engagement.id, relative_path),
+                    )
+                if stream in {"stdout", "stderr"}:
+                    connection.execute(
+                        f"UPDATE assessment_command_runs SET {stream}_artifact_ref = '' WHERE id = ?",
+                        (command_run_id,),
+                    )
+            warning = "; ".join(
+                f"{stream} snapshot: {detail}" for stream, _path, detail in failures
+            )
+            connection.execute(
+                """
+                UPDATE assessment_command_runs
+                SET output_integrity_status = 'warning',
+                    output_integrity_warning = ?,
+                    output_retention_status = 'integrity_failure'
+                WHERE id = ?
+                """,
+                (warning[:4096], command_run_id),
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE assessment_command_runs
+                SET output_integrity_status = 'verified',
+                    output_integrity_warning = ''
+                WHERE id = ?
+                """,
+                (command_run_id,),
+            )
+
+    if str(row["output_cleanup_status"] or "") == "pending":
+        config = _retention_config()
+        retentions: list[dict[str, Any]] = []
+        spills: list[tuple[Path, dict[str, Any]]] = []
+        validation_warning = ""
+        try:
+            for stream in ("stdout", "stderr"):
+                spill_path = _resolve_host_exec_spill_path(
+                    engagement.engagement_root,
+                    run_uuid=str(row["run_uuid"] or ""),
+                    stream=stream,
+                    path_value=row[f"{stream}_path"],
+                )
+                if spill_path is None:
+                    continue
+                device = row[f"{stream}_spill_device"]
+                inode = row[f"{stream}_spill_inode"]
+                if device is None or inode is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=f"{stream} spill identity metadata is missing",
+                    )
+                retention = _apply_host_exec_spill_retention(
+                    spill_path,
+                    engagement_root=engagement.engagement_root,
+                    suppression_reason=str(
+                        row[f"{stream}_suppression_reason"] or "suppressed"
+                    ),
+                    preview_bytes=int(config["preview_bytes"]),
+                    fallback_preview=None,
+                    expected_identity=(int(device), int(inode)),
+                )
+                retentions.append(retention)
+                if (
+                    str(retention["sha256"] or "")
+                    != str(row[f"{stream}_sha256"] or "")
+                    or int(retention["bytes"] or 0)
+                    != int(row[f"{stream}_bytes"] or 0)
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=f"{stream} spill content changed after terminal commit",
+                    )
+                spills.append((spill_path, retention))
+            validation_warning = _cleanup_suppressed_host_exec_spills(spills)
+        except HTTPException as exc:
+            validation_warning = str(exc.detail)
+        except Exception as exc:
+            validation_warning = f"suppression cleanup validation failed: {exc}"
+        finally:
+            _close_retention_descriptors(retentions)
+
+        deferred_notice = (
+            "physical cleanup deferred: raw spill bytes remain on disk in the "
+            "private host-exec directory pending isolation-backed cleanup"
+        )
+        warning = "; ".join(
+            part for part in (validation_warning, deferred_notice) if part
+        )
+        connection.execute(
+            """
+            UPDATE assessment_command_runs
+            SET output_cleanup_status = ?, output_cleanup_warning = ?,
+                output_retention_status = 'suppression_deferred'
+            WHERE id = ?
+            """,
+            (
+                "warning" if validation_warning else "deferred",
+                warning[:4096],
+                command_run_id,
+            ),
+        )
+
+    recovered = connection.execute(
+        "SELECT * FROM assessment_command_runs WHERE id = ?",
+        (command_run_id,),
+    ).fetchone()
+    assert recovered is not None
+    serialized = _serialize_command_run(recovered, include_output=True)
+    serialized["recovered_pending_output"] = True
+    return serialized
+
 
 def finalize_command_run(
     engagement_id: int,
@@ -727,6 +1668,7 @@ def finalize_command_run(
     stdout_preview: str | None = None,
     stderr_preview: str | None = None,
     timed_out: bool = False,
+    output_quiesced: bool = True,
     partial_results: bool = False,
     peak_rss_bytes: int | None = None,
     cpu_user_seconds: float | None = None,
@@ -745,132 +1687,550 @@ def finalize_command_run(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"finalize status must be one of {sorted(str(s) for s in _FINALIZE_ALLOWED_STATUSES)}",
         )
-    with _common.get_connection() as connection:
-        existing_row = connection.execute(
-            "SELECT * FROM assessment_command_runs WHERE engagement_id = ? AND id = ?",
-            (engagement.id, command_run_id),
-        ).fetchone()
-        if existing_row is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="command run not found",
-            )
-        existing_status = (existing_row["status"] or "").strip()
-        if existing_status in _FINALIZE_TERMINAL_STATUSES:
-            serialized = _serialize_command_run(existing_row, include_output=True)
-            serialized["noop"] = True
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "message": (
-                        f"command run id={command_run_id} already finalized with "
-                        f"status='{existing_status}'; refusing to overwrite"
-                    ),
-                    "existing": serialized,
-                },
-            )
-        if status_value == "running" and existing_status == "running":
-            serialized = _serialize_command_run(existing_row, include_output=True)
-            serialized["noop"] = True
-            return serialized
-        if status_value == "running":
-            serialized = _serialize_command_run(existing_row, include_output=True)
-            serialized["noop"] = True
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "message": (
-                        f"command run id={command_run_id} is status='{existing_status or 'unknown'}'; "
-                        "running refresh only applies to rows already in status='running'"
-                    ),
-                    "existing": serialized,
-                },
-            )
-        success_flag = 1 if (status_value == "completed" and (return_code in (0, None) and not timed_out)) else 0
-        if return_code is not None and return_code != 0:
-            success_flag = 0
-        sets: list[str] = [
-            "status = ?",
-            "completed_at = ?",
-            "timed_out = ?",
-            "success = ?",
-        ]
-        values: list[Any] = [
-            status_value,
-            ended_at,
-            1 if timed_out else 0,
-            success_flag,
-        ]
-        if return_code is not None:
-            sets.append("return_code = ?")
-            values.append(int(return_code))
-        if duration_ms is not None:
-            sets.append("duration_ms = ?")
-            values.append(int(duration_ms))
-        if stdout_preview is not None:
-            sets.append("stdout_preview = ?")
-            values.append(stdout_preview)
-        if stderr_preview is not None:
-            sets.append("stderr_preview = ?")
-            values.append(stderr_preview)
-        if peak_rss_bytes is not None:
-            sets.append("peak_rss_bytes = ?")
-            values.append(int(peak_rss_bytes))
-        if cpu_user_seconds is not None:
-            sets.append("cpu_user_seconds = ?")
-            values.append(float(cpu_user_seconds))
-        if cpu_system_seconds is not None:
-            sets.append("cpu_system_seconds = ?")
-            values.append(float(cpu_system_seconds))
-        sets.append("partial_results = ?")
-        values.append(1 if partial_results else 0)
-        mutable_statuses = tuple(sorted(str(s) for s in _FINALIZE_MUTABLE_STATUSES))
-        values.append(command_run_id)
-        values.extend(mutable_statuses)
-        # Guard against the read→update race when two finalize PATCHes arrive
-        # simultaneously: both can pass the SELECT-based terminal check above,
-        # but the UPDATE must only land when the row is still pre-terminal.
-        # The loser hits rowcount=0 and is funnelled into the same 409 path
-        # with the canonical row payload that the SELECT-based check uses.
-        mutable_placeholders = ", ".join("?" for _ in mutable_statuses)
-        cursor = connection.execute(
-            f"UPDATE assessment_command_runs SET {', '.join(sets)} WHERE id = ? AND status IN ({mutable_placeholders})",
-            tuple(values),
-        )
-        if cursor.rowcount == 0:
-            current_row = connection.execute(
-                "SELECT * FROM assessment_command_runs WHERE id = ?",
-                (command_run_id,),
+    retained_streams: list[dict[str, Any]] = []
+    published_outputs: list[dict[str, Any]] = []
+    suppressed_spills: list[tuple[Path, dict[str, Any]]] = []
+    serialized: dict[str, Any]
+    try:
+        with _common.get_connection() as connection:
+            # A deferred SQLite transaction lets two finalizers both hash and
+            # begin cleanup before one wins the guarded UPDATE. Take write
+            # ownership first: the loser waits, then observes terminal truth
+            # without ever opening or mutating a spill.
+            if not connection.in_transaction:
+                connection.execute("BEGIN IMMEDIATE")
+            existing_row = connection.execute(
+                "SELECT * FROM assessment_command_runs WHERE engagement_id = ? AND id = ?",
+                (engagement.id, command_run_id),
             ).fetchone()
-            if current_row is None:
+            if existing_row is None:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="command run not found",
                 )
-            serialized = _serialize_command_run(current_row, include_output=True)
-            serialized["noop"] = True
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "message": (
-                        f"command run id={command_run_id} already finalized with "
-                        f"status='{(current_row['status'] or '').strip()}'; refusing to overwrite"
+            existing_status = (existing_row["status"] or "").strip()
+            if existing_status in _FINALIZE_TERMINAL_STATUSES:
+                if (
+                    str(existing_row["route"] or "") == "host_exec"
+                    and (
+                        str(existing_row["output_cleanup_status"] or "") == "pending"
+                        or str(existing_row["output_integrity_status"] or "")
+                        == "pending"
+                    )
+                ):
+                    return _recover_pending_host_output(
+                        connection,
+                        engagement=engagement,
+                        row=existing_row,
+                    )
+                serialized = _serialize_command_run(existing_row, include_output=True)
+                serialized["noop"] = True
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "message": (
+                            f"command run id={command_run_id} already finalized with "
+                            f"status='{existing_status}'; refusing to overwrite"
+                        ),
+                        "existing": serialized,
+                    },
+                )
+            if status_value == "running" and existing_status == "running":
+                serialized = _serialize_command_run(existing_row, include_output=True)
+                serialized["noop"] = True
+                return serialized
+            if status_value == "running":
+                serialized = _serialize_command_run(existing_row, include_output=True)
+                serialized["noop"] = True
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "message": (
+                            f"command run id={command_run_id} is status='{existing_status or 'unknown'}'; "
+                            "running refresh only applies to rows already in status='running'"
+                        ),
+                        "existing": serialized,
+                    },
+                )
+
+            is_host_exec = str(existing_row["route"] or "") == "host_exec"
+            if not output_quiesced:
+                if not is_host_exec or status_value != "lost":
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            "output_quiesced=false is only valid for a lost "
+                            "host-exec process group"
+                        ),
+                    )
+                warning = (
+                    "host-exec process group could not be quiesced; mutable "
+                    "output was not hashed or retained"
+                )
+                cursor = connection.execute(
+                    """
+                    UPDATE assessment_command_runs
+                    SET status = 'lost', completed_at = ?, duration_ms = ?,
+                        output_recovery_observed_at = CURRENT_TIMESTAMP,
+                        return_code = ?, timed_out = ?, success = 0,
+                        stdout_sha256 = '', stderr_sha256 = '',
+                        stdout_preview = '', stderr_preview = ?,
+                        stdout_artifact_ref = '', stderr_artifact_ref = '',
+                        stdout_bytes = 0, stderr_bytes = 0,
+                        output_retention_status = 'untrusted',
+                        output_cleanup_status = 'not_required',
+                        output_cleanup_warning = '',
+                        output_integrity_status = 'warning',
+                        output_integrity_warning = ?, partial_results = 0
+                    WHERE id = ? AND status IN ('queued', 'running')
+                    """,
+                    (
+                        ended_at,
+                        int(duration_ms or 0),
+                        return_code,
+                        1 if timed_out else 0,
+                        str(stderr_preview or warning)[:4096],
+                        warning,
+                        command_run_id,
                     ),
-                    "existing": serialized,
-                },
+                )
+                if cursor.rowcount == 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="host-exec row was finalized by another owner",
+                    )
+                engagement_root = Path(engagement.engagement_root).expanduser().resolve()
+                for stream_name, path_value in (
+                    ("stdout", existing_row["stdout_path"]),
+                    ("stderr", existing_row["stderr_path"]),
+                ):
+                    spill_path = _resolve_host_exec_spill_path(
+                        engagement.engagement_root,
+                        run_uuid=str(existing_row["run_uuid"] or ""),
+                        stream=stream_name,
+                        path_value=path_value,
+                    )
+                    if spill_path is not None:
+                        canonical_relative = spill_path.relative_to(
+                            engagement_root
+                        ).as_posix()
+                        artifact_index.reserve_suppressed_command_output(
+                            engagement.id,
+                            relative_path=canonical_relative,
+                            reason="untrusted output from unquiesced host process",
+                            command_run_id=int(command_run_id),
+                        )
+                        artifact_index.remove_verified_command_output(
+                            engagement.id,
+                            relative_path=canonical_relative,
+                        )
+                row = connection.execute(
+                    "SELECT * FROM assessment_command_runs WHERE id = ?",
+                    (command_run_id,),
+                ).fetchone()
+                assert row is not None
+                return _serialize_command_run(row, include_output=True)
+
+            host_stdout_retention: dict[str, Any] | None = None
+            host_stderr_retention: dict[str, Any] | None = None
+            host_stdout_path: Path | None = None
+            host_stderr_path: Path | None = None
+            host_suppression_reason = ""
+            if str(existing_row["route"] or "") == "host_exec":
+                config = _retention_config()
+                preview_bytes = int(config["preview_bytes"])
+                suppress_rule = _match_suppress_rule(
+                    str(existing_row["command"] or ""),
+                    str(existing_row["tool_name"] or ""),
+                )
+                host_suppression_reason = (
+                    suppress_rule["reason"] if suppress_rule else ""
+                )
+                host_stdout_path = _resolve_host_exec_spill_path(
+                    engagement.engagement_root,
+                    run_uuid=str(existing_row["run_uuid"] or ""),
+                    stream="stdout",
+                    path_value=existing_row["stdout_path"],
+                )
+                host_stdout_retention = _apply_host_exec_spill_retention(
+                    host_stdout_path,
+                    engagement_root=engagement.engagement_root,
+                    suppression_reason=host_suppression_reason,
+                    preview_bytes=preview_bytes,
+                    fallback_preview=stdout_preview,
+                    expected_identity=(
+                        int(existing_row["stdout_spill_device"]),
+                        int(existing_row["stdout_spill_inode"]),
+                    )
+                    if existing_row["stdout_spill_device"] is not None
+                    and existing_row["stdout_spill_inode"] is not None
+                    else None,
+                )
+                if host_stdout_path is not None:
+                    retained_streams.append(host_stdout_retention)
+                host_stderr_path = _resolve_host_exec_spill_path(
+                    engagement.engagement_root,
+                    run_uuid=str(existing_row["run_uuid"] or ""),
+                    stream="stderr",
+                    path_value=existing_row["stderr_path"],
+                )
+                host_stderr_retention = _apply_host_exec_spill_retention(
+                    host_stderr_path,
+                    engagement_root=engagement.engagement_root,
+                    suppression_reason=host_suppression_reason,
+                    preview_bytes=preview_bytes,
+                    fallback_preview=stderr_preview,
+                    expected_identity=(
+                        int(existing_row["stderr_spill_device"]),
+                        int(existing_row["stderr_spill_inode"]),
+                    )
+                    if existing_row["stderr_spill_device"] is not None
+                    and existing_row["stderr_spill_inode"] is not None
+                    else None,
+                )
+                if host_stderr_path is not None:
+                    retained_streams.append(host_stderr_retention)
+
+                if not host_suppression_reason:
+                    for stream_name, spill_path, retention in (
+                        ("stdout", host_stdout_path, host_stdout_retention),
+                        ("stderr", host_stderr_path, host_stderr_retention),
+                    ):
+                        if (
+                            spill_path is None
+                            or retention.get("source") == "preview"
+                            or int(retention["bytes"]) == 0
+                        ):
+                            continue
+                        published = _publish_verified_command_output(
+                            engagement.engagement_root,
+                            run_uuid=str(existing_row["run_uuid"] or ""),
+                            stream=stream_name,
+                            retention=retention,
+                        )
+                        published_outputs.append(published)
+                        retention["published_output"] = published
+                        retention["artifact_ref"] = str(published["path"])
+                        retention["status"] = "artifact"
+
+            success_flag = (
+                1
+                if (
+                    status_value == "completed"
+                    and (return_code in (0, None) and not timed_out)
+                )
+                else 0
             )
-        row = connection.execute(
-            "SELECT * FROM assessment_command_runs WHERE id = ?",
-            (command_run_id,),
-        ).fetchone()
-        assert row is not None
-        return _serialize_command_run(row, include_output=True)
+            if return_code is not None and return_code != 0:
+                success_flag = 0
+            sets: list[str] = [
+                "status = ?",
+                "completed_at = ?",
+                "output_recovery_observed_at = CURRENT_TIMESTAMP",
+                "timed_out = ?",
+                "success = ?",
+            ]
+            values: list[Any] = [
+                status_value,
+                ended_at,
+                1 if timed_out else 0,
+                success_flag,
+            ]
+            if return_code is not None:
+                sets.append("return_code = ?")
+                values.append(int(return_code))
+            if duration_ms is not None:
+                sets.append("duration_ms = ?")
+                values.append(int(duration_ms))
+            if host_stdout_retention is not None and host_stderr_retention is not None:
+                retention_fields = {
+                    "stdout_sha256": host_stdout_retention["sha256"],
+                    "stderr_sha256": host_stderr_retention["sha256"],
+                    "stdout_preview": host_stdout_retention["preview"],
+                    "stderr_preview": host_stderr_retention["preview"],
+                    "output_retention_status": (
+                        "suppression_pending"
+                        if host_suppression_reason
+                        else _roll_up_output_retention_status(
+                            host_stdout_retention, host_stderr_retention
+                        )
+                    ),
+                    "stdout_suppression_reason": host_stdout_retention[
+                        "suppression_reason"
+                    ],
+                    "stderr_suppression_reason": host_stderr_retention[
+                        "suppression_reason"
+                    ],
+                    "stdout_artifact_ref": host_stdout_retention["artifact_ref"],
+                    "stderr_artifact_ref": host_stderr_retention["artifact_ref"],
+                    "stdout_bytes": host_stdout_retention["bytes"],
+                    "stderr_bytes": host_stderr_retention["bytes"],
+                    "output_cleanup_warning": "",
+                    "output_cleanup_status": (
+                        "pending" if host_suppression_reason else "not_required"
+                    ),
+                    "output_integrity_warning": "",
+                    "output_integrity_status": (
+                        "pending"
+                        if published_outputs and not host_suppression_reason
+                        else "not_applicable"
+                    ),
+                }
+                for column, value in retention_fields.items():
+                    sets.append(f"{column} = ?")
+                    values.append(value)
+            elif stdout_preview is not None:
+                sets.append("stdout_preview = ?")
+                values.append(stdout_preview)
+            if host_stderr_retention is None and stderr_preview is not None:
+                sets.append("stderr_preview = ?")
+                values.append(stderr_preview)
+            if peak_rss_bytes is not None:
+                sets.append("peak_rss_bytes = ?")
+                values.append(int(peak_rss_bytes))
+            if cpu_user_seconds is not None:
+                sets.append("cpu_user_seconds = ?")
+                values.append(float(cpu_user_seconds))
+            if cpu_system_seconds is not None:
+                sets.append("cpu_system_seconds = ?")
+                values.append(float(cpu_system_seconds))
+            sets.append("partial_results = ?")
+            values.append(1 if partial_results else 0)
+            mutable_statuses = tuple(sorted(str(s) for s in _FINALIZE_MUTABLE_STATUSES))
+            values.append(command_run_id)
+            values.extend(mutable_statuses)
+            # Guard against the read→update race when two finalize PATCHes arrive
+            # simultaneously: both can pass the SELECT-based terminal check above,
+            # but the UPDATE must only land when the row is still pre-terminal.
+            # The loser hits rowcount=0 and is funnelled into the same 409 path
+            # with the canonical row payload that the SELECT-based check uses.
+            mutable_placeholders = ", ".join("?" for _ in mutable_statuses)
+            cursor = connection.execute(
+                f"UPDATE assessment_command_runs SET {', '.join(sets)} WHERE id = ? AND status IN ({mutable_placeholders})",
+                tuple(values),
+            )
+            if cursor.rowcount == 0:
+                current_row = connection.execute(
+                    "SELECT * FROM assessment_command_runs WHERE id = ?",
+                    (command_run_id,),
+                ).fetchone()
+                if current_row is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="command run not found",
+                    )
+                serialized = _serialize_command_run(current_row, include_output=True)
+                serialized["noop"] = True
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "message": (
+                            f"command run id={command_run_id} already finalized with "
+                            f"status='{(current_row['status'] or '').strip()}'; refusing to overwrite"
+                        ),
+                        "existing": serialized,
+                    },
+                )
+            row = connection.execute(
+                "SELECT * FROM assessment_command_runs WHERE id = ?",
+                (command_run_id,),
+            ).fetchone()
+            assert row is not None
+            serialized = _serialize_command_run(row, include_output=True)
+            if host_stdout_retention is not None and host_stderr_retention is not None:
+                engagement_root = (
+                    Path(engagement.engagement_root).expanduser().resolve()
+                )
+                for spill_path, retention in (
+                    (host_stdout_path, host_stdout_retention),
+                    (host_stderr_path, host_stderr_retention),
+                ):
+                    if spill_path is None:
+                        continue
+                    canonical_relative = spill_path.relative_to(
+                        engagement_root
+                    ).as_posix()
+                    if host_suppression_reason:
+                        artifact_index.reserve_suppressed_command_output(
+                            engagement.id,
+                            relative_path=canonical_relative,
+                            reason=host_suppression_reason,
+                            command_run_id=int(serialized["id"]),
+                        )
+                    artifact_index.remove_verified_command_output(
+                        engagement.id,
+                        relative_path=canonical_relative,
+                    )
+                    if host_suppression_reason:
+                        suppressed_spills.append((spill_path, retention))
+                        continue
+                    published = retention.get("published_output")
+                    if published is None:
+                        continue
+                    published_path = Path(published["path"])
+                    artifact_index.register_verified_command_output(
+                        engagement.id,
+                        relative_path=published_path.relative_to(
+                            engagement_root
+                        ).as_posix(),
+                        size_bytes=int(retention["bytes"]),
+                        sha256=str(retention["sha256"]),
+                        sample_bytes=bytes(retention["sample_bytes"]),
+                        verified_device=int(published["stat_result"].st_dev),
+                        verified_inode=int(published["stat_result"].st_ino),
+                        producer_command_run_id=int(serialized["id"]),
+                        producer_agent_role=str(serialized.get("agent_name") or ""),
+                    )
+                for published in published_outputs:
+                    current = os.stat(
+                        published["name"],
+                        dir_fd=int(published["directory_descriptor"]),
+                        follow_symlinks=False,
+                    )
+                    descriptor_stat = os.fstat(int(published["file_descriptor"]))
+                    if not _same_file(current, descriptor_stat):
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail="verified command output changed before metadata commit",
+                        )
+    except BaseException:
+        _discard_published_outputs(published_outputs)
+        _close_retention_descriptors(retained_streams)
+        raise
+
+    try:
+        if published_outputs:
+            integrity_failures: list[dict[str, Any]] = []
+            engagement_root = Path(engagement.engagement_root).expanduser().resolve()
+            for published in published_outputs:
+                relative_path = Path(published["path"]).relative_to(
+                    engagement_root
+                ).as_posix()
+                metadata = published["stat_result"]
+                retention = (
+                    host_stdout_retention
+                    if published["stream"] == "stdout"
+                    else host_stderr_retention
+                )
+                assert retention is not None
+                try:
+                    artifact_index._verified_snapshot_payload(
+                        engagement_root,
+                        relative_path,
+                        expected_device=int(metadata.st_dev),
+                        expected_inode=int(metadata.st_ino),
+                        expected_size=int(retention["bytes"]),
+                        expected_sha256=str(retention["sha256"]),
+                    )
+                except HTTPException as exc:
+                    integrity_failures.append(
+                        {
+                            "stream": published["stream"],
+                            "relative_path": relative_path,
+                            "detail": str(exc.detail),
+                        }
+                    )
+
+            with _common.get_connection() as connection:
+                if integrity_failures:
+                    for failure in integrity_failures:
+                        connection.execute(
+                            """
+                            UPDATE assessment_artifacts
+                            SET present = 0, integrity_status = 'mismatch',
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE engagement_id = ? AND relative_path = ?
+                            """,
+                            (engagement.id, failure["relative_path"]),
+                        )
+                        artifact_column = f"{failure['stream']}_artifact_ref"
+                        connection.execute(
+                            f"UPDATE assessment_command_runs SET {artifact_column} = '' WHERE id = ?",
+                            (command_run_id,),
+                        )
+                    warning = "; ".join(
+                        f"{failure['stream']} snapshot: {failure['detail']}"
+                        for failure in integrity_failures
+                    )
+                    connection.execute(
+                        """
+                        UPDATE assessment_command_runs
+                        SET output_integrity_status = 'warning',
+                            output_integrity_warning = ?,
+                            output_retention_status = 'integrity_failure'
+                        WHERE id = ?
+                        """,
+                        (warning[:4096], command_run_id),
+                    )
+                else:
+                    connection.execute(
+                        """
+                        UPDATE assessment_command_runs
+                        SET output_integrity_status = 'verified',
+                            output_integrity_warning = ''
+                        WHERE id = ?
+                        """,
+                        (command_run_id,),
+                    )
+                row = connection.execute(
+                    "SELECT * FROM assessment_command_runs WHERE id = ?",
+                    (command_run_id,),
+                ).fetchone()
+                assert row is not None
+                serialized = _serialize_command_run(row, include_output=True)
+
+            if integrity_failures:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "message": "verified command output changed after metadata commit",
+                        "existing": serialized,
+                    },
+                )
+
+        if suppressed_spills:
+            try:
+                validation_warning = _cleanup_suppressed_host_exec_spills(
+                    suppressed_spills
+                )
+            except Exception as exc:  # cleanup state must remain durable
+                validation_warning = f"suppression cleanup validation failed: {exc}"
+            deferred_notice = (
+                "physical cleanup deferred: raw spill bytes remain on disk in "
+                "the private host-exec directory pending isolation-backed cleanup"
+            )
+            cleanup_warning = "; ".join(
+                part for part in (validation_warning, deferred_notice) if part
+            )
+            cleanup_status = "warning" if validation_warning else "deferred"
+            with _common.get_connection() as connection:
+                connection.execute(
+                    """
+                    UPDATE assessment_command_runs
+                    SET output_cleanup_warning = ?, output_cleanup_status = ?,
+                        output_retention_status = 'suppression_deferred'
+                    WHERE id = ?
+                    """,
+                    (cleanup_warning[:4096], cleanup_status, command_run_id),
+                )
+                row = connection.execute(
+                    "SELECT * FROM assessment_command_runs WHERE id = ?",
+                    (command_run_id,),
+                ).fetchone()
+                assert row is not None
+                serialized = _serialize_command_run(row, include_output=True)
+        return serialized
+    finally:
+        _close_published_outputs(published_outputs)
+        _close_retention_descriptors(retained_streams)
+
 
 # ── Assessment job lifecycle ────────────────────────────────────────
 
 
 # Job status membership sets are sourced from the JobStatus enum in _common
 # (imported above under their original private names).
+
 
 def _serialize_job(row) -> dict[str, Any]:
     data = dict(row)
@@ -883,6 +2243,7 @@ def _serialize_job(row) -> dict[str, Any]:
     else:
         data["audit_metadata"] = None
     return data
+
 
 def record_job(
     engagement_id: int,
@@ -903,7 +2264,11 @@ def record_job(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"job status must be one of {sorted(str(s) for s in _JOB_VALID_STATUSES)}",
         )
-    metadata_json = json.dumps(audit_metadata, ensure_ascii=False) if audit_metadata is not None else None
+    metadata_json = (
+        json.dumps(audit_metadata, ensure_ascii=False)
+        if audit_metadata is not None
+        else None
+    )
     with _common.get_connection() as connection:
         if parent_command_run_id is not None:
             row = connection.execute(
@@ -943,6 +2308,7 @@ def record_job(
         ).fetchone()
         assert out_row is not None
         return _serialize_job(out_row)
+
 
 def update_job(
     engagement_id: int,
@@ -1018,11 +2384,12 @@ def update_job(
         where = "WHERE engagement_id = ? AND id = ?"
         where_values: list[Any] = [engagement.id, int(job_id)]
         guard_pre_terminal_update = (
-            status_value is not None
-            and existing_status in _JOB_PRE_TERMINAL_STATUSES
+            status_value is not None and existing_status in _JOB_PRE_TERMINAL_STATUSES
         )
         if guard_pre_terminal_update:
-            pre_terminal_statuses = tuple(sorted(str(s) for s in _JOB_PRE_TERMINAL_STATUSES))
+            pre_terminal_statuses = tuple(
+                sorted(str(s) for s in _JOB_PRE_TERMINAL_STATUSES)
+            )
             placeholders = ", ".join("?" for _ in pre_terminal_statuses)
             where += f" AND status IN ({placeholders})"
             where_values.extend(pre_terminal_statuses)
@@ -1054,6 +2421,7 @@ def update_job(
         assert row is not None
         return _serialize_job(row)
 
+
 def list_jobs(
     engagement_id: int,
     *,
@@ -1081,6 +2449,7 @@ def list_jobs(
         rows = connection.execute(query, tuple(params)).fetchall()
     return [_serialize_job(row) for row in rows]
 
+
 def get_job(engagement_id: int, job_id: int) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
@@ -1089,8 +2458,11 @@ def get_job(engagement_id: int, job_id: int) -> dict[str, Any]:
             (engagement.id, int(job_id)),
         ).fetchone()
     if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="job not found"
+        )
     return _serialize_job(row)
+
 
 def _serialize_command_run(row, *, include_output: bool) -> dict[str, Any]:
     data = dict(row)
@@ -1115,6 +2487,9 @@ def _serialize_command_run(row, *, include_output: bool) -> dict[str, Any]:
     else:
         data["destructive"] = bool(destructive_raw)
     data["partial_results"] = bool(data.get("partial_results"))
+    data["output_recovery_observed_at"] = data.get(
+        "output_recovery_observed_at"
+    )
     if not include_output:
         # Listings default to lightweight rows so a sub-agent fetching 50
         # records does not load 50 × 64 KiB of preview text into context.
@@ -1130,9 +2505,11 @@ def _serialize_command_run(row, *, include_output: bool) -> dict[str, Any]:
         data["stderr_preview_chars"] = stderr_len
     return data
 
+
 def _fts_escape(term: str) -> str:
     """Back-compat shim; real implementation lives in ``services.search``."""
     return _fts_escape_shared(term)
+
 
 def list_command_runs(
     engagement_id: int,
@@ -1147,6 +2524,7 @@ def list_command_runs(
     route: str = "",
     success: bool | None = None,
     timed_out: bool | None = None,
+    output_attention: bool = False,
     technique: str = "",
     probe_kind: str = "",
     destructive: bool | None = None,
@@ -1216,7 +2594,10 @@ def list_command_runs(
             # rename are stamped route='aith assess kali/<tool>'. Match both
             # the new prefix and the old one so pre-rename rows still return.
             filters.append(
-                ("(r.route LIKE 'vigil assess kali/%' OR r.route LIKE 'aith assess kali/%')", [])
+                (
+                    "(r.route LIKE 'vigil assess kali/%' OR r.route LIKE 'aith assess kali/%')",
+                    [],
+                )
             )
         else:
             filters.append(("r.route = ?", [route]))
@@ -1224,6 +2605,18 @@ def list_command_runs(
         filters.append(("r.success = ?", [1 if success else 0]))
     if timed_out is not None:
         filters.append(("r.timed_out = ?", [1 if timed_out else 0]))
+    if output_attention:
+        filters.append(
+            (
+                "("
+                "r.output_retention_status IN "
+                "('integrity_failure', 'suppression_deferred', 'untrusted') "
+                "OR r.output_cleanup_status IN ('deferred', 'pending', 'warning') "
+                "OR r.output_integrity_status IN ('pending', 'warning')"
+                ")",
+                [],
+            )
+        )
     if technique:
         filters.append(("r.technique = ?", [technique]))
     if probe_kind:
@@ -1238,7 +2631,10 @@ def list_command_runs(
     if not sort_value:
         sort_value = "relevance" if match_terms else "recent"
     if sort_value not in {"relevance", "recent", "distant"}:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"invalid command-run sort: {sort}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid command-run sort: {sort}",
+        )
 
     if sort_value == "distant":
         return _list_distant_command_runs(
@@ -1256,7 +2652,9 @@ def list_command_runs(
 
     params = list(base_params)
     params.extend([int(limit), int(offset)])
-    rank_select = ", bm25(assessment_command_runs_fts) AS search_rank" if match_terms else ""
+    rank_select = (
+        ", bm25(assessment_command_runs_fts) AS search_rank" if match_terms else ""
+    )
     if sort_value == "relevance" and match_terms:
         order_sql = "ORDER BY search_rank ASC, r.created_at DESC, r.id DESC"
     else:
@@ -1270,9 +2668,16 @@ def list_command_runs(
     with _common.get_connection() as connection:
         rows = connection.execute(query, tuple(params)).fetchall()
     return [
-        _serialize_command_run_with_matches(row, include_output=include_output, q=q, show_matches=show_matches, exact=exact)
+        _serialize_command_run_with_matches(
+            row,
+            include_output=include_output,
+            q=q,
+            show_matches=show_matches,
+            exact=exact,
+        )
         for row in rows
     ]
+
 
 def _list_distant_command_runs(
     engagement_id: int,
@@ -1294,7 +2699,11 @@ def _list_distant_command_runs(
     that scope.
     """
 
-    distant_filters = [(clause, list(params)) for clause, params in filters if (clause, params) != match_filter]
+    distant_filters = [
+        (clause, list(params))
+        for clause, params in filters
+        if (clause, params) != match_filter
+    ]
     if not distant_filters:
         distant_filters = [("r.engagement_id = ?", [engagement_id])]
     distant_where = [clause for clause, _ in distant_filters]
@@ -1312,7 +2721,9 @@ def _list_distant_command_runs(
             "ORDER BY r.created_at DESC, r.id DESC LIMIT 200"
         )
         with _common.get_connection() as connection:
-            direct_rows = connection.execute(direct_query, tuple(base_params)).fetchall()
+            direct_rows = connection.execute(
+                direct_query, tuple(base_params)
+            ).fetchall()
         direct_ids = [int(row["id"]) for row in direct_rows]
 
     if direct_ids:
@@ -1321,7 +2732,13 @@ def _list_distant_command_runs(
         distant_params.extend(direct_ids)
         scope_clauses: list[str] = []
         for column in ("target_host", "tool_bin", "technique", "probe_kind", "phase"):
-            values = sorted({str(row[column] or "") for row in direct_rows if str(row[column] or "").strip()})
+            values = sorted(
+                {
+                    str(row[column] or "")
+                    for row in direct_rows
+                    if str(row[column] or "").strip()
+                }
+            )
             if values:
                 scope_placeholders = ", ".join("?" for _ in values)
                 scope_clauses.append(f"r.{column} IN ({scope_placeholders})")
@@ -1342,9 +2759,16 @@ def _list_distant_command_runs(
     with _common.get_connection() as connection:
         rows = connection.execute(query, tuple(distant_params)).fetchall()
     return [
-        _serialize_command_run_with_matches(row, include_output=include_output, q=q, show_matches=show_matches, exact=exact)
+        _serialize_command_run_with_matches(
+            row,
+            include_output=include_output,
+            q=q,
+            show_matches=show_matches,
+            exact=exact,
+        )
         for row in rows
     ]
+
 
 def _serialize_command_run_with_matches(
     row,
@@ -1359,7 +2783,10 @@ def _serialize_command_run_with_matches(
         data["matches"] = _command_run_match_reasons(data, q, exact=exact)
     return data
 
-def _command_run_match_reasons(row: dict[str, Any], q: str, *, exact: bool = False) -> list[str]:
+
+def _command_run_match_reasons(
+    row: dict[str, Any], q: str, *, exact: bool = False
+) -> list[str]:
     reasons: list[str] = []
     # In exact mode the FTS query is the user's raw phrase only — alias
     # expansion never ran, so attributing the match to an alias would be
@@ -1388,13 +2815,23 @@ def _command_run_match_reasons(row: dict[str, Any], q: str, *, exact: bool = Fal
                     if value and any(needle in value for needle in needle_values):
                         reasons.append(f"finding_alias:{canonical}:{field}")
     plain_terms = [term.lower() for term in str(q or "").split() if len(term) >= 3]
-    for field in ("command", "tool_name", "tool_bin", "agent_name", "phase", "notes", "intent", "technique"):
+    for field in (
+        "command",
+        "tool_name",
+        "tool_bin",
+        "agent_name",
+        "phase",
+        "notes",
+        "intent",
+        "technique",
+    ):
         value = str(row.get(field) or "").lower()
         for term in plain_terms:
             if term in value:
                 reasons.append(f"token:{term}:{field}")
                 break
     return sorted(set(reasons))
+
 
 def get_command_run(engagement_id: int, command_run_id: int) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
@@ -1404,8 +2841,11 @@ def get_command_run(engagement_id: int, command_run_id: int) -> dict[str, Any]:
             (engagement.id, int(command_run_id)),
         ).fetchone()
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="command run not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="command run not found"
+        )
     return _serialize_command_run(row, include_output=True)
+
 
 # ── Host liveness ledger ──────────────────────────────────────────────────
 # Authoritative per-host reachability, upserted from httpx probes via
@@ -1415,6 +2855,7 @@ def get_command_run(engagement_id: int, command_run_id: int) -> dict[str, Any]:
 _HOST_LIVENESS_TTL_SECONDS = 120 * 60  # 2h
 
 _HOST_LIVENESS_DECAYS = frozenset({"live", "blackholed", "dead"})
+
 
 def _normalize_liveness_host(value: str) -> str:
     """Canonical liveness key: lowercased, scheme- and port-stripped authority.
@@ -1435,6 +2876,7 @@ def _normalize_liveness_host(value: str) -> str:
         h = h.split(":", 1)[0]
     return h
 
+
 def _parse_probed_at(probed_at):
     """Parse an ISO probed_at into an aware UTC datetime, or None."""
     import datetime as _dt
@@ -1452,6 +2894,7 @@ def _parse_probed_at(probed_at):
         parsed = parsed.replace(tzinfo=_dt.timezone.utc)
     return parsed.astimezone(_dt.timezone.utc)
 
+
 def _canonical_probed_at(probed_at):
     """Normalize probed_at to a single lexicographically-sortable UTC form so the
     keep-newest TEXT comparison in the upsert is correct across mixed input
@@ -1462,6 +2905,7 @@ def _canonical_probed_at(probed_at):
         return None
     return parsed.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
 
+
 def _liveness_age_seconds(probed_at) -> float | None:
     import datetime as _dt
 
@@ -1470,7 +2914,10 @@ def _liveness_age_seconds(probed_at) -> float | None:
         return None
     return (_dt.datetime.now(_dt.timezone.utc) - parsed).total_seconds()
 
-def upsert_host_liveness(engagement_id: int, rows: list[dict[str, Any]]) -> dict[str, Any]:
+
+def upsert_host_liveness(
+    engagement_id: int, rows: list[dict[str, Any]]
+) -> dict[str, Any]:
     """Bulk-upsert host-liveness rows keyed by (engagement, host).
 
     The caller (ingest-httpx) supplies the already-classified ``reachability_class``
@@ -1540,6 +2987,7 @@ def upsert_host_liveness(engagement_id: int, rows: list[dict[str, Any]]) -> dict
             upserted += 1
     return {"upserted": upserted}
 
+
 def host_liveness(
     engagement_id: int,
     *,
@@ -1556,7 +3004,13 @@ def host_liveness(
     _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
         if hosts:
-            norm = sorted({_normalize_liveness_host(h) for h in hosts if _normalize_liveness_host(h)})
+            norm = sorted(
+                {
+                    _normalize_liveness_host(h)
+                    for h in hosts
+                    if _normalize_liveness_host(h)
+                }
+            )
             if not norm:
                 return []
             placeholders = ",".join("?" for _ in norm)

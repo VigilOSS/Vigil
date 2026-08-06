@@ -35,7 +35,7 @@ that's the normal report-writer entrypoint.
 
 **VRT:** [Bugcrowd VRT category path, most specific leaf — e.g. Broken Access Control > IDOR]
 
-**Severity:** [P1-P4] ([Critical/High/Medium/Low])
+**Severity:** [CRITICAL/HIGH/MEDIUM/LOW]
 
 **CVSS:** CVSS:3.1/[vector] ([score])
 
@@ -82,7 +82,13 @@ the steps — this is the severity justification. See "Attack Scenario vs Impact
   can sit above its raw CVSS score — Bugcrowd's technical-severity matrix assigns categories like
   broken access control a default P2 even when the calculated vector lands in the CVSS "Medium"
   range. Report the calculated CVSS honestly; justify a priority above the raw score by naming the
-  VRT default, not by inflating the vector.
+  VRT default, not by inflating the vector. The renderer's `Severity:` line always emits the plain
+  severity word on every platform (`export_submission.py` `severity.upper()`), matched to the CVSS
+  band — so a P2 access-control finding whose vector computes to 6.5 correctly reads
+  `**Severity:** MEDIUM`, and the P2 lives in Bugcrowd's own priority field, not in this document.
+  **Do not append the P-rating to the `VRT:` line** — that line is pasted verbatim into the
+  platform's VRT selector, so anything beyond the taxonomy path breaks the paste. The leaf you name
+  already carries its default priority.
 - **PoC is an operator-side attachment, not a rendered body line.** If the proof is a script, stage
   it as `submissions/<slug>/poc.<ext>` and attach it in the Bugcrowd form — see
   `submission-format.md` "PoC block". `export submission` emits no attachment block into the body;

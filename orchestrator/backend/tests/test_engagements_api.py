@@ -78,6 +78,35 @@ def test_list_engagements_discovers_filesystem_engagements(client, isolate_setti
     assert payload[0]["session_count"] == 1
 
 
+def test_both_engagement_exposes_independent_code_phase(client, isolate_settings):
+    engagement_dir = write_engagement(
+        isolate_settings["engagements_dir"],
+        key="2026-08-04-120000-both",
+    )
+    scope_path = engagement_dir / "scope.json"
+    scope = json.loads(scope_path.read_text(encoding="utf-8"))
+    scope.update(
+        {
+            "engagement_type": "both",
+            "current_phase": "hunt",
+            "code_phase": "verify-variant",
+        }
+    )
+    scope_path.write_text(json.dumps(scope), encoding="utf-8")
+
+    listed = client.get("/engagements")
+    fetched = client.get("/engagements/2026-08-04-120000-both")
+
+    assert listed.status_code == 200
+    assert fetched.status_code == 200
+    list_row = next(
+        row for row in listed.json() if row["key"] == "2026-08-04-120000-both"
+    )
+    assert list_row["current_phase"] == "hunt"
+    assert list_row["code_phase"] == "verify-variant"
+    assert fetched.json()["code_phase"] == "verify-variant"
+
+
 def test_list_engagements_surfaces_scope_hosts_for_proxy_router(client, isolate_settings):
     """The multi-engagement mitmproxy router fetches the active engagement set
     from this endpoint; scope_hosts must be present so the addon can route
@@ -2150,7 +2179,7 @@ def test_findings_patch_can_revive_false_positive_and_lower_severity(client, iso
             "defect_family": "integer-overflow",
             "root_cause_key": "parser-length-overflow",
             "auth_context": "anonymous",
-            "canonical_location": "file:src/parser.c:91",
+            "canonical_location": "https://example.com/src/parser.c?line=91",
             "summary": "Suppressed after verifier review.",
             "evidence_ref": "tools/analysis-state/verifier.json",
             "notes": "Killed during verification.",
@@ -2339,7 +2368,7 @@ def test_false_positive_findings_are_suppressed_but_semantically_sticky(client, 
             "defect_family": "integer-overflow",
             "root_cause_key": "header-length-overflow",
             "auth_context": "anonymous",
-            "canonical_location": "file:src/parser.c:128",
+            "canonical_location": "https://example.com/src/parser.c?line=128",
             "summary": "Header length appears to overflow before allocation.",
             "evidence_ref": "tools/analysis-state/findings.json",
             "notes": "Initial hunter report.",
@@ -2405,7 +2434,7 @@ def test_false_positive_findings_are_suppressed_but_semantically_sticky(client, 
             "defect_family": "integer-overflow",
             "root_cause_key": "header-length-overflow",
             "auth_context": "anonymous",
-            "canonical_location": "file:src/parser.c:128",
+            "canonical_location": "https://example.com/src/parser.c?line=128",
             "summary": "Rediscovery attempt from later analysis pass.",
             "evidence_ref": "tools/analysis-state/rediscovery.json",
             "notes": "Re-raised by later LLM pass.",
@@ -2447,7 +2476,7 @@ def test_false_positive_title_fallback_does_not_suppress_distinct_finding(client
             "defect_family": "integer-overflow",
             "root_cause_key": "overflow-a",
             "auth_context": "anonymous",
-            "canonical_location": "file:src/parser.c:128",
+            "canonical_location": "https://example.com/src/parser.c?line=128",
             "summary": "Suppressed integer overflow hypothesis.",
             "evidence_ref": "tools/analysis-state/a.json",
             "notes": "Verifier killed the original hypothesis.",
@@ -2475,7 +2504,7 @@ def test_false_positive_title_fallback_does_not_suppress_distinct_finding(client
             "defect_family": "buffer-overflow",
             "root_cause_key": "overflow-b",
             "auth_context": "anonymous",
-            "canonical_location": "file:src/parser.c:128",
+            "canonical_location": "https://example.com/src/parser.c?line=128",
             "summary": "Different defect family at the same location.",
             "evidence_ref": "tools/analysis-state/b.json",
             "notes": "Newly verified buffer overwrite path.",
@@ -2515,7 +2544,7 @@ def test_root_cause_free_false_positive_findings_stay_semantically_sticky(client
             "defect_family": "integer-overflow",
             "root_cause_key": "",
             "auth_context": "anonymous",
-            "canonical_location": "file:src/parser.c:150",
+            "canonical_location": "https://example.com/src/parser.c?line=150",
             "summary": "Suppressed parser hypothesis without a root cause key.",
             "evidence_ref": "tools/analysis-state/original.json",
             "notes": "Verifier killed the original hypothesis.",
@@ -2542,7 +2571,7 @@ def test_root_cause_free_false_positive_findings_stay_semantically_sticky(client
             "defect_family": "integer-overflow",
             "root_cause_key": "",
             "auth_context": "anonymous",
-            "canonical_location": "file:src/parser.c:150",
+            "canonical_location": "https://example.com/src/parser.c?line=150",
             "summary": "Rediscovered without a root cause key.",
             "evidence_ref": "tools/analysis-state/rediscovered.json",
             "notes": "Later analysis pass re-raised the same parser concern.",
@@ -2615,7 +2644,7 @@ def test_merge_into_false_positive_target_is_rejected(client, isolate_settings):
             "defect_family": "buffer-overflow",
             "root_cause_key": "live-parser-issue",
             "auth_context": "anonymous",
-            "canonical_location": "file:src/parser.c:211",
+            "canonical_location": "https://example.com/src/parser.c?line=211",
             "summary": "Live finding.",
             "evidence_ref": "tools/analysis-state/live.json",
             "notes": "Confirmed by hunter.",
@@ -2639,7 +2668,7 @@ def test_merge_into_false_positive_target_is_rejected(client, isolate_settings):
             "defect_family": "integer-overflow",
             "root_cause_key": "suppressed-parser-issue",
             "auth_context": "anonymous",
-            "canonical_location": "file:src/parser.c:333",
+            "canonical_location": "https://example.com/src/parser.c?line=333",
             "summary": "Suppressed by verifier.",
             "evidence_ref": "tools/analysis-state/suppressed.json",
             "notes": "Killed during verification.",
@@ -2684,7 +2713,7 @@ def test_merge_false_positive_source_preserves_live_target(client, isolate_setti
             "defect_family": "integer-overflow",
             "root_cause_key": "suppressed-parser-duplicate",
             "auth_context": "anonymous",
-            "canonical_location": "file:src/parser.c:211",
+            "canonical_location": "https://example.com/src/parser.c?line=211",
             "summary": "Duplicate was previously suppressed by verifier.",
             "evidence_ref": "tools/analysis-state/suppressed-duplicate.json",
             "notes": "Killed during verification.",
@@ -2713,7 +2742,7 @@ def test_merge_false_positive_source_preserves_live_target(client, isolate_setti
             "defect_family": "buffer-overflow",
             "root_cause_key": "live-parser-target",
             "auth_context": "anonymous",
-            "canonical_location": "file:src/parser.c:211",
+            "canonical_location": "https://example.com/src/parser.c?line=211",
             "summary": "Target finding is still live.",
             "evidence_ref": "tools/analysis-state/live-target.json",
             "notes": "Confirmed by hunter.",
@@ -2953,7 +2982,7 @@ def test_findings_verify_disputed_keeps_finding_live(client, isolate_settings):
             "defect_family": "state-confusion",
             "root_cause_key": "parser-state-confusion",
             "auth_context": "anonymous",
-            "canonical_location": "file:src/parser.c:411",
+            "canonical_location": "https://example.com/src/parser.c?line=411",
             "summary": "Verifier could not conclusively settle exploitability.",
             "evidence_ref": "tools/analysis-state/parser-state.json",
             "notes": "Needs further operator review.",

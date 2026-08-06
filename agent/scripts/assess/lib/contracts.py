@@ -65,6 +65,14 @@ COMMAND_GOALS: tuple[str, ...] = (
     "oob",
 )
 
+# Mirrors app.services.code_analysis.MAX_VARIANT_PARENT_FINDINGS. Agent code
+# cannot import the backend package; test_code_record_variant_parent_cap_mirrors_backend
+# pins the two contract owners.
+MAX_VARIANT_PARENT_FINDINGS = 1000
+# Mirrors app.services.code_analysis.MAX_VARIANT_RECEIPT_PAGE; pinned by the
+# fetch auto-pagination regression because agent code cannot import the backend.
+MAX_VARIANT_RECEIPT_PAGE = 500
+
 
 SPECIALIST_DISPATCH_MODES: tuple[str, ...] = (
     "hypothesis-driven",
@@ -345,6 +353,17 @@ def validate_specialist_dispatch_contract(
             "Proceeding (stored as-is) in case this is a newly-coined mode."
         )
 
+    if not payload.get("requested_model") and not payload.get("model"):
+        warnings.append(
+            "requested_model not set; the dispatch cannot be compared as a measured "
+            "model recipe. Record the selected client model when it is known."
+        )
+    if not payload.get("requested_reasoning") and not payload.get("reasoning"):
+        warnings.append(
+            "requested_reasoning not set; the dispatch cannot be compared as a measured "
+            "reasoning recipe. Record the selected effort when it is known."
+        )
+
     for str_field in ("role", "agent_role"):
         value = payload.get(str_field)
         if value is not None and not isinstance(value, str):
@@ -555,6 +574,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "title",
             "details.evidence",
             "details.impact",
+            "provenance.code_snapshot for every canonical_location beginning with file:",
         ),
         helper_defaults=(
             ("slug", "allocated from the engagement-local finding sequence when omitted"),
@@ -576,8 +596,8 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("links", "[]"),
         ),
         notes=(
-            "Omit top-level lifecycle fields unless you are intentionally overriding a helper default. The CLI fills workflow_status, verification_state, verification_disposition, and provenance — supply only the fields shown in the examples.",
-            "Code-specific detail fields are valid: details.entry_point, details.sink, details.taint_path, details.guards_evaluated, details.slot_type, details.variant_of, details.original_pattern.",
+            "Omit top-level lifecycle fields unless you are intentionally overriding a helper default. The CLI fills workflow_status, verification_state, verification_disposition, and producer provenance; a file finding still requires the current Code Source Identity under provenance.code_snapshot.",
+            "Code-specific detail fields are valid: details.entry_point, details.sink, details.taint_path, details.guards_evaluated, details.slot_type, details.variant_of, details.original_pattern. Every canonical_location beginning with file: must bind repo_id, repo_generation, and source_manifest_digest under provenance.code_snapshot; copy them from one current Code Source Identity block.",
             "details.poc_code holds exploit scripts; details.poc_request / details.poc_response hold a structured HTTP request/response pair.",
             "details.steps_to_reproduce is written FROM WHAT YOU ACTUALLY RAN, with concrete values (the real session cookie, the real object id, the real payload) — redaction is the report-writer's job at submission time, and an unbound placeholder (or one placeholder reused across different objects) makes the reproduction unfollowable by construction. details.repro_runs carries the command-run ids behind those steps, in step order: `export submission` renders their real argv, and a step with no run id behind it was imagined, not executed.",
             "details.references is an array of strings for CVE links, advisories, or related docs.",
@@ -596,6 +616,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("description", "use summary for the short finding statement or notes for replayable proof"),
             ("evidence", "use details.evidence"),
             ("impact", "use details.impact"),
+            ("file: canonical_location without provenance.code_snapshot", "copy repo_id, repo_generation, and source_manifest_digest from the current Code Source Identity block"),
             ("links[].link_kind=root_cause", "use `vigil assess finding link <sibling-slug> --root-cause <root-slug>` after verification"),
             ("reusing a reported finding's root_cause_key + canonical_location for a new finding", "differentiate the root_cause_key/defect_family and use finding link, or pass --update <slug> to modify the existing finding"),
         ),
@@ -644,6 +665,13 @@ _CONTRACTS: dict[str, CommandContract] = {
                 "defect_family": "buffer-overflow",
                 "canonical_location": "file:lib/urlapi.c:342",
                 "summary": "Attacker-controlled URL scheme exceeding 64 bytes overflows heap buffer in parseurl()",
+                "provenance": {
+                    "code_snapshot": {
+                        "repo_id": 7,
+                        "repo_generation": 3,
+                        "source_manifest_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    }
+                },
                 "details": {
                     "cwe_id": "CWE-122",
                     "impact": "Remote code execution via heap corruption",
@@ -841,6 +869,43 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("policy set with no fields", "pass at least one field — an empty update is rejected"),
         ),
     ),
+    "host-exec": CommandContract(
+        name="host-exec",
+        summary=(
+            "Run a host-machine command through the audited command-run lifecycle "
+            "with bounded previews and engagement-local full-output artifacts."
+        ),
+        schema_name="argparse + HostExecRecord/CommandRunFinalize",
+        preferred_invocations=(
+            "vigil assess host-exec --tool <tool> --intent '<why>' --technique <technique> --phase <phase> -- <command> [args...]",
+            "vigil assess host-exec --from-json <request.json>",
+        ),
+        author_supplied_fields=(
+            "command argv (positional after --) or --from-json <request.json>",
+            "--tool",
+            "--intent",
+            "--technique",
+            "--phase",
+            "--finding <slug-or-id> (optional; links the audit row to a finding)",
+        ),
+        helper_defaults=(
+            ("--timeout", "600 seconds"),
+            ("--audit-source", "header"),
+            ("--agent-name", "VIGIL_AGENT_NAME, then AGENT_NAME, then operator"),
+            ("--cwd", "engagement directory"),
+        ),
+        notes=(
+            "Use the positional argv form or --from-json; both feed the same parser-owned command shape. The wrapper never invokes a shell implicitly.",
+            "The wrapper pre-creates private spills, keeps those descriptors open through execution, and sends their device/inode identities with status=running. The backend independently opens the same no-follow paths and rejects any identity mismatch before execution. The POST is replay-safe by exact run_uuid-bound payload: an ambiguous lost response is retried before execution, while a mismatched replay conflicts. Every host command fails closed when no pre-exec row id is confirmed.",
+            "Full stdout/stderr stream to scans/host-exec/<run_uuid>.out|.err; after the process group is quiescent, the backend hash-pins those descriptors and publishes retained output as read-only scans/command-runs snapshots.",
+            "A process group that cannot be quiesced is finalized as status=lost with output_retention_status=untrusted; Vigil records no output hash or artifact claim for mutable bytes. Registry-read failure falls back only to the in-memory PID/PGID/start-identity proof captured by registration, so PID reuse is never signaled as the old worker.",
+            "A lost terminal PATCH response may be replayed, but a returned canonical terminal row is accepted only when status, return code, timeout flag, duration, completion time, and persisted partial-result truth match this invocation. A conflicting finalizer remains an audit failure.",
+            "Suppression of host output is logical, not physical: suppression_pending/suppression_deferred paths are removed from and reserved against artifact indexing, but 0600 spill bytes may remain until an isolation-backed cleanup mechanism can prove erasure. A duplicate terminal PATCH and the bounded sweep-orphans/resume-brief reconciler age pending work from server-owned output_recovery_observed_at and accept adoption only when the backend returns the same row/status, recovered_pending_output=true, valid non-pending cleanup/integrity outcomes, and a recognized terminal retention class (never suppression_pending or an unknown/empty status). New finalizations stamp that clock with terminal state; migrated pending rows start a recovery baseline when first observed, without claiming it is their historical completion time. Deferred and warning are terminal truth, not pending success. Inspect output_cleanup_status/output_cleanup_warning.",
+            "--require-audit additionally refuses a successful invocation when finalization, output integrity, or physical cleanup is failed, pending, warning, or deferred. Use it for state-changing blue-team actions; the pre-exec row is mandatory with or without the flag.",
+            "Destructive-looking argv is refused unless --allow-destructive is explicit; that flag records the override but does not broaden engagement authorization.",
+            "--finding accepts a finding slug or numeric id. Because the linkage was explicitly requested, lookup failure or backend rejection fails closed before command execution; Vigil never silently retries or records that invocation unlinked.",
+        ),
+    ),
     "record-probe": CommandContract(
         name="record-probe",
         phase=("consume-test", "exploit"),
@@ -927,6 +992,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         notes=(
             "First resume primitive — use instead of manually chaining findings, handoffs, command-runs, and local notes.",
             "Before reading the brief, the helper performs a bounded one-hour orphan sweep across command runs, async jobs, and precisely-owned host processes so stale runtime state is not presented as active work.",
+            "A pending-output recovery that converges to deferred, warning, or integrity_failure is surfaced as reconciliation attention, and affected command rows render their cleanup/integrity/retention truth instead of looking normally completed.",
             "Output is bounded; use command-run get and artifact get for drill-down.",
             "Carries aggregate Surfaces (status×type + top uncovered) and Work Buffer (pending coverage by gf-bucket) rollups plus coverage/read-first intel notes — drill into per-item coverage-items / request-variants / work-buffer only when a rollup flags a bucket.",
             "Carries an Attempts do-today ledger (recorded blocked techniques and roe_blocked findings) — read it BEFORE re-dispatching a surface so a walled-off technique is not silently re-attempted.",
@@ -981,17 +1047,20 @@ _CONTRACTS: dict[str, CommandContract] = {
             'vigil assess finding verify <slug> --disposition confirmed --reason "..."',
             'vigil assess finding verify <slug> --disposition downgraded --reason "..." --new-severity low',
             'vigil assess finding verify <slug> --disposition false_positive --reason "..." --kill-reason "..." --kill-check 2',
+            'vigil assess finding verify <slug> --disposition confirmed --reason "Re-reviewed current sealed source" --source-name code-vuln-verifier --provenance-inline \'{"code_snapshot":{"repo_id":7,"repo_generation":3,"source_manifest_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}\'',
             "vigil assess finding verify <slug> --payload-file verify.json",
             'vigil assess finding verify VA-001 VA-002 VA-003 --disposition confirmed --reason "batch: all reproduced"',
         ),
         author_supplied_fields=(
             "disposition",
             "reason_text",
+            "provenance.code_snapshot only when a code verifier binds/rebinds after reviewing current sealed bytes",
         ),
         notes=(
             "Use for confirmed, downgraded, and disputed verification outcomes.",
             "For false_positive, pass --disposition false_positive with details.kill_reason/details.kill_check (via --kill-reason/--kill-check).",
             "Use explicit flags for ordinary transitions. --payload-file is for a final, complete verification-transition document; it is mutually exclusive with request-content flags, while --narrative may accompany it.",
+            "A stale or legacy-unbound file finding can become current only through this verification transition. After independently re-reading the current sealed bytes, code-vuln-verifier passes --provenance-inline with code_snapshot.repo_id, repo_generation, and source_manifest_digest copied from Code Source Identity. Never use the flag to relabel old evidence without that review; generic finding update rejects the reserved binding.",
             "--details-inline MERGES, and the merge DROPS empty values (null, \"\", [], {}). Passing one is REJECTED at the CLI rather than returning 200 with a bumped row_version and unchanged content. To CLEAR a details key, send the complete object with --details-replace --expected-row-version <n>; to set one, give it a non-empty value.",
             "--evidence-ref is shape-checked the same way `finding record` checks it: a URL, a composite (\"scans/a.out; scans/b.out\"), or prose (\"command-runs 56052/56054\") WARNs and still writes, because the backend indexer mints NO artifact row for those shapes. Point it at ONE engagement-local path (a directory of captured evidence is fine).",
             "The generic --inline and trailing positional JSON forms were REMOVED. Use explicit flags or --payload-file <path>.",
@@ -1010,6 +1079,18 @@ _CONTRACTS: dict[str, CommandContract] = {
                 "disposition": "downgraded",
                 "reason_text": "Impact is lower after retest.",
                 "new_severity": "low",
+            },
+            {
+                "disposition": "confirmed",
+                "reason_text": "Re-reviewed the current sealed source and reproduced the dataflow.",
+                "source_name": "code-vuln-verifier",
+                "provenance": {
+                    "code_snapshot": {
+                        "repo_id": 7,
+                        "repo_generation": 3,
+                        "source_manifest_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    }
+                },
             },
         ),
     ),
@@ -1196,11 +1277,13 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Operate the backend code-analysis queue and cross-file trigger lifecycle.",
         schema_name="backend code-analysis queue / trigger request models",
         preferred_invocations=(
+            "vigil assess code-dispatch queue <queue-items-json-file>",
+            "vigil assess code-dispatch reanalyze <queue-items-json-file> <reason>",
             "vigil assess code-dispatch fetch <limit> <agent-name>",
             "vigil assess code-dispatch fetch <limit> <agent-name> --repo-id <id> --classification <tier> --batch-theme <theme>",
             "vigil assess code-dispatch fetch <limit> <agent-name> --ids-file <queue-ids-json>",
             "vigil assess code-dispatch heartbeat <item-id> <agent-name> <lease-token>",
-            "vigil assess code-dispatch done <item-id> <agent-name> <lease-token> <disposition> <cwe-coverage-json-file> [notes]",
+            "vigil assess code-dispatch done <item-id> <agent-name> <lease-token> <disposition> <cwe-coverage-json-file> [notes] [--dry-run] [--skip-reason <reason>]",
             "vigil assess code-dispatch list-triggers [status]",
             "vigil assess code-dispatch resolve-triggers <triggers-json-file> <resolution-status> <note>",
             "vigil assess code-dispatch requeue-triggers <triggers-json-file>",
@@ -1209,6 +1292,9 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         author_supplied_fields=(
             "queue item id(s)",
+            "queue mode: initial through `queue`, or explicit reanalysis through `reanalyze`",
+            "a non-empty audit reason for every reanalysis attempt",
+            "an explicit priority exactly equal to the file's current analysis_priority",
             "optional atomic fetch filters: repo_id, classification, batch_theme, and item_ids",
             "the fetched agent_name + lease_token for heartbeat, results, and closeouts",
             "bare JSON array for cwe_coverage when completing a queue item",
@@ -1217,21 +1303,31 @@ _CONTRACTS: dict[str, CommandContract] = {
             "resolution_note explaining why the trigger is accepted without requeue",
         ),
         notes=(
-            "Fetch filters are applied inside the same serialized SQL claim that changes pending rows to processing. The returned agent_name, lease_token, and repo_generation identify the owned analysis generation; reuse the agent and lease on heartbeat, result, and closeout writes.",
+            "Initial queue submission is transactionally idempotent per file and active repository generation. A retry inserts missing rows, updates only an unleased pending initial row, reports identical pending/processing work as already_active, and reports conflicts without mutating live leases or terminal evidence.",
+            "Use `reanalyze` only for deliberate added depth after a completed queue item. It creates a reasoned row linked to its completed predecessor; error and needs-context rows use their dedicated retry verbs instead.",
+            "Every initial or reanalysis item must supply priority explicitly and exactly match the current code_files.analysis_priority. The backend rejects the whole batch before mutation when any item drifts; the CLI rejects missing, non-integer, and out-of-range values instead of silently defaulting or clamping them. File, repository, queue-item, and trigger identifiers are strict positive JSON integers: booleans, floats, and numeric strings are rejected rather than coerced.",
+            "Trigger requeue rejects unclassified targets, derives priority from the current file, and transactionally merges distinct trigger context into one unleased pending row. Trigger-origin rows are protected from ordinary initial retries; new context is never written into a live processing lease.",
+            "Every queue response includes per-file inserted, updated, already_active, conflict, or reanalysis outcomes. The CLI exits nonzero when any conflict is reported, after saving and rendering the complete response.",
+            "`stats` projects only the latest current-generation attempt per file into actionable status counts and `total`. `historical_total` includes every preserved current-generation attempt; `superseded_history` is the older-attempt count excluded from actionable work. `invalid_active_identity` counts latest pending/processing rows whose lease identity is internally inconsistent. `invalid_active_history` counts files with an older pending/processing attempt overlapping the latest attempt. Both are visible debt but are not fetchable or actionable. Every exact-ID lifecycle mutation, trigger merge, initial/reanalysis write, priority synchronization, and stale reset applies this same canonical-attempt rule and fails closed on malformed history.",
+            "Fetch filters and the active repository generation are applied inside the same serialized SQL claim that changes pending rows to processing. Fetch never rewrites a stale row's generation. The returned agent_name, lease_token, and repo_generation identify the owned analysis generation; reuse the agent and lease on heartbeat, result, and closeout writes.",
+            "Queue every file admitted by the active repository generation. Classification and priority order claims; they never remove a file from accounting. A skip-tier row closes only through disposition=skipped with a structured reason.",
             "A finding/suspicious closeout requires a current same-disposition result for the active lease with inline evidence or evidence_ref. A clean closeout requires non-empty family coverage and review notes; skipped retains its structured skip reason.",
             "Analysis-result retries are idempotent within a lease. Coverage detail derives result-row, evidenced-row, and distinct-function effort from current nonsuperseded records instead of trusting the submitted effort counter alone.",
             "`resolve-triggers` records accepted terminal trigger gaps — use it when the target implementation is outside the supplied source snapshot, a source equivalent was analyzed, or the trigger family is genuinely not applicable.",
             "Do not inflate CWE effort numbers to satisfy the gate. Use `disposition=not_applicable` on the coverage entry, or `resolve-triggers` for cross-file gaps that cannot be queued.",
             "`list-triggers` defaults to pending triggers, so operators can inspect blockers before resolving or requeueing.",
-            "`retry-error` recovers queue items stuck at status='error' back to 'pending' so they re-enter the fetch rotation — `reset-stale` only recovers abandoned 'processing' rows on a time window and never touches 'error' rows.",
+            "`retry-error` recovers queue items stuck at status='error' back to 'pending' so they re-enter the fetch rotation — `reset-stale` only recovers abandoned 'processing' rows on a time window and never touches 'error' rows. Retry and stale-reset refresh ordinary queue priority from the current file; only the backend-owned metadata-refresh queue mode preserves prior-risk scheduling priority, so a caller-supplied batch theme cannot spoof this exception.",
             "`retry-needs-context` returns reviewed context gaps to pending and supersedes their old needs-context result projection.",
         ),
         common_mistakes=(
+            ("queueing a file twice for more depth", "complete the current attempt, then use `code-dispatch reanalyze <file> <reason>` so the added pass has an auditable predecessor"),
+            ("retrying error/needs-context with reanalyze", "use retry-error or retry-needs-context; reanalysis requires a completed predecessor"),
             ("filtering a fetched batch client-side", "pass repo/classification/theme/id filters to fetch so unrelated rows are never claimed"),
             ("closing finding/suspicious before recording evidence", "record the same-disposition result with evidence or evidence_ref under the active lease first"),
             ("closing clean without notes", "summarize the reviewed paths and guards in non-empty closeout notes"),
+            ("closing skipped without --skip-reason", "provide the evidence-based reason this admitted file does not receive source analysis"),
             ("cwe_coverage object wrapper", "`done` requires a bare JSON array, not {'cwe_coverage': [...]}"),
-            ("analysis_priority", "queue payloads use `priority`; classification payloads use `analysis_priority`. Preserve the architect's ordering by mapping analysis_priority to priority when queueing."),
+            ("analysis_priority", "queue payloads require explicit `priority`; copy the file's current `analysis_priority` exactly because the backend rejects any mismatch transactionally."),
             ("missing resolution_note", "accepted trigger gaps need a durable rationale"),
             ("using resolve-triggers for pending source that exists", "use requeue-triggers when the target file is available and needs analysis"),
         ),
@@ -1290,23 +1386,27 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         author_supplied_fields=(
             "repo_path (positional, required)",
-            "--name / --repo-key when the derived defaults need overriding",
+            "--name / --repo-key when the derived defaults need overriding; an explicit --repo-key must be one safe path component",
         ),
         helper_defaults=(
             ("--name", "repository directory basename"),
-            ("--repo-key", "stable name+realpath hash"),
+            ("--repo-key", "stable normalized-name+realpath hash"),
             ("--language", "unset (does NOT auto-tag unknown files)"),
             ("--default-language-for-unknown", "unset (unknown-extension files stay language-less)"),
             ("--max-included-skipped-bytes", "2000000"),
-            ("--skipped-manifest", "tools/analysis-state/skipped-artifacts/<repo-key>.json"),
+            ("--skipped-manifest", "optional projection root; default writes tools/analysis-state/skipped-artifacts/<repo_id>/<repo_generation>/<source_manifest_digest>-<snapshot_digest>.json"),
         ),
         notes=(
             "First code step: run before code-index / code-index-sync. It stages a complete source manifest and atomically promotes it, returning a repo_id that is also written into scope.json source_repos. Interrupted batches never replace the active tree; changed files invalidate their old analysis and removed files leave coverage in the same commit.",
             "Use --dry-run to report added, changed, renamed, and removed paths against the active backend generation without staging or committing.",
-            "Generated/binary/minified files and skip-dirs (node_modules, vendor, dist, ...) are excluded and accounted in the skipped-artifacts manifest. --include-minified, --include-skipped, and --include-path <glob> (repeatable) opt specific artifacts back in, capped by --max-included-skipped-bytes.",
+            "The sealed code-source-manifest/v2 is authoritative: its content address authenticates repository identity, Git provenance, every copied file, and the complete excluded_entries inventory used at refresh commit.",
+            "The skipped-artifacts file is an optional, atomically published audit projection of those authenticated exclusions, bound to repo ID, generation, backend source-manifest digest, and snapshot digest. --include-minified, --include-skipped, and --include-path <glob> (repeatable) opt specific artifacts back in, capped by --max-included-skipped-bytes.",
+            "Derived repo keys normalize unsafe repository-name characters. Explicit --repo-key values must be at most 255 filesystem-encoded bytes and one safe path component: no slash, backslash, exact '.' or '..' value, or ASCII control character.",
             "--language sets only the repo's primary language; use --default-language-for-unknown to stamp a language on unrecognized-extension files (use sparingly — a wrong stamp pollutes coverage math and structural indexing).",
         ),
         common_mistakes=(
+            ("passing a path as --repo-key", "use one safe component without /, \\, or control characters, and do not use exactly '.' or '..'; derived keys normalize unsafe name characters"),
+            ("treating --skipped-manifest as authoritative state", "the sealed v2 snapshot manifest owns exclusions; this option selects only the optional audit-projection root"),
             ("--language to tag unknown files", "--language sets the repo primary language only; use --default-language-for-unknown to stamp unrecognized-extension files"),
         ),
     ),
@@ -1317,37 +1417,43 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Build the structural index under the engagement analysis-state directory.",
         schema_name="structural-index aggregate manifest, per-repo manifest, and per-file index JSON",
         preferred_invocations=(
-            "vigil assess code-index build <repo-path> --repo-key <repo-key>",
-            "vigil assess code-index build <repo-path> --output-dir <engagement-dir>/tools/analysis-state",
-            "vigil assess code-index sync --repo-key <repo-key>",
+            "vigil assess code-index build <sealed-snapshot-path> --repo-id <repo-id>",
+            "vigil assess code-index build <sealed-snapshot-path> --repo-id <repo-id> --output-dir <engagement-dir>/tools/analysis-state",
+            "vigil assess code-index sync --repo-id <repo-id>",
         ),
         author_supplied_fields=(
-            "repo_path",
-            "repo_key when available",
+            "sealed snapshot path returned by code-ingest",
+            "--repo-id for the backend repository bound to that snapshot",
+            "--repo-key only as an optional assertion against the sealed snapshot",
             "--output-dir only for intentional non-engagement output",
         ),
         helper_defaults=(
             ("output_dir", "<engagement_dir>/tools/analysis-state"),
             ("aggregate manifest", "structural-index-manifest.json"),
-            ("per-repo manifest", "structural-index/<repo_key>-manifest.json"),
-            ("per-file indexes", "structural-index/<repo_key>/<sha16>.json"),
+            ("per-repo manifest", "structural-index/<repo_id>/<generation>/v5/<source_manifest_digest>/<structural_input_digest>/manifest.json"),
+            ("per-file indexes", "the per-repo manifest's sibling files/<file-id>.json directory"),
         ),
         notes=(
-            "The aggregate manifest is keyed by repo_key, so multiple source repos share one engagement analysis-state tree without relative-path collisions.",
+            "The aggregate manifest is keyed by numeric backend repo ID, so multiple source repos share one engagement analysis-state tree without relative-path collisions.",
+            "The build binds every artifact to the sealed snapshot, backend repository generation, source-manifest digest, source-file hash, and current canonical backend language. A language correction creates a new immutable structural-input identity without replacing the older derived artifact; an origin checkout is not an accepted input.",
+            "Each per-file artifact declares complete/degraded/unsupported analysis, parser mode, bytes scanned, unavailable/truncated dimensions, and full observed signal counts. Resource-bounded files receive an all-byte streaming security fallback plus explicit debt instead of a silent structural skip.",
+            "After a complete v5 artifact validates, build can upgrade exactly the writer-shaped structural-index-aggregate/v3 contract in place: unique keys, canonical numeric/digest/path bindings, and self-consistent debt counts are required before it retains the exact bytes under structural-index/history/aggregates/v3/<sha256>.json. It then atomically starts v4 with only the freshly rebuilt repo and never imports stale v3 repo pointers; malformed and unknown schemas fail closed.",
             "The default output directory is the one code-index sync consumes, so indexing and sync stay in one engagement-owned tree.",
             "Run inside the launched engagement session or pass --engagement-dir when outside its tree; the helper fails closed rather than write an unsynced .code-index tree into the source repo.",
         ),
         common_mistakes=(
+            ("passing the origin checkout", "pass the sealed .../<snapshot-digest>/source path published by code-ingest"),
             ("running outside engagement context", "pass --engagement-dir or --output-dir explicitly"),
             ("sync cannot find manifest", "use the default tools/analysis-state output or pass the same explicit output path consistently"),
-            ("legacy manifest with multiple repos", "pass --repo-id or rebuild the index so repo_key metadata is available"),
+            ("legacy v3 aggregate", "rerun build for each current repo; build archives the exact v3 aggregate only after a v5 artifact succeeds and publishes only that freshly rebuilt repo into v4"),
+            ("malformed or unknown aggregate schema", "inspect and migrate it explicitly; automatic archival is limited to the exact writer-shaped structural-index-aggregate/v3 contract"),
         ),
     ),
     "code-index sync": CommandContract(
         name="code-index sync",
         goals=("code-analysis",),
         phase=("code-ingest",),
-        summary="Push structural-index metadata (function/entry-point/sink/export counts) from the analysis-state manifest to the backend.",
+        summary="Push structural counts and explicit per-file/aggregate analysis debt from the analysis-state manifest to the backend.",
         schema_name="code/files bulk-structural-metadata (reads structural-index manifest + per-file index JSON)",
         preferred_invocations=(
             "vigil assess code-index sync",
@@ -1366,12 +1472,14 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         notes=(
             "Run after code-index has built the structural index into the default analysis-state tree; this consumes that manifest, so both must share the same output directory (the code-index default).",
-            "The aggregate manifest is keyed by repo_key, so multiple source repos sync from one engagement tree. Use --repo-key (or --repo-id) to re-sync just one repo.",
-            "A legacy single-repo manifest with no repo identity requires --repo-id when the engagement has more than one backend repo; otherwise rebuild the index with current code-index so repo_key metadata is recorded.",
+            "The aggregate manifest is keyed by numeric backend repo ID, so multiple source repos sync from one engagement tree. Use --repo-id (or exact --repo-key) to re-sync just one repo.",
+            "Sync validates the current artifact schema, every per-file debt record, indexed language, structural-input identity, and aggregate degraded/truncated paths and status counts against the current complete backend inventory before the backend transaction. It sends the schema with the bulk publication, and the backend independently rejects a non-current contract. Backend readiness exposes unreviewed debt as a counted quality warning during Classify/Hunt and requires durable specialist review before Verify + Variant.",
+            "Sync rejects legacy and pre-v5 structural manifests before applying repository filters or writing to the backend. Run code-index build for each current repo to archive and replace a valid v3 aggregate, or migrate malformed/unknown artifacts explicitly; sync itself never migrates.",
         ),
         common_mistakes=(
             ("manifest not found", "run code-index first, or point --manifest at the same output dir code-index wrote"),
-            ("--repo-id against an aggregate manifest with no matching identity", "pass --repo-key, or rebuild the index so repo_key/repo_path metadata matches the backend repo"),
+            ("using --repo-id to rescue a legacy manifest", "run code-index build for the current repo first; sync never archives or upgrades, and repository filters apply only after a current aggregate has been validated"),
+            ("--repo-id against a current aggregate with no matching identity", "select the numeric backend repo ID recorded by code-index build"),
         ),
     ),
     "code-record classify": CommandContract(
@@ -1396,8 +1504,9 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("repo_id", "optional disambiguator for duplicate file_path values"),
         ),
         notes=(
-            "analysis_priority sets classification ordering. The code-dispatch queue has a separate `priority` field; map analysis_priority to priority only when queueing hunt work.",
-            "Classification tiers: critical/high/medium/low/skip. analysis_priority is a 0-100 score that orders files inside a tier.",
+            "analysis_priority is required and must be an integer in the classification's band: critical 80-100, high 50-79, medium 20-49, low 5-19, skip 0. Bulk classify and partial file PATCHes validate the resulting pair without coercion or clamping.",
+            "Initial and reanalysis queue submissions must copy the file's current analysis_priority exactly. Trigger requeue derives priority server-side and accepts an optional supplied value only when it is exactly equal.",
+            "Valid slot types include EXEC-POLICY for configuration that controls command execution, plugin loading, crypto parameters, or access/session policy.",
             "Read `vigil assess contract code-record classify` before authoring the file.",
         ),
         common_mistakes=(
@@ -1454,14 +1563,16 @@ _CONTRACTS: dict[str, CommandContract] = {
         schema_name="backend threat_model object",
         preferred_invocations=(
             "vigil assess contract code-record threat-model",
-            "vigil assess code-record threat-model <repo-id> <threat-model-json-file>",
+            "vigil assess code-record threat-model <repo-id> <threat-model-json-file> --repo-generation <generation> --source-manifest-digest <sha256>",
         ),
         author_supplied_fields=(
             "repo_id",
+            "repo_generation captured before architecture analysis",
+            "source_manifest_digest captured before architecture analysis",
             "threat_model object",
         ),
         notes=(
-            "This contract is the threat-model shape source for code-architect output. The backend stores the object as durable analysis context for later dispatches.",
+            "This contract is the threat-model shape source for code-architect output. The backend compare-and-swaps the explicit generation/digest and returns conflict rather than binding old reasoning to refreshed source.",
             "Keep implementation detail in the artifact; persist durable attacker surfaces, trust boundaries, sensitive operations, and missing context through this helper.",
         ),
         common_mistakes=(
@@ -1528,6 +1639,132 @@ _CONTRACTS: dict[str, CommandContract] = {
             },
         ),
     ),
+    "code-record variant-check": CommandContract(
+        name="code-record variant-check",
+        goals=("code-analysis",),
+        phase=("code-verify",),
+        summary=(
+            "Persist one dispatch-bound receipt proving that a code-variant-hunter checked one "
+            "current file against the complete parent-finding set frozen on its dispatch."
+        ),
+        schema_name="backend VariantCheckReceiptRequest",
+        preferred_invocations=(
+            "vigil assess contract code-record variant-check",
+            "vigil assess code-record variant-check <receipt-json-file>",
+            "vigil assess code-record variant-check -",
+        ),
+        author_supplied_fields=(
+            "dispatch_id (active/completed code-variant-hunter dispatch that performed the check)",
+            "file_id and repo_id",
+            "repo_generation and source_manifest_digest from the current Code Source Identity block",
+            "file_sha256 from the sealed current file",
+            f"parent_finding_slugs (sorted, unique, at most {MAX_VARIANT_PARENT_FINDINGS} entries, and exactly the parent set registered on this dispatch's finding_slugs; [] is valid)",
+            "status (literal completed)",
+            "evidence_ref (engagement-owned per-file scan evidence)",
+            "rationale (what was searched, traced, and ruled in or out)",
+        ),
+        notes=(
+            "Record one receipt per checked file before the variant hunter hands off, including clean files and files where every match had a sufficient guard. A prose table or handoff alone is not durable coverage.",
+            "The backend derives file path/language/classification/role/slot types, recomputes parent and variant-input digests, and rejects stale source identity, file bytes, dispatch role, or any parent set that differs from the dispatch-registered finding_slugs with 409.",
+            "The verifier runs in parallel and may change finding dispositions. Receipt authority therefore stays on the immutable parent set registered when the variant-hunter dispatch began; repeat that set at closeout so the receipt remains attached to its dispatch.",
+            "Input is one strict JSON object from a regular file, or from stdin only when the positional value is exactly `-`; inline JSON is intentionally not accepted.",
+            f"On resume, `vigil assess fetch \"code/variant-checks?repo_id=<repo-id>\"` auto-pages all current receipts using the backend maximum of {MAX_VARIANT_RECEIPT_PAGE} rows per request.",
+            "Exact retries are idempotent and return the same receipt. Preserve the backend receipt/fingerprint as completion evidence.",
+        ),
+        common_mistakes=(
+            ("handoff/table only", "record one receipt per checked file with code-record variant-check before handoff"),
+            ("live/partial parent_finding_slugs", "repeat the canonical sorted set registered on the variant-hunter dispatch; do not rebuild it after the parallel verifier runs"),
+            ("stale repo/file identity", "re-read current source identity and sealed file bytes, then repeat the check"),
+            ("generic file status patch", "use this dispatch-bound receipt; a free-form variant_check_status flag is not coverage proof"),
+            ("inline JSON positional", "write the object to a file or pipe it with positional `-`"),
+        ),
+        examples=(
+            {
+                "dispatch_id": 17,
+                "file_id": 42,
+                "repo_id": 7,
+                "repo_generation": 3,
+                "source_manifest_digest": "a" * 64,
+                "file_sha256": "b" * 64,
+                "parent_finding_slugs": ["CH-001", "CH-004"],
+                "status": "completed",
+                "evidence_ref": "artifacts/variant-checks/src_parser_c.json",
+                "rationale": "Searched all parent pattern shapes, traced three candidates, and confirmed each guard blocks the defect condition.",
+            },
+        ),
+    ),
+    "code-record fuzz-decision": CommandContract(
+        name="code-record fuzz-decision",
+        goals=("code-analysis",),
+        phase=("code-verify", "code-fuzz"),
+        summary=(
+            "Persist the agent-attested, evidence-hashed current-source decision that "
+            "Phase 4 fuzzing is required or not required for one repository."
+        ),
+        schema_name="code-fuzz-decision.schema.json",
+        preferred_invocations=(
+            "vigil assess contract code-record fuzz-decision",
+            "vigil assess code-record fuzz-decision <decision-json-file>",
+            "vigil assess code-record fuzz-decision -",
+        ),
+        author_supplied_fields=(
+            "repo_id, repo_generation, and source_manifest_digest from Code Source Identity",
+            "decision (required or not_required)",
+            "target_ids (one or more sorted generation-bound target obligations for required; empty for not_required)",
+            "evidence_ref (existing engagement-owned applicability artifact)",
+            "rationale",
+        ),
+        notes=(
+            "Every current repository needs an explicit applicability decision before Phase 4 entry. Any current non-killed/non-merged native memory-safety finding in the canonical seven families makes not_required invalid; the backend exposes forced_decision=required until the operator records the required decision.",
+            "Every required decision must name at least one target_id. A not_required decision cannot name targets.",
+            "The backend hashes the evidence bytes and invalidates the decision when the repository generation, source digest, or evidence changes.",
+            "This acute gate records an agent attestation, not independent execution proof. Immutable run ownership and broker attestations remain Wave 2D work.",
+            "A different current-valid decision cannot replace the decision within the same sealed source identity. Exact replay returns the original row without another audit event; a newly forced memory finding invalidates not_required and permits only monotonic strengthening to required.",
+            "Decision history is immutable and paginated at `code/fuzz/decisions?repo_id=<id>&include_stale=true&limit=100&offset=0`; rows expose their current evidence verdict.",
+            "Input is one strict JSON object from a regular file or stdin (`-`); inline JSON is not accepted.",
+        ),
+        common_mistakes=(
+            ("skip only in a handoff", "persist the decision with code-record fuzz-decision"),
+            ("not_required despite a current native memory-safety finding", "run the campaign; the backend rejects the waiver"),
+            ("stale source identity", "re-evaluate applicability against the current sealed generation"),
+        ),
+    ),
+    "code-record fuzz-campaign": CommandContract(
+        name="code-record fuzz-campaign",
+        goals=("code-analysis",),
+        phase=("code-fuzz",),
+        summary=(
+            "Persist one agent-attested bounded generation- and fuzz-dispatch-bound sanitizer campaign outcome."
+        ),
+        schema_name="code-fuzz-campaign-receipt.schema.json",
+        preferred_invocations=(
+            "vigil assess contract code-record fuzz-campaign",
+            "vigil assess code-record fuzz-campaign <receipt-json-file>",
+            "vigil assess code-record fuzz-campaign -",
+        ),
+        author_supplied_fields=(
+            "dispatch_id for the code-fuzz-engineer that built and triaged the campaign",
+            "repo_id, repo_generation, and source_manifest_digest",
+            "target_id and covered_finding_slugs",
+            "engine, sorted sanitizers, run_budget_seconds, and executions",
+            "outcome, crash_count, and triage_summary",
+            "evidence_ref and rationale",
+        ),
+        notes=(
+            "Covering outcomes are completed_no_crash and completed_crashes_triaged. build_failed and campaign_failed are honest terminal records but leave obligations open.",
+            "A no-crash receipt means only that the stated bounded campaign observed no sanitizer crash; it is not proof that the target is vulnerability-free.",
+            "This acute receipt is agent-attested. It does not independently prove the build, harness, seed corpus, execution environment, or individual crash dispositions; immutable run-owned broker receipts and per-crash lifecycle remain Wave 2D work.",
+            "evidence_ref must name a compact engagement-owned receipt artifact no larger than 256 KiB. Keep full build/fuzzer/sanitizer outputs as separately retained engagement artifacts and list their identities in that compact manifest; this acute receipt hashes only the manifest bytes.",
+            "The backend derives the worker identity from an active/completed code-fuzz-engineer dispatch and rejects cross-engagement, wrong-role, stale-generation, and evidence-integrity mismatches.",
+            "Complete/report readiness stays blocked until every required target and current non-killed/non-merged native memory-safety finding has a covering current receipt.",
+            "Campaign history is paginated at `code/fuzz/campaign-receipts?repo_id=<id>&include_stale=true&limit=100&offset=0`; failed attempts remain durable and listable but never cover an obligation.",
+        ),
+        common_mistakes=(
+            ("campaign JSON artifact only", "record a durable backend receipt with code-record fuzz-campaign"),
+            ("failed campaign marked no-crash", "use campaign_failed or build_failed; failure does not cover an obligation"),
+            ("untriaged crashes", "triage every crash before completed_crashes_triaged"),
+        ),
+    ),
     "code-coverage": CommandContract(
         name="code-coverage",
         goals=("code-analysis",),
@@ -1538,21 +1775,25 @@ _CONTRACTS: dict[str, CommandContract] = {
             "vigil assess code-coverage",
             "vigil assess code-coverage --cwe-matrix",
             "vigil assess code-coverage --require-gate-pass",
+            "vigil assess code-coverage --require-transition-ready verify-variant",
             "vigil assess code-coverage --repo-id <repo-id> --cwe-matrix --require-gate-pass",
         ),
         author_supplied_fields=(
             "--repo-id to scope one repo",
-            "--cwe-matrix / --require-gate-pass flags as needed",
+            "--cwe-matrix / --require-gate-pass for review quality",
+            "--require-transition-ready <target-phase> for structural/lifecycle readiness",
         ),
         helper_defaults=(
             ("--repo-id", "unset (aggregate across all repos)"),
             ("--cwe-matrix", "off (summary view; on shows the per-file CWE effort matrix)"),
-            ("--require-gate-pass", "off (informational; on exits non-zero unless the gate passes)"),
+            ("--require-gate-pass", "off (on exits non-zero unless the self-reported review-quality gate passes)"),
+            ("--require-transition-ready", "off (on fetches target-specific backend readiness and exits non-zero when hard blockers remain)"),
         ),
         notes=(
             "The code Core-Loop coverage check — read it each iteration to see which files and vuln classes are under-tested before dispatching more hunt work.",
             "--cwe-matrix renders the per-file CWE effort table with a structural-verification cross-check (functions_analyzed vs the structural index) and flags critical/high files below their effort threshold.",
-            "--require-gate-pass makes the command a gate: it exits non-zero when the backend coverage gate has not passed (or, under --cwe-matrix, when a critical file has an effort gap), so it can front a phase transition.",
+            "--require-gate-pass is the quality gate for CWE effort. It does not replace target-specific structural/lifecycle readiness.",
+            "--require-transition-ready consumes backend readiness for classify-map, hunt, verify-variant, fuzz, or complete. Identity/incomplete-index blockers are always non-overrideable; unreviewed degraded/unsupported/truncated files are counted quality warnings during Classify/Hunt and become non-overrideable at Verify + Variant until each has a durable analyzed/done specialist review receipt. Effort warnings remain a separate quality signal.",
         ),
     ),
     "code-size-summary": CommandContract(
@@ -1834,10 +2075,12 @@ _CONTRACTS: dict[str, CommandContract] = {
             "vigil assess command-run list",
             "vigil assess command-run list --q sqlmap --show-matches",
             "vigil assess command-run list --target-host api.example.com --technique SSRF",
+            "vigil assess command-run list --output-attention --json --limit 1000",
         ),
         author_supplied_fields=(),
         notes=(
             "Read-only audit search. `--q` is a fuzzy keyword search over command/tool/previews/metadata/finding-aliases; `--sort {relevance|recent|distant}` (distant surfaces coverage-gap candidates); filters include --agent-name / --phase / --tool-name / --tool-bin / --target-host / --technique / --route.",
+            "`--output-attention` returns only rows whose output cleanup/integrity is pending or warning, whose physical cleanup is deferred, or whose retention is untrusted/integrity_failure. Use `--limit 1000` plus `--offset` pagination when a sweep/resume warning reports omitted row ids.",
             "Drill into a single row with `vigil assess command-run get <id>`.",
         ),
     ),
@@ -2531,9 +2774,10 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
         "Subcommands: start | status | tail | stop | list.",
     ),
     "sweep-orphans": (
-        "Host-side reconciler for `assessment_command_runs` rows stuck in status=running past --max-age-seconds. Run after a backend restart, host crash, or any window where finalize PATCHes may have failed.",
+        "Host-side reconciler for `assessment_command_runs` rows stuck in status=running and terminal host-exec rows committed with output cleanup/integrity pending past --max-age-seconds. Run after a backend restart, host crash, or any window where finalize PATCHes may have failed.",
         "Liveness probe: `docker exec <container> kill -0 <pid>` against the wrapper-recorded pid file at /tmp/vigil-pid-<run_uuid>.pid. run_uuid comes from the row's run_uuid column (stdout_path parsing kept only for older rows).",
         "PID alive -> left alone (still-running). PID dead OR pid file missing -> finalized to status=lost via PATCH command-runs/{id}.",
+        "A terminal host-exec row with output_cleanup_status=pending or output_integrity_status=pending is aged only from server-owned output_recovery_observed_at, then receives an idempotent duplicate terminal PATCH. New finalizations stamp that clock with terminal state; migrated pending rows start a recovery baseline when first observed rather than fabricating historical commit time. Recovery counts only when the response proves the same numeric row id and terminal status, recovered_pending_output=true, valid non-pending cleanup/integrity outcomes, and a recognized terminal retention class. Empty, unknown, or transient suppression_pending retention is never accepted as recovery. Unproven recovery remains visible in skipped_unverifiable/pending_recovery_failed; deferred, warning, and integrity_failure outcomes increment recovered_degraded and require operator attention.",
         "Rows are skipped when Docker probing itself fails, since the command cannot distinguish a live job from an unavailable liveness check.",
         "--scope {command-runs|jobs|all} (default command-runs): `jobs` also reconciles stuck assessment_jobs rows (the async dtach-job lifecycle). For jobs the host-readable exit marker is authoritative (marker present -> completed/failed with its real exit code); PID gone with no marker -> lost. This converges any job the agent was killed before it could poll to completion.",
         "Use --dry-run first to inspect candidates without writing — a thorough sweep is cheap, an incorrect finalize is not.",
@@ -3228,6 +3472,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             preferred_invocations=(
                 "vigil assess agent start --agent-id <id> --role <role> "
                 "--task \"...\" [--application-unit-id <id>] "
+                "[--code-repo-id <repo-id>] "
                 "--model <name> --reasoning <level> "
                 "--dispatch-mode <mode> --skills \"<skill>[,<skill>...]\"",
                 "vigil assess agent start --from-json <payload.json>",
@@ -3239,6 +3484,8 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "--skills (comma-separated; optional — omitting it WARNs, never blocks)",
                 "--task (one-line objective)",
                 "--application-unit-id (optional concrete application-unit identity for depth attribution)",
+                "--code-repo-id (code roles: selects the active backend repository used to render Code Source Identity; required when several active repositories exist)",
+                "--finding-slugs (optional canonical related/input finding set; required for a receipt-bearing code-variant-hunter dispatch)",
             ),
             helper_defaults=(
                 ("status", "in-progress (set on insert)"),
@@ -3248,8 +3495,11 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             notes=(
                 "This command only writes the backend dispatch row; it does not spawn or "
                 "launch the specialist. After it succeeds, launch the specialist in the active "
-                "client and pass the printed Runtime Identity block.",
+                "client and pass the printed Runtime Identity block. For code roles the helper "
+                "validates one active indexed repository before recording and prints the "
+                "backend-derived Code Source Identity block immediately after Runtime Identity.",
                 "`skills` on a specialist dispatch is a WARNING when missing, never a rejection — neither the CLI nor the backend blocks on it. A specialist picks its skills from what it observes, so the honest list is often known only after the dispatch runs. Set it when the applicable skill is already clear; otherwise name it in the handoff.",
+                "Missing requested model or reasoning is also visible warning debt: the dispatch remains usable, but it is not a fully measured/replayable recipe. Never invent an actual runtime model when the client does not expose it.",
                 "Discover skill names with `vigil assess list-skills` — each value must match a directory under `agent/skills/<name>/`.",
                 "Pair with `agent done` when the dispatch finishes; rows left `in-progress` past the dispatch's actual lifetime corrupt dedup checks.",
             ),

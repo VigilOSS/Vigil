@@ -4,11 +4,13 @@ skill: report-generation
 category: Disclosure & Reporting Formats
 ---
 
-**Title:** SSRF in webhook config allows org admin to steal IAM credentials
+**Title:** SSRF in webhook config lets any integration owner steal IAM credentials
 
 **Weakness:** CWE-918: Server-Side Request Forgery (SSRF)
 
-**Severity:** High — CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:N (7.1)
+**Severity:** HIGH
+
+**CVSS:** CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N (7.7)
 
 **Run:** `python3 poc-ssrf-webhook.py`
 **Pass if:** the script prints the stolen `AccessKeyId`/`SecretAccessKey` pair
@@ -17,7 +19,7 @@ category: Disclosure & Reporting Formats
 
 ### Summary
 
-An org admin points the outgoing-webhook URL at the instance metadata service and reads the response back through the app's own "test connection" feature. `POST /api/integrations/webhooks/test` fetches the configured URL server-side and returns the response body verbatim. It exists to preview what the receiving endpoint would get, but nothing restricts the URL to the tenant's own domain or filters link-local ranges. I noticed the response carries the full body rather than a pass/fail status, which turns a blind SSRF into a direct credential read.
+Any user holding webhook-config permission — a role many orgs hand to non-admin integration owners — points the outgoing-webhook URL at the instance metadata service. `POST /api/integrations/webhooks/test` fetches that URL server-side and returns the response body verbatim, to preview what the receiving endpoint would get. Nothing restricts that URL to the tenant's own domain or filters link-local ranges. The response carries the full fetched body rather than a pass/fail status, which is what turns a blind SSRF into a direct credential read.
 
 **Exploit flow**
 1. The PoC configures the webhook target as the instance metadata address and calls test-connection to read back the response body.
@@ -51,4 +53,4 @@ Read access to the EC2 instance profile's live temporary AWS credentials, valid 
 
 ### Remediation
 
-Block outbound requests from the webhook-fetch path to RFC 1918 ranges, `169.254.169.254`, and other link-local/metadata addresses. Enforce it with a network-level egress rule or a fetch proxy, not just app-layer URL parsing that a redirect can bypass. As defense-in-depth, move the instance to IMDSv2 with a hop limit of 1 so a single-hop SSRF can't reach the credentials endpoint despite bypassed filtering.
+Block outbound requests from the webhook-fetch path to RFC 1918 ranges, `169.254.169.254`, and other link-local/metadata addresses. Enforce it with a network-level egress rule or a fetch proxy, not just app-layer URL parsing that a redirect can bypass. Independently of that filter, require IMDSv2. Its session-token PUT/GET handshake is what defeats a URL-only SSRF primitive like this one, since the attacker can't perform that exchange through a simple fetch. A hop limit alone would not help here: this request already originates on the instance itself, with no extra hop to block.

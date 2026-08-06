@@ -226,6 +226,7 @@ def test_code_coverage_contract_documents_gate_flags():
     blob += " " + " ".join(default for _, default in contract.helper_defaults)
     assert "--cwe-matrix" in blob
     assert "--require-gate-pass" in blob
+    assert "--require-transition-ready" in blob
 
 
 # The discovery / navigation / core-query commands a specialist reaches for.

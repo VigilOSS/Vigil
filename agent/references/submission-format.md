@@ -120,18 +120,17 @@ not a placeholder.
 
 **VRT:** [Platform taxonomy category path]   (HackerOne: **Weakness:** CWE-[nnn]; omitted for direct)
 
-**Severity:** [the finding's severity word — CRITICAL / HIGH / MEDIUM / LOW / INFO. The renderer
-emits this from the finding on every platform; a Bugcrowd P1-P4 priority, where the program wants
-one, goes in the `VRT:` line's taxonomy path, not here]
+**Severity:** [the finding's severity word — CRITICAL / HIGH / MEDIUM / LOW / INFO, matched to the
+CVSS band. The renderer emits this from the finding on every platform. A Bugcrowd P1-P4 priority
+appears nowhere in this document: the operator sets it in Bugcrowd's own priority field, the VRT
+leaf you name already carries its default, and appending it to the `VRT:` line breaks that line's
+verbatim paste into the platform's VRT selector — see `templates/bugcrowd.md`]
 
 **CVSS:** CVSS:3.1/[vector] ([score])
 
 **Asset:** [finding canonical_location, verbatim]
-
 **Run:** [details.run]
-
 **Pass if:** [details.pass_if]
-
 **Deconfliction:** [required attribution header, e.g. X-HackerOne, if the program requires one]
 
 ---
@@ -147,7 +146,8 @@ no commands, giving a triager the mechanism before Steps' commands start — ins
 adds no numbering or marker of its own, so your numbers are what a triager reads and what any later
 cross-reference in the submission ("follow the redirect from step 4") resolves against. Prefix each
 step with the acting identity (`[attacker]` / `[administrator]` / `[server]` / `[both]`, or
-the finding's own role names; compound form like `[administrator, browser]` for a context switch).
+the finding's own role names; compound form like `[administrator, browser]` for a context switch,
+or `[attacker, concurrent]` for a step whose requests fire in parallel).
 Read the identity off the step's own request — which session, token, or header the argv carries — and
 run `vigil assess command-run get <id>` for a step whose actor the argv does not make obvious.
 One action per step, no narrative between
@@ -177,7 +177,7 @@ Truncated to only the lines that matter. No full tool dumps.
 Genuine third-party PII must be partial-masked; self-owned/synthetic data is shown in full — see "PII redaction" below.
 This is stored back on the finding as `details.evidence`; the raw output stays in `scans/`.]
 
-### Attack Scenario
+(### Attack Scenario)
 [2-3 sentences. Realistic adversary class + the access they start with + the action, ending at the
 moment of compromise. Stops there — no scope counts or blast-radius quantification (those are Impact).
 No theory.]
@@ -336,15 +336,20 @@ followability reason.
 | Title | 12 words, single clause |
 | Any single sentence | 25 words (20 in Steps to Reproduce) |
 | Summary | ≤4 sentences + optional 3-5 step Exploit flow |
-| Steps to Reproduce | One sentence per step, no narrative between steps; ≤10 steps, one action per step |
+| Steps to Reproduce | One sentence per step, no narrative between steps; ≤10 steps for most findings, one action per step |
 | Evidence | ≤15 lines of content per fenced block; annotate the proof line, and carry only proof the steps cannot show |
 | Attack Scenario | 3 sentences |
 | Impact | 2 sentences |
 | Remediation | 3 items |
-| Related Findings (if present) | 1 sentence per cross-reference |
 | Deconfliction (if required by program) | 3 lines: researcher ID, source IP, UTC time window |
 
 Sections not in this table (Chain Potential, Defender-positive, Probe Coverage, Architectural Analysis, Fix Validation steps) do not exist in external submissions. If content belongs in one of those categories, it belongs in the internal `report.md`, not the submission.
+
+A chain genuinely requiring more identities or stages may exceed the 10-step guideline — see the
+`[long]` exemplar in "Examples" below, where every one of 16 steps is load-bearing. That is the
+exception, not permission to pad: a finding that needs more space because it restates controls,
+narrates methodology, or re-proves an already-established fact is still over budget, per reporting.md
+Rule 21.
 
 **This table is the sole owner of external-submission section length.** `agent/rules/reporting.md`
 Rule 10 owns the internal `report.md`'s separate, non-conflicting ceilings for
@@ -428,9 +433,9 @@ Where a row's rationale is a reporting rule it cites the rule (`agent/rules/repo
 ### Proof & evidence
 
 - [ ] **[both]** Evidence is authored, annotated proof — not a raw tool dump; each fenced block is truncated to only the lines that prove the finding (≤15 lines of content per block in a submission; reporting.md Rule 10 owns the internal report's own ceiling), with the critical line bolded or `<-- proof`-annotated so a reviewer finds it in seconds (reporting.md Rule 13)
-- [ ] **[both]** Title and summary claim no reach, read, or impact beyond what the Evidence block literally shows — read them once as a blind triager would before publish, pre-empting the blind-triage lens rather than waiting for it to catch overclaim
+- [ ] **[both]** Title and summary claim no reach, read, or impact beyond what the Evidence block literally shows — fix any claim the Evidence does not literally support
 - [ ] **[both]** A reachable-but-not-fully-exploited finding scores CVSS on the demonstrated outcome only — there is a single `cvss_vector` field, not a separate score for the further reach a defender should still fix; name that further reach in `remediation` or one caveat sentence in `impact`, never as a second CVSS vector, and never in the title or summary
-- [ ] **[submission]** For any finding with claimed CVSS ≥ 8.0 (critical-severity), `agent/skills/disclosure-deployment-shape-check/SKILL.md`'s eight-category audit ran and passed before send — it catches the deployment-shape overstatement class (allocator dependence, build-flag gates, claim-vs-evidence fidelity, vendor-distro variation) that source-only verification does not, because those facts live in the runtime deployment, not the code. The audit memo lives at `tools/analysis-state/disclosure-shape-check-<slug>.md`.
+- [ ] **[submission]** For any finding with claimed CVSS ≥ 8.0 (upper-High into Critical — the platform's own "critical" label starts at 9.0), `agent/skills/disclosure-deployment-shape-check/SKILL.md`'s eight-category audit ran and passed before send — it catches the deployment-shape overstatement class (allocator dependence, build-flag gates, claim-vs-evidence fidelity, vendor-distro variation) that source-only verification does not, because those facts live in the runtime deployment, not the code. The audit memo lives at `tools/analysis-state/disclosure-shape-check-<slug>.md`.
 - [ ] **[submission]** PoC form matches the reproduction: inline-only → no attachment; a script → staged `poc.<ext>` with the correct extension, its run command, and a one-line pass criterion; multi-file → every file staged and attached
 - [ ] **[submission]** The attached PoC is agent-independent by inspection (de-harness rules above) and its clean-environment reproduction was established at exploit time — the report-writer does not re-run it here
 - [ ] **[submission]** The PoC script is minimal — no line that does not contribute to the decisive observable; a reviewer unfamiliar with the finding could read it end to end in under a minute
@@ -452,6 +457,7 @@ Where a row's rationale is a reporting rule it cites the rule (`agent/rules/repo
 - [ ] **[both]** The opening does not echo the title — sentence 1 adds the proof, victim scope, or attacker outcome the title does not carry (reporting.md Rule 11)
 - [ ] **[both]** No vulnerability-class definitions — the audience knows XSS/SQLi/IDOR/SSRF; jump to the specifics (reporting.md Rule 11)
 - [ ] **[both]** No banned filler phrases (`Furthermore`, `It is worth noting`, `During the course of our assessment`, `robust`, `comprehensive`, …) (reporting.md Rule 11)
+- [ ] **[both]** No narration of the report's own revision history or an earlier investigative pass being wrong (`Earlier revisions of this report carried...`, `An earlier pass... wrongly concluded...`) — state the current, correct fact only (reporting.md Rule 11)
 - [ ] **[both]** Active voice throughout — the subject acts (reporting.md Rule 12)
 - [ ] **[both]** Every sentence is load-bearing — if removing it does not reduce the reader's understanding, cut it (reporting.md Rule 15)
 - [ ] **[submission]** No "Defender-positive", "Dead ends", "Negative findings", or "What was ruled out" section or sub-section anywhere in the submission — a control that proves the causal claim (a safe branch escaping the same bytes, a pre-exploitation capability baseline) is corroborating proof in Evidence, not a dead end (reporting.md Rule 20)
@@ -461,7 +467,6 @@ Where a row's rationale is a reporting rule it cites the rule (`agent/rules/repo
 - [ ] **[submission]** No sentence instructs the reviewer how to interpret, score, or act on the finding (`"please do not treat"`, `"recorded so triage does not re-investigate"`, `"triage can prioritize"`) (reporting.md Rule 20)
 - [ ] **[submission]** The word "submission" does not appear in the body prose — use "finding" or "report" (reporting.md Rule 20)
 - [ ] **[submission]** CWE, CVSS, or VRT that appear in header fields are not restated or justified inside body prose (reporting.md Rule 20)
-- [ ] **[submission]** Related findings (if present) are one sentence each at the end of the submission, not multi-paragraph cross-references (reporting.md Rule 20)
 - [ ] **[submission]** No em-dash appears more than once per paragraph; replace surplus em-dashes with a period, comma, or parentheses
 - [ ] **[submission]** Contractions appear where natural (doesn't, it's, I've, won't) — the prose is not uniformly formal
 - [ ] **[submission]** If a genuine first-person observation, hunch, or unresolved gap exists, it is stated in your own voice ("I traced the failure to…") rather than flattened into third-person narration — one is usually there on a real finding, but do not manufacture one to fill this row (reporting.md Rules 15, 20). External submissions only; the internal `report.md` stays impersonal
@@ -471,8 +476,17 @@ Where a row's rationale is a reporting rule it cites the rule (`agent/rules/repo
 
 ## Examples
 
-- `agent/references/examples/submission-bugcrowd-idor-invoice-access.md` — Bugcrowd IDOR (VRT category, inline request/response proof)
-- `agent/references/examples/submission-hackerone-ssrf-webhook.md` — HackerOne SSRF (CWE weakness, `poc_code` proof)
-- `agent/references/examples/submission-direct-sql-injection-login.md` — Direct disclosure SQL injection (no platform-specific fields)
-- `agent/references/examples/bugbounty-submission-ldap-injection.md` — LDAP injection with a working PoC
-- `agent/references/examples/submission-direct-buffer-overflow-fuzz.md` — Direct disclosure memory-safety/buffer-overflow from a fuzzing campaign (reachable from `agent/phases/code-phase-4-fuzz.md`)
+Each entry is tagged **[short/medium/long]** by complexity — pick the tier that matches the finding
+you're writing, not just the vuln class. A short reference miscalibrates a report-writer facing a
+genuinely multi-step chain: it has no model for how many steps or Evidence blocks are legitimate, and
+tends to either under-write (missing proof) or over-write (padding). Reach for **[medium]** or
+**[long]** whenever Steps to Reproduce needs more than 3-4 steps or Evidence needs more than one block.
+
+- `agent/references/examples/submission-bugcrowd-idor-invoice-access.md` — **[short]** Bugcrowd IDOR (VRT category, inline request/response proof)
+- `agent/references/examples/submission-hackerone-ssrf-webhook.md` — **[short]** HackerOne SSRF (CWE weakness, `poc_code` proof)
+- `agent/references/examples/submission-direct-sql-injection-login.md` — **[short]** Direct disclosure SQL injection (no platform-specific fields)
+- `agent/references/examples/bugbounty-submission-ldap-injection.md` — **[short]** LDAP injection with a working PoC
+- `agent/references/examples/submission-direct-buffer-overflow-fuzz.md` — **[short]** Direct disclosure memory-safety/buffer-overflow from a fuzzing campaign (reachable from `agent/phases/code-phase-4-fuzz.md`)
+- `agent/references/examples/submission-hackerone-race-wallet-withdrawal.md` — **[short]** HackerOne race condition (CWE-362, impossible end-state proof, compound `[attacker, concurrent]` actor label)
+- `agent/references/examples/submission-bugcrowd-missing-auth-shared-report-bucket.md` — **[medium]** Bugcrowd missing authentication (VRT category, 9 steps, cross-account read of a shared storage bucket via an unauthenticated render endpoint)
+- `agent/references/examples/submission-hackerone-authz-shared-widget-query-override.md` — **[long]** HackerOne incorrect authorization (CWE-863, 16 steps, 5-block Evidence section, a shared-dashboard-widget query override that runs under the creator's permission instead of the requester's)

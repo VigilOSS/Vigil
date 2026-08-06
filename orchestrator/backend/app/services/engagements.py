@@ -25,6 +25,7 @@ class EngagementView:
     status: str
     engagement_root: str
     current_phase: str
+    code_phase: str | None
     exploit_policy: str
     exploit_review_state: str
     approved_targets: list[str]
@@ -378,13 +379,31 @@ def maybe_sync_engagements(force: bool = False) -> None:
 
 def _scope_details(
     engagement_root: Path,
-) -> tuple[str, str, str, list[str], list[str], int, str | None, list[str], list[str], list[str]]:
+) -> tuple[
+    str,
+    str | None,
+    str,
+    str,
+    list[str],
+    list[str],
+    int,
+    str | None,
+    list[str],
+    list[str],
+    list[str],
+]:
     try:
         scope = _migrate_scope_file(engagement_root / "scope.json")
     except RuntimeError as exc:
         _logger.warning("Using persisted engagement identity for invalid scope at %s: %s", engagement_root, exc)
-        return "unknown", "pause", "pending", [], [], 0, None, [], [], []
+        return "unknown", None, "pause", "pending", [], [], 0, None, [], [], []
     current_phase = str(scope.get("current_phase") or "unknown")
+    raw_code_phase = scope.get("code_phase")
+    code_phase = (
+        str(raw_code_phase).strip()
+        if isinstance(raw_code_phase, str) and raw_code_phase.strip()
+        else None
+    )
     exploit_policy = str(scope.get("exploit_policy") or "pause")
     exploit_review_state = str(scope.get("exploit_review_state") or "pending")
     approved_targets = scope.get("approved_targets")
@@ -405,6 +424,7 @@ def _scope_details(
     out_of_scope = _collect_out_of_scope(scope)
     return (
         current_phase,
+        code_phase,
         exploit_policy,
         exploit_review_state,
         [str(item) for item in approved_targets],
@@ -490,6 +510,7 @@ def _collect_out_of_scope(scope: dict[str, Any]) -> list[str]:
 def _view_for(engagement: Engagement, *, session_count: int | None = None) -> EngagementView:
     (
         current_phase,
+        code_phase,
         exploit_policy,
         exploit_review_state,
         approved_targets,
@@ -507,6 +528,7 @@ def _view_for(engagement: Engagement, *, session_count: int | None = None) -> En
         status=engagement.status,
         engagement_root=engagement.engagement_root,
         current_phase=current_phase,
+        code_phase=code_phase,
         exploit_policy=exploit_policy,
         exploit_review_state=exploit_review_state,
         approved_targets=approved_targets,

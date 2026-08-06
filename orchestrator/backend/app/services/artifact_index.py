@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import datetime as dt
+import errno
 import hashlib
 import mimetypes
+import os
+import sqlite3
+import stat
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -39,20 +43,73 @@ def _engagement_root(engagement_id: int) -> tuple[Any, Path]:
 def _normalize_relative_path(root: Path, path_value: str) -> str:
     value = str(path_value or "").strip()
     if not value:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="artifact path is required")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="artifact path is required"
+        )
     if "://" in value and urlparse(value).scheme != "file":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="artifact path must be engagement-local")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="artifact path must be engagement-local",
+        )
     raw_path = Path(value)
     candidate = raw_path.expanduser() if raw_path.is_absolute() else root / raw_path
-    resolved = candidate.resolve(strict=False)
+    # Canonicalise platform aliases such as macOS ``/var`` → ``/private/var``
+    # for the containment comparison. The returned relative path is then
+    # re-opened component-by-component with O_NOFOLLOW, so this resolution is
+    # not trusted as the read authorization.
+    normalized = candidate.resolve(strict=False)
     try:
-        relative = resolved.relative_to(root)
+        relative = normalized.relative_to(root)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="artifact path must be inside the engagement directory",
         ) from exc
     return relative.as_posix()
+
+
+def _open_registered_artifact(root: Path, relative_path: str) -> int | None:
+    """Open one registered path without following any component symlink."""
+    parts = Path(relative_path).parts
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    leaf_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    opened: list[int] = []
+    try:
+        if not parts:
+            return os.open(root, leaf_flags)
+        current = os.open(root, directory_flags)
+        opened.append(current)
+        for component in parts[:-1]:
+            current = os.open(component, directory_flags, dir_fd=current)
+            opened.append(current)
+        try:
+            return os.open(parts[-1], leaf_flags, dir_fd=current)
+        except FileNotFoundError:
+            return None
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+            detail = "artifact path must not traverse a symlink"
+        else:
+            detail = "artifact path could not be opened safely"
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=detail,
+        ) from exc
+    finally:
+        for descriptor in reversed(opened):
+            os.close(descriptor)
 
 
 def _guess_kind(relative_path: str, explicit: str = "") -> str:
@@ -97,7 +154,13 @@ def _is_textual(media_type: str, sample: bytes) -> bool:
     return b"\x00" not in sample[:1024]
 
 
-def _file_payload(root: Path, relative_path: str, media_type: str) -> dict[str, Any]:
+def _file_payload(
+    root: Path,
+    relative_path: str,
+    media_type: str,
+    *,
+    reject_unsafe_path: bool = False,
+) -> dict[str, Any]:
     """Index one registered path. ``present`` is EXISTENCE, not file-ness.
 
     ``vigil assess artifact register <dir>`` accepts a directory, and specialists
@@ -108,8 +171,13 @@ def _file_payload(root: Path, relative_path: str, media_type: str) -> dict[str, 
     directory has no single body to hash or preview, so those fields stay empty —
     but it is unambiguously present.
     """
-    path = root / relative_path
-    if not path.exists():
+    try:
+        descriptor = _open_registered_artifact(root, relative_path)
+    except HTTPException:
+        if reject_unsafe_path:
+            raise
+        descriptor = None
+    if descriptor is None:
         return {
             "present": False,
             "size_bytes": 0,
@@ -117,21 +185,23 @@ def _file_payload(root: Path, relative_path: str, media_type: str) -> dict[str, 
             "preview_text": "",
             "indexed_text": "",
         }
-    if not path.is_file():
-        return {
-            "present": True,
-            "size_bytes": 0,
-            "sha256": "",
-            "preview_text": "",
-            "indexed_text": "",
-        }
-    digest = hashlib.sha256()
-    size = 0
-    preview = bytearray()
-    indexed = bytearray()
-    with path.open("rb") as handle:
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            return {
+                "present": True,
+                "size_bytes": 0,
+                "sha256": "",
+                "preview_text": "",
+                "indexed_text": "",
+            }
+        digest = hashlib.sha256()
+        size = 0
+        preview = bytearray()
+        indexed = bytearray()
+        os.lseek(descriptor, 0, os.SEEK_SET)
         while True:
-            chunk = handle.read(1024 * 1024)
+            chunk = os.read(descriptor, 1024 * 1024)
             if not chunk:
                 break
             digest.update(chunk)
@@ -140,6 +210,28 @@ def _file_payload(root: Path, relative_path: str, media_type: str) -> dict[str, 
                 preview.extend(chunk[: PREVIEW_BYTES - len(preview)])
             if len(indexed) < INDEXED_TEXT_BYTES:
                 indexed.extend(chunk[: INDEXED_TEXT_BYTES - len(indexed)])
+        after = os.fstat(descriptor)
+        if (
+            before.st_dev != after.st_dev
+            or before.st_ino != after.st_ino
+            or before.st_size != after.st_size
+            or before.st_mtime_ns != after.st_mtime_ns
+            or size != after.st_size
+        ):
+            if reject_unsafe_path:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="artifact changed while it was being indexed",
+                )
+            return {
+                "present": False,
+                "size_bytes": 0,
+                "sha256": "",
+                "preview_text": "",
+                "indexed_text": "",
+            }
+    finally:
+        os.close(descriptor)
     sample = bytes(indexed or preview)
     if not _is_textual(media_type, sample):
         preview_text = ""
@@ -171,56 +263,30 @@ def _file_payload_if_changed(
     relative_path: str,
     media_type: str,
 ) -> dict[str, Any]:
-    """Skip the hash + preview read when the on-disk file is unchanged.
+    """Build registration metadata from one no-follow file descriptor."""
+    del engagement_id
+    return _file_payload(
+        root,
+        relative_path,
+        media_type,
+        reject_unsafe_path=True,
+    )
 
-    Compares the on-disk (size, mtime) against the stored row's
-    (size_bytes, last_indexed_at). When both match and the row already has a
-    sha256, return the cached payload — saves a full re-read on
-    re-registration of files that haven't changed since the last index.
-    """
-    path = root / relative_path
-    if not path.is_file():
-        # Directories (a registered evidence directory) and absent paths both
-        # fall through to the full builder — the (size, mtime) fast path below
-        # only models a regular file's body. `_file_payload` is the single
-        # existence predicate for both, so a directory is reported present.
-        return _file_payload(root, relative_path, media_type)
+
+def _execute_artifact_upsert(
+    connection,
+    sql: str,
+    parameters: tuple[Any, ...],
+):
     try:
-        stat = path.stat()
-    except OSError:
-        return _file_payload(root, relative_path, media_type)
-    with get_connection() as connection:
-        existing = connection.execute(
-            "SELECT size_bytes, sha256, preview_text, indexed_text, last_indexed_at "
-            "FROM assessment_artifacts WHERE engagement_id = ? AND relative_path = ?",
-            (engagement_id, relative_path),
-        ).fetchone()
-    if existing is None:
-        return _file_payload(root, relative_path, media_type)
-    stored_size = int(existing["size_bytes"] or 0)
-    stored_sha = str(existing["sha256"] or "")
-    stored_indexed_at = _parse_indexed_at(existing["last_indexed_at"])
-    if stored_size != stat.st_size or not stored_sha or stored_indexed_at is None:
-        return _file_payload(root, relative_path, media_type)
-    if stat.st_mtime > stored_indexed_at:
-        return _file_payload(root, relative_path, media_type)
-    return {
-        "present": True,
-        "size_bytes": stored_size,
-        "sha256": stored_sha,
-        "preview_text": str(existing["preview_text"] or ""),
-        "indexed_text": str(existing["indexed_text"] or ""),
-    }
-
-
-def _parse_indexed_at(value: Any) -> float | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        return dt.datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return None
+        return connection.execute(sql, parameters)
+    except sqlite3.IntegrityError as exc:
+        if "artifact path is reserved from indexing" in str(exc):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="artifact path is reserved from indexing",
+            ) from exc
+        raise
 
 
 def _normalize_related_finding_slug(value: str | None) -> str | None:
@@ -230,60 +296,128 @@ def _normalize_related_finding_slug(value: str | None) -> str | None:
     return canonical_finding_alias(raw) or raw
 
 
-def register_artifact(
+def _store_artifact(
     engagement_id: int,
     *,
-    path: str,
-    kind: str = "",
-    media_type: str = "",
-    sensitive: bool = False,
-    producer_agent_id: str | None = None,
-    producer_agent_role: str | None = None,
-    producer_command_run_id: int | None = None,
-    related_finding_slug: str | None = None,
-    related_chain_key: str | None = None,
-    related_surface_id: int | None = None,
-    related_request_variant_id: int | None = None,
+    relative_path: str,
+    kind: str,
+    media_type: str,
+    file_data: dict[str, Any],
+    sensitive: bool,
+    producer_agent_id: str | None,
+    producer_agent_role: str | None,
+    producer_command_run_id: int | None,
+    related_finding_slug: str | None,
+    related_chain_key: str | None,
+    related_surface_id: int | None,
+    related_request_variant_id: int | None,
+    verified_device: int | None = None,
+    verified_inode: int | None = None,
+    integrity_status: str = "unverified",
 ) -> dict[str, Any]:
-    _engagement, root = _engagement_root(engagement_id)
-    relative_path = _normalize_relative_path(root, path)
     kind_value = _guess_kind(relative_path, kind)
     media_type_value = _media_type(relative_path, media_type)
-    file_data = _file_payload_if_changed(engagement_id, root, relative_path, media_type_value)
     now = _utcnow_iso()
     linked_finding = _normalize_related_finding_slug(related_finding_slug)
     with get_connection() as connection:
-        connection.execute(
+        _execute_artifact_upsert(
+            connection,
             """
             INSERT INTO assessment_artifacts (
                 engagement_id, relative_path, kind, media_type, size_bytes, sha256,
                 preview_text, indexed_text, sensitive, present, producer_agent_id,
+                verified_device, verified_inode, integrity_status,
                 producer_agent_role, producer_command_run_id, related_finding_slug,
                 related_chain_key, related_surface_id, related_request_variant_id,
                 created_at, updated_at, last_indexed_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(engagement_id, relative_path) DO UPDATE SET
                 -- Bind the RAW caller-supplied kind/media_type here, not
                 -- excluded.* — excluded.kind carries the _guess_kind() result,
                 -- which is never empty, so NULLIF(excluded.kind, '') would
                 -- never preserve the stored kind and a bare re-register would
                 -- clobber an explicit kind (e.g. verification-narrative).
-                kind = COALESCE(NULLIF(?, ''), assessment_artifacts.kind),
-                media_type = COALESCE(NULLIF(?, ''), assessment_artifacts.media_type),
-                size_bytes = excluded.size_bytes,
-                sha256 = excluded.sha256,
-                preview_text = excluded.preview_text,
-                indexed_text = excluded.indexed_text,
-                sensitive = excluded.sensitive OR assessment_artifacts.sensitive,
-                present = excluded.present,
-                producer_agent_id = COALESCE(excluded.producer_agent_id, assessment_artifacts.producer_agent_id),
-                producer_agent_role = COALESCE(excluded.producer_agent_role, assessment_artifacts.producer_agent_role),
-                producer_command_run_id = COALESCE(excluded.producer_command_run_id, assessment_artifacts.producer_command_run_id),
-                related_finding_slug = COALESCE(excluded.related_finding_slug, assessment_artifacts.related_finding_slug),
-                related_chain_key = COALESCE(excluded.related_chain_key, assessment_artifacts.related_chain_key),
-                related_surface_id = COALESCE(excluded.related_surface_id, assessment_artifacts.related_surface_id),
-                related_request_variant_id = COALESCE(excluded.related_request_variant_id, assessment_artifacts.related_request_variant_id),
+                kind = CASE
+                    WHEN assessment_artifacts.verified_device IS NOT NULL
+                     AND excluded.verified_device IS NULL
+                    THEN assessment_artifacts.kind
+                    ELSE COALESCE(NULLIF(?, ''), assessment_artifacts.kind)
+                END,
+                media_type = CASE
+                    WHEN assessment_artifacts.verified_device IS NOT NULL
+                     AND excluded.verified_device IS NULL
+                    THEN assessment_artifacts.media_type
+                    ELSE COALESCE(NULLIF(?, ''), assessment_artifacts.media_type)
+                END,
+                size_bytes = CASE
+                    WHEN assessment_artifacts.verified_device IS NOT NULL
+                     AND excluded.verified_device IS NULL
+                    THEN assessment_artifacts.size_bytes ELSE excluded.size_bytes END,
+                sha256 = CASE
+                    WHEN assessment_artifacts.verified_device IS NOT NULL
+                     AND excluded.verified_device IS NULL
+                    THEN assessment_artifacts.sha256 ELSE excluded.sha256 END,
+                preview_text = CASE
+                    WHEN assessment_artifacts.verified_device IS NOT NULL
+                     AND excluded.verified_device IS NULL
+                    THEN assessment_artifacts.preview_text ELSE excluded.preview_text END,
+                indexed_text = CASE
+                    WHEN assessment_artifacts.verified_device IS NOT NULL
+                     AND excluded.verified_device IS NULL
+                    THEN assessment_artifacts.indexed_text ELSE excluded.indexed_text END,
+                sensitive = CASE
+                    WHEN assessment_artifacts.verified_device IS NOT NULL
+                     AND excluded.verified_device IS NULL
+                    THEN assessment_artifacts.sensitive
+                    ELSE excluded.sensitive OR assessment_artifacts.sensitive END,
+                present = CASE
+                    WHEN assessment_artifacts.verified_device IS NOT NULL
+                     AND excluded.verified_device IS NULL
+                    THEN assessment_artifacts.present ELSE excluded.present END,
+                verified_device = COALESCE(excluded.verified_device, assessment_artifacts.verified_device),
+                verified_inode = COALESCE(excluded.verified_inode, assessment_artifacts.verified_inode),
+                integrity_status = CASE
+                    WHEN excluded.verified_device IS NOT NULL
+                     AND excluded.verified_inode IS NOT NULL
+                    THEN excluded.integrity_status
+                    ELSE assessment_artifacts.integrity_status
+                END,
+                producer_agent_id = CASE
+                    WHEN assessment_artifacts.verified_device IS NOT NULL
+                     AND excluded.verified_device IS NULL
+                    THEN assessment_artifacts.producer_agent_id
+                    ELSE COALESCE(excluded.producer_agent_id, assessment_artifacts.producer_agent_id) END,
+                producer_agent_role = CASE
+                    WHEN assessment_artifacts.verified_device IS NOT NULL
+                     AND excluded.verified_device IS NULL
+                    THEN assessment_artifacts.producer_agent_role
+                    ELSE COALESCE(excluded.producer_agent_role, assessment_artifacts.producer_agent_role) END,
+                producer_command_run_id = CASE
+                    WHEN assessment_artifacts.verified_device IS NOT NULL
+                     AND excluded.verified_device IS NULL
+                    THEN assessment_artifacts.producer_command_run_id
+                    ELSE COALESCE(excluded.producer_command_run_id, assessment_artifacts.producer_command_run_id) END,
+                related_finding_slug = CASE
+                    WHEN assessment_artifacts.verified_device IS NOT NULL
+                     AND excluded.verified_device IS NULL
+                    THEN assessment_artifacts.related_finding_slug
+                    ELSE COALESCE(excluded.related_finding_slug, assessment_artifacts.related_finding_slug) END,
+                related_chain_key = CASE
+                    WHEN assessment_artifacts.verified_device IS NOT NULL
+                     AND excluded.verified_device IS NULL
+                    THEN assessment_artifacts.related_chain_key
+                    ELSE COALESCE(excluded.related_chain_key, assessment_artifacts.related_chain_key) END,
+                related_surface_id = CASE
+                    WHEN assessment_artifacts.verified_device IS NOT NULL
+                     AND excluded.verified_device IS NULL
+                    THEN assessment_artifacts.related_surface_id
+                    ELSE COALESCE(excluded.related_surface_id, assessment_artifacts.related_surface_id) END,
+                related_request_variant_id = CASE
+                    WHEN assessment_artifacts.verified_device IS NOT NULL
+                     AND excluded.verified_device IS NULL
+                    THEN assessment_artifacts.related_request_variant_id
+                    ELSE COALESCE(excluded.related_request_variant_id, assessment_artifacts.related_request_variant_id) END,
                 updated_at = excluded.updated_at,
                 last_indexed_at = excluded.last_indexed_at
             """,
@@ -299,6 +433,9 @@ def register_artifact(
                 1 if sensitive else 0,
                 1 if file_data["present"] else 0,
                 producer_agent_id,
+                verified_device,
+                verified_inode,
+                integrity_status,
                 producer_agent_role,
                 producer_command_run_id,
                 linked_finding,
@@ -321,6 +458,303 @@ def register_artifact(
     return _serialize_artifact(row)
 
 
+def register_artifact(
+    engagement_id: int,
+    *,
+    path: str,
+    kind: str = "",
+    media_type: str = "",
+    sensitive: bool = False,
+    producer_agent_id: str | None = None,
+    producer_agent_role: str | None = None,
+    producer_command_run_id: int | None = None,
+    related_finding_slug: str | None = None,
+    related_chain_key: str | None = None,
+    related_surface_id: int | None = None,
+    related_request_variant_id: int | None = None,
+) -> dict[str, Any]:
+    _engagement, root = _engagement_root(engagement_id)
+    relative_path = _normalize_relative_path(root, path)
+    with get_connection() as connection:
+        reservation = connection.execute(
+            """
+            SELECT 1 FROM assessment_artifact_path_reservations
+            WHERE engagement_id = ? AND relative_path = ?
+            """,
+            (engagement_id, relative_path),
+        ).fetchone()
+        if reservation is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="artifact path is reserved from indexing",
+            )
+        existing = connection.execute(
+            """
+            SELECT verified_device, verified_inode
+            FROM assessment_artifacts
+            WHERE engagement_id = ? AND relative_path = ?
+            """,
+            (engagement_id, relative_path),
+        ).fetchone()
+    if (
+        existing is not None
+        and existing["verified_device"] is not None
+        and existing["verified_inode"] is not None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="verified command output metadata is internal and immutable",
+        )
+    media_type_value = _media_type(relative_path, media_type)
+    file_data = _file_payload_if_changed(
+        engagement_id, root, relative_path, media_type_value
+    )
+    return _store_artifact(
+        engagement_id,
+        relative_path=relative_path,
+        kind=kind,
+        media_type=media_type,
+        file_data=file_data,
+        sensitive=sensitive,
+        producer_agent_id=producer_agent_id,
+        producer_agent_role=producer_agent_role,
+        producer_command_run_id=producer_command_run_id,
+        related_finding_slug=related_finding_slug,
+        related_chain_key=related_chain_key,
+        related_surface_id=related_surface_id,
+        related_request_variant_id=related_request_variant_id,
+    )
+
+
+def _verified_command_output_relative_path(relative_path: str) -> str:
+    path = Path(str(relative_path))
+    if (
+        path.is_absolute()
+        or ".." in path.parts
+        or len(path.parts) != 3
+        or path.parts[0] != "scans"
+        or path.parts[1] not in {"host-exec", "command-runs"}
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "verified command output must be beneath "
+                "scans/host-exec or scans/command-runs"
+            ),
+        )
+    return path.as_posix()
+
+
+def _open_verified_snapshot(root: Path, relative_path: str) -> int:
+    """Open a command-run snapshot without following any path component."""
+    normalized = _verified_command_output_relative_path(relative_path)
+    parts = Path(normalized).parts
+    if parts[:2] != ("scans", "command-runs"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="verified artifact no longer points at the snapshot directory",
+        )
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    file_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    opened: list[int] = []
+    try:
+        current = os.open(root, directory_flags)
+        opened.append(current)
+        for component in parts[:-1]:
+            current = os.open(component, directory_flags, dir_fd=current)
+            opened.append(current)
+        descriptor = os.open(parts[-1], file_flags, dir_fd=current)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            os.close(descriptor)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="verified artifact is no longer a regular file",
+            )
+        return descriptor
+    except HTTPException:
+        raise
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+            detail = "verified artifact path must not traverse a symlink"
+        elif exc.errno == errno.ENOENT:
+            detail = "verified artifact is missing"
+        else:
+            detail = "verified artifact could not be opened safely"
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=detail,
+        ) from exc
+    finally:
+        for directory_descriptor in reversed(opened):
+            os.close(directory_descriptor)
+
+
+def _verified_snapshot_payload(
+    root: Path,
+    relative_path: str,
+    *,
+    expected_device: int,
+    expected_inode: int,
+    expected_size: int,
+    expected_sha256: str,
+) -> dict[str, Any]:
+    """Read and verify one immutable snapshot from a single descriptor."""
+    descriptor = _open_verified_snapshot(root, relative_path)
+    try:
+        before = os.fstat(descriptor)
+        if (int(before.st_dev), int(before.st_ino)) != (
+            int(expected_device),
+            int(expected_inode),
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="verified artifact identity changed",
+            )
+        digest = hashlib.sha256()
+        size = 0
+        content = bytearray()
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            size += len(chunk)
+            if len(content) <= GET_CONTENT_BYTES:
+                content.extend(chunk[: GET_CONTENT_BYTES + 1 - len(content)])
+        after = os.fstat(descriptor)
+        observed_sha = digest.hexdigest() if size else ""
+        if (
+            (int(after.st_dev), int(after.st_ino))
+            != (int(expected_device), int(expected_inode))
+            or size != int(expected_size)
+            or observed_sha != str(expected_sha256)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="verified artifact content changed",
+            )
+        return {
+            "content_bytes": bytes(content[:GET_CONTENT_BYTES]),
+            "content_truncated": size > GET_CONTENT_BYTES,
+        }
+    finally:
+        os.close(descriptor)
+
+
+def register_verified_command_output(
+    engagement_id: int,
+    *,
+    relative_path: str,
+    size_bytes: int,
+    sha256: str,
+    sample_bytes: bytes,
+    verified_device: int,
+    verified_inode: int,
+    producer_command_run_id: int,
+    producer_agent_role: str,
+) -> dict[str, Any]:
+    """Index command output already read from a no-follow file descriptor.
+
+    The caller owns path opening and supplies metadata from that same descriptor,
+    so artifact indexing never reopens an attacker-swappable pathname.
+    """
+    normalized = _verified_command_output_relative_path(relative_path)
+    media_type_value = _media_type(normalized)
+    sample = bytes(sample_bytes[:INDEXED_TEXT_BYTES])
+    if _is_textual(media_type_value, sample):
+        preview_text = sample[:PREVIEW_BYTES].decode("utf-8", errors="replace")
+        indexed_text = sample.decode("utf-8", errors="replace")
+    else:
+        preview_text = ""
+        indexed_text = ""
+    return _store_artifact(
+        engagement_id,
+        relative_path=normalized,
+        kind="command-run-output",
+        media_type=media_type_value,
+        file_data={
+            "present": True,
+            "size_bytes": int(size_bytes),
+            "sha256": str(sha256),
+            "preview_text": preview_text,
+            "indexed_text": indexed_text,
+        },
+        sensitive=False,
+        producer_agent_id=None,
+        producer_agent_role=producer_agent_role,
+        producer_command_run_id=int(producer_command_run_id),
+        related_finding_slug=None,
+        related_chain_key=None,
+        related_surface_id=None,
+        related_request_variant_id=None,
+        verified_device=int(verified_device),
+        verified_inode=int(verified_inode),
+        integrity_status="verified",
+    )
+
+
+def remove_verified_command_output(
+    engagement_id: int,
+    *,
+    relative_path: str,
+) -> None:
+    """Remove every canonical row for a suppressed host-output pathname.
+
+    Path suppression is authoritative regardless of which older producer or
+    finding link registered the unique engagement/path row.
+    """
+    normalized = _verified_command_output_relative_path(relative_path)
+    with get_connection() as connection:
+        connection.execute(
+            """
+            DELETE FROM assessment_artifacts
+            WHERE engagement_id = ?
+              AND relative_path = ?
+            """,
+            (engagement_id, normalized),
+        )
+
+
+def reserve_suppressed_command_output(
+    engagement_id: int,
+    *,
+    relative_path: str,
+    reason: str,
+    command_run_id: int,
+) -> None:
+    """Durably prevent logical-suppression paths from being re-indexed."""
+    normalized = _verified_command_output_relative_path(relative_path)
+    with get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO assessment_artifact_path_reservations (
+                engagement_id, relative_path, reason, command_run_id
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(engagement_id, relative_path) DO UPDATE SET
+                reason = excluded.reason,
+                command_run_id = excluded.command_run_id
+            """,
+            (
+                engagement_id,
+                normalized,
+                str(reason or "suppressed")[:1024],
+                int(command_run_id),
+            ),
+        )
+
+
 def refresh_artifacts(engagement_id: int) -> dict[str, Any]:
     """Refresh on-disk presence/hash metadata for existing artifact rows only.
 
@@ -332,7 +766,7 @@ def refresh_artifacts(engagement_id: int) -> dict[str, Any]:
     now = _utcnow_iso()
     with get_connection() as connection:
         rows = connection.execute(
-            "SELECT id, relative_path, media_type FROM assessment_artifacts WHERE engagement_id = ?",
+            "SELECT * FROM assessment_artifacts WHERE engagement_id = ?",
             (engagement_id,),
         ).fetchall()
         present = 0
@@ -340,6 +774,50 @@ def refresh_artifacts(engagement_id: int) -> dict[str, Any]:
         for row in rows:
             relative_path = str(row["relative_path"])
             media_type_value = _media_type(relative_path, str(row["media_type"] or ""))
+            is_verified = (
+                row["verified_device"] is not None
+                or row["verified_inode"] is not None
+            )
+            if is_verified:
+                verified_ok = False
+                if (
+                    row["verified_device"] is not None
+                    and row["verified_inode"] is not None
+                ):
+                    try:
+                        _verified_snapshot_payload(
+                            root,
+                            relative_path,
+                            expected_device=int(row["verified_device"]),
+                            expected_inode=int(row["verified_inode"]),
+                            expected_size=int(row["size_bytes"] or 0),
+                            expected_sha256=str(row["sha256"] or ""),
+                        )
+                        verified_ok = True
+                    except HTTPException:
+                        verified_ok = False
+                if verified_ok:
+                    present += 1
+                    integrity_status = "verified"
+                else:
+                    missing += 1
+                    integrity_status = "mismatch"
+                connection.execute(
+                    """
+                    UPDATE assessment_artifacts
+                    SET present = ?, integrity_status = ?, updated_at = ?,
+                        last_indexed_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        1 if verified_ok else 0,
+                        integrity_status,
+                        now,
+                        now,
+                        int(row["id"]),
+                    ),
+                )
+                continue
             file_data = _file_payload(root, relative_path, media_type_value)
             if bool(file_data["present"]):
                 present += 1
@@ -449,7 +927,9 @@ def search_artifacts(
         fts_terms.append(expanded_fts_query(canonical_finding))
     fts_expr = " ".join(term for term in fts_terms if term)
     if fts_expr:
-        join_sql = "JOIN assessment_artifacts_fts ON assessment_artifacts_fts.rowid = a.id"
+        join_sql = (
+            "JOIN assessment_artifacts_fts ON assessment_artifacts_fts.rowid = a.id"
+        )
         where.append("assessment_artifacts_fts MATCH ?")
         params.append(fts_expr)
     if canonical_finding:
@@ -499,15 +979,70 @@ def get_artifact(engagement_id: int, artifact_id: int) -> dict[str, Any]:
             (engagement_id, int(artifact_id)),
         ).fetchone()
     if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="artifact not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="artifact not found"
+        )
     data = _serialize_artifact(row)
     data["content"] = ""
     data["content_truncated"] = False
-    path = root / str(row["relative_path"])
-    if bool(row["present"]) and path.is_file() and int(row["size_bytes"] or 0) <= GET_CONTENT_BYTES:
-        data["content"] = path.read_text(encoding="utf-8", errors="replace")
-    elif bool(row["present"]) and path.is_file():
-        data["content_truncated"] = True
+    if row["verified_device"] is not None or row["verified_inode"] is not None:
+        try:
+            if row["verified_device"] is None or row["verified_inode"] is None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="verified artifact identity metadata is incomplete",
+                )
+            verified = _verified_snapshot_payload(
+                root,
+                str(row["relative_path"]),
+                expected_device=int(row["verified_device"]),
+                expected_inode=int(row["verified_inode"]),
+                expected_size=int(row["size_bytes"] or 0),
+                expected_sha256=str(row["sha256"] or ""),
+            )
+        except HTTPException:
+            with get_connection() as connection:
+                connection.execute(
+                    """
+                    UPDATE assessment_artifacts
+                    SET present = 0, integrity_status = 'mismatch', updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (_utcnow_iso(), int(row["id"])),
+                )
+            raise
+        data["content"] = bytes(verified["content_bytes"]).decode(
+            "utf-8", errors="replace"
+        )
+        data["content_truncated"] = bool(verified["content_truncated"])
+        data["present"] = True
+        data["integrity_status"] = "verified"
+        return data
+    if bool(row["present"]):
+        descriptor = _open_registered_artifact(root, str(row["relative_path"]))
+        if descriptor is None:
+            data["present"] = False
+            return data
+        try:
+            metadata = os.fstat(descriptor)
+            if stat.S_ISREG(metadata.st_mode):
+                if metadata.st_size <= GET_CONTENT_BYTES:
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    chunks: list[bytes] = []
+                    remaining = GET_CONTENT_BYTES
+                    while remaining:
+                        chunk = os.read(descriptor, min(1024 * 1024, remaining))
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                        remaining -= len(chunk)
+                    data["content"] = b"".join(chunks).decode(
+                        "utf-8", errors="replace"
+                    )
+                else:
+                    data["content_truncated"] = True
+        finally:
+            os.close(descriptor)
     return data
 
 
@@ -611,7 +1146,9 @@ def set_scratch_flag(
                 (engagement_id, int(artifact_id)),
             ).fetchone()
             if row is None:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="artifact not found")
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND, detail="artifact not found"
+                )
         elif path:
             relative_path = _normalize_relative_path(root, path)
             row = connection.execute(
@@ -619,7 +1156,10 @@ def set_scratch_flag(
                 (engagement_id, relative_path),
             ).fetchone()
         else:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="path or artifact_id is required")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="path or artifact_id is required",
+            )
     if row is None:
         # Path-based mark on a path that exists on disk but has not been
         # indexed yet — register inline so the operator does not have to

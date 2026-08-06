@@ -11,6 +11,9 @@ name: ci
 #                     `--directory orchestrator/backend` resolves against the
 #                     backend cwd, collects zero tests, and pytest exits 0 —
 #                     a false green. The absolute path is load-bearing.
+#   - code-readiness: target-specific assess transition/readiness contract tests.
+#   - frontend-build: installs the locked frontend dependencies and compiles the
+#                     code-analysis readiness consumer.
 #   - ruff / mypy   : lint (`uvx ruff check .`) and types
 #                     (`uvx --with-editable . mypy src/vigil_cli`). The tree is
 #                     now lint- and type-clean, so these are blocking gates:
@@ -72,6 +75,37 @@ jobs:
       # when a relative path is resolved against --directory's cwd.
       - name: Run deterministic eval harness
         run: uv run --directory orchestrator/backend --extra dev pytest "${GITHUB_WORKSPACE}/tests/eval" -q
+
+  code-readiness:
+    name: code readiness CLI (blocking)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Run code transition/readiness contract tests
+        run: >-
+          uv run --directory orchestrator/backend --extra dev pytest
+          "${GITHUB_WORKSPACE}/agent/scripts/assess/tests/test_code_coverage_gate.py"
+          "${GITHUB_WORKSPACE}/agent/scripts/assess/tests/test_code_readiness_cli.py" -q
+
+  frontend-build:
+    name: frontend build (blocking)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: orchestrator/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: orchestrator/frontend/package-lock.json
+      - name: Install locked frontend dependencies
+        run: npm ci
+      - name: Build frontend
+        run: npm run build
 
   ruff:
     name: ruff (blocking)

@@ -9,10 +9,10 @@ kali-runtime rows by ``route='host_exec'``.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -46,6 +46,12 @@ _INTENT_MAX_LEN = 200
 _PROCESS_TERM_GRACE_SECONDS = 5
 _PROCESS_KILL_GRACE_SECONDS = 2
 _OUTPUT_PREVIEW_BYTES = 64 * 1024
+_OUTPUT_DIRECTORY_MODE = 0o700
+_SPILL_FILE_MODE = 0o600
+
+
+class HostProcessNotQuiescent(AssessError):
+    """The registered process group may still be able to mutate spill output."""
 
 
 def register(subparsers) -> None:
@@ -57,8 +63,9 @@ def register(subparsers) -> None:
         ),
     )
     p.add_argument(
-        "command",
+        "exec_argv",
         nargs="*",
+        metavar="command",
         help=(
             "Command and arguments. Use `--` to separate from host-exec flags "
             "if any argv tokens look like options. Omit when using --from-json."
@@ -142,7 +149,10 @@ def register(subparsers) -> None:
         "--require-audit",
         dest="require_audit",
         action="store_true",
-        help="Exit non-zero if the backend audit row cannot be recorded; use for blue WRITE actions.",
+        help=(
+            "Also exit non-zero when terminal audit integrity or physical cleanup "
+            "is not trustworthy; pre-exec audit is mandatory for every host command."
+        ),
     )
     p.add_argument(
         "--rate-override-reason",
@@ -156,7 +166,8 @@ def register(subparsers) -> None:
         help=(
             "Optional finding slug (or numeric id) to link this command-run to on "
             "record (assessment_command_runs.finding_id). Resolved to the finding's "
-            "id at audit time; a bad ref WARNs and records the run unlinked."
+            "id at audit time; an unresolved or rejected explicit link fails closed "
+            "before command execution."
         ),
     )
     p.add_argument(
@@ -175,12 +186,6 @@ def register(subparsers) -> None:
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-
-
-def _sha256_str(text: str) -> str:
-    if not text:
-        return ""
-    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
 
 
 def _contains_destructive_token(argv: list[str]) -> str | None:
@@ -224,8 +229,8 @@ def _merge_from_json(args: argparse.Namespace, doc: dict) -> None:
     only when the JSON does not supply the field; this keeps scripted
     invocations deterministic by treating the JSON as authoritative."""
     field_map = {
-        "command": "command",
-        "argv": "command",
+        "command": "exec_argv",
+        "argv": "exec_argv",
         "tool": "tool",
         "tool_name": "tool",
         "intent": "intent",
@@ -251,7 +256,7 @@ def _merge_from_json(args: argparse.Namespace, doc: dict) -> None:
 
 
 def _resolve_argv(args: argparse.Namespace) -> list[str]:
-    cmd = args.command
+    cmd = getattr(args, "exec_argv", getattr(args, "command", []))
     if isinstance(cmd, str):
         # --from-json may supply a string; split on whitespace.
         cmd = cmd.split()
@@ -369,23 +374,258 @@ def _bounded_head_tail(head: bytes, tail: bytes, *, marker: str, limit: int) -> 
     return head_text + marker + tail_text
 
 
-def _bounded_file_preview(path: Path, limit: int = _OUTPUT_PREVIEW_BYTES) -> str:
+def _bounded_descriptor_preview(
+    handle: Any,
+    path: Path,
+    limit: int = _OUTPUT_PREVIEW_BYTES,
+) -> str:
+    """Read a bounded preview from the exact spill descriptor given to Popen."""
     try:
-        size = path.stat().st_size
-        with path.open("rb") as fh:
-            if size <= limit:
-                return _clip_utf8(
-                    fh.read(limit).decode("utf-8", errors="replace"), limit
-                )
-            head = fh.read(limit)
-            fh.seek(max(size - limit, 0))
-            tail = fh.read(limit)
+        handle.flush()
+        size = os.fstat(handle.fileno()).st_size
+        handle.seek(0)
+        if size <= limit:
+            return _clip_utf8(
+                handle.read(limit).decode("utf-8", errors="replace"), limit
+            )
+        head = handle.read(limit)
+        handle.seek(max(size - limit, 0))
+        tail = handle.read(limit)
     except OSError:
         return ""
     marker = f"\n... output omitted; full output: {path} ...\n"
     return _bounded_head_tail(
         head, tail, marker=marker, limit=limit
     )
+
+
+def _directory_open_flags() -> int:
+    return (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+
+
+def _close_descriptors(*descriptors: int | None) -> None:
+    first_error: OSError | None = None
+    for descriptor in descriptors:
+        if descriptor is None:
+            continue
+        try:
+            os.close(descriptor)
+        except OSError as exc:
+            if first_error is None:
+                first_error = exc
+    if first_error is not None:
+        raise first_error
+
+
+def _open_directory_nofollow(path: Path) -> int:
+    """Open every component of an absolute directory without following links."""
+    absolute = path.absolute()
+    if not absolute.is_absolute():
+        raise AssessError(f"host-exec output directory must be absolute: {path}")
+    parts = absolute.parts
+    if any(part in {".", ".."} for part in parts[1:]):
+        raise AssessError(f"host-exec output directory is not normalized: {path}")
+
+    descriptor = os.open(absolute.anchor, _directory_open_flags())
+    try:
+        for part in parts[1:]:
+            next_descriptor = os.open(
+                part,
+                _directory_open_flags(),
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = next_descriptor
+            if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                raise AssessError(f"host-exec output component is not a directory: {path}")
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _open_host_exec_output_directory(engagement_dir: str | os.PathLike[str]) -> int:
+    """Create/open ``scans/host-exec`` beneath a no-follow engagement root."""
+    descriptor = _open_directory_nofollow(Path(engagement_dir))
+    try:
+        for part in ("scans", "host-exec"):
+            try:
+                os.mkdir(part, _OUTPUT_DIRECTORY_MODE, dir_fd=descriptor)
+            except FileExistsError:
+                pass
+            next_descriptor = os.open(
+                part,
+                _directory_open_flags(),
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = next_descriptor
+            component_metadata = os.fstat(descriptor)
+            if not stat.S_ISDIR(component_metadata.st_mode):
+                raise AssessError(
+                    f"host-exec output component is not a directory: {part}"
+                )
+            if part == "host-exec":
+                if component_metadata.st_uid != os.geteuid():
+                    raise AssessError(
+                        "host-exec output directory is not owned by the current user"
+                    )
+                if stat.S_IMODE(component_metadata.st_mode) != _OUTPUT_DIRECTORY_MODE:
+                    os.fchmod(descriptor, _OUTPUT_DIRECTORY_MODE)
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _create_output_spills(
+    stdout_path: Path,
+    stderr_path: Path,
+    *,
+    directory_descriptor: int | None = None,
+) -> tuple[int, int]:
+    """Claim both spill leaves and return descriptors that remain identity-bound."""
+    if stdout_path.parent != stderr_path.parent:
+        raise AssessError("host-exec stdout and stderr spills must share one directory")
+    owned_directory_descriptor = directory_descriptor is None
+    if directory_descriptor is None:
+        directory_descriptor = _open_directory_nofollow(stdout_path.parent)
+
+    flags = (
+        os.O_RDWR
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    descriptors: list[int] = []
+    try:
+        for path in (stdout_path, stderr_path):
+            descriptor = os.open(
+                path.name,
+                flags,
+                _SPILL_FILE_MODE,
+                dir_fd=directory_descriptor,
+            )
+            descriptors.append(descriptor)
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise AssessError(f"host-exec spill is not a regular file: {path}")
+        return descriptors[0], descriptors[1]
+    except Exception:
+        # Never unlink by a mutable pathname here.  A concurrent rename and
+        # replacement must not let failure cleanup delete an attacker's file.
+        _close_descriptors(*descriptors)
+        raise
+    finally:
+        if owned_directory_descriptor:
+            os.close(directory_descriptor)
+
+
+def _append_spill_text(descriptor: int, path: Path, text: str) -> None:
+    if not text:
+        return
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        raise AssessError(f"host-exec spill is not a regular file: {path}")
+    raw = text.encode("utf-8", errors="replace")
+    os.lseek(descriptor, 0, os.SEEK_END)
+    while raw:
+        written = os.write(descriptor, raw)
+        if written <= 0:
+            raise OSError(f"could not append host-exec spill: {path}")
+        raw = raw[written:]
+    os.fsync(descriptor)
+
+
+def _spill_identity_claim(descriptor: int, path: Path) -> tuple[int, int]:
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise AssessError(f"host-exec spill is not a regular file: {path}")
+    device = int(metadata.st_dev)
+    inode = int(metadata.st_ino)
+    if not (0 <= device <= 2**63 - 1 and 0 <= inode <= 2**63 - 1):
+        raise AssessError(f"host-exec spill identity is outside the audit contract: {path}")
+    return device, inode
+
+
+def _post_pre_exec_audit(
+    client: AssessmentClient,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Replay one identical POST when its response may have been lost.
+
+    ``run_uuid`` and the spill identity claims make the request an idempotency
+    key at the dedicated backend endpoint.  The extra replay is deliberately
+    byte-for-byte equivalent: mutating linkage or metadata here could turn an
+    already-committed execution into a conflicting second audit attempt.
+    """
+    try:
+        return client.post("command-runs/host-exec", payload)
+    except AssessError as exc:
+        # A concrete HTTP rejection reached the caller and is not ambiguous.
+        # Connection exhaustion is wrapped as ``AssessError`` without this
+        # prefix, so that case still gets the exact idempotent replay.
+        if str(exc).startswith("HTTP "):
+            raise
+        return client.post("command-runs/host-exec", payload)
+    except Exception:  # noqa: BLE001 - malformed/lost response is ambiguous
+        return client.post("command-runs/host-exec", payload)
+
+
+def _validate_terminal_finalize_response(
+    finalized: Any,
+    attempted: dict[str, Any],
+) -> dict[str, Any]:
+    """Accept a replayed terminal row only when its core facts are ours."""
+    if not isinstance(finalized, dict):
+        raise AssessError("audit finalize returned a non-object response")
+    mismatches: list[str] = []
+    for field in ("status", "return_code", "timed_out", "duration_ms"):
+        if field not in finalized or finalized[field] != attempted[field]:
+            mismatches.append(
+                f"{field} expected={attempted[field]!r} got={finalized.get(field)!r}"
+            )
+    expected_partial = bool(attempted["partial_results"])
+    if attempted.get("output_quiesced") is False:
+        expected_partial = False
+    partial_value = finalized.get("partial_results")
+    if not (
+        isinstance(partial_value, (bool, int))
+        and not isinstance(partial_value, float)
+        and partial_value in (0, 1)
+        and bool(partial_value) is expected_partial
+    ):
+        mismatches.append(
+            "partial_results "
+            f"expected={expected_partial!r} got={partial_value!r}"
+        )
+    try:
+        expected_completed_at = datetime.fromisoformat(
+            str(attempted["ended_at"]).replace("Z", "+00:00")
+        ).astimezone(timezone.utc)
+        actual_completed_at = datetime.fromisoformat(
+            str(finalized["completed_at"]).replace("Z", "+00:00")
+        ).astimezone(timezone.utc)
+    except (KeyError, TypeError, ValueError):
+        actual_completed_at = None
+        expected_completed_at = object()
+    if actual_completed_at != expected_completed_at:
+        mismatches.append(
+            "completed_at "
+            f"expected={attempted.get('ended_at')!r} "
+            f"got={finalized.get('completed_at')!r}"
+        )
+    if mismatches:
+        raise AssessError(
+            "audit finalize returned terminal facts owned by another finalizer: "
+            + "; ".join(mismatches)
+        )
+    return finalized
 
 
 def _run_host_process(
@@ -397,102 +637,254 @@ def _run_host_process(
     run_uuid: str,
     stdout_path: Path | None = None,
     stderr_path: Path | None = None,
+    stdout_descriptor: int | None = None,
+    stderr_descriptor: int | None = None,
 ) -> tuple[int, str, str, bool]:
     """Run one host process with line-one spill and precise group ownership."""
     output_dir = Path(engagement_dir) / "scans" / "host-exec"
-    output_dir.mkdir(parents=True, exist_ok=True)
     stdout_path = stdout_path or output_dir / f"{run_uuid}.out"
     stderr_path = stderr_path or output_dir / f"{run_uuid}.err"
-    stdout_path.parent.mkdir(parents=True, exist_ok=True)
-    stderr_path.parent.mkdir(parents=True, exist_ok=True)
+    if (stdout_descriptor is None) != (stderr_descriptor is None):
+        raise AssessError("host-exec requires both precreated spill descriptors")
 
-    with stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
-        try:
-            process = subprocess.Popen(  # noqa: S603 - operator-supplied argv is the contract
-                argv,
-                cwd=cwd,
-                stdout=stdout_file,
-                stderr=stderr_file,
-                start_new_session=True,
+    owns_descriptors = stdout_descriptor is None
+    if owns_descriptors:
+        if stdout_path.parent == output_dir and stderr_path.parent == output_dir:
+            directory_descriptor = _open_host_exec_output_directory(engagement_dir)
+            try:
+                stdout_descriptor, stderr_descriptor = _create_output_spills(
+                    stdout_path,
+                    stderr_path,
+                    directory_descriptor=directory_descriptor,
+                )
+            finally:
+                os.close(directory_descriptor)
+        else:
+            stdout_descriptor, stderr_descriptor = _create_output_spills(
+                stdout_path, stderr_path
             )
-        except FileNotFoundError as exc:
-            return 127, "", f"host-exec: command not found: {exc}\n", False
 
-        registered = False
-        return_code = int(process.returncode) if process.returncode is not None else 1
-        timed_out = False
-        communicated = False
-        captured_stdout = ""
-        captured_stderr = ""
-        try:
-            host_processes.register_process(
-                engagement_dir, run_uuid=run_uuid, pid=process.pid
-            )
-            registered = True
-        except Exception:
-            # A very short-lived command may exit between Popen and the identity
-            # lookup. It cannot become an orphan, so collect its completed result.
-            if process.poll() is not None:
-                captured_stdout, captured_stderr = process.communicate(timeout=1)
-                communicated = True
+    assert stdout_descriptor is not None
+    assert stderr_descriptor is not None
+    stdout_process_descriptor = os.dup(stdout_descriptor)
+    try:
+        stderr_process_descriptor = os.dup(stderr_descriptor)
+    except Exception:
+        os.close(stdout_process_descriptor)
+        if owns_descriptors:
+            _close_descriptors(stdout_descriptor, stderr_descriptor)
+        raise
+    try:
+        with (
+            os.fdopen(stdout_process_descriptor, "r+b") as stdout_file,
+            os.fdopen(stderr_process_descriptor, "r+b") as stderr_file,
+        ):
+            try:
+                process = subprocess.Popen(  # noqa: S603 - operator-supplied argv is the contract
+                    argv,
+                    cwd=cwd,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    start_new_session=True,
+                )
+            except FileNotFoundError as exc:
+                message = f"host-exec: command not found: {exc}\n"
+                stderr_file.write(message.encode("utf-8", errors="replace"))
+                stderr_file.flush()
+                return 127, "", message, False
+
+            registered = False
+            registered_ownership: host_processes.ProcessOwnership | None = None
+            return_code = int(process.returncode) if process.returncode is not None else 1
+            timed_out = False
+            communicated = False
+            captured_stdout = ""
+            captured_stderr = ""
+            try:
+                registered_ownership = host_processes.capture_process_ownership(
+                    process.pid
+                )
+                host_processes.register_owned_process(
+                    engagement_dir,
+                    run_uuid=run_uuid,
+                    pid=process.pid,
+                    ownership=registered_ownership,
+                )
+                registered = True
+            except Exception as exc:
+                if registered_ownership is not None:
+                    if not host_processes.terminate_owned_process(
+                        registered_ownership
+                    ):
+                        raise HostProcessNotQuiescent(
+                            "cannot establish quiescence after host-process "
+                            f"registration failed for run_uuid={run_uuid}; "
+                            "recording its output as untrusted"
+                        ) from exc
+                    raise
+
+                # Identity capture can lose a race with a very short-lived
+                # command. Completed output is trustworthy only when the leader
+                # is reaped and the process group is confirmed absent: an exited
+                # leader may otherwise have left descendants behind.
+                if (
+                    process.poll() is not None
+                    and _host_process_group_alive(process.pid) is False
+                ):
+                    captured_stdout, captured_stderr = process.communicate(timeout=1)
+                    communicated = True
+                    return_code = int(process.returncode)
+                else:
+                    raise HostProcessNotQuiescent(
+                        "cannot establish ownership after host-process "
+                        f"registration failed for run_uuid={run_uuid}; "
+                        "recording its output as untrusted"
+                    ) from exc
+
+            try:
+                if not communicated:
+                    captured_stdout, captured_stderr = process.communicate(
+                        timeout=timeout_seconds
+                    )
                 return_code = int(process.returncode)
-            else:
+            except subprocess.TimeoutExpired:
+                _terminate_process_group(process)
+                return_code = 124
+                timed_out = True
+            except BaseException:
+                # ``communicate`` can fail independently of the child. Reap the
+                # leader first, then the registry-backed finally block proves
+                # that no descendant remains before the exception can escape.
                 _terminate_process_group(process)
                 raise
-
-        try:
-            if not communicated:
-                captured_stdout, captured_stderr = process.communicate(
-                    timeout=timeout_seconds
-                )
-            return_code = int(process.returncode)
-        except subprocess.TimeoutExpired:
-            _terminate_process_group(process)
-            return_code = 124
-            timed_out = True
-        finally:
-            if registered and process.returncode is not None:
-                group_alive = host_processes.registered_group_alive(
-                    engagement_dir, run_uuid=run_uuid
-                )
-                if group_alive is False:
-                    host_processes.unregister_process(
-                        engagement_dir, run_uuid=run_uuid
+            finally:
+                if registered:
+                    _quiesce_registered_host_process(
+                        engagement_dir=engagement_dir,
+                        run_uuid=run_uuid,
+                        ownership=registered_ownership,
                     )
 
-    stdout_text = _bounded_file_preview(stdout_path)
-    stderr_text = _bounded_file_preview(stderr_path)
-    if not stdout_text and captured_stdout:
-        stdout_text = _bounded_text(captured_stdout)
-    if not stderr_text and captured_stderr:
-        stderr_text = _bounded_text(captured_stderr)
-    return return_code, stdout_text, stderr_text, timed_out
+            stdout_text = _bounded_descriptor_preview(stdout_file, stdout_path)
+            stderr_text = _bounded_descriptor_preview(stderr_file, stderr_path)
+            if not stdout_text and captured_stdout:
+                stdout_text = _bounded_text(captured_stdout)
+            if not stderr_text and captured_stderr:
+                stderr_text = _bounded_text(captured_stderr)
+
+        return return_code, stdout_text, stderr_text, timed_out
+    finally:
+        if owns_descriptors:
+            _close_descriptors(stdout_descriptor, stderr_descriptor)
+
+
+def _host_process_group_alive(process_group: int) -> bool | None:
+    try:
+        os.killpg(process_group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+    return True
+
+
+def _wait_for_host_process_group_exit(process_group: int, deadline: float) -> bool:
+    while True:
+        alive = _host_process_group_alive(process_group)
+        if alive is False:
+            return True
+        if alive is None or time.monotonic() >= deadline:
+            return False
+        time.sleep(min(0.05, max(deadline - time.monotonic(), 0)))
 
 
 def _terminate_process_group(process: subprocess.Popen) -> tuple[str, str]:
-    """Boundedly terminate and reap the whole process group created by Popen."""
+    """Boundedly terminate, reap, and prove exit of a newly owned process group."""
+    process_group = int(process.pid)
     try:
-        process_group = os.getpgid(process.pid)
+        observed_group = os.getpgid(process.pid)
     except ProcessLookupError:
-        try:
-            return process.communicate(timeout=1)
-        except subprocess.TimeoutExpired:
-            return "", ""
+        observed_group = None
+    except (PermissionError, OSError) as exc:
+        raise HostProcessNotQuiescent(
+            f"cannot verify host process group for pid={process.pid}"
+        ) from exc
+    if observed_group is not None and int(observed_group) != process_group:
+        raise HostProcessNotQuiescent(
+            f"host process pid={process.pid} no longer owns its process group"
+        )
 
+    captured_stdout = ""
+    captured_stderr = ""
     for sig, grace in (
         (signal.SIGTERM, _PROCESS_TERM_GRACE_SECONDS),
         (signal.SIGKILL, _PROCESS_KILL_GRACE_SECONDS),
     ):
+        alive = _host_process_group_alive(process_group)
+        if alive is False:
+            try:
+                stdout_text, stderr_text = process.communicate(timeout=1)
+                captured_stdout = stdout_text or captured_stdout
+                captured_stderr = stderr_text or captured_stderr
+            except subprocess.TimeoutExpired:
+                pass
+            return captured_stdout, captured_stderr
+        if alive is None:
+            raise HostProcessNotQuiescent(
+                f"cannot verify host process group pgid={process_group}"
+            )
+        deadline = time.monotonic() + grace
         try:
             os.killpg(process_group, sig)
         except ProcessLookupError:
-            pass
+            return captured_stdout, captured_stderr
+        except (PermissionError, OSError) as exc:
+            raise HostProcessNotQuiescent(
+                f"cannot terminate host process group pgid={process_group}"
+            ) from exc
         try:
             stdout_text, stderr_text = process.communicate(timeout=grace)
-            return stdout_text or "", stderr_text or ""
+            captured_stdout = stdout_text or captured_stdout
+            captured_stderr = stderr_text or captured_stderr
         except subprocess.TimeoutExpired:
-            continue
-    return "", ""
+            pass
+        if _wait_for_host_process_group_exit(process_group, deadline):
+            return captured_stdout, captured_stderr
+    raise HostProcessNotQuiescent(
+        f"host process group pgid={process_group} survived bounded termination"
+    )
+
+
+def _quiesce_registered_host_process(
+    *,
+    engagement_dir: str,
+    run_uuid: str,
+    ownership: host_processes.ProcessOwnership | None,
+) -> None:
+    """Prove exit from the immutable ownership token captured after spawn."""
+    try:
+        quiescent = ownership is not None and host_processes.terminate_owned_process(
+            ownership
+        )
+    except Exception as exc:  # noqa: BLE001 - output must fail closed
+        raise HostProcessNotQuiescent(
+            "cannot establish quiescence for registered host process "
+            f"run_uuid={run_uuid}; recording its output as untrusted"
+        ) from exc
+    if not quiescent:
+        raise HostProcessNotQuiescent(
+            "cannot establish quiescence for registered host process "
+            f"run_uuid={run_uuid}; recording its output as untrusted"
+        )
+
+    try:
+        host_processes.unregister_process(engagement_dir, run_uuid=run_uuid)
+    except OSError:
+        # Process-group exit is the output-integrity boundary. A stale registry
+        # record remains visible to orphan reconciliation but cannot mutate output.
+        pass
 
 
 def run(args) -> None:
@@ -519,7 +911,6 @@ def run(args) -> None:
 
     run_uuid = uuid.uuid4().hex
     output_dir = Path(cfg.engagement_dir) / "scans" / "host-exec"
-    output_dir.mkdir(parents=True, exist_ok=True)
     stdout_path = output_dir / f"{run_uuid}.out"
     stderr_path = output_dir / f"{run_uuid}.err"
     started_at = _utcnow_iso()
@@ -543,6 +934,7 @@ def run(args) -> None:
     except scope_lib.ScopePolicyError as exc:
         reason = str(exc)
         refusal_payload = {
+            "host_record_kind": "policy_refusal",
             "command": " ".join(argv),
             "argv": argv,
             "tool_name": args.tool.strip(),
@@ -564,8 +956,8 @@ def run(args) -> None:
             "target_host": (args.target_host or "").strip(),
             "audit_source": args.audit_source,
             "working_dir": cwd,
-            "stdout_path": str(stdout_path),
-            "stderr_path": str(stderr_path),
+            "stdout_path": None,
+            "stderr_path": None,
             "timeout_seconds_requested": timeout_seconds,
             "run_uuid": run_uuid,
             "status": "failed",
@@ -579,11 +971,58 @@ def run(args) -> None:
         print(f"host-exec: refusing to run — {reason}", file=sys.stderr)
         sys.exit(3)
 
+    finding_ref = str(getattr(args, "finding", "") or "").strip()
+    resolved_finding_id: int | None = None
+    if finding_ref:
+        finding_client = AssessmentClient(cfg.base_url, cfg.engagement_key)
+        try:
+            resolved_finding_id = _resolve_finding_id(finding_client, finding_ref)
+        except Exception as exc:  # noqa: BLE001 - explicit linkage is mandatory
+            print(
+                f"[host-exec] ERROR: explicit finding {finding_ref!r} could not "
+                f"be resolved -- {exc}; refusing execution.",
+                file=sys.stderr,
+            )
+            try:
+                finding_client.close()
+            except Exception:  # noqa: BLE001 - preserve the fail-closed exit
+                pass
+            sys.exit(4)
+        finding_client.close()
+
+    stdout_descriptor: int | None = None
+    stderr_descriptor: int | None = None
+    try:
+        output_directory_descriptor = _open_host_exec_output_directory(
+            cfg.engagement_dir
+        )
+        try:
+            stdout_descriptor, stderr_descriptor = _create_output_spills(
+                stdout_path,
+                stderr_path,
+                directory_descriptor=output_directory_descriptor,
+            )
+            stdout_spill_device, stdout_spill_inode = _spill_identity_claim(
+                stdout_descriptor, stdout_path
+            )
+            stderr_spill_device, stderr_spill_inode = _spill_identity_claim(
+                stderr_descriptor, stderr_path
+            )
+        finally:
+            os.close(output_directory_descriptor)
+    except Exception as exc:  # noqa: BLE001 - fail closed before the audit row
+        _close_descriptors(stdout_descriptor, stderr_descriptor)
+        print(f"host-exec: could not create output spills: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    assert stdout_descriptor is not None
+    assert stderr_descriptor is not None
+
     command_str = " ".join(argv)
-    command_hash = _sha256_str(command_str)
     notes = _build_notes(args.scope_host, execution_policy)
 
     pre_payload: dict = {
+        "host_record_kind": "pre_exec",
         "command": command_str,
         "argv": argv,
         "tool_name": args.tool.strip(),
@@ -598,7 +1037,6 @@ def run(args) -> None:
         "duration_ms": 0,
         "stdout": "",
         "stderr": "",
-        "command_hash": command_hash,
         "stdout_sha256": "",
         "stderr_sha256": "",
         "notes": notes,
@@ -610,52 +1048,38 @@ def run(args) -> None:
         "working_dir": cwd,
         "stdout_path": str(stdout_path),
         "stderr_path": str(stderr_path),
+        "stdout_spill_device": stdout_spill_device,
+        "stdout_spill_inode": stdout_spill_inode,
+        "stderr_spill_device": stderr_spill_device,
+        "stderr_spill_inode": stderr_spill_inode,
         "timeout_seconds_requested": timeout_seconds,
         "run_uuid": run_uuid,
         "status": "running",
         "auth_context": auth_context,
     }
+    if resolved_finding_id is not None:
+        pre_payload["finding_id"] = resolved_finding_id
 
     record_run_id: int | str = ""
     audit_record_failed = False
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
-    finding_ref = str(getattr(args, "finding", "") or "").strip()
-    if finding_ref:
-        try:
-            pre_payload["finding_id"] = _resolve_finding_id(client, finding_ref)
-        except Exception as exc:  # noqa: BLE001 - linkage is best-effort
-            print(
-                f"[host-exec] WARN: could not link finding {finding_ref!r}: {exc}; "
-                "recording the run unlinked.",
-                file=sys.stderr,
-            )
     try:
         try:
-            response = client.post("command-runs/host-exec", pre_payload)
+            response = _post_pre_exec_audit(client, pre_payload)
         except Exception as exc:  # noqa: BLE001 - honor require-audit below
-            if "finding_id" in pre_payload:
-                bad_id = pre_payload.pop("finding_id")
-                print(
-                    f"[host-exec] WARN: could not link finding id={bad_id}: {exc}; "
-                    "recording the run unlinked.",
-                    file=sys.stderr,
-                )
-                try:
-                    response = client.post("command-runs/host-exec", pre_payload)
-                except Exception as retry_exc:  # noqa: BLE001
-                    response = None
-                    audit_record_failed = True
-                    print(f"[host-exec] WARN: pre-exec audit failed -- {retry_exc}", file=sys.stderr)
-            else:
-                response = None
-                audit_record_failed = True
-                print(f"[host-exec] WARN: pre-exec audit failed -- {exc}", file=sys.stderr)
+            response = None
+            audit_record_failed = True
+            linkage = " with required finding linkage" if finding_ref else ""
+            print(
+                f"[host-exec] WARN: pre-exec audit{linkage} failed -- {exc}",
+                file=sys.stderr,
+            )
         if isinstance(response, dict):
             record_run_id = response.get("run_id") or response.get("id") or ""
 
-        if getattr(args, "require_audit", False) and not record_run_id:
+        if not record_run_id:
             print(
-                "[host-exec] required pre-exec audit record was not created; refusing execution",
+                "[host-exec] pre-exec audit record was not confirmed; refusing execution",
                 file=sys.stderr,
             )
             sys.exit(4)
@@ -664,6 +1088,7 @@ def run(args) -> None:
         stderr_text = ""
         return_code: int = -1
         timed_out = False
+        process_quiescent = True
 
         try:
             reservation = aggregate_rate_reservation(
@@ -681,6 +1106,8 @@ def run(args) -> None:
                     run_uuid=run_uuid,
                     stdout_path=stdout_path,
                     stderr_path=stderr_path,
+                    stdout_descriptor=stdout_descriptor,
+                    stderr_descriptor=stderr_descriptor,
                 )
             else:
                 numeric_run_id = int(record_run_id) if str(record_run_id).isdigit() else None
@@ -702,23 +1129,30 @@ def run(args) -> None:
                         run_uuid=run_uuid,
                         stdout_path=stdout_path,
                         stderr_path=stderr_path,
+                        stdout_descriptor=stdout_descriptor,
+                        stderr_descriptor=stderr_descriptor,
                     )
+        except HostProcessNotQuiescent as exc:
+            return_code = 1
+            process_quiescent = False
+            audit_record_failed = True
+            stderr_text = f"host-exec: {exc}\n"
+            print(f"[host-exec] WARN: {exc}", file=sys.stderr)
         except Exception as exc:  # noqa: BLE001 - finalize the running audit row
             return_code = 1
             stderr_text = f"host-exec: process setup failed: {exc}\n"
+            try:
+                _append_spill_text(stderr_descriptor, stderr_path, stderr_text)
+            except Exception as append_exc:  # noqa: BLE001 - finalization must still run
+                stderr_text = _bounded_text(
+                    stderr_text
+                    + f"host-exec: could not append failure to stderr spill: {append_exc}\n"
+                )
 
         completed_at = _utcnow_iso()
         duration_ms = int((time.monotonic() - started_monotonic) * 1000)
         success = (return_code == 0) and not timed_out
-
-        # Stream the wrapped command's output only after the process exits; the
-        # pre-exec audit already exists at this point.
-        if stdout_text:
-            sys.stdout.write(stdout_text)
-            sys.stdout.flush()
-        if stderr_text:
-            sys.stderr.write(stderr_text)
-            sys.stderr.flush()
+        console_output_failed = False
 
         finalize_payload: dict = {
             "return_code": return_code,
@@ -727,17 +1161,73 @@ def run(args) -> None:
             "duration_ms": duration_ms,
             "stdout_preview": stdout_text,
             "stderr_preview": stderr_text,
-            "status": "timed_out" if timed_out else ("completed" if success else "failed"),
+            "status": (
+                "lost"
+                if not process_quiescent
+                else ("timed_out" if timed_out else ("completed" if success else "failed"))
+            ),
             "partial_results": bool(stdout_text or stderr_text) and not success,
+            "output_quiesced": process_quiescent,
         }
         if record_run_id:
             try:
-                client.patch(f"command-runs/{record_run_id}", finalize_payload)
+                finalized = _validate_terminal_finalize_response(
+                    client.patch(
+                        f"command-runs/{record_run_id}",
+                        finalize_payload,
+                        accept_409=True,
+                    ),
+                    finalize_payload,
+                )
+                if isinstance(finalized, dict):
+                    for label in ("cleanup", "integrity"):
+                        output_status = str(
+                            finalized.get(f"output_{label}_status") or ""
+                        ).strip().lower()
+                        output_warning = str(
+                            finalized.get(f"output_{label}_warning") or ""
+                        ).strip()
+                        detail = f": {output_warning}" if output_warning else ""
+                        if output_status in {"warning", "pending"}:
+                            audit_record_failed = True
+                            print(
+                                f"[host-exec] WARN: output {label} is "
+                                f"{output_status}{detail}",
+                                file=sys.stderr,
+                            )
+                        elif label == "cleanup" and output_status == "deferred":
+                            audit_record_failed = True
+                            print(
+                                f"[host-exec] WARN: output cleanup is deferred{detail}",
+                                file=sys.stderr,
+                            )
             except Exception as exc:  # noqa: BLE001
                 audit_record_failed = True
                 print(f"[host-exec] WARN: audit finalize failed -- {exc}", file=sys.stderr)
+
+        # Console delivery cannot precede or prevent durable finalization.
+        if process_quiescent:
+            try:
+                if stdout_text:
+                    sys.stdout.write(stdout_text)
+                    sys.stdout.flush()
+                if stderr_text:
+                    sys.stderr.write(stderr_text)
+                    sys.stderr.flush()
+            except OSError as exc:
+                console_output_failed = True
+                try:
+                    print(
+                        f"[host-exec] WARN: console output failed after audit finalize -- {exc}",
+                        file=sys.stderr,
+                    )
+                except OSError:
+                    pass
     finally:
-        client.close()
+        try:
+            client.close()
+        finally:
+            _close_descriptors(stdout_descriptor, stderr_descriptor)
 
     audit_line = (
         f"[host-exec] recorded run_uuid={run_uuid} "
@@ -755,4 +1245,4 @@ def run(args) -> None:
         )
         sys.exit(4)
 
-    sys.exit(return_code)
+    sys.exit(1 if console_output_failed and return_code == 0 else return_code)

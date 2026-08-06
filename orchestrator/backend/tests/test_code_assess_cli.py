@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import argparse
+import hashlib
 import importlib.util
+import io
 import json
 import os
-from pathlib import Path
+import stat
 import subprocess
-from types import SimpleNamespace
 import sys
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -49,6 +53,89 @@ def _load_code_record_analysis_module():
     return _load_assess_module("code_record_analysis.py", "test_code_record_analysis_command")
 
 
+def _load_code_record_group_module():
+    return _load_assess_module("code_record.py", "test_code_record_group_command")
+
+
+def _load_code_record_variant_check_module():
+    return _load_assess_module(
+        "code_record_variant_check.py",
+        "test_code_record_variant_check_command",
+    )
+
+
+def _load_code_record_fuzz_decision_module():
+    return _load_assess_module(
+        "code_record_fuzz_decision.py",
+        "test_code_record_fuzz_decision_command",
+    )
+
+
+def _load_code_record_fuzz_campaign_module():
+    return _load_assess_module(
+        "code_record_fuzz_campaign.py",
+        "test_code_record_fuzz_campaign_command",
+    )
+
+
+@pytest.mark.parametrize("kind", ["fuzz-decision", "fuzz-campaign"])
+def test_code_record_registers_durable_fuzz_completion_verbs(kind):
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    _load_code_record_group_module().register(subparsers)
+
+    args = parser.parse_args(["code-record", kind, "receipt.json"])
+
+    assert callable(args.func)
+
+
+def _variant_check_payload() -> dict[str, object]:
+    return {
+        "dispatch_id": 17,
+        "file_id": 42,
+        "repo_id": 7,
+        "repo_generation": 3,
+        "source_manifest_digest": "a" * 64,
+        "file_sha256": "b" * 64,
+        "parent_finding_slugs": ["CH-001", "CH-004"],
+        "status": "completed",
+        "evidence_ref": "artifacts/variant-checks/src_parser_c.json",
+        "rationale": "Checked each parent pattern against every candidate match in this file.",
+    }
+
+
+def _fuzz_decision_payload() -> dict[str, object]:
+    return {
+        "repo_id": 7,
+        "repo_generation": 3,
+        "source_manifest_digest": "a" * 64,
+        "decision": "required",
+        "target_ids": ["parser-reset-state-sequence"],
+        "evidence_ref": "tools/fuzz-state/applicability.json",
+        "rationale": "The current native parser accepts attacker-controlled state sequences.",
+    }
+
+
+def _fuzz_campaign_payload() -> dict[str, object]:
+    return {
+        "dispatch_id": 17,
+        "repo_id": 7,
+        "repo_generation": 3,
+        "source_manifest_digest": "a" * 64,
+        "target_id": "parser-reset-state-sequence",
+        "covered_finding_slugs": ["VF-003"],
+        "engine": "libfuzzer",
+        "sanitizers": ["address", "undefined"],
+        "run_budget_seconds": 60,
+        "executions": 25000,
+        "outcome": "completed_no_crash",
+        "crash_count": 0,
+        "triage_summary": "No sanitizer crash observed during the bounded campaign.",
+        "evidence_ref": "tools/fuzz-state/campaign.json",
+        "rationale": "Built the real parser entrypoint and exercised reset/continue sequences.",
+    }
+
+
 def _load_code_index_module():
     return _load_assess_module("code_index.py", "test_code_index_command")
 
@@ -87,6 +174,88 @@ def _load_cli_module():
     return cli_module
 
 
+@pytest.mark.parametrize(
+    "action",
+    (
+        "stats",
+        "fetch",
+        "heartbeat",
+        "done",
+        "error",
+        "needs-context",
+        "reset-stale",
+        "retry-error",
+        "retry-needs-context",
+        "queue",
+        "reanalyze",
+        "requeue-triggers",
+        "list-triggers",
+        "resolve-triggers",
+    ),
+)
+def test_code_dispatch_action_help_is_explicit(action, capsys):
+    module = _load_code_dispatch_module()
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.maybe_print_action_help([action, "--help"])
+
+    assert excinfo.value.code == 0
+    assert f"Usage: vigil assess code-dispatch {action}" in capsys.readouterr().out
+
+
+def test_code_dispatch_action_help_routes_before_remainder_parsing(capsys):
+    cli_module = _load_cli_module()
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli_module.main(["code-dispatch", "requeue-triggers", "--help"])
+
+    captured = capsys.readouterr()
+    assert excinfo.value.code == 0
+    assert "Usage: vigil assess code-dispatch requeue-triggers" in captured.out
+    assert "Triggers JSON file not found" not in captured.err
+
+
+@pytest.mark.parametrize("extra", ([], ["--help"]))
+def test_code_dispatch_unknown_action_fails_before_engagement_resolution(extra, capsys):
+    cli_module = _load_cli_module()
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli_module.main(["code-dispatch", "unknown-action", *extra])
+
+    captured = capsys.readouterr()
+    assert excinfo.value.code == 2
+    assert "invalid choice: 'unknown-action'" in captured.err
+    assert "Cannot resolve engagement directory" not in captured.err
+
+
+def _mock_ingest_git(module, monkeypatch) -> None:
+    monkeypatch.setattr(
+        module,
+        "_prepare_git_source",
+        lambda _repo_path: (
+            "/trusted/git",
+            {"head": "a" * 40, "branch": "main", "dirty": False},
+        ),
+    )
+    monkeypatch.setattr(module, "_git_commit_count", lambda _repo_path: 0)
+    monkeypatch.setattr(module, "_git_churn_scores", lambda _repo_path: {})
+    monkeypatch.setattr(module, "_git_security_files", lambda _repo_path, _history: set())
+    monkeypatch.setattr(
+        module,
+        "_git_provenance",
+        lambda *_args: {"head": "a" * 40, "branch": "main", "dirty": False},
+    )
+
+
+def _bound_ingest_commit() -> dict[str, object]:
+    return {
+        "repo_id": 7,
+        "repo_generation": 1,
+        "source_manifest_version": "v1",
+        "source_manifest_digest": "d" * 64,
+    }
+
+
 def test_code_coverage_is_informational_by_default(monkeypatch, capsys):
     module = _load_code_coverage_module()
 
@@ -106,7 +275,12 @@ def test_code_coverage_is_informational_by_default(monkeypatch, capsys):
                 "total_files": 1,
                 "by_classification": {"critical": {"count": 1, "analyzed": 0}},
                 "function_level": {"total_contexts": 1, "analyzed": 0, "needs_context": 1, "pending": 0},
-                "gate": {"passed": False, "reasons": ["Critical files not fully analyzed: 0/1"]},
+                "gate": {
+                    "passed": False,
+                    "reasons": ["Critical files not fully analyzed: 0/1"],
+                    "effort_warnings": [],
+                    "coverage_integrity": [],
+                },
             }
 
         def close(self) -> None:
@@ -121,10 +295,10 @@ def test_code_coverage_is_informational_by_default(monkeypatch, capsys):
 
     module.run(SimpleNamespace(engagement_dir=Path("/tmp/eng"), repo_id=None, require_gate_pass=False))
     output = capsys.readouterr().out
-    assert "Coverage Gate: FAIL" in output
+    assert "Review Quality: PASS" in output
 
 
-def test_code_coverage_can_enforce_gate_failures(monkeypatch):
+def test_code_coverage_can_enforce_review_quality_failures(monkeypatch):
     module = _load_code_coverage_module()
 
     monkeypatch.setattr(
@@ -139,7 +313,14 @@ def test_code_coverage_can_enforce_gate_failures(monkeypatch):
             self.engagement_key = engagement_key
 
         def get(self, endpoint: str):
-            return {"gate": {"passed": False, "reasons": ["blocked"]}}
+            return {
+                "gate": {
+                    "passed": False,
+                    "reasons": ["effort below target"],
+                    "effort_warnings": ["effort below target"],
+                    "coverage_integrity": [],
+                }
+            }
 
         def close(self) -> None:
             return None
@@ -156,45 +337,44 @@ def test_code_coverage_can_enforce_gate_failures(monkeypatch):
     assert excinfo.value.code == 1
 
 
-def test_code_coverage_cwe_matrix_coerces_non_numeric_effort_values():
+def test_code_coverage_quality_flattens_integrity_warnings():
     module = _load_code_coverage_module()
 
-    has_gap = module._check_effort_gaps(
-        [
-            {
-                "classification": "critical",
-                "applicable_families": ["ssrf"],
-                "cwe_coverage": [{"family": "ssrf", "effort": "unknown"}],
-            }
-        ]
-    )
+    passed, warnings = module._review_quality({
+        "gate": {
+            "passed": False,
+            "reasons": ["structural blocker must not leak"],
+            "effort_warnings": ["effort below target"],
+            "coverage_integrity": [
+                {"file_path": "src/parser.py", "warnings": ["claimed count exceeds index"]}
+            ],
+        }
+    })
 
-    assert has_gap is True
+    assert passed is False
+    assert warnings == [
+        "effort below target",
+        "src/parser.py: claimed count exceeds index",
+    ]
 
 
-def test_code_coverage_cwe_matrix_treats_not_applicable_as_satisfied():
+def test_code_coverage_quality_ignores_structural_gate_failure():
     module = _load_code_coverage_module()
 
-    has_gap = module._check_effort_gaps(
-        [
-            {
-                "classification": "critical",
-                "applicable_families": ["ai-ml-security"],
-                "cwe_coverage": [
-                    {
-                        "family": "ai-ml-security",
-                        "effort": 0,
-                        "disposition": "not_applicable",
-                    }
-                ],
-            }
-        ]
-    )
+    passed, warnings = module._review_quality({
+        "gate": {
+            "passed": False,
+            "reasons": ["pending queue items remain"],
+            "effort_warnings": [],
+            "coverage_integrity": [],
+        }
+    })
 
-    assert has_gap is False
+    assert passed is True
+    assert warnings == []
 
 
-def test_code_coverage_cwe_matrix_require_gate_pass_honors_backend_gate(monkeypatch):
+def test_code_coverage_cwe_matrix_quality_flag_ignores_structural_gate(monkeypatch):
     module = _load_code_coverage_module()
 
     monkeypatch.setattr(
@@ -210,7 +390,12 @@ def test_code_coverage_cwe_matrix_require_gate_pass_honors_backend_gate(monkeypa
 
         def get(self, endpoint: str):
             return {
-                "gate": {"passed": False, "reasons": ["pending queue items remain"]},
+                "gate": {
+                    "passed": False,
+                    "reasons": ["pending queue items remain"],
+                    "effort_warnings": [],
+                    "coverage_integrity": [],
+                },
                 "files": [
                     {
                         "file_path": "src/parser.py",
@@ -231,16 +416,15 @@ def test_code_coverage_cwe_matrix_require_gate_pass_honors_backend_gate(monkeypa
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
-    with pytest.raises(SystemExit) as excinfo:
-        module.run(
-            SimpleNamespace(
-                engagement_dir=Path("/tmp/eng"),
-                repo_id=None,
-                require_gate_pass=True,
-                cwe_matrix=True,
-            )
+    module.run(
+        SimpleNamespace(
+            engagement_dir=Path("/tmp/eng"),
+            repo_id=None,
+            require_gate_pass=True,
+            cwe_matrix=True,
+            require_transition_ready=None,
         )
-    assert excinfo.value.code == 1
+    )
 
 
 def test_code_size_summary_uses_backend_code_files(monkeypatch, capsys):
@@ -350,6 +534,7 @@ def test_code_ingest_skips_named_pipes(monkeypatch, tmp_path):
     repo_path.mkdir()
     (repo_path / "app.py").write_text("print('ok')\n", encoding="utf-8")
     os.mkfifo(repo_path / "blocked.py")
+    _mock_ingest_git(module, monkeypatch)
 
     monkeypatch.setattr(
         module,
@@ -363,7 +548,7 @@ def test_code_ingest_skips_named_pipes(monkeypatch, tmp_path):
     monkeypatch.setattr(module, "_count_lines", lambda filepath: 1)
     monkeypatch.setattr(module, "_sha256_file", lambda filepath: f"sha:{Path(filepath).name}")
     monkeypatch.setattr(module, "_read_header", lambda filepath: f"header:{Path(filepath).name}")
-    monkeypatch.setattr(module, "_setup_ctags", lambda repo_path: {"available": False})
+    monkeypatch.setattr(module, "_setup_ctags", lambda *args, **kwargs: {"available": False, **kwargs})
 
     captured: dict[str, object] = {}
 
@@ -381,7 +566,12 @@ def test_code_ingest_skips_named_pipes(monkeypatch, tmp_path):
                 return {"staged": len(payload["files"])}
             if endpoint == "code/repos/7/refresh/commit":
                 assert payload == {"refresh_token": "refresh-7", "manifest_complete": True}
-                return {"inserted": 1, "changed": 0, "deleted": 0, "renamed": 0}
+                return _bound_ingest_commit()
+            if endpoint == "code/repos/7/lsp-config":
+                assert payload["repo_generation"] == 1
+                assert payload["source_manifest_digest"] == "d" * 64
+                assert payload["lsp_config"]["ctags"]["repo_generation"] == 1
+                return {"id": 7}
             raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
         def close(self) -> None:
@@ -418,6 +608,7 @@ def test_code_ingest_dry_run_reports_refresh_delta_without_staging(monkeypatch, 
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
     (repo_path / "app.py").write_text("print('changed')\n", encoding="utf-8")
+    _mock_ingest_git(module, monkeypatch)
     monkeypatch.setattr(
         module,
         "load_config",
@@ -425,7 +616,7 @@ def test_code_ingest_dry_run_reports_refresh_delta_without_staging(monkeypatch, 
             base_url="http://example.test", engagement_key="eng", engagement_dir=str(tmp_path / "engagement")
         ),
     )
-    monkeypatch.setattr(module, "_setup_ctags", lambda repo_path: {"available": False})
+    monkeypatch.setattr(module, "_setup_ctags", lambda *args, **kwargs: {"available": False, **kwargs})
     posted: list[str] = []
 
     class FakeClient:
@@ -457,6 +648,7 @@ def test_code_ingest_commits_complete_empty_manifest(monkeypatch, tmp_path):
     module = _load_code_ingest_module()
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
+    _mock_ingest_git(module, monkeypatch)
     monkeypatch.setattr(
         module,
         "load_config",
@@ -464,7 +656,7 @@ def test_code_ingest_commits_complete_empty_manifest(monkeypatch, tmp_path):
             base_url="http://example.test", engagement_key="eng", engagement_dir=str(tmp_path / "engagement")
         ),
     )
-    monkeypatch.setattr(module, "_setup_ctags", lambda repo_path: {"available": False})
+    monkeypatch.setattr(module, "_setup_ctags", lambda *args, **kwargs: {"available": False, **kwargs})
     posted: list[tuple[str, dict]] = []
 
     class FakeClient:
@@ -478,7 +670,11 @@ def test_code_ingest_commits_complete_empty_manifest(monkeypatch, tmp_path):
                 return {"repo_id": 7, "refresh_token": "refresh-7"}
             if endpoint == "code/repos/7/refresh/commit":
                 assert payload == {"refresh_token": "refresh-7", "manifest_complete": True}
-                return {"inserted": 0, "changed": 0, "deleted": 2, "renamed": 0}
+                return _bound_ingest_commit()
+            if endpoint == "code/repos/7/lsp-config":
+                assert payload["repo_generation"] == 1
+                assert payload["source_manifest_digest"] == "d" * 64
+                return {"id": 7}
             raise AssertionError(f"Unexpected endpoint: {endpoint}")
         def __enter__(self):
             return self
@@ -495,6 +691,7 @@ def test_code_ingest_commits_complete_empty_manifest(monkeypatch, tmp_path):
     assert [endpoint for endpoint, _ in posted] == [
         "code/repos/refresh/start",
         "code/repos/7/refresh/commit",
+        "code/repos/7/lsp-config",
     ]
 
 
@@ -513,10 +710,22 @@ def test_code_index_walk_repo_skips_named_pipes(tmp_path):
 
 def test_code_index_default_output_uses_engagement_analysis_state(monkeypatch, tmp_path):
     module = _load_code_index_module()
+    from assess.lib.code_snapshot import SnapshotBuilder, capture_regular_file
 
-    repo_path = tmp_path / "repo"
-    repo_path.mkdir()
-    (repo_path / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    raw = b"print('ok')\n"
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    origin_file = origin / "main.py"
+    origin_file.write_bytes(raw)
+    builder = SnapshotBuilder(tmp_path / "snapshots", "demo-repo")
+    builder.add("main.py", capture_regular_file(origin_file), language="python")
+    sealed = builder.finish(
+        repo_key="demo-repo",
+        repo_name="demo",
+        source_origin_path=str(origin),
+        git={"head": "", "branch": "", "dirty": None},
+    )
+    repo_path = sealed.source_path
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
     (engagement_dir / "scope.json").write_text("{}", encoding="utf-8")
@@ -524,24 +733,82 @@ def test_code_index_default_output_uses_engagement_analysis_state(monkeypatch, t
     monkeypatch.setitem(sys.modules, "tree_sitter", SimpleNamespace())
     monkeypatch.setattr(
         module,
-        "_walk_repo",
-        lambda _repo_path: [{"file_path": "main.py", "language": "python"}],
-    )
-    monkeypatch.setattr(
-        module,
         "index_file",
-        lambda _path, _lang: {
+        lambda _path, language, source=None: {
+            "language": language,
+            "structural_index_available": True,
+            "analysis_status": "complete",
+            "analysis_mode": "tree_sitter",
+            "degradation_reason": None,
+            "source_size": len(source),
+            "bytes_scanned": len(source),
+            "unavailable_dimensions": [],
+            "artifact_truncated": False,
+            "truncated_dimensions": [],
+            "signal_counts": {
+                "entry_points": 0,
+                "imports": 0,
+                "security_sinks": 0,
+                "security_sources": 0,
+            },
             "total_functions": 1,
+            "total_exports": 0,
+            "functions": [],
             "entry_points": [],
             "security_sinks": [],
+            "security_sources": [],
+            "call_sites": [],
+            "imports": [],
+            "import_targets": [],
             "exports": [],
+            "classes": [],
         },
+    )
+
+    class FakeClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def get(self, endpoint):
+            if endpoint == "code/repos/7":
+                return {
+                    "id": 7,
+                    "repo_key": "demo-repo",
+                    "repo_path": str(repo_path.resolve()),
+                    "active_generation": 2,
+                    "source_manifest_digest": "e" * 64,
+                }
+            if endpoint == "code/files?limit=5000&offset=0&repo_id=7":
+                return [
+                    {
+                        "id": 11,
+                        "repo_id": 7,
+                        "file_path": "main.py",
+                        "file_hash": hashlib.sha256(raw).hexdigest(),
+                        "language": "python",
+                    }
+                ]
+            raise AssertionError(endpoint)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
     )
 
     module.run(
         SimpleNamespace(
             repo_path=str(repo_path),
-            repo_id="demo",
+            repo_id=7,
+            repo_key=None,
+            repo_name=None,
             output_dir=None,
             file_list=None,
             engagement_dir=str(engagement_dir),
@@ -610,10 +877,11 @@ def test_git_security_files_parses_streamed_output(monkeypatch, tmp_path):
 
     captured: dict[str, object] = {}
 
-    def fake_run(cmd, stdout, stderr, text, cwd, timeout):
+    def fake_run(cmd, stdout, stderr, text, timeout, env, check):
         captured["cmd"] = cmd
-        captured["cwd"] = cwd
+        captured["env"] = env
         captured["timeout"] = timeout
+        assert check is False
         stdout.write("commit:abc123\nsrc/auth.py\nsrc/http.py\n\ncommit:def456\nsrc/auth.py\n")
         stdout.flush()
         return SimpleNamespace(returncode=0)
@@ -623,8 +891,7 @@ def test_git_security_files_parses_streamed_output(monkeypatch, tmp_path):
     files = module._git_security_files(str(tmp_path), [f"--since={module._GIT_SECURITY_LOOKBACK}"])
 
     assert files == {"src/auth.py", "src/http.py"}
-    assert captured["cmd"] == [
-        "git",
+    assert captured["cmd"][-5:] == [
         "log",
         f"--since={module._GIT_SECURITY_LOOKBACK}",
         "--grep=CVE\\|security\\|vulnerability\\|fix.*vuln\\|buffer.overflow\\|use.after.free",
@@ -652,6 +919,7 @@ def test_code_ingest_limits_security_scan_for_large_histories(monkeypatch, capsy
     repo_path.mkdir()
     (repo_path / "app.py").write_text("print('ok')\n", encoding="utf-8")
     (repo_path / ".git").mkdir()
+    _mock_ingest_git(module, monkeypatch)
 
     monkeypatch.setattr(
         module,
@@ -682,7 +950,11 @@ def test_code_ingest_limits_security_scan_for_large_histories(monkeypatch, capsy
             if endpoint == "code/repos/7/refresh/files":
                 return {"staged": len(payload["files"])}
             if endpoint == "code/repos/7/refresh/commit":
-                return {"inserted": 1, "changed": 0, "deleted": 0, "renamed": 0}
+                return _bound_ingest_commit()
+            if endpoint == "code/repos/7/lsp-config":
+                assert payload["repo_generation"] == 1
+                assert payload["source_manifest_digest"] == "d" * 64
+                return {"id": 7}
             raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
         def close(self) -> None:
@@ -694,7 +966,7 @@ def test_code_ingest_limits_security_scan_for_large_histories(monkeypatch, capsy
             return False
 
     monkeypatch.setattr(module, "_git_security_files", fake_security_files)
-    monkeypatch.setattr(module, "_setup_ctags", lambda repo_path: {"available": False})
+    monkeypatch.setattr(module, "_setup_ctags", lambda *args, **kwargs: {"available": False, **kwargs})
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
     module.run(
@@ -1070,6 +1342,7 @@ def test_code_dispatch_queue_flattens_batch_wrappers_and_resolves_paths(monkeypa
     module.run(SimpleNamespace(action="queue", extra=[str(queue_path)], engagement_dir=tmp_path))
 
     assert captured["endpoint"] == "code/analysis-queue"
+    assert captured["payload"]["mode"] == "initial"
     assert captured["payload"]["items"] == [
         {
             "file_id": 10,
@@ -1093,7 +1366,10 @@ def test_code_dispatch_queue_flattens_batch_wrappers_and_resolves_paths(monkeypa
             "guidance_hypotheses": ["Trace request handlers"],
         },
     ]
-    assert "Queued 3 analysis item(s)" in capsys.readouterr().out
+    assert (
+        "Queue outcomes: inserted=3, updated=0, already-active=0, conflicts=0"
+        in capsys.readouterr().out
+    )
 
 
 def test_code_dispatch_queue_resolves_file_path_from_later_pages(monkeypatch, tmp_path):
@@ -1447,6 +1723,46 @@ def test_code_dispatch_fetch_posts_atomic_lane_filters(monkeypatch, tmp_path):
     }
 
 
+def test_code_dispatch_ids_file_accepts_process_substitution_descriptor():
+    module = _load_code_dispatch_module()
+    read_fd, write_fd = os.pipe()
+    try:
+        os.write(write_fd, b"[7, 8, 7]\n")
+        os.close(write_fd)
+        write_fd = -1
+
+        assert module._ids_from_file(f"/dev/fd/{read_fd}") == [7, 8]
+    finally:
+        if write_fd >= 0:
+            os.close(write_fd)
+        os.close(read_fd)
+
+
+@pytest.mark.parametrize("payload", ["[true]", "[1.5]", '[\"1\"]', "[0]", "[-1]"])
+def test_code_dispatch_ids_file_rejects_non_strict_positive_json_ids(
+    payload, tmp_path
+):
+    module = _load_code_dispatch_module()
+    ids_path = tmp_path / "queue-ids.json"
+    ids_path.write_text(payload, encoding="utf-8")
+
+    with pytest.raises(SystemExit) as excinfo:
+        module._ids_from_file(str(ids_path))
+
+    assert excinfo.value.code == 1
+
+
+def test_code_dispatch_ids_file_handles_json_integer_digit_limit(tmp_path):
+    module = _load_code_dispatch_module()
+    ids_path = tmp_path / "queue-ids.json"
+    ids_path.write_text(f"[{'9' * 5000}]", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as excinfo:
+        module._ids_from_file(str(ids_path))
+
+    assert excinfo.value.code == 1
+
+
 def test_code_dispatch_resolve_triggers_posts_terminal_resolution(monkeypatch, tmp_path):
     module = _load_code_dispatch_module()
 
@@ -1556,6 +1872,275 @@ def test_code_record_analysis_rejects_bad_nested_payloads_before_post(tmp_path, 
 
     assert excinfo.value.code == 1
     assert "cwe_coverage must be a JSON array" in capsys.readouterr().err
+
+
+def test_code_record_registers_variant_check_leaf():
+    module = _load_code_record_group_module()
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    module.register(subparsers)
+
+    args = parser.parse_args(["code-record", "variant-check", "receipt.json"])
+
+    assert args.code_record_kind == "variant-check"
+    assert args.receipt_json == "receipt.json"
+
+
+def test_code_record_variant_parent_cap_mirrors_backend():
+    from app.services import code_analysis
+
+    module = _load_code_record_variant_check_module()
+
+    assert module.MAX_VARIANT_PARENT_FINDINGS == code_analysis.MAX_VARIANT_PARENT_FINDINGS
+
+
+@pytest.mark.parametrize("input_mode", ["file", "stdin"])
+def test_code_record_variant_check_posts_exact_receipt_and_prints_backend_record(
+    input_mode,
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    module = _load_code_record_variant_check_module()
+    payload = _variant_check_payload()
+    receipt = {
+        "id": 91,
+        **payload,
+        "current_file_id": payload["file_id"],
+        "file_path": "src/parser.c",
+        "language": "c",
+        "classification": "critical",
+        "role": "parser",
+        "slot_types": ["NETWORK-INPUT"],
+        "parent_finding_set_digest": "c" * 64,
+        "variant_input_digest": "d" * 64,
+        "receipt_fingerprint": "e" * 64,
+        "created_at": "2026-08-05T12:00:00Z",
+        "current": True,
+    }
+    posted: list[tuple[str, dict[str, object]]] = []
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+        ),
+    )
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            assert base_url == "http://example.test"
+            assert engagement_key == "eng"
+
+        def post(self, endpoint: str, body: dict[str, object]):
+            posted.append((endpoint, body))
+            return receipt
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+    if input_mode == "file":
+        receipt_path = tmp_path / "variant-check.json"
+        receipt_path.write_text(json.dumps(payload), encoding="utf-8")
+        source = str(receipt_path)
+    else:
+        source = "-"
+        monkeypatch.setattr(module.sys, "stdin", io.StringIO(json.dumps(payload)))
+
+    module.run(SimpleNamespace(receipt_json=source, engagement_dir=tmp_path))
+
+    assert posted == [("code/variant-checks", payload)]
+    assert json.loads(capsys.readouterr().out) == receipt
+
+
+@pytest.mark.parametrize(
+    ("mutate", "error_fragment"),
+    [
+        (lambda payload: payload.pop("dispatch_id"), "missing required fields: dispatch_id"),
+        (lambda payload: payload.__setitem__("unexpected", True), "unknown fields: unexpected"),
+        (lambda payload: payload.__setitem__("file_id", True), "file_id must be an integer"),
+        (lambda payload: payload.__setitem__("repo_generation", 0), "repo_generation must be at least 1"),
+        (
+            lambda payload: payload.__setitem__("source_manifest_digest", "A" * 64),
+            "source_manifest_digest must be a lowercase SHA-256 digest",
+        ),
+        (
+            lambda payload: payload.__setitem__("parent_finding_slugs", ["CH-004", "CH-001"]),
+            "parent_finding_slugs must be sorted",
+        ),
+        (
+            lambda payload: payload.__setitem__("parent_finding_slugs", ["CH-001", "CH-001"]),
+            "parent_finding_slugs must not contain duplicates",
+        ),
+        (
+            lambda payload: payload.__setitem__("parent_finding_slugs", [" CH-001"]),
+            "parent_finding_slugs entries must not have leading or trailing whitespace",
+        ),
+        (
+            lambda payload: payload.__setitem__("parent_finding_slugs", ["CH-\u0001"]),
+            "parent_finding_slugs entries must not contain control characters",
+        ),
+        (
+            lambda payload: payload.__setitem__(
+                "parent_finding_slugs",
+                [f"CH-{index:04d}" for index in range(1, 1002)],
+            ),
+            "parent_finding_slugs must contain at most 1000 entries",
+        ),
+        (lambda payload: payload.__setitem__("status", "clean"), "status must be 'completed'"),
+        (lambda payload: payload.__setitem__("evidence_ref", ""), "evidence_ref must be 1 to 4096 characters"),
+        (
+            lambda payload: payload.__setitem__("evidence_ref", " artifacts/check.json "),
+            "evidence_ref must not have leading or trailing whitespace",
+        ),
+        (lambda payload: payload.__setitem__("rationale", "x" * 20001), "rationale must be 1 to 20000 characters"),
+        (
+            lambda payload: payload.__setitem__("rationale", "   "),
+            "rationale must not have leading or trailing whitespace",
+        ),
+    ],
+)
+def test_code_record_variant_check_rejects_schema_drift_before_post(
+    mutate,
+    error_fragment,
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    module = _load_code_record_variant_check_module()
+    payload = _variant_check_payload()
+    mutate(payload)
+    receipt_path = tmp_path / "invalid.json"
+    receipt_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda _engagement_dir: pytest.fail("invalid input reached configuration or POST"),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(SimpleNamespace(receipt_json=str(receipt_path), engagement_dir=tmp_path))
+
+    assert excinfo.value.code == 1
+    assert error_fragment in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("raw", "error_fragment"),
+    [
+        ("", "receipt input is empty"),
+        ("{not-json", "receipt input is not valid JSON"),
+        ("[]", "receipt input must contain one JSON object"),
+        ('{"dispatch_id": 1, "dispatch_id": 2}', "duplicate JSON field: dispatch_id"),
+    ],
+)
+def test_code_record_variant_check_rejects_invalid_json_input(
+    raw,
+    error_fragment,
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    module = _load_code_record_variant_check_module()
+    receipt_path = tmp_path / "invalid.json"
+    receipt_path.write_text(raw, encoding="utf-8")
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda _engagement_dir: pytest.fail("invalid input reached configuration or POST"),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(SimpleNamespace(receipt_json=str(receipt_path), engagement_dir=tmp_path))
+
+    assert excinfo.value.code == 1
+    assert error_fragment in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("input_mode", ["file", "stdin"])
+def test_code_record_variant_check_bounds_file_and_stdin_before_json_parse(
+    input_mode,
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    module = _load_code_record_variant_check_module()
+    monkeypatch.setattr(module, "MAX_JSON_ARTIFACT_BYTES", 32)
+    if input_mode == "file":
+        receipt_path = tmp_path / "oversized.json"
+        receipt_path.write_text("x" * 33, encoding="utf-8")
+        source = str(receipt_path)
+    else:
+        source = "-"
+        monkeypatch.setattr(module.sys, "stdin", io.StringIO("x" * 33))
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(SimpleNamespace(receipt_json=source, engagement_dir=tmp_path))
+
+    assert excinfo.value.code == 1
+    assert "exceeds 32 bytes" in capsys.readouterr().err
+
+
+def test_code_record_variant_check_does_not_accept_inline_json(monkeypatch, tmp_path, capsys):
+    module = _load_code_record_variant_check_module()
+    inline = json.dumps(_variant_check_payload())
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda _engagement_dir: pytest.fail("inline JSON reached configuration or POST"),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(SimpleNamespace(receipt_json=inline, engagement_dir=tmp_path))
+
+    assert excinfo.value.code == 1
+    assert "could not read receipt file" in capsys.readouterr().err
+
+
+def test_code_record_variant_check_rejects_non_object_backend_response(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    module = _load_code_record_variant_check_module()
+    receipt_path = tmp_path / "variant-check.json"
+    receipt_path.write_text(json.dumps(_variant_check_payload()), encoding="utf-8")
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+        ),
+    )
+
+    class FakeClient:
+        def __init__(self, _base_url: str, _engagement_key: str) -> None:
+            pass
+
+        def post(self, _endpoint: str, _body: dict[str, object]):
+            return []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(SimpleNamespace(receipt_json=str(receipt_path), engagement_dir=tmp_path))
+
+    assert excinfo.value.code == 1
+    assert "backend response must be a JSON object" in capsys.readouterr().err
 
 
 def test_code_record_analysis_validates_whole_batch_before_any_post(monkeypatch, tmp_path):
@@ -1788,6 +2373,21 @@ def test_contract_prints_code_record_analysis_contract(capsys):
     assert "queue_item_id" in out
     assert "file_id = derived by the backend from queue_item_id" in out
     assert "file_id-only result -> include queue_item_id" in out
+
+
+def test_contract_prints_code_record_variant_check_contract(capsys):
+    module = _load_contract_module()
+
+    module.run(SimpleNamespace(name="code-record", variant=["variant-check"]))
+
+    out = capsys.readouterr().out
+    assert "Command: code-record variant-check" in out
+    assert "dispatch_id" in out
+    assert "parent_finding_slugs" in out
+    assert "source_manifest_digest" in out
+    assert "vigil assess code-record variant-check -" in out
+    assert "one receipt per checked file" in out.lower()
+    assert "at most 1000" in out
 
 
 def test_contract_prints_record_intel_variant_contract(capsys):
@@ -2314,6 +2914,133 @@ def test_code_classify_reports_all_validation_errors(tmp_path, capsys):
     assert "NETWORK_INPUT" in err
 
 
+def test_code_classify_accepts_exec_policy_and_priority_band():
+    module = _load_code_classify_module()
+
+    errors = module._validate_classification_payload(
+        [
+            {
+                "file_id": 7,
+                "classification": "high",
+                "slot_types": ["EXEC-POLICY"],
+                "analysis_priority": 79,
+            }
+        ]
+    )
+
+    assert errors == []
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (
+            {"file_id": 7, "classification": "low", "slot_types": []},
+            "missing required field 'analysis_priority'",
+        ),
+        (
+            {
+                "file_id": 7,
+                "classification": "high",
+                "slot_types": ["NETWORK-INPUT"],
+                "analysis_priority": 80,
+            },
+            "must be between 50 and 79",
+        ),
+        (
+            {
+                "file_id": 7,
+                "classification": "skip",
+                "slot_types": [],
+                "analysis_priority": 1,
+            },
+            "must be 0",
+        ),
+        (
+            {
+                "file_id": 7,
+                "classification": "high",
+                "slot_types": ["NETWORK-INPUT"],
+                "analysis_priority": "70",
+            },
+            "must be an integer",
+        ),
+    ],
+)
+def test_code_classify_validates_required_strict_priority_band(payload, expected):
+    module = _load_code_classify_module()
+
+    errors = module._validate_classification_payload([payload])
+
+    assert any(expected in error for error in errors)
+
+
+@pytest.mark.parametrize("priority", [True, 70.5, "70"])
+def test_code_dispatch_queue_requires_strict_integer_priority(
+    monkeypatch, tmp_path, priority
+):
+    module = _load_code_dispatch_module()
+    monkeypatch.setattr(module, "_fetch_code_files", lambda cfg: [])
+    cfg = SimpleNamespace()
+
+    with pytest.raises(SystemExit) as excinfo:
+        module._normalize_queue_items(
+            cfg,
+            [{"file_id": 7, "priority": priority}],
+        )
+
+    assert excinfo.value.code == 1
+
+
+@pytest.mark.parametrize(
+    "module_loader",
+    [_load_code_classify_module, _load_code_dispatch_module],
+    ids=["classify", "dispatch"],
+)
+@pytest.mark.parametrize("invalid_file_id", [True, 1.5, "1"])
+def test_code_commands_reject_non_integer_file_ids(
+    module_loader, invalid_file_id, capsys
+):
+    module = module_loader()
+    resolver = (
+        module._resolve_matching_file_ids
+        if module_loader is _load_code_classify_module
+        else module._resolve_queue_file_ids
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        resolver({"file_id": invalid_file_id}, [])
+
+    assert excinfo.value.code == 1
+    assert "file_id" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "module_loader",
+    [_load_code_classify_module, _load_code_dispatch_module],
+    ids=["classify", "dispatch"],
+)
+@pytest.mark.parametrize("invalid_repo_id", [True, 1.5, "1"])
+def test_code_commands_reject_non_integer_repo_ids(
+    module_loader, invalid_repo_id, capsys
+):
+    module = module_loader()
+    resolver = (
+        module._resolve_matching_file_ids
+        if module_loader is _load_code_classify_module
+        else module._resolve_queue_file_ids
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        resolver(
+            {"file_path": "src/parser.c", "repo_id": invalid_repo_id},
+            [{"id": 7, "repo_id": 1, "file_path": "src/parser.c"}],
+        )
+
+    assert excinfo.value.code == 1
+    assert "repo_id" in capsys.readouterr().err
+
+
 def test_cli_main_prints_assesserror_without_traceback(monkeypatch, capsys):
     cli_module = _load_cli_module()
     from assess.commands import fetch as fetch_command
@@ -2369,9 +3096,15 @@ def test_ctags_handles_missing_binary(tmp_path, monkeypatch):
     module = _load_code_ingest_module()
 
     # Make ctags unfindable
-    monkeypatch.setattr(module, "_which", lambda binary: None)
+    monkeypatch.setattr(module, "_resolve_trusted_tool", lambda *args, **kwargs: None)
 
-    result = module._setup_ctags(str(tmp_path))
+    result = module._setup_ctags(
+        str(tmp_path),
+        tmp_path / "ctags",
+        [],
+        repo_generation=1,
+        source_manifest_digest="d" * 64,
+    )
     assert result["available"] is False
 
 
@@ -2393,6 +3126,7 @@ def test_code_audit_write_snapshot_creates_manifest_and_keeps_metadata(tmp_path)
 
     manifest_path = engagement_dir / "tools" / "analysis-state" / module.MANIFEST_FILENAME
     assert manifest_path.is_file()
+    assert stat.S_IMODE(manifest_path.stat().st_mode) == 0o644
     manifest = json.loads(manifest_path.read_text())
     assert manifest["artifact_count"] == 1
     entry = manifest["entries"][0]
@@ -2401,6 +3135,52 @@ def test_code_audit_write_snapshot_creates_manifest_and_keeps_metadata(tmp_path)
     assert entry["label"] == "module 1 batch"
     assert entry["source_path"] == "/tmp/input.json"
     assert entry["metadata"]["command"] == "code-record-contexts"
+
+
+def test_code_audit_same_second_snapshots_never_overwrite(tmp_path, monkeypatch):
+    module = _load_code_audit_module()
+    monkeypatch.setattr(module, "_timestamp_slug", lambda: "20260806T040136000000Z")
+    engagement_dir = tmp_path / "engagement"
+
+    first = module.write_json_snapshot(
+        str(engagement_dir),
+        category="code-queue-done",
+        label="clean result",
+        payload={"item": 3},
+        source_path="queue-3.json",
+        metadata={"sequence": 1},
+    )
+    second = module.write_json_snapshot(
+        str(engagement_dir),
+        category="code-queue-done",
+        label="clean result",
+        payload={"item": 4},
+        source_path="queue-4.json",
+        metadata={"sequence": 2},
+    )
+
+    assert first != second
+    assert json.loads(first.read_text(encoding="utf-8")) == {"item": 3}
+    assert json.loads(second.read_text(encoding="utf-8")) == {"item": 4}
+    module.rebuild_manifest(str(engagement_dir))
+    manifest = json.loads(
+        (engagement_dir / "tools" / "analysis-state" / "artifact-manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert {entry["name"] for entry in manifest["entries"]} == {
+        first.name,
+        second.name,
+    }
+    by_name = {entry["name"]: entry for entry in manifest["entries"]}
+    assert by_name[first.name]["kind"] == "code-queue-done"
+    assert by_name[first.name]["label"] == "clean result"
+    assert by_name[first.name]["source_path"] == "queue-3.json"
+    assert by_name[first.name]["metadata"] == {"sequence": 1}
+    assert by_name[second.name]["kind"] == "code-queue-done"
+    assert by_name[second.name]["label"] == "clean result"
+    assert by_name[second.name]["source_path"] == "queue-4.json"
+    assert by_name[second.name]["metadata"] == {"sequence": 2}
 
 
 def test_code_audit_manifest_ignores_legacy_noncanonical_files(tmp_path):
@@ -2422,3 +3202,99 @@ def test_code_audit_manifest_ignores_legacy_noncanonical_files(tmp_path):
     manifest = json.loads((state_dir / "artifact-manifest.json").read_text())
     assert manifest["artifact_count"] == 1
     assert manifest["entries"][0]["kind"] == "code-analysis-submit"
+
+
+@pytest.mark.parametrize(
+    ("loader", "payload_factory", "argument_name", "endpoint"),
+    [
+        (_load_code_record_fuzz_decision_module, _fuzz_decision_payload, "decision_json", "code/fuzz/decision"),
+        (_load_code_record_fuzz_campaign_module, _fuzz_campaign_payload, "receipt_json", "code/fuzz/campaign-receipts"),
+    ],
+)
+def test_code_record_fuzz_completion_posts_exact_strict_json(
+    loader, payload_factory, argument_name, endpoint, monkeypatch, tmp_path, capsys
+):
+    module = loader()
+    payload = payload_factory()
+    source = tmp_path / "record.json"
+    source.write_text(json.dumps(payload), encoding="utf-8")
+    posted = []
+    backend_record = {"id": 91, **payload, "current": True}
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test", engagement_key="eng"
+        ),
+    )
+
+    class FakeClient:
+        def __init__(self, base_url, engagement_key):
+            assert (base_url, engagement_key) == ("http://example.test", "eng")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def post(self, actual_endpoint, body):
+            posted.append((actual_endpoint, body))
+            return backend_record
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+    module.run(
+        SimpleNamespace(**{argument_name: str(source)}, engagement_dir=tmp_path)
+    )
+
+    assert posted == [(endpoint, payload)]
+    assert json.loads(capsys.readouterr().out) == backend_record
+
+
+@pytest.mark.parametrize(
+    ("loader", "payload_factory", "argument_name", "mutation", "message"),
+    [
+        (
+            _load_code_record_fuzz_decision_module,
+            _fuzz_decision_payload,
+            "decision_json",
+            lambda payload: payload.__setitem__("target_ids", ["z", "a"]),
+            "target_ids must be sorted and unique",
+        ),
+        (
+            _load_code_record_fuzz_decision_module,
+            _fuzz_decision_payload,
+            "decision_json",
+            lambda payload: payload.__setitem__("target_ids", []),
+            "required decisions must declare at least one target_id",
+        ),
+        (
+            _load_code_record_fuzz_campaign_module,
+            _fuzz_campaign_payload,
+            "receipt_json",
+            lambda payload: payload.__setitem__("crash_count", 1),
+            "completed_no_crash requires crash_count=0",
+        ),
+    ],
+)
+def test_code_record_fuzz_completion_rejects_false_or_ambiguous_receipts(
+    loader,
+    payload_factory,
+    argument_name,
+    mutation,
+    message,
+    tmp_path,
+    capsys,
+):
+    module = loader()
+    payload = payload_factory()
+    mutation(payload)
+    source = tmp_path / "invalid.json"
+    source.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        module.run(
+            SimpleNamespace(**{argument_name: str(source)}, engagement_dir=tmp_path)
+        )
+
+    assert message in capsys.readouterr().err

@@ -4693,7 +4693,14 @@ class _FakeSweepClient:
 
     def patch(self, endpoint, payload, *, accept_409: bool = False):
         self.patches.append((endpoint, payload))
-        return {"id": int(endpoint.split("/")[-1]), "status": payload.get("status")}
+        return {
+            "id": int(endpoint.split("/")[-1]),
+            "status": payload.get("status"),
+            "recovered_pending_output": True,
+            "output_cleanup_status": "not_required",
+            "output_integrity_status": "verified",
+            "output_retention_status": "artifact",
+        }
 
     def close(self):
         return None
@@ -4863,17 +4870,10 @@ def test_sweep_orphans_dry_run_does_not_patch(monkeypatch, capsys, fake_engageme
     assert "reason=already-terminal" in out
 
 
-def test_sweep_orphans_filters_to_running_status_serverside(
+def test_sweep_orphans_requests_all_rows_for_pending_terminal_recovery(
     monkeypatch, fake_engagement
 ):
-    """The GET request must include ``status=running`` so the backend can
-    serve only the in-flight rows once it grows server-side filtering.
-
-    Until the backend supports the filter, the CLI also applies the same
-    filter client-side (covered by ``test_sweep_orphans_dry_run_does_not_patch``);
-    sending the query param now keeps the cutover painless when the backend
-    catches up.
-    """
+    """The reconciler owns running orphans and committed terminal pending work."""
     rows = [_orphan_row(row_id=1, age_seconds=7200, run_uuid="eeee5555")]
     sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, rows)
 
@@ -4893,12 +4893,384 @@ def test_sweep_orphans_filters_to_running_status_serverside(
         dry_run=True,
     ))
 
-    # The first GET must scope to status=running so the backend can short-
-    # circuit the scan once it supports the filter.
     assert fake_client.gets, "expected at least one GET against command-runs"
     first = fake_client.gets[0]
     assert first.startswith("command-runs?")
-    assert "status=running" in first
+    assert "status=" not in first
+
+
+@pytest.mark.parametrize(
+    "pending_field",
+    ["output_cleanup_status", "output_integrity_status"],
+)
+def test_sweep_orphans_recovers_committed_terminal_pending_output(
+    pending_field, monkeypatch, fake_engagement, capsys
+):
+    base_row = _orphan_row(
+        row_id=91,
+        age_seconds=7200,
+        run_uuid="pending0091",
+    )
+    row = {
+        **base_row,
+        "status": "completed",
+        "completed_at": base_row["started_at"],
+        "output_recovery_observed_at": base_row["started_at"],
+        pending_field: "pending",
+    }
+    sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, [row])
+
+    sweep.run(
+        SimpleNamespace(
+            engagement_dir=str(fake_engagement),
+            max_age_seconds=3600,
+            container_name="vigil",
+            dry_run=False,
+        )
+    )
+
+    assert fake_client.patches == [
+        (
+                "command-runs/91",
+                {
+                    "status": "completed",
+                    "ended_at": base_row["started_at"],
+                },
+        )
+    ]
+    summary = json.loads(capsys.readouterr().out.splitlines()[-1])["summary"]
+    assert summary["recovered_pending"] == 1
+    assert summary["pending_recovery_failed"] == 0
+
+
+def test_sweep_orphans_ages_pending_recovery_only_from_server_commit_time(
+    monkeypatch, fake_engagement, capsys
+):
+    base_row = _orphan_row(
+        row_id=92,
+        age_seconds=7200,
+        run_uuid="pending0092",
+    )
+    row = {
+        **base_row,
+        "status": "completed",
+        "completed_at": "2099-01-01T00:00:00Z",
+        "output_recovery_observed_at": base_row["started_at"],
+        "output_integrity_status": "pending",
+    }
+    sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, [row])
+
+    sweep.run(
+        SimpleNamespace(
+            engagement_dir=str(fake_engagement),
+            max_age_seconds=3600,
+            container_name="vigil",
+            dry_run=False,
+        )
+    )
+
+    assert [endpoint for endpoint, _ in fake_client.patches] == ["command-runs/92"]
+    summary = json.loads(capsys.readouterr().out.splitlines()[-1])["summary"]
+    assert summary["recovered_pending"] == 1
+
+
+def test_sweep_orphans_never_falls_back_to_client_time_for_pending_recovery(
+    monkeypatch, fake_engagement, capsys
+):
+    base_row = _orphan_row(
+        row_id=93,
+        age_seconds=7200,
+        run_uuid="pending0093",
+    )
+    row = {
+        **base_row,
+        "status": "completed",
+        "completed_at": base_row["started_at"],
+        "output_integrity_status": "pending",
+    }
+    sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, [row])
+
+    sweep.run(
+        SimpleNamespace(
+            engagement_dir=str(fake_engagement),
+            max_age_seconds=3600,
+            container_name="vigil",
+            dry_run=False,
+        )
+    )
+
+    assert fake_client.patches == []
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out.splitlines()[-1])["summary"]
+    assert summary["checked"] == 1
+    assert summary["pending_recovery_failed"] == 1
+    assert summary["skipped_unverifiable"] == 1
+    assert summary["pending_recovery_failed_ids"] == [93]
+    assert summary["output_attention_action"] == (
+        "vigil assess command-run list --output-attention --json --limit 1000"
+    )
+    assert "recovery baseline" in captured.err
+
+
+@pytest.mark.parametrize("recovery_baseline", [None, "not-a-timestamp"])
+def test_sweep_orphans_surfaces_unverifiable_pending_recovery_baseline(
+    recovery_baseline, monkeypatch, fake_engagement, capsys
+):
+    base_row = _orphan_row(
+        row_id=96,
+        age_seconds=7200,
+        run_uuid="pending-baseline-0096",
+    )
+    row = {
+        **base_row,
+        "status": "completed",
+        "completed_at": base_row["started_at"],
+        "output_recovery_observed_at": recovery_baseline,
+        "output_integrity_status": "pending",
+    }
+    sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, [row])
+
+    sweep.run(
+        SimpleNamespace(
+            engagement_dir=str(fake_engagement),
+            max_age_seconds=3600,
+            container_name="vigil",
+            dry_run=False,
+        )
+    )
+
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out.splitlines()[-1])["summary"]
+    assert fake_client.patches == []
+    assert summary["checked"] == 1
+    assert summary["pending_recovery_failed"] == 1
+    assert summary["skipped_unverifiable"] == 1
+    assert summary["pending_recovery_failed_ids"] == [96]
+    assert summary["output_attention_action"] == (
+        "vigil assess command-run list --output-attention --json --limit 1000"
+    )
+    assert "id=96" in captured.err
+    assert "recovery baseline" in captured.err
+
+
+@pytest.mark.parametrize(
+    "recovery_response",
+    [
+        [],
+        {},
+        {
+            "id": 94,
+            "status": "completed",
+            "recovered_pending_output": True,
+            "output_cleanup_status": "not_required",
+            "output_integrity_status": "verified",
+        },
+        {
+            "id": 93,
+            "status": "failed",
+            "recovered_pending_output": True,
+            "output_cleanup_status": "not_required",
+            "output_integrity_status": "verified",
+        },
+        {
+            "id": 93,
+            "status": "completed",
+            "recovered_pending_output": 1,
+            "output_cleanup_status": "not_required",
+            "output_integrity_status": "verified",
+        },
+        {
+            "id": 93,
+            "status": "completed",
+            "recovered_pending_output": True,
+            "output_cleanup_status": "pending",
+            "output_integrity_status": "verified",
+        },
+        {
+            "id": 93,
+            "status": "completed",
+            "recovered_pending_output": True,
+            "output_cleanup_status": "not_required",
+            "output_integrity_status": "pending",
+        },
+        {
+            "id": 93,
+            "status": "completed",
+            "recovered_pending_output": True,
+            "output_cleanup_status": "complete",
+            "output_integrity_status": "verified",
+        },
+        {
+            "id": 93,
+            "status": "completed",
+            "recovered_pending_output": True,
+            "output_cleanup_status": "not_required",
+            "output_integrity_status": "verified",
+            "output_retention_status": "suppression_pending",
+        },
+        {
+            "id": 93,
+            "status": "completed",
+            "recovered_pending_output": True,
+            "output_cleanup_status": "not_required",
+            "output_integrity_status": "verified",
+            "output_retention_status": "unknown-state",
+        },
+    ],
+    ids=(
+        "non-object",
+        "missing-proof",
+        "wrong-id",
+        "wrong-status",
+        "non-boolean-proof",
+        "cleanup-still-pending",
+        "integrity-still-pending",
+        "unknown-cleanup-outcome",
+        "transient-retention-outcome",
+        "unknown-retention-outcome",
+    ),
+)
+def test_sweep_orphans_rejects_unproven_pending_recovery(
+    recovery_response, monkeypatch, fake_engagement, capsys
+):
+    base_row = _orphan_row(
+        row_id=93,
+        age_seconds=7200,
+        run_uuid="pending-proof-0093",
+    )
+    row = {
+        **base_row,
+        "status": "completed",
+        "completed_at": base_row["started_at"],
+        "output_recovery_observed_at": base_row["started_at"],
+        "output_integrity_status": "pending",
+    }
+    sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, [row])
+
+    def fake_patch(endpoint, payload, *, accept_409=False):
+        fake_client.patches.append((endpoint, payload))
+        assert accept_409 is True
+        return recovery_response
+
+    fake_client.patch = fake_patch
+
+    sweep.run(
+        SimpleNamespace(
+            engagement_dir=str(fake_engagement),
+            max_age_seconds=3600,
+            container_name="vigil",
+            dry_run=False,
+        )
+    )
+
+    summary = json.loads(capsys.readouterr().out.splitlines()[-1])["summary"]
+    assert summary["recovered_pending"] == 0
+    assert summary["pending_recovery_failed"] == 1
+    assert summary["skipped_unverifiable"] == 1
+
+
+def test_sweep_orphans_tracks_degraded_pending_recovery(
+    monkeypatch, fake_engagement, capsys
+):
+    base_row = _orphan_row(
+        row_id=95,
+        age_seconds=7200,
+        run_uuid="pending-degraded-0095",
+    )
+    row = {
+        **base_row,
+        "status": "completed",
+        "completed_at": base_row["started_at"],
+        "output_recovery_observed_at": base_row["started_at"],
+        "output_cleanup_status": "pending",
+        "output_integrity_status": "not_applicable",
+    }
+    sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, [row])
+
+    def fake_patch(endpoint, payload, *, accept_409=False):
+        fake_client.patches.append((endpoint, payload))
+        return {
+            "id": 95,
+            "status": "completed",
+            "recovered_pending_output": True,
+            "output_cleanup_status": "deferred",
+            "output_integrity_status": "not_applicable",
+            "output_retention_status": "suppression_deferred",
+        }
+
+    fake_client.patch = fake_patch
+
+    sweep.run(
+        SimpleNamespace(
+            engagement_dir=str(fake_engagement),
+            max_age_seconds=3600,
+            container_name="vigil",
+            dry_run=False,
+        )
+    )
+
+    summary = json.loads(capsys.readouterr().out.splitlines()[-1])["summary"]
+    assert summary["recovered_pending"] == 1
+    assert summary["recovered_degraded"] == 1
+    assert summary["recovered_degraded_ids"] == [95]
+    assert summary["recovered_degraded_ids_omitted"] == 0
+    assert summary["output_attention_action"] == (
+        "vigil assess command-run list --output-attention --json --limit 1000"
+    )
+
+
+def test_sweep_orphans_bounds_degraded_recovery_ids(
+    monkeypatch, fake_engagement, capsys
+):
+    rows = []
+    for row_id in range(100, 100 + 25):
+        base_row = _orphan_row(
+            row_id=row_id,
+            age_seconds=7200,
+            run_uuid=f"pending-degraded-{row_id}",
+        )
+        rows.append(
+            {
+                **base_row,
+                "status": "completed",
+                "completed_at": base_row["started_at"],
+                "output_recovery_observed_at": base_row["started_at"],
+                "output_cleanup_status": "pending",
+                "output_integrity_status": "not_applicable",
+            }
+        )
+    sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, rows)
+
+    def fake_patch(endpoint, payload, *, accept_409=False):
+        fake_client.patches.append((endpoint, payload))
+        row_id = int(endpoint.rsplit("/", 1)[-1])
+        return {
+            "id": row_id,
+            "status": "completed",
+            "recovered_pending_output": True,
+            "output_cleanup_status": "deferred",
+            "output_integrity_status": "not_applicable",
+            "output_retention_status": "suppression_deferred",
+        }
+
+    fake_client.patch = fake_patch
+    sweep.run(
+        SimpleNamespace(
+            engagement_dir=str(fake_engagement),
+            max_age_seconds=3600,
+            container_name="vigil",
+            dry_run=False,
+        )
+    )
+
+    summary = json.loads(capsys.readouterr().out.splitlines()[-1])["summary"]
+    assert summary["recovered_degraded"] == 25
+    assert summary["recovered_degraded_ids"] == list(
+        range(100, 100 + sweep._ATTENTION_ID_LIMIT)
+    )
+    assert summary["recovered_degraded_ids_omitted"] == (
+        25 - sweep._ATTENTION_ID_LIMIT
+    )
 
 
 def test_sweep_orphans_handles_missing_pid_file_as_dead(monkeypatch, fake_engagement):

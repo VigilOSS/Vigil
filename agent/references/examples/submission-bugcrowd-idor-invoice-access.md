@@ -6,9 +6,11 @@ category: Disclosure & Reporting Formats
 
 **Title:** IDOR in invoice PDF endpoint allows customers to read other tenants' invoices
 
-**VRT:** Broken Access Control > Insecure Direct Object Reference (IDOR)
+**VRT:** Broken Access Control (BAC) > Insecure Direct Object References (IDOR) > View Sensitive Information(Iterable Object Identifiers)
 
-**Severity:** P2 (High) — CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N (6.5)
+**Severity:** MEDIUM
+
+**CVSS:** CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N (6.5)
 
 ---
 
@@ -19,15 +21,15 @@ A customer of the billing platform reads any other tenant's invoice PDF by chang
 ### Steps to Reproduce
 
 1. [attacker] Log in as a normal customer (Tenant A) and open any invoice to capture its ID, e.g. `41207`.
-2. [attacker] Request the tenant's own invoice as a control:
+2. [attacker] Request the tenant's own invoice, to fix the baseline response shape:
 ```
-curl -s -H "Authorization: Bearer $TENANT_A_TOKEN" \
+curl -s -D - -H "Authorization: Bearer $TENANT_A_TOKEN" \
   https://billing.example.com/api/v2/invoices/41207/pdf -o own-invoice.pdf
 ```
 **Expect:** 200, Tenant A's own invoice.
 3. [attacker] Request an adjacent ID outside the sequence the UI ever shows Tenant A:
 ```
-curl -s -H "Authorization: Bearer $TENANT_A_TOKEN" \
+curl -s -D - -H "Authorization: Bearer $TENANT_A_TOKEN" \
   https://billing.example.com/api/v2/invoices/41198/pdf -o other-invoice.pdf
 ```
 **Expect:** 200, but `other-invoice.pdf` is a different company's invoice — Tenant A never had access to this account.
@@ -54,7 +56,7 @@ A competitor or disgruntled customer works from an ordinary paid account with no
 
 ### Impact
 
-Every tenant's billing data — contact details and negotiated line-item pricing — is readable across the platform. The ID space is sequential and unsalted, so exposure isn't limited to adjacent accounts: it covers the full customer base in one enumerable range.
+Every tenant's billing data (contact details and negotiated line-item pricing) is readable across the platform. The ID space is sequential and unsalted, so exposure isn't limited to adjacent accounts: it covers the full customer base in one enumerable range.
 
 ### Remediation
 

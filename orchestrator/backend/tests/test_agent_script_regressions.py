@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import re
@@ -256,6 +257,36 @@ def test_fetch_auto_pages_bounded_assessment_lists(capsys) -> None:
     assert "auto-paging surfaces with page_size=5000" in err
     assert "stdout will be one combined JSON array" in err
     assert "fetched 5001 surfaces row(s) across all pages" in err
+
+
+def test_fetch_auto_pages_variant_receipts_at_backend_max(capsys) -> None:
+    from app.services import code_analysis
+
+    module = _load_script_module(
+        "test_fetch_module_variant_receipt_pages",
+        "agent/scripts/assess/commands/fetch.py",
+    )
+    page_size = code_analysis.MAX_VARIANT_RECEIPT_PAGE
+    assert module.MAX_VARIANT_RECEIPT_PAGE == page_size
+    assert module._PAGED_ASSESSMENT_ENDPOINTS["code/variant-checks"] == page_size
+    calls: list[str] = []
+
+    class FakeClient:
+        def get_all_pages(self, endpoint: str, *, page_size: int = 5000):
+            calls.append(endpoint)
+            assert page_size == code_analysis.MAX_VARIANT_RECEIPT_PAGE
+            return [{"id": i} for i in range(501)]
+
+    rows = module._fetch_assessment_endpoint(
+        FakeClient(),
+        "code/variant-checks?repo_id=7",
+    )
+
+    assert len(rows) == 501
+    assert calls == ["code/variant-checks?repo_id=7"]
+    err = capsys.readouterr().err
+    assert f"auto-paging code/variant-checks with page_size={page_size}" in err
+    assert "fetched 501 code/variant-checks row(s) across all pages" in err
 
 
 def test_fetch_respects_explicit_pagination_query(capsys) -> None:
@@ -987,7 +1018,20 @@ def test_code_ingest_posts_backend_contract_fields(monkeypatch, tmp_path: Path) 
             if endpoint == "code/repos/41/refresh/files":
                 return {"staged": len(payload["files"])}
             if endpoint == "code/repos/41/refresh/commit":
-                return {"inserted": 1, "changed": 0, "renamed": 0, "deleted": 0}
+                return {
+                    "inserted": 1,
+                    "changed": 0,
+                    "renamed": 0,
+                    "deleted": 0,
+                    "repo_generation": 1,
+                    "source_manifest_digest": "d" * 64,
+                }
+            if endpoint == "code/repos/41/lsp-config":
+                assert payload["repo_generation"] == 1
+                assert payload["source_manifest_digest"] == "d" * 64
+                assert payload["lsp_config"]["ctags"]["repo_generation"] == 1
+                assert payload["lsp_config"]["ctags"]["source_manifest_digest"] == "d" * 64
+                return {"id": 41}
             raise AssertionError(f"unexpected endpoint: {endpoint}")
 
         def close(self) -> None:
@@ -1061,7 +1105,20 @@ def test_code_ingest_records_skipped_minified_manifest(monkeypatch, tmp_path: Pa
             if endpoint == "code/repos/41/refresh/files":
                 return {"staged": len(payload["files"])}
             if endpoint == "code/repos/41/refresh/commit":
-                return {"inserted": 1, "changed": 0, "renamed": 0, "deleted": 0}
+                return {
+                    "inserted": 1,
+                    "changed": 0,
+                    "renamed": 0,
+                    "deleted": 0,
+                    "repo_generation": 1,
+                    "source_manifest_digest": "d" * 64,
+                }
+            if endpoint == "code/repos/41/lsp-config":
+                assert payload["repo_generation"] == 1
+                assert payload["source_manifest_digest"] == "d" * 64
+                assert payload["lsp_config"]["ctags"]["repo_generation"] == 1
+                assert payload["lsp_config"]["ctags"]["source_manifest_digest"] == "d" * 64
+                return {"id": 41}
             raise AssertionError(f"unexpected endpoint: {endpoint}")
 
         def close(self) -> None:
@@ -1091,9 +1148,22 @@ def test_code_ingest_records_skipped_minified_manifest(monkeypatch, tmp_path: Pa
 
     files_call = next(payload for endpoint, payload in calls if endpoint == "code/repos/41/refresh/files")
     assert [row["file_path"] for row in files_call["files"]] == ["app.js"]
-    manifest_path = engagement_dir / "tools" / "analysis-state" / "skipped-artifacts" / "demo.json"
+    repo_call = next(payload for endpoint, payload in calls if endpoint == "code/repos/refresh/start")
+    manifest_path = (
+        engagement_dir
+        / "tools"
+        / "analysis-state"
+        / "skipped-artifacts"
+        / "41"
+        / "1"
+        / f"{'d' * 64}-{repo_call['snapshot_digest']}.json"
+    )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    skipped_paths = {row["path"]: row for row in manifest["skipped_artifacts"]}
+    assert manifest["repo_id"] == 41
+    assert manifest["repo_generation"] == 1
+    assert manifest["source_manifest_digest"] == "d" * 64
+    assert manifest["snapshot_digest"] == repo_call["snapshot_digest"]
+    skipped_paths = {row["path"]: row for row in manifest["excluded_entries"]}
     assert skipped_paths["app.min.js"]["reason"] == "minified_or_bundle"
     assert skipped_paths["app.min.js"]["source_equivalent_candidate"] == "app.js"
     assert skipped_paths["build"]["reason"] == "skipped_dir:build"
@@ -1135,7 +1205,20 @@ def test_code_ingest_include_path_can_queue_security_relevant_build_artifact(mon
             if endpoint == "code/repos/42/refresh/files":
                 return {"staged": len(payload["files"])}
             if endpoint == "code/repos/42/refresh/commit":
-                return {"inserted": 2, "changed": 0, "renamed": 0, "deleted": 0}
+                return {
+                    "inserted": 2,
+                    "changed": 0,
+                    "renamed": 0,
+                    "deleted": 0,
+                    "repo_generation": 1,
+                    "source_manifest_digest": "d" * 64,
+                }
+            if endpoint == "code/repos/42/lsp-config":
+                assert payload["repo_generation"] == 1
+                assert payload["source_manifest_digest"] == "d" * 64
+                assert payload["lsp_config"]["ctags"]["repo_generation"] == 1
+                assert payload["lsp_config"]["ctags"]["source_manifest_digest"] == "d" * 64
+                return {"id": 42}
             raise AssertionError(f"unexpected endpoint: {endpoint}")
 
         def close(self) -> None:
@@ -1497,7 +1580,172 @@ def test_render_finding_widens_fence_when_poc_code_contains_backtick_run() -> No
     assert rendered.count(f"\n{fence}") >= 2
 
 
-def test_code_index_sync_requires_repo_id_for_multi_repo_engagement(monkeypatch, tmp_path: Path, capsys) -> None:
+def _write_bound_structural_fixture(
+    manifest_dir: Path,
+    *,
+    repo_id: int,
+    repo_key: str,
+    digest: str,
+    total_functions: int,
+) -> dict[str, object]:
+    from assess.lib.code_snapshot import SnapshotBuilder, capture_regular_file
+    from assess.lib.code_structural_identity import (
+        bind_structural_inputs,
+        structural_input_digest,
+    )
+
+    raw = f"# {repo_key}\n".encode()
+    origin = manifest_dir / "origins" / repo_key
+    origin.mkdir(parents=True)
+    origin_file = origin / "shared.py"
+    origin_file.write_bytes(raw)
+    builder = SnapshotBuilder(manifest_dir / "code-snapshots", repo_key)
+    builder.add("shared.py", capture_regular_file(origin_file), language="python")
+    sealed = builder.finish(
+        repo_key=repo_key,
+        repo_name=repo_key,
+        source_origin_path=str(origin.resolve()),
+        git={"head": "", "branch": "", "dirty": None},
+    )
+    source = sealed.source_path
+    source_sha = hashlib.sha256(raw).hexdigest()
+    generation = 3
+    backend_file = {
+        "id": 200 + repo_id,
+        "repo_id": repo_id,
+        "file_path": "shared.py",
+        "file_hash": source_sha,
+        "language": "python",
+    }
+    source_manifest = json.loads(sealed.manifest_path.read_text(encoding="utf-8"))
+    bound = bind_structural_inputs(
+        source_manifest["files"],
+        {"shared.py": backend_file},
+        repo_id=repo_id,
+    )
+    input_digest = structural_input_digest(
+        bound,
+        repo_id=repo_id,
+        repo_generation=generation,
+        source_manifest_digest=digest,
+    )
+    index_root = manifest_dir / "structural-index"
+    generation_dir = (
+        index_root / str(repo_id) / str(generation) / "v5" / digest / input_digest
+    )
+    files_dir = generation_dir / "files"
+    files_dir.mkdir(parents=True)
+    index_payload = {
+        "file_path": "shared.py",
+        "language": "python",
+        "repo_id": repo_id,
+        "repo_generation": generation,
+        "source_manifest_digest": digest,
+        "structural_input_digest": input_digest,
+        "source_sha256": source_sha,
+        "total_functions": total_functions,
+        "total_exports": 0,
+        "total_lines": 1,
+        "functions": [],
+        "entry_points": [],
+        "security_sinks": [],
+        "security_sources": [],
+        "call_sites": [],
+        "imports": [],
+        "import_targets": [],
+        "exports": [],
+        "classes": [],
+        "structural_index_available": True,
+        "analysis_status": "complete",
+        "analysis_mode": "tree_sitter",
+        "degradation_reason": None,
+        "source_size": len(raw),
+        "bytes_scanned": len(raw),
+        "unavailable_dimensions": [],
+        "artifact_truncated": False,
+        "truncated_dimensions": [],
+        "signal_counts": {
+            "entry_points": 0,
+            "imports": 0,
+            "security_sinks": 0,
+            "security_sources": 0,
+        },
+    }
+    index_bytes = json.dumps(index_payload).encode()
+    index_path = files_dir / "shared.json"
+    index_path.write_bytes(index_bytes)
+    manifest_path = generation_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema": "structural-index/v5",
+                "repo_id": repo_id,
+                "repo_key": repo_key,
+                "repo_generation": generation,
+                "source_manifest_digest": digest,
+                "structural_input_digest": input_digest,
+                "source_path": str(source.resolve()),
+                "source_snapshot_manifest_path": str(sealed.manifest_path),
+                "snapshot_digest": sealed.snapshot_digest,
+                "manifest_path": str(manifest_path.resolve()),
+                "files": {
+                    "shared.py": {
+                        "index_path": str(index_path.relative_to(index_root)),
+                        "source_sha256": source_sha,
+                        "language": "python",
+                        "index_sha256": hashlib.sha256(index_bytes).hexdigest(),
+                        "analysis_status": "complete",
+                        "analysis_mode": "tree_sitter",
+                        "artifact_truncated": False,
+                    }
+                },
+                "path_to_index": {
+                    "shared.py": str(index_path.relative_to(index_root)),
+                },
+                "degraded_files": 0,
+                "degraded_file_paths": [],
+                "artifact_truncated_files": 0,
+                "artifact_truncated_file_paths": [],
+                "analysis_status_counts": {
+                    "complete": 1,
+                    "degraded": 0,
+                    "unsupported": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "summary": {
+            "repo_id": repo_id,
+            "repo_generation": generation,
+            "source_manifest_digest": digest,
+            "structural_input_digest": input_digest,
+            "manifest_path": str(manifest_path.relative_to(manifest_dir)),
+            "degraded_files": 0,
+            "degraded_file_paths": [],
+            "artifact_truncated_files": 0,
+            "artifact_truncated_file_paths": [],
+            "analysis_status_counts": {
+                "complete": 1,
+                "degraded": 0,
+                "unsupported": 0,
+            },
+        },
+        "backend_repo": {
+            "id": repo_id,
+            "repo_key": repo_key,
+            "repo_path": str(source.resolve()),
+            "active_generation": generation,
+            "source_manifest_digest": digest,
+        },
+        "source_sha": source_sha,
+        "source_size": len(raw),
+        "backend_file": backend_file,
+    }
+
+
+def test_code_index_sync_rejects_legacy_unbound_manifest(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_script_module(
         "test_code_index_sync_multi_repo_module",
         "agent/scripts/assess/commands/code_index_sync.py",
@@ -1550,7 +1798,7 @@ def test_code_index_sync_requires_repo_id_for_multi_repo_engagement(monkeypatch,
         )
 
     assert excinfo.value.code == 1
-    assert "--repo-id" in capsys.readouterr().err
+    assert "rebuild with code-index" in capsys.readouterr().err
 
 
 def test_code_index_sync_repo_id_scopes_aggregate_to_matching_manifest(
@@ -1564,36 +1812,27 @@ def test_code_index_sync_repo_id_scopes_aggregate_to_matching_manifest(
     )
     engagement_dir = tmp_path / "engagement"
     manifest_dir = engagement_dir / "tools" / "analysis-state"
-    index_dir = manifest_dir / "structural-index"
-    (index_dir / "repo-a").mkdir(parents=True)
-    (index_dir / "repo-b").mkdir(parents=True)
-    (index_dir / "repo-a" / "a.json").write_text(
-        json.dumps(
-            {"total_functions": 99, "entry_points": [], "security_sinks": [], "exports": []}
-        ),
-        encoding="utf-8",
+    repo_a = _write_bound_structural_fixture(
+        manifest_dir,
+        repo_id=1,
+        repo_key="repo-a",
+        digest="a" * 64,
+        total_functions=99,
     )
-    (index_dir / "repo-b" / "b.json").write_text(
-        json.dumps(
-            {"total_functions": 7, "entry_points": [], "security_sinks": [], "exports": []}
-        ),
-        encoding="utf-8",
-    )
-    (index_dir / "repo-a-manifest.json").write_text(
-        json.dumps({"repo_key": "repo-a", "path_to_index": {"shared.py": "repo-a/a.json"}}),
-        encoding="utf-8",
-    )
-    (index_dir / "repo-b-manifest.json").write_text(
-        json.dumps({"repo_key": "repo-b", "path_to_index": {"shared.py": "repo-b/b.json"}}),
-        encoding="utf-8",
+    repo_b = _write_bound_structural_fixture(
+        manifest_dir,
+        repo_id=2,
+        repo_key="repo-b",
+        digest="b" * 64,
+        total_functions=7,
     )
     (manifest_dir / "structural-index-manifest.json").write_text(
         json.dumps(
             {
-                "schema": "structural-index-aggregate/v1",
+                "schema": "structural-index-aggregate/v4",
                 "repos": {
-                    "repo-a": {"manifest_path": "structural-index/repo-a-manifest.json"},
-                    "repo-b": {"manifest_path": "structural-index/repo-b-manifest.json"},
+                    "1": repo_a["summary"],
+                    "2": repo_b["summary"],
                 },
             }
         ),
@@ -1620,13 +1859,10 @@ def test_code_index_sync_repo_id_scopes_aggregate_to_matching_manifest(
 
         def get(self, endpoint: str):
             if endpoint == "code/repos":
-                return [
-                    {"id": 1, "repo_key": "repo-a", "name": "repo-a"},
-                    {"id": 2, "repo_key": "repo-b", "name": "repo-b"},
-                ]
+                return [repo_a["backend_repo"], repo_b["backend_repo"]]
             self.file_requests.append(endpoint)
             assert endpoint == "code/files?limit=5000&offset=0&repo_id=2"
-            return [{"id": 202, "file_path": "shared.py"}]
+            return [dict(repo_b["backend_file"])]
 
         def post(self, endpoint: str, payload: dict[str, object]):
             self.posts.append((endpoint, payload))
@@ -1657,16 +1893,133 @@ def test_code_index_sync_repo_id_scopes_aggregate_to_matching_manifest(
     assert FakeClient.file_requests == ["code/files?limit=5000&offset=0&repo_id=2"]
     assert len(FakeClient.posts) == 1
     _, payload = FakeClient.posts[0]
+    assert payload["structural_index_schema"] == "structural-index/v5"
+    assert payload["structural_input_digest"] == repo_b["summary"][
+        "structural_input_digest"
+    ]
     assert payload["updates"] == [
         {
             "file_id": 202,
+            "source_sha256": repo_b["source_sha"],
+            "indexed_language": "python",
             "total_functions": 7,
             "total_entry_points": 0,
             "total_sinks": 0,
             "total_exports": 0,
+            "structural_analysis_status": "complete",
+            "structural_analysis_mode": "tree_sitter",
+            "structural_degradation_reason": None,
+            "structural_source_size": repo_b["source_size"],
+            "structural_bytes_scanned": repo_b["source_size"],
+            "structural_unavailable_dimensions": [],
+            "structural_artifact_truncated": False,
+            "structural_truncated_dimensions": [],
+            "structural_signal_counts": {
+                "entry_points": 0,
+                "imports": 0,
+                "security_sinks": 0,
+                "security_sources": 0,
+            },
         }
     ]
     assert "across 1 repos" in capsys.readouterr().err
+
+
+def test_code_index_sync_rejects_late_repo_debt_shape_before_any_post(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_script_module(
+        "test_code_index_sync_late_invalid_debt_module",
+        "agent/scripts/assess/commands/code_index_sync.py",
+    )
+    engagement_dir = tmp_path / "engagement"
+    manifest_dir = engagement_dir / "tools" / "analysis-state"
+    repo_a = _write_bound_structural_fixture(
+        manifest_dir,
+        repo_id=1,
+        repo_key="repo-a",
+        digest="a" * 64,
+        total_functions=1,
+    )
+    repo_b = _write_bound_structural_fixture(
+        manifest_dir,
+        repo_id=2,
+        repo_key="repo-b",
+        digest="b" * 64,
+        total_functions=1,
+    )
+    aggregate_path = manifest_dir / "structural-index-manifest.json"
+    aggregate_path.write_text(
+        json.dumps(
+            {
+                "schema": "structural-index-aggregate/v4",
+                "repos": {"1": repo_a["summary"], "2": repo_b["summary"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    repo_b_manifest_path = manifest_dir / repo_b["summary"]["manifest_path"]
+    repo_b_manifest = json.loads(repo_b_manifest_path.read_text(encoding="utf-8"))
+    binding = repo_b_manifest["files"]["shared.py"]
+    artifact_path = manifest_dir / "structural-index" / binding["index_path"]
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    artifact["analysis_mode"] = "none"
+    artifact_bytes = json.dumps(artifact).encode()
+    artifact_path.write_bytes(artifact_bytes)
+    binding["index_sha256"] = hashlib.sha256(artifact_bytes).hexdigest()
+    binding["analysis_mode"] = "none"
+    repo_b_manifest_path.write_text(json.dumps(repo_b_manifest), encoding="utf-8")
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+
+    class FakeClient:
+        posts: list[tuple[str, dict[str, object]]] = []
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def get(self, endpoint: str):
+            if endpoint == "code/repos":
+                return [repo_a["backend_repo"], repo_b["backend_repo"]]
+            repo_id = int(endpoint.rsplit("=", 1)[1])
+            selected = repo_a if repo_id == 1 else repo_b
+            return [dict(selected["backend_file"])]
+
+        def post(self, endpoint: str, payload: dict[str, object]):
+            self.posts.append((endpoint, payload))
+            return {"updated": 1, "skipped": 0}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    FakeClient.posts = []
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    with pytest.raises(SystemExit):
+        module.run(
+            SimpleNamespace(
+                engagement_dir=engagement_dir,
+                manifest=str(aggregate_path),
+                index_dir=None,
+                repo_id=None,
+                repo_key=None,
+            )
+        )
+
+    assert FakeClient.posts == []
 
 
 def test_code_index_sync_rejects_mismatched_repo_id_and_repo_key(
@@ -1680,19 +2033,27 @@ def test_code_index_sync_rejects_mismatched_repo_id_and_repo_key(
     )
     engagement_dir = tmp_path / "engagement"
     manifest_dir = engagement_dir / "tools" / "analysis-state"
-    index_dir = manifest_dir / "structural-index"
-    index_dir.mkdir(parents=True)
-    (index_dir / "repo-a-manifest.json").write_text(
-        json.dumps({"repo_key": "repo-a", "path_to_index": {"shared.py": "repo-a/a.json"}}),
-        encoding="utf-8",
+    repo_a = _write_bound_structural_fixture(
+        manifest_dir,
+        repo_id=1,
+        repo_key="repo-a",
+        digest="a" * 64,
+        total_functions=1,
+    )
+    repo_b = _write_bound_structural_fixture(
+        manifest_dir,
+        repo_id=2,
+        repo_key="repo-b",
+        digest="b" * 64,
+        total_functions=1,
     )
     (manifest_dir / "structural-index-manifest.json").write_text(
         json.dumps(
             {
-                "schema": "structural-index-aggregate/v1",
+                "schema": "structural-index-aggregate/v4",
                 "repos": {
-                    "repo-a": {"manifest_path": "structural-index/repo-a-manifest.json"},
-                    "repo-b": {"manifest_path": "structural-index/repo-b-manifest.json"},
+                    "1": repo_a["summary"],
+                    "2": repo_b["summary"],
                 },
             }
         ),
@@ -1743,7 +2104,7 @@ def test_code_index_sync_rejects_mismatched_repo_id_and_repo_key(
         )
 
     assert excinfo.value.code == 1
-    assert "does not match per-repo manifest repo-a" in capsys.readouterr().err
+    assert "No structural manifest matched" in capsys.readouterr().err
 
 
 def test_code_record_modules_rejects_auto_derived_key_collisions(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -2371,6 +2732,21 @@ def test_start_swarm_records_N_rows_with_worker_encoded_task(
                 "status": "in-progress",
             }
 
+        def get(self, endpoint: str):
+            assert endpoint == "code/repos"
+            return [
+                {
+                    "id": 17,
+                    "repo_key": "swarm-repo",
+                    "repo_path": "/sealed/swarm-repo/source",
+                    "active_generation": 4,
+                    "source_manifest_digest": "c" * 64,
+                    "structural_index_schema": "structural-index/v5",
+                    "structural_index_manifest_path": "/sealed/swarm-repo/index/manifest.json",
+                    "lsp_config": {},
+                }
+            ]
+
         def close(self) -> None:
             return None
 
@@ -2405,6 +2781,7 @@ def test_start_swarm_records_N_rows_with_worker_encoded_task(
         swarm_items_file=str(items_path),
         finding_slugs=None,
         engagement_dir=str(tmp_path),
+        code_repo_id=17,
         extra=[],
     )
 
@@ -2429,6 +2806,8 @@ def test_start_swarm_records_N_rows_with_worker_encoded_task(
     assert "## Swarm Dispatch Table" in out
     assert "workers: 3" in out
     assert "batch_size: 5" in out
+    assert "## Code Source Identity" in out
+    assert "repo_id: 17" in out
 
 
 def test_start_swarm_rejects_empty_items_file(monkeypatch, tmp_path: Path, capsys) -> None:

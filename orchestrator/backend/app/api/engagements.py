@@ -25,6 +25,7 @@ class EngagementResponse(BaseModel):
     status: str
     engagement_root: str
     current_phase: str
+    code_phase: str | None = None
     exploit_policy: str
     exploit_review_state: str
     approved_targets: list[str]
@@ -65,6 +66,7 @@ def _engagement_response(engagement: EngagementView) -> EngagementResponse:
         status=engagement.status,
         engagement_root=engagement.engagement_root,
         current_phase=engagement.current_phase,
+        code_phase=engagement.code_phase,
         exploit_policy=engagement.exploit_policy,
         exploit_review_state=engagement.exploit_review_state,
         approved_targets=engagement.approved_targets,

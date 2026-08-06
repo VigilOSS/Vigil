@@ -2,7 +2,7 @@
 
 Validates preconditions before writing the new phase to scope.json.
 Exits non-zero and prints blockers when preconditions fail.
-Pass --force to override blockers (logged but not blocked).
+Pass --force to override ordinary blockers; source-identity integrity blockers remain hard.
 """
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ import sys
 from assess.lib.client import AssessmentClient
 from assess.lib.config import Config, load_config
 from assess.lib.scope import mutate_scope
-
 
 WEB_PHASES = [
     "recon",
@@ -68,7 +67,7 @@ def register(subparsers) -> None:
     p.add_argument(
         "--force",
         action="store_true",
-        help="Override blockers (transition proceeds with warnings)",
+        help="Override ordinary blockers; integrity blockers remain non-overrideable",
     )
     p.add_argument(
         "--reason",
@@ -172,6 +171,7 @@ def run(args) -> None:
 
     hard = [b for b in blockers if b.get("severity", "block") != "advisory"]
     advisory = [b for b in blockers if b.get("severity", "block") == "advisory"]
+    nonoverrideable = [b for b in hard if b.get("overrideable") is False]
 
     if advisory:
         print(
@@ -181,6 +181,16 @@ def run(args) -> None:
         )
         for b in advisory:
             print(f"  - [{b['kind']}] {b['detail']}", file=sys.stderr)
+
+    if nonoverrideable:
+        print(
+            f"transition-phase: {len(nonoverrideable)} integrity blocker(s) for "
+            f"'{target_phase}' cannot be overridden:",
+            file=sys.stderr,
+        )
+        for b in nonoverrideable:
+            print(f"  - [{b['kind']}] {b['detail']}", file=sys.stderr)
+        sys.exit(1)
 
     if hard and not args.force:
         print(f"transition-phase: {len(hard)} blocker(s) for '{target_phase}':", file=sys.stderr)
@@ -817,185 +827,95 @@ def _check_code_preconditions(
     target_phase: str,
     client: AssessmentClient,
 ) -> list[dict[str, str]]:
-    blockers: list[dict[str, str]] = []
+    """Consume the backend-owned, target-specific code readiness contract.
 
-    if target_phase == "classify-map":
-        try:
-            coverage = client.get("code/coverage")
-            if isinstance(coverage, dict):
-                total = coverage.get("total_files", 0)
-                if total == 0:
-                    blockers.append({
-                        "kind": "no_indexed_files",
-                        "detail": "No files indexed — ingest may be incomplete",
-                    })
-        except Exception as exc:
-            blockers.append(_precondition_check_failed("classify-map coverage", exc))
-
-    elif target_phase == "hunt":
-        try:
-            coverage = client.get("code/coverage")
-            if isinstance(coverage, dict):
-                by_class = coverage.get("by_classification", {})
-                classified = sum(
-                    v.get("count", 0) if isinstance(v, dict) else int(v)
-                    for k, v in by_class.items()
-                    if k != "skip"
-                )
-                if classified == 0:
-                    blockers.append({
-                        "kind": "no_classified_files",
-                        "detail": "No files classified — classify-map may be incomplete",
-                    })
-        except Exception as exc:
-            blockers.append(_precondition_check_failed("hunt coverage", exc))
-
-    elif target_phase == "verify-variant":
-        try:
-            findings = client.get("findings")
-            if isinstance(findings, list):
-                code_findings = [
-                    f for f in findings
-                    if str(f.get("canonical_location", "")).startswith("file:")
-                    and f.get("workflow_status") == "active"
-                ]
-                if len(code_findings) == 0:
-                    blockers.append({
-                        "kind": "no_code_findings",
-                        "detail": "No active code findings to verify — hunt may be incomplete",
-                    })
-        except Exception as exc:
-            blockers.append(_precondition_check_failed("verify-variant findings", exc))
-        blockers.extend(_code_coverage_blockers(client))
-
-    elif target_phase == "complete":
-        try:
-            findings = client.get("findings")
-            if isinstance(findings, list):
-                unverified = [
-                    f for f in findings
-                    if str(f.get("canonical_location", "")).startswith("file:")
-                    and f.get("severity") in ("critical", "high")
-                    and f.get("verification_state") != "verified"
-                    and f.get("workflow_status") == "active"
-                ]
-                if unverified:
-                    slugs = [f.get("slug", "?") for f in unverified[:5]]
-                    blockers.append({
-                        "kind": "unverified_code_findings",
-                        "detail": (
-                            f"{len(unverified)} high/critical code finding(s) unverified: "
-                            f"{', '.join(slugs)}"
-                            + (" ..." if len(unverified) > 5 else "")
-                        ),
-                    })
-        except Exception as exc:
-            blockers.append(_precondition_check_failed("complete code findings", exc))
-        blockers.extend(_code_coverage_blockers(client))
-        # The blind-triage gate is track-agnostic: every Medium-or-above active
-        # finding must carry a recorded Accept* blind_triage_verdict before the
-        # terminal edge (code-phase-4-fuzz.md makes the blind Pass-2 review
-        # mandatory for code findings too). ``_blind_triage_blockers`` filters
-        # findings + dispatches verdicts generically, so it applies unchanged.
-        # ``_chain_construction_blockers`` and ``_depth_backstop_blockers`` are
-        # intentionally NOT applied to the code track: chain-construction keys
-        # on the web-only exploit-developer A->B chain role, and depth-backstop
-        # is the web app-unit ledger (the backend returns skipped=true for code
-        # engagements), so neither is meaningful here.
-        blockers.extend(_blind_triage_blockers(client))
-
-    return blockers
-
-
-def _code_coverage_blockers(client: AssessmentClient) -> list[dict[str, str]]:
-    """CODE-track coverage gate (W3b): the structural completeness checks that
-    must pass before hunt -> verify-variant and before report/complete.
-
-    Wires the existing backend ``code/coverage`` sub-gates into the phase gate at
-    ``severity="block"`` (overridable by ``--force --reason`` with an audited
-    override-decision row, and satisfiable by recording the analysis or an
-    accepted-gap resolution):
-
-      (a) ``code_coverage_incomplete``    — every critical/high file fully
-          analyzed (``by_classification``);
-      (b) ``pending_cross_file_triggers`` — zero still-pending cross-file
-          triggers (``trigger_summary.pending``);
-      (c) ``uncovered_high_risk_file``    — no critical/high file closed with NO
-          function-level analysis, the backend ``gate.uncovered_high_risk_files``
-          structural-verification list (the broad-18 near-miss where high files
-          were closed with ``functions_analyzed=0``).
-
-    The per-family effort thresholds (70/50/30) intentionally stay a WARN: they
-    live in ``gate.effort_warnings`` and are NOT read here, so a shallow-but-
-    nonzero effort score never blocks the transition. Best-effort on read
-    failure: a backend error degrades to a single ``precondition_check_failed``
-    blocker rather than wedging the transition.
+    Source identity and generation currency are backend facts. Keeping their
+    decision logic behind one endpoint prevents the CLI and UI from blessing a
+    stale snapshot differently. A malformed or unavailable readiness response
+    therefore fails closed and is non-overrideable.
     """
+    # ``ingest`` is the reset/source-establishment phase, not a destination with
+    # backend readiness requirements. In particular, a deliberate backward
+    # transition must remain possible so the operator can replace stale source
+    # identity before any later-phase gate could become satisfiable again.
+    if target_phase == "ingest":
+        return []
+
     blockers: list[dict[str, str]] = []
     try:
-        coverage = client.get("code/coverage")
-    except Exception as exc:
-        blockers.append(_precondition_check_failed("code coverage gate", exc))
+        readiness = client.get(f"code/readiness?target_phase={target_phase}")
+    except Exception as exc:  # noqa: BLE001 - readiness transport failures must fail closed
+        blocker = _precondition_check_failed("code readiness", exc)
+        blocker["overrideable"] = False
+        blockers.append(blocker)
         return blockers
-    if not isinstance(coverage, dict):
+    if not isinstance(readiness, dict):
+        blockers.append({
+            "kind": "invalid_code_readiness",
+            "severity": "block",
+            "detail": "Backend returned a non-object code readiness response",
+            "overrideable": False,
+        })
         return blockers
 
-    # (a) critical/high file coverage.
-    by_class = coverage.get("by_classification", {})
-    if isinstance(by_class, dict):
-        for tier in ("critical", "high"):
-            tier_data = by_class.get(tier, {})
-            if not isinstance(tier_data, dict):
-                continue
-            count = int(tier_data.get("count", 0) or 0)
-            analyzed = int(tier_data.get("analyzed", 0) or 0)
-            if count > 0 and analyzed < count:
+    if readiness.get("target_phase") != target_phase:
+        blockers.append({
+            "kind": "invalid_code_readiness",
+            "severity": "block",
+            "detail": (
+                "Backend readiness response was bound to "
+                f"{readiness.get('target_phase')!r}, expected {target_phase!r}"
+            ),
+            "overrideable": False,
+        })
+        return blockers
+
+    raw_blockers = readiness.get("blockers")
+    if not isinstance(raw_blockers, list):
+        blockers.append({
+            "kind": "invalid_code_readiness",
+            "severity": "block",
+            "detail": "Backend readiness response omitted its blocker list",
+            "overrideable": False,
+        })
+        return blockers
+
+    for raw in raw_blockers:
+        if not isinstance(raw, dict) or not raw.get("code") or not raw.get("message"):
+            blockers.append({
+                "kind": "invalid_code_readiness",
+                "severity": "block",
+                "detail": "Backend readiness response contained a malformed blocker",
+                "overrideable": False,
+            })
+            continue
+        blockers.append({
+            "kind": str(raw["code"]),
+            "severity": "block",
+            "detail": str(raw["message"]),
+            # Missing override metadata is treated as an integrity constraint.
+            "overrideable": raw.get("overrideable") is True,
+        })
+
+    if readiness.get("transition_ready") is not True and not raw_blockers:
+        blockers.append({
+            "kind": "invalid_code_readiness",
+            "severity": "block",
+            "detail": "Backend marked the transition unready without naming a blocker",
+            "overrideable": False,
+        })
+
+    quality_gate = readiness.get("quality_gate", {})
+    if isinstance(quality_gate, dict):
+        warnings = quality_gate.get("warnings", [])
+        if isinstance(warnings, list):
+            for warning in warnings:
                 blockers.append({
-                    "kind": "code_coverage_incomplete",
-                    "severity": "block",
-                    "detail": (
-                        f"{tier.capitalize()} files not fully analyzed: "
-                        f"{analyzed}/{count} — analyze (or skip with a reason) the "
-                        "remaining files before advancing. Pass --force --reason "
-                        "\"...\" to override with an audited decision."
-                    ),
+                    "kind": "code_quality_warning",
+                    "severity": "advisory",
+                    "detail": str(warning),
+                    "overrideable": True,
                 })
-
-    # (b) pending cross-file triggers.
-    triggers = coverage.get("trigger_summary", {})
-    pending = int(triggers.get("pending", 0) or 0) if isinstance(triggers, dict) else 0
-    if pending > 0:
-        blockers.append({
-            "kind": "pending_cross_file_triggers",
-            "severity": "block",
-            "detail": (
-                f"{pending} cross-file trigger(s) still pending — resolve each "
-                "(requeue the target file, or mark external_context_unavailable / "
-                "source_equivalent_analyzed / not_applicable with a note) before "
-                "advancing. Pass --force --reason \"...\" to override with an "
-                "audited decision."
-            ),
-        })
-
-    # (c) uncovered high-risk files (function-count structural verification).
-    gate = coverage.get("gate", {})
-    uncovered = gate.get("uncovered_high_risk_files", []) if isinstance(gate, dict) else []
-    if isinstance(uncovered, list) and uncovered:
-        names = [str(u.get("file_path", "?")) for u in uncovered if isinstance(u, dict)]
-        sample = ", ".join(names[:5]) + (" ..." if len(names) > 5 else "")
-        blockers.append({
-            "kind": "uncovered_high_risk_file",
-            "severity": "block",
-            "detail": (
-                f"{len(uncovered)} critical/high file(s) closed with NO "
-                f"function-level analysis (functions_analyzed=0, no linked finding, "
-                f"no accepted-gap): {sample} — the structural index found functions "
-                "but none were analyzed. Record the analysis (functions_analyzed>0 "
-                "or an analysis-result function row), OR mark the applicable "
-                "families not_applicable with a note (accepted gap). Pass --force "
-                "--reason \"...\" to override with an audited decision."
-            ),
-        })
 
     return blockers
 

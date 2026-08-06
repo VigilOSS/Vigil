@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 import anyio
 from fastapi import APIRouter, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..models.engagement import Engagement
 from ..services import activity as activity_service
@@ -500,6 +500,8 @@ class CommandRunFinalize(BaseModel):
     duplicate terminal PATCHes can be detected and rejected with 409 instead
     of silently overwriting the first finalize."""
 
+    model_config = ConfigDict(extra="forbid")
+
     status: Literal[
         "running",
         "completed",
@@ -508,16 +510,21 @@ class CommandRunFinalize(BaseModel):
         "killed",
         "lost",
     ]
-    return_code: int | None = None
+    return_code: int | None = Field(default=None, ge=-(2**31), le=2**31 - 1)
     ended_at: datetime
-    duration_ms: int | None = Field(default=None, ge=0)
+    duration_ms: int | None = Field(default=None, ge=0, le=2**63 - 1)
     stdout_preview: str | None = Field(default=None, max_length=COMMAND_FINALIZE_PREVIEW_MAX_CHARS)
     stderr_preview: str | None = Field(default=None, max_length=COMMAND_FINALIZE_PREVIEW_MAX_CHARS)
     timed_out: bool = False
     partial_results: bool = False
-    peak_rss_bytes: int | None = Field(default=None, ge=0)
-    cpu_user_seconds: float | None = Field(default=None, ge=0)
-    cpu_system_seconds: float | None = Field(default=None, ge=0)
+    peak_rss_bytes: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    cpu_user_seconds: float | None = Field(
+        default=None, ge=0, le=10**12, allow_inf_nan=False
+    )
+    cpu_system_seconds: float | None = Field(
+        default=None, ge=0, le=10**12, allow_inf_nan=False
+    )
+    output_quiesced: bool = True
 
 
 class ArtifactRegisterRequest(BaseModel):
@@ -869,6 +876,35 @@ def _reject_invalid_submission_status(value: str | None) -> None:
         raise ValueError(f"submission_status must be one of: {allowed}")
 
 
+class CodeSnapshotProvenance(BaseModel):
+    """Immutable identity of the verified source snapshot behind a code finding."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    repo_id: int = Field(
+        ge=1,
+        description="code_repos.id for the source snapshot reviewed for this finding.",
+    )
+    repo_generation: int = Field(
+        ge=1,
+        description="The repository active_generation reviewed for this finding.",
+    )
+    source_manifest_digest: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+        description="The repository source_manifest_digest reviewed for this finding.",
+    )
+
+
+class FindingProvenance(BaseModel):
+    """Typed reserved provenance with forward-compatible producer metadata."""
+
+    model_config = ConfigDict(extra="allow")
+
+    code_snapshot: CodeSnapshotProvenance | None = None
+
+
 class FindingRecordRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -893,7 +929,7 @@ class FindingRecordRequest(BaseModel):
     notes: str = Field(default="", max_length=20000)
     source_name: str = Field(default="", max_length=128)
     details: dict[str, Any] = Field(default_factory=dict)
-    provenance: dict[str, Any] = Field(default_factory=dict)
+    provenance: FindingProvenance = Field(default_factory=FindingProvenance)
     # C44: evidence_type categorizes confirmation mode so report-writer can
     # sort/downrate without re-parsing details. Nullable; agents that don't
     # set it leave NULL (legacy behavior preserved).
@@ -916,6 +952,11 @@ class FindingRecordRequest(BaseModel):
     # false_positive still lands. Plumbed from `finding record --allow-remint/--force`.
     allow_remint: bool = Field(default=False)
 
+    @field_validator("canonical_location")
+    @classmethod
+    def _normalize_canonical_location(cls, value: str) -> str:
+        return value.strip()
+
     @model_validator(mode="after")
     def _root_cause_links_use_helper(self) -> "FindingRecordRequest":
         if any(link.link_kind == state_manager.ROOT_CAUSE_LINK_KIND for link in self.links):
@@ -925,6 +966,14 @@ class FindingRecordRequest(BaseModel):
     @model_validator(mode="after")
     def _validate_submission_status(self) -> "FindingRecordRequest":
         _reject_invalid_submission_status(self.submission_status)
+        return self
+
+    @model_validator(mode="after")
+    def _require_code_snapshot_for_file_finding(self) -> FindingRecordRequest:
+        if self.canonical_location.startswith("file:") and self.provenance.code_snapshot is None:
+            raise ValueError(
+                "file findings require provenance.code_snapshot bound to the current verified repository snapshot"
+            )
         return self
 
 
@@ -963,6 +1012,11 @@ class FindingPatchRequest(BaseModel):
     reason_text: str = Field(default="", max_length=4096)
     artifact_ref: str = Field(default="", max_length=1024)
     expected_row_version: int | None = Field(default=None, ge=1)
+
+    @field_validator("canonical_location")
+    @classmethod
+    def _normalize_canonical_location(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None
 
     @model_validator(mode="after")
     def _validate_submission_status(self) -> "FindingPatchRequest":
@@ -1032,6 +1086,14 @@ class FindingPatchRequest(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _protect_code_snapshot_binding(self) -> FindingPatchRequest:
+        if self.provenance is not None and "code_snapshot" in self.provenance:
+            raise ValueError(
+                "provenance.code_snapshot is reserved and cannot be changed by a generic finding patch"
+            )
+        return self
+
 
 class FindingVerifyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -1045,7 +1107,7 @@ class FindingVerifyRequest(BaseModel):
     notes: str = Field(default="", max_length=20000)
     source_name: str = Field(default="", max_length=128)
     details: dict[str, Any] = Field(default_factory=dict)
-    provenance: dict[str, Any] = Field(default_factory=dict)
+    provenance: FindingProvenance = Field(default_factory=FindingProvenance)
 
 
 _SUMMARY_AFFECTING_RECORD_TYPES = frozenset(
@@ -1409,6 +1471,7 @@ def get_command_runs(
     route: str = "",
     success: bool | None = Query(default=None),
     timed_out: bool | None = Query(default=None),
+    output_attention: bool = False,
     # Command-metadata filter axes. Technique + probe_kind are plain str
     # (matching the audit_source precedent) so new enum values don't force
     # a backend redeploy. intent_q runs a FTS5 scoped match against the
@@ -1443,6 +1506,7 @@ def get_command_runs(
         route=route,
         success=success,
         timed_out=timed_out,
+        output_attention=output_attention,
         technique=technique or "",
         probe_kind=probe_kind or "",
         destructive=destructive,
@@ -2248,6 +2312,14 @@ async def create_command_run(
     engagement_key: str,
     request: CommandRunRecordRequest,
 ) -> dict[str, Any]:
+    if request.route == "host_exec":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "route='host_exec' is reserved for the bounded "
+                "/command-runs/host-exec contract"
+            ),
+        )
     engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
     payload = request.model_dump()
     if not payload.get("command_hash"):
@@ -2262,15 +2334,91 @@ async def create_command_run(
 
 
 class HostExecRecord(CommandRunRecordRequest):
-    """Audit payload for ``vigil assess host-exec``.
+    """Bounded ingress for host pre-exec rows and policy refusals.
 
-    Reuses ``CommandRunRecordRequest`` for full field parity with the kali
-    route — the host-exec wrapper is just a different execution surface, not
-    a different audit shape. The dedicated route exists so the server can
-    force ``route='host_exec'`` regardless of client input, giving downstream
-    queries a single discriminator between kali-container rows and
-    host-machine rows.
+    Full host output belongs in descriptor-backed spill files, never this POST.
+    The ordinary command-run endpoint intentionally keeps its one-shot inline
+    contract for Kali and legacy tool writers.
     """
+
+    model_config = ConfigDict(extra="forbid")
+
+    host_record_kind: Literal["pre_exec", "policy_refusal"] = "pre_exec"
+    argv: list[str] = Field(min_length=1, max_length=256)
+    stdout: str = Field(default="", max_length=65_536)
+    stderr: str = Field(default="", max_length=65_536)
+    stdout_spill_device: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    stdout_spill_inode: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    stderr_spill_device: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    stderr_spill_inode: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    timeout_seconds_requested: int | None = Field(
+        default=None, ge=0, le=2**63 - 1
+    )
+    finding_id: int | None = Field(default=None, ge=1, le=2**63 - 1)
+
+    @model_validator(mode="after")
+    def _validate_host_record_shape(self) -> "HostExecRecord":
+        if any(len(arg.encode("utf-8", errors="replace")) > 4096 for arg in self.argv):
+            raise ValueError("host-exec argv entries must be at most 4096 bytes")
+        canonical_command = " ".join(self.argv)
+        if len(canonical_command.encode("utf-8", errors="replace")) > 65_536:
+            raise ValueError("host-exec argv must be at most 65536 bytes in total")
+        if self.command != canonical_command:
+            raise ValueError("host-exec command must exactly match argv joined by spaces")
+        if self.timed_out or self.duration_ms != 0:
+            raise ValueError("host-exec ingress timing fields must be empty")
+        if any(
+            value is not None
+            for value in (
+                self.peak_rss_bytes,
+                self.cpu_user_seconds,
+                self.cpu_system_seconds,
+            )
+        ):
+            raise ValueError("host-exec ingress resource fields must be empty")
+        if self.command_hash or self.stdout_sha256 or self.stderr_sha256:
+            raise ValueError("host-exec ingress hash fields are server-owned")
+        if self.engagement_artifact_dir is not None or self.force:
+            raise ValueError("host-exec ingress storage and dedup fields are server-owned")
+        if self.host_record_kind == "pre_exec":
+            if self.status != "running":
+                raise ValueError("host-exec pre_exec records must use status='running'")
+            if self.return_code is not None or self.success is not None or self.completed_at:
+                raise ValueError("host-exec pre_exec records cannot contain terminal fields")
+            if self.stdout or self.stderr:
+                raise ValueError("host-exec pre_exec output must be written to spill files")
+            if not self.stdout_path or not self.stderr_path:
+                raise ValueError("host-exec pre_exec records require stdout_path and stderr_path")
+            if any(
+                value is None
+                for value in (
+                    self.stdout_spill_device,
+                    self.stdout_spill_inode,
+                    self.stderr_spill_device,
+                    self.stderr_spill_inode,
+                )
+            ):
+                raise ValueError("host-exec pre_exec records require spill identity claims")
+        else:
+            if (
+                self.status != "failed"
+                or self.success is not False
+                or self.return_code is not None
+            ):
+                raise ValueError("host-exec policy_refusal records must be failed")
+            if self.stdout or self.stdout_path or self.stderr_path:
+                raise ValueError("host-exec policy_refusal records cannot claim output spills")
+            if any(
+                value is not None
+                for value in (
+                    self.stdout_spill_device,
+                    self.stdout_spill_inode,
+                    self.stderr_spill_device,
+                    self.stderr_spill_inode,
+                )
+            ):
+                raise ValueError("host-exec policy_refusal records cannot claim spill identity")
+        return self
 
 
 @router.post("/command-runs/host-exec", status_code=status.HTTP_201_CREATED)
@@ -2287,13 +2435,19 @@ async def record_host_exec(
     """
     engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
     payload = request.model_dump()
+    payload.pop("host_record_kind")
     payload["route"] = "host_exec"  # canonical marker, never trust client input
     if not payload.get("command_hash"):
         payload["command_hash"] = hashlib.sha256(
             payload["command"].encode("utf-8", errors="replace")
         ).hexdigest()
     record = await anyio.to_thread.run_sync(
-        functools.partial(state_manager.record_command_run, engagement.id, **payload)
+        functools.partial(
+            state_manager.record_command_run,
+            engagement.id,
+            _host_exec_contract=True,
+            **payload,
+        )
     )
     await _broadcast(engagement.key, "command_run", record)
     return record
@@ -2319,6 +2473,7 @@ async def patch_command_run(
             stdout_preview=request.stdout_preview,
             stderr_preview=request.stderr_preview,
             timed_out=request.timed_out,
+            output_quiesced=request.output_quiesced,
             partial_results=request.partial_results,
             peak_rss_bytes=request.peak_rss_bytes,
             cpu_user_seconds=request.cpu_user_seconds,
@@ -2741,7 +2896,7 @@ async def create_finding(engagement_key: str, request: FindingRecordRequest) -> 
             notes=request.notes,
             source_name=request.source_name,
             details=request.details,
-            provenance=request.provenance,
+            provenance=request.provenance.model_dump(exclude_none=True),
             evidence_type=request.evidence_type,
             submission_status=request.submission_status,
             request_variant_id=request.request_variant_id,
@@ -2965,7 +3120,7 @@ async def verify_finding(
             evidence_ref=request.evidence_ref,
             notes=request.notes,
             details=request.details,
-            provenance=request.provenance,
+            provenance=request.provenance.model_dump(exclude_none=True),
             artifact_ref=request.artifact_ref,
             new_severity=request.new_severity,
         )

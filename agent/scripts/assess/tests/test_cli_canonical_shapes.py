@@ -21,6 +21,13 @@ def _artifact_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _agent_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers()
+    agent.register(sub)
+    return parser
+
+
 def test_artifact_search_uses_q_for_free_text() -> None:
     args = _artifact_parser().parse_args(
         ["artifact", "search", "--q", "device fingerprint"]
@@ -53,6 +60,22 @@ def test_canonical_contracts_have_one_cli_shape() -> None:
     assert "<db_path>" not in agent_contract
     assert "work-buffer cases.db" not in agent_contract
     assert "does not spawn" in start_contract.lower()
+
+
+def test_host_exec_contract_exposes_the_authoritative_cli_shapes() -> None:
+    contract = contracts.get_contract("host-exec")
+
+    assert contract is not None
+    assert contract.name == "host-exec"
+    assert contract.schema_name == "argparse + HostExecRecord/CommandRunFinalize"
+    assert contract.preferred_invocations == (
+        "vigil assess host-exec --tool <tool> --intent '<why>' --technique <technique> --phase <phase> -- <command> [args...]",
+        "vigil assess host-exec --from-json <request.json>",
+    )
+    rendered = contracts.render_contract("host-exec")
+    assert "--require-audit" in rendered
+    assert "--allow-destructive" in rendered
+    assert "--finding" in rendered
 
 
 def test_operator_prompt_does_not_advertise_local_work_buffer_database() -> None:
@@ -107,3 +130,147 @@ def test_agent_start_output_explains_record_then_launch_flow(
     out = capsys.readouterr().out.lower()
     assert "does not spawn" in out
     assert "launch the specialist" in out
+
+
+class _CodeDispatchClient(_DispatchClient):
+    def __init__(self, repos: list[dict]) -> None:
+        self.repos = repos
+        self.recorded = False
+
+    def get(self, endpoint: str):
+        assert endpoint == "code/repos"
+        return self.repos
+
+    def record_dispatch(self, payload: dict) -> dict:
+        self.recorded = True
+        return super().record_dispatch(payload)
+
+
+def test_agent_start_code_role_renders_backend_derived_source_identity(
+    monkeypatch, capsys, tmp_path
+) -> None:
+    digest = "a" * 64
+    client = _CodeDispatchClient(
+        [
+            {
+                "id": 17,
+                "repo_key": "example-17",
+                "name": "example",
+                "repo_path": "/sealed/example/source",
+                "active_generation": 3,
+                "source_manifest_digest": digest,
+                "structural_index_schema": "structural-index/v5",
+                "structural_index_manifest_path": "/sealed/example/index/manifest.json",
+                "lsp_config": {
+                    "ctags": {
+                        "available": True,
+                        "repo_generation": 3,
+                        "source_manifest_digest": digest,
+                        "tags_path": "/sealed/example/ctags/tags",
+                    }
+                },
+            }
+        ]
+    )
+    args = SimpleNamespace(
+        agent_id="code-hunter-1",
+        agent_role="code-vuln-hunter",
+        code_repo_id=None,
+    )
+    monkeypatch.setattr(
+        agent.dispatch,
+        "_build_register_payload",
+        lambda _args: {
+            "agent_id": "code-hunter-1",
+            "agent_role": "code-vuln-hunter",
+        },
+    )
+    monkeypatch.setattr(
+        agent.dispatch,
+        "_client_for",
+        lambda _args: (
+            client,
+            SimpleNamespace(engagement_dir=str(tmp_path)),
+        ),
+    )
+    monkeypatch.setattr(agent, "_warn_missing_native_wrapper", lambda *_args: None)
+
+    agent._start(args)
+
+    assert client.recorded is True
+    output = capsys.readouterr().out
+    assert output.index("## Runtime Identity") < output.index("## Code Source Identity")
+    assert "repo_id: 17" in output
+    assert "repo_key: example-17" in output
+    assert "repo_generation: 3" in output
+    assert f"source_manifest_digest: {digest}" in output
+    assert "snapshot_path: /sealed/example/source" in output
+    assert "structural_index_schema: structural-index/v5" in output
+    assert "structural_index_manifest_path: /sealed/example/index/manifest.json" in output
+    assert "ctags_path: /sealed/example/ctags/tags" in output
+    assert "pass it the Runtime Identity and Code Source Identity blocks above" in output
+
+
+def test_agent_start_code_repo_selector_parses() -> None:
+    args = _agent_parser().parse_args(
+        [
+            "agent",
+            "start",
+            "--agent-id",
+            "code-hunter-1",
+            "--role",
+            "code-vuln-hunter",
+            "--code-repo-id",
+            "17",
+        ]
+    )
+
+    assert args.code_repo_id == 17
+
+
+def test_agent_start_code_role_requires_repo_selection_before_recording(
+    monkeypatch, capsys, tmp_path
+) -> None:
+    digest = "b" * 64
+    repos = [
+        {
+            "id": repo_id,
+            "repo_key": f"repo-{repo_id}",
+            "repo_path": f"/sealed/repo-{repo_id}/source",
+            "active_generation": 1,
+            "source_manifest_digest": digest,
+            "structural_index_schema": "structural-index/v5",
+            "structural_index_manifest_path": f"/sealed/repo-{repo_id}/manifest.json",
+            "lsp_config": {},
+        }
+        for repo_id in (17, 18)
+    ]
+    client = _CodeDispatchClient(repos)
+    args = SimpleNamespace(
+        agent_id="code-hunter-1",
+        agent_role="code-vuln-hunter",
+        code_repo_id=None,
+    )
+    monkeypatch.setattr(
+        agent.dispatch,
+        "_build_register_payload",
+        lambda _args: {
+            "agent_id": "code-hunter-1",
+            "agent_role": "code-vuln-hunter",
+        },
+    )
+    monkeypatch.setattr(
+        agent.dispatch,
+        "_client_for",
+        lambda _args: (
+            client,
+            SimpleNamespace(engagement_dir=str(tmp_path)),
+        ),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        agent._start(args)
+
+    assert excinfo.value.code == 1
+    assert client.recorded is False
+    assert "pass --code-repo-id" in capsys.readouterr().err
