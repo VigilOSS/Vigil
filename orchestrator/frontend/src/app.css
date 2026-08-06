@@ -1403,6 +1403,43 @@ input {
   background: rgba(255, 255, 255, 0.76);
 }
 
+.code-repo-card.code-repo-has-debt {
+  border-left: 3px solid var(--warn);
+}
+
+.code-structural-debt {
+  display: grid;
+  gap: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--divider);
+  color: var(--ink-2);
+  font-size: 0.78rem;
+}
+
+.code-structural-debt > strong {
+  color: var(--warn);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.code-structural-debt p {
+  margin: 2px 0 0;
+}
+
+.code-structural-debt summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.code-structural-debt ul {
+  display: grid;
+  gap: 3px;
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
 .code-repo-header {
   display: flex;
   align-items: baseline;
@@ -2161,6 +2198,9 @@ input {
 .findings-redesign .pill-unreviewed { background: rgba(140, 123, 98, 0.15); color: var(--pending); }
 .findings-redesign .pill-downgraded { background: rgba(23, 53, 76, 0.12); color: var(--accent); }
 .findings-redesign .pill-disputed   { background: color-mix(in srgb, var(--disputed) 16%, transparent); color: var(--disputed); }
+.findings-redesign .pill-source-current { background: rgba(47, 127, 82, 0.14); color: var(--ok); }
+.findings-redesign .pill-source-stale { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
+.findings-redesign .pill-source-unbound { background: rgba(140, 123, 98, 0.15); color: var(--pending); }
 
 /* ── Submission-status pills (external-program axis) ──────
  * A SEPARATE axis from the workflow/verification pills above: a finding can be

@@ -5,6 +5,7 @@ export type Engagement = {
   status: string;
   engagement_root: string;
   current_phase: string;
+  code_phase?: string | null;
   exploit_policy: string;
   exploit_review_state: string;
   approved_targets: string[];
@@ -108,6 +109,11 @@ export type FindingProvenance = {
   artifact_ref?: string;
   captured_at?: string;
   evidence_quote?: string;
+  code_snapshot?: {
+    repo_id: number;
+    repo_generation: number;
+    source_manifest_digest: string;
+  };
   [key: string]: unknown;
 };
 
@@ -162,6 +168,7 @@ export type AssessmentFindingDetail = AssessmentFinding & {
   auth_context: string;
   details_json: string;
   provenance_json?: string;
+  code_snapshot_status?: "current" | "stale" | "unbound" | "not_applicable";
   merged_into_slug?: string | null;
 };
 
@@ -747,6 +754,7 @@ export type AssessmentCommandRun = {
   success: boolean;
   started_at: string;
   completed_at: string;
+  output_recovery_observed_at: string | null;
   duration_ms: number;
   command_hash: string;
   stdout_sha256: string;
@@ -756,13 +764,21 @@ export type AssessmentCommandRun = {
   // Listings: always "" with preview_chars populated. Detail: full text.
   stdout_preview_chars?: number;
   stderr_preview_chars?: number;
-  output_retention_status: string; // retained | suppressed | artifact | empty
+  output_retention_status: string; // retained | artifact | suppressed | suppression_pending | suppression_deferred | untrusted | integrity_failure | empty
+  output_cleanup_status: string;
+  output_cleanup_warning: string;
+  output_integrity_status: string;
+  output_integrity_warning: string;
   stdout_suppression_reason: string;
   stderr_suppression_reason: string;
   stdout_artifact_ref: string;
   stderr_artifact_ref: string;
   stdout_bytes: number;
   stderr_bytes: number;
+  stdout_spill_device?: number | null;
+  stdout_spill_inode?: number | null;
+  stderr_spill_device?: number | null;
+  stderr_spill_inode?: number | null;
   indexed_for_embeddings_at: string | null;
   notes: string;
   created_at: string;
@@ -1108,6 +1124,37 @@ export type CodeRepo = {
   total_loc: number;
   commit_hash: string;
   branch: string;
+  active_generation: number;
+  source_origin_path: string;
+  source_kind: "git" | "directory" | "legacy";
+  snapshot_manifest_path: string;
+  snapshot_digest: string;
+  source_manifest_version: string;
+  source_manifest_digest: string;
+  source_snapshot_quality: "verified" | "legacy-unverified";
+  worktree_dirty: boolean | null;
+  lsp_config: {
+    ctags?: {
+      available?: boolean;
+      tags_path?: string;
+      universal?: boolean;
+      repo_generation?: number;
+      source_manifest_digest?: string;
+    };
+  };
+  structural_index_schema: string;
+  structural_index_generation: number | null;
+  structural_index_manifest_path: string;
+  structural_degraded_files: number;
+  structural_degraded_file_paths: string[];
+  structural_artifact_truncated_files: number;
+  structural_artifact_truncated_file_paths: string[];
+  structural_analysis_status_counts: {
+    complete?: number;
+    degraded?: number;
+    unsupported?: number;
+  };
+  threat_model_generation: number | null;
   analysis_status: string;
   // Hydrated (parsed) fields — the backend also returns *_json raw strings but
   // these parsed objects are what the frontend should use.
@@ -1137,6 +1184,25 @@ export type CodeFile = {
   has_past_cve_fix: boolean;
   header_snippet: string;
   notes: string;
+  structural_analysis_status: "pending" | "complete" | "degraded" | "unsupported";
+  structural_analysis_mode:
+    | ""
+    | "tree_sitter"
+    | "lightweight_regex"
+    | "streaming_security_fallback"
+    | "none";
+  structural_degradation_reason: string;
+  structural_source_size: number;
+  structural_bytes_scanned: number;
+  structural_unavailable_dimensions: string[];
+  structural_artifact_truncated: boolean;
+  structural_truncated_dimensions: string[];
+  structural_signal_counts: {
+    entry_points?: number;
+    imports?: number;
+    security_sinks?: number;
+    security_sources?: number;
+  };
   created_at: string;
   updated_at: string;
 };
@@ -1162,6 +1228,10 @@ export type CodeQueueStats = {
   error: number;
   needs_context: number;
   total: number;
+  historical_total: number;
+  superseded_history: number;
+  invalid_active_identity: number;
+  invalid_active_history: number;
 };
 
 export type CodeCoverage = {
@@ -1179,12 +1249,40 @@ export type CodeCoverage = {
     overall_loc_analyzed: number;
     unresolved_needs_context: number;
     active_queue_items: number;
+    invalid_active_history: number;
+    unprocessed_triggers: number;
     skip_reasons: Record<string, number>;
   };
   gate: {
     passed: boolean;
     reasons: string[];
     effort_warnings?: string[];
+    coverage_integrity?: Array<{
+      file_path?: string;
+      warnings?: string[];
+    }>;
+  };
+};
+
+export type CodeReadinessTarget =
+  | "classify-map"
+  | "hunt"
+  | "verify-variant"
+  | "fuzz"
+  | "complete";
+
+export type CodeReadiness = {
+  target_phase: CodeReadinessTarget;
+  transition_ready: boolean;
+  blockers: Array<{
+    code: string;
+    message: string;
+    overrideable: boolean;
+    repo_id?: number;
+  }>;
+  quality_gate: {
+    passed: boolean;
+    warnings: string[];
   };
 };
 
@@ -1237,6 +1335,13 @@ export function getCodeQueueStats(engagementKey: string) {
 export function getCodeCoverage(engagementKey: string, repoId?: number) {
   const qs = repoId != null ? `?repo_id=${repoId}` : "";
   return request<CodeCoverage>(`/engagements/${engagementKey}/assessment/code/coverage${qs}`);
+}
+
+export function getCodeReadiness(engagementKey: string, targetPhase: CodeReadinessTarget) {
+  const query = new URLSearchParams({ target_phase: targetPhase });
+  return request<CodeReadiness>(
+    `/engagements/${engagementKey}/assessment/code/readiness?${query.toString()}`,
+  );
 }
 
 export function listCodeAnalysisResults(engagementKey: string, params?: { file_id?: number; disposition?: string }) {

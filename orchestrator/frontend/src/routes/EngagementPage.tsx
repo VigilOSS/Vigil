@@ -18,6 +18,7 @@ import {
   CodeCoverage,
   CodeModule,
   CodeQueueStats,
+  CodeReadiness,
   CodeRepo,
   Engagement,
   EngagementSession,
@@ -28,6 +29,7 @@ import {
   getAssessmentSummary,
   getCodeCoverage,
   getCodeQueueStats,
+  getCodeReadiness,
   getEngagement,
   getIntelSummary,
   listActivityEntries,
@@ -142,7 +144,9 @@ export function EngagementPage({ engagementKey, onBack, initialTab, initialFindi
   const [codeModules, setCodeModules] = useState<CodeModule[]>([]);
   const [codeQueueStats, setCodeQueueStats] = useState<CodeQueueStats | null>(null);
   const [codeCoverage, setCodeCoverage] = useState<CodeCoverage | null>(null);
+  const [codeReadiness, setCodeReadiness] = useState<CodeReadiness | null>(null);
   const [codeResults, setCodeResults] = useState<CodeAnalysisResult[]>([]);
+  const [codeLoadError, setCodeLoadError] = useState<string | null>(null);
   const [intelSummary, setIntelSummary] = useState<IntelSummary | null>(null);
   const [assessmentSurfaces, setAssessmentSurfaces] = useState<AssessmentSurface[]>([]);
   const [activityTotal, setActivityTotal] = useState<number>(0);
@@ -202,14 +206,55 @@ export function EngagementPage({ engagementKey, onBack, initialTab, initialFindi
     return listEvents(engagementKey).then(setEvents);
   }
 
-  function refreshCodeAnalysis() {
-    return Promise.all([
-      listCodeRepos(engagementKey).then(setCodeRepos).catch(() => setCodeRepos([])),
-      listCodeModules(engagementKey).then(setCodeModules).catch(() => setCodeModules([])),
-      getCodeQueueStats(engagementKey).then(setCodeQueueStats).catch(() => setCodeQueueStats(null)),
-      getCodeCoverage(engagementKey).then(setCodeCoverage).catch(() => setCodeCoverage(null)),
-      listCodeAnalysisResults(engagementKey).then(setCodeResults).catch(() => setCodeResults([])),
+  async function refreshCodeAnalysis() {
+    const failures: string[] = [];
+    const captureFailure = (label: string, error: unknown) => {
+      const detail = error instanceof Error ? error.message : "request failed";
+      failures.push(`${label}: ${detail}`);
+    };
+    await Promise.all([
+      listCodeRepos(engagementKey)
+        .then(setCodeRepos)
+        .catch((error: unknown) => {
+          setCodeRepos([]);
+          captureFailure("repositories", error);
+        }),
+      listCodeModules(engagementKey)
+        .then(setCodeModules)
+        .catch((error: unknown) => {
+          setCodeModules([]);
+          captureFailure("modules", error);
+        }),
+      getCodeQueueStats(engagementKey)
+        .then(setCodeQueueStats)
+        .catch((error: unknown) => {
+          setCodeQueueStats(null);
+          captureFailure("queue", error);
+        }),
+      getCodeCoverage(engagementKey)
+        .then(setCodeCoverage)
+        .catch((error: unknown) => {
+          setCodeCoverage(null);
+          captureFailure("coverage", error);
+        }),
+      getCodeReadiness(engagementKey, "complete")
+        .then(setCodeReadiness)
+        .catch((error: unknown) => {
+          setCodeReadiness(null);
+          captureFailure("readiness", error);
+        }),
+      listCodeAnalysisResults(engagementKey)
+        .then(setCodeResults)
+        .catch((error: unknown) => {
+          setCodeResults([]);
+          captureFailure("results", error);
+        }),
     ]);
+    setCodeLoadError(
+      failures.length > 0
+        ? `Some code-analysis data is unavailable: ${failures.join("; ")}`
+        : null,
+    );
   }
 
   const refreshPage = useEffectEvent(async () => {
@@ -234,7 +279,9 @@ export function EngagementPage({ engagementKey, onBack, initialTab, initialFindi
         setCodeModules([]);
         setCodeQueueStats(null);
         setCodeCoverage(null);
+        setCodeReadiness(null);
         setCodeResults([]);
+        setCodeLoadError(null);
         setIntelSummary(null);
         setAssessmentSurfaces([]);
         setActivityTotal(0);
@@ -659,10 +706,13 @@ export function EngagementPage({ engagementKey, onBack, initialTab, initialFindi
 
           {activeTab === "code" && (
             <CodeAnalysisTab
+              persistedPhase={activeEngagement.code_phase ?? activeEngagement.current_phase}
+              loadError={codeLoadError}
               repos={codeRepos}
               modules={codeModules}
               queueStats={codeQueueStats}
               coverage={codeCoverage}
+              readiness={codeReadiness}
               results={codeResults}
             />
           )}
