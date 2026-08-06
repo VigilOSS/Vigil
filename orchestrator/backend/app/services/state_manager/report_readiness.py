@@ -4,18 +4,23 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+
 from fastapi import HTTPException, status
 
-from ..events import _engagement_or_404
-from ..artifact_index import _normalize_relative_path
 from ...finding_merge import strict_finding_id
-
+from ..artifact_index import _normalize_relative_path
+from ..events import _engagement_or_404
 from . import _common
-from ._common import ROOT_CAUSE_LINK_KIND, SEVERITY_RANK, _json_object, _serialize_finding_record
-from .links import _root_cause_link_metadata
+from ._common import (
+    ROOT_CAUSE_LINK_KIND,
+    SEVERITY_RANK,
+    _json_object,
+    _serialize_finding_record,
+)
 from .coverage import coverage_readiness, web_uncovered_high_route_hosts
 from .cvss import CvssVectorError, base_score
-
+from .findings import finding_code_snapshot_status, load_code_repo_snapshot_states
+from .links import _root_cause_link_metadata
 
 _MARKDOWN_PATH_REFERENCE_RE = re.compile(
     r"(?<![A-Za-z0-9_:/.-])"
@@ -231,6 +236,116 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
         for row in candidate_records
         if row.get("workflow_status") in reportable_statuses
     ]
+
+    with _common.get_connection() as connection:
+        repo_states = load_code_repo_snapshot_states(connection, engagement.id)
+        for row in candidates:
+            snapshot_status = finding_code_snapshot_status(
+                connection,
+                engagement.id,
+                row,
+                repo_states=repo_states,
+            )
+            if snapshot_status not in {"stale", "unbound"}:
+                continue
+            blockers.append(
+                {
+                    "kind": "finding_code_snapshot",
+                    "slug": row.get("slug", ""),
+                    "title": row.get("title", ""),
+                    "snapshot_status": snapshot_status,
+                    "detail": (
+                        "reportable finding is not bound to the current verified "
+                        f"repository snapshot: {snapshot_status}; re-review it and "
+                        "use finding verify with current provenance.code_snapshot"
+                    ),
+                }
+            )
+
+    # Import lazily: code_analysis imports the finding snapshot helpers from this
+    # package, so a module-level import would create a package initialization
+    # cycle. The code-analysis service remains the owner of receipt currency and
+    # candidate-file selection; report readiness only renders its obligations.
+    from .. import code_analysis as code_analysis_service
+
+    for obligation in code_analysis_service.unresolved_suspicious_analysis_obligations(
+        engagement.id
+    ):
+        suspicious_count = int(obligation["suspicious_count"])
+        blockers.append(
+            {
+                "kind": "unresolved_suspicious_analysis",
+                "repo_id": int(obligation["repo_id"]),
+                "suspicious_count": suspicious_count,
+                "detail": (
+                    f"repository has {suspicious_count} current suspicious "
+                    "code-analysis attempt(s); promote each to a finding or "
+                    "complete a clean terminal reanalysis"
+                ),
+            }
+        )
+
+    for obligation in code_analysis_service.confirmed_finding_variant_receipt_obligations(
+        engagement.id
+    ):
+        finding_slugs = list(obligation["finding_slugs"])
+        missing_file_ids = list(obligation["missing_file_ids"])
+        missing_file_paths = list(obligation["missing_file_paths"])
+        path_sample = ", ".join(missing_file_paths[:5])
+        if len(missing_file_paths) > 5:
+            path_sample += f", and {len(missing_file_paths) - 5} more"
+        blockers.append(
+            {
+                "kind": "finding_variant_receipts_incomplete",
+                "repo_id": int(obligation["repo_id"]),
+                "slugs": finding_slugs,
+                "missing_file_count": len(missing_file_ids),
+                "missing_file_ids": missing_file_ids,
+                "missing_file_paths": missing_file_paths,
+                "detail": (
+                    "confirmed current code finding(s) "
+                    f"{', '.join(finding_slugs)} have no complete current "
+                    f"variant-scan receipt for {len(missing_file_ids)} "
+                    f"admitted current repository file(s): {path_sample}"
+                ),
+            }
+        )
+
+    from .. import code_fuzz_completion
+
+    for fuzz_state in code_fuzz_completion.fuzz_states(engagement.id):
+        if not fuzz_state["applicability_ready"]:
+            blockers.append(
+                {
+                    "kind": "fuzz_decision_missing",
+                    "repo_id": int(fuzz_state["repo_id"]),
+                    "detail": (
+                        "repository has no evidence-backed current-source fuzz "
+                        "applicability decision; record required targets or a "
+                        "not-required rationale"
+                    ),
+                }
+            )
+            continue
+        if fuzz_state["completion_ready"]:
+            continue
+        blockers.append(
+            {
+                "kind": "fuzz_campaign_incomplete",
+                "repo_id": int(fuzz_state["repo_id"]),
+                "pending_target_ids": list(fuzz_state["pending_target_ids"]),
+                "pending_finding_slugs": list(
+                    fuzz_state["pending_finding_slugs"]
+                ),
+                "detail": (
+                    "required current-source fuzzing lacks covering terminal "
+                    "campaign receipts for "
+                    f"{len(fuzz_state['pending_target_ids'])} target(s) and "
+                    f"{len(fuzz_state['pending_finding_slugs'])} confirmed "
+                    "memory-safety finding(s)"
+                ),
+            }
+        )
 
     for row in candidate_records:
         if row.get("workflow_status") != "draft":

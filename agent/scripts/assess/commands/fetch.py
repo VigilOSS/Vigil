@@ -16,10 +16,12 @@ from typing import Any
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.contracts import MAX_VARIANT_RECEIPT_PAGE
 
 
 _ENGAGEMENT_SCOPED_PREFIXES = ("intel", "activity-entries")
 _PAGED_ASSESSMENT_ENDPOINTS = {
+    "code/variant-checks": MAX_VARIANT_RECEIPT_PAGE,
     "coverage-items": 5000,
     "probe-runs": 5000,
     "request-observations": 5000,
@@ -66,7 +68,7 @@ def _fetch_assessment_endpoint(client: AssessmentClient, endpoint: str) -> Any:
     path, _sep, raw_query = endpoint.partition("?")
     normalized_path = path.strip("/")
     page_limit = _PAGED_ASSESSMENT_ENDPOINTS.get(normalized_path)
-    if page_limit is None or "/" in normalized_path:
+    if page_limit is None:
         return client.get(endpoint)
 
     if raw_query and any(

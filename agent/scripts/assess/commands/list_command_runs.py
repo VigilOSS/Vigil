@@ -113,6 +113,15 @@ def register(subparsers) -> None:
         help="Only runs explicitly declared non-destructive (read-only probes)",
     )
     p.add_argument("--timed-out", dest="timed_out", action="store_true", help="Only runs that hit the tool timeout")
+    p.add_argument(
+        "--output-attention",
+        dest="output_attention",
+        action="store_true",
+        help=(
+            "Only runs whose retained output is pending, deferred, untrusted, "
+            "or failed integrity verification"
+        ),
+    )
     p.add_argument("--limit", type=int, default=50)
     p.add_argument("--offset", type=int, default=0)
     p.add_argument("--include-output", dest="include_output", action="store_true", help="Include stdout/stderr previews in default rendering")
@@ -164,6 +173,8 @@ def _build_query(args) -> str:
         params.append(("destructive", "false"))
     if args.timed_out:
         params.append(("timed_out", "true"))
+    if getattr(args, "output_attention", False):
+        params.append(("output_attention", "true"))
     if args.include_output:
         params.append(("include_output", "true"))
     params.append(("limit", str(args.limit)))

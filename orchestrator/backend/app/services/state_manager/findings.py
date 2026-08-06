@@ -3,17 +3,228 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 from urllib.parse import urlsplit
+
 from fastapi import HTTPException, status
 
+from ..code_security_policy import NATIVE_MEMORY_SAFETY_DEFECT_FAMILIES
 from ..events import _engagement_or_404
 from ..search import (
     canonical_finding_alias,
     is_canonical_finding_slug,
 )
-
 from . import _common
-from ._common import ROOT_CAUSE_LINK_KIND, SEVERITY_RANK, VERIFICATION_DISPOSITION_RANK, VERIFICATION_STATE_RANK, WORKFLOW_STATUS_RANK, VerificationDisposition, VerificationState, WorkflowStatus, _finding_confidence_tuple, _finding_not_found, _json_object, _json_text, _merge_object_text, _normalize_severity, _normalize_submission_status, _normalize_verification_disposition, _normalize_verification_state, _normalize_workflow_status, _require_canonical_finding_slug, _resolve_existing_finding_slug, _row_verification_disposition, _row_verification_state, _row_workflow_status, _serialize_finding_record, _slugify, _stronger_severity
+from ._common import (
+    ROOT_CAUSE_LINK_KIND,
+    SEVERITY_RANK,
+    VERIFICATION_DISPOSITION_RANK,
+    VERIFICATION_STATE_RANK,
+    WORKFLOW_STATUS_RANK,
+    VerificationDisposition,
+    VerificationState,
+    WorkflowStatus,
+    _finding_confidence_tuple,
+    _finding_not_found,
+    _json_object,
+    _json_text,
+    _merge_object_text,
+    _normalize_severity,
+    _normalize_submission_status,
+    _normalize_verification_disposition,
+    _normalize_verification_state,
+    _normalize_workflow_status,
+    _require_canonical_finding_slug,
+    _resolve_existing_finding_slug,
+    _row_verification_disposition,
+    _row_verification_state,
+    _row_workflow_status,
+    _serialize_finding_record,
+    _slugify,
+    _stronger_severity,
+)
 from .links import _is_root_cause_link, _upsert_finding_link
+
+CODE_SNAPSHOT_PROVENANCE_KEY = "code_snapshot"
+_CODE_SNAPSHOT_WRITE_MODES = frozenset({"record", "patch", "verify"})
+
+
+def is_file_finding(canonical_location: str) -> bool:
+    return str(canonical_location or "").strip().startswith("file:")
+
+
+def _code_snapshot_binding(
+    provenance: dict[str, Any] | None,
+    *,
+    strict: bool,
+) -> dict[str, Any] | None:
+    payload = provenance or {}
+    if CODE_SNAPSHOT_PROVENANCE_KEY not in payload:
+        return None
+    binding = payload.get(CODE_SNAPSHOT_PROVENANCE_KEY)
+    valid = (
+        isinstance(binding, dict)
+        and type(binding.get("repo_id")) is int
+        and binding["repo_id"] >= 1
+        and type(binding.get("repo_generation")) is int
+        and binding["repo_generation"] >= 1
+        and isinstance(binding.get("source_manifest_digest"), str)
+        and len(binding["source_manifest_digest"]) == 64
+        and all(
+            character in "0123456789abcdef"
+            for character in binding["source_manifest_digest"]
+        )
+    )
+    if not valid:
+        if strict:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "provenance.code_snapshot requires positive integer repo_id and "
+                    "repo_generation plus a lowercase SHA-256 source_manifest_digest"
+                ),
+            )
+        return None
+    return {
+        "repo_id": int(binding["repo_id"]),
+        "repo_generation": int(binding["repo_generation"]),
+        "source_manifest_digest": str(binding["source_manifest_digest"]),
+    }
+
+
+def _finding_provenance(record: dict[str, Any]) -> dict[str, Any]:
+    provenance = record.get("provenance")
+    if isinstance(provenance, dict):
+        return provenance
+    return _json_object(record.get("provenance_json", "{}"))
+
+
+def load_code_repo_snapshot_states(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+) -> dict[int, dict[str, Any]]:
+    """Load all repository identities once for batch finding classification."""
+
+    return {
+        int(row["id"]): dict(row)
+        for row in connection.execute(
+            """
+            SELECT id, active_generation, source_manifest_digest,
+                   source_snapshot_quality
+            FROM code_repos
+            WHERE engagement_id = ?
+            """,
+            (engagement_id,),
+        ).fetchall()
+    }
+
+
+def finding_code_snapshot_status(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    finding: dict[str, Any] | sqlite3.Row,
+    *,
+    repo_states: dict[int, dict[str, Any]] | None = None,
+) -> str:
+    """Classify file-like or explicitly bound findings against verified source."""
+
+    record = dict(finding)
+    provenance = _finding_provenance(record)
+    if CODE_SNAPSHOT_PROVENANCE_KEY not in provenance:
+        return (
+            "unbound"
+            if is_file_finding(str(record.get("canonical_location", "")))
+            else "not_applicable"
+        )
+    binding = _code_snapshot_binding(provenance, strict=False)
+    if binding is None:
+        return "stale"
+    repo = (
+        repo_states.get(binding["repo_id"])
+        if repo_states is not None
+        else connection.execute(
+            """
+            SELECT active_generation, source_manifest_digest, source_snapshot_quality
+            FROM code_repos
+            WHERE id = ? AND engagement_id = ?
+            """,
+            (binding["repo_id"], engagement_id),
+        ).fetchone()
+    )
+    if repo is None:
+        return "stale"
+    if str(repo["source_snapshot_quality"]) != "verified":
+        return "stale"
+    if int(repo["active_generation"]) != binding["repo_generation"]:
+        return "stale"
+    if str(repo["source_manifest_digest"]) != binding["source_manifest_digest"]:
+        return "stale"
+    return "current"
+
+
+def finding_has_current_code_snapshot(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    finding: dict[str, Any] | sqlite3.Row,
+) -> bool:
+    return finding_code_snapshot_status(connection, engagement_id, finding) == "current"
+
+
+def _serialize_finding_with_code_snapshot_status(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    finding: dict[str, Any] | sqlite3.Row,
+    *,
+    repo_states: dict[int, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    record = _serialize_finding_record(finding)
+    record["code_snapshot_status"] = finding_code_snapshot_status(
+        connection, engagement_id, record, repo_states=repo_states
+    )
+    return record
+
+
+def _require_current_code_snapshot(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    provenance: dict[str, Any] | None,
+) -> dict[str, Any]:
+    binding = _code_snapshot_binding(provenance, strict=True)
+    if binding is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "file findings require provenance.code_snapshot bound to the "
+                "current verified repository snapshot"
+            ),
+        )
+    repo = connection.execute(
+        """
+        SELECT active_generation, source_manifest_digest, source_snapshot_quality
+        FROM code_repos
+        WHERE id = ? AND engagement_id = ?
+        """,
+        (binding["repo_id"], engagement_id),
+    ).fetchone()
+    if repo is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="code snapshot repository is not part of this engagement",
+        )
+    if str(repo["source_snapshot_quality"]) != "verified":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="code snapshot repository is not a verified source snapshot",
+        )
+    if int(repo["active_generation"]) != binding["repo_generation"]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="code snapshot repository generation is stale; refetch and re-review",
+        )
+    if str(repo["source_manifest_digest"]) != binding["source_manifest_digest"]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="code snapshot source manifest digest is stale; refetch and re-review",
+        )
+    return binding
 
 
 
@@ -539,8 +750,12 @@ def create_finding(
     expected_row_version: int | None = None,
     notes_mode: str = "append",
     details_mode: str = "merge",
+    code_snapshot_write_mode: str = "record",
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+    canonical_location = str(canonical_location).strip()
+    if code_snapshot_write_mode not in _CODE_SNAPSHOT_WRITE_MODES:
+        raise ValueError(f"unknown code snapshot write mode: {code_snapshot_write_mode}")
     if slug:
         slug = str(slug).strip()
         if not allow_existing_noncanonical_slug:
@@ -556,6 +771,22 @@ def create_finding(
     incoming_submission_status = _normalize_submission_status(submission_status)
     with _common.get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
+        incoming_binding = _code_snapshot_binding(provenance, strict=True)
+        if code_snapshot_write_mode == "patch" and incoming_binding is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "provenance.code_snapshot is reserved and cannot be changed "
+                    "by a generic finding patch"
+                ),
+            )
+        if (
+            is_file_finding(canonical_location)
+            and code_snapshot_write_mode in {"record", "verify"}
+        ) or incoming_binding is not None:
+            incoming_binding = _require_current_code_snapshot(
+                connection, engagement.id, provenance
+            )
         existing = _semantic_finding_match(
             connection,
             engagement.id,
@@ -567,6 +798,51 @@ def create_finding(
             title=title,
         )
         if existing is not None:
+            existing_family = str(existing["defect_family"] or "").strip().lower()
+            requested_family = str(defect_family or "").strip().lower()
+            if (
+                code_snapshot_write_mode in {"record", "patch"}
+                and requested_family
+                and requested_family != existing_family
+                and existing_family in NATIVE_MEMORY_SAFETY_DEFECT_FAMILIES
+                and _row_verification_state(existing) == "verified"
+                and _row_verification_disposition(existing) == "confirmed"
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "ordinary finding mutation cannot relabel a verified/confirmed "
+                        "memory-safety defect_family; preserve the confirmed record "
+                        "until the verification lifecycle kills or merges it, then "
+                        "record the corrected distinct finding"
+                    ),
+                )
+            if code_snapshot_write_mode == "record" and is_file_finding(
+                canonical_location
+            ) != is_file_finding(str(existing["canonical_location"])):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "finding re-record cannot change canonical-location category "
+                        "between file and non-file; disposition the stored finding and "
+                        "record a separately reviewed destination finding"
+                    ),
+                )
+            existing_binding = _code_snapshot_binding(
+                _json_object(existing["provenance_json"]), strict=False
+            )
+            if (
+                code_snapshot_write_mode == "record"
+                and existing_binding != incoming_binding
+                and (existing_binding is not None or incoming_binding is not None)
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "finding code snapshot binding differs from the stored binding; "
+                        "re-review and use finding verify to rebind it"
+                    ),
+                )
             # I-21: the operator "named" this exact finding only when the
             # incoming slug resolves to it (matched by slug in
             # ``_semantic_finding_match``'s first tier). A tuple/title dedup
@@ -962,6 +1238,8 @@ def patch_finding(
     notes_mode: str = "append",
     details_mode: str = "merge",
 ) -> dict[str, Any]:
+    if canonical_location is not None:
+        canonical_location = str(canonical_location).strip()
     if notes_mode == "replace" and notes is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -975,14 +1253,13 @@ def patch_finding(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="details_mode='replace' requires details",
         )
-    if notes_mode == "replace" or details_mode == "replace":
-        if type(expected_row_version) is not int or expected_row_version < 1:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    "replacement modes require a positive expected_row_version"
-                ),
-            )
+    if (
+        notes_mode == "replace" or details_mode == "replace"
+    ) and (type(expected_row_version) is not int or expected_row_version < 1):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="replacement modes require a positive expected_row_version",
+        )
 
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
@@ -995,6 +1272,18 @@ def patch_finding(
     existing_workflow = _row_workflow_status(existing)
     existing_verification = _row_verification_state(existing)
     current_row_version = int(existing["row_version"])
+
+    if canonical_location is not None and is_file_finding(
+        canonical_location
+    ) != is_file_finding(str(existing["canonical_location"])):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "generic finding patch cannot change canonical-location category "
+                "between file and non-file; re-record and review the finding through "
+                "the destination workflow"
+            ),
+        )
 
     if not allow_verification_mutation:
         if verification_state is not None or verification_disposition is not None:
@@ -1040,7 +1329,11 @@ def patch_finding(
         defect_family=defect_family or "",
         root_cause_key=root_cause_key or "",
         auth_context=auth_context or "",
-        canonical_location=canonical_location or "",
+        canonical_location=(
+            str(existing["canonical_location"])
+            if canonical_location is None
+            else canonical_location
+        ),
         summary="" if summary is None else summary,
         evidence_ref=evidence_ref or "",
         notes="" if notes is None else notes,
@@ -1072,6 +1365,9 @@ def patch_finding(
         ),
         notes_mode=notes_mode,
         details_mode=details_mode,
+        code_snapshot_write_mode=(
+            "verify" if allow_verification_mutation else "patch"
+        ),
     )
 
 # Documented (not hard-enforced) vocabulary for what a blocked finding is
@@ -1368,6 +1664,33 @@ def merge_findings(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"target finding {target_slug} has a merge target but is not marked merged",
+            )
+        source_provenance = _json_object(source["provenance_json"])
+        target_provenance = _json_object(target["provenance_json"])
+        source_binding = _code_snapshot_binding(source_provenance, strict=False)
+        target_binding = _code_snapshot_binding(target_provenance, strict=False)
+        source_is_file = is_file_finding(str(source["canonical_location"]))
+        target_is_file = is_file_finding(str(target["canonical_location"]))
+        if source_is_file != target_is_file:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "cannot merge findings across the file/non-file "
+                    "canonical-location category boundary"
+                ),
+            )
+        either_has_binding = (
+            CODE_SNAPSHOT_PROVENANCE_KEY in source_provenance
+            or CODE_SNAPSHOT_PROVENANCE_KEY in target_provenance
+        )
+        if either_has_binding and (
+            source_binding is None
+            or target_binding is None
+            or source_binding != target_binding
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="cannot merge findings bound to different code snapshots",
             )
         merged_children = connection.execute(
             """
@@ -1764,7 +2087,13 @@ def list_findings(
             """,
             tuple(params),
         ).fetchall()
-    return [_serialize_finding_record(row) for row in rows]
+        repo_states = load_code_repo_snapshot_states(connection, engagement.id)
+        return [
+            _serialize_finding_with_code_snapshot_status(
+                connection, engagement.id, row, repo_states=repo_states
+            )
+            for row in rows
+        ]
 
 
 def _escape_like(value: str) -> str:
@@ -1785,7 +2114,9 @@ def get_finding(engagement_id: int, slug: str) -> dict[str, Any]:
         ).fetchone()
         if row is None:
             raise _finding_not_found(connection, engagement.id, slug)
-    return _serialize_finding_record(row)
+        return _serialize_finding_with_code_snapshot_status(
+            connection, engagement.id, row
+        )
 
 def list_exploit_candidates(engagement_id: int) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)

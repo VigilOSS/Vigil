@@ -11,10 +11,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from .code_snapshot import SOURCE_MANIFEST_VERSION, source_manifest_digest
 from .config import settings
-from .models.event import Event
-from .models.engagement_session import EngagementSession
 from .models.engagement import Engagement
+from .models.engagement_session import EngagementSession
+from .models.event import Event
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +54,9 @@ _connection_generation = 0
 
 _startup_database_fingerprint: DatabaseFingerprint | None = None
 _LEGACY_FINDING_PREFIX = "FINDING" + "-"
-_LEGACY_FINDING_REF_RE = re.compile(rf"\b{_LEGACY_FINDING_PREFIX}([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*-\d{{3}}[A-Z]?)\b")
+_LEGACY_FINDING_REF_RE = re.compile(
+    rf"\b{_LEGACY_FINDING_PREFIX}([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*-\d{{3}}[A-Z]?)\b"
+)
 _COVERAGE_STATUS_RANK = {
     "pending": 0,
     "queued": 1,
@@ -65,7 +68,10 @@ _COVERAGE_STATUS_RANK = {
 
 
 def _table_columns(connection: sqlite3.Connection, table_name: str) -> set[str]:
-    return {row[1] for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    return {
+        row[1]
+        for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
 
 
 def _has_unique_index_on_columns(
@@ -107,7 +113,9 @@ def _merge_coverage_status(statuses: list[str]) -> str:
     return best_status
 
 
-def _refresh_service_coverage_status(connection: sqlite3.Connection, engagement_id: int, service_id: int) -> None:
+def _refresh_service_coverage_status(
+    connection: sqlite3.Connection, engagement_id: int, service_id: int
+) -> None:
     # Sibling of state_manager.coverage._refresh_service_coverage_status. They are
     # NOT merged on purpose: importing that one here would create a cycle
     # (db -> coverage -> events -> db), and this migration/dedupe-time copy must
@@ -124,7 +132,10 @@ def _refresh_service_coverage_status(connection: sqlite3.Connection, engagement_
         coverage_status = "covered"
     elif any(status_value == "blocked" for status_value in statuses):
         coverage_status = "blocked"
-    elif any(status_value in {"covered", "not_applicable", "deferred"} for status_value in statuses):
+    elif any(
+        status_value in {"covered", "not_applicable", "deferred"}
+        for status_value in statuses
+    ):
         coverage_status = "partial"
     else:
         coverage_status = "pending"
@@ -180,12 +191,21 @@ def _dedupe_coverage_items(connection: sqlite3.Connection) -> None:
               AND attack_family = ?
             ORDER BY id ASC
             """,
-            (engagement_id, request_variant_id, service_id, auth_context, input_slot, attack_family),
+            (
+                engagement_id,
+                request_variant_id,
+                service_id,
+                auth_context,
+                input_slot,
+                attack_family,
+            ),
         ).fetchall()
         if len(rows) < 2:
             continue
         keeper_id = int(rows[0][0])
-        merged_status = _merge_coverage_status([str(row[1] or "pending") for row in rows])
+        merged_status = _merge_coverage_status(
+            [str(row[1] or "pending") for row in rows]
+        )
         merged_notes = ""
         for row in rows:
             merged_notes = _append_notes(merged_notes, str(row[2] or ""))
@@ -203,7 +223,9 @@ def _dedupe_coverage_items(connection: sqlite3.Connection) -> None:
                 "UPDATE assessment_probe_runs SET coverage_item_id = ? WHERE coverage_item_id = ?",
                 (keeper_id, duplicate_id),
             )
-            connection.execute("DELETE FROM assessment_coverage_items WHERE id = ?", (duplicate_id,))
+            connection.execute(
+                "DELETE FROM assessment_coverage_items WHERE id = ?", (duplicate_id,)
+            )
         if service_id is not None:
             affected_services.add((int(engagement_id), int(service_id)))
     for engagement_id, service_id in affected_services:
@@ -216,7 +238,9 @@ def _strip_legacy_finding_prefix(value: str) -> str:
     return value
 
 
-def _normalize_legacy_finding_refs(value: str, slug_map: dict[tuple[int, str], str], engagement_id: int | None) -> str:
+def _normalize_legacy_finding_refs(
+    value: str, slug_map: dict[tuple[int, str], str], engagement_id: int | None
+) -> str:
     def replace(match: re.Match[str]) -> str:
         old_slug = match.group(0)
         if engagement_id is not None:
@@ -228,15 +252,23 @@ def _normalize_legacy_finding_refs(value: str, slug_map: dict[tuple[int, str], s
     return _LEGACY_FINDING_REF_RE.sub(replace, value)
 
 
-def _strip_legacy_finding_prefixes(value, slug_map: dict[tuple[int, str], str] | None = None, engagement_id: int | None = None):
+def _strip_legacy_finding_prefixes(
+    value,
+    slug_map: dict[tuple[int, str], str] | None = None,
+    engagement_id: int | None = None,
+):
     if isinstance(value, str):
-        normalized = _normalize_legacy_finding_refs(value, slug_map or {}, engagement_id)
+        normalized = _normalize_legacy_finding_refs(
+            value, slug_map or {}, engagement_id
+        )
         return normalized, normalized != value
     if isinstance(value, list):
         changed = False
         normalized_items = []
         for item in value:
-            normalized_item, item_changed = _strip_legacy_finding_prefixes(item, slug_map, engagement_id)
+            normalized_item, item_changed = _strip_legacy_finding_prefixes(
+                item, slug_map, engagement_id
+            )
             normalized_items.append(normalized_item)
             changed = changed or item_changed
         return normalized_items, changed
@@ -244,14 +276,18 @@ def _strip_legacy_finding_prefixes(value, slug_map: dict[tuple[int, str], str] |
         changed = False
         normalized_dict = {}
         for key, item in value.items():
-            normalized_item, item_changed = _strip_legacy_finding_prefixes(item, slug_map, engagement_id)
+            normalized_item, item_changed = _strip_legacy_finding_prefixes(
+                item, slug_map, engagement_id
+            )
             normalized_dict[key] = normalized_item
             changed = changed or item_changed
         return normalized_dict, changed
     return value, False
 
 
-def _next_legacy_collision_slug(connection: sqlite3.Connection, engagement_id: int, preferred_slug: str, row_id: int) -> str:
+def _next_legacy_collision_slug(
+    connection: sqlite3.Connection, engagement_id: int, preferred_slug: str, row_id: int
+) -> str:
     candidate = f"{preferred_slug}-legacy-{row_id}"
     suffix = 2
     while connection.execute(
@@ -263,8 +299,12 @@ def _next_legacy_collision_slug(connection: sqlite3.Connection, engagement_id: i
     return candidate
 
 
-def _migrate_legacy_finding_slugs(connection: sqlite3.Connection) -> dict[tuple[int, str], str]:
-    if not {"id", "engagement_id", "slug"}.issubset(_table_columns(connection, "assessment_findings")):
+def _migrate_legacy_finding_slugs(
+    connection: sqlite3.Connection,
+) -> dict[tuple[int, str], str]:
+    if not {"id", "engagement_id", "slug"}.issubset(
+        _table_columns(connection, "assessment_findings")
+    ):
         return {}
 
     slug_map: dict[tuple[int, str], str] = {}
@@ -292,7 +332,9 @@ def _migrate_legacy_finding_slugs(connection: sqlite3.Connection) -> dict[tuple[
             (engagement_id, normalized, row_id),
         ).fetchone()
         if collision is not None:
-            normalized = _next_legacy_collision_slug(connection, int(engagement_id), normalized, int(row_id))
+            normalized = _next_legacy_collision_slug(
+                connection, int(engagement_id), normalized, int(row_id)
+            )
         if normalized != old_slug:
             connection.execute(
                 "UPDATE assessment_findings SET slug = ? WHERE id = ?",
@@ -311,7 +353,11 @@ def _migrate_legacy_finding_prefix_in_text_column(
     columns = _table_columns(connection, table_name)
     if column_name not in columns:
         return
-    select_columns = "id, engagement_id, " + column_name if "engagement_id" in columns else "id, " + column_name
+    select_columns = (
+        "id, engagement_id, " + column_name
+        if "engagement_id" in columns
+        else "id, " + column_name
+    )
     rows = connection.execute(
         f"SELECT {select_columns} FROM {table_name} WHERE {column_name} LIKE ?",
         (f"{_LEGACY_FINDING_PREFIX}%",),
@@ -326,7 +372,11 @@ def _migrate_legacy_finding_prefix_in_text_column(
             value = row[1]
         if not isinstance(value, str):
             continue
-        normalized = slug_map.get((engagement_id, value), _strip_legacy_finding_prefix(value)) if engagement_id is not None else _strip_legacy_finding_prefix(value)
+        normalized = (
+            slug_map.get((engagement_id, value), _strip_legacy_finding_prefix(value))
+            if engagement_id is not None
+            else _strip_legacy_finding_prefix(value)
+        )
         if normalized != value:
             connection.execute(
                 f"UPDATE {table_name} SET {column_name} = ? WHERE id = ?",
@@ -343,7 +393,11 @@ def _migrate_legacy_finding_prefix_in_json_column(
     columns = _table_columns(connection, table_name)
     if column_name not in columns:
         return
-    select_columns = "id, engagement_id, " + column_name if "engagement_id" in columns else "id, " + column_name
+    select_columns = (
+        "id, engagement_id, " + column_name
+        if "engagement_id" in columns
+        else "id, " + column_name
+    )
     rows = connection.execute(
         f"SELECT {select_columns} FROM {table_name} WHERE {column_name} LIKE ?",
         (f"%{_LEGACY_FINDING_PREFIX}%",),
@@ -362,7 +416,9 @@ def _migrate_legacy_finding_prefix_in_json_column(
             payload = json.loads(value)
         except json.JSONDecodeError:
             continue
-        normalized, changed = _strip_legacy_finding_prefixes(payload, slug_map, engagement_id)
+        normalized, changed = _strip_legacy_finding_prefixes(
+            payload, slug_map, engagement_id
+        )
         if changed:
             connection.execute(
                 f"UPDATE {table_name} SET {column_name} = ? WHERE id = ?",
@@ -378,7 +434,9 @@ def _migrate_legacy_finding_slug_references(connection: sqlite3.Connection) -> N
         ("code_analysis_results", "finding_slug"),
         ("intel_notes", "linked_finding_slug"),
     ):
-        _migrate_legacy_finding_prefix_in_text_column(connection, table_name, column_name, slug_map)
+        _migrate_legacy_finding_prefix_in_text_column(
+            connection, table_name, column_name, slug_map
+        )
 
     for table_name, column_name in (
         ("assessment_findings", "details_json"),
@@ -386,7 +444,9 @@ def _migrate_legacy_finding_slug_references(connection: sqlite3.Connection) -> N
         ("engagement_sessions", "assigned_targets_json"),
         ("assessment_finding_transitions", "metadata_json"),
     ):
-        _migrate_legacy_finding_prefix_in_json_column(connection, table_name, column_name, slug_map)
+        _migrate_legacy_finding_prefix_in_json_column(
+            connection, table_name, column_name, slug_map
+        )
 
 
 class IncompatibleDatabaseError(RuntimeError):
@@ -440,6 +500,7 @@ _ENGAGEMENT_SCOPED_TABLES = {
     "assessment_blocked_techniques",
     "assessment_command_runs",
     "assessment_artifacts",
+    "assessment_artifact_path_reservations",
     "assessment_jobs",
     "assessment_rate_leases",
     "code_repos",
@@ -448,6 +509,10 @@ _ENGAGEMENT_SCOPED_TABLES = {
     "code_analysis_queue",
     "code_analysis_results",
     "code_analysis_triggers",
+    "code_variant_check_receipts",
+    "code_variant_dispatch_scopes",
+    "code_fuzz_decisions",
+    "code_fuzz_campaign_receipts",
     "intel_tech_components",
     "intel_people",
     "intel_emails",
@@ -493,7 +558,8 @@ def _check_database_compatibility(db_path: Path) -> None:
             if legacy:
                 raise IncompatibleDatabaseError(
                     _incompatible_message(
-                        db_path, f"legacy pre-engagement tables present: {sorted(legacy)}"
+                        db_path,
+                        f"legacy pre-engagement tables present: {sorted(legacy)}",
                     )
                 )
 
@@ -533,12 +599,16 @@ def database_path() -> Path:
 
 def _database_fingerprint(db_path: Path) -> DatabaseFingerprint:
     stat_result = db_path.stat()
-    return DatabaseFingerprint(path=db_path.resolve(), device=stat_result.st_dev, inode=stat_result.st_ino)
+    return DatabaseFingerprint(
+        path=db_path.resolve(), device=stat_result.st_dev, inode=stat_result.st_ino
+    )
 
 
 def _require_startup_database_fingerprint() -> DatabaseFingerprint:
     if _startup_database_fingerprint is None:
-        raise RuntimeError("Orchestrator database has not been initialized for this process")
+        raise RuntimeError(
+            "Orchestrator database has not been initialized for this process"
+        )
     return _startup_database_fingerprint
 
 
@@ -550,7 +620,9 @@ def _verify_database_fingerprint() -> Path:
             f"Orchestrator database path changed after startup: expected {expected.path}, got {db_path.resolve()}"
         )
     if not db_path.exists():
-        raise RuntimeError(f"Orchestrator database file disappeared after startup: {db_path}")
+        raise RuntimeError(
+            f"Orchestrator database file disappeared after startup: {db_path}"
+        )
     current = _database_fingerprint(db_path)
     if current.device != expected.device or current.inode != expected.inode:
         raise RuntimeError(
@@ -571,7 +643,9 @@ def database_cache_token() -> tuple[str, int, int, int]:
 
 
 def _require_fts5(connection: sqlite3.Connection) -> None:
-    row = connection.execute("SELECT sqlite_compileoption_used('ENABLE_FTS5')").fetchone()
+    row = connection.execute(
+        "SELECT sqlite_compileoption_used('ENABLE_FTS5')"
+    ).fetchone()
     if not row or not row[0]:
         raise RuntimeError(
             "Orchestrator SQLite build lacks FTS5 support, which assessment_command_runs search requires. "
@@ -1484,6 +1558,7 @@ def _create_command_runs_table_and_fts(connection: sqlite3.Connection) -> None:
                 success INTEGER NOT NULL DEFAULT 0,
                 started_at TEXT NOT NULL,
                 completed_at TEXT NOT NULL,
+                output_recovery_observed_at TEXT,
                 duration_ms INTEGER NOT NULL DEFAULT 0,
                 command_hash TEXT NOT NULL,
                 stdout_sha256 TEXT NOT NULL DEFAULT '',
@@ -1497,6 +1572,10 @@ def _create_command_runs_table_and_fts(connection: sqlite3.Connection) -> None:
                 stderr_artifact_ref TEXT NOT NULL DEFAULT '',
                 stdout_bytes INTEGER NOT NULL DEFAULT 0,
                 stderr_bytes INTEGER NOT NULL DEFAULT 0,
+                output_cleanup_warning TEXT NOT NULL DEFAULT '',
+                output_cleanup_status TEXT NOT NULL DEFAULT 'not_required',
+                output_integrity_warning TEXT NOT NULL DEFAULT '',
+                output_integrity_status TEXT NOT NULL DEFAULT 'unverified',
                 indexed_for_embeddings_at TEXT,
                 notes TEXT NOT NULL DEFAULT '',
                 technique TEXT,
@@ -1505,6 +1584,10 @@ def _create_command_runs_table_and_fts(connection: sqlite3.Connection) -> None:
                 destructive INTEGER,
                 stdout_path TEXT,
                 stderr_path TEXT,
+                stdout_spill_device INTEGER,
+                stdout_spill_inode INTEGER,
+                stderr_spill_device INTEGER,
+                stderr_spill_inode INTEGER,
                 peak_rss_bytes INTEGER,
                 cpu_user_seconds REAL,
                 cpu_system_seconds REAL,
@@ -1532,7 +1615,9 @@ def _create_command_runs_table_and_fts(connection: sqlite3.Connection) -> None:
     # and the ALTER is skipped).
     cmdrun_columns = _table_columns(connection, "assessment_command_runs")
     if cmdrun_columns and "run_uuid" not in cmdrun_columns:
-        connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN run_uuid TEXT")
+        connection.execute(
+            "ALTER TABLE assessment_command_runs ADD COLUMN run_uuid TEXT"
+        )
         connection.execute(
             """
                 UPDATE assessment_command_runs
@@ -1558,9 +1643,7 @@ def _create_command_runs_table_and_fts(connection: sqlite3.Connection) -> None:
             "ALTER TABLE assessment_command_runs ADD COLUMN technique TEXT"
         )
     if cmdrun_columns and "intent" not in cmdrun_columns:
-        connection.execute(
-            "ALTER TABLE assessment_command_runs ADD COLUMN intent TEXT"
-        )
+        connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN intent TEXT")
     if cmdrun_columns and "probe_kind" not in cmdrun_columns:
         connection.execute(
             "ALTER TABLE assessment_command_runs ADD COLUMN probe_kind TEXT"
@@ -1584,21 +1667,37 @@ def _create_command_runs_table_and_fts(connection: sqlite3.Connection) -> None:
             "ALTER TABLE assessment_command_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'"
         )
     if cmdrun_columns and "stdout_path" not in cmdrun_columns:
-        connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN stdout_path TEXT")
+        connection.execute(
+            "ALTER TABLE assessment_command_runs ADD COLUMN stdout_path TEXT"
+        )
     if cmdrun_columns and "stderr_path" not in cmdrun_columns:
-        connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN stderr_path TEXT")
+        connection.execute(
+            "ALTER TABLE assessment_command_runs ADD COLUMN stderr_path TEXT"
+        )
     if cmdrun_columns and "peak_rss_bytes" not in cmdrun_columns:
-        connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN peak_rss_bytes INTEGER")
+        connection.execute(
+            "ALTER TABLE assessment_command_runs ADD COLUMN peak_rss_bytes INTEGER"
+        )
     if cmdrun_columns and "cpu_user_seconds" not in cmdrun_columns:
-        connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN cpu_user_seconds REAL")
+        connection.execute(
+            "ALTER TABLE assessment_command_runs ADD COLUMN cpu_user_seconds REAL"
+        )
     if cmdrun_columns and "cpu_system_seconds" not in cmdrun_columns:
-        connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN cpu_system_seconds REAL")
+        connection.execute(
+            "ALTER TABLE assessment_command_runs ADD COLUMN cpu_system_seconds REAL"
+        )
     if cmdrun_columns and "working_dir" not in cmdrun_columns:
-        connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN working_dir TEXT")
+        connection.execute(
+            "ALTER TABLE assessment_command_runs ADD COLUMN working_dir TEXT"
+        )
     if cmdrun_columns and "scope_version" not in cmdrun_columns:
-        connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN scope_version TEXT")
+        connection.execute(
+            "ALTER TABLE assessment_command_runs ADD COLUMN scope_version TEXT"
+        )
     if cmdrun_columns and "auth_context" not in cmdrun_columns:
-        connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN auth_context TEXT")
+        connection.execute(
+            "ALTER TABLE assessment_command_runs ADD COLUMN auth_context TEXT"
+        )
     # C30: target_host is the parsed target from argv for high-traffic verbs
     # (httpx, nuclei, ffuf, sqlmap). Unhandled verbs leave it empty; FTS
     # search via --q still finds those rows.
@@ -1611,7 +1710,9 @@ def _create_command_runs_table_and_fts(connection: sqlite3.Connection) -> None:
     # constraint is an integrity belt. Legacy rows simply have a plain
     # INTEGER column; new schema gets the REFERENCES via CREATE TABLE.
     if cmdrun_columns and "superseded_by_id" not in cmdrun_columns:
-        connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN superseded_by_id INTEGER")
+        connection.execute(
+            "ALTER TABLE assessment_command_runs ADD COLUMN superseded_by_id INTEGER"
+        )
     # Round 9 dropped ``strace_path``; we deliberately do NOT re-add the
     # column on legacy DBs (SQLite cannot DROP COLUMN reliably, so a
     # vestigial NULL column on existing files is the migration). Fresh DBs
@@ -1624,12 +1725,61 @@ def _create_command_runs_table_and_fts(connection: sqlite3.Connection) -> None:
         connection.execute(
             "ALTER TABLE assessment_command_runs ADD COLUMN partial_results INTEGER NOT NULL DEFAULT 0"
         )
+    if cmdrun_columns and "output_cleanup_warning" not in cmdrun_columns:
+        connection.execute(
+            "ALTER TABLE assessment_command_runs ADD COLUMN output_cleanup_warning TEXT NOT NULL DEFAULT ''"
+        )
+    if cmdrun_columns and "output_cleanup_status" not in cmdrun_columns:
+        connection.execute(
+            "ALTER TABLE assessment_command_runs ADD COLUMN output_cleanup_status TEXT NOT NULL DEFAULT 'not_required'"
+        )
+    if cmdrun_columns and "output_integrity_warning" not in cmdrun_columns:
+        connection.execute(
+            "ALTER TABLE assessment_command_runs ADD COLUMN output_integrity_warning TEXT NOT NULL DEFAULT ''"
+        )
+    if cmdrun_columns and "output_integrity_status" not in cmdrun_columns:
+        connection.execute(
+            "ALTER TABLE assessment_command_runs ADD COLUMN output_integrity_status TEXT NOT NULL DEFAULT 'unverified'"
+        )
+    if cmdrun_columns and "output_recovery_observed_at" not in cmdrun_columns:
+        connection.execute(
+            "ALTER TABLE assessment_command_runs ADD COLUMN output_recovery_observed_at TEXT"
+        )
+    if cmdrun_columns:
+        # Old terminal rows have no trustworthy server commit clock. Pending
+        # cleanup/integrity work needs one so the reconciler can age it without
+        # trusting client-supplied completed_at. Migration time is the first
+        # server-owned instant available, so start their grace period now.
+        connection.execute(
+            """
+            UPDATE assessment_command_runs
+            SET output_recovery_observed_at = CURRENT_TIMESTAMP
+            WHERE status NOT IN ('queued', 'running')
+              AND (
+                    output_cleanup_status = 'pending'
+                    OR output_integrity_status = 'pending'
+                  )
+              AND (
+                    output_recovery_observed_at IS NULL
+                    OR TRIM(output_recovery_observed_at) = ''
+                  )
+            """
+        )
+    for stream in ("stdout", "stderr"):
+        for suffix in ("device", "inode"):
+            column = f"{stream}_spill_{suffix}"
+            if cmdrun_columns and column not in cmdrun_columns:
+                connection.execute(
+                    f"ALTER TABLE assessment_command_runs ADD COLUMN {column} INTEGER"
+                )
     # Optional finding linkage. As with superseded_by_id above, SQLite cannot
     # ALTER a column to add a REFERENCES constraint, so legacy DBs get a plain
     # nullable INTEGER (the application enforces the link); fresh DBs pick up the
     # REFERENCES ... ON DELETE SET NULL from CREATE TABLE.
     if cmdrun_columns and "finding_id" not in cmdrun_columns:
-        connection.execute("ALTER TABLE assessment_command_runs ADD COLUMN finding_id INTEGER")
+        connection.execute(
+            "ALTER TABLE assessment_command_runs ADD COLUMN finding_id INTEGER"
+        )
     if not _has_unique_index_on_columns(
         connection, "assessment_command_runs", ("run_uuid",)
     ):
@@ -1692,13 +1842,21 @@ def _create_command_runs_table_and_fts(connection: sqlite3.Connection) -> None:
     # trigger bodies that reference a now-dropped column set.
     fts_columns = {
         row[1]
-        for row in connection.execute("PRAGMA table_info(assessment_command_runs_fts)").fetchall()
+        for row in connection.execute(
+            "PRAGMA table_info(assessment_command_runs_fts)"
+        ).fetchall()
     }
-    existing_cmdrun_count = connection.execute("SELECT COUNT(*) FROM assessment_command_runs").fetchone()[0]
+    existing_cmdrun_count = connection.execute(
+        "SELECT COUNT(*) FROM assessment_command_runs"
+    ).fetchone()[0]
     rebuild_command_runs_fts = not fts_columns and existing_cmdrun_count > 0
     if fts_columns and "tool_bin" not in fts_columns:
         connection.execute("DROP TABLE IF EXISTS assessment_command_runs_fts")
-        for trigger in ("assessment_command_runs_ai", "assessment_command_runs_ad", "assessment_command_runs_au"):
+        for trigger in (
+            "assessment_command_runs_ai",
+            "assessment_command_runs_ad",
+            "assessment_command_runs_au",
+        ):
             connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
         rebuild_command_runs_fts = existing_cmdrun_count > 0
         fts_columns = set()
@@ -1710,7 +1868,11 @@ def _create_command_runs_table_and_fts(connection: sqlite3.Connection) -> None:
     # FTS — so they are deliberately NOT included in this check.
     if fts_columns and "intent" not in fts_columns:
         connection.execute("DROP TABLE IF EXISTS assessment_command_runs_fts")
-        for trigger in ("assessment_command_runs_ai", "assessment_command_runs_ad", "assessment_command_runs_au"):
+        for trigger in (
+            "assessment_command_runs_ai",
+            "assessment_command_runs_ad",
+            "assessment_command_runs_au",
+        ):
             connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
         rebuild_command_runs_fts = existing_cmdrun_count > 0
     connection.execute(
@@ -1829,6 +1991,9 @@ def _create_artifacts_table_and_fts(connection: sqlite3.Connection) -> None:
                 indexed_text TEXT NOT NULL DEFAULT '',
                 sensitive INTEGER NOT NULL DEFAULT 0,
                 present INTEGER NOT NULL DEFAULT 1,
+                verified_device INTEGER,
+                verified_inode INTEGER,
+                integrity_status TEXT NOT NULL DEFAULT 'unverified',
                 producer_agent_id TEXT,
                 producer_agent_role TEXT,
                 producer_command_run_id INTEGER REFERENCES assessment_command_runs(id) ON DELETE SET NULL,
@@ -1855,13 +2020,68 @@ def _create_artifacts_table_and_fts(connection: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_assessment_artifacts_present "
         "ON assessment_artifacts(engagement_id, present)"
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assessment_artifact_path_reservations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+            relative_path TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            command_run_id INTEGER REFERENCES assessment_command_runs(id) ON DELETE SET NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(engagement_id, relative_path)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS assessment_artifacts_block_reserved_insert
+        BEFORE INSERT ON assessment_artifacts
+        WHEN EXISTS (
+            SELECT 1 FROM assessment_artifact_path_reservations r
+            WHERE r.engagement_id = NEW.engagement_id
+              AND r.relative_path = NEW.relative_path
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'artifact path is reserved from indexing');
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS assessment_artifacts_block_reserved_update
+        BEFORE UPDATE OF engagement_id, relative_path ON assessment_artifacts
+        WHEN EXISTS (
+            SELECT 1 FROM assessment_artifact_path_reservations r
+            WHERE r.engagement_id = NEW.engagement_id
+              AND r.relative_path = NEW.relative_path
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'artifact path is reserved from indexing');
+        END
+        """
+    )
     artifact_columns = {
         row[1]
-        for row in connection.execute("PRAGMA table_info(assessment_artifacts)").fetchall()
+        for row in connection.execute(
+            "PRAGMA table_info(assessment_artifacts)"
+        ).fetchall()
     }
     if "scratch" not in artifact_columns:
         connection.execute(
             "ALTER TABLE assessment_artifacts ADD COLUMN scratch INTEGER NOT NULL DEFAULT 0"
+        )
+    if "verified_device" not in artifact_columns:
+        connection.execute(
+            "ALTER TABLE assessment_artifacts ADD COLUMN verified_device INTEGER"
+        )
+    if "verified_inode" not in artifact_columns:
+        connection.execute(
+            "ALTER TABLE assessment_artifacts ADD COLUMN verified_inode INTEGER"
+        )
+    if "integrity_status" not in artifact_columns:
+        connection.execute(
+            "ALTER TABLE assessment_artifacts ADD COLUMN integrity_status TEXT NOT NULL DEFAULT 'unverified'"
         )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_assessment_artifacts_scratch "
@@ -1869,9 +2089,13 @@ def _create_artifacts_table_and_fts(connection: sqlite3.Connection) -> None:
     )
     artifact_fts_columns = {
         row[1]
-        for row in connection.execute("PRAGMA table_info(assessment_artifacts_fts)").fetchall()
+        for row in connection.execute(
+            "PRAGMA table_info(assessment_artifacts_fts)"
+        ).fetchall()
     }
-    existing_artifact_count = connection.execute("SELECT COUNT(*) FROM assessment_artifacts").fetchone()[0]
+    existing_artifact_count = connection.execute(
+        "SELECT COUNT(*) FROM assessment_artifacts"
+    ).fetchone()[0]
     rebuild_artifacts_fts = not artifact_fts_columns and existing_artifact_count > 0
     expected_artifact_fts_columns = {
         "relative_path",
@@ -1882,9 +2106,15 @@ def _create_artifacts_table_and_fts(connection: sqlite3.Connection) -> None:
         "related_finding_slug",
         "related_chain_key",
     }
-    if artifact_fts_columns and not expected_artifact_fts_columns.issubset(artifact_fts_columns):
+    if artifact_fts_columns and not expected_artifact_fts_columns.issubset(
+        artifact_fts_columns
+    ):
         connection.execute("DROP TABLE IF EXISTS assessment_artifacts_fts")
-        for trigger in ("assessment_artifacts_ai", "assessment_artifacts_ad", "assessment_artifacts_au"):
+        for trigger in (
+            "assessment_artifacts_ai",
+            "assessment_artifacts_ad",
+            "assessment_artifacts_au",
+        ):
             connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
         rebuild_artifacts_fts = existing_artifact_count > 0
     connection.execute(
@@ -2035,7 +2265,10 @@ def _create_rate_leases_table(connection: sqlite3.Connection) -> None:
 # assessment_command_runs / assessment_probe_runs. Fresh DBs get every column
 # via CREATE TABLE below; this list only backfills older on-disk schemas.
 _HTTP_FLOW_ADDITIVE_COLUMNS: tuple[tuple[str, str], ...] = (
-    ("request_variant_id", "INTEGER REFERENCES assessment_request_variants(id) ON DELETE SET NULL"),
+    (
+        "request_variant_id",
+        "INTEGER REFERENCES assessment_request_variants(id) ON DELETE SET NULL",
+    ),
     ("method", "TEXT NOT NULL DEFAULT ''"),
     ("scheme", "TEXT NOT NULL DEFAULT ''"),
     ("host", "TEXT NOT NULL DEFAULT ''"),
@@ -2187,6 +2420,24 @@ def _create_code_analysis_tables(connection: sqlite3.Connection) -> None:
                 git_churn_json TEXT NOT NULL DEFAULT '{}',
                 lsp_config_json TEXT NOT NULL DEFAULT '{}',
                 active_generation INTEGER NOT NULL DEFAULT 0,
+                source_origin_path TEXT NOT NULL DEFAULT '',
+                source_kind TEXT NOT NULL DEFAULT 'legacy',
+                snapshot_manifest_path TEXT NOT NULL DEFAULT '',
+                snapshot_digest TEXT NOT NULL DEFAULT '',
+                source_review_identity_digest TEXT NOT NULL DEFAULT '',
+                source_manifest_version TEXT NOT NULL DEFAULT 'v1',
+                source_manifest_digest TEXT NOT NULL DEFAULT '',
+                source_snapshot_quality TEXT NOT NULL DEFAULT 'legacy-unverified',
+                worktree_dirty INTEGER,
+                structural_index_schema TEXT NOT NULL DEFAULT '',
+                structural_index_generation INTEGER,
+                structural_index_manifest_path TEXT NOT NULL DEFAULT '',
+                structural_degraded_files INTEGER NOT NULL DEFAULT 0,
+                structural_degraded_file_paths_json TEXT NOT NULL DEFAULT '[]',
+                structural_artifact_truncated_files INTEGER NOT NULL DEFAULT 0,
+                structural_artifact_truncated_file_paths_json TEXT NOT NULL DEFAULT '[]',
+                structural_analysis_status_counts_json TEXT NOT NULL DEFAULT '{}',
+                threat_model_generation INTEGER,
                 pending_refresh_token TEXT NOT NULL DEFAULT '',
                 pending_refresh_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -2240,6 +2491,15 @@ def _create_code_analysis_tables(connection: sqlite3.Connection) -> None:
                 has_past_cve_fix INTEGER NOT NULL DEFAULT 0,
                 header_snippet TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
+                structural_analysis_status TEXT NOT NULL DEFAULT 'pending',
+                structural_analysis_mode TEXT NOT NULL DEFAULT '',
+                structural_degradation_reason TEXT NOT NULL DEFAULT '',
+                structural_source_size INTEGER NOT NULL DEFAULT 0,
+                structural_bytes_scanned INTEGER NOT NULL DEFAULT 0,
+                structural_unavailable_dimensions_json TEXT NOT NULL DEFAULT '[]',
+                structural_artifact_truncated INTEGER NOT NULL DEFAULT 0,
+                structural_truncated_dimensions_json TEXT NOT NULL DEFAULT '[]',
+                structural_signal_counts_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, repo_id, file_path),
@@ -2270,6 +2530,9 @@ def _create_code_analysis_tables(connection: sqlite3.Connection) -> None:
                 guidance_hypotheses_json TEXT NOT NULL DEFAULT '[]',
                 cwe_coverage_json TEXT NOT NULL DEFAULT '[]',
                 cross_file_triggers_json TEXT NOT NULL DEFAULT '[]',
+                queue_mode TEXT NOT NULL DEFAULT 'initial',
+                reanalysis_reason TEXT NOT NULL DEFAULT '',
+                reanalysis_of_queue_item_id INTEGER,
                 consumed_at TEXT,
                 completed_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -2308,6 +2571,119 @@ def _create_code_analysis_tables(connection: sqlite3.Connection) -> None:
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
                 FOREIGN KEY(queue_item_id) REFERENCES code_analysis_queue(id) ON DELETE CASCADE,
                 FOREIGN KEY(file_id) REFERENCES code_files(id) ON DELETE CASCADE
+            )
+            """
+    )
+    connection.execute(
+        """
+            CREATE TABLE IF NOT EXISTS code_variant_check_receipts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                dispatch_id INTEGER NOT NULL,
+                dispatch_agent_id TEXT NOT NULL,
+                dispatch_agent_role TEXT NOT NULL,
+                current_file_id INTEGER,
+                repo_id INTEGER NOT NULL,
+                repo_generation INTEGER NOT NULL,
+                source_manifest_digest TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                file_sha256 TEXT NOT NULL,
+                language TEXT NOT NULL,
+                classification TEXT NOT NULL,
+                role TEXT NOT NULL,
+                slot_types_json TEXT NOT NULL,
+                parent_finding_slugs_json TEXT NOT NULL,
+                parent_finding_set_digest TEXT NOT NULL,
+                variant_input_digest TEXT NOT NULL,
+                status TEXT NOT NULL,
+                evidence_ref TEXT NOT NULL,
+                rationale TEXT NOT NULL,
+                receipt_fingerprint TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, receipt_fingerprint),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(dispatch_id) REFERENCES assessment_dispatches(id) ON DELETE RESTRICT
+            )
+            """
+    )
+    connection.execute(
+        """
+            CREATE INDEX IF NOT EXISTS idx_code_variant_receipts_current_lookup
+            ON code_variant_check_receipts(
+                engagement_id, repo_id, current_file_id, variant_input_digest
+            )
+            """
+    )
+    connection.execute(
+        """
+            CREATE TABLE IF NOT EXISTS code_fuzz_decisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                repo_id INTEGER NOT NULL,
+                repo_generation INTEGER NOT NULL,
+                source_manifest_digest TEXT NOT NULL,
+                decision TEXT NOT NULL CHECK(decision IN ('required', 'not_required')),
+                target_ids_json TEXT NOT NULL DEFAULT '[]',
+                evidence_ref TEXT NOT NULL,
+                evidence_sha256 TEXT NOT NULL,
+                rationale TEXT NOT NULL,
+                decision_fingerprint TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, decision_fingerprint),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(repo_id) REFERENCES code_repos(id) ON DELETE RESTRICT
+            )
+            """
+    )
+    connection.execute(
+        """
+            CREATE INDEX IF NOT EXISTS idx_code_fuzz_decisions_current
+            ON code_fuzz_decisions(
+                engagement_id, repo_id, repo_generation,
+                source_manifest_digest, id DESC
+            )
+            """
+    )
+    connection.execute(
+        """
+            CREATE TABLE IF NOT EXISTS code_fuzz_campaign_receipts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                dispatch_id INTEGER NOT NULL,
+                dispatch_agent_id TEXT NOT NULL,
+                repo_id INTEGER NOT NULL,
+                repo_generation INTEGER NOT NULL,
+                source_manifest_digest TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                covered_finding_slugs_json TEXT NOT NULL DEFAULT '[]',
+                engine TEXT NOT NULL,
+                sanitizers_json TEXT NOT NULL DEFAULT '[]',
+                run_budget_seconds INTEGER NOT NULL,
+                executions INTEGER NOT NULL,
+                outcome TEXT NOT NULL CHECK(outcome IN (
+                    'completed_no_crash', 'completed_crashes_triaged',
+                    'build_failed', 'campaign_failed'
+                )),
+                crash_count INTEGER NOT NULL,
+                triage_summary TEXT NOT NULL,
+                evidence_ref TEXT NOT NULL,
+                evidence_sha256 TEXT NOT NULL,
+                rationale TEXT NOT NULL,
+                receipt_fingerprint TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, receipt_fingerprint),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(dispatch_id) REFERENCES assessment_dispatches(id) ON DELETE RESTRICT,
+                FOREIGN KEY(repo_id) REFERENCES code_repos(id) ON DELETE RESTRICT
+            )
+            """
+    )
+    connection.execute(
+        """
+            CREATE INDEX IF NOT EXISTS idx_code_fuzz_campaign_receipts_current
+            ON code_fuzz_campaign_receipts(
+                engagement_id, repo_id, repo_generation,
+                source_manifest_digest, target_id, id DESC
             )
             """
     )
@@ -2357,15 +2733,32 @@ def _create_code_analysis_tables(connection: sqlite3.Connection) -> None:
 def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
 
     # Migrate secret_locator → secret in assessment_credentials
-    cred_columns = {row[1] for row in connection.execute("PRAGMA table_info(assessment_credentials)").fetchall()}
+    cred_columns = {
+        row[1]
+        for row in connection.execute(
+            "PRAGMA table_info(assessment_credentials)"
+        ).fetchall()
+    }
     if "secret_locator" in cred_columns and "secret" not in cred_columns:
-        connection.execute("ALTER TABLE assessment_credentials RENAME COLUMN secret_locator TO secret")
+        connection.execute(
+            "ALTER TABLE assessment_credentials RENAME COLUMN secret_locator TO secret"
+        )
 
     session_columns = _table_columns(connection, "engagement_sessions")
-    if "assigned_findings_json" in session_columns and "assigned_targets_json" not in session_columns:
-        connection.execute("ALTER TABLE engagement_sessions RENAME COLUMN assigned_findings_json TO assigned_targets_json")
+    if (
+        "assigned_findings_json" in session_columns
+        and "assigned_targets_json" not in session_columns
+    ):
+        connection.execute(
+            "ALTER TABLE engagement_sessions RENAME COLUMN assigned_findings_json TO assigned_targets_json"
+        )
 
-    finding_columns = {row[1] for row in connection.execute("PRAGMA table_info(assessment_findings)").fetchall()}
+    finding_columns = {
+        row[1]
+        for row in connection.execute(
+            "PRAGMA table_info(assessment_findings)"
+        ).fetchall()
+    }
     finding_column_defaults = {
         "verification_state": "TEXT NOT NULL DEFAULT 'unreviewed'",
         "verification_disposition": "TEXT NOT NULL DEFAULT 'none'",
@@ -2395,7 +2788,9 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
     }
     for column_name, definition in finding_column_defaults.items():
         if column_name not in finding_columns:
-            connection.execute(f"ALTER TABLE assessment_findings ADD COLUMN {column_name} {definition}")
+            connection.execute(
+                f"ALTER TABLE assessment_findings ADD COLUMN {column_name} {definition}"
+            )
 
     if finding_columns:
         connection.execute(
@@ -2445,28 +2840,100 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         )
 
     # Migrate code_repos: add lsp_config_json if missing
-    repo_columns = {row[1] for row in connection.execute("PRAGMA table_info(code_repos)").fetchall()}
-    legacy_repos_need_generation_backfill = bool(repo_columns) and "active_generation" not in repo_columns
+    repo_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(code_repos)").fetchall()
+    }
+    legacy_repos_need_generation_backfill = (
+        bool(repo_columns) and "active_generation" not in repo_columns
+    )
+    snapshot_columns_added = False
     for col_name, col_def in {
         "lsp_config_json": "TEXT NOT NULL DEFAULT '{}'",
         "active_generation": "INTEGER NOT NULL DEFAULT 0",
+        "source_origin_path": "TEXT NOT NULL DEFAULT ''",
+        "source_kind": "TEXT NOT NULL DEFAULT 'legacy'",
+        "snapshot_manifest_path": "TEXT NOT NULL DEFAULT ''",
+        "snapshot_digest": "TEXT NOT NULL DEFAULT ''",
+        "source_review_identity_digest": "TEXT NOT NULL DEFAULT ''",
+        "source_manifest_version": "TEXT NOT NULL DEFAULT 'v1'",
+        "source_manifest_digest": "TEXT NOT NULL DEFAULT ''",
+        "source_snapshot_quality": "TEXT NOT NULL DEFAULT 'legacy-unverified'",
+        "worktree_dirty": "INTEGER",
+        "structural_index_schema": "TEXT NOT NULL DEFAULT ''",
+        "structural_index_generation": "INTEGER",
+        "structural_index_manifest_path": "TEXT NOT NULL DEFAULT ''",
+        "structural_degraded_files": "INTEGER NOT NULL DEFAULT 0",
+        "structural_degraded_file_paths_json": "TEXT NOT NULL DEFAULT '[]'",
+        "structural_artifact_truncated_files": "INTEGER NOT NULL DEFAULT 0",
+        "structural_artifact_truncated_file_paths_json": "TEXT NOT NULL DEFAULT '[]'",
+        "structural_analysis_status_counts_json": "TEXT NOT NULL DEFAULT '{}'",
+        "threat_model_generation": "INTEGER",
         "pending_refresh_token": "TEXT NOT NULL DEFAULT ''",
         "pending_refresh_json": "TEXT NOT NULL DEFAULT '{}'",
     }.items():
         if repo_columns and col_name not in repo_columns:
-            connection.execute(f"ALTER TABLE code_repos ADD COLUMN {col_name} {col_def}")
+            connection.execute(
+                f"ALTER TABLE code_repos ADD COLUMN {col_name} {col_def}"
+            )
+            snapshot_columns_added = (
+                snapshot_columns_added or col_name == "source_manifest_digest"
+            )
     if legacy_repos_need_generation_backfill:
         # Repositories created before refresh generations existed are already
         # authoritative snapshots. Generation zero is reserved for an
         # uncommitted first refresh, so preserve legacy visibility as gen 1.
         connection.execute("UPDATE code_repos SET active_generation = 1")
+    if repo_columns:
+        connection.execute(
+            "UPDATE code_repos SET source_origin_path = repo_path WHERE source_origin_path = ''"
+        )
+        connection.execute(
+            "UPDATE code_repos SET source_manifest_version = ? "
+            "WHERE source_manifest_version = ''",
+            (SOURCE_MANIFEST_VERSION,),
+        )
+        if snapshot_columns_added:
+            rows = connection.execute(
+                "SELECT id FROM code_repos WHERE active_generation > 0"
+            ).fetchall()
+            for row in rows:
+                file_rows = connection.execute(
+                    "SELECT file_path, file_hash, language FROM code_files WHERE repo_id = ?",
+                    (int(row[0]),),
+                ).fetchall()
+                connection.execute(
+                    "UPDATE code_repos SET source_manifest_digest = ? WHERE id = ?",
+                    (
+                        source_manifest_digest(
+                            {
+                                "file_path": file_row[0],
+                                "file_hash": file_row[1],
+                                "language": file_row[2],
+                            }
+                            for file_row in file_rows
+                        ),
+                        int(row[0]),
+                    ),
+                )
 
-    result_columns = {row[1] for row in connection.execute("PRAGMA table_info(code_analysis_results)").fetchall()}
+    result_columns = {
+        row[1]
+        for row in connection.execute(
+            "PRAGMA table_info(code_analysis_results)"
+        ).fetchall()
+    }
     if result_columns and "audit_metadata_json" not in result_columns:
-        connection.execute("ALTER TABLE code_analysis_results ADD COLUMN audit_metadata_json TEXT NOT NULL DEFAULT '{}'")
+        connection.execute(
+            "ALTER TABLE code_analysis_results ADD COLUMN audit_metadata_json TEXT NOT NULL DEFAULT '{}'"
+        )
 
     # Migrate code_analysis_queue: add file-direct queue columns
-    queue_columns = {row[1] for row in connection.execute("PRAGMA table_info(code_analysis_queue)").fetchall()}
+    queue_columns = {
+        row[1]
+        for row in connection.execute(
+            "PRAGMA table_info(code_analysis_queue)"
+        ).fetchall()
+    }
     queue_new_columns = {
         "batch_theme": "TEXT NOT NULL DEFAULT ''",
         "slot_types_json": "TEXT NOT NULL DEFAULT '[]'",
@@ -2481,16 +2948,41 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         "lease_token": "TEXT NOT NULL DEFAULT ''",
         "repo_generation": "INTEGER NOT NULL DEFAULT 0",
         "last_heartbeat_at": "TEXT",
+        "queue_mode": "TEXT NOT NULL DEFAULT 'initial'",
+        "reanalysis_reason": "TEXT NOT NULL DEFAULT ''",
+        "reanalysis_of_queue_item_id": "INTEGER",
     }
     for col_name, col_def in queue_new_columns.items():
         if queue_columns and col_name not in queue_columns:
-            connection.execute(f"ALTER TABLE code_analysis_queue ADD COLUMN {col_name} {col_def}")
+            connection.execute(
+                f"ALTER TABLE code_analysis_queue ADD COLUMN {col_name} {col_def}"
+            )
+    if queue_columns:
+        connection.execute(
+            """
+            UPDATE code_analysis_queue
+            SET queue_mode = 'trigger'
+            WHERE queue_mode = 'initial'
+              AND (
+                  batch_theme = 'cross-file-trigger'
+                  OR trim(cross_file_triggers_json) NOT IN ('', '[]')
+              )
+            """
+        )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_code_analysis_queue_file_generation_status "
+        "ON code_analysis_queue(engagement_id, file_id, repo_generation, status, id)"
+    )
 
     # Migrate code_analysis_results: add cwe_coverage and cross_file_triggers
     if result_columns and "cwe_coverage_json" not in result_columns:
-        connection.execute("ALTER TABLE code_analysis_results ADD COLUMN cwe_coverage_json TEXT NOT NULL DEFAULT '[]'")
+        connection.execute(
+            "ALTER TABLE code_analysis_results ADD COLUMN cwe_coverage_json TEXT NOT NULL DEFAULT '[]'"
+        )
     if result_columns and "cross_file_triggers_json" not in result_columns:
-        connection.execute("ALTER TABLE code_analysis_results ADD COLUMN cross_file_triggers_json TEXT NOT NULL DEFAULT '[]'")
+        connection.execute(
+            "ALTER TABLE code_analysis_results ADD COLUMN cross_file_triggers_json TEXT NOT NULL DEFAULT '[]'"
+        )
     for col_name, col_def in {
         "lease_token": "TEXT NOT NULL DEFAULT ''",
         "repo_generation": "INTEGER NOT NULL DEFAULT 0",
@@ -2499,7 +2991,9 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         "superseded_at": "TEXT",
     }.items():
         if result_columns and col_name not in result_columns:
-            connection.execute(f"ALTER TABLE code_analysis_results ADD COLUMN {col_name} {col_def}")
+            connection.execute(
+                f"ALTER TABLE code_analysis_results ADD COLUMN {col_name} {col_def}"
+            )
     connection.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_code_analysis_results_idempotent "
         "ON code_analysis_results(queue_item_id, lease_token, result_fingerprint) "
@@ -2513,11 +3007,29 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         "total_entry_points": "INTEGER NOT NULL DEFAULT 0",
         "total_sinks": "INTEGER NOT NULL DEFAULT 0",
         "total_exports": "INTEGER NOT NULL DEFAULT 0",
+        "structural_analysis_status": "TEXT NOT NULL DEFAULT 'pending'",
+        "structural_analysis_mode": "TEXT NOT NULL DEFAULT ''",
+        "structural_degradation_reason": "TEXT NOT NULL DEFAULT ''",
+        "structural_source_size": "INTEGER NOT NULL DEFAULT 0",
+        "structural_bytes_scanned": "INTEGER NOT NULL DEFAULT 0",
+        "structural_unavailable_dimensions_json": "TEXT NOT NULL DEFAULT '[]'",
+        "structural_artifact_truncated": "INTEGER NOT NULL DEFAULT 0",
+        "structural_truncated_dimensions_json": "TEXT NOT NULL DEFAULT '[]'",
+        "structural_signal_counts_json": "TEXT NOT NULL DEFAULT '{}'",
     }
     for col_name, col_def in structural_columns.items():
         if file_columns and col_name not in file_columns:
-            connection.execute(f"ALTER TABLE code_files ADD COLUMN {col_name} {col_def}")
+            connection.execute(
+                f"ALTER TABLE code_files ADD COLUMN {col_name} {col_def}"
+            )
 
+    variant_receipt_columns = _table_columns(connection, "code_variant_check_receipts")
+    for col_name in ("dispatch_agent_id", "dispatch_agent_role"):
+        if variant_receipt_columns and col_name not in variant_receipt_columns:
+            connection.execute(
+                f"ALTER TABLE code_variant_check_receipts "
+                f"ADD COLUMN {col_name} TEXT NOT NULL DEFAULT ''"
+            )
 
 
 def _create_intel_tables(connection: sqlite3.Connection) -> None:
@@ -2879,15 +3391,27 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
     if dispatch_columns and "skills" not in dispatch_columns:
         connection.execute("ALTER TABLE assessment_dispatches ADD COLUMN skills TEXT")
     if dispatch_columns and "requested_model" not in dispatch_columns:
-        connection.execute("ALTER TABLE assessment_dispatches ADD COLUMN requested_model TEXT")
-        connection.execute("UPDATE assessment_dispatches SET requested_model = model WHERE requested_model IS NULL")
+        connection.execute(
+            "ALTER TABLE assessment_dispatches ADD COLUMN requested_model TEXT"
+        )
+        connection.execute(
+            "UPDATE assessment_dispatches SET requested_model = model WHERE requested_model IS NULL"
+        )
     if dispatch_columns and "actual_model" not in dispatch_columns:
-        connection.execute("ALTER TABLE assessment_dispatches ADD COLUMN actual_model TEXT")
+        connection.execute(
+            "ALTER TABLE assessment_dispatches ADD COLUMN actual_model TEXT"
+        )
     if dispatch_columns and "requested_reasoning" not in dispatch_columns:
-        connection.execute("ALTER TABLE assessment_dispatches ADD COLUMN requested_reasoning TEXT")
-        connection.execute("UPDATE assessment_dispatches SET requested_reasoning = reasoning WHERE requested_reasoning IS NULL")
+        connection.execute(
+            "ALTER TABLE assessment_dispatches ADD COLUMN requested_reasoning TEXT"
+        )
+        connection.execute(
+            "UPDATE assessment_dispatches SET requested_reasoning = reasoning WHERE requested_reasoning IS NULL"
+        )
     if dispatch_columns and "actual_reasoning" not in dispatch_columns:
-        connection.execute("ALTER TABLE assessment_dispatches ADD COLUMN actual_reasoning TEXT")
+        connection.execute(
+            "ALTER TABLE assessment_dispatches ADD COLUMN actual_reasoning TEXT"
+        )
     # Blue-engagement tier tag ('L1' | 'L2' | 'L3' | 'L4'). Enforced in
     # the Pydantic layer; stored as free-form TEXT so the enum can evolve
     # without a schema rebuild. Existing rows stay NULL.
@@ -2918,6 +3442,27 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_dispatches_engagement_tier "
         "ON assessment_dispatches(engagement_id, tier)"
+    )
+
+    connection.execute(
+        """
+            CREATE TABLE IF NOT EXISTS code_variant_dispatch_scopes (
+                dispatch_id INTEGER PRIMARY KEY,
+                engagement_id INTEGER NOT NULL,
+                parent_finding_slugs_json TEXT NOT NULL,
+                parent_finding_set_digest TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, dispatch_id),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(dispatch_id) REFERENCES assessment_dispatches(id) ON DELETE CASCADE
+            )
+            """
+    )
+    connection.execute(
+        """
+            CREATE INDEX IF NOT EXISTS idx_variant_dispatch_scopes_engagement
+            ON code_variant_dispatch_scopes(engagement_id, dispatch_id)
+            """
     )
 
     connection.execute(
@@ -2957,12 +3502,16 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
             "ALTER TABLE assessment_dispatch_handoffs ADD COLUMN handoff_version INTEGER NOT NULL DEFAULT 1"
         )
     if handoff_columns and "last_checkpoint_at" not in handoff_columns:
-        connection.execute("ALTER TABLE assessment_dispatch_handoffs ADD COLUMN last_checkpoint_at TEXT")
+        connection.execute(
+            "ALTER TABLE assessment_dispatch_handoffs ADD COLUMN last_checkpoint_at TEXT"
+        )
         connection.execute(
             "UPDATE assessment_dispatch_handoffs SET last_checkpoint_at = created_at WHERE last_checkpoint_at IS NULL"
         )
     if handoff_columns and "closed_dispatch_status" not in handoff_columns:
-        connection.execute("ALTER TABLE assessment_dispatch_handoffs ADD COLUMN closed_dispatch_status TEXT")
+        connection.execute(
+            "ALTER TABLE assessment_dispatch_handoffs ADD COLUMN closed_dispatch_status TEXT"
+        )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_handoffs_engagement_at "
         "ON assessment_dispatch_handoffs(engagement_id, created_at DESC)"
@@ -3028,7 +3577,9 @@ def _create_oob_correlation_tables(connection: sqlite3.Connection) -> None:
     )
     probe_columns = {
         row[1]
-        for row in connection.execute("PRAGMA table_info(assessment_oob_probes)").fetchall()
+        for row in connection.execute(
+            "PRAGMA table_info(assessment_oob_probes)"
+        ).fetchall()
     }
     if "client_name" not in probe_columns:
         connection.execute(
@@ -3143,7 +3694,9 @@ def _create_intel_and_activity_fts(connection: sqlite3.Connection) -> None:
 
     activity_fts_columns = {
         row[1]
-        for row in connection.execute("PRAGMA table_info(activity_entries_fts)").fetchall()
+        for row in connection.execute(
+            "PRAGMA table_info(activity_entries_fts)"
+        ).fetchall()
     }
     existing_activity_count = connection.execute(
         "SELECT COUNT(*) FROM activity_entries"
@@ -3156,7 +3709,9 @@ def _create_intel_and_activity_fts(connection: sqlite3.Connection) -> None:
         "body_markdown",
         "actor_name",
     }
-    if activity_fts_columns and not expected_activity_fts_columns.issubset(activity_fts_columns):
+    if activity_fts_columns and not expected_activity_fts_columns.issubset(
+        activity_fts_columns
+    ):
         connection.execute("DROP TABLE IF EXISTS activity_entries_fts")
         for trigger in (
             "activity_entries_ai",
@@ -3267,7 +3822,6 @@ def _run_data_migrations(connection: sqlite3.Connection) -> None:
     # ── End Intel Tables ──────────────────────────────────────
 
     _migrate_legacy_finding_slug_references(connection)
-
 
 
 def _create_assessment_work_items_table(connection: sqlite3.Connection) -> None:
@@ -3411,8 +3965,24 @@ def init_db() -> None:
 
 
 _READINESS_SUBSYSTEM_TABLES: tuple[tuple[str, frozenset[str]], ...] = (
-    ("assessment_schema", frozenset({"engagements", "assessment_dispatches", "assessment_findings"})),
-    ("code_analysis_schema", frozenset({"code_repos", "code_files", "code_analysis_queue"})),
+    (
+        "assessment_schema",
+        frozenset({"engagements", "assessment_dispatches", "assessment_findings"}),
+    ),
+    (
+        "code_analysis_schema",
+        frozenset(
+            {
+                "code_repos",
+                "code_files",
+                "code_analysis_queue",
+                "code_variant_check_receipts",
+                "code_variant_dispatch_scopes",
+                "code_fuzz_decisions",
+                "code_fuzz_campaign_receipts",
+            }
+        ),
+    ),
 )
 
 
@@ -3426,7 +3996,9 @@ def database_readiness_flags(connection: sqlite3.Connection) -> dict[str, bool]:
     """
     names = {
         str(row[0])
-        for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
     }
     flags: dict[str, bool] = {}
     for prefix, required in _READINESS_SUBSYSTEM_TABLES:
@@ -3579,7 +4151,15 @@ def update_engagement_identity(
                 WHERE id = ?
                   AND (target != ? OR status != ? OR engagement_root != ?)
                 """,
-                (target, status, engagement_root, engagement_id, target, status, engagement_root),
+                (
+                    target,
+                    status,
+                    engagement_root,
+                    engagement_id,
+                    target,
+                    status,
+                    engagement_root,
+                ),
             )
         else:
             connection.execute(
@@ -3717,7 +4297,7 @@ def get_engagement_by_key(key: str) -> Engagement | None:
 # a lazy sweep runs at the start of every credential read. Age NEVER marks a
 # session `dead` (only a failed liveness probe does) — it soft-flags `stale`
 # (LLM must re-probe) then hard-deletes.
-_CRED_STALE_TTL_SECONDS = 8 * 3600           # 8h since last_seen -> stale
+_CRED_STALE_TTL_SECONDS = 8 * 3600  # 8h since last_seen -> stale
 _CRED_HARD_DELETE_TTL_SECONDS = 5 * 24 * 3600  # 5 days since last_seen -> delete
 
 
@@ -3776,7 +4356,11 @@ def _sweep_credential_age(
         age = (now_dt - seen).total_seconds()
         if age > _CRED_HARD_DELETE_TTL_SECONDS:
             to_delete.append((row["id"],))
-        elif age > _CRED_STALE_TTL_SECONDS and row["state"] != "dead" and row["state"] != "stale":
+        elif (
+            age > _CRED_STALE_TTL_SECONDS
+            and row["state"] != "dead"
+            and row["state"] != "stale"
+        ):
             to_stale.append((row["id"],))
     if to_delete:
         connection.executemany(
@@ -3826,6 +4410,7 @@ def _credential_row_to_material(row: sqlite3.Row) -> dict[str, Any]:
     UNDER the typed columns so any verbatim-preserved extras (custom fields)
     survive, while the typed columns remain authoritative.
     """
+
     def _loads(value: str, fallback: Any) -> Any:
         try:
             return json.loads(value)
@@ -3904,9 +4489,7 @@ def _material_matches_host(material: dict[str, Any], host: str) -> bool:
     # Flat-cookie fallback: only when NO per-host buckets exist (else bleed).
     if not usable_bucket_exists:
         cookies = material.get("cookies")
-        if isinstance(cookies, dict) and any(
-            str(v).strip() for v in cookies.values()
-        ):
+        if isinstance(cookies, dict) and any(str(v).strip() for v in cookies.values()):
             return True
     return False
 
@@ -4076,12 +4659,25 @@ def upsert_credential(
                 updated_at = excluded.updated_at
             """,
             (
-                engagement_id, identity_name, principal_id, mfa_factor,
-                mode, state, 1 if use_for_requests else 0,
-                auth_context, 1 if make_active else 0,
-                json.dumps(cookies), json.dumps(headers), json.dumps(tokens),
-                json.dumps(host_cookies), json.dumps(raw), notes, expires_at,
-                now, now, now,
+                engagement_id,
+                identity_name,
+                principal_id,
+                mfa_factor,
+                mode,
+                state,
+                1 if use_for_requests else 0,
+                auth_context,
+                1 if make_active else 0,
+                json.dumps(cookies),
+                json.dumps(headers),
+                json.dumps(tokens),
+                json.dumps(host_cookies),
+                json.dumps(raw),
+                notes,
+                expires_at,
+                now,
+                now,
+                now,
                 1 if make_active else 0,
             ),
         )
@@ -4141,12 +4737,23 @@ def record_credential_liveness(
             "verdict=excluded.verdict, observed_at=excluded.observed_at, "
             "expires_at=excluded.expires_at, source=excluded.source, reason=excluded.reason "
             "WHERE excluded.observed_at >= engagement_credential_liveness.observed_at",
-            (engagement_id, identity_name, scope_key.strip(), verdict, observed_at, expires_at, source, reason),
+            (
+                engagement_id,
+                identity_name,
+                scope_key.strip(),
+                verdict,
+                observed_at,
+                expires_at,
+                source,
+                reason,
+            ),
         )
     return get_credential(engagement_id, identity_name)
 
 
-def list_credential_liveness(engagement_id: int, identity_name: str) -> list[dict[str, Any]]:
+def list_credential_liveness(
+    engagement_id: int, identity_name: str
+) -> list[dict[str, Any]]:
     with get_connection() as connection:
         rows = connection.execute(
             "SELECT scope_key, verdict, observed_at, expires_at, source, reason "
@@ -4159,7 +4766,9 @@ def list_credential_liveness(engagement_id: int, identity_name: str) -> list[dic
     for row in rows:
         item = dict(row)
         try:
-            expiry = datetime.fromisoformat(str(row["expires_at"]).replace("Z", "+00:00"))
+            expiry = datetime.fromisoformat(
+                str(row["expires_at"]).replace("Z", "+00:00")
+            )
         except ValueError:
             expiry = now
         item["fresh"] = expiry > now
@@ -4185,9 +4794,7 @@ def resolve_credential_alias(
         ).fetchone()
     # An alias resolve is a resolve-for-replay, so it counts as a USE.
     return (
-        get_credential(engagement_id, row["identity_name"], touch=True)
-        if row
-        else None
+        get_credential(engagement_id, row["identity_name"], touch=True) if row else None
     )
 
 
@@ -4420,11 +5027,21 @@ def upsert_engagement_session(
                 merged_at = excluded.merged_at,
                 updated_at = CURRENT_TIMESTAMP
             """,
-            (engagement_id, session_id, session_path, status, merge_state, assigned_targets_json, merged_at),
+            (
+                engagement_id,
+                session_id,
+                session_path,
+                status,
+                merge_state,
+                assigned_targets_json,
+                merged_at,
+            ),
         )
 
 
-def list_engagement_sessions_for_engagement(engagement_id: int) -> list[EngagementSession]:
+def list_engagement_sessions_for_engagement(
+    engagement_id: int,
+) -> list[EngagementSession]:
     with get_connection() as connection:
         rows = connection.execute(
             """

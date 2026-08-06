@@ -41,6 +41,17 @@ _ACTION_HELP: dict[str, str] = {
     ),
 }
 
+_CODE_SOURCE_IDENTITY_ROLES = frozenset(
+    {
+        "code-architect",
+        "code-fuzz-engineer",
+        "code-variant-hunter",
+        "code-vuln-hunter",
+        "code-vuln-verifier",
+    }
+)
+_IMMUTABLE_DISPATCH_FINDING_SCOPE_ROLES = frozenset({"code-variant-hunter"})
+
 
 def maybe_print_action_help(tokens: list[str]) -> None:
     if len(tokens) >= 2 and any(token in {"-h", "--help"} for token in tokens[1:]):
@@ -82,6 +93,16 @@ def register(subparsers) -> None:
         type=int,
         default=None,
         help="(start) Concrete application-unit id for depth attribution.",
+    )
+    p.add_argument(
+        "--code-repo-id",
+        dest="code_repo_id",
+        type=int,
+        default=None,
+        help=(
+            "(start) Backend repository id used to render Code Source Identity. "
+            "Required for code roles when more than one active repository exists."
+        ),
     )
     p.add_argument("--model", dest="dispatch_model", default=None)
     p.add_argument("--reasoning", dest="reasoning", default=None,
@@ -380,7 +401,10 @@ def _close_one(args, agent_id: str) -> None:
             "status": target_status,
             "completed_at": getattr(args, "completed_at", None) or _utcnow_iso(),
         }
-        if handoff.get("finding_slugs"):
+        if (
+            handoff.get("finding_slugs")
+            and dispatch_row.get("agent_role") not in _IMMUTABLE_DISPATCH_FINDING_SCOPE_ROLES
+        ):
             patch["finding_slugs"] = handoff.get("finding_slugs")
         updated = client.update_dispatch(agent_id, patch)
         decision = client.record_decision(
@@ -562,7 +586,10 @@ def _close_via_client(client, agent_id: str, *, reason: str) -> dict:
     if target_status not in {"completed", "blocked", "failed", "aborted"}:
         raise _ReconcileSkipped(f"invalid closed status {target_status}")
     patch: dict = {"status": target_status, "completed_at": _utcnow_iso()}
-    if handoff.get("finding_slugs"):
+    if (
+        handoff.get("finding_slugs")
+        and dispatch_row.get("agent_role") not in _IMMUTABLE_DISPATCH_FINDING_SCOPE_ROLES
+    ):
         patch["finding_slugs"] = handoff.get("finding_slugs")
     updated = client.update_dispatch(agent_id, patch)
     decision = client.record_decision(
@@ -588,6 +615,11 @@ def _start(args) -> None:
     payload = dispatch._build_register_payload(args)  # noqa: SLF001
     client, cfg = dispatch._client_for(args)  # noqa: SLF001
     try:
+        source_identity = _code_source_identity_lines(
+            client,
+            agent_role=str(payload.get("agent_role") or ""),
+            requested_repo_id=getattr(args, "code_repo_id", None),
+        )
         if getattr(args, "check_overlap", False) and not getattr(args, "allow_duplicate", False):
             dispatch._warn_on_overlapping_dispatch(client, payload)  # noqa: SLF001
         row = client.record_dispatch(payload)
@@ -599,20 +631,131 @@ def _start(args) -> None:
         "agent_id": row.get("agent_id"),
         "status": row.get("status"),
     }, ensure_ascii=False))
+    identity_lines = [
+        "## Runtime Identity",
+        f"agent_id: {row.get('agent_id')}",
+        f"agent_role: {row.get('agent_role')}",
+        "authorized_phase: <set-by-operator>",
+    ]
+    if source_identity:
+        identity_lines.extend(["", *source_identity])
+    blocks = (
+        "Runtime Identity and Code Source Identity blocks"
+        if source_identity
+        else "Runtime Identity block"
+    )
     print(
         "\n".join(
             [
-                "## Runtime Identity",
-                f"agent_id: {row.get('agent_id')}",
-                f"agent_role: {row.get('agent_role')}",
-                "authorized_phase: <set-by-operator>",
+                *identity_lines,
                 "",
                 "## Next action",
                 "This command records the dispatch only; it does not spawn or launch the specialist.",
-                "Launch the specialist in your client and pass it the Runtime Identity block above.",
+                f"Launch the specialist in your client and pass it the {blocks} above.",
             ]
         )
     )
+
+
+def _code_source_identity_lines(
+    client,
+    *,
+    agent_role: str,
+    requested_repo_id: int | None,
+) -> list[str]:
+    if agent_role not in _CODE_SOURCE_IDENTITY_ROLES and requested_repo_id is None:
+        return []
+
+    repos = client.get("code/repos")
+    if not isinstance(repos, list):
+        print("agent start: code repository listing returned an invalid payload", file=sys.stderr)
+        raise SystemExit(1)
+    active_repos = [
+        repo
+        for repo in repos
+        if isinstance(repo, dict) and int(repo.get("active_generation") or 0) > 0
+    ]
+    if requested_repo_id is not None:
+        active_repos = [
+            repo for repo in active_repos if int(repo.get("id") or 0) == requested_repo_id
+        ]
+        if not active_repos:
+            print(
+                f"agent start: --code-repo-id {requested_repo_id} does not identify an active repository",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+    elif len(active_repos) > 1:
+        choices = ", ".join(
+            f"{repo.get('id')}:{repo.get('repo_key')}" for repo in active_repos
+        )
+        print(
+            "agent start: multiple active code repositories exist; pass "
+            f"--code-repo-id to select exactly one ({choices})",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    elif not active_repos:
+        print(
+            "agent start: code role requires one active indexed repository",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    repo = active_repos[0]
+    repo_id = int(repo.get("id") or 0)
+    generation = int(repo.get("active_generation") or 0)
+    digest = str(repo.get("source_manifest_digest") or "")
+    required = {
+        "repo_id": repo_id,
+        "repo_key": str(repo.get("repo_key") or ""),
+        "repo_generation": generation,
+        "source_manifest_digest": digest,
+        "snapshot_path": str(repo.get("repo_path") or ""),
+        "structural_index_schema": str(repo.get("structural_index_schema") or ""),
+        "structural_index_manifest_path": str(
+            repo.get("structural_index_manifest_path") or ""
+        ),
+    }
+    missing = [key for key, value in required.items() if not value]
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        missing.append("source_manifest_digest")
+    if missing:
+        print(
+            "agent start: active code repository has incomplete source identity: "
+            + ", ".join(sorted(set(missing))),
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    ctags_path = "unavailable"
+    lsp_config = repo.get("lsp_config")
+    ctags = lsp_config.get("ctags") if isinstance(lsp_config, dict) else None
+    if isinstance(ctags, dict):
+        try:
+            ctags_generation = int(ctags.get("repo_generation") or 0)
+        except (TypeError, ValueError):
+            ctags_generation = 0
+        if (
+            ctags.get("available") is True
+            and ctags_generation == generation
+            and str(ctags.get("source_manifest_digest") or "") == digest
+            and str(ctags.get("tags_path") or "")
+        ):
+            ctags_path = str(ctags["tags_path"])
+
+    return [
+        "## Code Source Identity",
+        f"repo_id: {repo_id}",
+        f"repo_key: {required['repo_key']}",
+        f"repo_generation: {generation}",
+        f"source_manifest_digest: {digest}",
+        f"snapshot_path: {required['snapshot_path']}",
+        f"structural_index_schema: {required['structural_index_schema']}",
+        "structural_index_manifest_path: "
+        f"{required['structural_index_manifest_path']}",
+        f"ctags_path: {ctags_path}",
+    ]
 
 
 def _start_swarm(args) -> None:
@@ -691,6 +834,11 @@ def _start_swarm(args) -> None:
     client, cfg = dispatch._client_for(args)  # noqa: SLF001
     rows_emitted: list[dict[str, str | int | None]] = []
     try:
+        source_identity = _code_source_identity_lines(
+            client,
+            agent_role=str(role),
+            requested_repo_id=getattr(args, "code_repo_id", None),
+        )
         base_uuid_short = uuid.uuid4().hex[:6]
         role_slug = role.replace("_", "-").replace(" ", "-")
         for worker_idx, batch in enumerate(batches, start=1):
@@ -738,11 +886,19 @@ def _start_swarm(args) -> None:
     print("|---|---|---|---|")
     for r in rows_emitted:
         print(f"| {r['worker']} | {r['agent_id']} | {r['items']} | {r['status']} |")
+    if source_identity:
+        print("")
+        print("\n".join(source_identity))
     print("")
+    identity_instruction = (
+        "passing the row's agent_id in Runtime Identity plus the printed Code Source Identity block"
+        if source_identity
+        else "passing the row's agent_id in the Runtime Identity block"
+    )
     print(
         "Next: fire one specialist per row using your runtime's wrapper "
-        "(@<role> in Claude Code, or spawn_agent in Codex), passing the row's "
-        "agent_id in the Runtime Identity block. The specialist reads its "
+        "(@<role> in Claude Code, or spawn_agent in Codex), "
+        f"{identity_instruction}. The specialist reads its "
         "batch range from its own dispatch row via `vigil assess agent get <agent_id>`."
     )
 

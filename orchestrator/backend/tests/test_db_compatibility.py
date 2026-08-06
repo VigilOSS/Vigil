@@ -165,3 +165,122 @@ def test_check_accepts_future_shared_table_without_engagement_id(isolate_setting
         """,
     )
     db_module._check_database_compatibility(db_path)  # no raise
+
+
+_LEGACY_CODE_ANALYSIS_QUEUE_SQL = """
+CREATE TABLE code_analysis_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    engagement_id INTEGER NOT NULL,
+    file_id INTEGER NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 50,
+    status TEXT NOT NULL DEFAULT 'pending',
+    assigned_agent TEXT NOT NULL DEFAULT '',
+    lease_token TEXT NOT NULL DEFAULT '',
+    repo_generation INTEGER NOT NULL DEFAULT 0,
+    last_heartbeat_at TEXT,
+    disposition TEXT NOT NULL DEFAULT '',
+    analysis_notes TEXT NOT NULL DEFAULT '',
+    skip_reason TEXT NOT NULL DEFAULT '',
+    expansion_request_json TEXT NOT NULL DEFAULT '{}',
+    batch_theme TEXT NOT NULL DEFAULT '',
+    slot_types_json TEXT NOT NULL DEFAULT '[]',
+    guidance_hypotheses_json TEXT NOT NULL DEFAULT '[]',
+    cwe_coverage_json TEXT NOT NULL DEFAULT '[]',
+    cross_file_triggers_json TEXT NOT NULL DEFAULT '[]',
+    consumed_at TEXT,
+    completed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+    FOREIGN KEY(file_id) REFERENCES code_files(id) ON DELETE CASCADE
+);
+"""
+
+
+def test_legacy_metadata_theme_is_not_elevated_to_service_owned_mode(
+    isolate_settings,
+):
+    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+    _write_db_with_tables(
+        db_path,
+        _LEGACY_CODE_ANALYSIS_QUEUE_SQL
+        + """
+        INSERT INTO code_analysis_queue (
+            engagement_id, file_id, priority, status, batch_theme
+        ) VALUES (1, 1, 91, 'pending', 'metadata-refresh-review');
+        """,
+    )
+
+    db_module.init_db()
+
+    with sqlite3.connect(str(db_path)) as connection:
+        row = connection.execute(
+            "SELECT queue_mode, priority FROM code_analysis_queue WHERE id = 1"
+        ).fetchone()
+    assert row == ("initial", 91)
+
+
+@pytest.mark.parametrize("schema_kind", ["fresh", "migrated"])
+def test_reanalysis_history_preserves_engagement_delete_parity(
+    isolate_settings, schema_kind
+):
+    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+    if schema_kind == "migrated":
+        _write_db_with_tables(db_path, _LEGACY_CODE_ANALYSIS_QUEUE_SQL)
+    db_module.init_db()
+
+    with sqlite3.connect(str(db_path)) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        engagement_id = connection.execute(
+            """
+            INSERT INTO engagements (key, target, status, engagement_root)
+            VALUES ('queue-delete', 'example.com', 'in_progress', '/tmp/queue-delete')
+            """
+        ).lastrowid
+        repo_id = connection.execute(
+            """
+            INSERT INTO code_repos (
+                engagement_id, repo_key, name, repo_path, active_generation
+            ) VALUES (?, 'repo', 'repo', '/tmp/repo', 1)
+            """,
+            (engagement_id,),
+        ).lastrowid
+        file_id = connection.execute(
+            """
+            INSERT INTO code_files (engagement_id, repo_id, file_path)
+            VALUES (?, ?, 'src/parser.py')
+            """,
+            (engagement_id, repo_id),
+        ).lastrowid
+        predecessor_id = connection.execute(
+            """
+            INSERT INTO code_analysis_queue (
+                engagement_id, file_id, priority, status, repo_generation
+            ) VALUES (?, ?, 80, 'done', 1)
+            """,
+            (engagement_id, file_id),
+        ).lastrowid
+        connection.execute(
+            """
+            INSERT INTO code_analysis_queue (
+                engagement_id, file_id, priority, status, repo_generation,
+                queue_mode, reanalysis_reason, reanalysis_of_queue_item_id
+            ) VALUES (?, ?, 80, 'pending', 1, 'reanalysis', 'independent reread', ?)
+            """,
+            (engagement_id, file_id, predecessor_id),
+        )
+        connection.commit()
+
+        connection.execute("DELETE FROM engagements WHERE id = ?", (engagement_id,))
+        connection.commit()
+        assert connection.execute(
+            "SELECT COUNT(*) FROM code_analysis_queue"
+        ).fetchone()[0] == 0
+        self_references = [
+            row
+            for row in connection.execute(
+                "PRAGMA foreign_key_list(code_analysis_queue)"
+            ).fetchall()
+            if row[3] == "reanalysis_of_queue_item_id"
+        ]
+        assert self_references == []

@@ -7,12 +7,19 @@ import sys
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 
-
 EFFORT_THRESHOLDS = {
     "critical": 70,
     "high": 50,
     "medium": 30,
 }
+
+READINESS_TARGETS = (
+    "classify-map",
+    "hunt",
+    "verify-variant",
+    "fuzz",
+    "complete",
+)
 
 
 def _coerce_effort(value) -> float:
@@ -39,7 +46,19 @@ def register(subparsers) -> None:
     p.add_argument(
         "--require-gate-pass",
         action="store_true",
-        help="Exit non-zero unless the coverage gate explicitly passes",
+        help=(
+            "Exit non-zero when self-reported CWE effort or coverage-integrity "
+            "warnings remain; structural transition readiness is separate"
+        ),
+    )
+    p.add_argument(
+        "--require-transition-ready",
+        choices=READINESS_TARGETS,
+        metavar="TARGET_PHASE",
+        help=(
+            "Fetch backend readiness for the target code phase and exit non-zero "
+            "when structural or lifecycle blockers remain"
+        ),
     )
     p.add_argument(
         "--cwe-matrix",
@@ -51,9 +70,29 @@ def register(subparsers) -> None:
 
 def run(args) -> None:
     cfg = load_config(args.engagement_dir)
+    readiness_target = getattr(args, 'require_transition_ready', None)
 
     if getattr(args, 'cwe_matrix', False):
-        _run_cwe_matrix(cfg, args)
+        quality_passed = _run_cwe_matrix(cfg, args)
+        failed = bool(getattr(args, 'require_gate_pass', False) and not quality_passed)
+        if readiness_target:
+            with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+                readiness = client.get(f'code/readiness?target_phase={readiness_target}')
+            if not isinstance(readiness, dict):
+                print(
+                    f"Transition Readiness ({readiness_target}): UNKNOWN\n"
+                    "  - [invalid_code_readiness] Backend returned a non-object response"
+                )
+                failed = True
+            else:
+                _print_transition_readiness(readiness_target, readiness)
+                if (
+                    readiness.get('target_phase') != readiness_target
+                    or readiness.get('transition_ready') is not True
+                ):
+                    failed = True
+        if failed:
+            sys.exit(1)
         return
 
     endpoint = 'code/coverage'
@@ -62,24 +101,78 @@ def run(args) -> None:
 
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.get(endpoint)
+        readiness = (
+            client.get(f'code/readiness?target_phase={readiness_target}')
+            if readiness_target
+            else None
+        )
 
     if not isinstance(result, dict):
         print(json.dumps(result, indent=2, ensure_ascii=False))
-        sys.exit(0)
+        if getattr(args, 'require_gate_pass', False) or readiness_target:
+            sys.exit(1)
+        return
 
     _print_coverage(result)
     _print_vuln_class_summary(result)
 
-    if args.require_gate_pass:
-        gate = result.get('gate', {})
-        if isinstance(gate, dict):
-            passed = gate.get('passed')
-            if passed is not True:
-                sys.exit(1)
+    failed = False
+    if getattr(args, 'require_gate_pass', False):
+        quality_passed, _ = _review_quality(result)
+        if not quality_passed:
+            failed = True
+
+    if readiness_target:
+        if not isinstance(readiness, dict):
+            print(
+                f"Transition Readiness ({readiness_target}): UNKNOWN\n"
+                "  - [invalid_code_readiness] Backend returned a non-object response"
+            )
+            failed = True
+        else:
+            _print_transition_readiness(readiness_target, readiness)
+            if (
+                readiness.get('target_phase') != readiness_target
+                or readiness.get('transition_ready') is not True
+            ):
+                failed = True
+
+    if failed:
+        sys.exit(1)
 
 
-def _run_cwe_matrix(cfg, args) -> None:
-    """Fetch and display the per-file CWE effort coverage matrix."""
+def _print_transition_readiness(target_phase: str, readiness: dict) -> None:
+    bound_target = readiness.get('target_phase')
+    ready = bound_target == target_phase and readiness.get('transition_ready') is True
+    print(f"Transition Readiness ({target_phase}): {'READY' if ready else 'BLOCKED'}")
+
+    blockers = readiness.get('blockers', [])
+    if isinstance(blockers, list):
+        for blocker in blockers:
+            if not isinstance(blocker, dict):
+                continue
+            code = blocker.get('code', 'unknown')
+            message = blocker.get('message', 'Unnamed readiness blocker')
+            integrity = " [integrity; non-overrideable]" if blocker.get('overrideable') is False else ""
+            print(f"  - [{code}] {message}{integrity}")
+
+    quality = readiness.get('quality_gate')
+    if isinstance(quality, dict):
+        warnings = quality.get('warnings', [])
+        quality_passed = quality.get('passed') is True
+        if not quality_passed or warnings:
+            print(
+                "Readiness Advisories: "
+                f"{'PASS' if quality_passed else 'NEEDS ATTENTION'}"
+            )
+            if isinstance(warnings, list):
+                for warning in warnings:
+                    print(f"  - {warning}")
+    print()
+
+
+def _run_cwe_matrix(cfg, args) -> bool:
+    """Fetch and display the per-file CWE effort matrix; return its quality verdict."""
     endpoint = 'code/coverage?detail=cwe'
     if args.repo_id:
         endpoint = f'code/coverage?detail=cwe&repo_id={args.repo_id}'
@@ -89,31 +182,20 @@ def _run_cwe_matrix(cfg, args) -> None:
 
     if not isinstance(result, dict):
         print(json.dumps(result, indent=2, ensure_ascii=False))
-        sys.exit(0)
+        return False
 
     files = result.get('files', [])
     if not files:
         print("NOTE: No CWE coverage data available from backend.\n")
         _print_coverage(result)
-        if args.require_gate_pass:
-            gate = result.get('gate', {})
-            if isinstance(gate, dict) and gate.get('passed') is not True:
-                sys.exit(1)
-        return
+        quality_passed, _ = _review_quality(result)
+        return quality_passed
 
     _print_cwe_matrix(files)
+    _print_review_quality(result)
 
-    gate_failed = False
-    if args.require_gate_pass:
-        gate = result.get('gate', {})
-        if isinstance(gate, dict):
-            gate_failed = gate.get('passed') is not True
-
-    # Exit non-zero if any critical file has effort below threshold, or if the
-    # caller requires the backend gate to pass for non-effort reasons.
-    has_gap = _check_effort_gaps(files)
-    if has_gap or gate_failed:
-        sys.exit(1)
+    quality_passed, _ = _review_quality(result)
+    return quality_passed
 
 
 def _print_cwe_matrix(files: list[dict]) -> None:
@@ -217,8 +299,7 @@ def _print_structural_verification(files: list[dict]) -> None:
                 fa = int(fa)
             except (TypeError, ValueError):
                 fa = 0
-            if fa > funcs_analyzed:
-                funcs_analyzed = fa
+            funcs_analyzed = max(funcs_analyzed, fa)
 
         file_path = f.get('file_path', '?')
         display = file_path.rsplit('/', 1)[-1] if '/' in file_path else file_path
@@ -241,34 +322,35 @@ def _print_structural_verification(files: list[dict]) -> None:
         print("All indexed files report function-count coverage matching structural index.")
 
 
-def _check_effort_gaps(files: list[dict]) -> bool:
-    """Return True if any classified file has effort below its tier threshold (critical/high/medium)."""
-    for f in files:
-        classification = f.get('classification', '')
-        threshold = EFFORT_THRESHOLDS.get(classification, 0)
-        if threshold == 0:
-            continue
+def _review_quality(data: dict) -> tuple[bool, list[str]]:
+    """Derive the advisory quality verdict from its two canonical inputs only."""
+    gate = data.get('gate')
+    if not isinstance(gate, dict):
+        return False, ["Review-quality metadata is unavailable"]
 
-        applicable = f.get('applicable_families', [])
-        if isinstance(applicable, list):
-            applicable = set(applicable)
+    effort_warnings = gate.get('effort_warnings')
+    integrity = gate.get('coverage_integrity')
+    if not isinstance(effort_warnings, list) or not isinstance(integrity, list):
+        return False, ["Review-quality metadata is incomplete"]
 
-        effort_map: dict[str, float] = {}
-        not_applicable: set[str] = set()
-        for cwe in f.get('cwe_coverage', []):
-            fam = cwe.get('family', '')
-            if _is_not_applicable_cwe_entry(cwe):
-                not_applicable.add(fam)
-                continue
-            effort_map[fam] = _coerce_effort(cwe.get('effort', 0))
+    warnings = [str(warning) for warning in effort_warnings]
+    for item in integrity:
+        if not isinstance(item, dict):
+            return False, ["Review-quality metadata is invalid"]
+        item_warnings = item.get('warnings', [])
+        if not isinstance(item_warnings, list):
+            return False, ["Review-quality metadata is invalid"]
+        for warning in item_warnings:
+            warnings.append(f"{item.get('file_path', 'unknown file')}: {warning}")
+    warnings = list(dict.fromkeys(warnings))
+    return not warnings, warnings
 
-        for fam in applicable:
-            if fam in not_applicable:
-                continue
-            effort = effort_map.get(fam, 0)
-            if effort < threshold:
-                return True
-    return False
+
+def _print_review_quality(data: dict) -> None:
+    passed, warnings = _review_quality(data)
+    print(f"\nReview Quality: {'PASS' if passed else 'NEEDS ATTENTION'}")
+    for warning in warnings:
+        print(f"  - {warning}")
 
 
 def _print_vuln_class_summary(data: dict) -> None:
@@ -402,18 +484,5 @@ def _print_coverage(data: dict) -> None:
             f"{accepted} accepted gap"
         )
 
-    # Coverage Gate
-    gate = data.get('gate', {})
-    if isinstance(gate, dict):
-        passed = gate.get('passed')
-        if passed is True:
-            print("\nCoverage Gate: PASS")
-        elif passed is False:
-            print("\nCoverage Gate: FAIL")
-            reasons = gate.get('reasons', [])
-            if reasons:
-                for reason in reasons:
-                    print(f"  - {reason}")
-        else:
-            print("\nCoverage Gate: UNKNOWN")
+    _print_review_quality(data)
     print()
