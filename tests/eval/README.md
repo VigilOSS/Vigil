@@ -86,3 +86,4 @@ python agent/scripts/assess/commands/eval_capture.py --engagement-dir <engagemen
 `--check` exits non-zero on a regression (fewer findings, a dropped CWE, a
 shrunken severity bucket, or a newly-empty `details.impact`) and writes nothing.
 Strictly-more coverage is not a regression.
+
