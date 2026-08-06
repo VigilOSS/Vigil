@@ -1,4 +1,4 @@
-"""vigil assess kali sweep-orphans — reconcile stuck `running` command-run rows.
+"""vigil assess kali sweep-orphans — reconcile incomplete command-run state.
 
 When a `kali_exec` finalize PATCH fails (network blip, backend restart, host
 crash mid-run), the pre-exec audit row stays at ``status=running`` forever.
@@ -6,6 +6,11 @@ This command sweeps rows older than ``--max-age-seconds`` and either leaves
 them alone (the in-container PID is still alive), finalizes them to
 ``status=lost`` (the PID is gone or the wrapper pid file is missing), or skips
 them when Docker probing itself fails and liveness is unknown.
+
+The same sweep is the durable owner for a rarer crash window: a host-exec
+terminal row whose transaction committed with output cleanup or integrity
+still ``pending`` before the request worker died.  Replaying the terminal
+PATCH asks the backend to adopt and verify that pending work idempotently.
 
 The wrapper shell in ``kali.py:_build_docker_exec`` writes the in-container
 PID to ``/tmp/vigil-pid-<run_uuid>.pid``. The canonical source of ``run_uuid``
@@ -36,6 +41,10 @@ from assess.lib.host_processes import reap_registered_processes
 from assess.lib.rate_leases import release_target_rate_lease
 
 _DEFAULT_MAX_AGE_SECONDS = 3600
+_ATTENTION_ID_LIMIT = 20
+_OUTPUT_ATTENTION_ACTION = (
+    "vigil assess command-run list --output-attention --json --limit 1000"
+)
 
 # What `run()` reconciles. ``command-runs`` (default) preserves the original
 # behavior byte-for-byte; ``jobs`` reconciles stuck assessment_jobs rows (the
@@ -48,6 +57,25 @@ _VALID_SCOPES = ("command-runs", "jobs", "host-processes", "all")
 # recorded, so finalizing it again would be a no-op at best and a destructive
 # overwrite at worst (e.g., flipping a recorded ``completed`` to ``lost``).
 _RUNNING_STATUSES = frozenset({"running", "queued"})
+_TERMINAL_COMMAND_STATUSES = frozenset(
+    {"completed", "failed", "timed_out", "killed", "lost"}
+)
+_RECOVERED_CLEANUP_STATUSES = frozenset({"not_required", "deferred", "warning"})
+_RECOVERED_INTEGRITY_STATUSES = frozenset(
+    {"not_applicable", "verified", "warning"}
+)
+_DEGRADED_RETENTION_STATUSES = frozenset(
+    {"integrity_failure", "suppression_deferred", "untrusted"}
+)
+_RECOVERED_RETENTION_STATUSES = frozenset(
+    {
+        "artifact",
+        "retained",
+        "empty",
+        "suppressed",
+        *_DEGRADED_RETENTION_STATUSES,
+    }
+)
 _JOB_RECONCILABLE_STATUSES = frozenset({"running", "queued", "stop_failed"})
 
 # stdout_path is recorded as ``<engagement-dir>/scans/kali/<run_uuid>.out``.
@@ -147,6 +175,63 @@ def _row_age_seconds(row: dict, now: _dt.datetime) -> float | None:
     return (now - started_at).total_seconds()
 
 
+def _pending_output_age_seconds(row: dict, now: _dt.datetime) -> float | None:
+    """Age pending work only from the backend-owned recovery observation clock."""
+    terminal_at = _parse_started_at(row.get("output_recovery_observed_at"))
+    return None if terminal_at is None else (now - terminal_at).total_seconds()
+
+
+def _pending_recovery_proof(
+    recovered: object,
+    *,
+    row_id: int,
+    terminal_status: str,
+) -> tuple[bool, bool, str]:
+    """Validate the backend's exact adoption proof for pending output work."""
+    if not isinstance(recovered, dict):
+        return False, False, "response was not an object"
+    recovered_id = recovered.get("id")
+    if type(recovered_id) is not int or recovered_id != row_id:
+        return False, False, "response did not identify the same numeric row"
+    recovered_status = str(recovered.get("status") or "").strip().lower()
+    if (
+        terminal_status not in _TERMINAL_COMMAND_STATUSES
+        or recovered_status != terminal_status
+    ):
+        return False, False, "response did not preserve the terminal status"
+    if recovered.get("recovered_pending_output") is not True:
+        return False, False, "response did not prove pending-output adoption"
+    cleanup_status = str(
+        recovered.get("output_cleanup_status") or ""
+    ).strip().lower()
+    integrity_status = str(
+        recovered.get("output_integrity_status") or ""
+    ).strip().lower()
+    if cleanup_status not in _RECOVERED_CLEANUP_STATUSES:
+        return False, False, "response carried an invalid cleanup outcome"
+    if integrity_status not in _RECOVERED_INTEGRITY_STATUSES:
+        return False, False, "response carried an invalid integrity outcome"
+    retention_status = str(
+        recovered.get("output_retention_status") or ""
+    ).strip().lower()
+    if retention_status not in _RECOVERED_RETENTION_STATUSES:
+        return False, False, "response carried an invalid or pending retention outcome"
+    degraded = (
+        cleanup_status in {"deferred", "warning"}
+        or integrity_status == "warning"
+        or retention_status in _DEGRADED_RETENTION_STATUSES
+    )
+    return True, degraded, ""
+
+
+def _remember_attention_id(summary: dict, field: str, row_id: int) -> None:
+    ids = summary[field]
+    if len(ids) < _ATTENTION_ID_LIMIT:
+        ids.append(int(row_id))
+    else:
+        summary[f"{field}_omitted"] += 1
+
+
 def _job_age_seconds(row: dict, now: _dt.datetime) -> float | None:
     """Age queued jobs from creation; running jobs from their actual start."""
     timestamp = row.get("started_at") or row.get("created_at")
@@ -227,21 +312,13 @@ def _pid_alive_in_container(container_name: str, pid: int) -> bool | None:
     return None
 
 
-def _list_running_rows(client: AssessmentClient) -> list[dict]:
-    """Page through ``GET command-runs?status=running`` and return every row.
-
-    The CLI sends ``status=running`` server-side as a forward-compatible hint —
-    the backend currently ignores it (``list_command_runs`` does not yet filter
-    on status), so we apply the same filter client-side as a fallback. Without
-    the client-side filter every terminal row is returned and the per-row
-    decision logic prints misleading ``would-finalize`` lines for rows it will
-    actually skip.
-    """
+def _list_command_run_rows(client: AssessmentClient) -> list[dict]:
+    """Page every row needed for running-orphan and pending-terminal recovery."""
     rows: list[dict] = []
     limit = 1000
     offset = 0
     while True:
-        params = [("status", "running"), ("limit", str(limit)), ("offset", str(offset))]
+        params = [("limit", str(limit)), ("offset", str(offset))]
         endpoint = "command-runs?" + urlencode(params, quote_via=quote)
         page = client.get(endpoint)
         if not isinstance(page, list):
@@ -271,18 +348,13 @@ def _sweep_command_runs(
     now_iso: str,
     max_age: int,
 ) -> dict:
-    """Reconcile stuck ``assessment_command_runs`` rows (the original behavior).
-
-    Extracted verbatim from the pre-scope ``run`` so the default code path —
-    output shape and per-row print lines included — is byte-for-byte unchanged.
-    """
+    """Reconcile stale in-flight rows and committed terminal pending output."""
     # ``skipped`` is a conflated union — split into two sub-counters so the
     # resume-brief WARN (resume_brief._orphan_attention) fires ONLY on the
-    # genuinely-bad bucket. Because the backend ignores ?status=running
-    # (_list_running_rows), this sweep pages ALL historical rows and skips every
-    # already-terminal one; that benign count can reach the thousands and used to
-    # drown the actionable signal, making the warning fire on every resume
-    # (I-05). ``skipped`` is kept as the grand total for backward compatibility.
+    # genuinely-bad bucket. This sweep intentionally pages all historical rows:
+    # terminal host rows can carry crash-recoverable pending output work. Benign
+    # terminal rows can reach the thousands and must not drown the actionable
+    # signal. ``skipped`` remains the grand total for compatibility.
     #   * skipped_already_terminal — BENIGN: the row's outcome is already
     #     recorded, so re-finalizing would be a no-op (or a destructive
     #     overwrite). Not worth surfacing.
@@ -295,25 +367,116 @@ def _sweep_command_runs(
         "skipped": 0,
         "skipped_already_terminal": 0,
         "skipped_unverifiable": 0,
+        "recovered_pending": 0,
+        "recovered_degraded": 0,
+        "recovered_degraded_ids": [],
+        "recovered_degraded_ids_omitted": 0,
+        "pending_recovery_failed": 0,
+        "pending_recovery_failed_ids": [],
+        "pending_recovery_failed_ids_omitted": 0,
+        "output_attention_action": "",
     }
-    rows = _list_running_rows(client)
+    rows = _list_command_run_rows(client)
 
     for row in rows:
         row_id = row.get("id")
         if row_id is None:
             continue
-        age_seconds = _row_age_seconds(row, now)
+        existing_status = str(row.get("status") or "").strip().lower()
+        pending_output = existing_status not in _RUNNING_STATUSES and any(
+            str(row.get(field) or "").strip().lower() == "pending"
+            for field in ("output_cleanup_status", "output_integrity_status")
+        )
+        age_seconds = (
+            _pending_output_age_seconds(row, now)
+            if pending_output
+            else _row_age_seconds(row, now)
+        )
+        if pending_output and age_seconds is None:
+            summary["checked"] += 1
+            summary["skipped"] += 1
+            summary["skipped_unverifiable"] += 1
+            summary["pending_recovery_failed"] += 1
+            _remember_attention_id(
+                summary, "pending_recovery_failed_ids", int(row_id)
+            )
+            summary["output_attention_action"] = _OUTPUT_ATTENTION_ACTION
+            print(
+                "warning: pending-output recovery baseline is missing or "
+                f"unparseable for id={row_id}; refusing client-time fallback",
+                file=sys.stderr,
+            )
+            continue
         if age_seconds is None or age_seconds < max_age:
             continue
         summary["checked"] += 1
 
-        # Client-side status filter as a fallback for the unfiltered GET
-        # response (see ``_list_running_rows``). Rows already in a terminal
-        # state are not candidates for finalize; print a ``would-skip``
-        # line so the dry-run output never claims it would finalize a row
-        # whose outcome is already recorded.
-        existing_status = str(row.get("status") or "").strip().lower()
+        # Terminal rows are immutable except for backend-owned adoption of a
+        # committed pending cleanup/integrity operation. All other terminal
+        # rows remain benign skips.
         if existing_status not in _RUNNING_STATUSES:
+            if pending_output:
+                if args.dry_run:
+                    summary["recovered_pending"] += 1
+                    print(
+                        f"would-recover id={row_id} status={existing_status} "
+                        "reason=terminal-output-pending"
+                    )
+                    continue
+                try:
+                    recovered = client.patch(
+                        f"command-runs/{int(row_id)}",
+                        {
+                            "status": existing_status,
+                            "ended_at": row.get("completed_at") or now_iso,
+                        },
+                        accept_409=True,
+                    )
+                except (AssessError, json.JSONDecodeError) as exc:
+                    summary["skipped"] += 1
+                    summary["skipped_unverifiable"] += 1
+                    summary["pending_recovery_failed"] += 1
+                    _remember_attention_id(
+                        summary, "pending_recovery_failed_ids", int(row_id)
+                    )
+                    summary["output_attention_action"] = _OUTPUT_ATTENTION_ACTION
+                    print(
+                        f"warning: pending-output recovery PATCH failed for "
+                        f"id={row_id}: {exc}",
+                        file=sys.stderr,
+                    )
+                    continue
+                proved, degraded, proof_error = _pending_recovery_proof(
+                    recovered,
+                    row_id=int(row_id),
+                    terminal_status=existing_status,
+                )
+                if not proved:
+                    summary["skipped"] += 1
+                    summary["skipped_unverifiable"] += 1
+                    summary["pending_recovery_failed"] += 1
+                    _remember_attention_id(
+                        summary, "pending_recovery_failed_ids", int(row_id)
+                    )
+                    summary["output_attention_action"] = _OUTPUT_ATTENTION_ACTION
+                    print(
+                        f"warning: pending-output recovery was not proven for "
+                        f"id={row_id}: {proof_error}",
+                        file=sys.stderr,
+                    )
+                    continue
+                summary["recovered_pending"] += 1
+                if degraded:
+                    summary["recovered_degraded"] += 1
+                    _remember_attention_id(
+                        summary, "recovered_degraded_ids", int(row_id)
+                    )
+                    summary["output_attention_action"] = _OUTPUT_ATTENTION_ACTION
+                print(
+                    f"recovered-pending id={row_id} status={existing_status} "
+                    f"degraded={'true' if degraded else 'false'}"
+                )
+                continue
             summary["skipped"] += 1
             summary["skipped_already_terminal"] += 1
             if args.dry_run:

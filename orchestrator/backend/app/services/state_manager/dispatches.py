@@ -13,6 +13,12 @@ from ._common import (
     _require_canonical_finding_slugs,
 )
 from .findings import _ensure_finding_slugs_exist
+from ..variant_scopes import (
+    MAX_VARIANT_PARENT_FINDINGS,
+    VARIANT_DISPATCH_ROLE,
+    canonical_variant_parent_slugs,
+    variant_parent_finding_set_digest,
+)
 
 
 
@@ -73,6 +79,25 @@ def record_dispatch(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="agent_id is required")
     dispatched_value = dispatched_at or _common._utcnow_iso_dispatch()
     finding_slugs = _require_canonical_finding_slugs(finding_slugs)
+    variant_parent_slugs: list[str] | None = None
+    if agent_role == VARIANT_DISPATCH_ROLE:
+        if len(finding_slugs or []) > MAX_VARIANT_PARENT_FINDINGS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "code-variant-hunter finding_slugs exceeds the immutable scope cap "
+                    f"of {MAX_VARIANT_PARENT_FINDINGS}"
+                ),
+            )
+        variant_parent_slugs = canonical_variant_parent_slugs(finding_slugs or [])
+        if list(finding_slugs or []) != variant_parent_slugs:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "code-variant-hunter finding_slugs must be sorted and unique "
+                    "because they define an immutable dispatch scope"
+                ),
+            )
     findings_json = json.dumps(list(finding_slugs)) if finding_slugs is not None else None
     skills_value = (skills or "").strip() or None
     tier_value = (tier or "").strip() or None
@@ -137,6 +162,21 @@ def record_dispatch(
                 identity_value,
             ),
         )
+        if variant_parent_slugs is not None:
+            connection.execute(
+                """
+                INSERT INTO code_variant_dispatch_scopes (
+                    dispatch_id, engagement_id, parent_finding_slugs_json,
+                    parent_finding_set_digest
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    int(cursor.lastrowid),
+                    engagement.id,
+                    json.dumps(variant_parent_slugs, separators=(",", ":")),
+                    variant_parent_finding_set_digest(variant_parent_slugs),
+                ),
+            )
         row = connection.execute(
             "SELECT * FROM assessment_dispatches WHERE id = ?",
             (cursor.lastrowid,),
@@ -162,6 +202,14 @@ def update_dispatch(
         ).fetchone()
         if existing is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="dispatch not found")
+        if finding_slugs is not None and str(existing["agent_role"]) == VARIANT_DISPATCH_ROLE:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "code-variant-hunter finding_slugs define the immutable parent-finding "
+                    "scope and cannot be updated; record produced findings on the handoff"
+                ),
+            )
         sets: list[str] = []
         values: list[Any] = []
         if status_value is not None:

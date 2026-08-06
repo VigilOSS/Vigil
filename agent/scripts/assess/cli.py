@@ -408,6 +408,8 @@ def main(argv: list[str] | None = None) -> None:
     if command_index is not None and command_index < len(argv):
         if argv[command_index] == "agent":
             agent.maybe_print_action_help(argv[command_index + 1 :])
+        elif argv[command_index] == "code-dispatch":
+            code_dispatch.maybe_print_action_help(argv[command_index + 1 :])
         elif argv[command_index] == "work-buffer":
             work_buffer.maybe_print_action_help(argv[command_index + 1 :])
     args = parser.parse_args(argv)

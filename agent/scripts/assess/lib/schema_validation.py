@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -194,6 +195,14 @@ def _validate_value(value: Any, schema: dict[str, Any], path: str, errors: list[
         if not isinstance(value, bool):
             errors.append(f"{path} must be a boolean")
             return
+
+    # String assertion keywords apply to string instances even when a
+    # subschema deliberately omits ``type`` (as conditional ``if`` branches
+    # commonly do). Non-string instances ignore ``pattern`` per JSON Schema.
+    if isinstance(value, str):
+        pattern = schema.get("pattern")
+        if isinstance(pattern, str) and re.search(pattern, value) is None:
+            errors.append(f"{path} must match pattern {pattern!r}")
 
     if (
         expected_type is None

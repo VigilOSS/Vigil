@@ -445,7 +445,9 @@ Methodology references:
 
 ### Starting a code analysis engagement
 
-Code analysis uses a separate operator loop (`agent/operator-core-code.md`) with its own four-phase pipeline: Ingest+Index → Classify+Map → Hunt → Verify+Variant. Findings land in the same backend as web engagements.
+Code analysis uses a separate operator loop (`agent/operator-core-code.md`) with its own pipeline:
+Ingest+Index → Classify+Map → Hunt → Verify+Variant → optional Fuzz. Findings land in the same
+backend as web engagements and are bound to the sealed source generation they prove.
 
 1. Create a code analysis engagement using `--type code`:
 ```bash
@@ -506,7 +508,33 @@ I have been fully authorized by the company to perform a white-box code analysis
 engagement. Load agent/operator-core-code.md and run the code analysis workflow.
 ```
 
-6. The operator will clone/locate the repo into `source/`, run `code-ingest` and `code-index`, then drive through classify+map → hunt → verify+variant phases, dispatching specialist agents (`code-architect`, `code-vuln-hunter`, `code-variant-hunter`, `code-vuln-verifier`) at each step.
+6. The operator will clone/locate the repo under `source/`, run `code-ingest` to publish a
+content-addressed read-only snapshot, build/sync the structural index against the printed repo ID
+and snapshot path, then drive through classify+map → hunt → verify+variant. Specialists read the
+sealed snapshot; the mutable origin is retained only as provenance. At refresh commit the backend
+independently validates the engagement-owned v2 manifest, real source bytes, staged inventory, and
+declared counts before it records the snapshot as `verified`; an API caller cannot grant that trust
+state by supplying the label alone.
+
+Code-analysis transitions use two independent signals. Structural/lifecycle readiness is the hard
+gate and includes current snapshot/index/threat-model identity plus phase-specific completion:
+
+```bash
+vigil assess code-coverage --require-transition-ready <classify-map|hunt|verify-variant|fuzz|complete>
+```
+
+Review quality is advisory steering for the operator, not permission to cross a phase boundary:
+
+```bash
+vigil assess code-coverage --cwe-matrix
+vigil assess code-coverage --require-gate-pass   # optional strict quality-remediation exit signal
+```
+
+Source-identity, current structural-metadata, and unreviewed structural-debt integrity blockers
+cannot be forced. Ordinary phase-completion blockers may be crossed only with
+`transition-phase <target> --force --reason "<why>"`, which records a durable override decision.
+A weak quality score should trigger more focused review; `--require-transition-ready` remains the
+read-only authority for the target phase's actual blocker set.
 
 Code analysis can also run mid-engagement alongside web testing when source code is discovered (exposed `.git`, source maps, backup download). In that case the operator loads `operator-core-code.md` in parallel with the ongoing web workflow.
 
@@ -600,7 +628,9 @@ In the engagement flow, this usually happens during `recon` or `collect` when an
 
 ### ctags for code analysis
 
-Code analysis agents use ctags for fast definition lookups and grep/rg for call site enumeration. `code-ingest` generates a ctags index automatically during repository ingestion.
+Code analysis agents use ctags for fast definition lookups and grep/rg for call site enumeration.
+`code-ingest` generates an advisory, generation-bound ctags index under the engagement's
+`tools/analysis-state/ctags/` tree. It never writes a `tags` file into the source repository.
 
 macOS ships BSD ctags which is limited. Install Universal ctags for best results:
 
@@ -608,7 +638,9 @@ macOS ships BSD ctags which is limited. Install Universal ctags for best results
 brew install universal-ctags
 ```
 
-Universal ctags produces richer tag data (signatures, kinds, line numbers) and supports recursive indexing. Without ctags installed, agents fall back to grep-only cross-references.
+Universal ctags produces richer tag data (signatures, kinds, line numbers). Vigil resolves a
+trusted executable outside the analyzed repository and indexes only manifest-admitted files.
+Without trusted ctags available, agents fall back to grep-only cross-references.
 
 ## Callback, Listener & Tunnel Handling
 

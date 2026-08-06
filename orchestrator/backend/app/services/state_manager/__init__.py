@@ -27,7 +27,7 @@ from ._common import (
 )
 from .links import (
     create_finding_link,
-    update_finding_link,
+    update_finding_link as update_finding_link,
     set_root_cause_link,
     clear_root_cause_link,
     list_finding_links,

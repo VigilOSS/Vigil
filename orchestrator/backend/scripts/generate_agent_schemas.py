@@ -4,11 +4,10 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-import sys
 from typing import Any
-
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -20,7 +19,7 @@ for path in (BACKEND_ROOT, AGENT_SCRIPTS_DIR):
     if path_str not in sys.path:
         sys.path.insert(0, path_str)
 
-from app.api.assessment import (  # noqa: E402
+from app.api.assessment import (  # noqa: E402 - import path is bootstrapped above
     AccessRecordRequest,
     AttackChainRecordRequest,
     CredentialRecordRequest,
@@ -28,10 +27,18 @@ from app.api.assessment import (  # noqa: E402
     JobRecord,
     ProbeRunRecordRequest,
 )
-from app.api.code_analysis import AnalysisResultRecord, CodeFileClassification  # noqa: E402
-from app.services.state_manager._common import SubmissionStatus, VerificationDisposition  # noqa: E402
-from assess.lib.contracts import get_contract  # noqa: E402
-
+from app.api.code_analysis import (  # noqa: E402 - import path is bootstrapped above
+    AnalysisResultRecord,
+    CodeFileClassification,
+    FuzzCampaignReceiptRequest,
+    FuzzDecisionRequest,
+)
+from app.services.state_manager._common import (  # noqa: E402 - import path is bootstrapped above
+    SubmissionStatus,
+    VerificationDisposition,
+)
+from app.services.code_analysis import CLASSIFICATION_PRIORITY_BANDS  # noqa: E402
+from assess.lib.contracts import get_contract  # noqa: E402 - import path is bootstrapped above
 
 # Sourced from the canonical backend StrEnum so the agent-side overlay can never
 # drift from the values the backend actually persists + serializes on GET
@@ -82,6 +89,19 @@ def _finding_record_examples() -> list[dict[str, Any]]:
                 "agent_name": "vulnerability-analyst",
             },
         )
+        provenance = normalized["provenance"]
+        if not isinstance(provenance, dict):
+            provenance = {"agent_name": "vulnerability-analyst"}
+            normalized["provenance"] = provenance
+        if str(normalized.get("canonical_location", "")).startswith("file:"):
+            provenance.setdefault(
+                "code_snapshot",
+                {
+                    "repo_id": 1,
+                    "repo_generation": 1,
+                    "source_manifest_digest": "0" * 64,
+                },
+            )
         normalized.setdefault("links", [])
         examples.append(normalized)
     return examples
@@ -731,6 +751,27 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
             model=FindingRecordRequest,
             title="Assessment Finding Record",
             overlay={
+                "allOf": [
+                    {
+                        "if": {
+                            "required": ["canonical_location"],
+                            "properties": {
+                                "canonical_location": {"pattern": r"^\s*file:"},
+                            },
+                        },
+                        "then": {
+                            "required": ["provenance"],
+                            "properties": {
+                                "provenance": {
+                                    "required": ["code_snapshot"],
+                                    "properties": {
+                                        "code_snapshot": {"type": "object"},
+                                    },
+                                },
+                            },
+                        },
+                    },
+                ],
                 "required": [
                     "title",
                     "severity",
@@ -898,6 +939,27 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
             title="Code File Classification",
             description="Classification payload for bulk-classifying source code files by security relevance.",
             overlay={
+                "x-classification-priority-bands": {
+                    tier: [minimum, maximum]
+                    for tier, (minimum, maximum) in CLASSIFICATION_PRIORITY_BANDS.items()
+                },
+                "allOf": [
+                    {
+                        "if": {
+                            "properties": {"classification": {"const": tier}},
+                            "required": ["classification"],
+                        },
+                        "then": {
+                            "properties": {
+                                "analysis_priority": {
+                                    "minimum": minimum,
+                                    "maximum": maximum,
+                                }
+                            }
+                        },
+                    }
+                    for tier, (minimum, maximum) in CLASSIFICATION_PRIORITY_BANDS.items()
+                ],
                 "examples": [
                     {
                         "file_id": 42,
@@ -924,13 +986,120 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "description": "Optional language correction when ingestion guessed wrong. Omit when the stored language is already correct.",
                     },
                     "slot_types": {
-                        "description": "Untrusted data types that flow into this file. Set at least one for critical/high files — omitting it on those tiers degrades taint-path scheduling. The 8 values above are the only accepted slot types; auth/crypto/error families are derived from role+language by the backend.",
+                        "description": "Untrusted data types or execution-policy decisions that flow into this file. Set at least one for critical/high files — omitting it on those tiers degrades taint-path scheduling. The enum values above are the only accepted slot types; auth/crypto/error families are derived from role+language by the backend.",
                         "default": [],
                     },
                     "analysis_priority": {
                         "description": "Priority score combining classification tier, git churn, entry-point proximity, and past CVE history. critical: 80-100, high: 50-79, medium: 20-49, low: 5-19, skip: 0.",
                     },
                 },
+            },
+        ),
+        SchemaSpec(
+            filename="code-fuzz-decision.schema.json",
+            model=FuzzDecisionRequest,
+            title="Code Fuzz Applicability Decision",
+            description=(
+                "Agent-attested, evidence-hashed generation-bound decision to run or "
+                "skip Phase 4 fuzzing. The backend rejects not_required while a "
+                "current non-killed/non-merged native memory-safety finding exists. "
+                "This acute gate is not an independent broker execution attestation."
+            ),
+            overlay={
+                "additionalProperties": False,
+                "required": [
+                    "repo_id",
+                    "repo_generation",
+                    "source_manifest_digest",
+                    "decision",
+                    "target_ids",
+                    "evidence_ref",
+                    "rationale",
+                ],
+                "properties": {
+                    "target_ids": {"uniqueItems": True},
+                },
+                "allOf": [
+                    {
+                        "if": {
+                            "properties": {"decision": {"const": "required"}}
+                        },
+                        "then": {"properties": {"target_ids": {"minItems": 1}}},
+                    },
+                    {
+                        "if": {
+                            "properties": {
+                                "decision": {"const": "not_required"}
+                            }
+                        },
+                        "then": {"properties": {"target_ids": {"maxItems": 0}}},
+                    },
+                ],
+            },
+        ),
+        SchemaSpec(
+            filename="code-fuzz-campaign-receipt.schema.json",
+            model=FuzzCampaignReceiptRequest,
+            title="Code Fuzz Campaign Receipt",
+            description=(
+                "Agent-attested bounded generation- and dispatch-bound sanitizer "
+                "campaign outcome. Failure outcomes remain durable but do not close "
+                "required obligations. Independent run ownership, build/harness/seed "
+                "attestation, and per-crash lifecycle remain Wave 2D work."
+            ),
+            overlay={
+                "additionalProperties": False,
+                "required": [
+                    "dispatch_id",
+                    "repo_id",
+                    "repo_generation",
+                    "source_manifest_digest",
+                    "target_id",
+                    "covered_finding_slugs",
+                    "engine",
+                    "sanitizers",
+                    "run_budget_seconds",
+                    "executions",
+                    "outcome",
+                    "crash_count",
+                    "triage_summary",
+                    "evidence_ref",
+                    "rationale",
+                ],
+                "properties": {
+                    "covered_finding_slugs": {"uniqueItems": True},
+                    "sanitizers": {"uniqueItems": True},
+                },
+                "allOf": [
+                    {
+                        "if": {
+                            "properties": {
+                                "outcome": {"const": "completed_no_crash"}
+                            }
+                        },
+                        "then": {
+                            "properties": {
+                                "crash_count": {"const": 0},
+                                "executions": {"minimum": 1},
+                            }
+                        },
+                    },
+                    {
+                        "if": {
+                            "properties": {
+                                "outcome": {
+                                    "const": "completed_crashes_triaged"
+                                }
+                            }
+                        },
+                        "then": {
+                            "properties": {
+                                "crash_count": {"minimum": 1},
+                                "executions": {"minimum": 1},
+                            }
+                        },
+                    },
+                ],
             },
         ),
         SchemaSpec(

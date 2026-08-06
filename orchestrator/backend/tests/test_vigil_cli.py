@@ -7,6 +7,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -4517,9 +4518,13 @@ def test_transition_phase_both_engagement_advances_code_track_separately(
             pass
 
         def get(self, path: str) -> dict:
-            if path == "code/coverage":
-                return {"total_files": 2, "by_classification": {"critical": {"count": 1}}}
-            return {}
+            assert path == "code/readiness?target_phase=classify-map"
+            return {
+                "target_phase": "classify-map",
+                "transition_ready": True,
+                "blockers": [],
+                "quality_gate": {"passed": True, "warnings": []},
+            }
 
         def close(self) -> None:
             return None
@@ -5086,6 +5091,13 @@ def test_transition_code_complete_unaffected_by_depth_backstop(monkeypatch, tmp_
             pass
         def get(self, path: str):
             queried.append(path)
+            if path == "code/readiness?target_phase=complete":
+                return {
+                    "target_phase": "complete",
+                    "transition_ready": True,
+                    "blockers": [],
+                    "quality_gate": {"passed": True, "warnings": []},
+                }
             if path == "findings":
                 return []
             return []
@@ -5099,6 +5111,7 @@ def test_transition_code_complete_unaffected_by_depth_backstop(monkeypatch, tmp_
         engagement_key=eng.name, agent_root=str(tmp_path / "agent")))
 
     module.run(_transition_args(eng, "complete"))
+    assert "code/readiness?target_phase=complete" in queried
     assert "application-units/terminal-block" not in queried
     assert json.loads((eng / "scope.json").read_text())["current_phase"] == "complete"
 
@@ -6955,6 +6968,39 @@ def test_link_finding_intel_preserves_details_json_related_intel_ids(
     assert json.loads(capsys.readouterr().out) == {"ok": True}
 
 
+def _host_finalize_response(payload: dict, **fields: object) -> dict:
+    response = dict(payload)
+    completed_at = str(response.pop("ended_at"))
+    response.pop("output_quiesced", None)
+    if payload.get("output_quiesced") is False:
+        response["partial_results"] = False
+    response["completed_at"] = completed_at.replace("Z", "+00:00")
+    response.update(fields)
+    return response
+
+
+def _patch_test_host_ownership(
+    module,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    quiescent: bool = True,
+) -> None:
+    monkeypatch.setattr(
+        module.host_processes,
+        "capture_process_ownership",
+        lambda pid: module.host_processes.ProcessOwnership(
+            pid=pid,
+            pgid=pid,
+            process_identity=f"test-process-{pid}",
+        ),
+    )
+    monkeypatch.setattr(
+        module.host_processes,
+        "terminate_owned_process",
+        lambda _ownership: quiescent,
+    )
+
+
 def test_host_exec_uses_agent_name_env_for_audit_payload(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -6977,7 +7023,7 @@ def test_host_exec_uses_agent_name_env_for_audit_payload(
 
         def patch(self, endpoint: str, payload: dict, **_kwargs: object) -> dict:
             events.append("finalize")
-            return {"id": 42, **payload}
+            return _host_finalize_response(payload, id=42)
 
         def close(self) -> None:
             return None
@@ -7041,9 +7087,254 @@ def test_host_exec_uses_agent_name_env_for_audit_payload(
     assert prepared == [(["echo", "ok"], "member")]
     assert posts[0][1]["status"] == "running"
     assert posts[0][1]["stdout"] == ""
+    assert "command_hash" not in posts[0][1]
     assert posts[0][1]["stdout_path"].endswith(".out")
     assert posts[0][1]["stderr_path"].endswith(".err")
+    stdout_metadata = Path(posts[0][1]["stdout_path"]).stat()
+    stderr_metadata = Path(posts[0][1]["stderr_path"]).stat()
+    assert posts[0][1]["stdout_spill_device"] == stdout_metadata.st_dev
+    assert posts[0][1]["stdout_spill_inode"] == stdout_metadata.st_ino
+    assert posts[0][1]["stderr_spill_device"] == stderr_metadata.st_dev
+    assert posts[0][1]["stderr_spill_inode"] == stderr_metadata.st_ino
     assert events == ["audit", "process", "finalize"]
+
+
+def test_host_exec_replays_pre_exec_post_after_lost_response_before_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_lost_post_response",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    posts: list[tuple[str, dict]] = []
+    events: list[str] = []
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def post(self, endpoint: str, payload: dict) -> dict:
+            events.append("audit")
+            posts.append((endpoint, dict(payload)))
+            if len(posts) == 1:
+                raise module.AssessError("response lost after the backend committed")
+            return {"id": 42, "idempotent_replay": True}
+
+        def patch(self, endpoint: str, payload: dict, **_kwargs: object) -> dict:
+            events.append("finalize")
+            assert endpoint == "command-runs/42"
+            return _host_finalize_response(payload, id=42)
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "prepare_execution_command",
+        lambda *_args, **_kwargs: "member",
+    )
+    monkeypatch.setattr(
+        module,
+        "_run_host_process",
+        lambda *_args, **_kwargs: (events.append("process") or (0, "ok\n", "", False)),
+    )
+    (tmp_path / "scope.json").write_text(json.dumps({"hosts": []}), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(tmp_path),
+                from_json=None,
+                command=["echo", "ok"],
+                tool="echo",
+                intent="test lost response recovery",
+                technique="T0000",
+                phase="investigate",
+                target_host="",
+                scope_host="acme",
+                cwd=None,
+                timeout=30,
+                audit_source="argv",
+                allow_destructive=False,
+                require_audit=True,
+                finding="",
+                identity=None,
+                identity_scope="",
+            )
+        )
+
+    assert exc_info.value.code == 0
+    assert len(posts) == 2
+    assert posts[0] == posts[1]
+    assert events == ["audit", "audit", "process", "finalize"]
+
+
+def test_host_exec_explicit_finding_resolution_failure_stops_before_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_finding_resolution_failure",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    events: list[str] = []
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def get(self, endpoint: str) -> dict:
+            events.append(f"resolve:{endpoint}")
+            raise module.AssessError("finding VA-MISSING not found")
+
+        def post(self, _endpoint: str, _payload: dict) -> dict:
+            events.append("post")
+            return {"id": 42}
+
+        def patch(self, _endpoint: str, payload: dict, **_kwargs: object) -> dict:
+            events.append("finalize")
+            return _host_finalize_response(payload, id=42)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+    monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "member")
+    monkeypatch.setattr(
+        module,
+        "_run_host_process",
+        lambda *_a, **_k: (events.append("process") or (0, "", "", False)),
+    )
+    (tmp_path / "scope.json").write_text(json.dumps({"hosts": []}), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(tmp_path),
+                from_json=None,
+                command=["echo", "ok"],
+                tool="echo",
+                intent="require explicit finding linkage",
+                technique="T0000",
+                phase="investigate",
+                target_host="",
+                agent_name=None,
+                scope_host="",
+                cwd=None,
+                timeout=30,
+                audit_source="argv",
+                allow_destructive=False,
+                require_audit=False,
+                finding="VA-MISSING",
+                identity=None,
+                identity_scope="",
+            )
+        )
+
+    assert exc_info.value.code == 4
+    assert events == ["resolve:findings/VA-MISSING"]
+    assert not (tmp_path / "scans" / "host-exec").exists()
+
+
+def test_host_exec_backend_rejection_with_finding_never_retries_unlinked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_finding_post_rejection",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    posts: list[dict] = []
+    events: list[str] = []
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def get(self, endpoint: str) -> dict:
+            events.append(f"resolve:{endpoint}")
+            return {"id": 7}
+
+        def post(self, _endpoint: str, payload: dict) -> dict:
+            events.append("post")
+            posts.append(dict(payload))
+            if payload.get("finding_id") == 7:
+                raise module.AssessError("HTTP 404: finding id=7 not found")
+            return {"id": 42}
+
+        def patch(self, _endpoint: str, payload: dict, **_kwargs: object) -> dict:
+            events.append("finalize")
+            return _host_finalize_response(payload, id=42)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+    monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "member")
+    monkeypatch.setattr(
+        module,
+        "_run_host_process",
+        lambda *_a, **_k: (events.append("process") or (0, "", "", False)),
+    )
+    (tmp_path / "scope.json").write_text(json.dumps({"hosts": []}), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(tmp_path),
+                from_json=None,
+                command=["echo", "ok"],
+                tool="echo",
+                intent="preserve explicit finding linkage",
+                technique="T0000",
+                phase="investigate",
+                target_host="",
+                agent_name=None,
+                scope_host="",
+                cwd=None,
+                timeout=30,
+                audit_source="argv",
+                allow_destructive=False,
+                require_audit=False,
+                finding="VA-007",
+                identity=None,
+                identity_scope="",
+            )
+        )
+
+    assert exc_info.value.code == 4
+    assert len(posts) == 1
+    assert posts[0]["finding_id"] == 7
+    assert events == ["resolve:findings/VA-007", "post"]
 
 
 def test_host_exec_destructive_gate_allows_format_flags_but_blocks_format_command() -> None:
@@ -7082,20 +7373,16 @@ def test_host_exec_registers_process_before_communicate_and_unregisters_after(
             return "ok\n", ""
 
     monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **k: _Proc())
+    _patch_test_host_ownership(module, monkeypatch)
     monkeypatch.setattr(
         module.host_processes,
-        "register_process",
+        "register_owned_process",
         lambda *a, **k: events.append("register"),
     )
     monkeypatch.setattr(
         module.host_processes,
         "unregister_process",
         lambda *a, **k: events.append("unregister"),
-    )
-    monkeypatch.setattr(
-        module.host_processes,
-        "registered_group_alive",
-        lambda *a, **k: False,
     )
 
     result = module._run_host_process(
@@ -7110,7 +7397,56 @@ def test_host_exec_registers_process_before_communicate_and_unregisters_after(
     assert events == ["register", "communicate", "unregister"]
 
 
-def test_host_exec_keeps_registry_for_background_child_after_leader_exits(
+def test_host_exec_preview_reads_the_open_spill_not_a_swapped_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_preview_fd_pin",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    run_uuid = "preview-fd-pin"
+    output_dir = tmp_path / "scans" / "host-exec"
+    stdout_path = output_dir / f"{run_uuid}.out"
+    moved_path = output_dir / "moved-original.out"
+    secret_path = tmp_path / "secret.txt"
+    secret_path.write_text("secret replacement must not be previewed\n", encoding="utf-8")
+
+    class _Proc:
+        pid = 4321
+        returncode = 0
+
+        def __init__(self, *, stdout, stderr, **_kwargs):
+            self.stdout = stdout
+            self.stderr = stderr
+
+        def communicate(self, timeout: int):
+            self.stdout.write(b"trusted process output\n")
+            self.stdout.flush()
+            stdout_path.replace(moved_path)
+            stdout_path.symlink_to(secret_path)
+            return "", ""
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **k: _Proc(**k))
+    _patch_test_host_ownership(module, monkeypatch)
+    monkeypatch.setattr(module.host_processes, "register_owned_process", lambda *a, **k: None)
+    monkeypatch.setattr(module.host_processes, "unregister_process", lambda *a, **k: None)
+
+    result = module._run_host_process(
+        ["echo", "ok"],
+        cwd=str(tmp_path),
+        timeout_seconds=30,
+        engagement_dir=str(tmp_path),
+        run_uuid=run_uuid,
+    )
+
+    assert result == (0, "trusted process output\n", "", False)
+    assert moved_path.read_text(encoding="utf-8") == "trusted process output\n"
+
+
+def test_host_exec_quiesces_background_child_before_returning_output(
     tmp_path: Path,
 ) -> None:
     module = _load_assess_module(
@@ -7145,18 +7481,473 @@ def test_host_exec_keeps_registry_for_background_child_after_leader_exits(
         registry = (
             tmp_path / ".runtime" / "host-processes" / f"{run_uuid}.json"
         )
-        assert registry.is_file()
-        summary = module.host_processes.reap_registered_processes(
-            tmp_path, max_age_seconds=0
-        )
-        assert summary["reaped"] == 1
         assert not registry.exists()
+        assert module.host_processes._pid_exists(child_pid) is False
     finally:
         if child_pid:
             try:
                 os.kill(child_pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+def test_host_exec_quiesces_surviving_group_without_registry_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_registry_read_failure",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    child_pid_path = tmp_path / "registry-failure-child.pid"
+    run_uuid = "run-registry-read-failure"
+    original_popen = module.subprocess.Popen
+    spawned: list[subprocess.Popen] = []
+    child_pid = 0
+
+    def capture_popen(*args, **kwargs):
+        process = original_popen(*args, **kwargs)
+        spawned.append(process)
+        return process
+
+    monkeypatch.setattr(module.subprocess, "Popen", capture_popen)
+    try:
+        result = module._run_host_process(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import subprocess, sys; "
+                    "child = subprocess.Popen([sys.executable, '-c', "
+                    "'import time; time.sleep(30)'], stdin=subprocess.DEVNULL, "
+                    "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+                    "open(sys.argv[1], 'w', encoding='ascii').write(str(child.pid))"
+                ),
+                str(child_pid_path),
+            ],
+            cwd=str(tmp_path),
+            timeout_seconds=10,
+            engagement_dir=str(tmp_path),
+            run_uuid=run_uuid,
+        )
+        child_pid = int(child_pid_path.read_text(encoding="ascii"))
+
+        assert result[0] == 0
+        assert module.host_processes._pid_exists(child_pid) is False
+        registry = tmp_path / ".runtime" / "host-processes" / f"{run_uuid}.json"
+        assert not registry.exists()
+    finally:
+        for process in spawned:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                pass
+        if child_pid:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_host_exec_in_memory_ownership_never_signals_a_reused_process_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_registry_pid_reuse",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    ownership = module.host_processes.ProcessOwnership(
+        pid=4321,
+        pgid=4321,
+        process_identity="original",
+    )
+
+    monkeypatch.setattr(
+        module.host_processes,
+        "_process_identity",
+        lambda _pid: "replacement",
+    )
+    monkeypatch.setattr(module.host_processes, "_pid_exists", lambda _pid: True)
+    monkeypatch.setattr(
+        module.host_processes.os,
+        "killpg",
+        lambda *_args: pytest.fail("reused process group must never be signalled"),
+    )
+
+    with pytest.raises(module.HostProcessNotQuiescent):
+        module._quiesce_registered_host_process(
+            engagement_dir=str(tmp_path),
+            run_uuid="run-registry-pid-reuse",
+            ownership=ownership,
+        )
+
+
+def test_host_exec_tightens_owned_legacy_output_directory_without_changing_scans_mode(
+    tmp_path: Path,
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_legacy_output_mode",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    scans_dir = tmp_path / "scans"
+    output_dir = scans_dir / "host-exec"
+    output_dir.mkdir(parents=True)
+    scans_dir.chmod(0o755)
+    output_dir.chmod(0o755)
+
+    descriptor = module._open_host_exec_output_directory(tmp_path)
+    try:
+        assert module.stat.S_IMODE(module.os.fstat(descriptor).st_mode) == 0o700
+    finally:
+        module.os.close(descriptor)
+
+    assert module.stat.S_IMODE(scans_dir.stat().st_mode) == 0o755
+    assert module.stat.S_IMODE(output_dir.stat().st_mode) == 0o700
+
+
+def test_host_exec_rejects_unowned_legacy_output_directory_before_chmod(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_unowned_output_mode",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    output_dir = tmp_path / "scans" / "host-exec"
+    output_dir.mkdir(parents=True)
+    output_dir.chmod(0o755)
+    output_identity = (output_dir.stat().st_dev, output_dir.stat().st_ino)
+    real_fstat = module.os.fstat
+
+    def report_output_as_unowned(descriptor: int):
+        metadata = real_fstat(descriptor)
+        if (metadata.st_dev, metadata.st_ino) == output_identity:
+            return SimpleNamespace(
+                st_mode=metadata.st_mode,
+                st_uid=module.os.geteuid() + 1,
+            )
+        return metadata
+
+    monkeypatch.setattr(module.os, "fstat", report_output_as_unowned)
+    monkeypatch.setattr(
+        module.os,
+        "fchmod",
+        lambda *_args: pytest.fail("unowned output directory must not be chmodded"),
+    )
+
+    with pytest.raises(module.AssessError, match="not owned by the current user"):
+        module._open_host_exec_output_directory(tmp_path)
+
+
+def test_host_exec_mode_repair_stays_on_pinned_descriptor_during_path_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_output_mode_fd_pin",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    scans_dir = tmp_path / "scans"
+    output_dir = scans_dir / "host-exec"
+    output_dir.mkdir(parents=True)
+    output_dir.chmod(0o755)
+    moved_output_dir = scans_dir / "moved-host-exec"
+    attacker_output_dir = tmp_path / "attacker-host-exec"
+    attacker_output_dir.mkdir()
+    attacker_output_dir.chmod(0o755)
+    real_fchmod = module.os.fchmod
+    swapped = False
+
+    def swap_before_chmod(descriptor: int, mode: int) -> None:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            output_dir.replace(moved_output_dir)
+            output_dir.symlink_to(attacker_output_dir, target_is_directory=True)
+        real_fchmod(descriptor, mode)
+
+    monkeypatch.setattr(module.os, "fchmod", swap_before_chmod)
+
+    descriptor = module._open_host_exec_output_directory(tmp_path)
+    try:
+        opened = module.os.fstat(descriptor)
+        moved = moved_output_dir.stat()
+        assert (opened.st_dev, opened.st_ino) == (moved.st_dev, moved.st_ino)
+    finally:
+        module.os.close(descriptor)
+
+    assert swapped is True
+    assert output_dir.is_symlink()
+    assert module.stat.S_IMODE(moved_output_dir.stat().st_mode) == 0o700
+    assert module.stat.S_IMODE(attacker_output_dir.stat().st_mode) == 0o755
+
+
+def test_host_exec_rejects_symlinked_output_directory_without_chmodding_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_output_mode_symlink",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    scans_dir = tmp_path / "scans"
+    scans_dir.mkdir()
+    attacker_output_dir = tmp_path / "attacker-host-exec"
+    attacker_output_dir.mkdir()
+    attacker_output_dir.chmod(0o755)
+    (scans_dir / "host-exec").symlink_to(
+        attacker_output_dir,
+        target_is_directory=True,
+    )
+    monkeypatch.setattr(
+        module.os,
+        "fchmod",
+        lambda *_args: pytest.fail("symlink target must not be chmodded"),
+    )
+
+    with pytest.raises(OSError):
+        module._open_host_exec_output_directory(tmp_path)
+
+    assert module.stat.S_IMODE(attacker_output_dir.stat().st_mode) == 0o755
+
+
+def test_host_exec_precreated_descriptors_survive_parent_directory_symlink_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_parent_fd_pin",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    posted_paths: dict[str, Path] = {}
+    patches: list[dict] = []
+    moved_output_dir = tmp_path / "moved-host-exec"
+    attacker_output_dir = tmp_path / "attacker-host-exec"
+    attacker_output_dir.mkdir()
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def post(self, _endpoint: str, payload: dict) -> dict:
+            posted_paths["stdout"] = Path(payload["stdout_path"])
+            posted_paths["stderr"] = Path(payload["stderr_path"])
+            output_dir = posted_paths["stdout"].parent
+            output_dir.replace(moved_output_dir)
+            output_dir.symlink_to(attacker_output_dir, target_is_directory=True)
+            return {"id": 42}
+
+        def patch(self, _endpoint: str, payload: dict, **_kwargs: object) -> dict:
+            patches.append(payload)
+            return _host_finalize_response(
+                payload,
+                id=42,
+                output_cleanup_status="complete",
+            )
+
+        def close(self) -> None:
+            pass
+
+    class _Proc:
+        pid = 4321
+        returncode = 0
+
+        def __init__(self, *, stdout, stderr, **_kwargs: object) -> None:
+            stdout.write(b"trusted stdout\n")
+            stdout.flush()
+            stderr.write(b"trusted stderr\n")
+            stderr.flush()
+
+        def communicate(self, timeout: int):
+            return None, None
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+    monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "anonymous")
+    monkeypatch.setattr(module.scope_lib, "enforce_execution_policy", lambda *_a, **_k: {})
+    monkeypatch.setattr(module, "aggregate_rate_reservation", lambda *_a, **_k: None)
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **k: _Proc(**k))
+    _patch_test_host_ownership(module, monkeypatch)
+    monkeypatch.setattr(module.host_processes, "register_owned_process", lambda *a, **k: None)
+    monkeypatch.setattr(module.host_processes, "unregister_process", lambda *a, **k: None)
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(tmp_path),
+                from_json=None,
+                command=["echo", "ok"],
+                tool="echo",
+                intent="pin host output descriptors",
+                technique="T0000",
+                phase="investigate",
+                target_host="",
+                agent_name=None,
+                scope_host="",
+                cwd=None,
+                timeout=30,
+                audit_source="argv",
+                allow_destructive=False,
+                require_audit=True,
+            )
+        )
+
+    assert exc_info.value.code == 0
+    assert patches
+    assert (moved_output_dir / posted_paths["stdout"].name).read_bytes() == b"trusted stdout\n"
+    assert (moved_output_dir / posted_paths["stderr"].name).read_bytes() == b"trusted stderr\n"
+    assert list(attacker_output_dir.iterdir()) == []
+
+
+def test_host_exec_spill_identity_claims_reject_leaf_swap_before_post(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_prepost_leaf_swap",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    moved_metadata: dict[str, os.stat_result] = {}
+    posted: list[dict] = []
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            output_dir = tmp_path / "scans" / "host-exec"
+            for path in output_dir.iterdir():
+                moved = path.with_name(f"moved-{path.name}")
+                path.replace(moved)
+                moved_metadata[path.suffix] = moved.stat()
+                path.write_bytes(b"attacker replacement")
+
+        def post(self, _endpoint: str, payload: dict) -> dict:
+            posted.append(payload)
+            raise module.AssessError(
+                "HTTP 409:\nbackend rejected spill identity mismatch"
+            )
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+    monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "anonymous")
+    monkeypatch.setattr(module.scope_lib, "enforce_execution_policy", lambda *_a, **_k: {})
+    monkeypatch.setattr(
+        module,
+        "_run_host_process",
+        lambda *_a, **_k: pytest.fail("identity-rejected command must not execute"),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(tmp_path),
+                from_json=None,
+                command=["echo", "ok"],
+                tool="echo",
+                intent="bind spill identity before post",
+                technique="T0000",
+                phase="investigate",
+                target_host="",
+                agent_name=None,
+                scope_host="",
+                cwd=None,
+                timeout=30,
+                audit_source="argv",
+                allow_destructive=False,
+                require_audit=True,
+            )
+        )
+
+    assert exc_info.value.code == 4
+    assert len(posted) == 1
+    payload = posted[0]
+    stdout_replacement = Path(payload["stdout_path"]).stat()
+    stderr_replacement = Path(payload["stderr_path"]).stat()
+    assert payload["stdout_spill_device"] == moved_metadata[".out"].st_dev
+    assert payload["stdout_spill_inode"] == moved_metadata[".out"].st_ino
+    assert payload["stderr_spill_device"] == moved_metadata[".err"].st_dev
+    assert payload["stderr_spill_inode"] == moved_metadata[".err"].st_ino
+    assert payload["stdout_spill_inode"] != stdout_replacement.st_ino
+    assert payload["stderr_spill_inode"] != stderr_replacement.st_ino
+
+
+def test_host_exec_partial_spill_creation_never_unlinks_a_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_partial_create",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    stdout_path = tmp_path / "run.out"
+    moved_stdout = tmp_path / "moved.out"
+    stderr_path = tmp_path / "run.err"
+    stderr_path.write_bytes(b"force second create failure")
+    original_open = module.os.open
+    leaf_create_count = 0
+
+    def swapping_open(path, flags, *args, **kwargs):
+        nonlocal leaf_create_count
+        if flags & module.os.O_EXCL:
+            leaf_create_count += 1
+            if leaf_create_count == 2:
+                stdout_path.replace(moved_stdout)
+                stdout_path.write_bytes(b"replacement must survive")
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "open", swapping_open)
+
+    with pytest.raises(FileExistsError):
+        module._create_output_spills(stdout_path, stderr_path)
+
+    assert stdout_path.read_bytes() == b"replacement must survive"
+    assert moved_stdout.read_bytes() == b""
+
+
+def test_host_exec_spill_leaf_creation_is_nonblocking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_nonblocking_spills",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    original_open = module.os.open
+    leaf_flags: list[int] = []
+
+    def recording_open(path, flags, *args, **kwargs):
+        if flags & module.os.O_EXCL:
+            leaf_flags.append(flags)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "open", recording_open)
+    descriptors = module._create_output_spills(
+        tmp_path / "run.out", tmp_path / "run.err"
+    )
+    if descriptors is not None:
+        for descriptor in descriptors:
+            module.os.close(descriptor)
+
+    assert len(leaf_flags) == 2
+    assert all(flags & module.os.O_NONBLOCK for flags in leaf_flags)
 
 
 def test_host_exec_spills_stdout_and_stderr_from_process_start(
@@ -7187,7 +7978,8 @@ def test_host_exec_spills_stdout_and_stderr_from_process_start(
         return _Proc()
 
     monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(module.host_processes, "register_process", lambda *a, **k: None)
+    _patch_test_host_ownership(module, monkeypatch)
+    monkeypatch.setattr(module.host_processes, "register_owned_process", lambda *a, **k: None)
     monkeypatch.setattr(module.host_processes, "unregister_process", lambda *a, **k: None)
 
     result = module._run_host_process(
@@ -7228,7 +8020,8 @@ def test_host_exec_large_output_returns_bounded_head_tail_preview(
         return _Proc()
 
     monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(module.host_processes, "register_process", lambda *a, **k: None)
+    _patch_test_host_ownership(module, monkeypatch)
+    monkeypatch.setattr(module.host_processes, "register_owned_process", lambda *a, **k: None)
     monkeypatch.setattr(module.host_processes, "unregister_process", lambda *a, **k: None)
 
     _, stdout_preview, stderr_preview, _ = module._run_host_process(
@@ -7275,14 +8068,10 @@ def test_host_exec_fast_exit_before_registry_is_treated_as_already_reaped(
     monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **k: _Proc())
     monkeypatch.setattr(
         module.host_processes,
-        "register_process",
-        lambda *a, **k: (_ for _ in ()).throw(module.AssessError("process already exited")),
+        "capture_process_ownership",
+        lambda _pid: (_ for _ in ()).throw(module.AssessError("process already exited")),
     )
-    monkeypatch.setattr(
-        module.host_processes,
-        "unregister_process",
-        lambda *a, **k: events.append("unregister"),
-    )
+    monkeypatch.setattr(module, "_host_process_group_alive", lambda _pgid: False)
 
     assert module._run_host_process(
         ["true"],
@@ -7292,6 +8081,96 @@ def test_host_exec_fast_exit_before_registry_is_treated_as_already_reaped(
         run_uuid="run-fast",
     ) == (0, "done\n", "", False)
     assert events == ["communicate:1"]
+
+
+def test_host_exec_registry_write_failure_quiesces_fast_leader_descendants(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_fast_leader_descendant",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    child_pid_path = tmp_path / "fast-leader-child.pid"
+    run_uuid = "run-fast-leader-child"
+    original_popen = module.subprocess.Popen
+    spawned: list[subprocess.Popen] = []
+    child_pid = 0
+    ownership = module.host_processes.ProcessOwnership(
+        pid=0,
+        pgid=0,
+        process_identity="captured-before-registry-write",
+    )
+
+    def capture_popen(*args, **kwargs):
+        process = original_popen(*args, **kwargs)
+        spawned.append(process)
+        return process
+
+    def capture_ownership(pid: int):
+        return module.host_processes.ProcessOwnership(
+            pid=pid,
+            pgid=pid,
+            process_identity=ownership.process_identity,
+        )
+
+    def fail_registry_after_leader_exit(*_args, **_kwargs):
+        deadline = time.monotonic() + 5
+        while not child_pid_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert child_pid_path.exists()
+        spawned[0].wait(timeout=5)
+        raise RuntimeError("registry write failed after leader exit")
+
+    monkeypatch.setattr(module.subprocess, "Popen", capture_popen)
+    monkeypatch.setattr(
+        module.host_processes,
+        "capture_process_ownership",
+        capture_ownership,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        module.host_processes,
+        "register_owned_process",
+        fail_registry_after_leader_exit,
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="registry write failed"):
+            module._run_host_process(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import subprocess, sys; "
+                        "subprocess.Popen([sys.executable, '-c', "
+                        "\"import os,sys,time; "
+                        "open(sys.argv[1], 'w', encoding='ascii').write(str(os.getpid())); "
+                        "time.sleep(2); print('LATE-DESCENDANT', flush=True)\", "
+                        "sys.argv[1]], stdin=subprocess.DEVNULL)"
+                    ),
+                    str(child_pid_path),
+                ],
+                cwd=str(tmp_path),
+                timeout_seconds=10,
+                engagement_dir=str(tmp_path),
+                run_uuid=run_uuid,
+            )
+        child_pid = int(child_pid_path.read_text(encoding="ascii"))
+        assert module.host_processes._pid_exists(child_pid) is False
+        stdout_path = tmp_path / "scans" / "host-exec" / f"{run_uuid}.out"
+        assert b"LATE-DESCENDANT" not in stdout_path.read_bytes()
+    finally:
+        for process in spawned:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                pass
+        if child_pid:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 def test_host_exec_registry_failure_terminates_process_group_with_bounded_kill(
@@ -7316,11 +8195,34 @@ def test_host_exec_registry_failure_terminates_process_group_with_bounded_kill(
     monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **k: _Proc())
     monkeypatch.setattr(
         module.host_processes,
-        "register_process",
+        "register_owned_process",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("registry unavailable")),
     )
-    monkeypatch.setattr(module.os, "getpgid", lambda _pid: 4321)
-    monkeypatch.setattr(module.os, "killpg", lambda _pgid, sig: signals.append(sig))
+    alive = True
+
+    def fake_killpg(_pgid, sig):
+        nonlocal alive
+        if sig == 0:
+            if alive:
+                return
+            raise ProcessLookupError
+        signals.append(sig)
+        if sig == module.signal.SIGKILL:
+            alive = False
+
+    monkeypatch.setattr(
+        module.host_processes,
+        "capture_process_ownership",
+        lambda pid: module.host_processes.ProcessOwnership(pid, pid, "owned"),
+    )
+    monkeypatch.setattr(module.host_processes, "_process_identity", lambda _pid: "owned")
+    monkeypatch.setattr(module.host_processes, "_process_group_id", lambda pid: pid)
+    monkeypatch.setattr(module.host_processes.os, "killpg", fake_killpg)
+    monkeypatch.setattr(
+        module.host_processes,
+        "_wait_for_owned_exit",
+        lambda *_args: not alive,
+    )
 
     with pytest.raises(RuntimeError, match="registry unavailable"):
         module._run_host_process(
@@ -7334,14 +8236,183 @@ def test_host_exec_registry_failure_terminates_process_group_with_bounded_kill(
     assert signals == [module.signal.SIGTERM, module.signal.SIGKILL]
 
 
-def test_host_exec_process_failure_finalizes_pre_exec_audit(
+def test_host_exec_registry_failure_refuses_output_when_group_exit_is_unproven(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     module = _load_assess_module(
-        "host_exec_command_module_process_failure_audit",
+        "host_exec_command_module_registry_failure_unquiesced",
         "agent/scripts/assess/commands/host_exec.py",
     )
-    patches: list[tuple[str, dict]] = []
+
+    class _Proc:
+        pid = 4321
+        returncode = None
+
+        def poll(self):
+            return None
+
+        def communicate(self, timeout: int):
+            raise module.subprocess.TimeoutExpired("cmd", timeout)
+
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **k: _Proc())
+    monkeypatch.setattr(
+        module.host_processes,
+        "register_owned_process",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("registry unavailable")),
+    )
+    monkeypatch.setattr(
+        module.host_processes,
+        "capture_process_ownership",
+        lambda pid: module.host_processes.ProcessOwnership(pid, pid, "owned"),
+    )
+    monkeypatch.setattr(module.host_processes, "_process_identity", lambda _pid: "owned")
+    monkeypatch.setattr(module.host_processes, "_process_group_id", lambda pid: pid)
+    monkeypatch.setattr(module.host_processes.os, "killpg", lambda *_args: None)
+    monkeypatch.setattr(
+        module.host_processes,
+        "_wait_for_owned_exit",
+        lambda *_args: False,
+    )
+
+    with pytest.raises(module.HostProcessNotQuiescent):
+        module._run_host_process(
+            ["sleep", "60"],
+            cwd=str(tmp_path),
+            timeout_seconds=30,
+            engagement_dir=str(tmp_path),
+            run_uuid="run-registry-unquiesced",
+        )
+
+
+def test_host_exec_refuses_preview_when_registered_group_cannot_be_quiesced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_unquiesced_group",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+
+    class _Proc:
+        pid = 4321
+        returncode = 0
+
+        def communicate(self, timeout: int):
+            return None, None
+
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **k: _Proc())
+    _patch_test_host_ownership(module, monkeypatch, quiescent=False)
+    monkeypatch.setattr(module.host_processes, "register_owned_process", lambda *a, **k: None)
+    with pytest.raises(module.AssessError, match="cannot establish quiescence"):
+        module._run_host_process(
+            ["example"],
+            cwd=str(tmp_path),
+            timeout_seconds=30,
+            engagement_dir=str(tmp_path),
+            run_uuid="run-unquiesced",
+        )
+
+
+def test_host_exec_false_registry_absence_cannot_bypass_in_memory_ownership(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_false_registry_absence",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    ownership = module.host_processes.ProcessOwnership(
+        pid=4321,
+        pgid=4321,
+        process_identity="trusted-live-token",
+    )
+    events: list[str] = []
+    monkeypatch.setattr(
+        module.host_processes,
+        "terminate_owned_process",
+        lambda candidate: (
+            events.append(f"memory-proof:{candidate.process_identity}") or True
+        ),
+    )
+    monkeypatch.setattr(
+        module.host_processes,
+        "unregister_process",
+        lambda *a, **k: events.append("unregister"),
+    )
+
+    module._quiesce_registered_host_process(
+        engagement_dir=str(tmp_path),
+        run_uuid="run-false-absence",
+        ownership=ownership,
+    )
+
+    assert events == ["memory-proof:trusted-live-token", "unregister"]
+
+
+def test_host_exec_communicate_error_still_quiesces_registered_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_communicate_error_group",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    original_popen = module.subprocess.Popen
+    spawned: list[subprocess.Popen] = []
+
+    def flaky_popen(*args, **kwargs):
+        process = original_popen(*args, **kwargs)
+        spawned.append(process)
+        original_communicate = process.communicate
+        first_call = True
+
+        def flaky_communicate(*, timeout):
+            nonlocal first_call
+            if first_call:
+                first_call = False
+                raise OSError("capture pipe failed")
+            return original_communicate(timeout=timeout)
+
+        process.communicate = flaky_communicate
+        return process
+
+    monkeypatch.setattr(
+        module,
+        "subprocess",
+        SimpleNamespace(Popen=flaky_popen, TimeoutExpired=subprocess.TimeoutExpired),
+    )
+    run_uuid = "run-communicate-error"
+    try:
+        with pytest.raises(OSError, match="capture pipe failed"):
+            module._run_host_process(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                cwd=str(tmp_path),
+                timeout_seconds=30,
+                engagement_dir=str(tmp_path),
+                run_uuid=run_uuid,
+            )
+
+        assert len(spawned) == 1
+        assert module.host_processes._pid_exists(spawned[0].pid) is False
+        registry = tmp_path / ".runtime" / "host-processes" / f"{run_uuid}.json"
+        assert not registry.exists()
+    finally:
+        for process in spawned:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+
+def test_host_exec_records_lost_when_group_cannot_be_quiesced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_unquiesced_audit",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    patches: list[dict] = []
 
     class _Client:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
@@ -7350,9 +8421,91 @@ def test_host_exec_process_failure_finalizes_pre_exec_audit(
         def post(self, _endpoint: str, _payload: dict) -> dict:
             return {"id": 42}
 
+        def patch(self, _endpoint: str, payload: dict, **_kwargs: object) -> dict:
+            patches.append(payload)
+            return _host_finalize_response(payload, id=42)
+
+        def close(self) -> None:
+            pass
+
+    class _Proc:
+        pid = 4321
+        returncode = 0
+
+        def communicate(self, timeout: int):
+            return None, None
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+    monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "anonymous")
+    monkeypatch.setattr(module.scope_lib, "enforce_execution_policy", lambda *_a, **_k: {})
+    monkeypatch.setattr(module, "aggregate_rate_reservation", lambda *_a, **_k: None)
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **k: _Proc())
+    _patch_test_host_ownership(module, monkeypatch, quiescent=False)
+    monkeypatch.setattr(module.host_processes, "register_owned_process", lambda *a, **k: None)
+    with pytest.raises(SystemExit) as exc_info:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(tmp_path),
+                from_json=None,
+                command=["example"],
+                tool="example",
+                intent="verify output quiescence",
+                technique="T0000",
+                phase="investigate",
+                target_host="",
+                agent_name=None,
+                scope_host="",
+                cwd=None,
+                timeout=30,
+                audit_source="argv",
+                allow_destructive=False,
+                require_audit=True,
+            )
+        )
+
+    assert exc_info.value.code == 4
+    assert len(patches) == 1
+    assert patches[0]["status"] == "lost"
+    assert patches[0]["output_quiesced"] is False
+    assert patches[0]["stdout_preview"] == ""
+    assert "cannot establish quiescence" in patches[0]["stderr_preview"]
+
+
+def test_host_exec_process_failure_finalizes_pre_exec_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_process_failure_audit",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    patches: list[tuple[str, dict]] = []
+    spill_paths: dict[str, Path] = {}
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def post(self, _endpoint: str, payload: dict) -> dict:
+            spill_paths["stdout"] = Path(payload["stdout_path"])
+            spill_paths["stderr"] = Path(payload["stderr_path"])
+            assert spill_paths["stdout"].is_file()
+            assert spill_paths["stderr"].is_file()
+            assert spill_paths["stdout"].stat().st_mode & 0o777 == 0o600
+            assert spill_paths["stderr"].stat().st_mode & 0o777 == 0o600
+            return {"id": 42}
+
         def patch(self, endpoint: str, payload: dict, **_kwargs: object) -> dict:
             patches.append((endpoint, payload))
-            return payload
+            return _host_finalize_response(payload)
 
         def close(self) -> None:
             pass
@@ -7399,6 +8552,342 @@ def test_host_exec_process_failure_finalizes_pre_exec_audit(
     assert patches[0][0] == "command-runs/42"
     assert patches[0][1]["status"] == "failed"
     assert "registry unavailable" in patches[0][1]["stderr_preview"]
+    assert spill_paths["stdout"].read_bytes() == b""
+    assert "registry unavailable" in spill_paths["stderr"].read_text(encoding="utf-8")
+
+
+def test_host_exec_process_setup_append_failure_still_finalizes_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_append_failure_finalize",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    patches: list[tuple[str, dict]] = []
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def post(self, _endpoint: str, _payload: dict) -> dict:
+            return {"id": 42}
+
+        def patch(self, endpoint: str, payload: dict, **_kwargs: object) -> dict:
+            patches.append((endpoint, payload))
+            return _host_finalize_response(payload)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "_run_host_process",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("process setup exploded")
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "_append_spill_text",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("spill append failed")),
+    )
+    (tmp_path / "scope.json").write_text(json.dumps({"hosts": []}), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(tmp_path),
+                from_json=None,
+                command=["echo", "ok"],
+                tool="echo",
+                intent="audit setup and spill failure",
+                technique="T0000",
+                phase="investigate",
+                target_host="",
+                agent_name=None,
+                scope_host="",
+                cwd=None,
+                timeout=30,
+                audit_source="argv",
+                allow_destructive=False,
+                require_audit=True,
+            )
+        )
+
+    assert exc_info.value.code == 1
+    assert patches[0][0] == "command-runs/42"
+    assert patches[0][1]["status"] == "failed"
+    assert "process setup exploded" in patches[0][1]["stderr_preview"]
+    assert "spill append failed" in patches[0][1]["stderr_preview"]
+
+
+def test_host_exec_accepts_exact_terminal_row_after_committed_response_loss(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_finalize_response_loss",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    patches: list[tuple[dict, bool]] = []
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def post(self, _endpoint: str, _payload: dict) -> dict:
+            return {"id": 42}
+
+        def patch(
+            self,
+            _endpoint: str,
+            payload: dict,
+            *,
+            accept_409: bool = False,
+        ) -> dict:
+            patches.append((dict(payload), accept_409))
+            if not accept_409:
+                raise module.AssessError(
+                    "Failed after retry: first finalize committed but its response was lost"
+                )
+            return {
+                "id": 42,
+                "finalize_409": True,
+                "status": payload["status"],
+                "return_code": payload["return_code"],
+                "timed_out": payload["timed_out"],
+                "duration_ms": payload["duration_ms"],
+                "partial_results": payload["partial_results"],
+                "completed_at": payload["ended_at"].replace("Z", "+00:00"),
+                "output_cleanup_status": "not_required",
+                "output_integrity_status": "verified",
+            }
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+    monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "member")
+    monkeypatch.setattr(
+        module,
+        "_run_host_process",
+        lambda *_args, **_kwargs: (0, "trusted output\n", "", False),
+    )
+    (tmp_path / "scope.json").write_text(json.dumps({"hosts": []}), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(tmp_path),
+                from_json=None,
+                command=["echo", "ok"],
+                tool="echo",
+                intent="recover exact finalize response",
+                technique="T0000",
+                phase="investigate",
+                target_host="",
+                agent_name=None,
+                scope_host="",
+                cwd=None,
+                timeout=30,
+                audit_source="argv",
+                allow_destructive=False,
+                require_audit=True,
+            )
+        )
+
+    assert exc_info.value.code == 0
+    assert len(patches) == 1
+    assert patches[0][1] is True
+
+
+def test_host_exec_rejects_conflicting_terminal_row_after_finalize_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_finalize_conflict",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    patches: list[tuple[dict, bool]] = []
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def post(self, _endpoint: str, _payload: dict) -> dict:
+            return {"id": 42}
+
+        def patch(
+            self,
+            _endpoint: str,
+            payload: dict,
+            *,
+            accept_409: bool = False,
+        ) -> dict:
+            patches.append((dict(payload), accept_409))
+            return {
+                "id": 42,
+                "finalize_409": True,
+                "status": payload["status"],
+                "return_code": payload["return_code"],
+                "timed_out": payload["timed_out"],
+                "duration_ms": payload["duration_ms"],
+                "partial_results": not payload["partial_results"],
+                "completed_at": payload["ended_at"].replace("Z", "+00:00"),
+                "output_cleanup_status": "not_required",
+                "output_integrity_status": "verified",
+            }
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+    monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "member")
+    monkeypatch.setattr(
+        module,
+        "_run_host_process",
+        lambda *_args, **_kwargs: (0, "trusted output\n", "", False),
+    )
+    (tmp_path / "scope.json").write_text(json.dumps({"hosts": []}), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(tmp_path),
+                from_json=None,
+                command=["echo", "ok"],
+                tool="echo",
+                intent="reject conflicting finalize response",
+                technique="T0000",
+                phase="investigate",
+                target_host="",
+                agent_name=None,
+                scope_host="",
+                cwd=None,
+                timeout=30,
+                audit_source="argv",
+                allow_destructive=False,
+                require_audit=True,
+            )
+        )
+
+    assert exc_info.value.code == 4
+    assert len(patches) == 1
+
+
+def test_host_exec_policy_refusal_uses_terminal_inline_audit_without_spills(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_policy_refusal",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    posts: list[tuple[str, dict]] = []
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def post(self, endpoint: str, payload: dict) -> dict:
+            posts.append((endpoint, payload))
+            return {"id": 42}
+
+        def close(self) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            self.close()
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+    monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "anonymous")
+    monkeypatch.setattr(
+        module.scope_lib,
+        "enforce_execution_policy",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            module.scope_lib.ScopePolicyError("tool is outside declared scope")
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "_run_host_process",
+        lambda *_a, **_k: pytest.fail("policy-refused command must not execute"),
+    )
+    (tmp_path / "scope.json").write_text(json.dumps({"hosts": []}), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(tmp_path),
+                from_json=None,
+                command=["echo", "blocked"],
+                tool="echo",
+                intent="verify policy refusal audit",
+                technique="T0000",
+                phase="investigate",
+                target_host="",
+                agent_name=None,
+                scope_host="",
+                cwd=None,
+                timeout=30,
+                audit_source="argv",
+                allow_destructive=False,
+                require_audit=True,
+                identity=None,
+                identity_scope="",
+            )
+        )
+
+    assert exc_info.value.code == 3
+    assert len(posts) == 1
+    endpoint, payload = posts[0]
+    assert endpoint == "command-runs/host-exec"
+    assert payload["host_record_kind"] == "policy_refusal"
+    assert payload["status"] == "failed"
+    assert "outside declared scope" in payload["stderr"]
+    assert payload["stdout_path"] is None
+    assert payload["stderr_path"] is None
 
 
 def test_host_exec_acquires_aggregate_rate_lease_after_pre_exec_audit(
@@ -7420,7 +8909,7 @@ def test_host_exec_acquires_aggregate_rate_lease_after_pre_exec_audit(
 
         def patch(self, _endpoint: str, payload: dict, **_kwargs: object) -> dict:
             events.append("finalize")
-            return payload
+            return _host_finalize_response(payload)
 
         def close(self) -> None:
             pass
@@ -7495,7 +8984,9 @@ def test_host_exec_acquires_aggregate_rate_lease_after_pre_exec_audit(
     ]
 
 
-def test_host_exec_require_audit_fails_when_audit_record_fails(
+@pytest.mark.parametrize("require_audit", [False, True])
+def test_host_exec_fails_closed_when_pre_exec_audit_record_fails(
+    require_audit: bool,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7553,11 +9044,349 @@ def test_host_exec_require_audit_fails_when_audit_record_fails(
                 timeout=30,
                 audit_source="argv",
                 allow_destructive=False,
+                require_audit=require_audit,
+            )
+        )
+
+    assert exc_info.value.code == 4
+
+
+@pytest.mark.parametrize(
+    ("status_field", "untrustworthy_status"),
+    [
+        ("output_cleanup_status", "warning"),
+        ("output_cleanup_status", "pending"),
+        ("output_integrity_status", "warning"),
+        ("output_integrity_status", "pending"),
+    ],
+)
+def test_host_exec_require_audit_rejects_untrustworthy_output_status(
+    status_field: str,
+    untrustworthy_status: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_assess_module(
+        f"host_exec_command_module_{status_field}_{untrustworthy_status}",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def post(self, _endpoint: str, _payload: dict) -> dict:
+            return {"id": 42}
+
+        def patch(self, _endpoint: str, payload: dict, **_kwargs: object) -> dict:
+            response = _host_finalize_response(
+                payload,
+                id=42,
+                output_cleanup_status="complete",
+                output_integrity_status="verified",
+                output_cleanup_warning="retained spill could not be removed",
+                output_integrity_warning="retained snapshot could not be verified",
+            )
+            response[status_field] = untrustworthy_status
+            return response
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+    monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "anonymous")
+    monkeypatch.setattr(module.scope_lib, "enforce_execution_policy", lambda *_a, **_k: {})
+    monkeypatch.setattr(module, "aggregate_rate_reservation", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        module,
+        "_run_host_process",
+        lambda *_args, **_kwargs: (0, "ok\n", "", False),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(tmp_path),
+                from_json=None,
+                command=["echo", "ok"],
+                tool="echo",
+                intent="require trustworthy audit cleanup",
+                technique="T0000",
+                phase="investigate",
+                target_host="",
+                agent_name=None,
+                scope_host="",
+                cwd=None,
+                timeout=30,
+                audit_source="argv",
+                allow_destructive=False,
                 require_audit=True,
             )
         )
 
     assert exc_info.value.code == 4
+    label = status_field.removeprefix("output_").removesuffix("_status")
+    assert f"output {label} is {untrustworthy_status}" in capsys.readouterr().err
+
+
+def test_host_exec_require_audit_rejects_deferred_physical_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_deferred_cleanup",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def post(self, _endpoint: str, _payload: dict) -> dict:
+            return {"id": 42}
+
+        def patch(self, _endpoint: str, payload: dict, **_kwargs: object) -> dict:
+            return _host_finalize_response(
+                payload,
+                id=42,
+                output_cleanup_status="deferred",
+                output_cleanup_warning="physical erasure deferred by policy",
+                output_integrity_status="not_applicable",
+            )
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+    monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "anonymous")
+    monkeypatch.setattr(module.scope_lib, "enforce_execution_policy", lambda *_a, **_k: {})
+    monkeypatch.setattr(module, "aggregate_rate_reservation", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        module,
+        "_run_host_process",
+        lambda *_args, **_kwargs: (0, "", "", False),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(tmp_path),
+                from_json=None,
+                command=["echo", "ok"],
+                tool="echo",
+                intent="report deferred cleanup",
+                technique="T0000",
+                phase="investigate",
+                target_host="",
+                agent_name=None,
+                scope_host="",
+                cwd=None,
+                timeout=30,
+                audit_source="argv",
+                allow_destructive=False,
+                require_audit=True,
+            )
+        )
+
+    assert exc_info.value.code == 4
+    assert "output cleanup is deferred" in capsys.readouterr().err
+
+
+def test_host_exec_console_write_failure_cannot_strand_a_quiesced_audit_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_broken_console",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    patches: list[dict] = []
+    warnings: list[str] = []
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def post(self, _endpoint: str, _payload: dict) -> dict:
+            return {"id": 42}
+
+        def patch(self, _endpoint: str, payload: dict, **_kwargs: object) -> dict:
+            patches.append(payload)
+            return _host_finalize_response(
+                payload,
+                id=42,
+                output_cleanup_status="not_required",
+                output_integrity_status="verified",
+            )
+
+        def close(self) -> None:
+            pass
+
+    class _BrokenStdout:
+        def write(self, _value: str) -> None:
+            raise BrokenPipeError("consumer closed")
+
+        def flush(self) -> None:
+            pass
+
+    class _WarningSink:
+        def write(self, value: str) -> None:
+            warnings.append(value)
+
+        def flush(self) -> None:
+            pass
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+    monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "anonymous")
+    monkeypatch.setattr(module.scope_lib, "enforce_execution_policy", lambda *_a, **_k: {})
+    monkeypatch.setattr(module, "aggregate_rate_reservation", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        module,
+        "_run_host_process",
+        lambda *_a, **_k: (0, "trusted output\n", "", False),
+    )
+    monkeypatch.setattr(
+        module,
+        "sys",
+        SimpleNamespace(stdout=_BrokenStdout(), stderr=_WarningSink(), exit=sys.exit),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(tmp_path),
+                from_json=None,
+                command=["echo", "ok"],
+                tool="echo",
+                intent="finalize despite console closure",
+                technique="T0000",
+                phase="investigate",
+                target_host="",
+                agent_name=None,
+                scope_host="",
+                cwd=None,
+                timeout=30,
+                audit_source="argv",
+                allow_destructive=False,
+                require_audit=True,
+            )
+        )
+
+    assert exc_info.value.code == 1
+    assert len(patches) == 1
+    assert patches[0]["status"] == "completed"
+    assert patches[0]["output_quiesced"] is True
+    assert "console output failed" in "".join(warnings)
+
+
+def test_host_exec_client_close_failure_still_closes_both_retained_spill_fds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_close_chain",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    retained_descriptors: list[int] = []
+    real_create_output_spills = module._create_output_spills
+
+    def capture_output_spills(*args, **kwargs):
+        descriptors = real_create_output_spills(*args, **kwargs)
+        retained_descriptors.extend(descriptors)
+        return descriptors
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def post(self, _endpoint: str, _payload: dict) -> dict:
+            return {"id": 42}
+
+        def patch(self, _endpoint: str, payload: dict, **_kwargs: object) -> dict:
+            return _host_finalize_response(
+                payload,
+                id=42,
+                output_cleanup_status="not_required",
+                output_integrity_status="verified",
+            )
+
+        def close(self) -> None:
+            raise RuntimeError("client close failed")
+
+    monkeypatch.setattr(module, "_create_output_spills", capture_output_spills)
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+    monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "anonymous")
+    monkeypatch.setattr(module.scope_lib, "enforce_execution_policy", lambda *_a, **_k: {})
+    monkeypatch.setattr(module, "aggregate_rate_reservation", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        module,
+        "_run_host_process",
+        lambda *_a, **_k: (0, "", "", False),
+    )
+
+    with pytest.raises(RuntimeError, match="client close failed"):
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(tmp_path),
+                from_json=None,
+                command=["echo", "ok"],
+                tool="echo",
+                intent="close retained descriptors",
+                technique="T0000",
+                phase="investigate",
+                target_host="",
+                agent_name=None,
+                scope_host="",
+                cwd=None,
+                timeout=30,
+                audit_source="argv",
+                allow_destructive=False,
+                require_audit=True,
+            )
+        )
+
+    assert len(retained_descriptors) == 2
+    for descriptor in retained_descriptors:
+        with pytest.raises(OSError, match="Bad file descriptor"):
+            os.fstat(descriptor)
 
 
 def test_approve_proposal_rejects_non_containment_decision(
@@ -9447,6 +11276,101 @@ def test_resume_brief_cli_requests_targeted_json(
     assert json.loads(capsys.readouterr().out)["engagement"]["key"] == "eng"
 
 
+def test_resume_brief_orphan_attention_surfaces_degraded_recovery() -> None:
+    module = _load_assess_module(
+        "resume_brief_command_module_degraded_attention",
+        "agent/scripts/assess/commands/resume_brief.py",
+    )
+
+    attention = module._orphan_attention(
+        json.dumps(
+            {
+                "summary": {
+                    "recovered_degraded": 2,
+                    "recovered_degraded_ids": [95, 96],
+                    "recovered_degraded_ids_omitted": 0,
+                    "output_attention_action": (
+                        "vigil assess command-run list --output-attention "
+                        "--json --limit 1000"
+                    ),
+                }
+            }
+        )
+    )
+
+    assert attention == (
+        "command_runs:recovered_degraded=2 ids=95,96 "
+        "action=`vigil assess command-run list --output-attention --json --limit 1000`"
+    )
+
+
+def test_resume_brief_orphan_attention_locates_failed_recovery_rows() -> None:
+    module = _load_assess_module(
+        "resume_brief_command_module_failed_recovery_attention",
+        "agent/scripts/assess/commands/resume_brief.py",
+    )
+
+    attention = module._orphan_attention(
+        json.dumps(
+            {
+                "summary": {
+                    "skipped_unverifiable": 3,
+                    "pending_recovery_failed": 3,
+                    "pending_recovery_failed_ids": [93, 96],
+                    "pending_recovery_failed_ids_omitted": 1,
+                    "output_attention_action": (
+                        "vigil assess command-run list --output-attention "
+                        "--json --limit 1000"
+                    ),
+                }
+            }
+        )
+    )
+
+    assert attention == (
+        "command_runs:skipped_unverifiable=3,pending_recovery_failed=3 "
+        "failed_ids=93,96 failed_ids_omitted=1 "
+        "action=`vigil assess command-run list --output-attention --json --limit 1000`"
+    )
+
+
+def test_resume_brief_command_rows_render_degraded_output_truth() -> None:
+    module = _load_assess_module(
+        "resume_brief_command_module_output_truth",
+        "agent/scripts/assess/commands/resume_brief.py",
+    )
+    brief = {
+        "engagement": {"key": "eng"},
+        "command_runs": [
+            {
+                "id": 7,
+                "created_at": "2026-08-06T12:00:00Z",
+                "tool_bin": "curl",
+                "agent_name": "operator",
+                "intent": "suppressed output recovery",
+                "output_retention_status": "suppression_deferred",
+                "output_cleanup_status": "deferred",
+                "output_integrity_status": "not_applicable",
+            },
+            {
+                "id": 8,
+                "created_at": "2026-08-06T12:01:00Z",
+                "tool_bin": "clang",
+                "agent_name": "operator",
+                "intent": "snapshot verification",
+                "output_retention_status": "integrity_failure",
+                "output_cleanup_status": "warning",
+                "output_integrity_status": "warning",
+            },
+        ],
+    }
+
+    rendered = module._render_markdown(brief)
+
+    assert "output=suppression_deferred cleanup=deferred integrity=not_applicable" in rendered
+    assert "output=integrity_failure cleanup=warning integrity=warning" in rendered
+
+
 def test_artifact_cli_registers_payload(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -9606,6 +11530,7 @@ def test_list_command_runs_cli_sends_fuzzy_search_flags(
             destructive=False,
             not_destructive=False,
             timed_out=False,
+            output_attention=True,
             include_output=False,
             limit=10,
             offset=0,
@@ -9614,7 +11539,7 @@ def test_list_command_runs_cli_sends_fuzzy_search_flags(
     )
 
     assert calls == [
-        "command-runs?q=VA047&tool_bin=curl&target_host=example.com&sort=distant&show_matches=true&limit=10&offset=0"
+        "command-runs?q=VA047&tool_bin=curl&target_host=example.com&sort=distant&show_matches=true&output_attention=true&limit=10&offset=0"
     ]
     assert "(no command runs matched)" in capsys.readouterr().out
 
@@ -9651,6 +11576,48 @@ def test_agent_close_uses_ready_handoff_to_complete_dispatch(
         ("AG-READY", {"status": "completed", "completed_at": "2026-05-19T12:00:00Z", "finding_slugs": ["VA-001"]})
     ]
     assert fake.decisions_recorded[0]["kind"] == "dispatch_closed_from_handoff"
+    assert json.loads(capsys.readouterr().out)["dispatch"]["status"] == "completed"
+
+
+def test_agent_close_preserves_variant_parent_scope_in_dispatch_row(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_assess_module(
+        "agent_command_module_close_variant_scope",
+        "agent/scripts/assess/commands/agent.py",
+    )
+    fake = _CapturingClient()
+    fake.dispatches_by_id["VARIANT-READY"] = {
+        "agent_id": "VARIANT-READY",
+        "agent_role": "code-variant-hunter",
+        "status": "in-progress",
+        "finding_slugs": ["VF-001"],
+    }
+    fake.handoffs_by_id["VARIANT-READY"] = {
+        "agent_id": "VARIANT-READY",
+        "handoff_status": "ready",
+        "handoff_version": 1,
+        "finding_slugs": ["VF-004"],
+    }
+    monkeypatch.setattr(module.dispatch, "_client_for", lambda _args: (fake, SimpleNamespace()))
+
+    module.run(
+        SimpleNamespace(
+            action="close",
+            extra=["VARIANT-READY"],
+            agent_id=None,
+            completed_at="2026-08-06T12:00:00Z",
+            reason="variant closure",
+        )
+    )
+
+    assert fake.patches == [
+        (
+            "VARIANT-READY",
+            {"status": "completed", "completed_at": "2026-08-06T12:00:00Z"},
+        )
+    ]
     assert json.loads(capsys.readouterr().out)["dispatch"]["status"] == "completed"
 
 
@@ -10099,7 +12066,7 @@ def test_dispatch_register_overlap_check_is_opt_in(
     )
 
     err = capsys.readouterr().err
-    assert "WARN agent start" not in err
+    assert "active dispatch rows appear to overlap" not in err
     assert list_calls == []
     assert fake.recorded[0]["agent_id"] == "AG-NEW"
 
@@ -10191,7 +12158,7 @@ def test_dispatch_register_does_not_warn_for_shared_unit_mode_only(
     )
 
     err = capsys.readouterr().err
-    assert "WARN agent start" not in err
+    assert "active dispatch rows appear to overlap" not in err
     assert fake.recorded[0]["agent_id"] == "AG-NEW"
 
 
@@ -11158,6 +13125,23 @@ def test_validate_dispatch_missing_skills_is_a_warning_not_an_error() -> None:
     errors, warnings = validate_specialist_dispatch_contract(payload)
     assert not any("skills is required" in e for e in errors), errors
     assert any("skills not set" in w for w in warnings), warnings
+
+
+def test_validate_dispatch_missing_recipe_metadata_is_visible_debt() -> None:
+    """A live dispatch without requested model/reasoning must not look fully measured."""
+    from assess.lib.contracts import validate_specialist_dispatch_contract
+
+    errors, warnings = validate_specialist_dispatch_contract(
+        {
+            "agent_role": "code-vuln-hunter",
+            "dispatch_mode": "item-iterating",
+            "skills": "code-vulnerability-analysis",
+        }
+    )
+
+    assert errors == []
+    assert any("requested_model" in warning for warning in warnings)
+    assert any("requested_reasoning" in warning for warning in warnings)
 
 
 def test_validate_dispatch_has_no_engagement_file_dependency() -> None:

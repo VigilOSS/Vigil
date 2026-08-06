@@ -566,9 +566,45 @@
     },
     "provenance": {
       "additionalProperties": false,
-      "title": "Provenance",
-      "type": "object",
+      "description": "Typed reserved provenance with forward-compatible producer metadata.",
       "properties": {
+        "code_snapshot": {
+          "additionalProperties": false,
+          "description": "Immutable identity of the verified source snapshot behind a code finding.",
+          "properties": {
+            "repo_id": {
+              "description": "code_repos.id for the source snapshot reviewed for this finding.",
+              "minimum": 1,
+              "title": "Repo Id",
+              "type": "integer"
+            },
+            "repo_generation": {
+              "description": "The repository active_generation reviewed for this finding.",
+              "minimum": 1,
+              "title": "Repo Generation",
+              "type": "integer"
+            },
+            "source_manifest_digest": {
+              "description": "The repository source_manifest_digest reviewed for this finding.",
+              "maxLength": 64,
+              "minLength": 64,
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Source Manifest Digest",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repo_id",
+            "repo_generation",
+            "source_manifest_digest"
+          ],
+          "title": "CodeSnapshotProvenance",
+          "type": [
+            "object",
+            "null"
+          ],
+          "default": null
+        },
         "agent_name": {
           "type": "string",
           "description": "Agent that produced this finding (e.g. 'vulnerability-analyst'). Mirror of source_name."
@@ -577,7 +613,9 @@
           "type": "string",
           "description": "Path or ID of the artifact this finding was derived from."
         }
-      }
+      },
+      "title": "FindingProvenance",
+      "type": "object"
     },
     "evidence_type": {
       "enum": [
@@ -717,6 +755,37 @@
   ],
   "title": "Assessment Finding Record",
   "type": "object",
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "canonical_location"
+        ],
+        "properties": {
+          "canonical_location": {
+            "pattern": "^\\s*file:"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "provenance"
+        ],
+        "properties": {
+          "provenance": {
+            "required": [
+              "code_snapshot"
+            ],
+            "properties": {
+              "code_snapshot": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
   "examples": [
     {
       "title": "Blind SQL injection in search",
@@ -782,6 +851,13 @@
       "defect_family": "buffer-overflow",
       "canonical_location": "file:lib/urlapi.c:342",
       "summary": "Attacker-controlled URL scheme exceeding 64 bytes overflows heap buffer in parseurl()",
+      "provenance": {
+        "code_snapshot": {
+          "repo_id": 7,
+          "repo_generation": 3,
+          "source_manifest_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        }
+      },
       "details": {
         "cwe_id": "CWE-122",
         "impact": "Remote code execution via heap corruption",
@@ -818,9 +894,6 @@
       "evidence_ref": "",
       "notes": "",
       "source_name": "vulnerability-analyst",
-      "provenance": {
-        "agent_name": "vulnerability-analyst"
-      },
       "links": []
     },
     {

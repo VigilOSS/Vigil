@@ -14,6 +14,11 @@ from assess.lib.config import load_config
 from assess.lib.finding_render import blocked_reason_summary
 
 _COVERING_STATUSES = {"tested", "signal"}
+_DEGRADED_OUTPUT_RETENTION = {
+    "integrity_failure",
+    "suppression_deferred",
+    "untrusted",
+}
 
 
 def _orphan_attention(output: str) -> str:
@@ -33,11 +38,20 @@ def _orphan_attention(output: str) -> str:
     # sweep's ``skipped`` counter is a benign-vs-genuine union (the backend
     # ignores ?status=running, so it pages ALL historical rows and "skips" every
     # already-terminal one — a benign count that can reach the thousands). Key on
-    # ``skipped_unverifiable`` (liveness/pid/PATCH failures), NOT the conflated
-    # ``skipped``, mirroring how host_processes already keys on its bad states
-    # (unverifiable/failed) rather than a catch-all (I-05).
+    # ``skipped_unverifiable`` (liveness/pid/PATCH/pending-recovery failures),
+    # NOT the conflated ``skipped``, mirroring how host_processes already keys
+    # on its bad states (unverifiable/failed) rather than a catch-all (I-05).
     sections = (
-        ("command_runs", payload.get("summary"), ("still_running", "skipped_unverifiable")),
+        (
+            "command_runs",
+            payload.get("summary"),
+            (
+                "still_running",
+                "skipped_unverifiable",
+                "pending_recovery_failed",
+                "recovered_degraded",
+            ),
+        ),
         ("jobs", payload.get("jobs_summary"), ("still_running", "skipped_unverifiable")),
         (
             "host_processes",
@@ -55,7 +69,42 @@ def _orphan_attention(output: str) -> str:
             if int(summary.get(field) or 0) > 0
         ]
         if counts:
-            rendered.append(f"{name}:{','.join(counts)}")
+            attention = f"{name}:{','.join(counts)}"
+            if name == "command_runs":
+                degraded_ids = [
+                    str(row_id)
+                    for row_id in (summary.get("recovered_degraded_ids") or [])
+                    if type(row_id) is int
+                ][: kali_sweep_orphans._ATTENTION_ID_LIMIT]
+                if degraded_ids:
+                    attention += f" ids={','.join(degraded_ids)}"
+                degraded_omitted = int(
+                    summary.get("recovered_degraded_ids_omitted") or 0
+                )
+                if degraded_omitted > 0:
+                    attention += f" ids_omitted={degraded_omitted}"
+                failed_ids = [
+                    str(row_id)
+                    for row_id in (
+                        summary.get("pending_recovery_failed_ids") or []
+                    )
+                    if type(row_id) is int
+                ][: kali_sweep_orphans._ATTENTION_ID_LIMIT]
+                if failed_ids:
+                    attention += f" failed_ids={','.join(failed_ids)}"
+                failed_omitted = int(
+                    summary.get("pending_recovery_failed_ids_omitted") or 0
+                )
+                if failed_omitted > 0:
+                    attention += f" failed_ids_omitted={failed_omitted}"
+                if (
+                    summary.get("output_attention_action")
+                    == kali_sweep_orphans._OUTPUT_ATTENTION_ACTION
+                ):
+                    attention += (
+                        f" action=`{kali_sweep_orphans._OUTPUT_ATTENTION_ACTION}`"
+                    )
+            rendered.append(attention)
     return "; ".join(rendered)
 
 
@@ -275,7 +324,13 @@ def _render_markdown(brief: dict) -> str:
                 )
     lines.extend(["", "## Command Runs"])
     for row in brief.get("command_runs") or []:
-        lines.append(f"- #{row.get('id')} {row.get('created_at')} {row.get('tool_bin') or row.get('tool_name')} {row.get('agent_name')} :: {_trim(row.get('intent') or row.get('command') or '', 120)}")
+        output_truth = _command_output_truth(row)
+        lines.append(
+            f"- #{row.get('id')} {row.get('created_at')} "
+            f"{row.get('tool_bin') or row.get('tool_name')} {row.get('agent_name')} "
+            f":: {_trim(row.get('intent') or row.get('command') or '', 120)}"
+            f"{output_truth}"
+        )
     if not brief.get("command_runs"):
         lines.append("- none")
     lines.extend(["", "## Artifacts"])
@@ -322,6 +377,30 @@ def _render_markdown(brief: dict) -> str:
             entity = f" [{row.get('entity_kind')} {row.get('entity_id')}]"
         lines.append(f"- {row.get('reason')}{entity}: `{row.get('command')}`")
     return "\n".join(lines)
+
+
+def _command_output_truth(row: dict) -> str:
+    retention = str(row.get("output_retention_status") or "").strip().lower()
+    cleanup = str(row.get("output_cleanup_status") or "").strip().lower()
+    integrity = str(row.get("output_integrity_status") or "").strip().lower()
+    if not (
+        retention in _DEGRADED_OUTPUT_RETENTION
+        or cleanup in {"deferred", "pending", "warning"}
+        or integrity in {"pending", "warning"}
+    ):
+        return ""
+    recovery_observed_at = str(
+        row.get("output_recovery_observed_at") or ""
+    ).strip()
+    observed = (
+        f" output_recovery_observed_at={recovery_observed_at}"
+        if recovery_observed_at
+        else ""
+    )
+    return (
+        f" [output={retention or 'unknown'} cleanup={cleanup or 'unknown'} "
+        f"integrity={integrity or 'unknown'}{observed}]"
+    )
 
 
 def _render_dispatch_more(lines: list, shown: int, total, label: str) -> None:
