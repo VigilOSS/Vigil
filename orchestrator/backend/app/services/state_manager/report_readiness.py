@@ -19,7 +19,11 @@ from ._common import (
 )
 from .coverage import coverage_readiness, web_uncovered_high_route_hosts
 from .cvss import CvssVectorError, base_score
-from .findings import finding_code_snapshot_status, load_code_repo_snapshot_states
+from .findings import (
+    finding_code_snapshot_status,
+    is_file_finding,
+    load_code_repo_snapshot_states,
+)
 from .links import _root_cause_link_metadata
 
 _MARKDOWN_PATH_REFERENCE_RE = re.compile(
@@ -237,15 +241,20 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
         if row.get("workflow_status") in reportable_statuses
     ]
 
+    draft_snapshot_statuses: dict[str, str] = {}
     with _common.get_connection() as connection:
         repo_states = load_code_repo_snapshot_states(connection, engagement.id)
-        for row in candidates:
+        for row in candidate_records:
             snapshot_status = finding_code_snapshot_status(
                 connection,
                 engagement.id,
                 row,
                 repo_states=repo_states,
             )
+            if row.get("workflow_status") == "draft":
+                draft_snapshot_statuses[str(row.get("slug", ""))] = snapshot_status
+            if row.get("workflow_status") not in reportable_statuses:
+                continue
             if snapshot_status not in {"stale", "unbound"}:
                 continue
             blockers.append(
@@ -285,7 +294,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
             }
         )
 
-    for obligation in code_analysis_service.confirmed_finding_variant_receipt_obligations(
+    for obligation in code_analysis_service.report_durable_finding_variant_receipt_obligations(
         engagement.id
     ):
         finding_slugs = list(obligation["finding_slugs"])
@@ -303,7 +312,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 "missing_file_ids": missing_file_ids,
                 "missing_file_paths": missing_file_paths,
                 "detail": (
-                    "confirmed current code finding(s) "
+                    "report-durable current code finding(s) "
                     f"{', '.join(finding_slugs)} have no complete current "
                     f"variant-scan receipt for {len(missing_file_ids)} "
                     f"admitted current repository file(s): {path_sample}"
@@ -351,18 +360,31 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
         if row.get("workflow_status") != "draft":
             continue
         slug = str(row.get("slug", ""))
-        advisories.append(
+        snapshot_status = draft_snapshot_statuses.get(slug, "not_applicable")
+        destination = (
+            blockers
+            if is_file_finding(str(row.get("canonical_location", "") or ""))
+            else advisories
+        )
+        destination.append(
             {
                 "kind": "draft_finding_needs_disposition",
                 "slug": slug,
                 "title": row.get("title", ""),
+                "snapshot_status": snapshot_status,
                 "detail": (
                     f"finding {slug} is parked in workflow_status='draft' and will NOT appear in "
                     f"the report or export. Disposition it: promote to active with "
-                    f"`vigil assess finding update {slug} --workflow-status active` so it reports, "
+                    f"`vigil assess finding update {slug} --status active` so it reports, "
                     f"or verify it false positive with `vigil assess finding verify {slug} "
                     f"--disposition false_positive --reason \"...\" --kill-reason \"...\" "
                     f"--kill-check <index>` after documenting the failed check."
+                    + (
+                        " The code finding is not bound to the current verified source; "
+                        "re-review and rebind it before promotion."
+                        if snapshot_status in {"stale", "unbound"}
+                        else ""
+                    )
                 ),
             }
         )
@@ -954,9 +976,9 @@ def _report_finding_records(engagement_id: int, *, mode: str = "draft") -> list[
         # leak it into draft reports; mirror how ``final`` mode keeps only
         # {confirmed, downgraded} dispositions. There is no chain_required bypass
         # in ``final`` — a held finding is never report-durable. Also drop
-        # ``workflow_status == "draft"`` findings: ``report_readiness()`` never
-        # gates them (draft is not a reportable status) and ``final`` mode already
-        # excludes them, so they must not leak into the draft projection either.
+        # ``workflow_status == "draft"`` findings: readiness blocks them until
+        # triage closes, while both report projections intentionally omit unresolved
+        # work so a renderer cannot mistake it for report-durable content.
         rows = [
             row
             for row in rows

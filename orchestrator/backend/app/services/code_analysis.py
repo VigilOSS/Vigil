@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -5038,19 +5039,31 @@ def list_analysis_results(
 # =========================================================================
 
 
-def _current_reportable_variant_parent_slugs(
+def _current_variant_parent_rows_by_repo(
     connection,
     engagement_id: int,
-    repo_id: int,
-) -> list[str]:
+    repo_ids: set[int],
+    *,
+    report_durable_only: bool,
+) -> dict[int, list[Any]]:
     reportable_statuses = sorted(_REPORTABLE_FINDING_STATUSES)
     status_placeholders = ",".join("?" for _ in reportable_statuses)
+    lifecycle_clause = (
+        "AND findings.verification_state = 'verified' "
+        "AND findings.verification_disposition IN ('confirmed', 'downgraded')"
+        if report_durable_only
+        else (
+            "AND COALESCE(findings.verification_disposition, 'none') "
+            "NOT IN ('blocked', 'false_positive')"
+        )
+    )
     rows = connection.execute(
         f"""
         SELECT findings.*
         FROM assessment_findings AS findings
         WHERE findings.engagement_id = ?
           AND findings.status IN ({status_placeholders})
+          {lifecycle_clause}
           AND NOT EXISTS (
               SELECT 1
               FROM assessment_finding_links AS links
@@ -5064,11 +5077,12 @@ def _current_reportable_variant_parent_slugs(
         (engagement_id, *reportable_statuses),
     ).fetchall()
     repo_states = load_code_repo_snapshot_states(connection, engagement_id)
-    eligible: list[str] = []
+    eligible: dict[int, list[Any]] = {repo_id: [] for repo_id in repo_ids}
     for row in rows:
+        repo_id = _finding_snapshot_repo_id(row)
         if (
             not is_file_finding(str(row["canonical_location"] or ""))
-            or _finding_snapshot_repo_id(row) != repo_id
+            or repo_id not in repo_ids
             or finding_code_snapshot_status(
                 connection,
                 engagement_id,
@@ -5078,8 +5092,169 @@ def _current_reportable_variant_parent_slugs(
             != "current"
         ):
             continue
-        eligible.append(str(row["slug"]))
+        assert repo_id is not None
+        eligible[repo_id].append(row)
     return eligible
+
+
+def _current_phase2_variant_parent_slugs_by_repo(
+    connection,
+    engagement_id: int,
+    repo_ids: set[int],
+) -> dict[int, list[str]]:
+    return {
+        repo_id: [str(row["slug"]) for row in rows]
+        for repo_id, rows in _current_variant_parent_rows_by_repo(
+            connection,
+            engagement_id,
+            repo_ids,
+            report_durable_only=False,
+        ).items()
+    }
+
+
+def _current_report_durable_variant_parent_slugs_by_repo(
+    connection,
+    engagement_id: int,
+    repo_ids: set[int],
+) -> dict[int, list[str]]:
+    return {
+        repo_id: [str(row["slug"]) for row in rows]
+        for repo_id, rows in _current_variant_parent_rows_by_repo(
+            connection,
+            engagement_id,
+            repo_ids,
+            report_durable_only=True,
+        ).items()
+    }
+
+
+def _current_phase2_variant_parent_slugs(
+    connection,
+    engagement_id: int,
+    repo_id: int,
+) -> list[str]:
+    return _current_phase2_variant_parent_slugs_by_repo(
+        connection,
+        engagement_id,
+        {repo_id},
+    )[repo_id]
+
+
+def validate_variant_dispatch_parent_scope(
+    connection,
+    engagement_id: int,
+    parent_finding_slugs: list[str],
+) -> None:
+    """Require receipt authority to freeze one repository's exact Phase 2 roots."""
+    placeholders = ",".join("?" for _ in parent_finding_slugs)
+    rows = connection.execute(
+        f"""
+        SELECT *
+        FROM assessment_findings
+        WHERE engagement_id = ? AND slug IN ({placeholders})
+        """,
+        (engagement_id, *parent_finding_slugs),
+    ).fetchall()
+    repo_ids = {_finding_snapshot_repo_id(row) for row in rows}
+    if None in repo_ids or len(repo_ids) != 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "code-variant-hunter finding_slugs must equal the exact current "
+                "Phase 2 root set for one repository"
+            ),
+        )
+    repo_id = next(iter(repo_ids))
+    assert repo_id is not None
+    expected = _current_phase2_variant_parent_slugs(
+        connection,
+        engagement_id,
+        repo_id,
+    )
+    if parent_finding_slugs != expected:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "code-variant-hunter finding_slugs must equal the exact current "
+                "Phase 2 root set for one repository; expected "
+                f"{expected}"
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _VariantReceiptProjection:
+    repos: dict[int, dict[str, Any]]
+    files: dict[int, dict[str, Any]]
+    latest_receipts: dict[int, dict[str, Any]]
+    dispatch_scopes: dict[int, dict[str, Any]]
+    parent_slugs: dict[int, list[str]]
+
+
+_LATEST_CURRENT_VARIANT_RECEIPTS_SQL = """
+    SELECT receipts.*,
+           scopes.dispatch_id AS projection_scope_dispatch_id,
+           scopes.parent_finding_slugs_json AS projection_scope_slugs_json,
+           scopes.parent_finding_set_digest AS projection_scope_digest
+    FROM code_files AS current_files
+    JOIN code_repos AS current_repos
+      ON current_repos.id = current_files.repo_id
+     AND current_repos.engagement_id = current_files.engagement_id
+     AND current_repos.active_generation > 0
+    JOIN code_variant_check_receipts AS receipts
+      ON receipts.id = (
+          SELECT candidate.id
+          FROM code_variant_check_receipts AS candidate
+          WHERE candidate.engagement_id = ?
+            AND candidate.current_file_id = current_files.id
+          ORDER BY candidate.id DESC
+          LIMIT 1
+      )
+    LEFT JOIN assessment_dispatches AS dispatches
+      ON dispatches.id = receipts.dispatch_id
+     AND dispatches.engagement_id = receipts.engagement_id
+     AND dispatches.agent_role = ?
+    LEFT JOIN code_variant_dispatch_scopes AS scopes
+      ON scopes.dispatch_id = dispatches.id
+     AND scopes.engagement_id = dispatches.engagement_id
+    WHERE current_files.engagement_id = ?
+    ORDER BY current_files.id
+"""
+
+
+def _load_variant_receipt_projection(
+    connection,
+    engagement_id: int,
+    *,
+    repo_rows: list[dict[str, Any]],
+    file_rows: list[dict[str, Any]],
+    parent_slugs: dict[int, list[str]],
+) -> _VariantReceiptProjection:
+    latest_receipts: dict[int, dict[str, Any]] = {}
+    dispatch_scopes: dict[int, dict[str, Any]] = {}
+    for raw_row in connection.execute(
+        _LATEST_CURRENT_VARIANT_RECEIPTS_SQL,
+        (engagement_id, _VARIANT_DISPATCH_ROLE, engagement_id),
+    ).fetchall():
+        row = dict(raw_row)
+        scope_dispatch_id = row.pop("projection_scope_dispatch_id")
+        scope_slugs_json = row.pop("projection_scope_slugs_json")
+        scope_digest = row.pop("projection_scope_digest")
+        latest_receipts[int(row["current_file_id"])] = row
+        if scope_dispatch_id is not None:
+            dispatch_scopes[int(scope_dispatch_id)] = {
+                "dispatch_id": int(scope_dispatch_id),
+                "parent_finding_slugs_json": scope_slugs_json,
+                "parent_finding_set_digest": scope_digest,
+            }
+    return _VariantReceiptProjection(
+        repos={int(row["id"]): dict(row) for row in repo_rows},
+        files={int(row["id"]): dict(row) for row in file_rows},
+        latest_receipts=latest_receipts,
+        dispatch_scopes=dispatch_scopes,
+        parent_slugs=parent_slugs,
+    )
 
 
 def _validate_dispatch_variant_parent_slugs(
@@ -5089,7 +5264,10 @@ def _validate_dispatch_variant_parent_slugs(
     parent_finding_slugs: list[str],
 ) -> None:
     if not parent_finding_slugs:
-        return
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="variant check requires a non-empty parent finding scope",
+        )
     placeholders = ",".join("?" for _ in parent_finding_slugs)
     rows = connection.execute(
         f"""
@@ -5180,6 +5358,7 @@ def _variant_receipt_is_current(
     receipt: Any,
     *,
     parent_finding_cache: dict[int, list[str]] | None = None,
+    projection: _VariantReceiptProjection | None = None,
 ) -> bool:
     row = dict(receipt)
     file_id = row.get("current_file_id")
@@ -5188,18 +5367,22 @@ def _variant_receipt_is_current(
     covered_parent_slugs = _json_decode(
         row.get("parent_finding_slugs_json"), []
     )
-    dispatch_scope = connection.execute(
-        """
-        SELECT scopes.parent_finding_slugs_json, scopes.parent_finding_set_digest
-        FROM code_variant_dispatch_scopes AS scopes
-        JOIN assessment_dispatches AS dispatches
-          ON dispatches.id = scopes.dispatch_id
-         AND dispatches.engagement_id = scopes.engagement_id
-        WHERE scopes.engagement_id = ? AND scopes.dispatch_id = ?
-          AND dispatches.agent_role = ?
-        """,
-        (engagement_id, int(row["dispatch_id"]), _VARIANT_DISPATCH_ROLE),
-    ).fetchone()
+    dispatch_scope = (
+        projection.dispatch_scopes.get(int(row["dispatch_id"]))
+        if projection is not None
+        else connection.execute(
+            """
+            SELECT scopes.parent_finding_slugs_json, scopes.parent_finding_set_digest
+            FROM code_variant_dispatch_scopes AS scopes
+            JOIN assessment_dispatches AS dispatches
+              ON dispatches.id = scopes.dispatch_id
+             AND dispatches.engagement_id = scopes.engagement_id
+            WHERE scopes.engagement_id = ? AND scopes.dispatch_id = ?
+              AND dispatches.agent_role = ?
+            """,
+            (engagement_id, int(row["dispatch_id"]), _VARIANT_DISPATCH_ROLE),
+        ).fetchone()
+    )
     if dispatch_scope is None:
         return False
     scope_parent_slugs = _json_decode(
@@ -5211,35 +5394,59 @@ def _variant_receipt_is_current(
         != _variant_parent_finding_set_digest(scope_parent_slugs)
     ):
         return False
-    latest = connection.execute(
-        """
-        SELECT MAX(id)
-        FROM code_variant_check_receipts
-        WHERE engagement_id = ? AND repo_id = ? AND current_file_id = ?
-        """,
-        (engagement_id, int(row["repo_id"]), int(file_id)),
-    ).fetchone()
-    if latest is None or int(latest[0] or 0) != int(row["id"]):
+    latest_id = (
+        int(projection.latest_receipts.get(int(file_id), {}).get("id", 0) or 0)
+        if projection is not None
+        else int(
+            (
+                connection.execute(
+                    """
+                    SELECT MAX(id)
+                    FROM code_variant_check_receipts
+                    WHERE engagement_id = ? AND repo_id = ? AND current_file_id = ?
+                    """,
+                    (engagement_id, int(row["repo_id"]), int(file_id)),
+                ).fetchone()
+                or (0,)
+            )[0]
+            or 0
+        )
+    )
+    if latest_id != int(row["id"]):
         return False
-    file_row = connection.execute(
-        """
-        SELECT files.*
-        FROM code_files AS files
-        JOIN code_repos AS repos
-          ON repos.id = files.repo_id
-         AND repos.engagement_id = files.engagement_id
-         AND repos.active_generation > 0
-        WHERE files.engagement_id = ? AND files.id = ?
-        """,
-        (engagement_id, int(file_id)),
-    ).fetchone()
+    file_row = (
+        projection.files.get(int(file_id))
+        if projection is not None
+        else connection.execute(
+            """
+            SELECT files.*
+            FROM code_files AS files
+            JOIN code_repos AS repos
+              ON repos.id = files.repo_id
+             AND repos.engagement_id = files.engagement_id
+             AND repos.active_generation > 0
+            WHERE files.engagement_id = ? AND files.id = ?
+            """,
+            (engagement_id, int(file_id)),
+        ).fetchone()
+    )
     if file_row is None or int(file_row["repo_id"]) != int(row["repo_id"]):
         return False
-    repo = _get_published_repo_row(connection, engagement_id, int(row["repo_id"]))
+    repo = (
+        projection.repos.get(int(row["repo_id"]))
+        if projection is not None
+        else _get_published_repo_row(connection, engagement_id, int(row["repo_id"]))
+    )
+    if repo is None:
+        return False
     cache = parent_finding_cache if parent_finding_cache is not None else {}
-    current_parent_slugs = cache.get(int(row["repo_id"]))
+    current_parent_slugs = (
+        projection.parent_slugs.get(int(row["repo_id"]))
+        if projection is not None
+        else cache.get(int(row["repo_id"]))
+    )
     if current_parent_slugs is None:
-        current_parent_slugs = _current_reportable_variant_parent_slugs(
+        current_parent_slugs = _current_phase2_variant_parent_slugs(
             connection,
             engagement_id,
             int(row["repo_id"]),
@@ -5291,26 +5498,32 @@ def _current_variant_check_status(
     *,
     parent_finding_cache: dict[int, list[str]] | None = None,
     require_done_projection: bool = True,
+    projection: _VariantReceiptProjection | None = None,
 ) -> str:
     if require_done_projection and str(file_row.get("variant_check_status", "")) != "done":
         return "pending"
-    rows = connection.execute(
-        """
-        SELECT *
-        FROM code_variant_check_receipts
-        WHERE engagement_id = ? AND repo_id = ? AND current_file_id = ?
-        ORDER BY id DESC
-        LIMIT 1
-        """,
-        (engagement_id, int(file_row["repo_id"]), int(file_row["id"])),
-    ).fetchall()
-    if not rows:
+    receipt = (
+        projection.latest_receipts.get(int(file_row["id"]))
+        if projection is not None
+        else connection.execute(
+            """
+            SELECT *
+            FROM code_variant_check_receipts
+            WHERE engagement_id = ? AND repo_id = ? AND current_file_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (engagement_id, int(file_row["repo_id"]), int(file_row["id"])),
+        ).fetchone()
+    )
+    if receipt is None:
         return "pending"
     return "done" if _variant_receipt_is_current(
         connection,
         engagement_id,
-        rows[0],
+        receipt,
         parent_finding_cache=parent_finding_cache,
+        projection=projection,
     ) else "pending"
 
 
@@ -5329,6 +5542,11 @@ def record_variant_check_receipt(
     rationale: str,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+    if not parent_finding_slugs:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="variant check requires a non-empty parent_finding_slugs scope",
+        )
     if (
         len(parent_finding_slugs) > MAX_VARIANT_PARENT_FINDINGS
         or parent_finding_slugs != sorted(set(parent_finding_slugs))
@@ -5425,19 +5643,6 @@ def record_variant_check_receipt(
             repo_id,
             parent_finding_slugs,
         )
-        current_parent_slugs = _current_reportable_variant_parent_slugs(
-            connection,
-            engagement.id,
-            repo_id,
-        )
-        if not set(current_parent_slugs).issubset(set(parent_finding_slugs)):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    "variant check dispatch omits a current reportable parent finding "
-                    "from this repository"
-                ),
-            )
         if status_value != "completed":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -5619,10 +5824,10 @@ def unresolved_suspicious_analysis_obligations(
     ]
 
 
-def confirmed_finding_variant_receipt_obligations(
+def report_durable_finding_variant_receipt_obligations(
     engagement_id: int,
 ) -> list[dict[str, Any]]:
-    """Return current variant-receipt gaps activated by confirmed code findings.
+    """Return current variant-receipt gaps for report-durable code root findings.
 
     The receipt table is authoritative for completed per-file variant work, but
     Vigil does not yet own an immutable candidate ledger. Until it does, fail
@@ -5631,77 +5836,72 @@ def confirmed_finding_variant_receipt_obligations(
     possible variant carrier.
     """
     engagement = _engagement_or_404(engagement_id)
-    reportable_statuses = sorted(_REPORTABLE_FINDING_STATUSES)
-    placeholders = ",".join("?" for _ in reportable_statuses)
     with get_connection() as connection:
-        finding_rows = connection.execute(
-            f"""
-            SELECT findings.*
-            FROM assessment_findings AS findings
-            WHERE findings.engagement_id = ?
-              AND findings.status IN ({placeholders})
-              AND findings.verification_state = 'verified'
-              AND findings.verification_disposition = 'confirmed'
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM assessment_finding_links AS links
-                  WHERE links.engagement_id = findings.engagement_id
-                    AND links.finding_id = findings.id
-                    AND links.link_kind = 'variant_of'
-                    AND links.retired_at IS NULL
-              )
-            ORDER BY findings.slug
-            """,
-            (engagement.id, *reportable_statuses),
-        ).fetchall()
-        repo_states = load_code_repo_snapshot_states(connection, engagement.id)
-        confirmed_by_repo: dict[int, list[str]] = {}
-        for finding_row in finding_rows:
-            if (
-                not is_file_finding(str(finding_row["canonical_location"] or ""))
-                or finding_code_snapshot_status(
-                    connection,
-                    engagement.id,
-                    finding_row,
-                    repo_states=repo_states,
-                )
-                != "current"
-            ):
-                continue
-            repo_id = _finding_snapshot_repo_id(finding_row)
-            if repo_id is None:
-                continue
-            confirmed_by_repo.setdefault(repo_id, []).append(
-                str(finding_row["slug"])
+        repo_rows = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT * FROM code_repos
+                WHERE engagement_id = ? AND active_generation > 0
+                ORDER BY id
+                """,
+                (engagement.id,),
+            ).fetchall()
+        ]
+        repo_ids = {int(row["id"]) for row in repo_rows}
+        report_durable_by_repo = _current_report_durable_variant_parent_slugs_by_repo(
+            connection,
+            engagement.id,
+            repo_ids,
+        )
+        if not any(report_durable_by_repo.values()):
+            return []
+        currency_parent_slugs_by_repo = (
+            _current_phase2_variant_parent_slugs_by_repo(
+                connection,
+                engagement.id,
+                repo_ids,
             )
-
+        )
+        inventory_files = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT files.*
+                FROM code_files AS files
+                JOIN code_repos AS repos
+                  ON repos.id = files.repo_id
+                 AND repos.engagement_id = files.engagement_id
+                 AND repos.active_generation > 0
+                WHERE files.engagement_id = ?
+                ORDER BY files.repo_id, files.file_path, files.id
+                """,
+                (engagement.id,),
+            ).fetchall()
+        ]
+        files_by_repo: dict[int, list[dict[str, Any]]] = {}
+        for file_row in inventory_files:
+            files_by_repo.setdefault(int(file_row["repo_id"]), []).append(file_row)
+        projection = _load_variant_receipt_projection(
+            connection,
+            engagement.id,
+            repo_rows=repo_rows,
+            file_rows=inventory_files,
+            parent_slugs=currency_parent_slugs_by_repo,
+        )
         obligations: list[dict[str, Any]] = []
-        parent_finding_cache: dict[int, list[str]] = {}
-        for repo_id, finding_slugs in sorted(confirmed_by_repo.items()):
-            inventory_files = [
-                dict(row)
-                for row in connection.execute(
-                    """
-                    SELECT files.*
-                    FROM code_files AS files
-                    JOIN code_repos AS repos
-                      ON repos.id = files.repo_id
-                     AND repos.engagement_id = files.engagement_id
-                     AND repos.active_generation > 0
-                    WHERE files.engagement_id = ? AND files.repo_id = ?
-                    ORDER BY files.file_path, files.id
-                    """,
-                    (engagement.id, repo_id),
-                ).fetchall()
-            ]
+        for repo_id, finding_slugs in sorted(report_durable_by_repo.items()):
+            if not finding_slugs:
+                continue
+            repo_inventory = files_by_repo.get(repo_id, [])
             missing_files = [
                 file_row
-                for file_row in inventory_files
+                for file_row in repo_inventory
                 if _current_variant_check_status(
                     connection,
                     engagement.id,
                     file_row,
-                    parent_finding_cache=parent_finding_cache,
+                    projection=projection,
                 )
                 != "done"
             ]
@@ -6545,9 +6745,115 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                 (engagement.id,),
             ).fetchall()
         ]
+        active_repo_ids = {int(repo["id"]) for repo in repos}
         suspicious_counts = _current_suspicious_analysis_counts(
             connection, engagement.id
         )
+        unresolved_draft_counts: dict[int, int] = {}
+        stale_draft_counts: dict[int, int] = {}
+        unbound_draft_count = 0
+        if target_phase in {"fuzz", "complete"}:
+            repo_states = load_code_repo_snapshot_states(connection, engagement.id)
+            draft_rows = connection.execute(
+                """
+                SELECT *
+                FROM assessment_findings
+                WHERE engagement_id = ? AND status = 'draft'
+                  AND COALESCE(verification_disposition, '') != 'blocked'
+                ORDER BY slug
+                """,
+                (engagement.id,),
+            ).fetchall()
+            for row in draft_rows:
+                repo_id = _finding_snapshot_repo_id(row)
+                if not is_file_finding(str(row["canonical_location"] or "")):
+                    continue
+                snapshot_status = finding_code_snapshot_status(
+                    connection,
+                    engagement.id,
+                    row,
+                    repo_states=repo_states,
+                )
+                if (
+                    repo_id is None
+                    or repo_id not in active_repo_ids
+                    or snapshot_status == "unbound"
+                ):
+                    unbound_draft_count += 1
+                    continue
+                unresolved_draft_counts[repo_id] = (
+                    unresolved_draft_counts.get(repo_id, 0) + 1
+                )
+                if snapshot_status == "stale":
+                    stale_draft_counts[repo_id] = (
+                        stale_draft_counts.get(repo_id, 0) + 1
+                    )
+        if unbound_draft_count:
+            blockers.append(
+                _readiness_blocker(
+                    "unbound_draft_code_findings_unresolved",
+                    (
+                        f"Engagement has {unbound_draft_count} draft code finding(s) "
+                        "without a resolvable repository binding; re-review and rebind, "
+                        "then promote, merge, or kill each draft."
+                    ),
+                )
+            )
+        variant_inventory_by_repo: dict[int, list[dict[str, Any]]] = {}
+        variant_parent_slugs_by_repo: dict[int, list[str]] = {}
+        variant_unready_parent_slugs_by_repo: dict[int, list[str]] = {}
+        variant_projection: _VariantReceiptProjection | None = None
+        if target_phase in {"fuzz", "complete"} and active_repo_ids:
+            phase2_parent_rows_by_repo = _current_variant_parent_rows_by_repo(
+                connection,
+                engagement.id,
+                active_repo_ids,
+                report_durable_only=False,
+            )
+            variant_parent_slugs_by_repo = {
+                repo_id: [str(row["slug"]) for row in rows]
+                for repo_id, rows in phase2_parent_rows_by_repo.items()
+            }
+            variant_unready_parent_slugs_by_repo = {
+                repo_id: [
+                    str(row["slug"])
+                    for row in rows
+                    if not (
+                        str(row["verification_state"] or "") == "verified"
+                        and str(row["verification_disposition"] or "")
+                        in {"confirmed", "downgraded", "pending_runtime_proof"}
+                    )
+                ]
+                for repo_id, rows in phase2_parent_rows_by_repo.items()
+            }
+            if any(variant_parent_slugs_by_repo.values()):
+                variant_inventory_files = [
+                    dict(row)
+                    for row in connection.execute(
+                        """
+                        SELECT files.*
+                        FROM code_files AS files
+                        JOIN code_repos AS repos
+                          ON repos.id = files.repo_id
+                         AND repos.engagement_id = files.engagement_id
+                         AND repos.active_generation > 0
+                        WHERE files.engagement_id = ?
+                        ORDER BY files.repo_id, files.id
+                        """,
+                        (engagement.id,),
+                    ).fetchall()
+                ]
+                for file_row in variant_inventory_files:
+                    variant_inventory_by_repo.setdefault(
+                        int(file_row["repo_id"]), []
+                    ).append(file_row)
+                variant_projection = _load_variant_receipt_projection(
+                    connection,
+                    engagement.id,
+                    repo_rows=repos,
+                    file_rows=variant_inventory_files,
+                    parent_slugs=variant_parent_slugs_by_repo,
+                )
         if not repos:
             blockers.append(
                 _readiness_blocker(
@@ -6851,40 +7157,67 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                 )
 
             if target_phase in {"fuzz", "complete"}:
-                variant_inventory_files = [
-                    dict(row)
-                    for row in connection.execute(
-                        """
-                        SELECT * FROM code_files
-                        WHERE engagement_id = ? AND repo_id = ?
-                        ORDER BY id
-                        """,
-                        (engagement.id, repo_id),
-                    ).fetchall()
-                ]
-                parent_finding_cache: dict[int, list[str]] = {}
-                incomplete_variants = sum(
-                    _current_variant_check_status(
-                        connection,
-                        engagement.id,
-                        file_row,
-                        parent_finding_cache=parent_finding_cache,
+                unresolved_draft_count = unresolved_draft_counts.get(repo_id, 0)
+                if unresolved_draft_count:
+                    stale_draft_count = stale_draft_counts.get(repo_id, 0)
+                    stale_detail = (
+                        f"; {stale_draft_count} have stale snapshot bindings"
+                        if stale_draft_count
+                        else ""
                     )
-                    != "done"
-                    for file_row in variant_inventory_files
-                )
-                if incomplete_variants:
                     blockers.append(
                         _readiness_blocker(
-                            "variant_checks_incomplete",
+                            "draft_code_findings_unresolved",
                             (
-                                f"Repository has {incomplete_variants} incomplete "
-                                "admitted-file variant check(s)."
+                                f"Repository has {unresolved_draft_count} unresolved draft "
+                                f"code finding(s){stale_detail}; re-review and rebind when "
+                                "needed, then promote, merge, or kill each "
+                                "draft before leaving verification."
                             ),
                             repo_id=repo_id,
-                            overrideable=True,
                         )
                     )
+
+                parent_finding_slugs = variant_parent_slugs_by_repo.get(repo_id, [])
+                if parent_finding_slugs:
+                    unready_parent_slugs = (
+                        variant_unready_parent_slugs_by_repo.get(repo_id, [])
+                    )
+                    if unready_parent_slugs:
+                        blockers.append(
+                            _readiness_blocker(
+                                "variant_parent_verification_incomplete",
+                                (
+                                    f"Repository has {len(unready_parent_slugs)} current "
+                                    "Phase 2 root finding(s) without a verified "
+                                    "confirmed, downgraded, or pending-runtime-proof "
+                                    "disposition; finish evidence triage before entering fuzz."
+                                ),
+                                repo_id=repo_id,
+                            )
+                        )
+                    incomplete_variants = sum(
+                        _current_variant_check_status(
+                            connection,
+                            engagement.id,
+                            file_row,
+                            projection=variant_projection,
+                        )
+                        != "done"
+                        for file_row in variant_inventory_by_repo.get(repo_id, [])
+                    )
+                    if incomplete_variants:
+                        blockers.append(
+                            _readiness_blocker(
+                                "variant_checks_incomplete",
+                                (
+                                    f"Repository has {incomplete_variants} incomplete "
+                                    "admitted-file variant check(s)."
+                                ),
+                                repo_id=repo_id,
+                                overrideable=True,
+                            )
+                        )
 
     coverage = code_coverage_summary(engagement.id)
     coverage_gate = coverage.get("gate", {})
