@@ -2616,6 +2616,15 @@ def _create_code_analysis_tables(connection: sqlite3.Connection) -> None:
     )
     connection.execute(
         """
+            CREATE INDEX IF NOT EXISTS idx_code_variant_receipts_latest_file
+            ON code_variant_check_receipts(
+                engagement_id, current_file_id, id DESC
+            )
+            WHERE current_file_id IS NOT NULL
+            """
+    )
+    connection.execute(
+        """
             CREATE TABLE IF NOT EXISTS code_fuzz_decisions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 engagement_id INTEGER NOT NULL,

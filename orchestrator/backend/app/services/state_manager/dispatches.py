@@ -81,6 +81,14 @@ def record_dispatch(
     finding_slugs = _require_canonical_finding_slugs(finding_slugs)
     variant_parent_slugs: list[str] | None = None
     if agent_role == VARIANT_DISPATCH_ROLE:
+        if finding_slugs is not None and not finding_slugs:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "code-variant-hunter requires a non-empty immutable "
+                    "finding_slugs parent scope"
+                ),
+            )
         if len(finding_slugs or []) > MAX_VARIANT_PARENT_FINDINGS:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -89,15 +97,16 @@ def record_dispatch(
                     f"of {MAX_VARIANT_PARENT_FINDINGS}"
                 ),
             )
-        variant_parent_slugs = canonical_variant_parent_slugs(finding_slugs or [])
-        if list(finding_slugs or []) != variant_parent_slugs:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    "code-variant-hunter finding_slugs must be sorted and unique "
-                    "because they define an immutable dispatch scope"
-                ),
-            )
+        if finding_slugs is not None:
+            variant_parent_slugs = canonical_variant_parent_slugs(finding_slugs)
+            if finding_slugs != variant_parent_slugs:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "code-variant-hunter finding_slugs must be sorted and unique "
+                        "because they define an immutable dispatch scope"
+                    ),
+                )
     findings_json = json.dumps(list(finding_slugs)) if finding_slugs is not None else None
     skills_value = (skills or "").strip() or None
     tier_value = (tier or "").strip() or None
@@ -107,6 +116,17 @@ def record_dispatch(
     requested_reasoning_value = requested_reasoning if requested_reasoning is not None else reasoning
     with _common.get_connection() as connection:
         _ensure_finding_slugs_exist(connection, engagement.id, finding_slugs)
+        if variant_parent_slugs is not None:
+            # Import lazily because code_analysis imports the finding lifecycle
+            # helpers from this package. Receipt-bearing authority is the only
+            # dispatch path that needs the code-specific snapshot selector.
+            from .. import code_analysis
+
+            code_analysis.validate_variant_dispatch_parent_scope(
+                connection,
+                engagement.id,
+                variant_parent_slugs,
+            )
         if application_unit_id is not None:
             unit = connection.execute(
                 "SELECT id FROM assessment_application_units "
