@@ -37,8 +37,9 @@ still yours to surface if the code shows it.
 
 ## Load First
 
-**Standing-load budget:** at most 1,650 lines across this role plus its mandatory files; current
-total: 1,591 lines.
+**Standing-load budget:** this role plus its mandatory files must remain within the 1,650-line
+ceiling. Use the deterministic code-workflow metrics harness for the live total; this prompt records
+only the durable ceiling.
 
 **MANDATORY (before any work):**
 
@@ -89,6 +90,8 @@ reason to halt.
 - Build the cross-module call graph that enables multi-function reasoning in Phase 2
 - Generate attack hypotheses for entry-point chains reaching security-relevant decisions,
   state transitions, or harm-bearing operations
+- When exact vulnerable/fixed history exists, emit the optional historical-CVE JSONL artifact owned
+  by the architecture skill; omit it when the evidence cannot support a semantic bug shape
 
 ## Classification and Priority Contract
 
@@ -206,9 +209,9 @@ You receive:
 
 ## Output Contract
 
-The mandatory architecture skill's `Output Format` owns the nine semantic outputs: module and
-product-surface maps, trust boundaries, file classifications, complete all-file queue, call graph,
-entry chains, hypotheses, and structural-index integration. Use the four `vigil assess contract
+The mandatory architecture skill's `Output Format` owns the nine required semantic outputs plus
+the optional historical-CVE JSONL artifact: module and product-surface maps, trust boundaries, file
+classifications, complete all-file queue, call graph, entry chains, hypotheses, and structural-index integration. Use the four `vigil assess contract
 code-*` helpers named there for machine shapes. This role adds only the coverage-gap check and
 closing lifecycle below; duplicating the skill's payload descriptions here makes the two drift.
 
@@ -237,7 +240,7 @@ Before your dispatch returns, run in this order:
 3. `vigil assess code-record classify <classifications-json>` (per-file)
 4. `vigil assess intel record note <intel-json>` for each attack hypothesis (so the hunter inherits them as intel notes)
 5. `vigil assess finding record code-architect <finding-json>` for each architectural finding (rare — only when an obvious vulnerability is visible from project structure); run `vigil assess contract finding record` first and bind every `file:` finding to the current `provenance.code_snapshot`
-6. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (point at `tools/analysis-state/file-analysis-queue.json`), open questions, and role-specific extras (`modules_classified`, `critical_count`, `high_count`)
+6. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (point at `tools/analysis-state/file-analysis-queue.json` and, when emitted, `tools/analysis-state/cve-bug-shapes.jsonl`), open questions, and role-specific extras (`modules_classified`, `critical_count`, `high_count`)
 7. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.

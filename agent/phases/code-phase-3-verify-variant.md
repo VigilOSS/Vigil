@@ -1,10 +1,11 @@
 # Code Phase 3 — Verify + Variant
 
 **Read-on-phase-entry.** When you ENTER Code Phase 3 (Verify + Variant), Read this doc before
-dispatching the parallel `code-vuln-verifier` / `code-variant-hunter` pair, and re-read it on a
+dispatching `code-vuln-verifier` and, when a non-empty parent set exists, the parallel
+`code-variant-hunter`, and re-read it on a
 method re-anchor. It carries the coverage gate that must pass before Phase 3 starts, Agent A
 (`code-vuln-verifier`) dispatch fields and the clean-file spot-check, Agent B (`code-variant-hunter`)
-dispatch fields, the Multi-Perspective Voting protocol for conflicting dispositions, handling
+dispatch fields, the independent evidence-adjudication protocol for conflicting dispositions, handling
 spot-check findings, the on-return recording commands, pre-report deduplication (same-phase and
 cross-phase), and the Phase 3 exit. Cross-phase machinery — the Core Loop, the Phased mindset flow
 (code) (which scopes `code-vuln-verifier` to the verification-skeptic stance and `code-variant-hunter`
@@ -13,14 +14,18 @@ Checklist — stays in `agent/operator-core-code.md`; this doc does not restate 
 
 ### Phase 3: VERIFY + VARIANT
 
-Phase 3 merges verification and variant scanning into a single parallel phase. Two agents run
-simultaneously on independent objectives:
+Phase 3 merges verification and applicable variant scanning into one phase. The verifier always
+runs; the variant hunter runs in parallel only when the current Phase 2 root findings produce a
+non-empty frozen parent set. That pre-verification set contains current-source findings in a
+reportable workflow status, excludes `variant_of` children and blocked/false-positive dispositions,
+and is frozen before either parallel worker changes live verification state:
 
 - **Agent A (code-vuln-verifier)**: TOB-style false positive elimination on all findings
-- **Agent B (code-variant-hunter)**: systematic variant scanning for confirmed bug patterns
+- **Agent B (code-variant-hunter, conditional)**: systematic scanning for variants of the frozen Phase 2 root patterns
 
-Both agents run in parallel because their work is independent: the verifier evaluates existing
-findings, while the variant hunter scans for new instances of confirmed patterns.
+When Agent B is applicable, both agents run in parallel because their work is independent: the
+verifier evaluates existing findings, while the variant hunter scans for new instances of
+confirmed patterns.
 
 **Hard transition readiness** -- must pass before proceeding:
 ```bash
@@ -91,9 +96,19 @@ analysis methodology consistently misses a pattern class. If the spot-check find
 vulnerability, that file goes back to Phase 2B for re-analysis with the specific CWE
 directive.
 
-#### Agent B: Variant Scanning
+#### Agent B: Variant Scanning (conditional)
 
-Dispatch `code-variant-hunter` with `agent/skills/code-variant-analysis/SKILL.md`.
+First derive the exact current Phase 2 root set for this repository and freeze its canonical sorted
+slugs before verification starts. Include current-source findings in a reportable workflow status
+even while unreviewed or disputed; exclude `variant_of` children and verification-blocked or
+false-positive findings. If that set is empty, variant-pattern review is not applicable: do **not** dispatch
+`code-variant-hunter`, create an empty-scope dispatch, or fabricate per-file receipts. Continue the
+verifier path and the Phase 4 applicability decision. Complete/fuzz readiness derives this
+non-applicability from the absence of current parent findings.
+
+When the frozen set is non-empty, dispatch `code-variant-hunter` with
+`agent/skills/code-variant-analysis/SKILL.md` under the role prompt's **Phase 3 receipt-bearing
+mode** contract.
 
 Before registering the dispatch, freeze the Phase 2 parent findings into one canonical sorted slug
 list. Register that exact list on the dispatch and retain the numeric backend row ID printed by the
@@ -120,10 +135,11 @@ Provide:
   pattern (CWE, taint-flow or operation/state/lifetime shape, guard failure type, code signature)
 - The current Code Source Identity block and its matching structural-index manifest; a prior
   generation or summary cannot substitute for the bound index
-- Candidate file list: every admitted same-language file plus any cross-language wrapper,
-  configuration, template, generated implementation, or build path structurally capable of the
-  same source/control/sink or operation/state/failing-use pattern, with each current numeric `file_id`, repo-relative path, and
-  `file_sha256`. Classification orders work but never removes a plausible variant from eligibility
+- Admitted-file list: every current admitted file, with each numeric `file_id`, repo-relative path,
+  language, and `file_sha256`. Order same-language files and structurally capable cross-language
+  wrappers/configuration/templates/generated implementations first, but retain every other file for
+  a bounded pattern-inapplicability check and receipt. Classification orders work; it never removes
+  a file from the backend's admitted-file receipt obligation
 - CWE pattern references from `agent/references/code-vuln-patterns/` matching each
   finding's CWE
 - Current threat-model envelope from `vigil assess fetch "code/threat-model/<repo-id>"`, with
@@ -131,12 +147,12 @@ Provide:
   supplemental navigation context
 
 The variant hunter:
-- Extracts the abstract pattern from each confirmed finding
+- Extracts the abstract pattern from each dispatch-frozen Phase 2 root finding
 - Searches the codebase for functions matching the same pattern shape
 - Evaluates whether each candidate has the same guard failure
 - Records variant findings with references back to the original
 
-**Parallel dispatch**: Agent A and Agent B are dispatched simultaneously. They have no
+**Parallel dispatch when applicable**: Agent A and Agent B are dispatched simultaneously. They have no
 data dependency on each other -- the verifier works from the Phase 2 finding list, and the
 variant hunter works from the dispatch-frozen parent set plus the codebase. The verifier may change
 live finding dispositions while the scan runs; Agent B repeats that same registered sorted parent
@@ -152,7 +168,7 @@ against the code and produces a reasoned disposition. Evidence strength determin
 a complete source-to-sink trace, falsifiable guard analysis, or controlled runtime proof outweighs
 unsupported confidence or two correlated opinions. If the conflict remains unresolved, record
 `finding verify --disposition disputed` and retain both arguments; never convert uncertainty into
-a false-positive kill by vote count.
+a false-positive kill by reviewer count.
 
 This should be rare -- the verifier evaluates existing findings while the variant hunter
 scans for new ones. Conflicts arise only when the variant hunter finds evidence that
@@ -165,7 +181,7 @@ If the verifier's clean-file spot-check discovers a missed vulnerability:
 2. Dispatch the file back to Phase 2B with a CWE directive targeting the missed class
 3. After re-analysis completes, re-check the effort matrix for the affected file
 
-#### On return from both agents:
+#### On return from the applicable agent set:
 
 ```bash
 # Record verification results (updates existing findings)
@@ -181,10 +197,13 @@ vigil assess finding verify <slug> --disposition false_positive --reason "<kill 
 vigil assess finding verify <slug1> <slug2> <slug3> --disposition false_positive --reason "<shared kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
 # Reopen a previously verified or false-positive finding when new evidence requires re-triage
 vigil assess finding update <slug> --reason "<why the prior verdict no longer holds>" --status draft
+# Verification deliberately preserves draft workflow state. After review, every retained draft
+# must be promoted explicitly; a confirmed-but-draft finding blocks fuzz and completion.
+vigil assess finding update <slug> --reason "Verification retained this finding" --status active
 # Record variant findings (new findings)
 vigil assess finding record code-variant-hunter <variant-finding-json>
-# Record one durable completion receipt for every assigned candidate file, including clean files.
-# Each payload repeats variant_dispatch_id and the exact registered parent_finding_slugs set.
+# Record one durable completion receipt for every current admitted file, including quick non-matches.
+# Set dispatch_id to variant_dispatch_id and repeat the exact registered parent_finding_slugs set.
 vigil assess contract code-record variant-check
 vigil assess code-record variant-check <per-file-receipt-json>
 ```
@@ -192,6 +211,12 @@ vigil assess code-record variant-check <per-file-receipt-json>
 Every new variant/spot-check file finding must follow `vigil assess contract finding record`,
 including `provenance.code_snapshot` copied from the current Code Source Identity block. Generic
 `finding update` cannot bind or rebind it.
+
+Reopening is not a terminal disposition. For every finding whose workflow status is `draft` after
+verification, either promote the retained finding with `finding update --status active`, merge it
+into its canonical target, or kill it through `finding verify --disposition false_positive`.
+Fuzz/complete readiness rejects both unverified drafts and confirmed-but-draft records so an
+ambiguous lifecycle state cannot disappear from the report queue.
 
 **D4 killed-finding re-mint guard:** Agent A (killing FPs) and Agent B (minting variants) run in
 parallel on overlapping files, so Agent B may `finding record` a candidate at a file the verifier
@@ -223,10 +248,21 @@ vigil assess finding merge <source-slug> <target-slug> "<reason>"
 
 **Phase 3 exit:**
 
-First reconcile the assigned candidate file list against the backend receipts returned by
-`code-record variant-check`. Every assigned file needs one current receipt; scan-result prose and a
-handoff table do not substitute for this durable row. On resume, fetch the current rows with
-`vigil assess fetch "code/variant-checks?repo_id=<repo-id>"`.
+When the frozen parent set was non-empty, first reconcile the complete current admitted-file list against
+the backend receipts returned by `code-record variant-check`. Every admitted file needs one current
+receipt, including a bounded non-match receipt for a file that cannot instantiate, route,
+configure, or reach the pattern; scan-result prose and a handoff table do not substitute for this
+durable row. On resume,
+fetch the current rows with `vigil assess fetch
+"code/variant-checks?repo_id=<repo-id>"`. If a new current Phase 2 root appeared after dispatch,
+the old-scope receipts remain historical evidence but are non-covering; register a new dispatch with
+the new exact set and repeat the file receipts. Killed, non-reportable, stale, and child findings do
+not create current debt. When the parent set was empty, do not create receipts; readiness treats
+variant review as not applicable until a current Phase 2 root finding exists.
+
+Fuzz entry also requires every current Phase 2 root to leave unreviewed/disputed triage. A verified
+`pending_runtime_proof` disposition may enter Phase 4 when the receipt and fuzz-decision gates pass;
+it remains outside report-durable completion until runtime proof resolves it.
 
 Next read only `agent/phases/code-phase-4-fuzz.md` **Pre-entry applicability decision**. Use its
 bounded criteria and current findings/files/fuzzer inventory to persist one current-generation
@@ -243,7 +279,8 @@ vigil assess code-coverage --require-transition-ready fuzz
 vigil assess transition-phase fuzz
 ```
 
-Exit: All findings verified. Variant scan complete. If most of the verifier's kills lean on
+Exit: All findings verified. Variant scan complete or explicitly not applicable because the
+current parent set is empty. If most of the verifier's kills lean on
 circumstantial reasoning rather than code evidence at the hunter's rigor bar (the same check as
 above), that pattern is the signal that Phase 2 hunter dispatch context (CWE pattern references,
 threat model) needs tightening before the next batch. A `required` decision enters Phase 4 to run

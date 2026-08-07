@@ -1,6 +1,6 @@
 ---
 name: code-finding-verification
-description: False-positive elimination using five-check verification protocol with devil's advocate and multi-perspective voting
+description: False-positive elimination using five-check verification, devil's advocate review, and evidence-weighted adjudication
 origin: Vigil
 ---
 
@@ -8,7 +8,8 @@ origin: Vigil
 
 Together with `agent/shared-constraints-code.md` §5, this skill owns the code verification
 contract: independently re-read the current sealed path, charge PASS and KILL the same evidence
-cost, apply the net-new capability ceiling, and preserve genuine uncertainty for voting. The web
+cost, apply the net-new capability ceiling, and preserve genuine uncertainty for evidence
+adjudication. The web
 hunting rules are not required to reach or record a verdict.
 
 ## When to Activate
@@ -43,7 +44,7 @@ Audit trail requirement:
 
 ## Methodology — Five-Check Protocol
 
-Every check produces one of four outcomes: PASS, KILL, DOWNGRADE, or ESCALATE. PASS and KILL carry the same evidence cost — PASS requires cited supporting evidence at the hunter's rigor bar, KILL requires cited counter-evidence at the same bar. DOWNGRADE applies when counter-evidence reduces exploitability but does not eliminate the bug. ESCALATE routes to the Multi-Perspective Voting Protocol section when evidence fits neither PASS nor KILL — absence of counter-evidence is not PASS evidence, and plausibility of counter-evidence is not KILL evidence.
+Every check produces one of four outcomes: PASS, KILL, DOWNGRADE, or ESCALATE. PASS and KILL carry the same evidence cost — PASS requires cited supporting evidence at the hunter's rigor bar, KILL requires cited counter-evidence at the same bar. DOWNGRADE applies when counter-evidence reduces exploitability but does not eliminate the bug. ESCALATE routes to the Evidence Adjudication Protocol section when evidence fits neither PASS nor KILL — absence of counter-evidence is not PASS evidence, and plausibility of counter-evidence is not KILL evidence.
 
 ### Check 1: Target-Kind Product Reachability
 
@@ -96,7 +97,7 @@ grep '^parse_header_value\t' "$ctags_path"
   state: **KILL** ("unsupported caller sequence, not product reachability").
 - A test-only helper with no supported production/exported path: **KILL**. A test harness that calls
   the same supported production API may prove behavior; the harness is evidence, not the entry.
-- **ESCALATE**: the evidence does not fit PASS or KILL — record the specific ambiguity (missing reachability witness, unresolved indirect call, callback registered at runtime, plugin-dispatched sink) and route to the **Multi-Perspective Voting Protocol** section below. Do not default to KILL or PASS.
+- **ESCALATE**: the evidence does not fit PASS or KILL — record the specific ambiguity (missing reachability witness, unresolved indirect call, callback registered at runtime, plugin-dispatched sink) and route to the **Evidence Adjudication Protocol** section below. Do not default to KILL or PASS.
 
 ### Check 2: Upstream Guards
 
@@ -118,7 +119,7 @@ The vulnerability analysis (Phase 3) evaluated guards within the vulnerable func
   each), then confirm no guard is present on the relevant value/state. Alternatively, name a
   present-but-ineffective check and show why it does not constrain the trigger. "No guard found"
   without the inspected path is not PASS evidence.
-- **ESCALATE**: a guard exists but its completeness is contested — macro-expanded check whose definition is conditional, guard enforced by a caller invariant that may or may not hold, compile-time check whose predicate depends on unverified config. Record the specific ambiguity and route to the **Multi-Perspective Voting Protocol** section.
+- **ESCALATE**: a guard exists but its completeness is contested — macro-expanded check whose definition is conditional, guard enforced by a caller invariant that may or may not hold, compile-time check whose predicate depends on unverified config. Record the specific ambiguity and route to the **Evidence Adjudication Protocol** section.
 
 **Common upstream guard locations:**
 - Request validation layers (input sanitization before dispatch)
@@ -160,7 +161,7 @@ rg "FEATURE_NAME" .config defconfig
 - Code behind debug-only flag (`#ifdef DEBUG`, `#[cfg(test)]`): **KILL** ("debug-only code, not compiled in production")
 - Code behind optional feature flag: **DOWNGRADE** severity + note the flag ("vulnerable code requires `--enable-experimental-parser` flag, not enabled by default")
 - Code excluded on common platforms: **DOWNGRADE** + note platforms affected
-- **ESCALATE**: the guarding symbol's default state is contested (vendor patch flips it, distro configs disagree, feature is on-by-default upstream but off in common downstreams). Record the specific config ambiguity and route to the **Multi-Perspective Voting Protocol** section.
+- **ESCALATE**: the guarding symbol's default state is contested (vendor patch flips it, distro configs disagree, feature is on-by-default upstream but off in common downstreams). Record the specific config ambiguity and route to the **Evidence Adjudication Protocol** section.
 
 ### Check 4: Exploitation Feasibility (PoC-or-Proof Required)
 
@@ -221,7 +222,7 @@ acceptable terminal result.
 - **PASS (probabilistic)**: cite the standard attacker technique that closes the gap (heap spray shape, ASLR brute-force budget, race-window widening mechanism, info-leak chain partner) and the conditions under which it succeeds. Name the technique — "probabilistic but feasible" asserted without naming the technique is not PASS evidence.
 - Exploit theoretically possible but mitigations make it impractical: **DOWNGRADE** severity + document mitigation effectiveness
 - No concrete or probabilistic exploit path AND specific blocking constraint identified: **KILL** — you must cite (a) the specific constraint (guard, type-system limit, allocator cap, mitigation) with file:line, AND (b) demonstrate that the attacker cannot route around it. Enumerate and rule out: alternative input channels that bypass the constraint, encoding/normalization mismatches (UTF-8 vs. byte count, canonicalization before vs. after the check), partial-match or prefix bypasses, pre-guard-state mutation (TOCTOU on the checked value), integer-width or signedness escapes, and chained primitives that satisfy the constraint's precondition under attacker control. "Mitigation exists" is not sufficient; "mitigation exists AND these N routes around it are each closed by [specific evidence]" is.
-- **ESCALATE**: exploit construction is blocked by a condition whose attacker-controllability is contested (heap grooming feasibility on this allocator, timing window width on this scheduler, availability of a companion info leak). Record the specific ambiguity and route to the **Multi-Perspective Voting Protocol** section.
+- **ESCALATE**: exploit construction is blocked by a condition whose attacker-controllability is contested (heap grooming feasibility on this allocator, timing window width on this scheduler, availability of a companion info leak). Record the specific ambiguity and route to the **Evidence Adjudication Protocol** section.
 
 ### Check 5: Devil's Advocate (Trail of Bits fp-check methodology)
 
@@ -276,7 +277,7 @@ message mentions security, the code "looks well-written" — is not sufficient t
 - Counter-argument with specific code evidence **as rigorous as the original finding**: **KILL** with full counter-argument documentation
 - Counter-evidence weakens but does not fully refute the finding: **DOWNGRADE** severity — the bug is real but the counter-evidence reduces impact or exploitability
 - **PASS (survives)**: cite what you tried to disprove in each of the 4 steps (guard search, constraint search, intent search, mitigation search), the file:line evidence you inspected in each, and why the counter-hypotheses fail. A survival asserted without naming the disproof attempts is not PASS evidence — silence across the 4 steps is not the same as discharge of the 4 steps.
-- **ESCALATE (multi-perspective voting)**: counter-argument is plausible but rests on assumptions, implicit invariants, or incomplete coverage proof — route to the **Multi-Perspective Voting Protocol** section. Do not kill on uncertainty, do not pass on absence of counter-evidence. Record the specific ambiguity that blocks a clean PASS or KILL.
+- **ESCALATE (evidence adjudication)**: counter-argument is plausible but rests on assumptions, implicit invariants, or incomplete coverage proof — route to the **Evidence Adjudication Protocol** section. Do not kill on uncertainty, do not pass on absence of counter-evidence. Record the specific ambiguity that blocks a clean PASS or KILL.
 
 Document: what you tried to disprove, what evidence you found for and against, and the final determination. This documentation strengthens confirmed findings and makes kills auditable.
 
@@ -334,11 +335,11 @@ attacker vector, affected asset, and severity. Generic API capability and correc
 still fail C6/C7 or the net-new test; a concrete TLS/authentication, memory-safety, unsafe-parser, or
 resource invariant is not false merely because deployment-specific impact remains conditional.
 
-## Multi-Perspective Voting Protocol
+## Evidence Adjudication Protocol
 
 Entered when any of Checks 1-5 returns **ESCALATE** — the evidence fits neither the PASS bar nor the KILL bar for that check. Check 5 is one entry point; Checks 1-4 may also escalate when their specific ambiguity is recorded.
 
-**When to invoke voting:**
+**When to invoke adjudication:**
 - Reachability witness is indirect (runtime callback, plugin dispatch, FFI boundary) and the taint trace cannot be closed from source alone
 - Upstream guard's completeness depends on a macro, caller invariant, or compile-time predicate that cannot be resolved from the source checked out
 - Build-config default state is contested across vendors, distros, or release profiles
@@ -347,7 +348,7 @@ Entered when any of Checks 1-5 returns **ESCALATE** — the evidence fits neithe
 - The counter-argument relies on implicit invariants not enforced in code
 - Two reasonable security engineers could disagree on the disposition
 
-**Voting procedure:**
+**Adjudication procedure:**
 1. Document the argument FOR the finding:
    - Hunter's original evidence
    - Your verification of the taint path (Checks 1-4)
@@ -356,17 +357,24 @@ Entered when any of Checks 1-5 returns **ESCALATE** — the evidence fits neithe
    - Devil's advocate evidence from Check 5
    - Specific code locations supporting the counter-argument
    - What assumption would need to hold for this to be safe
-3. Present both perspectives to the operator with your recommendation
-4. Operator may dispatch a third agent with both perspectives for independent assessment
-5. Majority vote (2 of 3) determines final disposition
-6. Record the vote outcome and reasoning for audit trail
+3. Group reviews that share a premise, trace, source excerpt, or derived assumption into one
+   evidence group. Correlated reviews are one evidentiary observation, regardless of reviewer count.
+4. Present both perspectives to the operator. The operator may dispatch an independent verifier
+   for missing evidence, but an additional opinion does not increase evidentiary weight by itself.
+5. Decide from the strongest complete proof. A cited source-to-sink, guard, build, state-sequence,
+   or runtime proof that closes the disputed condition outweighs any number of correlated opinions.
+   Never decide from reviewer count.
+6. If no side closes the disputed condition, record `disputed`, retain every argument and evidence
+   group, and identify the exact proof needed to resolve it.
+7. Record the adjudication outcome, evidence groups, and decisive proof for the audit trail.
 
-**Output format for voting request:**
+**Output format for adjudication request:**
 ```
-VOTING REQUEST: [Finding ID]
+ADJUDICATION REQUEST: [Finding ID]
 FOR:    [summary of evidence supporting the finding]
 AGAINST: [summary of devil's advocate evidence]
 RECOMMENDATION: [your lean, with confidence level]
+EVIDENCE GROUPS: [which observations share a premise or trace]
 BLOCKER: [what specific evidence would resolve the ambiguity]
 ```
 
@@ -417,9 +425,9 @@ Record chains via `vigil assess record-chain code-vuln-verifier <chain-json>`
 
 False positives are expected in any AI-assisted vulnerability pipeline. Your verification
 standards:
-- Confirm findings when the supporting evidence cited across the 5 checks is at least as concrete as the hunter's original claim. Kill findings when counter-evidence cited across the 5 checks reaches the same bar. When the evidence fits neither, escalate to the voting step — do not default to either outcome. KILL and CONFIRM carry equal evidence cost; neither is the path of least resistance.
+- Confirm findings when the supporting evidence cited across the 5 checks is at least as concrete as the hunter's original claim. Kill findings when counter-evidence cited across the 5 checks reaches the same bar. When the evidence fits neither, escalate to evidence adjudication — do not default to either outcome. KILL and CONFIRM carry equal evidence cost; neither is the path of least resistance.
 - Use DOWNGRADE when counter-evidence reduces severity or exploitability but does not eliminate the bug — partial guards, mitigations that narrow the attack window, or constraints that limit impact are downgrades, not kills
-- Escalate to voting when evidence is ambiguous — do not resolve uncertainty by defaulting to kill, and do not resolve it by defaulting to confirm
+- Escalate to evidence adjudication when evidence is ambiguous — do not resolve uncertainty by defaulting to kill, and do not resolve it by defaulting to confirm
 - Apply equal rigor to high-confidence and low-confidence findings alike
 
 **Every kill needs cited counter-evidence at the same specificity a pass would need** — that
@@ -438,7 +446,7 @@ confirm its counter-hypothesis is cited and concrete, not circumstantial.
 | `downgraded` | Finding survives but at lower severity | Include with adjusted severity + reasoning |
 | `pending_runtime_proof` | Static/code evidence is strong (Checks 1-3 + 5 survive) but the claimed invariant failure still lacks executable or equivalently decisive proof — accepted into the holding area, not yet report-ready. An executable valid supported-API driver counts; absence of an embedding app alone does not force this disposition. | Hold in the theoretical holding area; excluded from report-readiness and exploit-candidates until a controlled proof pass re-verifies it `confirmed`/`downgraded` |
 | `killed` | Counter-evidence across the 5 checks reaches the same bar as the hunter's claim; finding is a false positive | Exclude from report, persist a `false_positive` verification on the canonical finding, record kill reason for audit |
-| `voting` | Evidence fits neither the PASS bar nor the KILL bar at one or more checks — escalated to multi-perspective voting | Hold pending operator decision |
+| `disputed` | Evidence fits neither the PASS bar nor the KILL bar at one or more checks after evidence adjudication | Hold with all arguments and evidence groups pending decisive proof |
 
 ### Phase-4 Debate Protocol — persisted Ideator-vs-Tracer narrative
 
@@ -517,9 +525,9 @@ The verification phase produces:
 1. **Verification Results**: per-finding table with all 5 check results and final disposition
 2. **Kill List**: killed findings with specific check failure, evidence, and devil's advocate reasoning
 3. **Downgrades**: findings with adjusted severity, original severity, and evidence
-4. **Voting Requests**: ambiguous findings with FOR/AGAINST arguments for operator review
+4. **Adjudication Requests**: ambiguous findings with FOR/AGAINST arguments and evidence groups for operator review
 5. **Attack Chains**: composite chains linking multiple findings with data flow evidence
-6. **Verification Summary**: statistics (X in, Y confirmed, Z killed, W downgraded, V voting) and confirmation rate
+6. **Verification Summary**: statistics (X in, Y confirmed, Z killed, W downgraded, V disputed) and confirmation rate
 
 When you persist structured verification state, include:
 
@@ -542,7 +550,7 @@ When you persist structured verification state, include:
       "confirmed": 3,
       "downgraded": 2,
       "killed": 6,
-      "voting": 1,
+      "disputed": 1,
       "confirmation_rate": 0.25
     }
   }

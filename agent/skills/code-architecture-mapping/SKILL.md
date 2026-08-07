@@ -405,6 +405,13 @@ Produce a structured architecture map containing:
 7. **Entry-Point Chains**: ranked list of complete data flow chains from entry to target.
 8. **Attack Hypotheses**: prioritized list of specific vulnerability hypotheses. Each includes: entry point, chain, target, CWE, concrete scenario, score. Written to `tools/analysis-state/attack-hypotheses.json`.
 9. **Structural Index Integration**: the call graph and entry-point chains incorporate tree-sitter-derived function definitions, call sites, and security-relevant operations resolved through the Code Source Identity manifest.
+10. **Historical CVE Bug Shapes (optional)**: when repository history/advisories expose a concrete
+    vulnerable-to-fixed delta, write `tools/analysis-state/cve-bug-shapes.jsonl`, one compact JSON
+    object per physical line with `shape_id`, `cwe`, `affected_paths`, `vulnerable_revision`,
+    `fixed_revision`, `bug_pattern`, `guard_delta`, and `evidence_refs`. The two revision fields may
+    name commits, tags, or advisory/source snapshots, but every record must contain enough cited
+    vulnerable/fixed evidence to derive the semantic pattern. Omit the artifact rather than emit an
+    identifier-only record; Phase 2 treats absence as not applicable, not as completed discovery.
 
 ## Extended Resources
 

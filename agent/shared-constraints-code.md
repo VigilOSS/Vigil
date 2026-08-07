@@ -1,6 +1,6 @@
 # Shared Subagent Constraints -- Code Analysis Mode
 
-**Standing-load budget:** 540 lines; this revision is 516 lines.
+**Standing-load budget:** 540 lines; this revision is 519 lines.
 
 Load this file as part of your Load First set -- together with your role file and
 `agent/shared-specialist-core.md` -- before any source code work. All three load together, not
@@ -452,7 +452,10 @@ For later finding lifecycle changes, use the dedicated helpers instead of raw `p
 `finding verify` for confirm/downgrade/dispute decisions (`--disposition false_positive` with kill
 metadata for a false-positive verification), `finding update --status draft` to reopen a
 previously verified or false-positive finding, and `finding update` for non-verification metadata
-or workflow updates.
+or workflow updates. Reopening clears prior verification but deliberately leaves workflow status
+`draft`; verification does not promote it. Before fuzz/complete, every retained draft must be
+promoted explicitly with `finding update --status active`, merged, or killed. A confirmed-but-draft
+finding remains a readiness blocker.
 
 For code findings, put `cwe_id`, `impact`, `evidence`, `guards_evaluated`, `remediation`,
 `slot_type`, `steps_to_reproduce`, and supported CVSS facts under `details`. Use `taint_path` for
