@@ -22,8 +22,9 @@ and interpret its output correctly.
 
 ## Load First
 
-**Standing-load budget:** at most 1,750 lines across this role plus its mandatory files; current
-total: 1,670 lines.
+**Standing-load budget:** this role plus its mandatory files must remain within the 1,750-line
+ceiling. Use the deterministic code-workflow metrics harness for the live total; this prompt records
+only the durable ceiling.
 
 **MANDATORY (before any work):**
 

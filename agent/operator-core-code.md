@@ -1,6 +1,6 @@
 ## Activation
 
-**Operator-doctrine budget:** 450 lines; this revision is 425 lines.
+**Operator-doctrine budget:** 450 lines; this revision is 428 lines.
 
 This file replaces the web-focused core loop from `operator-core.md` for code-analysis
 engagements (same backend, findings table, and CLI tools).
@@ -103,8 +103,8 @@ returning clean with declining effort scores across successive batches.
 5. **NAME THE SKILL, DON'T LOAD IT** -- Use `vigil assess list-skills` to pick the matching skill by its compact name + one-line "Use when:" description; you do not need the skill's full content to make this selection. Put the skill's path in the dispatch prompt with the enforcement line from the Pre-Dispatch Checklist below, and tell the specialist to run `vigil assess list-references --skill <name>` itself immediately after loading the skill. The specialist reads both in full before starting target work — that is the specialist's job, not the operator's; holding a skill's full methodology in operator context is exactly the boundary violation "Operator Boundary" (below) warns against.
    - **Phase 0 (Ingest + Index):** operator-mechanical, no agent dispatch needed
    - **Phase 1 (Classify + Map):** `code-architect` -> `agent/skills/code-architecture-mapping/SKILL.md`
-   - **Phase 2 (Hunt):** `code-vuln-hunter` -> `agent/skills/code-vulnerability-analysis/SKILL.md` + CWE-specific refs
-   - **Phase 3 (Verify + Variant):** `code-vuln-verifier` -> `agent/skills/code-finding-verification/SKILL.md` AND `code-variant-hunter` -> `agent/skills/code-variant-analysis/SKILL.md` (parallel)
+   - **Phase 2 (Hunt):** `code-vuln-hunter` -> `agent/skills/code-vulnerability-analysis/SKILL.md` + CWE-specific refs; when Phase 1 emitted evidence-backed `tools/analysis-state/cve-bug-shapes.jsonl`, `code-variant-hunter` -> `agent/skills/code-variant-analysis/SKILL.md` in the role prompt's non-covering discovery mode
+   - **Phase 3 (Verify + Variant):** `code-vuln-verifier` -> `agent/skills/code-finding-verification/SKILL.md`; when the frozen current Phase 2 root-finding set is non-empty, also `code-variant-hunter` -> `agent/skills/code-variant-analysis/SKILL.md` (parallel). Freeze the exact current-source, reportable-workflow, non-child root set before verification changes live dispositions; never fabricate an empty-scope variant dispatch or receipts.
    - **Phase 4 (Fuzz):** `code-fuzz-engineer` -> `agent/skills/code-fuzz-campaign/SKILL.md` + memory-safety CWE refs (conditional, C/C++ only)
 6. **HOST READS; RUNTIME EXECUTES** -- Read sealed source and author configuration/harness files on the host beneath the active Code Source Identity and engagement roots. Never compile, fuzz, or execute a repository-built binary on the host: those steps use the audited `vigil assess kali ...` surface and container-visible `/engagements/$ENGAGEMENT_KEY/...` paths. If sealed/build inputs cannot be mapped beneath the engagement mount, stop and surface the boundary instead of silently running host-side. The component-safe path contract lives in `agent/shared-constraints-code.md` §3 and the mandatory fuzz skill. Before shaping a runtime dispatch, query `vigil assess command-run list --q <keyword> --show-matches` and inspect any reused run with `command-run get <id>`. The audit flags and coverage-vs-duplicate semantics are canonical in `agent/shared-constraints.md` §2/§2b and `agent/references/runtime-guides/command-history-auditing.md`; apply them unchanged in code mode.
 7. **DISPATCH** -- Dispatch to the appropriate subagent for all analysis work. The operator's job is orchestration: fetching metadata, providing paths, recording outputs, gating quality, and managing the analysis queue. Subagents read source files directly and produce structured outputs. Source reading, file-level analysis, and vulnerability judgment belong to subagents -- the operator provides paths, structural index, and metadata, not content.
@@ -127,23 +127,26 @@ injected packet under `agent/rules/mindsets/` more specific than the role's base
 `code-fuzz-engineer` do not (see "Scoped out"). Assignment is mechanical by phase, not chosen from
 a menu:
 - **WIDE survey** (Phase 1 map, Phase 2A broad hunt) — `code-architect`, `code-vuln-hunter` (survey
-  pass), and `source-analyzer` (when it runs a code-track dispatch alongside web testing) all carry
-  baseline + `developer.md`, no family lens.
+  pass), `code-variant-hunter` when running the optional historical-CVE discovery seed, and
+  `source-analyzer` (when it runs a code-track dispatch alongside web testing) all carry baseline +
+  `developer.md`, no family lens.
 - **DEEP drill** (Phase 2B/2C) — `code-vuln-hunter` carries ONE family lens matching the flagged
   signal (`injection-surface.md`, `idor-bac.md`, `business-logic.md`, or closest fit) plus the
   matching CWE pattern refs.
 - **SYNTHESIS** (Phase 2D) — `code-vuln-hunter` carries `chain-impact.md`, complementing (not
   replacing) the seam manifest and the exploit-developer A→B chain table.
 - **VARIANT** (Phase 3) — `code-variant-hunter` carries the sibling/variant lens of the confirmed
-  family, generalizing to every file the family touches rather than pattern-matching one bug string.
+  family, sweeping every current admitted file; structurally irrelevant files close through a
+  bounded non-match receipt rather than disappearing from coverage.
 
 That mechanical assignment governs *selection*, not *application*: once the specialist has the
 lens, it derives its OWN hypotheses under it rather than running a pre-named checklist — a lens
 describes *how the developer was thinking*; naming the specific bug instead would cap depth at the
 operator's guess.
 
-**`hunt_scope`:** `wide` for `code-vuln-hunter` in Phase 1/2A, `deep` for 2B/2C/2D;
-`code-variant-hunter`/`code-vuln-verifier` are always `deep` (Phase 3 is convergent). The offensive
+**`hunt_scope`:** `wide` for `code-vuln-hunter` in Phase 1/2A and `code-variant-hunter` in Phase 2
+historical discovery, `deep` for Phase 2B/2C/2D and Phase 3 variant scanning;
+`code-vuln-verifier` is always `deep` (Phase 3 is convergent). The offensive
 `wide -> hypothesis-driven` pairing does NOT transfer: the code surface is an enumerable file/queue,
 not a hypothesis-sampled host pool, so code WIDE is the queue-coverage broad hunt (`dispatch_mode:
 item-iterating`) and code DEEP is `deep-manual`. Keep each role's `dispatch_mode` default from the
@@ -167,7 +170,7 @@ existing finding rather than hunting a fresh vuln-class.
 |-------|------|-------|
 | `code-architect` | Architecture recon, threat modeling, call graph, attack hypotheses, file analysis queue | Phase 1 |
 | `code-vuln-hunter` | Deep file-level vulnerability analysis with TOB-style methodology | Phase 2 (batched, parallel) |
-| `code-variant-hunter` | Systematic variant scanning for confirmed bug patterns | Phase 3 (parallel with verifier) |
+| `code-variant-hunter` | Historical bug-shape discovery or receipt-bearing sibling scans | Phase 2A (optional seed) and Phase 3 (parallel with verifier) |
 | `code-vuln-verifier` | FP elimination with devil's advocate verification + clean-file spot-check | Phase 3 (parallel with variant) |
 | `code-fuzz-engineer` | AI-driven fuzz campaigns: target selection, harness construction, crash triage | Phase 4 (conditional, C/C++ only) |
 | `report-writer` | Per-finding submission closeout — `export submission --platform direct` by default (reused from web engagement) | After Phase 3 or 4 completes |
@@ -197,7 +200,7 @@ whether entry to `fuzz` is ready. The rest of the Phase 4 document remains entry
 | 0 — Ingest + Index | `agent/phases/code-phase-0-ingest-index.md` | Operator-mechanical clone/ingest/index/sync bash walkthrough; structural index generation; Phase 0 exit gate. |
 | 1 — Classify + Map | `agent/phases/code-phase-1-classify-map.md` | `code-architect` dispatch (six deliverables: classifications, module map, threat model, call graph, attack hypotheses, file analysis queue); on-return recording; coverage-gap review; Phase 1 exit gate. |
 | 2 — Hunt | `agent/phases/code-phase-2-hunt.md` | 2A Broad Hunt (queue + fetch loop, batch framing, trigger-gated CWE refs), 2B advisory CWE Coverage Review (effort matrix, CWE-directed re-dispatch), 2C Adversarial Depth Pass, 2D System-Level Synthesis Pass (seam manifest + reduce); completion checks plus independent transition readiness. |
-| 3 — Verify + Variant | `agent/phases/code-phase-3-verify-variant.md` | Coverage gate; Agent A `code-vuln-verifier` (FP elimination + clean-file spot-check) and Agent B `code-variant-hunter` run in parallel; Multi-Perspective Voting; pre-report dedup; Phase 3 exit. |
+| 3 — Verify + Variant | `agent/phases/code-phase-3-verify-variant.md` | Coverage gate; Agent A `code-vuln-verifier` (FP elimination + clean-file spot-check) and, only for a non-empty frozen parent set, Agent B `code-variant-hunter` run in parallel; evidence adjudication; pre-report dedup; Phase 3 exit. |
 | 4 — Fuzz (conditional) | `agent/phases/code-phase-4-fuzz.md` | Bounded applicability decision read from Phase 3; after entry, required campaigns run through 4A Target Selection + Harness Construction, 4B Campaign Execution, and 4C Crash Triage; a current `not_required` receipt skips campaign work without bypassing terminal closeout. |
 
 ## Dispatch Context Template
@@ -296,7 +299,8 @@ Before every dispatch, verify:
       `shared-constraints-code.md` §5
 - [ ] For a Phase 3 `code-variant-hunter` dispatch, Variant Receipt Authority is immediately after
       Code Source Identity and exactly matches the numeric row ID plus sorted `finding_slugs`
-      registered by `agent start`
+      registered by `agent start`; the dispatch also includes current identity for every admitted
+      file because backend readiness requires one receipt per admitted file
 - [ ] Current phase stated with specific task objective (not just "analyze this")
 - [ ] Skill name(s) identified from `vigil assess list-skills` (the first column = `name`, matches `agent/skills/<name>/`)
 - [ ] Full skill path(s) `agent/skills/<name>/SKILL.md` included in the dispatch prompt with explicit enforcement: "You MUST read and follow `agent/skills/<name>/SKILL.md` before beginning work; if a skill contradicts this prompt, the skill wins for procedural steps."
@@ -339,7 +343,7 @@ Phase-specific resume actions:
   loop for unprocessed file batches.
 - **Phase 2B (hunt -- CWE review)**: Run `code-coverage --cwe-matrix` to check current effort
   scores. Resume CWE-directed re-dispatch for files below threshold.
-- **Phase 3 (verify-variant)**: Check if both verifier and variant hunter have returned.
+- **Phase 3 (verify-variant)**: Check that the verifier and, when a non-empty parent set made it applicable, the variant hunter have returned.
   Resume whichever is incomplete.
 - **Phase 4 (fuzz)**: Check `tools/fuzz-state/` for existing targets, harnesses, campaigns,
   and crashes. If targets.json exists but no harnesses, resume from Stage 3. If crashes
@@ -418,8 +422,9 @@ per-phase "Returns" sections being written for the web track.
 
 Each agent's Handoffs section specifies **which skill to bring** downstream. Summary (code track):
 `code-architect` -> `code-vuln-hunter` (vulnerability-analysis skill matching the flagged signal),
-`code-vuln-hunter` -> `code-vuln-verifier` (code-finding-verification) + `code-variant-hunter`
-(code-variant-analysis, parallel), operator-mediated into Phase 4 when a CWE class is fuzz-suited
+`code-vuln-hunter` -> `code-vuln-verifier` (code-finding-verification) plus, only when the frozen
+current root-finding set is non-empty, `code-variant-hunter` (code-variant-analysis, parallel),
+operator-mediated into Phase 4 when a CWE class is fuzz-suited
 (`code-fuzz-engineer` does its own Phase 4A target selection rather than a direct hunter handoff;
 bring code-fuzz-campaign, C/C++ only), `code-vuln-verifier`/`code-variant-hunter` -> `report-writer`
 (report-generation; per-finding `export submission --platform direct` closeout).
