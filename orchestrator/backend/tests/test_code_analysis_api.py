@@ -408,6 +408,7 @@ def _create_code_parent_finding(
     file_path: str = "src/parser.py",
     source_name: str = "code-vuln-hunter",
     severity: str = "high",
+    workflow_status: str = "active",
     line: int = 10,
     allow_remint: bool = False,
     links: list[dict[str, object]] | None = None,
@@ -418,7 +419,7 @@ def _create_code_parent_finding(
             "slug": slug,
             "title": f"Parent pattern {slug}",
             "severity": severity,
-            "workflow_status": "active",
+            "workflow_status": workflow_status,
             "verification_state": "unreviewed",
             "verification_disposition": "none",
             "defect_family": "parser-memory-safety",
@@ -443,6 +444,31 @@ def _create_code_parent_finding(
         },
     )
     assert response.status_code == 201, response.text
+    return response.json()
+
+
+def _verify_code_finding(
+    client,
+    engagement_key: str,
+    repo_id: int,
+    slug: str,
+    *,
+    disposition: str = "confirmed",
+) -> dict[str, object]:
+    response = client.post(
+        f"/engagements/{engagement_key}/assessment/findings/{slug}/verify",
+        json={
+            "disposition": disposition,
+            "reason_code": "source-proof",
+            "reason_text": "Verified against the current sealed source snapshot.",
+            "source_name": "code-vuln-verifier",
+            "provenance": {
+                "agent_name": "code-vuln-verifier",
+                "code_snapshot": _finding_code_snapshot(client, engagement_key, repo_id),
+            },
+        },
+    )
+    assert response.status_code == 200, response.text
     return response.json()
 
 
@@ -7879,12 +7905,19 @@ def test_variant_receipt_is_dispatch_bound_current_and_idempotent(
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     helper = next(row for row in files if row["file_path"] == "src/helpers.py")
     _classify_file(client, engagement_key, int(parser["id"]), "medium", 49)
+    _create_code_parent_finding(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        slug="VR-101",
+    )
+    _verify_code_finding(client, engagement_key, int(repo["id"]), "VR-101")
     base = f"/engagements/{engagement_key}/assessment/code"
     dispatch = _register_variant_dispatch(
         client,
         engagement_key,
         agent_id="variant-current",
-        finding_slugs=[],
+        finding_slugs=["VR-101"],
     )
     payload = _variant_receipt_payload(
         client,
@@ -7892,7 +7925,7 @@ def test_variant_receipt_is_dispatch_bound_current_and_idempotent(
         int(repo["id"]),
         parser,
         dispatch,
-        parent_finding_slugs=[],
+        parent_finding_slugs=["VR-101"],
     )
     db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
     with sqlite3.connect(str(db_path)) as connection:
@@ -7918,7 +7951,7 @@ def test_variant_receipt_is_dispatch_bound_current_and_idempotent(
     first = client.post(f"{base}/variant-checks", json=payload)
     assert first.status_code == 201, first.text
     assert first.json()["current"] is True
-    assert first.json()["parent_finding_slugs"] == []
+    assert first.json()["parent_finding_slugs"] == ["VR-101"]
     assert first.json()["file_path"] == parser["file_path"]
     replay = client.post(f"{base}/variant-checks", json=payload)
     assert replay.status_code == 201, replay.text
@@ -7941,7 +7974,7 @@ def test_variant_receipt_is_dispatch_bound_current_and_idempotent(
             int(repo["id"]),
             helper,
             dispatch,
-            parent_finding_slugs=[],
+            parent_finding_slugs=["VR-101"],
         ),
     )
     assert helper_receipt.status_code == 201, helper_receipt.text
@@ -7949,6 +7982,471 @@ def test_variant_receipt_is_dispatch_bound_current_and_idempotent(
     assert "variant_checks_incomplete" not in {
         blocker["code"] for blocker in after["blockers"]
     }
+
+
+def test_variant_readiness_is_not_applicable_until_a_current_phase2_root_exists(
+    client, isolate_settings
+):
+    engagement_key = "2026-08-06-code-variant-no-parent"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="variant-no-parent")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    base = f"/engagements/{engagement_key}/assessment/code"
+
+    without_parent = client.get(f"{base}/readiness?target_phase=complete")
+
+    assert without_parent.status_code == 200, without_parent.text
+    assert "variant_checks_incomplete" not in {
+        blocker["code"] for blocker in without_parent.json()["blockers"]
+    }
+    empty_dispatch = client.post(
+        f"/engagements/{engagement_key}/assessment/dispatches",
+        json={
+            "agent_id": "variant-empty-scope",
+            "agent_role": "code-variant-hunter",
+            "task": "This dispatch must not exist without a parent finding.",
+            "status": "in-progress",
+            "dispatch_mode": "hypothesis-driven",
+            "finding_slugs": [],
+            "skills": "code-variant-analysis",
+        },
+    )
+    assert empty_dispatch.status_code == 400, empty_dispatch.text
+    unscoped_dispatches = []
+    for agent_id, finding_field in (
+        ("variant-cve-shape-omitted", "omitted"),
+        ("variant-cve-shape-null", None),
+    ):
+        dispatch_payload = {
+            "agent_id": agent_id,
+            "agent_role": "code-variant-hunter",
+            "task": "Search Phase 2 CVE bug-shape intelligence without receipt authority.",
+            "status": "in-progress",
+            "dispatch_mode": "wide",
+            "skills": "code-variant-analysis",
+        }
+        if finding_field != "omitted":
+            dispatch_payload["finding_slugs"] = finding_field
+        response = client.post(
+            f"/engagements/{engagement_key}/assessment/dispatches",
+            json=dispatch_payload,
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["finding_slugs"] is None
+        unscoped_dispatches.append(response.json())
+    with db_module.get_connection() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM code_variant_dispatch_scopes WHERE dispatch_id IN (?, ?)",
+            tuple(row["id"] for row in unscoped_dispatches),
+        ).fetchone()[0] == 0
+    empty_receipt = client.post(
+        f"{base}/variant-checks",
+        json=_variant_receipt_payload(
+            client,
+            engagement_key,
+            int(repo["id"]),
+            files[0],
+            {"id": 999_999},
+            parent_finding_slugs=[],
+        ),
+    )
+    assert empty_receipt.status_code == 400, empty_receipt.text
+    assert client.get(f"{base}/variant-checks").json() == []
+
+    _create_code_parent_finding(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        slug="WF-001",
+    )
+    unscoped_receipt = client.post(
+        f"{base}/variant-checks",
+        json=_variant_receipt_payload(
+            client,
+            engagement_key,
+            int(repo["id"]),
+            files[0],
+            unscoped_dispatches[0],
+            parent_finding_slugs=["WF-001"],
+        ),
+    )
+    assert unscoped_receipt.status_code == 409, unscoped_receipt.text
+    assert "immutable start-time scope" in unscoped_receipt.json()["detail"]
+    with_unverified_parent = client.get(f"{base}/readiness?target_phase=complete")
+    assert with_unverified_parent.status_code == 200, with_unverified_parent.text
+    unverified_codes = {
+        item["code"] for item in with_unverified_parent.json()["blockers"]
+    }
+    assert "variant_checks_incomplete" in unverified_codes
+    assert "variant_parent_verification_incomplete" in unverified_codes
+
+    _verify_code_finding(client, engagement_key, int(repo["id"]), "WF-001")
+    with_parent = client.get(f"{base}/readiness?target_phase=complete")
+    assert with_parent.status_code == 200, with_parent.text
+    blocker = next(
+        item
+        for item in with_parent.json()["blockers"]
+        if item["code"] == "variant_checks_incomplete"
+    )
+    assert blocker == {
+        "code": "variant_checks_incomplete",
+        "message": (
+            f"Repository has {len(files)} incomplete admitted-file variant check(s)."
+        ),
+        "overrideable": True,
+        "repo_id": repo["id"],
+    }
+
+
+def test_variant_dispatch_scope_is_exact_current_phase2_root_set_and_excludes_children(
+    client, isolate_settings
+):
+    engagement_key = "2026-08-07-code-variant-exact-phase2-scope"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="variant-exact-phase2-scope")
+    _create_files(client, engagement_key, int(repo["id"]))
+    _create_code_parent_finding(
+        client, engagement_key, int(repo["id"]), slug="EX-001"
+    )
+    _create_code_parent_finding(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        slug="EX-002",
+        line=20,
+        allow_remint=True,
+    )
+    _create_code_parent_finding(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        slug="CV-901",
+        source_name="code-variant-hunter",
+        line=30,
+        allow_remint=True,
+        links=[
+            {
+                "link_kind": "variant_of",
+                "target_kind": "finding",
+                "target_ref": "EX-001",
+            }
+        ],
+    )
+    endpoint = f"/engagements/{engagement_key}/assessment/dispatches"
+
+    def start(agent_id: str, finding_slugs: list[str]):
+        return client.post(
+            endpoint,
+            json={
+                "agent_id": agent_id,
+                "agent_role": "code-variant-hunter",
+                "task": "Scan the exact frozen Phase 2 root set.",
+                "status": "in-progress",
+                "dispatch_mode": "hypothesis-driven",
+                "finding_slugs": finding_slugs,
+                "skills": "code-variant-analysis",
+            },
+        )
+
+    omitted = start("variant-scope-omitted-root", ["EX-001"])
+    assert omitted.status_code == 409, omitted.text
+    assert "exact current Phase 2 root set" in omitted.json()["detail"]
+    child_added = start(
+        "variant-scope-child-added", ["CV-901", "EX-001", "EX-002"]
+    )
+    assert child_added.status_code == 409, child_added.text
+    assert "exact current Phase 2 root set" in child_added.json()["detail"]
+
+    accepted = start("variant-scope-exact", ["EX-001", "EX-002"])
+    assert accepted.status_code == 201, accepted.text
+    assert accepted.json()["finding_slugs"] == ["EX-001", "EX-002"]
+@pytest.mark.parametrize("verified", [False, True])
+def test_draft_code_finding_blocks_fuzz_and_complete_until_promoted(
+    client, isolate_settings, verified
+):
+    engagement_key = f"2026-08-06-code-draft-finding-{int(verified)}"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key=f"draft-finding-{int(verified)}")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    base = f"/engagements/{engagement_key}/assessment/code"
+    slug = f"DF-{int(verified) + 1:03d}"
+    _create_code_parent_finding(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        slug=slug,
+        workflow_status="draft",
+    )
+    if verified:
+        response = client.post(
+            f"/engagements/{engagement_key}/assessment/findings/{slug}/verify",
+            json={
+                "disposition": "confirmed",
+                "reason_code": "source-proof",
+                "reason_text": "Confirmed against the current sealed source snapshot.",
+                "source_name": "code-vuln-verifier",
+                "provenance": {
+                    "agent_name": "code-vuln-verifier",
+                    "code_snapshot": _finding_code_snapshot(
+                        client, engagement_key, int(repo["id"])
+                    ),
+                },
+            },
+        )
+        assert response.status_code == 200, response.text
+
+    verify_entry = client.get(
+        f"{base}/readiness?target_phase=verify-variant"
+    ).json()
+    assert "draft_code_findings_unresolved" not in {
+        blocker["code"] for blocker in verify_entry["blockers"]
+    }
+    for target_phase in ("fuzz", "complete"):
+        readiness = client.get(
+            f"{base}/readiness?target_phase={target_phase}"
+        ).json()
+        draft_blocker = next(
+            blocker
+            for blocker in readiness["blockers"]
+            if blocker["code"] == "draft_code_findings_unresolved"
+        )
+        assert draft_blocker == {
+            "code": "draft_code_findings_unresolved",
+            "message": (
+                "Repository has 1 unresolved draft code finding(s); re-review and "
+                "rebind when needed, then promote, merge, or kill each draft before "
+                "leaving verification."
+            ),
+            "overrideable": False,
+            "repo_id": repo["id"],
+        }
+        assert "variant_checks_incomplete" not in {
+            blocker["code"] for blocker in readiness["blockers"]
+        }
+
+    report_readiness = client.get(
+        f"/engagements/{engagement_key}/assessment/report-readiness"
+    )
+    assert report_readiness.status_code == 200, report_readiness.text
+    report_draft = next(
+        blocker
+        for blocker in report_readiness.json()["blockers"]
+        if blocker["kind"] == "draft_finding_needs_disposition"
+        and blocker["slug"] == slug
+    )
+    assert report_draft["snapshot_status"] == "current"
+
+    promoted = client.patch(
+        f"/engagements/{engagement_key}/assessment/findings/{slug}",
+        json={
+            "workflow_status": "active",
+            "source_name": "operator",
+            "reason_code": "verification-triage-complete",
+            "reason_text": "Promote the current-source draft into the reportable workflow.",
+        },
+    )
+    assert promoted.status_code == 200, promoted.text
+    after = client.get(f"{base}/readiness?target_phase=fuzz").json()
+    assert "draft_code_findings_unresolved" not in {
+        blocker["code"] for blocker in after["blockers"]
+    }
+    variant_blockers = [
+        blocker
+        for blocker in after["blockers"]
+        if blocker["code"] == "variant_checks_incomplete"
+    ]
+    assert variant_blockers[0]["message"] == (
+        f"Repository has {len(files)} incomplete admitted-file variant check(s)."
+    )
+    verification_blockers = [
+        blocker
+        for blocker in after["blockers"]
+        if blocker["code"] == "variant_parent_verification_incomplete"
+    ]
+    assert bool(verification_blockers) is (not verified)
+
+
+def test_code_readiness_blocks_current_stale_and_unbound_drafts_but_not_terminalized(
+    client, isolate_settings
+):
+    engagement_key = "2026-08-06-code-draft-binding-states"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="draft-binding-states")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    base = f"/engagements/{engagement_key}/assessment/code"
+    _create_code_parent_finding(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        slug="DS-001",
+        workflow_status="draft",
+    )
+
+    manifest_fields = {
+        "file_path",
+        "language",
+        "loc",
+        "file_hash",
+        "header_snippet",
+        "git_churn_score",
+        "has_past_cve_fix",
+    }
+    changed_manifest = [{key: row[key] for key in manifest_fields} for row in files]
+    changed_manifest[0]["file_hash"] = _source_hash("draft-binding-state-refresh")
+    _refresh_repo_files(client, engagement_key, int(repo["id"]), changed_manifest)
+
+    _create_code_parent_finding(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        slug="DC-001",
+        workflow_status="draft",
+    )
+    _create_code_parent_finding(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        slug="DM-001",
+        workflow_status="draft",
+        line=20,
+    )
+    _create_code_parent_finding(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        slug="DM-002",
+        workflow_status="active",
+        line=20,
+    )
+    merged = client.post(
+        f"/engagements/{engagement_key}/assessment/findings/merge",
+        json={
+            "source_slug": "DM-001",
+            "target_slug": "DM-002",
+            "reason": "same current-source defect",
+        },
+    )
+    assert merged.status_code == 200, merged.text
+
+    _create_code_parent_finding(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        slug="DK-001",
+        workflow_status="draft",
+        line=30,
+    )
+    killed = client.post(
+        f"/engagements/{engagement_key}/assessment/findings/DK-001/verify",
+        json={
+            "disposition": "false_positive",
+            "reason_code": "guard-proven",
+            "reason_text": "Current sealed source proves a complete containment guard.",
+            "source_name": "code-vuln-verifier",
+            "details": {"kill_check": 2, "kill_reason": "Containment is enforced."},
+            "provenance": {
+                "agent_name": "code-vuln-verifier",
+                "code_snapshot": _finding_code_snapshot(
+                    client, engagement_key, int(repo["id"])
+                ),
+            },
+        },
+    )
+    assert killed.status_code == 200, killed.text
+
+    _create_code_parent_finding(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        slug="DU-001",
+        workflow_status="draft",
+        line=40,
+        allow_remint=True,
+    )
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_findings SET provenance_json = '{}' WHERE slug = ?",
+            ("DU-001",),
+        )
+        connection.commit()
+    _create_code_parent_finding(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        slug="DB-001",
+        workflow_status="draft",
+        line=50,
+        allow_remint=True,
+    )
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_findings SET verification_disposition = 'blocked' "
+            "WHERE slug = ?",
+            ("DB-001",),
+        )
+        connection.commit()
+
+    readiness = client.get(f"{base}/readiness?target_phase=complete")
+    assert readiness.status_code == 200, readiness.text
+    blockers = readiness.json()["blockers"]
+    repo_blocker = next(
+        row for row in blockers if row["code"] == "draft_code_findings_unresolved"
+    )
+    assert repo_blocker["repo_id"] == repo["id"]
+    assert "2 unresolved draft code finding(s)" in repo_blocker["message"]
+    unbound_blocker = next(
+        row
+        for row in blockers
+        if row["code"] == "unbound_draft_code_findings_unresolved"
+    )
+    assert "1 draft code finding(s)" in unbound_blocker["message"]
+    findings = {
+        row["slug"]: row
+        for row in client.get(
+            f"/engagements/{engagement_key}/assessment/findings"
+        ).json()
+    }
+    assert findings["DM-001"]["workflow_status"] == "merged"
+    assert findings["DK-001"]["workflow_status"] == "false_positive"
+
+
+def test_code_readiness_does_not_drop_draft_bound_to_inactive_repository(
+    client, isolate_settings
+):
+    engagement_key = "2026-08-06-code-draft-inactive-repo"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="draft-inactive-repo")
+    _create_files(client, engagement_key, int(repo["id"]))
+    _create_code_parent_finding(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        slug="DI-001",
+        workflow_status="draft",
+    )
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "UPDATE code_repos SET active_generation = 0 WHERE id = ?",
+            (repo["id"],),
+        )
+
+    response = client.get(
+        f"/engagements/{engagement_key}/assessment/code/readiness?target_phase=complete"
+    )
+
+    assert response.status_code == 200, response.text
+    blockers = response.json()["blockers"]
+    unbound = next(
+        row
+        for row in blockers
+        if row["code"] == "unbound_draft_code_findings_unresolved"
+    )
+    assert "1 draft code finding(s)" in unbound["message"]
+    assert not any(
+        row["code"] == "draft_code_findings_unresolved"
+        and row.get("repo_id") == repo["id"]
+        for row in blockers
+    )
 
 
 def test_variant_receipt_rejects_stale_authority_and_unsafe_evidence(
@@ -7966,6 +8464,7 @@ def test_variant_receipt_rejects_stale_authority_and_unsafe_evidence(
         int(repo["id"]),
         slug="CH-701",
     )
+    _verify_code_finding(client, engagement_key, int(repo["id"]), "CH-701")
     dispatch = _register_variant_dispatch(
         client,
         engagement_key,
@@ -7998,7 +8497,7 @@ def test_variant_receipt_rejects_stale_authority_and_unsafe_evidence(
         f"{base}/variant-checks",
         json={**payload, "parent_finding_slugs": []},
     )
-    assert mismatched_parent.status_code == 409
+    assert mismatched_parent.status_code == 400
     stale_generation = client.post(
         f"{base}/variant-checks",
         json={**payload, "repo_generation": int(payload["repo_generation"]) + 1},
@@ -8185,11 +8684,22 @@ def test_variant_receipt_rejects_stale_authority_and_unsafe_evidence(
     assert rejected_status.status_code == 409
     other_engagement = "2026-08-05-code-variant-receipt-other-engagement"
     write_engagement(isolate_settings["engagements_dir"], other_engagement)
+    foreign_repo = _create_repo(
+        client,
+        other_engagement,
+        repo_key="variant-foreign-engagement",
+    )
+    _create_code_parent_finding(
+        client,
+        other_engagement,
+        int(foreign_repo["id"]),
+        slug="FX-701",
+    )
     foreign_dispatch = _register_variant_dispatch(
         client,
         other_engagement,
         agent_id="variant-foreign-engagement",
-        finding_slugs=[],
+        finding_slugs=["FX-701"],
     )
     rejected_foreign = client.post(
         f"{base}/variant-checks",
@@ -8211,6 +8721,7 @@ def test_variant_receipt_scope_survives_kill_excludes_children_and_detects_new_p
     repo = _create_repo(client, engagement_key, repo_key="variant-parent-race")
     files = _create_files(client, engagement_key, int(repo["id"]))
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
+    helper = next(row for row in files if row["file_path"] == "src/helpers.py")
     _classify_file(client, engagement_key, int(parser["id"]), "critical", 100)
     _create_code_parent_finding(
         client,
@@ -8276,9 +8787,28 @@ def test_variant_receipt_scope_survives_kill_excludes_children_and_detects_new_p
         line=30,
         allow_remint=True,
     )
+    _verify_code_finding(client, engagement_key, int(repo["id"]), "CH-802")
+    assert client.get(f"{base}/variant-checks").json() == []
+    raced_receipt = client.post(
+        f"{base}/variant-checks",
+        json=_variant_receipt_payload(
+            client,
+            engagement_key,
+            int(repo["id"]),
+            helper,
+            dispatch,
+            parent_finding_slugs=["CH-801"],
+        ),
+    )
+    assert raced_receipt.status_code == 201, raced_receipt.text
+    assert raced_receipt.json()["current"] is False
     assert client.get(f"{base}/variant-checks").json() == []
     history = client.get(f"{base}/variant-checks?include_stale=true").json()
-    assert history[0]["current"] is False
+    assert {row["id"] for row in history} == {
+        receipt_id
+        for receipt_id in (recorded.json()["id"], raced_receipt.json()["id"])
+    }
+    assert all(row["current"] is False for row in history)
     assert client.get(f"{base}/files/{parser['id']}").json()[
         "variant_check_status"
     ] == "pending"
@@ -8298,11 +8828,17 @@ def test_variant_receipt_replay_does_not_demote_newer_current_receipt(
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     helper = next(row for row in files if row["file_path"] == "src/helpers.py")
     _classify_file(client, engagement_key, int(parser["id"]), "critical", 100)
+    _create_code_parent_finding(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        slug="VR-201",
+    )
     dispatch = _register_variant_dispatch(
         client,
         engagement_key,
         agent_id="variant-replay-order",
-        finding_slugs=[],
+        finding_slugs=["VR-201"],
     )
     first_payload = _variant_receipt_payload(
         client,
@@ -8310,7 +8846,7 @@ def test_variant_receipt_replay_does_not_demote_newer_current_receipt(
         int(repo["id"]),
         parser,
         dispatch,
-        parent_finding_slugs=[],
+        parent_finding_slugs=["VR-201"],
     )
     base = f"/engagements/{engagement_key}/assessment/code"
     first = client.post(f"{base}/variant-checks", json=first_payload).json()
@@ -8349,7 +8885,7 @@ def test_variant_receipt_replay_does_not_demote_newer_current_receipt(
             int(repo["id"]),
             helper,
             dispatch,
-            parent_finding_slugs=[],
+            parent_finding_slugs=["VR-201"],
         ),
     )
     assert helper_receipt.status_code == 201, helper_receipt.text
@@ -8359,10 +8895,295 @@ def test_variant_receipt_replay_does_not_demote_newer_current_receipt(
     }
 
 
-def test_report_readiness_requires_current_variant_receipts_for_confirmed_code_findings(
+def test_variant_readiness_query_count_is_independent_of_admitted_file_count(
     client, isolate_settings
 ):
-    engagement_key = "2026-08-06-report-variant-receipt"
+    def measure(file_count: int, suffix: str) -> tuple[int, int]:
+        engagement_key = f"2026-08-06-variant-query-scale-{suffix}"
+        write_engagement(isolate_settings["engagements_dir"], engagement_key)
+        repo = _create_repo(client, engagement_key, repo_key=f"variant-query-{suffix}")
+        _create_files(client, engagement_key, int(repo["id"]))
+        extra_count = file_count - 2
+        files = _append_repo_files(
+            client,
+            engagement_key,
+            int(repo["id"]),
+            [
+                {
+                    "file_path": f"src/variant_{index:03d}.py",
+                    "language": "python",
+                    "loc": 5,
+                    "file_hash": _source_hash(f"variant-query-{suffix}-{index}"),
+                    "header_snippet": f"def variant_{index:03d}(): pass\n",
+                    "git_churn_score": 0,
+                    "has_past_cve_fix": False,
+                }
+                for index in range(extra_count)
+            ],
+        )
+        slug = "QS-001" if suffix == "small" else "QL-001"
+        _create_code_parent_finding(
+            client,
+            engagement_key,
+            int(repo["id"]),
+            slug=slug,
+        )
+        verified = client.post(
+            f"/engagements/{engagement_key}/assessment/findings/{slug}/verify",
+            json={
+                "disposition": "confirmed",
+                "reason_code": "source-proof",
+                "reason_text": "Current sealed source proves the report-durable root pattern.",
+                "source_name": "code-vuln-verifier",
+                "provenance": {
+                    "agent_name": "code-vuln-verifier",
+                    "code_snapshot": _finding_code_snapshot(
+                        client, engagement_key, int(repo["id"])
+                    ),
+                },
+            },
+        )
+        assert verified.status_code == 200, verified.text
+        dispatch = _register_variant_dispatch(
+            client,
+            engagement_key,
+            agent_id=f"variant-query-{suffix}",
+            finding_slugs=[slug],
+        )
+        for file_row in files:
+            receipt = client.post(
+                f"/engagements/{engagement_key}/assessment/code/variant-checks",
+                json=_variant_receipt_payload(
+                    client,
+                    engagement_key,
+                    int(repo["id"]),
+                    file_row,
+                    dispatch,
+                    parent_finding_slugs=[slug],
+                ),
+            )
+            assert receipt.status_code == 201, receipt.text
+
+        engagement_id = int(client.get(f"/engagements/{engagement_key}").json()["id"])
+        statements: list[str] = []
+        with db_module.get_connection() as connection:
+            connection.set_trace_callback(statements.append)
+            try:
+                code_analysis.code_readiness(engagement_id, target_phase="fuzz")
+            finally:
+                connection.set_trace_callback(None)
+        code_selects = sum(
+            statement.lstrip().upper().startswith("SELECT") for statement in statements
+        )
+        statements.clear()
+        with db_module.get_connection() as connection:
+            connection.set_trace_callback(statements.append)
+            try:
+                code_analysis.report_durable_finding_variant_receipt_obligations(
+                    engagement_id
+                )
+            finally:
+                connection.set_trace_callback(None)
+        report_selects = sum(
+            statement.lstrip().upper().startswith("SELECT") for statement in statements
+        )
+        return code_selects, report_selects
+
+    two_file_code_selects, two_file_report_selects = measure(2, "small")
+    twelve_file_code_selects, twelve_file_report_selects = measure(12, "large")
+
+    assert twelve_file_code_selects <= two_file_code_selects + 3, {
+        "two_files": two_file_code_selects,
+        "twelve_files": twelve_file_code_selects,
+    }
+    assert twelve_file_code_selects <= 60, twelve_file_code_selects
+    assert twelve_file_report_selects <= two_file_report_selects + 1, {
+        "two_files": two_file_report_selects,
+        "twelve_files": twelve_file_report_selects,
+    }
+    assert twelve_file_report_selects <= 12, twelve_file_report_selects
+
+
+def test_variant_projection_queries_are_skipped_without_parent_obligations(
+    client, isolate_settings
+):
+    engagement_key = "2026-08-07-variant-projection-not-applicable"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="variant-projection-none")
+    _create_files(client, engagement_key, int(repo["id"]))
+    engagement_id = int(client.get(f"/engagements/{engagement_key}").json()["id"])
+
+    statements: list[str] = []
+    with db_module.get_connection() as connection:
+        connection.set_trace_callback(statements.append)
+        try:
+            code_analysis.code_readiness(engagement_id, target_phase="fuzz")
+            assert (
+                code_analysis.report_durable_finding_variant_receipt_obligations(
+                    engagement_id
+                )
+                == []
+            )
+        finally:
+            connection.set_trace_callback(None)
+
+    variant_projection_statements = [
+        statement
+        for statement in statements
+        if "CODE_VARIANT_CHECK_RECEIPTS AS RECEIPTS" in statement.upper()
+        or "CODE_VARIANT_DISPATCH_SCOPES AS SCOPES" in statement.upper()
+    ]
+    assert variant_projection_statements == []
+
+
+def test_variant_projection_bounds_historical_receipts_scopes_and_removed_files(
+    client, isolate_settings
+):
+    engagement_key = "2026-08-07-variant-projection-history-bound"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="variant-projection-history")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    _create_code_parent_finding(
+        client, engagement_key, int(repo["id"]), slug="PB-001"
+    )
+    dispatch = _register_variant_dispatch(
+        client,
+        engagement_key,
+        agent_id="variant-projection-current",
+        finding_slugs=["PB-001"],
+    )
+    base = f"/engagements/{engagement_key}/assessment/code"
+    current_receipt_ids: set[int] = set()
+    for file_row in files:
+        response = client.post(
+            f"{base}/variant-checks",
+            json=_variant_receipt_payload(
+                client,
+                engagement_key,
+                int(repo["id"]),
+                file_row,
+                dispatch,
+                parent_finding_slugs=["PB-001"],
+            ),
+        )
+        assert response.status_code == 201, response.text
+        current_receipt_ids.add(int(response.json()["id"]))
+
+    engagement_id = int(client.get(f"/engagements/{engagement_key}").json()["id"])
+    template_receipt_id = min(current_receipt_ids)
+    historical_count = 250
+    with db_module.get_connection() as connection:
+        for index in range(historical_count):
+            dispatch_cursor = connection.execute(
+                """
+                INSERT INTO assessment_dispatches (
+                    engagement_id, agent_id, agent_role, task, dispatched_at, status
+                ) VALUES (?, ?, 'code-variant-hunter', 'historical removed-file scan',
+                          '2026-01-01T00:00:00Z', 'completed')
+                """,
+                (engagement_id, f"variant-history-{index:04d}"),
+            )
+            historical_dispatch_id = int(dispatch_cursor.lastrowid)
+            connection.execute(
+                """
+                INSERT INTO code_variant_dispatch_scopes (
+                    dispatch_id, engagement_id, parent_finding_slugs_json,
+                    parent_finding_set_digest
+                )
+                SELECT ?, engagement_id, parent_finding_slugs_json,
+                       parent_finding_set_digest
+                FROM code_variant_dispatch_scopes
+                WHERE dispatch_id = ?
+                """,
+                (historical_dispatch_id, dispatch["id"]),
+            )
+            connection.execute(
+                """
+                INSERT INTO code_variant_check_receipts (
+                    engagement_id, dispatch_id, dispatch_agent_id,
+                    dispatch_agent_role, current_file_id, repo_id,
+                    repo_generation, source_manifest_digest, file_path,
+                    file_sha256, language, classification, role, slot_types_json,
+                    parent_finding_slugs_json, parent_finding_set_digest,
+                    variant_input_digest, status, evidence_ref, rationale,
+                    receipt_fingerprint
+                )
+                SELECT engagement_id, ?, ?, dispatch_agent_role, ?, repo_id,
+                       repo_generation, source_manifest_digest, ?, file_sha256,
+                       language, classification, role, slot_types_json,
+                       parent_finding_slugs_json, parent_finding_set_digest,
+                       variant_input_digest, status, evidence_ref, rationale, ?
+                FROM code_variant_check_receipts
+                WHERE id = ?
+                """,
+                (
+                    historical_dispatch_id,
+                    f"variant-history-{index:04d}",
+                    1_000_000 + index,
+                    f"removed/history_{index:04d}.py",
+                    _source_hash(f"variant-history-receipt-{index}"),
+                    template_receipt_id,
+                ),
+            )
+
+        repo_rows = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT * FROM code_repos WHERE engagement_id = ?",
+                (engagement_id,),
+            ).fetchall()
+        ]
+        file_rows = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT * FROM code_files WHERE engagement_id = ? ORDER BY id",
+                (engagement_id,),
+            ).fetchall()
+        ]
+        parent_slugs = code_analysis._current_phase2_variant_parent_slugs_by_repo(
+            connection, engagement_id, {int(repo["id"])}
+        )
+        projection = code_analysis._load_variant_receipt_projection(
+            connection,
+            engagement_id,
+            repo_rows=repo_rows,
+            file_rows=file_rows,
+            parent_slugs=parent_slugs,
+        )
+        plan = connection.execute(
+            "EXPLAIN QUERY PLAN "
+            + code_analysis._LATEST_CURRENT_VARIANT_RECEIPTS_SQL,
+            (
+                engagement_id,
+                code_analysis._VARIANT_DISPATCH_ROLE,
+                engagement_id,
+            ),
+        ).fetchall()
+        index_columns = [
+            str(row[2])
+            for row in connection.execute(
+                "PRAGMA index_info(idx_code_variant_receipts_latest_file)"
+            ).fetchall()
+        ]
+
+    assert set(projection.latest_receipts) == {int(row["id"]) for row in files}
+    assert {int(row["id"]) for row in projection.latest_receipts.values()} == (
+        current_receipt_ids
+    )
+    assert set(projection.dispatch_scopes) == {int(dispatch["id"])}
+    assert len(projection.latest_receipts) == len(files)
+    assert len(projection.dispatch_scopes) == 1
+    assert index_columns == ["engagement_id", "current_file_id", "id"]
+    plan_text = "\n".join(str(tuple(row)) for row in plan)
+    assert "idx_code_variant_receipts_latest_file" in plan_text
+    assert "SCAN candidate" not in plan_text
+
+
+@pytest.mark.parametrize("verification_disposition", ["confirmed", "downgraded"])
+def test_report_readiness_requires_current_variant_receipts_for_report_durable_code_findings(
+    client, isolate_settings, verification_disposition
+):
+    engagement_key = f"2026-08-06-report-variant-receipt-{verification_disposition}"
     engagement_dir = write_engagement(
         isolate_settings["engagements_dir"], engagement_key
     )
@@ -8372,7 +9193,11 @@ def test_report_readiness_requires_current_variant_receipts_for_confirmed_code_f
     scope["current_phase"] = "verify-variant"
     scope_path.write_text(json.dumps(scope), encoding="utf-8")
 
-    repo = _create_repo(client, engagement_key, repo_key="report-variant-receipt")
+    repo = _create_repo(
+        client,
+        engagement_key,
+        repo_key=f"report-variant-receipt-{verification_disposition}",
+    )
     _create_files(client, engagement_key, int(repo["id"]))
     files = _append_repo_files(
         client,
@@ -8438,16 +9263,16 @@ def test_report_readiness_requires_current_variant_receipts_for_confirmed_code_f
         f"/engagements/{engagement_key}/assessment/findings",
         json={
             "slug": "VF-001",
-            "title": "Confirmed parser trust-boundary bypass",
+            "title": "Report-durable parser trust-boundary bypass",
             "severity": "high",
             "workflow_status": "active",
             "verification_state": "verified",
-            "verification_disposition": "confirmed",
+            "verification_disposition": verification_disposition,
             "defect_family": "parser-memory-safety",
             "root_cause_key": "parser-memory-safety-vf-001",
             "auth_context": "anonymous",
             "canonical_location": "file:src/parser.py:10",
-            "summary": "A current confirmed code finding requires its variant pass.",
+            "summary": "A current report-durable code finding requires its variant pass.",
             "evidence_ref": "notes/VF-001.md",
             "source_name": "code-vuln-verifier",
             "details": {
@@ -8502,12 +9327,21 @@ def test_report_readiness_requires_current_variant_receipts_for_confirmed_code_f
                 "src/parser.py",
             ],
             "detail": (
-                "confirmed current code finding(s) VF-001 have no complete current "
+                "report-durable current code finding(s) VF-001 have no complete current "
                 "variant-scan receipt for 3 admitted current repository file(s): "
                 "build/CMakeLists.txt, src/helpers.py, src/parser.py"
             ),
         }
     ]
+    blocked_export = client.post(
+        f"/engagements/{engagement_key}/assessment/report-export",
+        json={"mode": "final"},
+    )
+    assert blocked_export.status_code == 409, blocked_export.text
+    assert any(
+        blocker["kind"] == "finding_variant_receipts_incomplete"
+        for blocker in blocked_export.json()["detail"]["blockers"]
+    )
 
     for target_phase in ("fuzz", "complete"):
         code_readiness = client.get(
@@ -8675,11 +9509,18 @@ def test_variant_receipt_history_survives_file_replacement(client, isolate_setti
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     helper = next(row for row in files if row["file_path"] == "src/helpers.py")
     _classify_file(client, engagement_key, int(parser["id"]), "critical", 100)
+    _create_code_parent_finding(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        slug="VR-301",
+    )
+    _verify_code_finding(client, engagement_key, int(repo["id"]), "VR-301")
     dispatch = _register_variant_dispatch(
         client,
         engagement_key,
         agent_id="variant-file-removal",
-        finding_slugs=[],
+        finding_slugs=["VR-301"],
     )
     payload = _variant_receipt_payload(
         client,
@@ -8687,7 +9528,7 @@ def test_variant_receipt_history_survives_file_replacement(client, isolate_setti
         int(repo["id"]),
         parser,
         dispatch,
-        parent_finding_slugs=[],
+        parent_finding_slugs=["VR-301"],
     )
     base = f"/engagements/{engagement_key}/assessment/code"
     receipt = client.post(f"{base}/variant-checks", json=payload)
@@ -8715,6 +9556,15 @@ def test_variant_receipt_history_survives_file_replacement(client, isolate_setti
         ],
     )
     _classify_file(client, engagement_key, int(parser["id"]), "critical", 100)
+    _create_code_parent_finding(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        slug="VR-302",
+        line=20,
+        allow_remint=True,
+    )
+    _verify_code_finding(client, engagement_key, int(repo["id"]), "VR-302")
 
     history = client.get(
         f"{base}/variant-checks?file_id={parser['id']}&include_stale=true"
@@ -8801,24 +9651,6 @@ def test_fuzz_readiness_keeps_effort_warnings_advisory(client, isolate_settings)
         ),
     )
     assert completed.status_code == 200, completed.text
-    variant_dispatch = _register_variant_dispatch(
-        client,
-        engagement_key,
-        agent_id="variant-effort-advisory",
-        finding_slugs=[],
-    )
-    variant_receipt = client.post(
-        f"{base}/variant-checks",
-        json=_variant_receipt_payload(
-            client,
-            engagement_key,
-            int(repo["id"]),
-            parser,
-            variant_dispatch,
-            parent_finding_slugs=[],
-        ),
-    )
-    assert variant_receipt.status_code == 201, variant_receipt.text
     helper_claim = _claim_file_for_analysis(client, engagement_key, int(helper["id"]))
     helper_skipped = client.post(
         f"{base}/analysis-queue/done",
@@ -8830,18 +9662,6 @@ def test_fuzz_readiness_keeps_effort_warnings_advisory(client, isolate_settings)
         ),
     )
     assert helper_skipped.status_code == 200, helper_skipped.text
-    helper_variant_receipt = client.post(
-        f"{base}/variant-checks",
-        json=_variant_receipt_payload(
-            client,
-            engagement_key,
-            int(repo["id"]),
-            helper,
-            variant_dispatch,
-            parent_finding_slugs=[],
-        ),
-    )
-    assert helper_variant_receipt.status_code == 201, helper_variant_receipt.text
 
     applicability = engagement_dir / "tools" / "fuzz-state" / "applicability.json"
     applicability.parent.mkdir(parents=True, exist_ok=True)
@@ -8864,6 +9684,153 @@ def test_fuzz_readiness_keeps_effort_warnings_advisory(client, isolate_settings)
     assert payload["blockers"] == []
     assert payload["quality_gate"]["passed"] is False
     assert any("effort" in warning.lower() for warning in payload["quality_gate"]["warnings"])
+
+
+def test_fuzz_entry_requires_phase2_root_triage_but_allows_pending_runtime_proof(
+    client, isolate_settings
+):
+    engagement_key = "2026-08-07-code-fuzz-pending-runtime-proof"
+    engagement_dir = write_engagement(
+        isolate_settings["engagements_dir"], engagement_key
+    )
+    repo = _create_repo(client, engagement_key, repo_key="fuzz-pending-runtime-proof")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    base = f"/engagements/{engagement_key}/assessment/code"
+    binding = client.get(f"{base}/repos/{repo['id']}").json()
+    indexed = client.post(
+        f"{base}/files/bulk-structural-metadata",
+        json=_complete_structural_payload(
+            repo_id=int(repo["id"]),
+            repo_generation=int(binding["active_generation"]),
+            source_manifest_digest=str(binding["source_manifest_digest"]),
+            updates=[
+                {
+                    "file_id": row["id"],
+                    "source_sha256": row["file_hash"],
+                    "total_functions": 0,
+                    "total_entry_points": 1,
+                    "total_sinks": 0,
+                    "total_exports": 0,
+                }
+                for row in files
+            ],
+        ),
+    )
+    assert indexed.status_code == 200, indexed.text
+    threat = client.post(
+        f"{base}/threat-model",
+        json={
+            "repo_id": repo["id"],
+            "repo_generation": binding["active_generation"],
+            "source_manifest_digest": binding["source_manifest_digest"],
+            "threat_model": {"trust_boundaries": ["network"]},
+        },
+    )
+    assert threat.status_code == 200, threat.text
+    parser = next(row for row in files if row["file_path"] == "src/parser.py")
+    helper = next(row for row in files if row["file_path"] == "src/helpers.py")
+    _classify_file(client, engagement_key, int(parser["id"]), "critical", 100)
+    _classify_file(client, engagement_key, int(helper["id"]), "low", 10)
+    parser_claim = _claim_file_for_analysis(
+        client, engagement_key, int(parser["id"])
+    )
+    parser_done = client.post(
+        f"{base}/analysis-queue/done",
+        json=_owned(
+            parser_claim,
+            item_ids=[parser_claim["id"]],
+            disposition="clean",
+            notes="Completed the current-source parser review.",
+            cwe_coverage=_network_input_coverage(default_effort=80),
+        ),
+    )
+    assert parser_done.status_code == 200, parser_done.text
+    helper_claim = _claim_file_for_analysis(
+        client, engagement_key, int(helper["id"])
+    )
+    helper_done = client.post(
+        f"{base}/analysis-queue/done",
+        json=_owned(
+            helper_claim,
+            item_ids=[helper_claim["id"]],
+            disposition="skipped",
+            skip_reason="generated-code",
+        ),
+    )
+    assert helper_done.status_code == 200, helper_done.text
+
+    _create_code_parent_finding(
+        client, engagement_key, int(repo["id"]), slug="PR-001"
+    )
+    dispatch = _register_variant_dispatch(
+        client,
+        engagement_key,
+        agent_id="variant-pending-runtime-proof",
+        finding_slugs=["PR-001"],
+    )
+    for file_row in files:
+        receipt = client.post(
+            f"{base}/variant-checks",
+            json=_variant_receipt_payload(
+                client,
+                engagement_key,
+                int(repo["id"]),
+                file_row,
+                dispatch,
+                parent_finding_slugs=["PR-001"],
+            ),
+        )
+        assert receipt.status_code == 201, receipt.text
+
+    applicability = engagement_dir / "tools" / "fuzz-state" / "applicability.json"
+    applicability.parent.mkdir(parents=True, exist_ok=True)
+    applicability.write_text(
+        '{"decision":"required","target_ids":["parser-entry"]}',
+        encoding="utf-8",
+    )
+    decision = _record_fuzz_decision(
+        client,
+        engagement_key,
+        binding,
+        decision="required",
+        target_ids=["parser-entry"],
+    )
+    assert decision.status_code == 201, decision.text
+
+    unreviewed = client.get(f"{base}/readiness?target_phase=fuzz").json()
+    assert {item["code"] for item in unreviewed["blockers"]} == {
+        "variant_parent_verification_incomplete"
+    }
+    disputed = _verify_code_finding(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        "PR-001",
+        disposition="disputed",
+    )
+    assert disputed["finding"]["verification_state"] == "disputed"
+    disputed_readiness = client.get(
+        f"{base}/readiness?target_phase=fuzz"
+    ).json()
+    assert {item["code"] for item in disputed_readiness["blockers"]} == {
+        "variant_parent_verification_incomplete"
+    }
+
+    pending = _verify_code_finding(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        "PR-001",
+        disposition="pending_runtime_proof",
+    )
+    assert pending["finding"]["verification_state"] == "verified"
+    assert (
+        pending["finding"]["verification_disposition"]
+        == "pending_runtime_proof"
+    )
+    ready = client.get(f"{base}/readiness?target_phase=fuzz").json()
+    assert ready["transition_ready"] is True
+    assert ready["blockers"] == []
 
 
 def test_complete_readiness_requires_snapshot_current_verification_and_blind_triage_for_info(
@@ -13419,6 +14386,7 @@ def test_fuzz_campaign_receipt_rejects_cross_engagement_and_forged_dispatches(
         second_key,
         agent_id="not-a-fuzz-worker",
         finding_slugs=[],
+        role="code-vuln-hunter",
     )
     forged = client.post(
         f"/engagements/{second_key}/assessment/code/fuzz/campaign-receipts",

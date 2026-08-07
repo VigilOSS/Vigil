@@ -3,16 +3,16 @@
 These exercise the harness pivot recorded in ``docs/adr/0001``:
 administrative-hygiene checks at the report
 boundary are softened from HARD blockers to ADVISORIES (``ready`` does not flip
-to False on them alone), while a real finding parked in ``draft`` is surfaced
-loudly as an advisory requiring disposition (S21 — never silent-drop). A
+to False on them alone). A web finding parked in ``draft`` remains visible as
+an advisory; file/code drafts hard-block in the code-workflow regressions. A
 genuine quality blocker (unverified high finding) MUST still block, proving we
 did not over-soften.
 
 Covered:
   - L1-1: an unlinked markdown note → advisory, ``ready`` stays True.
   - L1-8: a stale ready handoff on an in-progress dispatch → advisory, not blocking.
-  - S21 : a draft finding → ``draft_finding_needs_disposition`` advisory listing
-          its slug; it is not silently hidden.
+  - S21 : a web URL draft → ``draft_finding_needs_disposition`` advisory listing
+          its slug; it remains visible without changing the established web gate.
   - over-soften guard: an unverified high finding STILL hard-blocks.
 """
 from __future__ import annotations
@@ -156,19 +156,23 @@ def test_l1_8_stale_ready_handoff_is_advisory_not_blocking(client, isolate_setti
     assert body["ready"] is True, body
 
 
-def test_s21_draft_finding_surfaced_as_advisory_with_slug(client, isolate_settings) -> None:
+def test_s21_web_draft_finding_is_advisory_with_slug(client, isolate_settings) -> None:
     eng = _write_engagement(isolate_settings["engagements_dir"])
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
     _reportable_finding(client, eng, slug="HR-002", workflow_status="draft")
 
     body = _readiness(client)
     advisory = next(
-        a for a in body["advisories"]
-        if a["kind"] == "draft_finding_needs_disposition" and a["slug"] == "HR-002"
+        row for row in body["advisories"]
+        if row["kind"] == "draft_finding_needs_disposition" and row["slug"] == "HR-002"
     )
-    assert "finding update HR-002 --workflow-status active" in advisory["detail"]
+    assert "finding update HR-002 --status active" in advisory["detail"]
     assert "finding verify HR-002 --disposition false_positive" in advisory["detail"]
-    assert any(a["slug"] == "HR-002" for a in body["advisories"]), body
+    assert not any(
+        row["kind"] == "draft_finding_needs_disposition" and row["slug"] == "HR-002"
+        for row in body["blockers"]
+    )
+    assert body["ready"] is True, body
 
 
 def test_over_soften_guard_unverified_high_finding_still_blocks(client, isolate_settings) -> None:
