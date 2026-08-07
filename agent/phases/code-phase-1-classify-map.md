@@ -2,7 +2,8 @@
 
 **Read-on-phase-entry.** When you ENTER Code Phase 1 (Classify + Map), Read this doc before
 dispatching `code-architect`, and re-read it on a method re-anchor. It carries the full
-`code-architect` dispatch shape (what to provide, the six deliverables), the on-return recording
+`code-architect` dispatch shape (what to provide, the six required deliverables plus one optional
+historical-CVE artifact), the on-return recording
 commands, the pre-transition coverage-gap review, and the Phase 1 exit gate. Cross-phase machinery —
 the Core Loop, the Phased mindset flow (code) (which sets `code-architect`'s survey lens), the Agent
 Roster, and the Dispatch Context Template / Pre-Dispatch Checklist — stays in
@@ -24,9 +25,10 @@ Provide:
   `vigil assess code-index build --repo-id <repo-id> <snapshot-path>` plus
   `vigil assess code-index sync` before dispatching
 
-Phase 1 produces six deliverables. The call graph and attack hypotheses provide navigational
-guidance for hunters. The file analysis queue accounts for every admitted file; classification
-controls dispatch order, never whether a file disappears from the review ledger.
+Phase 1 produces six required deliverables plus one optional historical-CVE artifact. The call
+graph and attack hypotheses provide navigational guidance for hunters. The file analysis queue
+accounts for every admitted file; classification controls dispatch order, never whether a file
+disappears from the review ledger.
 
 Use the helper contracts as the durable shape source before authoring or reviewing Phase 1 machine artifacts: `vigil assess contract code-record classify`, `vigil assess contract code-record modules`, `vigil assess contract code-record threat-model`, and `vigil assess contract code-dispatch`. Point dispatches at those contracts instead of embedding copied JSON templates, because the CLI contract stays aligned with backend validation and catches field-name drift.
 
@@ -71,6 +73,12 @@ Use the helper contracts as the durable shape source before authoring or reviewi
    an explicit `skipped` closeout with a reason. The on-disk queue artifact is a flat per-file JSON
    array -- no nested batch wrappers or glob patterns.
 
+7. **Historical CVE bug shapes (optional)** -- only when repository history or cited advisories
+   expose a concrete vulnerable-to-fixed delta, emit
+   `tools/analysis-state/cve-bug-shapes.jsonl` using the architecture skill's exact one-object-per-line
+   contract. An identifier or commit subject alone is not a bug shape. When exact evidence is
+   unavailable, omit the artifact and state that historical seeding is not applicable.
+
 **Sizing check (informs Phase 2 batch sizing):** Run `vigil assess code-size-summary`
 to get LOC buckets and large-file candidates across the indexed repo(s). Phase 2's
 adaptive batching (1 logical module or 1-3 tightly related files per hunter dispatch,
@@ -95,6 +103,8 @@ cp <call-graph-json> "$DIR/tools/analysis-state/call-graph.json"
 cp <hypotheses-json> "$DIR/tools/analysis-state/attack-hypotheses.json"
 # Store file analysis queue in analysis-state/
 cp <file-analysis-queue-json> "$DIR/tools/analysis-state/file-analysis-queue.json"
+# The architect writes an applicable historical-shape artifact directly to
+# "$DIR/tools/analysis-state/cve-bug-shapes.jsonl" under the output contract above.
 # Check structural/lifecycle readiness separately from review-quality effort
 vigil assess code-coverage --require-transition-ready hunt
 ```
@@ -118,7 +128,8 @@ vigil assess transition-phase hunt
 ```
 
 Exit: Every file classified. Threat model recorded against the current source generation. Call graph recorded with entry-point chains.
-Attack hypotheses queued as guidance. File analysis queue complete with every admitted file.
+Attack hypotheses queued as guidance. File analysis queue complete with every admitted file. Any
+historical-CVE JSONL artifact is evidence-backed and contract-shaped, or explicitly absent.
 Coverage gaps reviewed. Transition to Phase 2.
 
 ---

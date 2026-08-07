@@ -40,16 +40,32 @@ Adaptive batching is part of the method, not a convenience:
 
 #### Phase 2A -- Broad Hunt
 
-**CVE bug-shape seeding (when the architect produced `tools/analysis-state/cve-bug-shapes.txt`).**
+**CVE bug-shape seeding (when the architect produced
+`tools/analysis-state/cve-bug-shapes.jsonl`).**
 Before the broad-hunt loop, hunt the historical bug-shapes — "is this old bug's fix complete and
-applied everywhere?" is a faster path to a finding than rediscovering the class. Scale the dispatch
-to the number of shapes: for a few, dispatch one `code-variant-hunter` over the bug-shape intel
-notes; for many (Git/libcurl carry dozens of historical CVEs), cluster related shapes (e.g. all
-size-arithmetic integer overflows) and fan out with `vigil assess agent start-swarm --role
-code-variant-hunter --items-file tools/analysis-state/cve-bug-shapes.txt --batch-size 1-2 --skills
-code-variant-analysis ...`, one specialist per worker row. Each agent verifies the fix is complete
-in this revision, then hunts sibling code paths the patch never touched. Dedup results against the
-main hunt before Phase 3 -- this pass is additive to the file-analysis queue, not a replacement.
+applied everywhere?" is a faster path to a finding than rediscovering the class. The Phase 1
+architecture contract defines one compact, evidence-backed JSON object per physical line, so a
+two-line worker batch always carries one or two complete shapes. Scale the worker count from the
+actual line count and use an integer batch size:
+
+```bash
+shape_count=$(wc -l < "$DIR/tools/analysis-state/cve-bug-shapes.jsonl")
+worker_count=$(( (shape_count + 1) / 2 ))
+vigil assess agent start-swarm --role code-variant-hunter --code-repo-id <repo-id> \
+  --workers "$worker_count" --batch-size 2 \
+  --items-file "$DIR/tools/analysis-state/cve-bug-shapes.jsonl" \
+  --skills code-variant-analysis \
+  --task "Verify each assigned historical fix and hunt semantic siblings"
+```
+
+For each printed worker row, pass its exact assigned JSONL line range in the dispatch context; the
+record's vulnerable/fixed evidence is the seed, while source reads remain rooted at the current
+sealed snapshot. Each agent verifies the fix is complete in this revision, then hunts sibling code
+paths the patch never touched. Dedup results against the main hunt before Phase 3 -- this pass is
+additive to the file-analysis queue, not a replacement.
+Dispatch it under the `code-variant-hunter.md` **Phase 2 discovery mode** contract: Runtime Identity
+selects the mode, historical CVE/patch evidence supplies the seed, both Variant Receipt Authority
+fields stay absent, and the handoff remains explicitly non-covering with no variant-check receipts.
 
 **Queue setup:**
 ```bash

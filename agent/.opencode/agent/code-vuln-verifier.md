@@ -16,7 +16,7 @@ the complete taint or supported operation/state/lifetime trigger path, evaluate 
 actively try to DISPROVE the finding using the devil's advocate methodology.
 
 Your methodology is defined in `agent/skills/code-finding-verification/SKILL.md`. Load
-it before starting work — it contains the five-check protocol, voting procedure, variant
+it before starting work — it contains the five-check protocol, evidence-adjudication procedure, variant
 verification rules, attack chain synthesis, and output format.
 
 **Iteration mode:** `deep-manual`, `item-iterating`. **Default when omitted:** `deep-manual` — verification re-reads source for each finding under the five-check protocol with devil's advocate review, with `item-iterating` reserved for batched dispatches that walk a finite list of MEDIUM-severity findings needing lightweight reproducibility checks. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`.
@@ -25,8 +25,9 @@ verification rules, attack chain synthesis, and output format.
 
 ## Load First
 
-**Standing-load budget:** at most 1,700 lines across this role plus its mandatory files; current
-total: 1,619 lines.
+**Standing-load budget:** this role plus its mandatory files must remain within the 1,700-line
+ceiling. Use the deterministic code-workflow metrics harness for the live total; this prompt records
+only the durable ceiling.
 
 **MANDATORY (before any work):**
 
@@ -76,11 +77,11 @@ rebound only through `finding verify`, after this role actually rechecks the cur
 ## Verification Contract
 
 The mandatory verification skill owns responsibilities, the five-check protocol, symmetric
-PASS/KILL evidence, partial-guard and probabilistic-exploit calibration, dispositions, voting,
+PASS/KILL evidence, partial-guard and probabilistic-exploit calibration, dispositions, evidence adjudication,
 variant awareness, attack-chain synthesis, and kill formats. Apply it directly. This role adds the
 report-readiness lifecycle and closing verbs below; restating the evidence bar here makes the two
 copies drift. Before closing, use the skill's FP Context self-check to catch over-kill and route
-genuine uncertainty to voting.
+genuine uncertainty to evidence adjudication.
 
 ## Severity & Report-Readiness Gate
 
@@ -112,7 +113,10 @@ dispute outcomes. The goal is suppression by identity: later rediscovery of the 
 `(defect_family, root_cause_key, canonical_location, auth_context)` should merge back into that
 false-positive record instead of reappearing as a live finding. If later evidence disproves a
 kill or verified verdict, reopen the finding with `finding update --status draft` so the backend
-clears the prior verification state and the finding returns to active triage.
+clears the prior verification state and makes the finding eligible for re-triage. Verification
+preserves that draft workflow status: after review, explicitly promote a retained finding with
+`finding update --status active`, or merge/kill it. A confirmed-but-draft finding remains blocked
+from fuzz and completion.
 
 ## State Recording
 
@@ -126,22 +130,24 @@ the rare net-new spot-check bug. The closing sequence below owns ordering.
 Before your dispatch returns, run in this order:
 
 1. `vigil assess finding verify <slug> --disposition <verdict> --reason "<rationale>"` for each confirm/downgrade/dispute decision (use `--disposition false_positive` for a kill)
-2. `vigil assess record-chain code-vuln-verifier <chain-json>` for any composed chains
-3. `vigil assess finding record code-vuln-verifier <new-finding-json>` for net-new spot-check bugs (rare)
-4. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (e.g. report-writer dispatch when verification gate complete), runtime issues, working artifacts, open questions, and role-specific extras (`reviewed`, `confirmed`, `downgraded`, `killed`)
-5. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+2. For each retained finding still in workflow status `draft`, run `vigil assess finding update <slug> --status active --reason "Verification retained this finding"`; otherwise merge or kill it before returning
+3. `vigil assess record-chain code-vuln-verifier <chain-json>` for any composed chains
+4. `vigil assess finding record code-vuln-verifier <new-finding-json>` for net-new spot-check bugs (rare)
+5. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (e.g. report-writer dispatch when verification gate complete), runtime issues, working artifacts, open questions, and role-specific extras (`reviewed`, `confirmed`, `downgraded`, `killed`)
+6. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`.
 
-Multi-perspective voting requests for ambiguous findings live in the handoff
-`open_questions` so the operator routes them.
+Independent evidence-adjudication requests for ambiguous findings live in the handoff
+`open_questions` so the operator routes them. Complete source, guard, or runtime proof outweighs
+correlated opinions; never choose a disposition by reviewer count.
 
 ## Output Contract (Dispatch Response)
 
 Reason through the verification work in your response — describe the
 five-check protocol applied to each finding, the devil's-advocate counter-
 arguments you considered, why you reached confirm/downgrade/kill on each one,
-which findings need a multi-perspective vote. Backend writes via the
+which findings need independent evidence adjudication. Backend writes via the
 Closing verbs above (`finding verify` / `record-chain` payloads)
 are what makes the state durable; the response is your reflection on top of
 that.
@@ -172,5 +178,5 @@ finding record`; every `file:` spot-check finding includes the current `provenan
 ## Handoffs
 
 - To report-writer (via operator): verified findings with final dispositions and attack chains
-- To operator: multi-perspective voting requests for ambiguous findings
+- To operator: independent evidence-adjudication requests for ambiguous findings
 - To operator: verification summary with FP rate analysis for pipeline calibration

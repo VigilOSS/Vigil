@@ -155,7 +155,7 @@ agent_description() {
     report-writer) printf '%s\n' "Human-first reporting specialist for concise, evidence-backed reporting." ;;
     code-architect) printf '%s\n' "Architecture reconnaissance, threat modeling, and file classification for source code repositories." ;;
     code-vuln-hunter) printf '%s\n' "Deep vulnerability analysis specialist for function-level code review and exploitability assessment." ;;
-    code-variant-hunter) printf '%s\n' "Systematic variant scanner for confirmed code vulnerability patterns." ;;
+    code-variant-hunter) printf '%s\n' "Systematic scanner for historical bug shapes and variants of current code findings." ;;
     code-vuln-verifier) printf '%s\n' "False-positive elimination specialist for code findings using full entry-to-sink validation." ;;
     code-fuzz-engineer) printf '%s\n' "AI-driven fuzz campaign orchestration for memory-safety vulnerability discovery." ;;
     alert-triage-specialist) printf '%s\n' "L1 alert triage. Normalize, classify, auto-close mechanical noise with cited tenant-ref pattern, dispatch to L2 with platform skill named." ;;
