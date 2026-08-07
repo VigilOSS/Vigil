@@ -1,7 +1,11 @@
 # Eval Harness
 
-Offline, deterministic quality checks over captured engagement outputs (JSON
-finding arrays). No LLM calls, no network access, no real assessment backend.
+Deterministic quality checks for two different evidence rungs. The simple eval
+definitions replay captured JSON finding arrays without an assessment backend.
+The Wave 0 code-workflow harness instead drives the real in-process FastAPI,
+SQLite, sealed-source, structural-index, dispatch, queue, finding, verification,
+variant, fuzz-decision, and readiness surfaces. Neither rung calls an LLM or an
+external network.
 
 ## How to run
 
@@ -33,6 +37,47 @@ modes:
 
 Assertions supported: `min_findings`, `max_findings`, `expected_cwes`,
 `expected_severities`, `severity_distribution`, `attacker_outcome_present`.
+
+## Wave 0 production lifecycle reference
+
+`fixtures/code/cwe22-path-traversal-seed-0/` contains vulnerable, clean, and
+hostile-instruction near twins. `harnesses/code_workflow/fixture.py` validates
+their byte identities and exact oracle, `runner.py` sends reference-solver
+decisions through production HTTP contracts, `metrics.py` measures anti-choke
+facts, and `schema.py` validates the strict result in
+`schemas/code-workflow-result-v1.schema.json`.
+
+The reference solver proves lifecycle solvability only. Its result declares
+`measurement_kind=oracle_reference_solvability` and
+`model_efficacy_claimed=false`; zero LLM invocations is not a claim about model
+recall or precision. The runner also keeps publication and submission disabled.
+
+Run the lifecycle and its calibration regression through the backend suite:
+
+```bash
+uv run --directory orchestrator/backend --extra dev pytest \
+  tests/test_code_workflow_runner.py
+```
+
+`baselines/private-code-evaluation.json` is the committed runner-calibration
+envelope. It binds the exact fixture and recipe identities to seven distinct
+production-workflow observations, their observation/platform digests, and
+recomputed medians. Each bounded observation receipt is recomputable from its
+run index, platform fingerprint, retained metrics, and exact fixture, recipe,
+and runtime identities. Ordinary runs load that envelope and require matching
+fixture, recipe, and declared-runtime identity. Requests, mutations, exact
+dispatch topology, and assigned-input counts remain blocking across platforms;
+only wall-time and latency become informational when the platform fingerprint
+differs. An absent or mismatched calibration is explicitly unavailable and
+cannot produce a green overall gate; malformed or tampered evidence fails
+validation.
+
+To refresh the baseline intentionally, call
+`harnesses.code_workflow.runner.calibrate_workflow(...)` with the backend test
+client and isolated settings used by `test_code_workflow_runner.py`, review the
+returned seven-or-more runner-calibration envelope, then replace the committed JSON.
+The helper uses distinct engagement/workspace names for each repetition; it does
+not pretend that repetitions sharing one test process are isolated runtimes.
 
 ## Adding a new definition
 
