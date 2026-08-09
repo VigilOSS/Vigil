@@ -2153,6 +2153,14 @@ def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_
             message_flag="-t",
             extra_env=_GOOSE_EXTRA_ENV.format(install_dir="$VIGIL_INSTALL_DIR"),
         )
+    # Kimi Code reads the same engagement-local AGENTS.md natively and needs no
+    # generated roster, so — like opencode/goose — always emit start_kimi.sh.
+    # `--auto` (fully autonomous, no questions) mirrors codex --full-auto / claude
+    # --dangerously-skip-permissions. The model is deliberately NOT pinned: the CLI's
+    # own default_model is Moonshot's current flagship, so the best model is the
+    # default and upgrades land without a repo change.
+    if client_kind in {"codex", "claude", "both"}:
+        _write_launcher(agent_root, eng_dir, "kimi", "--auto" if skip_permissions else "")
 
 
 def _write_launcher(

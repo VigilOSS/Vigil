@@ -101,6 +101,8 @@ def test_engagement_create_web_writes_scope_launchers_and_list_entry(
     assert (created.path / "start_codex.sh").exists()
     assert (created.path / "start_claude.sh").exists()
     assert "codex --full-auto" in (created.path / "start_codex.sh").read_text(encoding="utf-8")
+    assert (created.path / "start_kimi.sh").exists()
+    assert "kimi --auto" in (created.path / "start_kimi.sh").read_text(encoding="utf-8")
 
     rows = list_engagements(install_root)
     assert [row.key for row in rows] == [created.key]
