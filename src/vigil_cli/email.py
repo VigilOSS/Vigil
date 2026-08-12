@@ -9,8 +9,8 @@ owns the account auth.
 
 The primary use is retrieving short-lived email-verification codes (6-8 digit
 OTPs or verification links) sent to a test mailbox: ``vigil email`` filters by
-recipient mailbox, sender, and recency, optionally extracts the matching token,
-and can emit JSON so an automation can parse the code directly.
+recipient mailbox, sender or subject, and recency; can poll for delayed mail;
+can decode links hidden in raw MIME; and emits JSON for automation.
 """
 from __future__ import annotations
 
@@ -20,7 +20,11 @@ import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from email import policy
+from email.parser import Parser
 from email.utils import parseaddr
+from html import unescape
+from html.parser import HTMLParser
 
 
 class EmailReadError(RuntimeError):
@@ -42,6 +46,7 @@ function run(argv) {
   const cfg = JSON.parse(argv[0] || "{}");
   const since = cfg.since ? new Date(String(cfg.since)) : new Date(0);
   const limit = Math.max(1, Number(cfg.limit || 200));
+  const includeSource = Boolean(cfg.include_source);
 
   function safe(fn, fallbackValue) {
     try {
@@ -107,6 +112,7 @@ function run(argv) {
         recipients: recipientAddresses(message),
         subject: String(safe(() => message.subject(), "") || ""),
         body: String(safe(() => message.content(), "") || ""),
+        source: includeSource ? String(safe(() => message.source(), "") || "") : "",
         received_at: isoDate(received),
       });
     }
@@ -207,6 +213,7 @@ class EmailMessage:
     received_at: datetime
     account: str = ""
     mailbox: str = ""
+    raw_source: str = ""
 
 
 def normalize_email(value: str) -> str:
@@ -221,9 +228,14 @@ def read_messages(
     since: datetime,
     limit: int = 200,
     timeout_seconds: float = 30.0,
+    include_source: bool = False,
 ) -> list[EmailMessage]:
     """Scan Mail.app inbox messages received at/after ``since``."""
-    payload = {"since": since.isoformat(), "limit": limit}
+    payload = {
+        "since": since.isoformat(),
+        "limit": limit,
+        "include_source": include_source,
+    }
     raw = _run_jxa_json(_READ_MESSAGES_JXA, [json.dumps(payload)], timeout_seconds=timeout_seconds)
     if not isinstance(raw, dict):
         raise EmailReadError(f"unexpected Mail.app read response: {raw!r}")
@@ -251,6 +263,7 @@ def read_messages(
                 received_at=received_at,
                 account=str(item.get("account", "") or ""),
                 mailbox=str(item.get("mailbox", "") or ""),
+                raw_source=str(item.get("source", "") or ""),
             )
         )
     return messages
@@ -261,6 +274,7 @@ def filter_messages(
     *,
     mailbox_address: str,
     from_filter: str | None = None,
+    subject_filter: str | None = None,
     since: datetime | None = None,
 ) -> list[EmailMessage]:
     """Keep messages addressed to ``mailbox_address`` and matching the filters.
@@ -271,8 +285,10 @@ def filter_messages(
     """
     mailbox_norm = normalize_email(mailbox_address)
     from_norm = _normalize_filter(from_filter) if from_filter else None
+    subject_norm = str(subject_filter or "").strip().casefold()
 
     kept: list[EmailMessage] = []
+    seen: set[tuple[object, ...]] = set()
     for message in messages:
         if since is not None and message.received_at < since:
             continue
@@ -280,6 +296,21 @@ def filter_messages(
             continue
         if from_norm and not _address_matches(from_norm, [message.sender]):
             continue
+        if subject_norm and subject_norm not in message.subject.casefold():
+            continue
+        # Mail.app exposes the same message through both its synthetic
+        # cross-account Inbox and the backing account's INBOX. Treat those as
+        # one message while retaining the first view's account/mailbox fields.
+        duplicate_key = (
+            normalize_email(message.sender),
+            tuple(sorted(normalize_email(value) for value in message.recipients)),
+            message.subject,
+            message.body,
+            message.received_at,
+        )
+        if duplicate_key in seen:
+            continue
+        seen.add(duplicate_key)
         kept.append(message)
 
     kept.sort(key=lambda m: m.received_at, reverse=True)
@@ -305,8 +336,67 @@ def extract_token(body: str, *, pattern: str = DEFAULT_CODE_PATTERN) -> str | No
     return match.group(0)
 
 
-def message_to_dict(message: EmailMessage, *, extracted: str | None = None) -> dict[str, object]:
-    return {
+class _LinkCollector(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.links: list[str] = []
+
+    def handle_starttag(self, _tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        for key, value in attrs:
+            if key.lower() == "href" and value:
+                self.links.append(value)
+
+
+def extract_links(message: EmailMessage) -> list[str]:
+    """Return unique HTTP(S) links from visible content and decoded MIME source.
+
+    Mail.app's ``content`` property keeps link labels but commonly strips their
+    href targets. When ``raw_source`` is available, parse and decode its MIME
+    parts so quoted-printable HTML download and verification links are exposed.
+    """
+    texts = [message.body]
+    if message.raw_source:
+        try:
+            parsed = Parser(policy=policy.default).parsestr(message.raw_source)
+            for part in parsed.walk():
+                if part.get_content_maintype() != "text":
+                    continue
+                try:
+                    content = part.get_content()
+                except (LookupError, UnicodeError):
+                    content = part.get_payload(decode=False)
+                if isinstance(content, str):
+                    texts.append(content)
+        except (TypeError, ValueError):
+            texts.append(message.raw_source)
+
+    found: list[str] = []
+    seen: set[str] = set()
+    url_pattern = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+    for text in texts:
+        decoded = unescape(text or "")
+        collector = _LinkCollector()
+        try:
+            collector.feed(decoded)
+        except (TypeError, ValueError):
+            pass
+        candidates = collector.links + url_pattern.findall(decoded)
+        for candidate in candidates:
+            link = unescape(candidate).strip().rstrip(".,;]")
+            if not link.lower().startswith(("http://", "https://")) or link in seen:
+                continue
+            seen.add(link)
+            found.append(link)
+    return found
+
+
+def message_to_dict(
+    message: EmailMessage,
+    *,
+    extracted: str | None = None,
+    links: Sequence[str] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
         "received_at": message.received_at.isoformat(),
         "from": message.sender,
         "to": list(message.recipients),
@@ -316,6 +406,9 @@ def message_to_dict(message: EmailMessage, *, extracted: str | None = None) -> d
         "extracted": extracted,
         "body": message.body,
     }
+    if links is not None:
+        payload["links"] = list(links)
+    return payload
 
 
 def _normalize_filter(value: str) -> str:
