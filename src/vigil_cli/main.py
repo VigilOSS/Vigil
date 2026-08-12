@@ -8,6 +8,7 @@ import shlex
 import subprocess
 import sys
 import tarfile
+import time
 import webbrowser
 from dataclasses import asdict
 from pathlib import Path
@@ -564,6 +565,12 @@ def main(argv: list[str] | None = None) -> None:
         help="only messages FROM this address or domain (e.g. security@bank.acme.example or @bank.acme.example)",
     )
     email_p.add_argument(
+        "--subject",
+        dest="subject_filter",
+        default=None,
+        help="only messages whose subject contains this text (case-insensitive)",
+    )
+    email_p.add_argument(
         "--within",
         type=int,
         default=3,
@@ -596,6 +603,23 @@ def main(argv: list[str] | None = None) -> None:
         type=float,
         default=30.0,
         help="timeout for the Mail.app read (default: 30)",
+    )
+    email_p.add_argument(
+        "--wait-seconds",
+        type=float,
+        default=0.0,
+        help="poll for a delayed matching message for up to N seconds (default: 0)",
+    )
+    email_p.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=2.0,
+        help="seconds between reads while --wait-seconds is active (default: 2)",
+    )
+    email_p.add_argument(
+        "--links",
+        action="store_true",
+        help="include HTTP(S) links decoded from the message's raw MIME source",
     )
     email_p.add_argument(
         "--json",
@@ -1790,30 +1814,60 @@ def _email(args: argparse.Namespace) -> None:
         raise SystemExit("--limit must be a positive integer")
     if args.timeout_seconds <= 0:
         raise SystemExit("--timeout-seconds must be > 0")
+    if args.wait_seconds < 0:
+        raise SystemExit("--wait-seconds must be >= 0")
+    if args.poll_seconds <= 0:
+        raise SystemExit("--poll-seconds must be > 0")
 
     cutoff = email_module.cutoff_for_window(args.within)
+    deadline = time.monotonic() + args.wait_seconds
+    poll_attempts = 0
+    last_error: email_module.EmailReadError | None = None
+    matched = []
+    while True:
+        poll_attempts += 1
+        try:
+            read_kwargs = {
+                "since": cutoff,
+                "limit": args.limit,
+                "timeout_seconds": args.timeout_seconds,
+            }
+            if args.links:
+                read_kwargs["include_source"] = True
+            messages = email_module.read_messages(**read_kwargs)
+            matched = email_module.filter_messages(
+                messages,
+                mailbox_address=args.mailbox,
+                from_filter=args.from_filter,
+                subject_filter=args.subject_filter,
+                since=cutoff,
+            )
+            last_error = None
+        except email_module.EmailReadError as exc:
+            last_error = exc
+        remaining = deadline - time.monotonic()
+        if matched or remaining <= 0:
+            break
+        time.sleep(min(args.poll_seconds, remaining))
+
+    if not matched and last_error is not None:
+        raise SystemExit(f"error: {last_error}") from last_error
+
     try:
-        messages = email_module.read_messages(
-            since=cutoff,
-            limit=args.limit,
-            timeout_seconds=args.timeout_seconds,
-        )
-        matched = email_module.filter_messages(
-            messages,
-            mailbox_address=args.mailbox,
-            from_filter=args.from_filter,
-            since=cutoff,
-        )
         # Extract when a regex is given, when --extract is set, or always in
         # JSON mode (the automation wants a candidate `extracted` field).
         do_extract = bool(args.match) or args.extract or args.json
         pattern = args.match or email_module.DEFAULT_CODE_PATTERN
         extracted_by_id = {}
+        links_by_id = {}
         if do_extract:
             for index, message in enumerate(matched):
                 extracted_by_id[index] = email_module.extract_token(
                     message.body, pattern=pattern
                 )
+        if args.links:
+            for index, message in enumerate(matched):
+                links_by_id[index] = email_module.extract_links(message)
     except email_module.EmailReadError as exc:
         raise SystemExit(f"error: {exc}") from exc
 
@@ -1821,11 +1875,17 @@ def _email(args: argparse.Namespace) -> None:
         payload = {
             "mailbox": args.mailbox,
             "from": args.from_filter,
+            "subject": args.subject_filter,
             "within_minutes": args.within,
             "cutoff": cutoff.isoformat(),
             "count": len(matched),
+            "poll_attempts": poll_attempts,
             "messages": [
-                email_module.message_to_dict(message, extracted=extracted_by_id.get(index))
+                email_module.message_to_dict(
+                    message,
+                    extracted=extracted_by_id.get(index),
+                    links=links_by_id.get(index) if args.links else None,
+                )
                 for index, message in enumerate(matched)
             ],
         }
@@ -1845,6 +1905,9 @@ def _email(args: argparse.Namespace) -> None:
         line = f"{timestamp}\t{message.sender}\t{message.subject}"
         if do_extract:
             line += f"\t{extracted if extracted is not None else '-'}"
+        if args.links:
+            links = links_by_id.get(index) or []
+            line += f"\t{','.join(links) if links else '-'}"
         print(line)
 
 

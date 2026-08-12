@@ -408,6 +408,83 @@ def test_prepare_browser_identity_material_only_stamps_when_materialized(monkeyp
     assert "vigil assess auth list" in str(prepared["refusal_detail"])
 
 
+def test_prepare_browser_identity_preserves_parent_domain_cookie_scope(
+    monkeypatch, tmp_path
+) -> None:
+    material = {
+        "host_cookies": [
+            {"host": "example.com", "cookies": {"parent_session": "abc"}},
+        ],
+    }
+    monkeypatch.setattr(
+        kali,
+        "resolve_identity",
+        lambda _eng, requested: (requested, material),
+    )
+
+    auth_context, prepared = kali.prepare_browser_identity_material(
+        tmp_path, "member", "https://app.example.com/account"
+    )
+
+    assert auth_context == "member"
+    assert prepared["cookies"] == [
+        {
+            "name": "parent_session",
+            "value": "abc",
+            "domain": ".example.com",
+            "path": "/",
+        }
+    ]
+
+
+def test_prepare_browser_identity_exact_cookie_overlays_parent_collision(
+    monkeypatch, tmp_path
+) -> None:
+    material = {
+        "host_cookies": [
+            {
+                "host": "example.com",
+                "cookies": {"session": "parent", "parent_only": "p"},
+            },
+            {
+                "host": "app.example.com",
+                "cookies": {"session": "exact", "exact_only": "e"},
+            },
+        ],
+    }
+    monkeypatch.setattr(
+        kali,
+        "resolve_identity",
+        lambda _eng, requested: (requested, material),
+    )
+
+    _auth_context, prepared = kali.prepare_browser_identity_material(
+        tmp_path, "member", "https://app.example.com/account"
+    )
+
+    cookies = {cookie["name"]: cookie for cookie in prepared["cookies"]}
+    assert cookies == {
+        "session": {
+            "name": "session",
+            "value": "exact",
+            "domain": "app.example.com",
+            "path": "/",
+        },
+        "parent_only": {
+            "name": "parent_only",
+            "value": "p",
+            "domain": ".example.com",
+            "path": "/",
+        },
+        "exact_only": {
+            "name": "exact_only",
+            "value": "e",
+            "domain": "app.example.com",
+            "path": "/",
+        },
+    }
+
+
 def test_prepare_execution_command_refuses_missing_requested_identity(
     monkeypatch, tmp_path
 ) -> None:

@@ -77,6 +77,29 @@ def test_filter_messages_by_mailbox_and_domain_from():
     assert kept == [on_target]
 
 
+def test_filter_messages_can_narrow_rewritten_relay_sender_by_subject():
+    from vigil_cli.email import filter_messages
+
+    acme = _msg(
+        sender="Mail Forwarder <mail-forwarder@wearehackerone.com>",
+        recipients=("researcher+pc1@example.com",),
+        subject="Your Acme verification code",
+    )
+    unrelated = _msg(
+        sender=acme.sender,
+        recipients=acme.recipients,
+        subject="Recruiting interview confirmation 482915",
+    )
+
+    kept = filter_messages(
+        [acme, unrelated],
+        mailbox_address="researcher+pc1@example.com",
+        subject_filter="Acme",
+    )
+
+    assert kept == [acme]
+
+
 def test_filter_messages_orders_newest_first_and_respects_since():
     from vigil_cli.email import filter_messages
 
@@ -138,6 +161,191 @@ def test_email_cli_no_matches_exits_nonzero(monkeypatch, capsys):
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "no messages" in err
+
+
+def test_filter_messages_deduplicates_aggregate_and_account_views():
+    from vigil_cli.email import filter_messages
+
+    received = datetime(2026, 8, 24, 23, 41, 29, tzinfo=UTC)
+    aggregate = _msg(
+        sender="Acme <mail-forwarder@wearehackerone.com>",
+        recipients=("researcher@example.com",),
+        subject="Acme Groups People CSV Export Download Link.",
+        body="Your CSV export is ready.",
+        received_at=received,
+        account="",
+        mailbox="Inbox",
+    )
+    account_view = _msg(
+        sender=aggregate.sender,
+        recipients=aggregate.recipients,
+        subject=aggregate.subject,
+        body=aggregate.body,
+        received_at=received,
+        account="Parameno",
+        mailbox="INBOX",
+    )
+
+    kept = filter_messages(
+        [aggregate, account_view],
+        mailbox_address="researcher@example.com",
+    )
+
+    assert kept == [aggregate]
+
+
+def test_extract_links_decodes_hidden_html_href_from_raw_mime_source():
+    from vigil_cli.email import extract_links
+
+    raw_source = """\
+From: Acme <mail-forwarder@wearehackerone.com>
+To: researcher@example.com
+MIME-Version: 1.0
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: quoted-printable
+
+<p>Your export is ready.</p><a href=3D"https://groups.acme-portal.example/=
+exports/owned-fixture.csv?token=3Dabc123">Download CSV</a>
+"""
+    message = _msg(
+        body="Your export is ready. Download CSV",
+        raw_source=raw_source,
+    )
+
+    assert extract_links(message) == [
+        "https://groups.acme-portal.example/exports/owned-fixture.csv?token=abc123"
+    ]
+
+
+def test_email_cli_waits_for_delayed_message_without_moving_cutoff(monkeypatch, capsys):
+    from vigil_cli import email as email_module
+    from vigil_cli import main as main_module
+    from vigil_cli.main import main
+
+    calls = []
+    expected = _msg(received_at=datetime.now(UTC))
+
+    def fake_read(*, since, limit, timeout_seconds):
+        calls.append(since)
+        return [] if len(calls) == 1 else [expected]
+
+    monkeypatch.setattr(email_module, "read_messages", fake_read)
+    monkeypatch.setattr(main_module.time, "sleep", lambda _: None)
+
+    main(
+        [
+            "email",
+            "researcher@example.com",
+            "--wait-seconds",
+            "5",
+            "--poll-seconds",
+            "0.01",
+            "--json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["count"] == 1
+    assert payload["poll_attempts"] == 2
+    assert calls == [calls[0], calls[0]]
+
+
+def test_email_cli_wait_retries_transient_mail_app_error(monkeypatch, capsys):
+    from vigil_cli import email as email_module
+    from vigil_cli import main as main_module
+    from vigil_cli.main import main
+
+    attempts = 0
+
+    def fake_read(**_):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise email_module.EmailReadError("osascript timed out")
+        return [_msg(received_at=datetime.now(UTC))]
+
+    monkeypatch.setattr(email_module, "read_messages", fake_read)
+    monkeypatch.setattr(main_module.time, "sleep", lambda _: None)
+
+    main(
+        [
+            "email",
+            "researcher@example.com",
+            "--wait-seconds",
+            "5",
+            "--poll-seconds",
+            "0.01",
+            "--json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["count"] == 1
+    assert payload["poll_attempts"] == 2
+
+
+def test_email_cli_links_reads_message_source_only_when_requested(monkeypatch, capsys):
+    from vigil_cli import email as email_module
+    from vigil_cli.main import main
+
+    captured = {}
+    message = _msg(
+        received_at=datetime.now(UTC),
+        raw_source=(
+            "Content-Type: text/html; charset=UTF-8\n\n"
+            '<a href="https://example.test/download?id=1">Download</a>'
+        ),
+    )
+
+    def fake_read(*, since, limit, timeout_seconds, include_source=False):
+        captured["include_source"] = include_source
+        return [message]
+
+    monkeypatch.setattr(email_module, "read_messages", fake_read)
+
+    main(["email", "researcher@example.com", "--links", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert captured["include_source"] is True
+    assert payload["messages"][0]["links"] == [
+        "https://example.test/download?id=1"
+    ]
+
+
+def test_email_cli_passes_subject_filter(monkeypatch, capsys):
+    from vigil_cli import email as email_module
+    from vigil_cli.main import main
+
+    monkeypatch.setattr(
+        email_module,
+        "read_messages",
+        lambda **_: [
+            _msg(
+                sender="Mail Forwarder <mail-forwarder@wearehackerone.com>",
+                subject="Your Acme verification code",
+                received_at=datetime.now(UTC),
+            ),
+            _msg(
+                sender="Mail Forwarder <mail-forwarder@wearehackerone.com>",
+                subject="Unrelated message",
+                received_at=datetime.now(UTC),
+            ),
+        ],
+    )
+
+    main(
+        [
+            "email",
+            "researcher@example.com",
+            "--subject",
+            "Acme",
+            "--json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["subject"] == "Acme"
+    assert payload["count"] == 1
 
 
 # ---------------------------------------------------------------------------
