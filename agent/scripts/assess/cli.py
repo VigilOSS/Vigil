@@ -353,11 +353,23 @@ def main(argv: list[str] | None = None) -> None:
         leaf_modules=(list_command_runs, get_command_run),
     )
 
-    from assess.lib.kali import ScopedErrorParser
+    from assess.lib.kali import KALI_EXIT_CODES, ScopedErrorParser
 
     kali = sub.add_parser(
         "kali",
         help="Run Kali tools via host-side docker exec with audit recording.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Exit codes (also reported as `.status` in the JSON on stdout):\n"
+            "  0  completed, or waf_challenge — a usable result came back. A WAF\n"
+            "     interstitial IS a complete exchange; it is loud on stderr and in\n"
+            "     `.status`, and its remedy is `kali browser`, not aborting the chain.\n"
+            + "".join(
+                f"  {code}  {status} — no complete output exists to interpret\n"
+                for status, code in sorted(KALI_EXIT_CODES.items(), key=lambda kv: kv[1])
+            )
+            + "  1  Vigil refused the run (scope/policy/audit); 2  argparse rejected the flags.\n"
+        ),
     )
     # parser_class makes every `kali <verb>` subparser a ScopedErrorParser so a
     # parse-time enum miss (--technique/--probe-kind/--phase invalid choice) is

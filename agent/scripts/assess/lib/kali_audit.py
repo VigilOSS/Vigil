@@ -10,6 +10,7 @@ makes it onto the wire at all.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 from pathlib import Path
@@ -421,6 +422,34 @@ def _post_pre_exec_row(
     return client.post("command-runs", payload)
 
 
+_OUTPUT_HASH_CHUNK_BYTES = 1 << 20
+
+
+def _stream_output_truth(path: str | Path | None) -> tuple[int, str] | None:
+    """Return ``(bytes_written, sha256)`` for one wrapper-owned output file.
+
+    The run streams its FULL stdout/stderr to a file this CLI opened, while the
+    finalize payload carries only a head+tail-truncated preview — so this file
+    is the only honest source for the byte count and digest the audit row
+    records. Hashed in chunks because a scan's output is routinely far larger
+    than memory-comfortable. Returns None when the path is missing or unreadable
+    so the row simply records no byte truth, never a wrong one.
+    """
+    if not path:
+        return None
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(_OUTPUT_HASH_CHUNK_BYTES), b""):
+                size += len(chunk)
+                digest.update(chunk)
+    except OSError:
+        return None
+    # Empty streams carry no digest, matching the backend's own retention rule.
+    return size, digest.hexdigest() if size else ""
+
+
 def _patch_finalize(
     client: AssessmentClient,
     *,
@@ -436,6 +465,8 @@ def _patch_finalize(
     peak_rss_bytes: int | None,
     cpu_user_seconds: float | None,
     cpu_system_seconds: float | None,
+    stdout_path: str | Path | None = None,
+    stderr_path: str | Path | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "status": status,
@@ -447,6 +478,16 @@ def _patch_finalize(
         "timed_out": bool(timed_out),
         "partial_results": bool(partial_results),
     }
+    # Retention/byte columns are only recomputed backend-side for the host_exec
+    # lane; on every other route (`vigil assess kali/<tool>`) they keep the
+    # pre-exec placeholders unless this PATCH carries the measured truth. Pass
+    # the paths this row was OPENED with, so the recorded bytes and digest
+    # belong to the file the row names.
+    for stream, path in (("stdout", stdout_path), ("stderr", stderr_path)):
+        truth = _stream_output_truth(path)
+        if truth is None:
+            continue
+        payload[f"{stream}_bytes"], payload[f"{stream}_sha256"] = truth
     if peak_rss_bytes is not None:
         payload["peak_rss_bytes"] = int(peak_rss_bytes)
     if cpu_user_seconds is not None:

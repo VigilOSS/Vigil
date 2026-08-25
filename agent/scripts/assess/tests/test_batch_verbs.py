@@ -874,3 +874,83 @@ def test_update_validates_details_against_the_record_contract(
         update_finding.run(args)
         capsys.readouterr()
         assert len(fake.patches) == 1
+
+
+def test_verify_rejects_new_severity_outside_downgraded_before_the_post(
+    tmp_path, monkeypatch, capsys
+):
+    """``--new-severity`` is consumed ONLY by the downgraded disposition; under
+    any other one the backend silently dropped it and answered 200. Fail here,
+    naming the verb that actually re-bands a finding, so nothing is sent."""
+    fake = _FakeClient()
+    _install(monkeypatch, verify_finding, tmp_path, fake)
+    args = _parse(
+        verify_finding,
+        [
+            "verify", "VA-1",
+            "--disposition", "confirmed",
+            "--reason", "reproduced",
+            "--new-severity", "low",
+        ],
+        tmp_path,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        verify_finding.run(args)
+
+    assert exc.value.code == 1
+    assert fake.posts == []
+    err = capsys.readouterr().err
+    assert "new_severity applies only to --disposition downgraded" in err
+    assert "finding update VA-1 --severity low" in err
+
+
+def test_verify_new_severity_rejection_names_every_slug_in_the_batch(
+    tmp_path, monkeypatch, capsys
+):
+    """The remedy has to cover the whole batch, not just its first slug.
+
+    `finding verify A B C --new-severity low` is one intent over three findings.
+    A message naming only A would be followed literally: A gets re-banded and
+    B and C silently keep the old severity — the exact silent partial the
+    rejection exists to prevent."""
+    fake = _FakeClient()
+    _install(monkeypatch, verify_finding, tmp_path, fake)
+    args = _parse(
+        verify_finding,
+        [
+            "verify", "VA-1", "VA-2", "VA-3",
+            "--disposition", "confirmed",
+            "--reason", "reproduced",
+            "--new-severity", "low",
+        ],
+        tmp_path,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        verify_finding.run(args)
+
+    assert exc.value.code == 1
+    assert fake.posts == []
+    err = capsys.readouterr().err
+    assert "finding update VA-1 VA-2 VA-3 --severity low" in err
+
+
+def test_verify_downgraded_still_forwards_new_severity(tmp_path, monkeypatch, capsys):
+    fake = _FakeClient()
+    _install(monkeypatch, verify_finding, tmp_path, fake)
+    args = _parse(
+        verify_finding,
+        [
+            "verify", "VA-1",
+            "--disposition", "downgraded",
+            "--reason", "over-scored",
+            "--new-severity", "medium",
+        ],
+        tmp_path,
+    )
+
+    verify_finding.run(args)
+    capsys.readouterr()
+
+    assert fake.posts[0][1]["new_severity"] == "medium"

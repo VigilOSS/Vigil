@@ -160,6 +160,13 @@ def finalize_parent_command_run(
             peak_rss_bytes=None,
             cpu_user_seconds=None,
             cpu_system_seconds=None,
+            # Same host paths the paired command-run row was opened with
+            # (``start_job`` writes one ``_job_paths`` pair to both rows), so
+            # the audit row records the byte count and digest of the spill it
+            # names rather than keeping the pre-exec placeholders. The previews
+            # read above are head+tail truncations and cannot supply them.
+            stdout_path=record.get("stdout_path"),
+            stderr_path=record.get("stderr_path"),
         )
     except AssessError:
         return

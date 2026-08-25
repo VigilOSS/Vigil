@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from assess.lib import scope as scope_lib
 from assess.lib.client import AssessError
 from assess.lib.config import resolve_engagement_dir
 from assess.lib.kali import (
@@ -18,16 +19,17 @@ from assess.lib.kali import (
     kali_exec,
     prepare_browser_identity_material,
 )
-from assess.lib.kali_output import _required_headers
 
 _MAX_STEPS = 50
 _MAX_STEP_TIMEOUT_MS = 120_000
 _ACTIONS = frozenset({"navigate", "click", "fill", "wait", "eval", "assert"})
+_WAIT_STATES = ("attached", "visible", "hidden", "detached")
+_NAV_WAIT_UNTIL = ("domcontentloaded", "load", "networkidle")
 _STEP_KEYS = {
     "navigate": frozenset({"action", "url", "wait_until", "timeout_ms"}),
     "click": frozenset({"action", "selector", "timeout_ms"}),
     "fill": frozenset({"action", "selector", "value", "timeout_ms"}),
-    "wait": frozenset({"action", "selector", "timeout_ms"}),
+    "wait": frozenset({"action", "selector", "state", "timeout_ms"}),
     "eval": frozenset({"action", "script"}),
     "assert": frozenset({"action", "selector", "contains", "equals", "visible", "timeout_ms"}),
 }
@@ -37,7 +39,7 @@ _STEP_KEYS = {
 # JSON argv value, avoiding shell interpolation and keeping every target URL
 # visible in the audited argv before Chromium starts.
 _BROWSER_DRIVER = r'''
-import hashlib, json, os, re, sys, time
+import hashlib, ipaddress, json, os, re, sys
 from urllib.parse import urlsplit
 
 MAX_NETWORK_EVENTS = 500
@@ -88,8 +90,36 @@ omitted = set()
 required_headers = dict(cfg.get("required_headers") or {})
 operator_headers = dict(cfg.get("operator_headers") or {})
 identity_headers = dict(cfg.get("identity_headers") or {})
-document_origins = set(cfg.get("document_origins") or [])
 identity_hosts = set(cfg.get("identity_hosts") or [])
+attribute_every_origin = cfg.get("attribution_scope") == "all"
+allow_entries = list(cfg.get("attribution_allow") or [])
+deny_entries = list(cfg.get("attribution_deny") or [])
+page_timeout_ms = int(float(cfg.get("page_timeout") or 30) * 1000)
+
+def entry_matches(entry, host):
+    entry_host = entry.get("host") or ""
+    kind = entry.get("entry_kind")
+    if kind == "cidr":
+        try:
+            return ipaddress.ip_address(host) in ipaddress.ip_network(entry_host, strict=False)
+        except ValueError:
+            return False
+    if kind == "wildcard":
+        return host == entry_host or host.endswith("." + entry_host)
+    return host == entry_host
+
+def host_admitted(host):
+    # Mirrors assess.lib.scope.host_admitted across the container boundary. The
+    # host side ships pre-classified entries, so only the final comparison lives
+    # here; the denylist still wins. Chromium hands over A-label hostnames, so
+    # the shared matcher's IDNA step has nothing left to do. It decides ONE
+    # thing: whether a request carries the program attribution header, never
+    # whether the request is sent.
+    if not host:
+        return False
+    if not any(entry_matches(entry, host) for entry in allow_entries):
+        return False
+    return not any(entry_matches(entry, host) for entry in deny_entries)
 
 def add_candidate(request):
     if len(result["route_candidates"]) >= MAX_ROUTE_CANDIDATES:
@@ -136,24 +166,24 @@ def on_response(response):
 def route_request(route, request):
     headers = dict(request.headers)
     headers.update(operator_headers)
-    request_origin = origin(request.url)
     request_host = (urlsplit(request.url).hostname or "").lower().rstrip(".")
-    is_document_navigation = request.is_navigation_request()
     # Bearer/custom identity headers are target credentials, not ambient browser
-    # headers. Keep them on the resolved identity target host; cookies use
-    # Chromium's native domain/path scoping through context.add_cookies().
+    # headers. They ride only to the hosts this run was explicitly told to visit
+    # (the initial URL plus every declared navigate step); cookies use Chromium's
+    # native domain/path scoping through context.add_cookies().
     if request_host in identity_hosts:
         headers.update(identity_headers)
-    should_attribute = cfg.get("attribution_scope") == "all" or (
-        cfg.get("attribution_scope") == "document-origin"
-        and (request_origin in document_origins or is_document_navigation)
-    )
-    if should_attribute:
-        headers.update(required_headers)
-        if is_document_navigation and request_origin:
-            document_origins.add(request_origin)
-    elif required_headers and request_origin:
-        omitted.add(request_origin)
+    # Program attribution follows the SCOPE boundary, not the document origin. An
+    # in-scope sibling host carrying the real testing traffic must be attributed
+    # (deconfliction), and a third-party analytics/CDN origin must never see the
+    # program handle. Everything is still sent either way.
+    if required_headers:
+        if attribute_every_origin or host_admitted(request_host):
+            headers.update(required_headers)
+        else:
+            request_origin = origin(request.url)
+            if request_origin:
+                omitted.add(request_origin)
     route.continue_(headers=headers)
 
 def capture_failure(page, label):
@@ -201,17 +231,19 @@ with sync_playwright() as playwright:
     page.on("pageerror", lambda exc: console.append({"type": "pageerror", "text": str(exc)}) if len(console) < MAX_CONSOLE_EVENTS else None)
     failed = False
     try:
-        response = page.goto(cfg["url"], wait_until="domcontentloaded", timeout=int(float(cfg.get("page_timeout") or 30) * 1000))
+        response = page.goto(cfg["url"], wait_until=cfg.get("wait_until") or "domcontentloaded", timeout=page_timeout_ms)
         result["http_status"] = response.status if response else None
         if cfg.get("wait_selector"):
-            page.locator(cfg["wait_selector"]).wait_for(state="attached", timeout=int(float(cfg.get("page_timeout") or 30) * 1000))
-        else:
-            page.wait_for_timeout(int(float(cfg.get("settle") or 0) * 1000))
+            page.locator(cfg["wait_selector"]).wait_for(state=cfg.get("wait_state") or "attached", timeout=page_timeout_ms)
+        # The settle composes with the selector wait instead of replacing it: an
+        # XHR can land (selector attached) while the DOM it drives keeps mutating.
+        if cfg.get("settle"):
+            page.wait_for_timeout(int(float(cfg["settle"]) * 1000))
         if cfg.get("eval_js"):
             result["eval_result"] = page.evaluate(cfg["eval_js"])
         for index, step in enumerate(cfg.get("steps") or []):
             action = step["action"]
-            timeout = int(step.get("timeout_ms") or min(int(float(cfg.get("page_timeout") or 30) * 1000), 120000))
+            timeout = int(step.get("timeout_ms") or min(page_timeout_ms, 120000))
             record = {"index": index, "action": action, "status": "completed"}
             try:
                 if action == "navigate":
@@ -223,7 +255,7 @@ with sync_playwright() as playwright:
                     page.locator(step["selector"]).fill(step["value"], timeout=timeout)
                 elif action == "wait":
                     if step.get("selector"):
-                        page.locator(step["selector"]).wait_for(state="attached", timeout=timeout)
+                        page.locator(step["selector"]).wait_for(state=step.get("state") or "attached", timeout=timeout)
                     else:
                         page.wait_for_timeout(timeout)
                 elif action == "eval":
@@ -272,14 +304,32 @@ def register(subparsers) -> None:
     p.add_argument("url", nargs="?", default="", help="Initial HTTP(S) URL.")
     p.add_argument("--screenshot", default="", help="Engagement-relative screenshot path.")
     p.add_argument("--dom-out", dest="dom_out", default="", help="Engagement-relative DOM path.")
-    p.add_argument("--wait-selector", default="", help="CSS selector to await before capture.")
+    p.add_argument(
+        "--wait-selector", default="",
+        help="CSS selector to await before capture; --settle then applies on top of it.",
+    )
+    p.add_argument(
+        "--wait-state", choices=_WAIT_STATES, default="attached",
+        help="Locator state --wait-selector waits for (default attached).",
+    )
+    p.add_argument(
+        "--wait-until", choices=_NAV_WAIT_UNTIL, default="domcontentloaded",
+        help="Completion event for the initial navigation (default domcontentloaded).",
+    )
     p.add_argument("--page-timeout", type=float, default=30.0)
-    p.add_argument("--settle", type=float, default=2.0)
+    p.add_argument(
+        "--settle", type=float, default=2.0,
+        help="Extra settle wait after the load and any --wait-selector; 0 disables.",
+    )
     p.add_argument("--eval", dest="eval_js", default="", help="Evaluate JavaScript after initial load.")
     p.add_argument("--header", dest="extra_headers", action="append", default=[], metavar="NAME:VALUE")
     p.add_argument(
-        "--attribution-scope", choices=("all", "document-origin"), default="all",
-        help="Apply required attribution to all requests or only document origins.",
+        "--attribution-scope", choices=("scope", "all"), default="scope",
+        help=(
+            "Which requests carry the program attribution headers: 'scope' (default) "
+            "sends them to scope.json-admitted hosts only; 'all' sends them to every "
+            "origin the page touches, leaking the program handle to third parties."
+        ),
     )
     p.add_argument("--steps-file", default="", help="JSON array of typed browser steps (max 50).")
     p.add_argument(
@@ -363,6 +413,10 @@ def _load_steps(path: Path) -> list[dict[str, Any]]:
             raise AssessError(f"browser step {index} requires selector")
         if action == "fill" and "value" not in step:
             raise AssessError(f"browser step {index} requires value")
+        if action == "wait" and step.get("state", "attached") not in _WAIT_STATES:
+            raise AssessError(
+                f"browser step {index} state must be one of {', '.join(_WAIT_STATES)}"
+            )
         if action == "eval" and not str(step.get("script") or "").strip():
             raise AssessError(f"browser step {index} requires script")
         if action == "assert" and not any(key in step for key in ("contains", "equals", "visible")):
@@ -397,14 +451,6 @@ def _load_storage_state(value: str, engagement_dir: Path | None) -> dict[str, An
     return payload
 
 
-def _resolve_required_headers(args) -> dict[str, str]:
-    try:
-        eng_dir = resolve_engagement_dir(getattr(args, "engagement_dir", None))
-    except SystemExit:
-        return {}
-    return _required_headers(Path(eng_dir))
-
-
 def _engagement_dir(args) -> Path | None:
     try:
         return Path(resolve_engagement_dir(getattr(args, "engagement_dir", None)))
@@ -412,11 +458,113 @@ def _engagement_dir(args) -> Path | None:
         return None
 
 
-def _origin(url: str) -> str:
-    parsed = urlsplit(url)
-    port = parsed.port
-    default = (parsed.scheme == "https" and port == 443) or (parsed.scheme == "http" and port == 80)
-    return f"{parsed.scheme.lower()}://{parsed.hostname.lower()}{'' if not port or default else f':{port}'}"
+def _host(url: str) -> str:
+    return (urlsplit(url).hostname or "").lower().rstrip(".")
+
+
+def _attribution_entries(entries: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Reduce classified scope entries to what the in-container driver matches on."""
+    return [{"entry_kind": entry["entry_kind"], "host": entry["host"]} for entry in entries]
+
+
+def _scope_attribution(
+    engagement_dir: Path | None,
+) -> tuple[dict[str, str], list[dict[str, str]], list[dict[str, str]]]:
+    """Return ``(required_headers, allow_entries, deny_entries)`` for this run.
+
+    One scope.json read feeds both halves of the attribution decision: which
+    headers the program mandates, and which hosts are inside the boundary that
+    must carry them. Entries are classified here with the shared scope
+    primitives so the driver only performs the final host comparison. An
+    unreadable scope yields nothing; a readable scope with an unusable ``hosts``
+    list still yields its headers, so ``run`` can refuse rather than navigate a
+    mandated-attribution engagement with no resolvable boundary.
+    """
+    if engagement_dir is None:
+        return {}, [], []
+    try:
+        scope = scope_lib.load_scope(str(engagement_dir), persist_migration=False)
+    except (SystemExit, OSError, ValueError):
+        return {}, [], []
+    headers = scope_lib.required_headers(scope)
+    try:
+        allow = scope_lib.scope_entries(scope)
+        deny = scope_lib.out_of_scope_entries(scope)
+    except SystemExit:
+        return headers, [], []
+    return headers, allow, deny
+
+
+def _warn_timeout_budget(
+    timeout: int, page_timeout: float, settle: float, wait_selector: str
+) -> None:
+    """WARN before launch when the wrapper ``--timeout`` cannot outlast the driver.
+
+    The driver writes the DOM and screenshot only after the workflow completes and
+    Playwright flushes the HAR at context close, so a wrapper kill mid-flight
+    yields zero artifacts - a result structurally indistinguishable from a clean
+    negative. That is worth saying out loud; it is NOT worth refusing over,
+    because the driver budget is a CEILING and not a cost: a page that renders in
+    3s finishes inside a 45s --page-timeout, so the tight pairing usually
+    completes. Naming both numbers keeps the unfalsifiable outcome visible while
+    leaving the run to the caller.
+    """
+    parts = [f"--page-timeout {page_timeout:g}s to load"]
+    budget = page_timeout + settle
+    if wait_selector:
+        budget += page_timeout
+        parts.append(f"{page_timeout:g}s more for --wait-selector")
+    parts.append(f"--settle {settle:g}s")
+    if timeout > budget:
+        return
+    print(
+        f"browser: WARN --timeout {timeout}s does not outlast this run's worst-case "
+        f"in-container budget of {budget:g}s ({' + '.join(parts)}). That budget is a "
+        "CEILING, not the expected cost - most pages finish far inside it - but a run "
+        "that DOES reach it is killed by the wrapper mid-flight, and the DOM, screenshot "
+        "and HAR are all written at the end, so the kill leaves ZERO artifacts and reads "
+        f"exactly like a clean negative. Raise --timeout above {budget:g}s to keep a slow "
+        "page falsifiable.",
+        file=sys.stderr,
+    )
+
+
+def _warn_unattributed_navigations(
+    hosts: list[str],
+    required_headers: dict[str, str],
+    attribution_scope: str,
+    allow_entries: list[dict[str, str]],
+    deny_entries: list[dict[str, str]],
+) -> None:
+    """WARN when this run's OWN targets will not carry the mandated header.
+
+    Scope routing sends the program handle only to ``scope.json``-admitted hosts.
+    That is right for a third-party CDN and WRONG-looking for the host under
+    test: Vigil does not gate execution on scope, so a run against a real target
+    that ``hosts`` never declared (a recon-discovered sibling lives in
+    ``discovered_hosts``) navigates it with NO attribution — the precise
+    deconfliction failure the header exists to prevent, and silently, because
+    ``kali_output`` reports ``browser`` as self-attributing so no injection
+    warning fires either. Warn, never refuse: naming the host and both remedies
+    keeps the operator in control of a call only they can make.
+    """
+    if attribution_scope == "all" or not required_headers or not hosts:
+        return
+    missing = [
+        host
+        for host in hosts
+        if not scope_lib.host_admitted(host, allow_entries, deny_entries)
+    ]
+    if not missing:
+        return
+    print(
+        f"browser: {', '.join(missing)} will be navigated WITHOUT the mandated "
+        f"header(s) {', '.join(sorted(required_headers))} — scope.json `hosts` does "
+        "not declare them (a discovered_hosts entry does not count). Declare the "
+        "host in scope.json, or pass --attribution-scope all, before treating "
+        "this run as deconflicted traffic.",
+        file=sys.stderr,
+    )
 
 
 def run(args) -> None:
@@ -432,8 +580,35 @@ def run(args) -> None:
         raise AssessError("browser --max-body-bytes must be between 1 and 10485760")
     steps_path = str(getattr(args, "steps_file", "") or "").strip()
     steps = _load_steps(Path(steps_path).expanduser()) if steps_path else []
+    page_timeout = float(getattr(args, "page_timeout", 30.0))
+    settle = float(getattr(args, "settle", 2.0))
+    wait_selector = str(getattr(args, "wait_selector", "") or "")
+    _warn_timeout_budget(int(getattr(args, "timeout", 0) or 0), page_timeout, settle, wait_selector)
 
-    required_headers = _resolve_required_headers(args)
+    eng_dir = _engagement_dir(args)
+    required_headers, allow_entries, deny_entries = _scope_attribution(eng_dir)
+    attribution_scope = str(getattr(args, "attribution_scope", "scope"))
+    if required_headers:
+        names = ", ".join(sorted(required_headers))
+        if attribution_scope == "all":
+            print(
+                f"browser: --attribution-scope all sends the mandated header(s) {names} to EVERY "
+                "origin this page loads - third-party analytics, CDN and vendor hosts included - "
+                "so the program handle leaks off-target. Drop the flag to attribute only "
+                "scope.json-admitted hosts.",
+                file=sys.stderr,
+            )
+        elif not allow_entries:
+            # The one fail-closed case: the program mandates attribution on every
+            # in-scope request and the boundary cannot be resolved, so navigating
+            # would send unattributed traffic to hosts that must be deconflicted.
+            raise AssessError(
+                f"browser cannot resolve the scope boundary that mandated header(s) {names} apply "
+                "to: scope.json declares no usable `hosts` entry, so in-scope traffic would be "
+                "sent unattributed. Declare the in-scope hosts, or pass --attribution-scope all "
+                "to attribute every origin the page touches."
+            )
+
     operator_headers = _parse_header_args(getattr(args, "extra_headers", []) or [])
     # Required program attribution always wins an explicit operator collision.
     required_header_names = {name.lower() for name in required_headers}
@@ -443,7 +618,6 @@ def run(args) -> None:
         if name.lower() not in required_header_names
     }
 
-    eng_dir = _engagement_dir(args)
     storage_state = _load_storage_state(
         str(getattr(args, "storage_state", "") or ""), eng_dir
     )
@@ -477,23 +651,35 @@ def run(args) -> None:
                 + (f" because {detail}." if detail else ".")
             )
 
+    # Identity credentials follow every host this run was explicitly told to
+    # visit, so a multi-step workflow keeps its session across a declared
+    # navigation. Hosts the page merely pulls resources from are not included.
+    navigation_urls = [url, *(step["url"] for step in steps if step["action"] == "navigate")]
+    identity_hosts = sorted({host for host in map(_host, navigation_urls) if host})
+    _warn_unattributed_navigations(
+        identity_hosts, required_headers, attribution_scope, allow_entries, deny_entries
+    )
+
     config = {
         "url": url,
         "screenshot": screenshot,
         "dom_path": dom_out,
         "failure_stem": f"{stem}-failure",
-        "page_timeout": float(getattr(args, "page_timeout", 30.0)),
-        "settle": float(getattr(args, "settle", 2.0)),
-        "wait_selector": str(getattr(args, "wait_selector", "") or ""),
+        "page_timeout": page_timeout,
+        "settle": settle,
+        "wait_selector": wait_selector,
+        "wait_state": str(getattr(args, "wait_state", "attached")),
+        "wait_until": str(getattr(args, "wait_until", "domcontentloaded")),
         "eval_js": str(getattr(args, "eval_js", "") or "").strip(),
-        "attribution_scope": str(getattr(args, "attribution_scope", "all")),
+        "attribution_scope": attribution_scope,
+        "attribution_allow": _attribution_entries(allow_entries),
+        "attribution_deny": _attribution_entries(deny_entries),
         "required_headers": required_headers,
         "operator_headers": operator_headers,
         "identity_headers": identity_headers,
-        "identity_hosts": [(urlsplit(url).hostname or "").lower().rstrip(".")],
+        "identity_hosts": identity_hosts,
         "cookies": cookies,
         "storage_state": storage_state,
-        "document_origins": [_origin(url)],
         "steps": steps,
         "har_out": har_out,
         "capture_bodies": bool(getattr(args, "capture_bodies", False)),

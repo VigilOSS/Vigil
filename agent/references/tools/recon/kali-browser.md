@@ -1,5 +1,5 @@
 ---
-description: Audited Playwright/system-Chromium browser workflows with scoped attribution, typed steps, and bounded application evidence.
+description: Audited Playwright/system-Chromium browser workflows with scope-routed attribution, typed steps, and bounded application evidence.
 skill: web-recon
 ---
 
@@ -36,12 +36,25 @@ the rendered DOM + the captured origin status reflect the **real** application.
 - `url` (positional, required) — the URL to render.
 - `--screenshot <path>` — engagement-relative PNG output (default `scans/browser/<host>-<id>.png`).
 - `--dom-out <path>` — engagement-relative rendered-DOM output (default `scans/browser/<host>-<id>.html`).
-- `--wait-selector '<css>'` — explicit-wait for a specific element before capture (bounded by `--page-timeout`); omit to fall back to `--settle`.
+- `--wait-selector '<css>'` — explicit-wait for a specific element before capture (bounded by `--page-timeout`).
+- `--wait-state attached|visible|hidden|detached` — the state `--wait-selector` waits for
+  (default `attached`). Use `visible` when the element is rendered empty first, `hidden` to
+  wait a spinner out.
+- `--wait-until domcontentloaded|load|networkidle` — completion event for the initial
+  navigation (default `domcontentloaded`). `networkidle` is the one to reach for when the
+  evidence only exists after late XHRs land.
 - `--page-timeout <s>` — per-page load + explicit-wait timeout in seconds (default `30`).
-- `--settle <s>` — extra settle wait after load when no `--wait-selector` is given (default `2`).
-- `--attribution-scope all|document-origin` — `all` preserves the historical global
-  header behavior; `document-origin` applies program attribution to the top-level document's
-  navigations and their same-origin requests, preventing cross-origin CORS preflight failures.
+  `--wait-selector` gets its own `--page-timeout` budget on top of the load.
+- `--settle <s>` — extra settle wait (default `2`), applied **after** the load *and* after any
+  `--wait-selector` resolves — the two compose, so "wait for `#root`, then settle 5s" is
+  `--wait-selector '#root' --settle 5`. Pass `--settle 0` to skip it.
+- `--attribution-scope scope|all` — which requests carry the program's mandated attribution
+  headers. `scope` (default) sends them to every host `scope.json` admits (wildcards and
+  `out_of_scope` carve-outs included, via the same matcher every other scope surface uses) and
+  to nothing else, so in-scope sibling hosts stay deconflicted and third-party
+  analytics/CDN/vendor origins never see the program handle. `all` is the explicit escape
+  hatch: it attributes every origin the page touches and prints a loud stderr line naming the
+  leak. Origins left unattributed are listed in `omitted_attribution_origins`.
 - `--steps-file <json>` — up to 50 typed `navigate`, `click`, `fill`, `wait`, `eval`, or
   `assert` steps. Unknown actions/fields, non-HTTP navigation, and excessive timeouts fail
   before the browser starts.
@@ -53,11 +66,29 @@ the rendered DOM + the captured origin status reflect the **real** application.
 - `--capture-bodies --body-dir <path> --max-body-bytes <n>` — opt-in bounded capture of
   document/XHR/fetch response bodies.
 
-Required attribution routing is installed before the first navigation when matching metadata is
-available. Missing or inapplicable attribution metadata does not refuse the browser run. Scope and
-path metadata never abort a navigation; the specialist owns the engagement boundary in
-`agent/shared-constraints.md` §1. Failed typed steps still write owned screenshot/DOM artifacts and
-return non-zero rather than being mistaken for completed coverage.
+Attribution routing is installed before the first navigation. Scope decides **only** which
+requests carry the attribution headers — it never aborts, blocks or filters a navigation or a
+request, and the specialist still owns the engagement boundary in `agent/shared-constraints.md`
+§1. An engagement with no mandated header runs unattributed without complaint; the single
+fail-closed case is a program that **does** mandate a header while `scope.json` declares no
+usable `hosts` entry — that run is refused before navigation rather than sending unattributed
+in-scope traffic (declare the hosts, or pass `--attribution-scope all`).
+
+The near-miss to watch for: scope is a **predicate, never a gate**, so a run against a host `scope.json` `hosts` does not declare still executes — and under `scope` routing it navigates that host with **no** attribution header. Recon-discovered siblings live in `discovered_hosts`, which does not count. The verb WARNs on stderr naming every such host (the initial URL plus every declared `navigate` step) before launching; declare the host in `hosts`, or pass `--attribution-scope all`, before treating the run as deconflicted traffic.
+
+`--timeout` (the wrapper's wall-clock kill) should exceed the in-container budget
+`--page-timeout` + `--page-timeout` again when `--wait-selector` is set + `--settle`. When it
+does not, the verb **WARNs on stderr before launch** with both numbers named and still runs —
+that budget is a **ceiling, not a cost** (a page that renders in 3s finishes well inside a 45s
+`--page-timeout`), so the tight pairing usually completes. Heed the warning on a slow surface:
+the DOM and screenshot are written at the end and the HAR flushes at context close, so a
+wrapper kill mid-run yields **zero** artifacts and is indistinguishable from a clean negative.
+Raise `--timeout` above the named budget rather than trimming the page waits.
+
+Identity headers follow the hosts the run was explicitly told to visit — the initial URL and
+every `navigate` step — so a multi-step workflow keeps its session across a declared hop;
+cookies follow Chromium's own domain/path scoping. Failed typed steps still write owned
+screenshot/DOM artifacts and return non-zero rather than being mistaken for completed coverage.
 
 ## Invocation
 
@@ -67,10 +98,9 @@ vigil assess kali browser https://app.target.example/login \
   --technique RECON --intent "headless render of WAF-flagged login surface" \
   --probe-kind baseline --phase recon --timeout 120
 
-# Wait for a specific element (SPA) before capturing, with a custom screenshot path.
+# Wait for an SPA element to become visible, then let late XHR-driven DOM mutations settle.
 vigil assess kali browser https://app.target.example/dashboard \
-  --wait-selector '#root' --page-timeout 45 \
-  --attribution-scope document-origin \
+  --wait-selector '#root' --wait-state visible --page-timeout 45 --settle 5 \
   --identity member \
   --storage-state tools/auth/dashboard-state.json \
   --screenshot scans/browser/dashboard.png \
@@ -84,7 +114,7 @@ Example steps file:
 [
   {"action": "fill", "selector": "#search", "value": "invoice"},
   {"action": "click", "selector": "button[type=submit]"},
-  {"action": "wait", "selector": "#results", "timeout_ms": 10000},
+  {"action": "wait", "selector": "#results", "state": "visible", "timeout_ms": 10000},
   {"action": "assert", "selector": "#results", "contains": "invoice"}
 ]
 ```

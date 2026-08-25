@@ -16,6 +16,12 @@ def register(subparsers) -> None:
     p.add_argument("command_run_id", type=int, help="numeric id from `vigil assess command-run list`")
     p.add_argument("--json", dest="as_json", action="store_true", help="No-op: `command-run get` always emits JSON.")
     p.add_argument(
+        "--include-output",
+        dest="include_output",
+        action="store_true",
+        help="No-op: `command-run get` always returns the full stdout/stderr previews. Accepted so the flag carried over from `command-run list` does not read as a CLI breakage.",
+    )
+    p.add_argument(
         "--live",
         action="store_true",
         help="Read the current on-disk stdout/stderr tails instead of relying only on finalized previews.",

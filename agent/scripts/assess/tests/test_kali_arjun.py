@@ -30,13 +30,13 @@ def test_arjun_identity_injects_auth_into_headers():
     # Bearer-token identity -> Authorization header folded into --headers.
     cmd = ["arjun", "-u", "https://target.example/api/item", "-m", "GET",
            "-oJ", "scans/arjun/x.json"]
-    assert _apply_identity_material(cmd, "arjun", {"token": "SECRET-BEARER"}) is True
+    assert _apply_identity_material(cmd, "arjun", {"token": "SECRET-BEARER"}) == "injected"
     assert "--headers" in cmd
     assert "Authorization: Bearer SECRET-BEARER" in cmd
 
     # Cookie-session identity -> Cookie header folded into --headers.
     cmd2 = ["arjun", "-u", "https://t.example/x", "-m", "GET"]
-    assert _apply_identity_material(cmd2, "arjun", {"cookies": {"session": "abc"}}) is True
+    assert _apply_identity_material(cmd2, "arjun", {"cookies": {"session": "abc"}}) == "injected"
     assert "--headers" in cmd2
     assert "Cookie: session=abc" in cmd2
 
