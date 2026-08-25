@@ -79,7 +79,12 @@ def _status_args(identity=None):
 def _wire_status(monkeypatch, eng, verdict="live"):
     persisted: list[tuple] = []
     monkeypatch.setattr(main_mod, "_resolve_command_engagement", lambda _root, _args: eng)
-    monkeypatch.setattr(main_mod.auth_module, "status_line", lambda _eng: "status-line")
+    # A "don't care" stub for a function this file is not testing: it accepts
+    # ANY signature on purpose, so it can never encode a contract the source
+    # lacks. (An arity-pinned lambda here silently hid `status_line` growing
+    # its identity/scope_key parameters; the real signature is exercised in
+    # orchestrator/backend/tests/test_vigil_cli.py against a fake store.)
+    monkeypatch.setattr(main_mod.auth_module, "status_line", lambda *_a, **_k: "status-line")
     monkeypatch.setattr(
         main_mod.auth_module,
         "probe_liveness",

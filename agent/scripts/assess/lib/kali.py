@@ -55,7 +55,12 @@ from .audit_enums import (
 )
 from .client import AssessError, AssessmentClient, default_runtime_container
 from .config import Config, load_config
-from .identity import host_cookie_hosts, host_cookies_for, resolve_identity
+from .identity import (
+    browser_cookies_for,
+    host_cookie_hosts,
+    host_cookies_for,
+    resolve_identity,
+)
 from .kali_audit import (
     _INTENT_MAX_LEN,
     ALLOWED_PHASES,
@@ -581,16 +586,20 @@ def prepare_browser_identity_material(
     token = _identity_bearer_token(material)
     if token and not any(name.lower() == "authorization" for name in headers):
         headers["Authorization"] = f"Bearer {token}"
-    cookie_map = host_cookies_for(material, host)
-    if not cookie_map and not host_cookie_hosts(material):
+    cookies = browser_cookies_for(material, host)
+    if not cookies and not host_cookie_hosts(material):
         raw_cookies = material.get("cookies")
         if isinstance(raw_cookies, dict):
-            cookie_map = {str(name): str(value) for name, value in raw_cookies.items()}
-    cookies = [
-        {"name": name, "value": value, "domain": host, "path": "/"}
-        for name, value in cookie_map.items()
-        if host
-    ]
+            cookies = [
+                {
+                    "name": str(name),
+                    "value": str(value),
+                    "domain": host,
+                    "path": "/",
+                }
+                for name, value in raw_cookies.items()
+                if host
+            ]
     prepared: dict[str, object] = {
         "headers": headers,
         "cookies": cookies,

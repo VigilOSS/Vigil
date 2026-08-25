@@ -13,6 +13,7 @@ from .client_rosters import repair_engagement_client_rosters
 from .oob import DEFAULT_OOB_DOMAIN
 from .oob_tenants import initialize_tenant_route
 from .runtime import build_runtime
+from .status import write_install_meta
 
 
 def _rmtree(path: Path) -> None:
@@ -181,6 +182,14 @@ def install_from_source(options: InstallOptions, *, runner: docker.Runner = dock
             or DEFAULT_OOB_DOMAIN
         ),
     )
+
+    # Stamp the synced source commit HERE, in the function that performs the
+    # sync, so every caller leaves the same record. Stamping from the CLI
+    # dispatch table instead is what let `vigil up` sync the working root without
+    # re-stamping it: the recorded sha stayed pinned at the last explicit
+    # `vigil install`, so `vigil status` reported a permanent false "stale" and
+    # real install drift became invisible.
+    write_install_meta(install_root, source_root)
 
     image_built = False
     if options.verify_docker_image:

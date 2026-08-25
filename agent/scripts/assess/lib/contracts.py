@@ -1830,6 +1830,48 @@ _CONTRACTS: dict[str, CommandContract] = {
     # catalog is a COMPLETE index of what a specialist reaches for — not only
     # the write/probe verbs. `vigil assess contract <name>` resolves each via
     # `get_contract` -> `_CONTRACTS.get(name)` with no extra wiring.
+    "fixture": CommandContract(
+        name="fixture",
+        goals=("artifact",),
+        summary="Record observed fixture IDs atomically and resolve rotation-safe manifest references for engagement PoCs.",
+        schema_name="vigil-fixture-manifest/v1 local JSON manifest",
+        preferred_invocations=(
+            "vigil assess fixture observe <fixture-name> [payload.json] --manifest <manifest.json>",
+            "printf '%s\\n' '<json-response>' | vigil assess fixture observe <fixture-name> --manifest <manifest.json> --json",
+            "vigil assess fixture resolve <fixture-name>.<field> --manifest <manifest.json>",
+            "vigil assess contract fixture",
+        ),
+        author_supplied_fields=(
+            "fixture alias and the observed JSON response (file or stdin)",
+            "--manifest path and optional --source provenance",
+            "--replace only after an intentional fixture rotation",
+        ),
+        helper_defaults=(
+            ("payload.json", "stdin when omitted or '-'"),
+            ("--replace", "off; changed IDs fail closed"),
+            ("--json", "off for concise text; on for machine-readable output"),
+        ),
+        notes=(
+            "The manifest stores IDs and provenance only; session cookies and tokens remain in the credential store.",
+            "observe rejects responses with no recognized concrete IDs, ambiguous parent.id values, placeholders, and non-scalar IDs before saving.",
+            "Writes use a same-directory temporary file and os.replace. A final dot separates the field, so fixture aliases may contain dots.",
+        ),
+        common_mistakes=(
+            ("hard-coded organization/person/subscription IDs", "observe the create or identity response, then resolve the manifest reference"),
+            ("reusing an alias after rotation", "use a fresh alias or pass --replace explicitly after confirming the rotation"),
+            ("storing cookies in the manifest", "keep credentials in the existing credential/session store"),
+        ),
+        examples=(
+            {
+                "command": "vigil assess fixture observe org3.admin response.json --manifest scans/fixture-identities.json --json",
+                "result": {"fixture": "org3.admin", "observed": {"organization_id": "org-created"}},
+            },
+            {
+                "command": "vigil assess fixture resolve org3.admin.organization_id --manifest scans/fixture-identities.json",
+                "result": "org-created",
+            },
+        ),
+    ),
     "list-commands": CommandContract(
         name="list-commands",
         goals=("discovery",),

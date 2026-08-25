@@ -8,6 +8,7 @@ import shlex
 import subprocess
 import sys
 import tarfile
+import time
 import webbrowser
 from dataclasses import asdict
 from pathlib import Path
@@ -61,6 +62,7 @@ from .oob import (
     clean_oob_clients,
     client_payload_host,
     interactions_for_domain,
+    is_self_test_interaction,
     list_oob_clients,
     list_running_oob_clients,
     match_interactions_to_nonces,
@@ -76,6 +78,7 @@ from .oob import (
     stop_oob,
     stop_oob_client,
     test_oob,
+    verify_oob_channel_cached,
 )
 from .oob_tenants import legacy_tenant_route, render_edge_routing
 from .orchestrator import (
@@ -89,7 +92,7 @@ from .orchestrator import (
 from .paths import default_runtime_container, resolve_install_root, resolve_source_root
 from .quickstart import QuickstartOptions, run_quickstart
 from .runtime import RuntimeOptions, vigil_runtime_resources, build_runtime, runtime_image_build_state, runtime_status, start_runtime, stop_runtime
-from .status import collect_doctor_checks, collect_status, print_doctor, print_status, write_install_meta
+from .status import collect_doctor_checks, collect_status, install_staleness, print_doctor, print_status
 from .up import UpOptions, run_up
 
 
@@ -564,6 +567,12 @@ def main(argv: list[str] | None = None) -> None:
         help="only messages FROM this address or domain (e.g. security@acme-bank.example or @acme-bank.example)",
     )
     email_p.add_argument(
+        "--subject",
+        dest="subject_filter",
+        default=None,
+        help="only messages whose subject contains this text (case-insensitive)",
+    )
+    email_p.add_argument(
         "--within",
         type=int,
         default=3,
@@ -589,13 +598,30 @@ def main(argv: list[str] | None = None) -> None:
         "--limit",
         type=int,
         default=200,
-        help="maximum Mail.app messages to scan (default: 200)",
+        help="maximum matching messages to return after filtering (default: 200)",
     )
     email_p.add_argument(
         "--timeout-seconds",
         type=float,
         default=30.0,
         help="timeout for the Mail.app read (default: 30)",
+    )
+    email_p.add_argument(
+        "--wait-seconds",
+        type=float,
+        default=0.0,
+        help="poll for a delayed matching message for up to N seconds (default: 0)",
+    )
+    email_p.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=2.0,
+        help="seconds between reads while --wait-seconds is active (default: 2)",
+    )
+    email_p.add_argument(
+        "--links",
+        action="store_true",
+        help="include HTTP(S) links decoded from the message's raw MIME source",
     )
     email_p.add_argument(
         "--json",
@@ -989,9 +1015,6 @@ def main(argv: list[str] | None = None) -> None:
         )
         if not args.dry_run:
             config_module.set_config_value("install.root", str(result.install_root))
-            # Stamp the source commit synced into the working root so `vigil
-            # status` can later warn when the install lags its source (I-5).
-            write_install_meta(result.install_root, source_root)
         print(result.install_root)
         if not args.dry_run:
             _print_post_install(result)
@@ -1095,6 +1118,33 @@ def _top_level_command_index(raw_argv: list[str]) -> int | None:
     return None
 
 
+def _warn_if_install_stale(install_root: Path) -> None:
+    """Emit one non-fatal STDERR line when the assess passthrough execs a lagging root.
+
+    ``vigil assess ...`` execs the INSTALL ROOT's ``assess.py``, so a working root
+    behind its source silently exposes an older verb set — the failure surfaces as
+    "no such verb" rather than "your install lags". Never writes to stdout (callers
+    parse assess JSON there), never raises, and never blocks the exec: the agent
+    stays free to proceed and decide.
+    """
+    try:
+        staleness = install_staleness(install_root)
+    except Exception:  # noqa: BLE001 — a diagnostic must never break the exec
+        return
+    state = str(staleness.get("state") or "")
+    if state not in {"stale", "no-stamp"}:
+        return
+    installed = str(staleness.get("installed_sha") or "unstamped")[:12]
+    current = str(staleness.get("current_source_sha") or "unknown")[:12]
+    print(
+        f"[vigil] WARN: install root {install_root} is {state} "
+        f"(installed {installed}, source {current}); "
+        "run `vigil install` to sync it.",
+        file=sys.stderr,
+        flush=True,  # execvpe replaces this process without flushing Python buffers
+    )
+
+
 def _exec_assess_passthrough(raw_argv: list[str], idx: int) -> None:
     root_value: str | None = None
     source_value: str | None = None
@@ -1118,6 +1168,7 @@ def _exec_assess_passthrough(raw_argv: list[str], idx: int) -> None:
             continue
         i += 1
     install_root = resolve_install_root(root_value)
+    _warn_if_install_stale(install_root)
     assess = install_root / "agent" / "scripts" / "assess.py"
     if not assess.exists():
         source_root = resolve_source_root(source_value, install_root=install_root)
@@ -1782,6 +1833,58 @@ def _print_mitmproxy_status(payload: dict) -> None:
             print(f"  {line}")
 
 
+def _email_json_payload(
+    args: argparse.Namespace,
+    cutoff_iso: str,
+    *,
+    messages: list[dict[str, object]],
+    poll_attempts: int,
+    coverage: email_module.EmailScanCoverage | None,
+    error: str | None = None,
+) -> dict[str, object]:
+    """Build the one `vigil email --json` payload shape, match or no match."""
+    payload: dict[str, object] = {
+        "mailbox": args.mailbox,
+        "from": args.from_filter,
+        "subject": args.subject_filter,
+        "within_minutes": args.within,
+        "cutoff": cutoff_iso,
+        "count": len(messages),
+        "poll_attempts": poll_attempts,
+        "messages": messages,
+    }
+    if coverage is not None:
+        payload["scan_coverage"] = asdict(coverage)
+    if error is not None:
+        payload["error"] = error
+    return payload
+
+
+def _email_coverage_line(coverage: email_module.EmailScanCoverage | None) -> str:
+    """One-line folder-coverage summary for the plain-text path.
+
+    Coverage used to be visible only under ``--json``, so an operator reading the
+    TSV output could not tell a scanned-everything zero from an unscanned-folder
+    zero. Goes to stderr: stdout stays parseable result lines.
+    """
+    if coverage is None:
+        return ""
+    folders = [
+        f"{entry.account}/{entry.mailbox}" if entry.account else entry.mailbox
+        for entry in coverage.mailboxes
+    ]
+    scanned = ", ".join(
+        f"{name}={entry.examined}" + ("" if entry.complete else " (partial)")
+        for name, entry in zip(folders, coverage.mailboxes)
+    )
+    state = (
+        "complete"
+        if coverage.complete
+        else f"INCOMPLETE: {coverage.incomplete_summary()}"
+    )
+    return f"scanned {len(folders)} folder(s) [{state}]: {scanned or 'none'}"
+
+
 def _email(args: argparse.Namespace) -> None:
     """Read recent Mail.app messages for a mailbox and optionally extract a code."""
     if args.within <= 0:
@@ -1790,47 +1893,103 @@ def _email(args: argparse.Namespace) -> None:
         raise SystemExit("--limit must be a positive integer")
     if args.timeout_seconds <= 0:
         raise SystemExit("--timeout-seconds must be > 0")
+    if args.wait_seconds < 0:
+        raise SystemExit("--wait-seconds must be >= 0")
+    if args.poll_seconds <= 0:
+        raise SystemExit("--poll-seconds must be > 0")
 
     cutoff = email_module.cutoff_for_window(args.within)
+    deadline = time.monotonic() + args.wait_seconds
+    poll_attempts = 0
+    last_error: email_module.EmailReadError | None = None
+    matched: list[email_module.EmailMessage] = []
+    while True:
+        poll_attempts += 1
+        try:
+            read_kwargs = {
+                "since": cutoff,
+                "limit": args.limit,
+                "timeout_seconds": args.timeout_seconds,
+            }
+            if args.links:
+                read_kwargs["include_source"] = True
+            messages = email_module.read_messages(**read_kwargs)
+            matched = email_module.filter_messages(
+                messages,
+                mailbox_address=args.mailbox,
+                from_filter=args.from_filter,
+                subject_filter=args.subject_filter,
+                since=cutoff,
+            )
+            last_error = None
+        except email_module.EmailReadError as exc:
+            last_error = exc
+        remaining = deadline - time.monotonic()
+        if matched or remaining <= 0:
+            break
+        time.sleep(min(args.poll_seconds, remaining))
+
+    if not matched and last_error is not None:
+        if not args.json:
+            raise SystemExit(f"error: {last_error}") from last_error
+        # A JSON caller gets JSON on the unauthoritative-empty path too. Emitting
+        # a plain-text error here forced automation to parse stderr, which is how
+        # scan coverage stayed invisible on exactly the answer that needs it.
+        print(
+            json.dumps(
+                _email_json_payload(
+                    args,
+                    cutoff.isoformat(),
+                    messages=[],
+                    poll_attempts=poll_attempts,
+                    coverage=getattr(last_error, "coverage", None),
+                    error=str(last_error),
+                ),
+                indent=2,
+            )
+        )
+        raise SystemExit(1) from last_error
+
     try:
-        messages = email_module.read_messages(
-            since=cutoff,
-            limit=args.limit,
-            timeout_seconds=args.timeout_seconds,
-        )
-        matched = email_module.filter_messages(
-            messages,
-            mailbox_address=args.mailbox,
-            from_filter=args.from_filter,
-            since=cutoff,
-        )
         # Extract when a regex is given, when --extract is set, or always in
         # JSON mode (the automation wants a candidate `extracted` field).
         do_extract = bool(args.match) or args.extract or args.json
         pattern = args.match or email_module.DEFAULT_CODE_PATTERN
         extracted_by_id = {}
+        links_by_id = {}
         if do_extract:
             for index, message in enumerate(matched):
                 extracted_by_id[index] = email_module.extract_token(
                     message.body, pattern=pattern
                 )
+        if args.links:
+            for index, message in enumerate(matched):
+                links_by_id[index] = email_module.extract_links(message)
     except email_module.EmailReadError as exc:
         raise SystemExit(f"error: {exc}") from exc
 
+    scan_coverage = getattr(matched, "coverage", None)
     if args.json:
-        payload = {
-            "mailbox": args.mailbox,
-            "from": args.from_filter,
-            "within_minutes": args.within,
-            "cutoff": cutoff.isoformat(),
-            "count": len(matched),
-            "messages": [
-                email_module.message_to_dict(message, extracted=extracted_by_id.get(index))
+        payload = _email_json_payload(
+            args,
+            cutoff.isoformat(),
+            messages=[
+                email_module.message_to_dict(
+                    message,
+                    extracted=extracted_by_id.get(index),
+                    links=links_by_id.get(index) if args.links else None,
+                )
                 for index, message in enumerate(matched)
             ],
-        }
+            poll_attempts=poll_attempts,
+            coverage=scan_coverage,
+        )
         print(json.dumps(payload, indent=2))
         return
+
+    coverage_line = _email_coverage_line(scan_coverage)
+    if coverage_line:
+        print(coverage_line, file=sys.stderr)
 
     if not matched:
         print(
@@ -1845,6 +2004,9 @@ def _email(args: argparse.Namespace) -> None:
         line = f"{timestamp}\t{message.sender}\t{message.subject}"
         if do_extract:
             line += f"\t{extracted if extracted is not None else '-'}"
+        if args.links:
+            links = links_by_id.get(index) or []
+            line += f"\t{','.join(links) if links else '-'}"
         print(line)
 
 
@@ -1852,7 +2014,6 @@ def _auth(args: argparse.Namespace, install_root: Path) -> None:
     engagement = _resolve_command_engagement(install_root, args)
     identity = getattr(args, "identity", None)
     if args.auth_command == "status":
-        print(auth_module.status_line(engagement))
         if getattr(args, "probe", False):
             probe_url = getattr(args, "probe_url", None)
             if not probe_url:
@@ -1868,6 +2029,7 @@ def _auth(args: argparse.Namespace, install_root: Path) -> None:
                 detail += f"\thttp_status={result['http_status']}"
             if result.get("error"):
                 detail += f"\terror={result['error']}"
+            resolved_scope = str(result.get("scope_key") or "")
             # WS4 opt-in persistence: when a SPECIFIC identity is probed, persist
             # the classified verdict (live->available, dead->dead, unknown leaves
             # state untouched — never a false verdict). The active-identity probe
@@ -1878,13 +2040,34 @@ def _auth(args: argparse.Namespace, install_root: Path) -> None:
                     engagement,
                     str(resolved_identity),
                     result["liveness"],
-                    scope_key=getattr(args, "scope", ""),
+                    scope_key=resolved_scope,
                     reason=str(result.get("reason") or ""),
                 )
                 detail += f"\tpersisted={bool(persisted)}"
             elif identity:
                 detail += "\tpersisted=False"
-            print(f"liveness={result['liveness']}\t{detail}")
+            print(
+                auth_module.status_line(
+                    engagement,
+                    str(resolved_identity or identity)
+                    if resolved_identity or identity
+                    else None,
+                    scope_key=resolved_scope,
+                )
+            )
+            subject = str(resolved_identity or identity or "-")
+            print(
+                f"liveness={result['liveness']}\tidentity={subject}"
+                f"\tscope={resolved_scope or '-'}\t{detail}"
+            )
+        else:
+            print(
+                auth_module.status_line(
+                    engagement,
+                    identity,
+                    scope_key=getattr(args, "scope", ""),
+                )
+            )
     elif args.auth_command == "show":
         material = (
             auth_module.read_identity(engagement, identity)
@@ -2238,6 +2421,12 @@ def _oob_poll(args: argparse.Namespace, install_root: Path, options: OobOptions)
         options.oob_domain,
         client_payload_host=payload_host,
     )
+    # Drop Vigil's own channel-verification markers. The zero-match verification
+    # below fires a real DNS+HTTP round trip whose callback lands in THIS log, so
+    # without this every empty poll permanently adds two synthetic entries that
+    # the next poll reports as unclaimed callbacks — the check would pollute the
+    # evidence surface it exists to qualify.
+    interactions = [item for item in interactions if not is_self_test_interaction(item)]
     with _build_assessment_client(install_root, engagement_key) as client:
         probes = client.get("oob-probes")
         owned_probes = [
@@ -2269,6 +2458,23 @@ def _oob_poll(args: argparse.Namespace, install_root: Path, options: OobOptions)
             )
             matched_pairs.append({"interaction": interaction, "result": result})
 
+    # A zero match is used as evidence ("the payload produced no callback"), so it
+    # has to be qualified: a clean zero from a live channel and a zero from a
+    # channel that could never have carried a callback are otherwise identical.
+    # Only the zero path pays for the round trip — a correlation already proves
+    # the channel works. Polling for a blind callback is a LOOP, so the proof
+    # runs on a cadence (`verify_oob_channel_cached`) rather than once per empty
+    # poll: the verdict still comes from a real end-to-end round trip, and a
+    # reused one says so in `cached`/`age_seconds`. This never refuses; it
+    # reports and lets the caller decide.
+    verification = (
+        None
+        if matched_pairs
+        else verify_oob_channel_cached(
+            options, client=args.client, runner=docker_run_command
+        )
+    )
+
     if args.json:
         payload = {
             "client": sanitize_name(args.client),
@@ -2293,7 +2499,10 @@ def _oob_poll(args: argparse.Namespace, install_root: Path, options: OobOptions)
                 }
                 for item in unmatched_interactions
             ],
+            "channel_verified": None if verification is None else verification.verified,
         }
+        if verification is not None:
+            payload["channel_check"] = verification.as_dict()
         print(json.dumps(payload, indent=2))
         return
 
@@ -2313,6 +2522,20 @@ def _oob_poll(args: argparse.Namespace, install_root: Path, options: OobOptions)
         print("unmatched interactions:")
         for item in unmatched_interactions:
             print(f"  {item.full_host}\t{item.protocol}\tfrom={item.remote_address or '-'}")
+    if verification is not None:
+        checked = verification.describe_freshness()
+        if verification.verified:
+            print(
+                f"channel\tverified\tmarker={verification.marker}"
+                f"\tdns={verification.dns_address}\thttp={verification.http_status}"
+                f"\tchecked={checked}"
+            )
+        else:
+            print(f"channel\tUNVERIFIED\t{verification.reason}\tchecked={checked}")
+            print(
+                "A zero match from an unverified channel is not evidence that no "
+                "callback occurred."
+            )
 
 
 def _resolve_command_engagement(install_root: Path, args: argparse.Namespace) -> Path:

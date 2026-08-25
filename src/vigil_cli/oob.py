@@ -607,12 +607,77 @@ def list_oob_clients(container_name: str | None = None, *, runner: docker.Runner
     return sorted(live | _configured_oob_clients(container_name, runner=runner))
 
 
-def test_oob(options: OobOptions, *, runner: docker.Runner = docker.run_command) -> None:
-    """Prove the public DNS and HTTP routes reach this tenant's OOB server."""
-    _require_runtime(options.container_name, runner=runner)
+@dataclass(frozen=True, slots=True)
+class ChannelVerification:
+    """Verdict of an end-to-end OOB channel proof.
+
+    ``verified`` is True only when a freshly minted marker completed the whole
+    round trip: public DNS -> public HTTP -> the callback landing in the running
+    client's log. Anything less carries the failing step in ``reason``.
+    """
+
+    verified: bool
+    reason: str = ""
+    client: str = ""
+    marker: str = ""
+    payload_host: str = ""
+    dns_address: str = ""
+    http_status: int = 0
+    cached: bool = False
+    age_seconds: float = 0.0
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "verified": self.verified,
+            "reason": self.reason,
+            "client": self.client,
+            "marker": self.marker,
+            "payload_host": self.payload_host,
+            "dns_address": self.dns_address,
+            "http_status": self.http_status,
+            "cached": self.cached,
+            "age_seconds": round(self.age_seconds, 1),
+        }
+
+    def describe_freshness(self) -> str:
+        """How this verdict was obtained, for callers that print one line."""
+        return f"cached({self.age_seconds:.0f}s ago)" if self.cached else "fresh"
+
+
+def verify_oob_channel(
+    options: OobOptions,
+    *,
+    client: str = "",
+    runner: docker.Runner = docker.run_command,
+    callback_timeout: float = 10.0,
+) -> ChannelVerification:
+    """Prove the public DNS and HTTP routes actually reach this tenant's OOB server.
+
+    Mints a throwaway marker, resolves it against public DNS, fetches it over
+    public HTTP, and waits for the callback to appear in the client's log — the
+    only sequence that distinguishes a live channel from a dead one.
+
+    Returns a verdict rather than raising, because the caller decides what a
+    failure means: ``vigil oob test`` turns it into an error, while
+    ``vigil oob poll`` (through :func:`verify_oob_channel_cached`) uses it to
+    qualify a zero-match result without blocking the agent. ``client`` pins the
+    check to one registered client; empty picks the first running one.
+    """
+    if not docker.container_running(options.container_name, runner=runner):
+        return ChannelVerification(
+            verified=False,
+            reason="Kali runtime is not running; start it with `vigil runtime start`",
+            client=client,
+        )
+
+    candidates = (
+        [sanitize_name(client)]
+        if client
+        else list_running_oob_clients(options.container_name, runner=runner)
+    )
     selected_client = ""
     payload_host = ""
-    for candidate in list_running_oob_clients(options.container_name, runner=runner):
+    for candidate in candidates:
         candidate_host = client_payload_host(
             candidate,
             options.container_name,
@@ -624,13 +689,26 @@ def test_oob(options: OobOptions, *, runner: docker.Runner = docker.run_command)
             payload_host = candidate_host
             break
     if not payload_host:
-        raise SystemExit(
-            "oob test: no registered OOB client is running; start one with "
+        detail = (
+            f"client {client!r} is not running or has no payload host"
+            if client
+            else "no registered OOB client is running; start one with "
             "`vigil oob client start <name> --engagement <key> --agent <role>`"
         )
+        return ChannelVerification(verified=False, reason=detail, client=selected_client or client)
 
-    marker = mint_nonce(prefix="vigil-test", length=8)
+    marker = mint_nonce(prefix=SELF_TEST_NONCE_PREFIX, length=8)
     host = f"{marker}.{payload_host}"
+
+    def unverified(reason: str) -> ChannelVerification:
+        return ChannelVerification(
+            verified=False,
+            reason=reason,
+            client=selected_client,
+            marker=marker,
+            payload_host=payload_host,
+        )
+
     dns_result = _run_exec(
         options.container_name,
         f"dig +short +time=5 +tries=1 {shlex.quote(host)} @8.8.8.8 A",
@@ -647,9 +725,7 @@ def test_oob(options: OobOptions, *, runner: docker.Runner = docker.run_command)
     )
     if dns_result.returncode != 0 or not dns_address:
         detail = (dns_result.stderr or dns_result.stdout).strip() or "no A record returned"
-        raise SystemExit(
-            f"oob test: public DNS probe failed for {host}: {detail}"
-        )
+        return unverified(f"public DNS probe failed for {host}: {detail}")
 
     http_result = _run_exec(
         options.container_name,
@@ -664,15 +740,10 @@ def test_oob(options: OobOptions, *, runner: docker.Runner = docker.run_command)
     status = int(status_text) if status_text.isdigit() else 0
     if http_result.returncode != 0 or not 200 <= status < 300:
         detail = (http_result.stderr or status_text).strip() or "no HTTP status returned"
-        raise SystemExit(
-            f"oob test: public HTTP probe failed for {host}: {detail}"
-        )
+        return unverified(f"public HTTP probe failed for {host}: {detail}")
 
-    client_log = shlex.quote(
-        f"{OOB_ROOT}/clients/{sanitize_name(selected_client)}.log"
-    )
-    deadline = time.monotonic() + 10.0
-    callback_seen = False
+    client_log = shlex.quote(f"{OOB_ROOT}/clients/{sanitize_name(selected_client)}.log")
+    deadline = time.monotonic() + callback_timeout
     while True:
         callback_result = _run_exec(
             options.container_name,
@@ -681,20 +752,144 @@ def test_oob(options: OobOptions, *, runner: docker.Runner = docker.run_command)
             check=False,
         )
         if marker.lower() in callback_result.stdout.lower():
-            callback_seen = True
-            break
+            return ChannelVerification(
+                verified=True,
+                reason="marker completed DNS + HTTP + callback round trip",
+                client=selected_client,
+                marker=marker,
+                payload_host=payload_host,
+                dns_address=dns_address,
+                http_status=status,
+            )
         if time.monotonic() >= deadline:
-            break
+            return unverified(
+                f"callback was not observed by client {selected_client!r} "
+                f"within {callback_timeout:g}s for {host}"
+            )
         time.sleep(0.5)
-    if not callback_seen:
-        raise SystemExit(
-            f"oob test: callback was not observed by client {selected_client!r} "
-            f"within 10s for {host}"
-        )
 
+
+# Where a channel verdict is remembered between CLI invocations. Every
+# `vigil oob poll` is a fresh process, so an in-process cache would never hit;
+# the file lives beside the tenant routing record it is keyed against.
+CHANNEL_VERIFICATION_CACHE_RELATIVE_PATH = Path(".runtime-data/oob/channel-verification.json")
+# How long a verdict stays usable. A live channel is stable across a poll loop
+# (it breaks on runtime/route events, not between two polls), so trusting it for
+# minutes costs nothing real. A BROKEN channel expires much sooner: the operator
+# is likely fixing it right now, and a stale "unverified" that outlives the
+# repair is its own kind of lie.
+VERIFIED_CHANNEL_TTL_SECONDS = 300.0
+UNVERIFIED_CHANNEL_TTL_SECONDS = 60.0
+
+
+def _channel_cache_path(options: OobOptions) -> Path:
+    return options.install_root / CHANNEL_VERIFICATION_CACHE_RELATIVE_PATH
+
+
+def _channel_cache_key(options: OobOptions, client: str) -> str:
+    # One verdict per tenant domain + client: a different client is a different
+    # payload host and a different interactsh log, so it is a different channel.
+    # The name is sanitized exactly as :func:`verify_oob_channel` pins it, so two
+    # spellings of one client share the verdict they would both have produced.
+    name = sanitize_name(client) if str(client or "").strip() else ""
+    return f"{options.oob_domain}|{name}"
+
+
+def _read_channel_cache(path: Path) -> dict[str, dict]:
+    # Every read is defensive: this file is a local optimisation that a stray
+    # edit or a half-written line could corrupt, and a poll must never die on it.
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    entries = raw.get("entries") if isinstance(raw, dict) else None
+    return entries if isinstance(entries, dict) else {}
+
+
+def _cached_channel_verdict(entry: object, *, now: float) -> ChannelVerification | None:
+    """Rebuild a still-usable verdict from a cache entry, or None."""
+    if not isinstance(entry, dict):
+        return None
+    verdict = entry.get("verification")
+    stored_at = entry.get("stored_at")
+    if not isinstance(verdict, dict) or not isinstance(stored_at, (int, float)):
+        return None
+    age = now - float(stored_at)
+    verified = bool(verdict.get("verified"))
+    raw_status = verdict.get("http_status")
+    ttl = VERIFIED_CHANNEL_TTL_SECONDS if verified else UNVERIFIED_CHANNEL_TTL_SECONDS
+    # A negative age means the clock moved backwards; re-prove rather than trust it.
+    if age < 0 or age >= ttl:
+        return None
+    return ChannelVerification(
+        verified=verified,
+        reason=str(verdict.get("reason", "")),
+        client=str(verdict.get("client", "")),
+        marker=str(verdict.get("marker", "")),
+        payload_host=str(verdict.get("payload_host", "")),
+        dns_address=str(verdict.get("dns_address", "")),
+        http_status=raw_status if isinstance(raw_status, int) and not isinstance(raw_status, bool) else 0,
+        cached=True,
+        age_seconds=age,
+    )
+
+
+def _store_channel_verdict(path: Path, key: str, result: ChannelVerification, *, now: float) -> None:
+    entries = _read_channel_cache(path)
+    entries[key] = {"stored_at": now, "verification": result.as_dict()}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"entries": entries}, indent=2, sort_keys=True), encoding="utf-8"
+        )
+    except OSError:
+        # The cache is an optimisation, not state anyone depends on. A read-only
+        # install root costs the round trip again; it must never fail the poll.
+        pass
+
+
+def verify_oob_channel_cached(
+    options: OobOptions,
+    *,
+    client: str = "",
+    runner: docker.Runner = docker.run_command,
+    callback_timeout: float = 10.0,
+    now: float | None = None,
+) -> ChannelVerification:
+    """Prove the OOB channel on a cadence instead of on every call.
+
+    :func:`verify_oob_channel` costs a full DNS + HTTP + callback round trip —
+    up to ``callback_timeout`` when the channel is broken. `vigil oob poll` runs
+    it on the zero-match path, which is exactly what an agent loops on while it
+    waits for a blind callback, so proving the same fact on every empty poll
+    taxes the hot path hardest for no new information.
+
+    The guarantee is unchanged: a zero match is still qualified by a real
+    end-to-end proof. Only the cadence changes — a recent verdict is reused
+    within its TTL and reported as reused (``cached`` / ``age_seconds``), never
+    dressed up as a fresh round trip.
+    """
+    now = time.time() if now is None else now
+    path = _channel_cache_path(options)
+    key = _channel_cache_key(options, client)
+    cached = _cached_channel_verdict(_read_channel_cache(path).get(key), now=now)
+    if cached is not None:
+        return cached
+    result = verify_oob_channel(
+        options, client=client, runner=runner, callback_timeout=callback_timeout
+    )
+    _store_channel_verdict(path, key, result, now=now)
+    return result
+
+
+def test_oob(options: OobOptions, *, runner: docker.Runner = docker.run_command) -> None:
+    """Prove the public DNS and HTTP routes reach this tenant's OOB server."""
+    result = verify_oob_channel(options, runner=runner)
+    if not result.verified:
+        raise SystemExit(f"oob test: {result.reason}")
     print(
-        f"oob test\tok\tdomain={options.oob_domain}\tmarker={marker}"
-        f"\tdns={dns_address}\thttp={status}"
+        f"oob test\tok\tdomain={options.oob_domain}\tmarker={result.marker}"
+        f"\tdns={result.dns_address}\thttp={result.http_status}"
     )
 
 
@@ -763,6 +958,37 @@ class OobInteraction:
     nonce: str = ""
 
 
+# Prefix stamped on the throwaway markers :func:`verify_oob_channel` mints. Its
+# callbacks land in the SAME client log the poller reads as evidence, so both
+# sides must agree on one spelling: the verifier stamps it, the poller drops it.
+SELF_TEST_NONCE_PREFIX = "vigil-test"
+
+
+def _nonce_prefix_label(prefix: str) -> str:
+    """The prefix as it survives into a DNS label: [a-z0-9] only, capped at 24.
+
+    A DNS label cannot carry the punctuation a caller may write, so
+    :func:`mint_nonce` strips it. Recognising a minted marker later means
+    applying the SAME reduction — reading the raw prefix would look for
+    ``vigil-test-`` in a label that says ``vigiltest-``, and the recogniser
+    would silently never fire.
+    """
+    return re.sub(r"[^a-z0-9]+", "", str(prefix or "").lower())[:24]
+
+
+def is_self_test_interaction(interaction: OobInteraction) -> bool:
+    """True when this callback is Vigil's own channel-verification round trip.
+
+    Every unmatched interaction is reported to the operator as a real, unclaimed
+    callback. Vigil's own verification markers are neither — counting them would
+    let a channel check manufacture the evidence it exists to qualify, and they
+    accumulate in the log for the life of the client.
+    """
+    label = (interaction.label or "").strip().lower()
+    marker_prefix = _nonce_prefix_label(SELF_TEST_NONCE_PREFIX)
+    return bool(marker_prefix) and label.startswith(f"{marker_prefix}-")
+
+
 def mint_nonce(
     *,
     prefix: str = "",
@@ -787,7 +1013,7 @@ def mint_nonce(
         if not token:
             raise ValueError("token_factory produced an empty nonce after sanitization")
     if prefix:
-        clean_prefix = re.sub(r"[^a-z0-9]+", "", prefix.lower())[:24]
+        clean_prefix = _nonce_prefix_label(prefix)
         if clean_prefix:
             return f"{clean_prefix}-{token}"
     return token
