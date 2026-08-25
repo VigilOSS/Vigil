@@ -176,6 +176,18 @@ Preferred pattern: subject-verb-object. The endpoint does X. The attacker sends 
 |---|---|
 | `robust` · `comprehensive` · `seamless` · `crucial` · `admirably honest` · `the crux of the matter` | Name what the thing does instead of rating it |
 
+**Given-property qualifiers → cut the adjective.** An adjective earns its place only when dropping it would let the reader assume something false or materially different. If the property is already implied by the setup, or the finding does not turn on it, cut it.
+
+| Instead of | Write |
+|---|---|
+| `disposable` / `throwaway` / `burner` organization · `dummy user` | `a test organization`, or `a second organization you control` — the PoC setup already implies it is disposable; `you control` is the only load-bearing qualifier |
+| `malicious attacker` · `malicious actor` | `an attacker` |
+| `unsuspecting victim` | `the victim` |
+| `carefully crafted` / `specially crafted` payload | name the payload; the crafting is a given |
+| `vulnerable` / `affected` endpoint | name the endpoint; being vulnerable is the finding |
+
+Keep a qualifier that distinguishes the instance from a relevant alternative the reader would otherwise assume: `attacker-controlled input` (vs trusted/server input), `an organization you control` (vs the victim's), `pre-authentication` (vs after login).
+
 **Meta-commentary → state the fact.** A distinct class from the filler above: the writer narrating its own reporting decisions instead of reporting.
 
 | Instead of | Write |
