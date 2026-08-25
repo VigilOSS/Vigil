@@ -261,6 +261,9 @@ async def persist_liveness(
     )
     # The singleton columns are a legacy unscoped projection. A dead verdict for
     # one app scope must not kill the same principal's capability everywhere.
+    # Conversely, a newer positive observation proves the credential is usable
+    # somewhere and must revive a stale legacy-dead projection; otherwise the
+    # global ``state=dead`` blocks the very scoped identity that just proved live.
     if material is not None and not request.scope_key:
         authoritative = next(
             (
@@ -277,6 +280,27 @@ async def persist_liveness(
                     identity_name,
                     str(authoritative["verdict"]),
                     str(authoritative["observed_at"]),
+                )
+            )
+    elif material is not None and verdict == "live":
+        scoped_live = next(
+            (
+                row
+                for row in material.get("liveness_observations", [])
+                if row.get("scope_key") == request.scope_key
+                and row.get("verdict") == "live"
+            ),
+            None,
+        )
+        if scoped_live is not None and str(scoped_live.get("observed_at") or "") >= str(
+            material.get("last_probed_at") or ""
+        ):
+            material = await anyio.to_thread.run_sync(
+                lambda: db.set_liveness(
+                    engagement.id,
+                    identity_name,
+                    "live",
+                    str(scoped_live["observed_at"]),
                 )
             )
     if material is None:

@@ -4479,3 +4479,115 @@ def test_list_command_runs_filters_by_target_host(client, isolate_settings):
     response = client.get(f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs")
     assert response.status_code == 200
     assert len(response.json()) == 3
+
+
+def test_kali_route_finalize_records_the_wrapper_measured_output_truth(
+    client, isolate_settings
+):
+    """Byte/hash/retention columns must reflect real output on EVERY route.
+
+    Retention was recomputed only for the ``host_exec`` lane, so a
+    ``vigil assess kali/<tool>`` row kept the pre-exec placeholders forever:
+    stdout_bytes=0, no sha256, output_retention_status='empty' — while the row
+    held a real preview. Evidence that exists read as evidence destroyed.
+    """
+    _write_engagement(isolate_settings["engagements_dir"])
+    created = _post(
+        client,
+        _base_payload(
+            status="running",
+            route="vigil assess kali/nmap_scan",
+            # The real pre-exec POST carries no inline output — the wrapper is
+            # still streaming it to its own file.
+            stdout="",
+            stderr="",
+            stdout_path="/engagements/example/scans/kali/run-9.out",
+            stderr_path="/engagements/example/scans/kali/run-9.err",
+        ),
+    ).json()
+    assert created["stdout_bytes"] == 0
+    assert created["output_retention_status"] == "empty"
+
+    digest = "a" * 64
+    response = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
+        json={
+            "status": "completed",
+            "return_code": 0,
+            "ended_at": "2026-04-17T12:00:05Z",
+            "duration_ms": 5000,
+            "stdout_preview": "22/tcp open ssh",
+            "stderr_preview": "",
+            "stdout_bytes": 4096,
+            "stderr_bytes": 0,
+            "stdout_sha256": digest,
+            "stderr_sha256": "",
+            "timed_out": False,
+            "partial_results": False,
+        },
+    )
+    assert response.status_code == 200, response.text
+    updated = response.json()
+    assert updated["stdout_bytes"] == 4096
+    assert updated["stderr_bytes"] == 0
+    assert updated["stdout_sha256"] == digest
+    assert updated["stderr_sha256"] == ""
+    assert updated["output_retention_status"] == "retained"
+
+
+def test_kali_route_finalize_without_byte_truth_leaves_the_columns_alone(
+    client, isolate_settings
+):
+    """A wrapper that reports no byte truth must not have one invented for it."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    created = _post(
+        client,
+        _base_payload(
+            status="running", route="vigil assess kali/nmap_scan", stdout="", stderr=""
+        ),
+    ).json()
+    response = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
+        json={
+            "status": "completed",
+            "return_code": 0,
+            "ended_at": "2026-04-17T12:00:05Z",
+            "duration_ms": 5000,
+            "stdout_preview": "22/tcp open ssh",
+        },
+    )
+    assert response.status_code == 200, response.text
+    updated = response.json()
+    assert updated["stdout_bytes"] == 0
+    assert updated["output_retention_status"] == "empty"
+
+
+def test_kali_route_finalize_with_no_output_records_empty_retention(
+    client, isolate_settings
+):
+    """Zero measured bytes is a real observation, distinct from 'not reported'."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    created = _post(
+        client,
+        _base_payload(
+            status="running", route="vigil assess kali/curl", stdout="", stderr=""
+        ),
+    ).json()
+    response = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
+        json={
+            "status": "completed",
+            "return_code": 0,
+            "ended_at": "2026-04-17T12:00:05Z",
+            "duration_ms": 5000,
+            "stdout_bytes": 0,
+            "stderr_bytes": 0,
+            "stdout_sha256": "",
+            "stderr_sha256": "",
+        },
+    )
+    assert response.status_code == 200, response.text
+    updated = response.json()
+    assert updated["stdout_bytes"] == 0
+    assert updated["stdout_sha256"] == ""
+    assert updated["output_retention_status"] == "empty"

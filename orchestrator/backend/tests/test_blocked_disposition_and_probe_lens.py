@@ -230,7 +230,8 @@ def test_blocked_finding_absent_from_both_report_modes(client, isolate_settings)
         client, "VA-001",
         verification_state="verified", verification_disposition="confirmed",
         details={"evidence": "e", "impact": "i", "cvss_score": 7.5,
-                 "cvss_vector": "AV:N", "steps_to_reproduce": ["a"], "remediation": "fix"},
+                 "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+                     "steps_to_reproduce": ["a"], "remediation": "fix"},
     )
     # A blocked finding (active + verified + blocked) that must NOT report.
     _create_finding(client, "VA-002")

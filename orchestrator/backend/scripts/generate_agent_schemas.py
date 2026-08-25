@@ -175,9 +175,14 @@ _FINDING_DETAIL_PROPERTIES = {
     },
     "cvss_score": {
         "type": "number",
-        "exclusiveMinimum": 0,
+        # 0.0 is a real, reachable score: an all-N vector computes to it, and it
+        # is the ONLY score the `info` severity band (< 0.1) can hold. Excluding
+        # it made an informational finding unrepresentable and pushed authors to
+        # a 0.1 fudge that trips both the severity<->CVSS and vector<->score
+        # readiness blockers at once.
+        "minimum": 0,
         "maximum": 10,
-        "description": "CVSS 3.1 base score (0.1-10.0). Must match cvss_vector.",
+        "description": "CVSS 3.1 base score (0.0-10.0). Must match cvss_vector.",
     },
     "remediation": {
         "type": "string",

@@ -515,6 +515,14 @@ class CommandRunFinalize(BaseModel):
     duration_ms: int | None = Field(default=None, ge=0, le=2**63 - 1)
     stdout_preview: str | None = Field(default=None, max_length=COMMAND_FINALIZE_PREVIEW_MAX_CHARS)
     stderr_preview: str | None = Field(default=None, max_length=COMMAND_FINALIZE_PREVIEW_MAX_CHARS)
+    # Byte truth measured by the wrapper from the output file it owns. The
+    # previews above are truncated, so they cannot supply it, and only the
+    # ``host_exec`` lane spills through the backend's own retention machinery —
+    # for every other route these are the sole source of a real byte count.
+    stdout_bytes: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    stderr_bytes: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    stdout_sha256: str | None = Field(default=None, max_length=64)
+    stderr_sha256: str | None = Field(default=None, max_length=64)
     timed_out: bool = False
     partial_results: bool = False
     peak_rss_bytes: int | None = Field(default=None, ge=0, le=2**63 - 1)
@@ -2472,6 +2480,10 @@ async def patch_command_run(
             duration_ms=request.duration_ms,
             stdout_preview=request.stdout_preview,
             stderr_preview=request.stderr_preview,
+            stdout_bytes=request.stdout_bytes,
+            stderr_bytes=request.stderr_bytes,
+            stdout_sha256=request.stdout_sha256,
+            stderr_sha256=request.stderr_sha256,
             timed_out=request.timed_out,
             output_quiesced=request.output_quiesced,
             partial_results=request.partial_results,

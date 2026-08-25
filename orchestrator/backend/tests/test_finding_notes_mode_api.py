@@ -41,7 +41,7 @@ def _finding_payload() -> dict:
         "source_name": "test",
         "notes": "PROVEN by run 13691",
         "details": {
-            "cvss_score": 8.1,
+            "cvss_score": 7.5,
             "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
             "steps_to_reproduce": ["Replay the recorded request."],
             "remediation": "Enforce object-level authorization.",

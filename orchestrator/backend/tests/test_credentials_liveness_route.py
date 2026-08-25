@@ -9,7 +9,11 @@ probe verdict and reconciles session state through `db.set_liveness`:
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from test_engagements_api import write_engagement
+
+from app import db
 
 KEY = "2026-03-30-120000-example"
 
@@ -61,6 +65,111 @@ def test_liveness_live_sets_available_and_clears_stale(client, isolate_settings)
     mat = resp.json()
     assert mat["liveness_verdict"] == "live"
     assert mat["state"] == "available"  # a live probe cleared the stale mark
+
+
+def test_newer_scoped_live_observation_clears_legacy_dead_projection(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    _put_identity(client)
+    dead = client.post(
+        f"/engagements/{KEY}/credentials/user_a/liveness",
+        json={"verdict": "dead", "probed_at": "2026-07-03T12:00:00Z"},
+    )
+    assert dead.status_code == 200
+    assert dead.json()["state"] == "dead"
+
+    live = client.post(
+        f"/engagements/{KEY}/credentials/user_a/liveness",
+        json={
+            "verdict": "live",
+            "probed_at": "2026-07-03T12:05:00Z",
+            "scope_key": "https://chat.example.test",
+        },
+    )
+
+    assert live.status_code == 200
+    material = live.json()
+    assert material["identity_name"] == "user_a"
+    assert material["state"] == "available"
+    assert material["liveness_verdict"] == "live"
+    assert material["last_probed_at"] == "2026-07-03T12:05:00Z"
+
+
+def test_unscoped_listing_does_not_render_older_dead_beside_available_identity(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    _put_identity(client)
+    engagement = db.get_engagement_by_key(KEY)
+    assert engagement is not None
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    dead_at = (now - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    live_at = (now - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with db.get_connection() as connection:
+        connection.execute(
+            "UPDATE engagement_credentials SET state='available', "
+            "liveness_verdict='dead', last_probed_at=?, host_cookies_json=? "
+            "WHERE engagement_id=? AND identity_name='user_a'",
+            (
+                dead_at,
+                '[{"host":"chat.example.test","cookies":{"sid":"abc"}}]',
+                engagement.id,
+            ),
+        )
+    db.record_credential_liveness(
+        engagement.id,
+        "user_a",
+        scope_key="https://chat.example.test",
+        verdict="live",
+        observed_at=live_at,
+        ttl_seconds=3600,
+        source="auth-status",
+    )
+
+    listing = client.get(f"/engagements/{KEY}/credentials")
+
+    assert listing.status_code == 200
+    material = listing.json()["identities"]["user_a"]
+    assert material["state"] == "available"
+    assert material["liveness_verdict"] == "live"
+    assert material["last_probed_at"] == live_at
+
+
+def test_unscoped_listing_drops_available_identity_legacy_dead_when_live_expired(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    _put_identity(client)
+    engagement = db.get_engagement_by_key(KEY)
+    assert engagement is not None
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    dead_at = (now - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    live_at = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with db.get_connection() as connection:
+        connection.execute(
+            "UPDATE engagement_credentials SET state='available', "
+            "liveness_verdict='dead', last_probed_at=? "
+            "WHERE engagement_id=? AND identity_name='user_a'",
+            (dead_at, engagement.id),
+        )
+    db.record_credential_liveness(
+        engagement.id,
+        "user_a",
+        scope_key="https://chat.example.test",
+        verdict="live",
+        observed_at=live_at,
+        ttl_seconds=1,
+        source="auth-status",
+    )
+
+    listing = client.get(f"/engagements/{KEY}/credentials")
+
+    assert listing.status_code == 200
+    material = listing.json()["identities"]["user_a"]
+    assert material["state"] == "available"
+    assert material["liveness_verdict"] == "unknown"
+    assert material["last_probed_at"] is None
 
 
 def test_liveness_unknown_leaves_state_untouched(client, isolate_settings):

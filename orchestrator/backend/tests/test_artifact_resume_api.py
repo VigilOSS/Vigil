@@ -1246,8 +1246,8 @@ def test_finding_with_directory_evidence_ref_is_not_reported_missing(
             "evidence_ref": "scans/va-049-evidence",
             "source_name": "vulnerability-analyst",
             "details": {
-                "cvss_score": 7.1,
-                "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+                "cvss_score": 7.7,
+                "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N",
                 "steps_to_reproduce": ["capture pair", "replay as second identity"],
                 "remediation": "Enforce object-level authorization",
                 "impact": "Cross-account read",
