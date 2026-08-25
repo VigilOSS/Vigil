@@ -376,6 +376,28 @@ def _short_sha(value: object) -> str:
     return value[:12] if isinstance(value, str) and value else "?"
 
 
+def _install_staleness_check(install_root: Path) -> Check:
+    """Working-root-vs-source drift, as a doctor check.
+
+    ``vigil status`` already surfaced this, but doctor is where an operator looks
+    when a documented verb is missing — which is exactly the symptom a working
+    root lagging its source produces.
+    """
+    staleness = install_staleness(install_root)
+    state = str(staleness.get("state") or "unknown")
+    if state == "current":
+        return Check("install-staleness", "OK")
+    if state == "unknown":
+        return Check("install-staleness", "SKIPPED", "no source checkout to compare against")
+    installed = _short_sha(staleness.get("installed_sha"))
+    current = _short_sha(staleness.get("current_source_sha"))
+    return Check(
+        "install-staleness",
+        "STALE",
+        f"{state}: working root at {installed}, source at {current}; run `vigil install`",
+    )
+
+
 def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.run_command) -> list[Check]:
     checks: list[Check] = []
     binary_status: dict[str, str] = {}
@@ -424,6 +446,7 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
         checks.append(Check("orchestrator-health", "OK" if healthy else "FAIL", detail))
     backup = latest_backup(install_root)
     checks.append(Check("backup-latest", "OK" if backup else "MISSING", str(backup.path) if backup else ""))
+    checks.append(_install_staleness_check(install_root))
     checks.append(_failed_audit_marker_check(install_root))
     checks.append(_host_recon_tools_check())
     checks.append(_oob_tenant_check(install_root))

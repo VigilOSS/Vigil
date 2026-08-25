@@ -11,6 +11,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -1536,6 +1537,184 @@ def test_install_cli_stamps_install_meta(
     assert meta["source_sha"] == sha
 
 
+def test_install_from_source_stamps_every_sync_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stamp is written by the sync itself, not by the CLI dispatch table.
+
+    `vigil up` calls install_from_source directly, so a stamp owned by the
+    `install`/`update` dispatch branch left `up` syncing without re-stamping —
+    the recorded sha stayed pinned at the last explicit install and `vigil status`
+    reported a permanent false "stale".
+    """
+    from vigil_cli.install import InstallOptions, install_from_source
+    from vigil_cli.status import read_install_meta
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    source = tmp_path / "source"
+    (source / "agent" / "engagements").mkdir(parents=True)
+    (source / "orchestrator" / "backend" / "data").mkdir(parents=True)
+    sha = _init_git_repo(source, {"README.md": "seed\n"})
+    install = tmp_path / "install"
+
+    install_from_source(
+        InstallOptions(source_root=source, install_root=install, verify_docker_image=False)
+    )
+
+    meta = read_install_meta(install)
+    assert meta is not None and meta["source_sha"] == sha
+
+    advanced = _git_commit(source, "README.md", "advanced\n")
+    install_from_source(
+        InstallOptions(source_root=source, install_root=install, verify_docker_image=False)
+    )
+    assert (read_install_meta(install) or {})["source_sha"] == advanced
+
+
+def test_install_from_source_dry_run_does_not_stamp(tmp_path: Path) -> None:
+    from vigil_cli.install import InstallOptions, install_from_source
+    from vigil_cli.status import read_install_meta
+
+    source = tmp_path / "source"
+    (source / "agent").mkdir(parents=True)
+    install = tmp_path / "install"
+    install.mkdir()
+
+    install_from_source(
+        InstallOptions(
+            source_root=source, install_root=install, dry_run=True, verify_docker_image=False
+        )
+    )
+
+    assert read_install_meta(install) is None
+
+
+def test_up_source_sync_restamps_the_working_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`vigil up` is the README-blessed path; it must leave the stamp current.
+
+    Deliberately exercises the REAL install_from_source — stubbing it (as the
+    other `up` tests do, for their own subject) is what made this hole
+    invisible.
+    """
+    from vigil_cli import up as up_module
+    from vigil_cli.status import install_staleness, read_install_meta
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    source = tmp_path / "source"
+    (source / "agent" / "engagements").mkdir(parents=True)
+    (source / "orchestrator" / "backend" / "data").mkdir(parents=True)
+    _init_git_repo(source, {"README.md": "seed\n"})
+    install = tmp_path / "install"
+
+    monkeypatch.setattr(up_module, "resolve_source_root", lambda *_a, **_k: source)
+    monkeypatch.setattr(up_module, "image_outdated", lambda *_a, **_k: False)
+    monkeypatch.setattr(up_module, "_runtime_image_drift", lambda *_a, **_k: False)
+    monkeypatch.setattr(up_module, "proxy_image_drift", lambda **_k: False)
+    monkeypatch.setattr(up_module.docker, "container_running", lambda name, runner=None: False)
+    monkeypatch.setattr(up_module, "start_runtime", lambda *_a, **_k: None)
+    monkeypatch.setattr(up_module, "start_proxy", lambda *_a, **_k: None)
+    monkeypatch.setattr(up_module, "start_orchestrator", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        up_module, "oob_status", lambda *_a, **_k: {"state": "running", "clients": [{"x": 1}]}
+    )
+    monkeypatch.setattr(up_module, "start_oob", lambda *_a, **_k: None)
+
+    up_module.run_up(up_module.UpOptions(install_root=install), runner=lambda *_a, **_k: None)
+    capsys.readouterr()
+
+    advanced = _git_commit(source, "README.md", "advanced\n")
+    up_module.run_up(up_module.UpOptions(install_root=install), runner=lambda *_a, **_k: None)
+    capsys.readouterr()
+
+    assert (read_install_meta(install) or {})["source_sha"] == advanced
+    assert install_staleness(install, source_root=source)["state"] == "current"
+
+
+def test_doctor_reports_install_staleness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lagging working root is why a documented verb "does not exist" — doctor
+    is where that question gets asked, so the drift has to show up there."""
+    from vigil_cli import status as status_module
+    from vigil_cli.docker import DockerResult
+
+    source = tmp_path / "source"
+    (source / "agent").mkdir(parents=True)
+    (source / "orchestrator").mkdir(parents=True)
+    installed_sha = _init_git_repo(source, {"README.md": "seed\n"})
+    install = tmp_path / "install"
+    install.mkdir()
+    status_module.write_install_meta(install, source)
+    current_sha = _git_commit(source, "README.md", "advanced\n")
+    monkeypatch.setenv("VIGIL_SOURCE_DIR", str(source))
+    monkeypatch.setattr(status_module.shutil, "which", lambda _command: None)
+    monkeypatch.setattr(status_module, "runtime_status", lambda **_k: "stopped")
+
+    checks = status_module.collect_doctor_checks(
+        install, runner=lambda *_a, **_k: DockerResult(0, "", "")
+    )
+
+    check = next(c for c in checks if c.name == "install-staleness")
+    assert check.status == "STALE"
+    assert installed_sha[:12] in check.detail
+    assert current_sha[:12] in check.detail
+    assert "vigil install" in check.detail
+
+
+def test_assess_passthrough_warns_on_stderr_when_install_is_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The passthrough execs the INSTALL ROOT's assess.py, so a lagging root
+    silently exposes an older verb set. Warn on STDERR — callers parse assess
+    JSON from stdout — and never block the exec."""
+    from vigil_cli import main as main_module
+    from vigil_cli.status import write_install_meta
+
+    source = tmp_path / "source"
+    (source / "agent" / "scripts").mkdir(parents=True)
+    (source / "orchestrator").mkdir(parents=True)
+    _init_git_repo(source, {"README.md": "seed\n"})
+    install = tmp_path / "install"
+    (install / "agent" / "scripts").mkdir(parents=True)
+    assess = install / "agent" / "scripts" / "assess.py"
+    assess.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    write_install_meta(install, source)
+    _git_commit(source, "README.md", "advanced\n")
+    monkeypatch.setenv("VIGIL_SOURCE_DIR", str(source))
+
+    execs: list[list[str]] = []
+    monkeypatch.setattr(main_module.os, "execvpe", lambda path, argv, env: execs.append(argv))
+
+    main_module._exec_assess_passthrough(["--root", str(install), "assess", "list-skills"], 2)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""  # stdout stays clean for JSON consumers
+    assert "WARN" in captured.err and "run `vigil install`" in captured.err
+    assert execs == [[str(assess), "list-skills"]]  # never blocks the exec
+
+
+def test_assess_passthrough_is_silent_when_install_is_current(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import main as main_module
+    from vigil_cli.status import write_install_meta
+
+    source = tmp_path / "source"
+    (source / "agent" / "scripts").mkdir(parents=True)
+    (source / "orchestrator").mkdir(parents=True)
+    _init_git_repo(source, {"README.md": "seed\n"})
+    install = tmp_path / "install"
+    (install / "agent" / "scripts").mkdir(parents=True)
+    (install / "agent" / "scripts" / "assess.py").write_text("#!\n", encoding="utf-8")
+    write_install_meta(install, source)
+    monkeypatch.setenv("VIGIL_SOURCE_DIR", str(source))
+    monkeypatch.setattr(main_module.os, "execvpe", lambda *_a: None)
+
+    main_module._exec_assess_passthrough(["--root", str(install), "assess", "list-skills"], 2)
+
+    assert capsys.readouterr().err == ""
+
+
 def test_runtime_start_uses_expected_docker_mounts(tmp_path: Path) -> None:
     from vigil_cli.docker import DockerResult
     from vigil_cli.runtime import RuntimeOptions, start_runtime
@@ -2896,12 +3075,22 @@ def test_logs_routes_to_centralized_targets(tmp_path: Path, monkeypatch: pytest.
     assert ["tail", "-n", "5", str(log_file)] in calls
 
 
-def _install_fake_credential_store(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict]:
+def _install_fake_credential_store(
+    monkeypatch: pytest.MonkeyPatch, calls: list[tuple[str, str, dict | None]] | None = None
+) -> dict[str, dict]:
     """Stub auth_module._api with an in-memory backend keyed by engagement name.
 
-    Credentials are centralized in the orchestrator backend now; the CLI's real
-    status/clear/import logic runs against this fake store instead of auth.json.
+    ``auth._api`` is the ONE network boundary in ``vigil_cli.auth`` — everything
+    above it (status_line, import_auth, probe_liveness, persist_liveness) is real
+    code under test here. Stub only this; never the function whose contract the
+    test asserts.
+
+    Mirrors the routes in ``app/api/credentials.py``: ``GET /resolve`` honours the
+    ``identity``/``scope`` query the CLI sends and, like
+    ``creds_service.resolve_identity``, returns ``(requested, {})`` for an unknown
+    name; resolved material carries ``identity_name`` the way a stored row does.
     Store shape: {eng_key: {"identities": {name: material}, "active_identity": name}}.
+    Pass ``calls`` to record every ``(method, path, payload)`` the CLI issues.
     """
     from vigil_cli import auth as auth_module
 
@@ -2913,13 +3102,31 @@ def _install_fake_credential_store(monkeypatch: pytest.MonkeyPatch) -> dict[str,
             {"identities": {}, "active_identity": auth_module.DEFAULT_IDENTITY},
         )
 
+    def _resolved(st: dict, requested: str) -> dict:
+        name = requested or st["active_identity"]
+        material = st["identities"].get(name)
+        if not material:
+            # Unknown name echoes back (the caller warns); an empty active slot
+            # resolves to nothing at all — matches creds_service.resolve_identity.
+            return {"identity_name": requested or None, "material": {}}
+        return {"identity_name": name, "material": {**material, "identity_name": name}}
+
     def fake_api(engagement_dir, method, path="", payload=None):
         st = _state(Path(engagement_dir))
+        if calls is not None:
+            calls.append((method, path, payload))
         if method == "GET" and path == "":
             return st
-        if method == "GET" and path == "/resolve":
-            active = st["active_identity"]
-            return {"identity_name": active, "material": st["identities"].get(active, {})}
+        if method == "GET" and path.split("?")[0] == "/resolve":
+            query = parse_qs(urlparse(path).query)
+            return _resolved(st, (query.get("identity") or [""])[0])
+        if method == "POST" and path.endswith("/liveness"):
+            name = path.strip("/").split("/")[0]
+            material = st["identities"].get(name)
+            if material is None:
+                return {}
+            material["liveness_verdict"] = str((payload or {}).get("verdict") or "")
+            return {**material, "identity_name": name}
         if method == "GET" and path.startswith("/"):
             return st["identities"].get(path[1:], {})
         if method == "PUT" and path.startswith("/"):
@@ -2977,6 +3184,170 @@ def test_auth_status_and_clear_operate_on_engagement_auth(
     # Clear with no --identity removes the ACTIVE identity; here it was the only
     # one, so the store ends empty.
     assert store["eng-1"]["identities"] == {}
+
+
+class _FakeProbeResponse:
+    """Minimal http.client response for the outbound liveness probe."""
+
+    def __init__(self, status: int, body: str, headers: list[tuple[str, str]]) -> None:
+        self.status = status
+        self.reason = "OK" if status == 200 else "Found"
+        self._body = body
+        self._headers = headers
+
+    def getheaders(self) -> list[tuple[str, str]]:
+        return self._headers
+
+    def read(self) -> bytes:
+        return self._body.encode("utf-8")
+
+
+def _stub_probe_socket(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    status: int = 200,
+    body: str = "",
+    headers: list[tuple[str, str]] | None = None,
+) -> list[tuple[str, str, dict[str, str]]]:
+    """Stub the probe's OUTBOUND socket only — the real probe_liveness still runs.
+
+    Returns the list of ``(method, path, headers)`` the probe actually sent.
+    """
+    sent: list[tuple[str, str, dict[str, str]]] = []
+
+    class _FakeConnection:
+        def __init__(self, host, port, timeout=None):
+            self.host = host
+            self.port = port
+
+        def request(self, method, path, headers=None):
+            sent.append((method, path, dict(headers or {})))
+
+        def getresponse(self):
+            return _FakeProbeResponse(status, body, headers or [])
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("http.client.HTTPSConnection", _FakeConnection)
+    monkeypatch.setattr("http.client.HTTPConnection", _FakeConnection)
+    return sent
+
+
+def test_auth_status_probe_reports_requested_identity_instead_of_active(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`auth status --identity X --probe` must report X, not whatever is active.
+
+    Written against the REAL status_line/probe_liveness/persist_liveness: the
+    previous version of this test faked all three with signatures the source did
+    not have, so it stayed green while `vigil auth status` raised TypeError. Only
+    the two genuine boundaries are stubbed — the backend (`auth._api`) and the
+    outbound probe socket.
+    """
+    from vigil_cli import main as main_module
+
+    install_root = tmp_path / "install"
+    engagement = install_root / "agent" / "engagements" / "eng-1"
+    engagement.mkdir(parents=True)
+    (engagement / "scope.json").write_text("{}", encoding="utf-8")
+
+    calls: list[tuple[str, str, dict | None]] = []
+    store = _install_fake_credential_store(monkeypatch, calls)
+    store["eng-1"] = {
+        "identities": {
+            "other-active": {"mode": "manual", "state": "present", "cookies": {"sid": "a"}},
+            "cap-target": {
+                "mode": "capture",
+                "state": "present",
+                "cookies": {"sid": "b"},
+                "liveness": {"expect_status": 200, "authed_marker": "signed-in-as-cap"},
+            },
+        },
+        "active_identity": "other-active",
+    }
+    sent = _stub_probe_socket(monkeypatch, status=200, body="<p>signed-in-as-cap</p>")
+
+    main_module.main(
+        [
+            "--root",
+            str(install_root),
+            "auth",
+            "status",
+            "eng-1",
+            "--identity",
+            "cap-target",
+            "--probe",
+            "--probe-url",
+            "https://chat.example.test/me",
+        ]
+    )
+    status_out, liveness_out = capsys.readouterr().out.strip().splitlines()
+
+    # The probe carried cap-target's cookie, not the active identity's.
+    assert sent == [("GET", "/me", {"Cookie": "sid=b"})]
+    # Both printed lines name the REQUESTED identity.
+    assert "\tidentity=cap-target\t" in status_out
+    assert "other-active" not in status_out
+    assert liveness_out.startswith(
+        "liveness=live\tidentity=cap-target\tscope=https://chat.example.test\t"
+    )
+    assert "persisted=True" in liveness_out
+    # The scope the CLI resolved from the probe URL is the one it sent to the
+    # backend on every leg — resolve, re-resolve for the status line, and persist.
+    resolves = [path for method, path, _ in calls if method == "GET" and path.startswith("/resolve")]
+    assert resolves == [
+        "/resolve?identity=cap-target&scope=https%3A%2F%2Fchat.example.test",
+        "/resolve?identity=cap-target&scope=https%3A%2F%2Fchat.example.test",
+    ]
+    persist = [payload for method, path, payload in calls if path == "/cap-target/liveness"]
+    assert persist and persist[0]["verdict"] == "live"
+    assert persist[0]["scope_key"] == "https://chat.example.test"
+    assert store["eng-1"]["active_identity"] == "other-active"  # probing never re-activates
+
+
+def test_auth_status_probe_of_unconfigured_identity_reports_unknown_not_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An identity with no `material.liveness` signature must probe `unknown`.
+
+    The honesty invariant behind the whole probe path: a 200 alone is not proof of
+    a live session, so the verdict must not be persisted as `live`.
+    """
+    from vigil_cli import main as main_module
+
+    install_root = tmp_path / "install"
+    engagement = install_root / "agent" / "engagements" / "eng-1"
+    engagement.mkdir(parents=True)
+    (engagement / "scope.json").write_text("{}", encoding="utf-8")
+
+    calls: list[tuple[str, str, dict | None]] = []
+    store = _install_fake_credential_store(monkeypatch, calls)
+    store["eng-1"] = {
+        "identities": {"cap-target": {"mode": "capture", "state": "present", "cookies": {"sid": "b"}}},
+        "active_identity": "cap-target",
+    }
+    _stub_probe_socket(monkeypatch, status=200, body="<p>hello</p>")
+
+    main_module.main(
+        [
+            "--root",
+            str(install_root),
+            "auth",
+            "status",
+            "eng-1",
+            "--identity",
+            "cap-target",
+            "--probe",
+            "--probe-url",
+            "https://chat.example.test/me",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert "liveness=unknown\tidentity=cap-target" in out
+    assert "no liveness signature configured" in out
+    persist = [payload for _m, path, payload in calls if path == "/cap-target/liveness"]
+    assert persist and persist[0]["verdict"] == "unknown"
 
 
 def test_auth_clear_without_identity_deletes_only_active_not_all(
@@ -3043,6 +3414,120 @@ def test_auth_import_expands_multi_identity_file(
     assert ids["user_a"]["cookies"] == {"s": "a"}
     assert ids["user_b"]["cookies"] == {"s": "b"}
     assert store["eng-1"]["active_identity"] == "user_b"  # active flag honored
+
+
+def test_auth_import_rejects_wrapped_payload_that_would_store_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wrapped export must fail loudly, not import an inert empty identity.
+
+    ``{"material": {...}}`` used to reach the backend intact (the request model
+    allows extra keys), where only top-level cookies/headers/tokens are read: the
+    real cookies landed in raw_json, the identity was stored ``state="missing"``,
+    and the CLI printed success — a manufactured credential blocker.
+    """
+    from vigil_cli import main as main_module
+
+    install_root = tmp_path / "install"
+    engagement = install_root / "agent" / "engagements" / "eng-1"
+    engagement.mkdir(parents=True)
+    (engagement / "scope.json").write_text("{}", encoding="utf-8")
+    calls: list[tuple[str, str, dict | None]] = []
+    store = _install_fake_credential_store(monkeypatch, calls)
+    src = tmp_path / "auth.json"
+    src.write_text(
+        json.dumps({"material": {"cookies": {"sid": "abc"}}, "identity_name": "alice"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        main_module.main(
+            ["--root", str(install_root), "auth", "import", "eng-1", "--source", str(src)]
+        )
+
+    message = str(excinfo.value)
+    assert "would store nothing" in message
+    assert "'material'" in message  # names the wrapper that was found
+    assert '"cookies"' in message  # names the shape that works
+    assert not [call for call in calls if call[0] == "PUT"]  # nothing was written
+    assert store.get("eng-1", {"identities": {}})["identities"] == {}
+
+
+def test_auth_import_accepts_host_cookies_only_material(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """host_cookies alone is replayable material — the empty-import guard must not
+    refuse it just because the backend leaves ``state`` at missing for it."""
+    from vigil_cli import main as main_module
+
+    install_root = tmp_path / "install"
+    engagement = install_root / "agent" / "engagements" / "eng-1"
+    engagement.mkdir(parents=True)
+    (engagement / "scope.json").write_text("{}", encoding="utf-8")
+    store = _install_fake_credential_store(monkeypatch)
+    src = tmp_path / "auth.json"
+    src.write_text(
+        json.dumps({"host_cookies": [{"host": "app.example.test", "cookies": {"sid": "x"}}]}),
+        encoding="utf-8",
+    )
+
+    main_module.main(
+        ["--root", str(install_root), "auth", "import", "eng-1", "--source", str(src)]
+    )
+
+    stored = store["eng-1"]["identities"]["default"]
+    assert stored["host_cookies"][0]["cookies"] == {"sid": "x"}
+
+
+def test_auth_import_accepts_a_legacy_top_level_bearer_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`{"token": ...}` is replayable (auth._bearer_token reads it back out of
+    raw_json), so the empty-import guard must not refuse it — a guard that blocks
+    a working import is a worse failure than the silent one it replaced."""
+    from vigil_cli import auth as auth_module
+    from vigil_cli import main as main_module
+
+    install_root = tmp_path / "install"
+    engagement = install_root / "agent" / "engagements" / "eng-1"
+    engagement.mkdir(parents=True)
+    (engagement / "scope.json").write_text("{}", encoding="utf-8")
+    store = _install_fake_credential_store(monkeypatch)
+    src = tmp_path / "auth.json"
+    src.write_text(json.dumps({"token": "eyJhbGciOi.legacy"}), encoding="utf-8")
+
+    main_module.main(
+        ["--root", str(install_root), "auth", "import", "eng-1", "--source", str(src)]
+    )
+
+    stored = store["eng-1"]["identities"]["default"]
+    assert auth_module._bearer_token(stored) == "eyJhbGciOi.legacy"
+
+
+def test_auth_import_rejects_identity_map_with_no_material_anywhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli import main as main_module
+
+    install_root = tmp_path / "install"
+    engagement = install_root / "agent" / "engagements" / "eng-1"
+    engagement.mkdir(parents=True)
+    (engagement / "scope.json").write_text("{}", encoding="utf-8")
+    calls: list[tuple[str, str, dict | None]] = []
+    _install_fake_credential_store(monkeypatch, calls)
+    src = tmp_path / "auth.json"
+    src.write_text(
+        json.dumps({"identities": {"user_a": {"mode": "manual"}, "user_b": {}}}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        main_module.main(
+            ["--root", str(install_root), "auth", "import", "eng-1", "--source", str(src)]
+        )
+
+    assert "user_a, user_b" in str(excinfo.value)
+    assert not [call for call in calls if call[0] == "PUT"]
 
 
 def test_auth_edit_without_identity_writes_back_to_the_active_identity(
@@ -3377,6 +3862,585 @@ def test_oob_start_renders_config_and_starts_idempotent_sessions(tmp_path: Path)
     assert "tmux new-session -d -s frpc" in rendered
 
 
+def _self_test_marker(token: str) -> str:
+    """The channel-verification marker the REAL minter produces for ``token``.
+
+    Never hand-write this label. ``mint_nonce`` reduces the prefix to the
+    [a-z0-9] a DNS label can carry, so a hand-written ``vigil-test-…`` is a
+    string the shipped code cannot mint — and a test built on one cannot see the
+    minter and the self-test recogniser disagreeing about the spelling, which is
+    exactly how the recogniser silently never fired.
+    """
+    from vigil_cli import oob as oob_module
+
+    return oob_module.mint_nonce(
+        prefix=oob_module.SELF_TEST_NONCE_PREFIX,
+        length=len(token),
+        token_factory=lambda _length: token,
+    )
+
+
+def _pin_self_test_marker(monkeypatch: pytest.MonkeyPatch, token: str) -> str:
+    """Pin the marker deterministically WITHOUT bypassing the real minter."""
+    from vigil_cli import oob as oob_module
+
+    real = oob_module.mint_nonce
+    monkeypatch.setattr(
+        "vigil_cli.oob.mint_nonce",
+        lambda **kwargs: real(**{**kwargs, "token_factory": lambda _length: token}),
+    )
+    return _self_test_marker(token)
+
+
+def test_verify_oob_channel_returns_a_verdict_instead_of_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The extracted verifier reports; only `oob test` turns a failure into an error.
+
+    `oob poll` calls it on the zero-match path, where a refusal would be a dead
+    end mid-engagement — the caller has to stay free to proceed.
+    """
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.oob import OobOptions, verify_oob_channel
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "vigil\n", "")
+        if argv[-1].startswith("dig "):
+            return DockerResult(9, "", "connection timed out")
+        raise AssertionError(f"unexpected command: {argv[-1]}")
+
+    marker = _pin_self_test_marker(monkeypatch, "deadbeef")
+    monkeypatch.setattr(
+        "vigil_cli.oob.client_payload_host",
+        lambda *_args, **_kwargs: "client-id.tenant.oob.example.test",
+    )
+
+    result = verify_oob_channel(
+        OobOptions(install_root=tmp_path, oob_domain="tenant.oob.example.test"),
+        client="probe",
+        runner=runner,
+    )
+
+    assert result.verified is False
+    assert "public DNS probe failed" in result.reason
+    assert result.client == "probe"  # pinned to the requested client, not the first running one
+    assert result.as_dict()["marker"] == marker
+
+
+def test_verify_oob_channel_unverified_when_runtime_is_down(
+    tmp_path: Path,
+) -> None:
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.oob import OobOptions, verify_oob_channel
+
+    result = verify_oob_channel(
+        OobOptions(install_root=tmp_path, oob_domain="tenant.oob.example.test"),
+        runner=lambda *_a, **_k: DockerResult(0, "", ""),
+    )
+
+    assert result.verified is False
+    assert "Kali runtime is not running" in result.reason
+
+
+def _channel_probe_runner(
+    probes: list[str], *, dns_fails: bool = False, marker: str = ""
+):
+    """Runner that records each channel-verification round trip it is asked for."""
+    from vigil_cli.docker import DockerResult
+
+    marker = marker or _self_test_marker("cafebabe")
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "vigil\n", "")
+        command = argv[-1]
+        probes.append(command.split(" ", 1)[0])
+        if command.startswith("dig "):
+            if dns_fails:
+                return DockerResult(9, "", "connection timed out")
+            return DockerResult(0, "203.0.113.10\n", "")
+        if command.startswith("curl "):
+            return DockerResult(0, "200", "")
+        if command.startswith("grep "):
+            return DockerResult(0, f"[{marker}.host] HTTP\n", "")
+        raise AssertionError(f"unexpected command: {command}")
+
+    return runner
+
+
+def _cached_channel_options(tmp_path: Path):
+    from vigil_cli.oob import OobOptions
+
+    return OobOptions(install_root=tmp_path, oob_domain="tenant.oob.example.test")
+
+
+@pytest.fixture
+def _channel_check_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
+    _pin_self_test_marker(monkeypatch, "cafebabe")
+    monkeypatch.setattr(
+        "vigil_cli.oob.client_payload_host",
+        lambda *_args, **_kwargs: "agent-a.tenant.oob.example.test",
+    )
+
+
+def test_verified_channel_verdict_is_reused_within_its_ttl(
+    tmp_path: Path, _channel_check_stubs: None
+) -> None:
+    """An empty `oob poll` loop must not re-pay the round trip to learn the same fact.
+
+    The proof itself is unchanged — a real DNS + HTTP + callback trip — but an
+    agent polling for a blind callback calls this repeatedly, and channel health
+    does not change between two polls seconds apart.
+    """
+    from vigil_cli.oob import VERIFIED_CHANNEL_TTL_SECONDS, verify_oob_channel_cached
+
+    probes: list[str] = []
+    options = _cached_channel_options(tmp_path)
+    runner = _channel_probe_runner(probes)
+
+    first = verify_oob_channel_cached(options, client="agent-a", runner=runner, now=1_000.0)
+    assert first.verified is True
+    assert first.cached is False
+    fresh_probe_count = len(probes)
+    assert fresh_probe_count > 0
+
+    later = verify_oob_channel_cached(
+        options,
+        client="agent-a",
+        runner=runner,
+        now=1_000.0 + VERIFIED_CHANNEL_TTL_SECONDS - 1,
+    )
+
+    assert later.verified is True
+    # The reuse is reported, never dressed up as a fresh proof.
+    assert later.cached is True
+    assert later.age_seconds == pytest.approx(VERIFIED_CHANNEL_TTL_SECONDS - 1)
+    assert later.as_dict()["cached"] is True
+    assert later.describe_freshness().startswith("cached(")
+    assert len(probes) == fresh_probe_count  # no second round trip
+
+
+def test_expired_channel_verdict_is_proved_again(
+    tmp_path: Path, _channel_check_stubs: None
+) -> None:
+    """The cadence is a cache, not an answer cast in stone."""
+    from vigil_cli.oob import VERIFIED_CHANNEL_TTL_SECONDS, verify_oob_channel_cached
+
+    probes: list[str] = []
+    options = _cached_channel_options(tmp_path)
+    runner = _channel_probe_runner(probes)
+
+    verify_oob_channel_cached(options, client="agent-a", runner=runner, now=1_000.0)
+    fresh_probe_count = len(probes)
+
+    again = verify_oob_channel_cached(
+        options,
+        client="agent-a",
+        runner=runner,
+        now=1_000.0 + VERIFIED_CHANNEL_TTL_SECONDS + 1,
+    )
+
+    assert again.cached is False
+    assert again.age_seconds == 0.0
+    assert len(probes) == fresh_probe_count * 2
+
+
+def test_broken_channel_verdict_expires_sooner_than_a_healthy_one(
+    tmp_path: Path, _channel_check_stubs: None
+) -> None:
+    """A repaired channel must be noticed quickly.
+
+    An `unverified` verdict is the one the operator is actively fixing, so
+    holding it for the full healthy TTL would keep reporting a channel as dead
+    after it came back. It costs the 10s wait again — bounded to once a minute,
+    not once a poll.
+    """
+    from vigil_cli.oob import (
+        UNVERIFIED_CHANNEL_TTL_SECONDS,
+        VERIFIED_CHANNEL_TTL_SECONDS,
+        verify_oob_channel_cached,
+    )
+
+    assert UNVERIFIED_CHANNEL_TTL_SECONDS < VERIFIED_CHANNEL_TTL_SECONDS
+
+    probes: list[str] = []
+    options = _cached_channel_options(tmp_path)
+    runner = _channel_probe_runner(probes, dns_fails=True)
+
+    first = verify_oob_channel_cached(options, client="agent-a", runner=runner, now=1_000.0)
+    assert first.verified is False
+    fresh_probe_count = len(probes)
+
+    within = verify_oob_channel_cached(
+        options,
+        client="agent-a",
+        runner=runner,
+        now=1_000.0 + UNVERIFIED_CHANNEL_TTL_SECONDS - 1,
+    )
+    assert within.cached is True
+    assert within.verified is False
+    assert "public DNS probe failed" in within.reason
+    assert len(probes) == fresh_probe_count
+
+    beyond = verify_oob_channel_cached(
+        options,
+        client="agent-a",
+        runner=runner,
+        now=1_000.0 + UNVERIFIED_CHANNEL_TTL_SECONDS + 1,
+    )
+    assert beyond.cached is False
+    assert len(probes) == fresh_probe_count * 2
+
+
+def test_channel_verdict_is_not_shared_across_clients(
+    tmp_path: Path, _channel_check_stubs: None
+) -> None:
+    """A different client is a different payload host and a different log."""
+    from vigil_cli.oob import verify_oob_channel_cached
+
+    probes: list[str] = []
+    options = _cached_channel_options(tmp_path)
+    runner = _channel_probe_runner(probes)
+
+    verify_oob_channel_cached(options, client="agent-a", runner=runner, now=1_000.0)
+    fresh_probe_count = len(probes)
+
+    other = verify_oob_channel_cached(options, client="agent-b", runner=runner, now=1_000.5)
+
+    assert other.cached is False
+    assert len(probes) == fresh_probe_count * 2
+
+
+def test_corrupt_channel_verdict_cache_falls_back_to_proving_the_channel(
+    tmp_path: Path, _channel_check_stubs: None
+) -> None:
+    """A hand-edited or half-written cache file must degrade to a real proof."""
+    from vigil_cli.oob import (
+        CHANNEL_VERIFICATION_CACHE_RELATIVE_PATH,
+        verify_oob_channel_cached,
+    )
+
+    cache = tmp_path / CHANNEL_VERIFICATION_CACHE_RELATIVE_PATH
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text('{"entries": [1, 2', encoding="utf-8")
+
+    probes: list[str] = []
+    result = verify_oob_channel_cached(
+        _cached_channel_options(tmp_path),
+        client="agent-a",
+        runner=_channel_probe_runner(probes),
+        now=1_000.0,
+    )
+
+    assert result.verified is True
+    assert result.cached is False
+    assert probes  # the round trip actually ran
+
+
+def test_channel_verdict_cache_write_failure_never_fails_the_check(
+    tmp_path: Path, _channel_check_stubs: None
+) -> None:
+    """The cache is an optimisation; an unwritable install root must not dead-end a poll."""
+    from vigil_cli.oob import verify_oob_channel_cached
+
+    # A file where the cache directory must go makes mkdir/write raise.
+    (tmp_path / ".runtime-data").write_text("not a directory", encoding="utf-8")
+
+    result = verify_oob_channel_cached(
+        _cached_channel_options(tmp_path),
+        client="agent-a",
+        runner=_channel_probe_runner([]),
+        now=1_000.0,
+    )
+
+    assert result.verified is True
+    assert result.cached is False
+
+
+# `_oob_options` resolves the default tenant domain, and `interactions_for_domain`
+# filters callbacks against it — the fixture host must live under it.
+def _oob_poll_payload_host() -> str:
+    from vigil_cli.oob import DEFAULT_OOB_DOMAIN
+
+    return f"agent-a.{DEFAULT_OOB_DOMAIN}"
+
+
+def _seed_oob_poll_engagement(install_root: Path, key: str) -> Path:
+    eng_dir = install_root / "agent" / "engagements" / key
+    eng_dir.mkdir(parents=True, exist_ok=True)
+    (eng_dir / "scope.json").write_text("{}", encoding="utf-8")
+    return eng_dir
+
+
+class _OobPollClient:
+    """AssessmentClient stand-in for `_oob_poll` (the backend boundary)."""
+
+    def __init__(self, probes: list[dict[str, object]]) -> None:
+        self._probes = probes
+        self.posts: list[tuple[str, dict]] = []
+
+    def get(self, endpoint: str) -> list[dict[str, object]]:
+        assert endpoint == "oob-probes"
+        return self._probes
+
+    def post(self, endpoint: str, payload: dict) -> dict:
+        self.posts.append((endpoint, payload))
+        return {"duplicate": False, "probe": {"technique": "ssrf"}}
+
+    def __enter__(self) -> _OobPollClient:
+        return self
+
+    def __exit__(self, *_exc: object) -> bool:
+        return False
+
+
+def _run_oob_poll(
+    monkeypatch: pytest.MonkeyPatch,
+    install_root: Path,
+    *,
+    log: str,
+    probes: list[dict[str, object]],
+    runner,
+    as_json: bool = True,
+) -> _OobPollClient:
+    from vigil_cli import main as main_module
+
+    key = "2026-08-25-120000-poll"
+    _seed_oob_poll_engagement(install_root, key)
+    client = _OobPollClient(probes)
+    monkeypatch.setattr(main_module, "docker_run_command", runner)
+    monkeypatch.setattr(main_module, "read_client_log", lambda *_a, **_k: log)
+    monkeypatch.setattr(
+        main_module, "poll_client_payload_host", lambda *_a, **_k: _oob_poll_payload_host()
+    )
+    monkeypatch.setattr(main_module, "_build_assessment_client", lambda *_a: client)
+    _pin_self_test_marker(monkeypatch, "cafebabe")
+    monkeypatch.setattr(
+        "vigil_cli.oob.client_payload_host",
+        lambda *_args, **_kwargs: _oob_poll_payload_host(),
+    )
+    args = SimpleNamespace(
+        engagement=key, select=False, client="agent-a", lines=2000, json=as_json
+    )
+    main_module._oob_poll(args, install_root, main_module._oob_options(install_root))
+    return client
+
+
+def test_oob_poll_zero_match_reports_channel_verified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A clean zero has to say whether the channel could have carried a callback.
+
+    Otherwise `matched 0` from a live channel and from a broken one are
+    byte-identical — and an OOB negative is used as evidence.
+    """
+    from vigil_cli.docker import DockerResult
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "vigil\n", "")
+        command = argv[-1]
+        if command.startswith("dig "):
+            return DockerResult(0, "203.0.113.10\n", "")
+        if command.startswith("curl "):
+            return DockerResult(0, "200", "")
+        if command.startswith("grep "):
+            return DockerResult(
+                0, f"[{_self_test_marker('cafebabe')}.{_oob_poll_payload_host()}] HTTP\n", ""
+            )
+        raise AssertionError(f"unexpected command: {command}")
+
+    _run_oob_poll(monkeypatch, tmp_path, log="", probes=[], runner=runner)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["matched"] == []
+    assert payload["channel_verified"] is True
+    assert payload["channel_check"]["dns_address"] == "203.0.113.10"
+    assert payload["channel_check"]["http_status"] == 200
+
+
+def test_oob_poll_loop_does_not_reprove_the_channel_every_empty_poll(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Waiting for a blind callback means polling in a loop.
+
+    The first empty poll pays for the end-to-end proof; the ones right behind it
+    must not, or every "nothing yet" costs an agent the full callback timeout to
+    learn what it already knew. The reused verdict is still reported honestly.
+    """
+    from vigil_cli.docker import DockerResult
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "vigil\n", "")
+        command = argv[-1]
+        if command.startswith("dig "):
+            return DockerResult(0, "203.0.113.10\n", "")
+        if command.startswith("curl "):
+            return DockerResult(0, "200", "")
+        if command.startswith("grep "):
+            return DockerResult(
+                0, f"[{_self_test_marker('cafebabe')}.{_oob_poll_payload_host()}] HTTP\n", ""
+            )
+        raise AssertionError(f"unexpected command: {command}")
+
+    def refuses(argv: list[str], **_: object) -> DockerResult:
+        raise AssertionError(f"second poll must not re-prove the channel: {argv[-1]}")
+
+    _run_oob_poll(monkeypatch, tmp_path, log="", probes=[], runner=runner)
+    first = json.loads(capsys.readouterr().out)
+    _run_oob_poll(monkeypatch, tmp_path, log="", probes=[], runner=refuses)
+    second = json.loads(capsys.readouterr().out)
+
+    assert first["channel_verified"] is True
+    assert first["channel_check"]["cached"] is False
+    # Same guarantee, no second round trip — and the caller can see it is reused.
+    assert second["channel_verified"] is True
+    assert second["channel_check"]["cached"] is True
+    assert second["channel_check"]["age_seconds"] >= 0
+    assert second["channel_check"]["dns_address"] == "203.0.113.10"
+
+
+def test_oob_poll_text_output_says_how_the_channel_verdict_was_obtained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Text mode carries the same freshness the JSON does — a cached verdict says so."""
+    from vigil_cli.docker import DockerResult
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "vigil\n", "")
+        command = argv[-1]
+        if command.startswith("dig "):
+            return DockerResult(0, "203.0.113.10\n", "")
+        if command.startswith("curl "):
+            return DockerResult(0, "200", "")
+        if command.startswith("grep "):
+            return DockerResult(
+                0, f"[{_self_test_marker('cafebabe')}.{_oob_poll_payload_host()}] HTTP\n", ""
+            )
+        raise AssertionError(f"unexpected command: {command}")
+
+    _run_oob_poll(monkeypatch, tmp_path, log="", probes=[], runner=runner, as_json=False)
+    assert "channel\tverified" in capsys.readouterr().out
+
+    _run_oob_poll(
+        monkeypatch,
+        tmp_path,
+        log="",
+        probes=[],
+        runner=lambda *_a, **_k: pytest.fail("channel must not be re-proved"),
+        as_json=False,
+    )
+    out = capsys.readouterr().out
+    assert "channel\tverified" in out
+    assert "checked=cached(" in out
+
+
+def test_oob_poll_zero_match_reports_an_unverified_channel_without_failing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A broken channel must be loud but must NOT block the caller."""
+    from vigil_cli.docker import DockerResult
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "vigil\n", "")
+        if argv[-1].startswith("dig "):
+            return DockerResult(9, "", "connection timed out")
+        raise AssertionError(f"unexpected command: {argv[-1]}")
+
+    _run_oob_poll(monkeypatch, tmp_path, log="", probes=[], runner=runner, as_json=False)
+
+    out = capsys.readouterr().out
+    assert "matched\t0\tunmatched\t0" in out
+    assert "channel\tUNVERIFIED" in out
+    assert "public DNS probe failed" in out
+    assert "not evidence that no callback occurred" in out
+
+
+def test_oob_poll_does_not_report_its_own_verification_markers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The zero-match channel check fires a REAL round trip into this same log.
+
+    Its markers must never come back as unclaimed callbacks: the operator reads
+    `unmatched` as "something hit the channel that no probe claims", and every
+    empty poll would otherwise add two synthetic entries that persist for the
+    life of the client — the check manufacturing the evidence it exists to
+    qualify.
+    """
+    from vigil_cli.docker import DockerResult
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "vigil\n", "")
+        command = argv[-1]
+        if command.startswith("dig "):
+            return DockerResult(0, "203.0.113.10\n", "")
+        if command.startswith("curl "):
+            return DockerResult(0, "200", "")
+        if command.startswith("grep "):
+            return DockerResult(
+                0, f"[{_self_test_marker('cafebabe')}.{_oob_poll_payload_host()}] HTTP\n", ""
+            )
+        raise AssertionError(f"unexpected command: {command}")
+
+    host = _oob_poll_payload_host()
+    log = (
+        f"[{_self_test_marker('cafebabe')}.{host}] Received DNS interaction (A) "
+        "from 203.0.113.10 at 2026-08-25 12:00:00\n"
+        f"[{_self_test_marker('cafebabe')}.{host}] Received HTTP interaction "
+        "from 203.0.113.10 at 2026-08-25 12:00:01\n"
+        f"[realstranger1.{host}] Received DNS interaction (A) "
+        "from 198.51.100.7 at 2026-08-25 12:00:02\n"
+    )
+    _run_oob_poll(monkeypatch, tmp_path, log=log, probes=[], runner=runner)
+
+    payload = json.loads(capsys.readouterr().out)
+    # The genuine unclaimed callback survives; only Vigil's own markers are dropped.
+    assert [item["full_host"] for item in payload["unmatched"]] == [f"realstranger1.{host}"]
+    assert payload["parsed"] == 1
+    assert payload["channel_verified"] is True
+
+
+def test_oob_poll_skips_the_channel_check_when_a_probe_correlated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A correlation already proves the channel works — don't pay for the round trip."""
+    from vigil_cli.docker import DockerResult
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "vigil\n", "")
+        raise AssertionError(f"channel check must not run: {argv[-1]}")
+
+    log = (
+        f"[knownnonce01.{_oob_poll_payload_host()}] Received DNS interaction (A) "
+        "from 203.0.113.9 at 2026-08-25 12:00:00\n"
+    )
+    client = _run_oob_poll(
+        monkeypatch,
+        tmp_path,
+        log=log,
+        probes=[
+            {
+                "nonce": "knownnonce01",
+                "client_name": "agent-a",
+                "client_payload_host": _oob_poll_payload_host(),
+            }
+        ],
+        runner=runner,
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert [entry["nonce"] for entry in payload["matched"]] == ["knownnonce01"]
+    assert payload["channel_verified"] is None
+    assert "channel_check" not in payload
+    assert client.posts and client.posts[0][0] == "oob-probes/interactions"
+
+
 def test_oob_test_fails_when_public_dns_probe_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3391,9 +4455,7 @@ def test_oob_test_fails_when_public_dns_probe_fails(
             return DockerResult(9, "", "connection timed out")
         raise AssertionError(f"unexpected command: {command}")
 
-    monkeypatch.setattr(
-        "vigil_cli.oob.mint_nonce", lambda **_: "vigil-test-deadbeef"
-    )
+    _pin_self_test_marker(monkeypatch, "deadbeef")
     monkeypatch.setattr(
         "vigil_cli.oob.list_running_oob_clients", lambda *_args, **_kwargs: ["probe"]
     )
@@ -3433,15 +4495,13 @@ def test_oob_test_reports_bounded_dns_and_http_success(
         if command.startswith("grep "):
             return DockerResult(
                 0,
-                "[vigil-test-cafebabe.client-id.tenant.oob.example.test] "
+                f"[{marker}.client-id.tenant.oob.example.test] "
                 "Received HTTP interaction\n",
                 "",
             )
         raise AssertionError(f"unexpected command: {command}")
 
-    monkeypatch.setattr(
-        "vigil_cli.oob.mint_nonce", lambda **_: "vigil-test-cafebabe"
-    )
+    marker = _pin_self_test_marker(monkeypatch, "cafebabe")
     monkeypatch.setattr(
         "vigil_cli.oob.list_running_oob_clients", lambda *_args, **_kwargs: ["probe"]
     )
@@ -3459,14 +4519,14 @@ def test_oob_test_reports_bounded_dns_and_http_success(
 
     assert capsys.readouterr().out == (
         "oob test\tok\tdomain=tenant.oob.example.test"
-        "\tmarker=vigil-test-cafebabe\tdns=203.0.113.10\thttp=200\n"
+        f"\tmarker={marker}\tdns=203.0.113.10\thttp=200\n"
     )
     assert len(commands) == 3
     assert all(
-        "vigil-test-cafebabe.client-id.tenant.oob.example.test" in command
+        f"{marker}.client-id.tenant.oob.example.test" in command
         for command in commands[:2]
     )
-    assert "vigil-test-cafebabe" in commands[2]
+    assert marker in commands[2]
     assert all("tail " not in command for command in commands)
 
 
@@ -3486,9 +4546,7 @@ def test_oob_test_fails_when_public_http_probe_fails(
             return DockerResult(28, "000", "operation timed out")
         raise AssertionError(f"unexpected command: {command}")
 
-    monkeypatch.setattr(
-        "vigil_cli.oob.mint_nonce", lambda **_: "vigil-test-bad0cafe"
-    )
+    _pin_self_test_marker(monkeypatch, "bad0cafe")
     monkeypatch.setattr(
         "vigil_cli.oob.list_running_oob_clients", lambda *_args, **_kwargs: ["probe"]
     )
@@ -3527,9 +4585,7 @@ def test_oob_test_fails_when_callback_does_not_reach_client_log(
     monotonic = iter((0.0, 0.0, 11.0))
     monkeypatch.setattr("vigil_cli.oob.time.monotonic", lambda: next(monotonic))
     monkeypatch.setattr("vigil_cli.oob.time.sleep", lambda _seconds: None)
-    monkeypatch.setattr(
-        "vigil_cli.oob.mint_nonce", lambda **_: "vigil-test-nointeraction"
-    )
+    _pin_self_test_marker(monkeypatch, "nointeraction")
     monkeypatch.setattr(
         "vigil_cli.oob.list_running_oob_clients", lambda *_args, **_kwargs: ["probe"]
     )
@@ -3564,9 +4620,7 @@ def test_oob_test_rejects_http_redirects(
             return DockerResult(0, "308", "")
         raise AssertionError(f"unexpected command: {command}")
 
-    monkeypatch.setattr(
-        "vigil_cli.oob.mint_nonce", lambda **_: "vigil-test-redirect"
-    )
+    _pin_self_test_marker(monkeypatch, "redirect")
     monkeypatch.setattr(
         "vigil_cli.oob.list_running_oob_clients", lambda *_args, **_kwargs: ["probe"]
     )
@@ -13059,7 +14113,6 @@ def test_list_attempts_build_query_emits_route_param_names() -> None:
     accepts (notably --surface -> surface_id, --host -> target_host); a drift here
     silently returns unfiltered results and no round-trip test would catch it."""
     from types import SimpleNamespace
-    from urllib.parse import parse_qs, urlparse
 
     from assess.commands.coverage import _attempts_query as _build_query
 
