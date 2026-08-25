@@ -86,8 +86,10 @@ def _merge(client, source_slug: str, target_slug: str):
     )
 
 
-_HIGH_VECTOR = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"
-_MEDIUM_VECTOR = "CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:U/C:L/I:L/A:N"
+# Both vectors compute EXACTLY the score they are paired with below — the
+# write-time cvss_score<->cvss_vector check rejects a fixture that does not.
+_HIGH_VECTOR = "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N"  # 8.1
+_MEDIUM_VECTOR = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"  # 5.3
 
 
 def _create_cvss_finding(
@@ -591,3 +593,155 @@ def test_fractional_merge_pointers_are_never_coerced_to_finding_ids(
     assert "valid finding id" in merge_blockers["MI-301"]
     assert "valid finding id" in merge_blockers["MI-302"]
     assert "valid finding id" in merge_blockers["MI-303"]
+
+
+# --------------------------------------------------------------------------- #
+# CVSS is a pair: merge must never assemble one out of two findings
+# --------------------------------------------------------------------------- #
+
+
+def _create_finding_with_details(client, slug: str, *, severity: str, details: dict) -> dict:
+    response = client.post(
+        f"{ASSESSMENT_BASE}/findings",
+        json={
+            "slug": slug,
+            "title": f"Finding {slug}",
+            "severity": severity,
+            "workflow_status": "active",
+            "verification_state": "verified",
+            "verification_disposition": "confirmed",
+            "defect_family": "merge-integrity",
+            "auth_context": "anonymous",
+            "canonical_location": f"https://merge.example/{slug.lower()}",
+            "summary": f"Summary for {slug}",
+            "evidence_ref": f"evidence/{slug.lower()}.json",
+            "source_name": "test-agent",
+            "details": details,
+            "provenance": {"agent_name": "test-agent"},
+            "links": [],
+        },
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["finding"]
+
+
+def test_merge_never_completes_a_half_cvss_pair_from_the_losing_side(
+    client, isolate_settings
+):
+    """Filling only the half the winner lacks manufactures a score its own
+    vector never produced — a mismatch NEITHER input finding had."""
+    _seed_engagement(client, isolate_settings)
+    _create_finding_with_details(
+        client,
+        "CV-901",
+        severity="high",
+        details={"cvss_vector": _HIGH_VECTOR, "impact": "Full account takeover"},
+    )
+    _create_finding_with_details(
+        client,
+        "CV-902",
+        severity="medium",
+        details={"cvss_score": 5.3, "cvss_vector": _MEDIUM_VECTOR, "impact": "Limited"},
+    )
+
+    response = _merge(client, "CV-902", "CV-901")
+    assert response.status_code == 200, response.text
+
+    details = json.loads(
+        client.get(f"{ASSESSMENT_BASE}/findings/CV-901").json()["details_json"]
+    )
+    assert details["cvss_vector"] == _HIGH_VECTOR
+    # The severity winner declared no score, so it inherits none — the loser's
+    # 5.3 belongs to the loser's vector, not to this one.
+    assert "cvss_score" not in details
+
+
+@pytest.mark.parametrize(
+    ("planted", "expected_blocker", "expected_in_warning"),
+    [
+        ({"cvss_score": 4.4}, "cvss_vector_score_mismatch", "4.4"),
+        ({"cvss_vector": "CVSS:3.1/AV:N"}, "cvss_vector_invalid", "CVSS:3.1/AV:N"),
+    ],
+    ids=["score_mismatch", "unparseable_vector"],
+)
+def test_merge_completes_over_a_legacy_cvss_defect_and_reports_it(
+    client, isolate_settings, planted, expected_blocker, expected_in_warning
+):
+    """Consolidating duplicates must never be refused over data the caller did
+    not author.
+
+    The atomic pair-move above means a contradictory merged pair always arrived
+    whole on ONE input — merge cannot manufacture one. Blocking would strand a
+    correct consolidation mid-engagement and leave two duplicates in the report,
+    so the merge completes, the response says what is wrong, and report-readiness
+    still refuses to ship the finding. The defect is planted directly in the row
+    because the write path rejects authoring one.
+    """
+    _seed_engagement(client, isolate_settings)
+    _create_finding_with_details(
+        client,
+        "CV-903",
+        severity="high",
+        details={"cvss_score": 8.1, "cvss_vector": _HIGH_VECTOR, "impact": "Takeover"},
+    )
+    _create_finding_with_details(
+        client,
+        "CV-904",
+        severity="medium",
+        details={"cvss_score": 5.3, "cvss_vector": _MEDIUM_VECTOR, "impact": "Limited"},
+    )
+    with db_module.get_connection() as connection:
+        stored = json.loads(
+            connection.execute(
+                "SELECT details_json FROM assessment_findings WHERE slug = ?",
+                ("CV-903",),
+            ).fetchone()[0]
+        )
+        stored.update(planted)
+        connection.execute(
+            "UPDATE assessment_findings SET details_json = ? WHERE slug = ?",
+            (json.dumps(stored), "CV-903"),
+        )
+
+    response = _merge(client, "CV-904", "CV-903")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    # The consolidation actually happened — the duplicate is gone from the report.
+    assert body["source"]["workflow_status"] == "merged"
+    assert body["target"]["slug"] == "CV-903"
+    # ... and the contradiction is stated, with the verb that repairs it.
+    assert len(body["warnings"]) == 1, body["warnings"]
+    warning = body["warnings"][0]
+    assert expected_in_warning in warning
+    assert "vigil assess finding update CV-903" in warning
+
+    # The backstop that actually keeps it out of a submission is still armed.
+    blockers = client.get(f"{ASSESSMENT_BASE}/report-readiness").json()["blockers"]
+    assert [
+        blocker
+        for blocker in blockers
+        if blocker.get("slug") == "CV-903" and blocker["kind"] == expected_blocker
+    ], blockers
+
+
+def test_a_clean_merge_reports_no_warnings(client, isolate_settings):
+    """The ``warnings`` key is unconditional so a caller can read it blind."""
+    _seed_engagement(client, isolate_settings)
+    _create_finding_with_details(
+        client,
+        "CV-905",
+        severity="high",
+        details={"cvss_score": 8.1, "cvss_vector": _HIGH_VECTOR, "impact": "Takeover"},
+    )
+    _create_finding_with_details(
+        client,
+        "CV-906",
+        severity="medium",
+        details={"cvss_score": 5.3, "cvss_vector": _MEDIUM_VECTOR, "impact": "Limited"},
+    )
+
+    response = _merge(client, "CV-906", "CV-905")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["warnings"] == []

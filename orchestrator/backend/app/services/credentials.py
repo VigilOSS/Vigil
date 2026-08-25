@@ -15,7 +15,9 @@ import base64
 import hashlib
 import json
 import re
+from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 from .. import db
 
@@ -93,8 +95,134 @@ def load_identities(
         else DEFAULT_IDENTITY
     )
     rows = db.list_credentials(engagement_id, host=host, include_dead=include_dead)
+    rows = [_project_list_liveness(row, requested_host=host) for row in rows]
     identities = {row["identity_name"]: row for row in rows}
     return {"identities": identities, "active_identity": active}
+
+
+def _project_list_liveness(
+    material: dict[str, Any], *, requested_host: str | None
+) -> dict[str, Any]:
+    """Return the effective liveness view for one listed identity.
+
+    The typed ``liveness_verdict``/``last_probed_at`` columns predate scoped
+    observations and are only a legacy global projection.  A later origin-scoped
+    probe must therefore win when the list has a defensible host (an explicit
+    ``--host`` or exactly one usable cookie host).  Without such a host, a newer
+    scoped observation cannot be truthfully promoted to a global verdict, so the
+    aggregate is ``unknown`` at that observation's time.
+
+    This is a read projection only.  It neither mutates credential lifecycle
+    state nor crosses identity rows, and expired scoped observations never win.
+    """
+    projected = dict(material)
+    observations = [
+        {
+            "scope_key": str(item.get("scope_key") or ""),
+            "verdict": str(item.get("verdict") or ""),
+            "observed_at": str(item.get("observed_at") or ""),
+            "typed": True,
+        }
+        for item in (material.get("liveness_observations") or [])
+        if isinstance(item, dict)
+        and item.get("fresh") is True
+        and str(item.get("verdict") or "") in {"live", "dead", "unknown"}
+        and str(item.get("observed_at") or "")
+    ]
+    legacy_verdict = str(material.get("liveness_verdict") or "")
+    legacy_probed_at = str(material.get("last_probed_at") or "")
+    if legacy_verdict in {"live", "dead", "unknown"} and legacy_probed_at:
+        observations.append(
+            {
+                "scope_key": "",
+                "verdict": legacy_verdict,
+                "observed_at": legacy_probed_at,
+                "typed": False,
+            }
+        )
+    if not observations:
+        if legacy_verdict == "dead" and material.get("state") != "dead":
+            projected["liveness_verdict"] = "unknown"
+            projected["last_probed_at"] = None
+        return projected
+
+    host = _normalized_host(requested_host or "")
+    if not host:
+        material_hosts = {
+            normalized
+            for bucket in (material.get("host_cookies") or [])
+            if isinstance(bucket, dict)
+            and isinstance(bucket.get("cookies"), dict)
+            and bucket["cookies"]
+            if (normalized := _normalized_host(str(bucket.get("host") or "")))
+        }
+        if len(material_hosts) == 1:
+            host = next(iter(material_hosts))
+
+    if host:
+        compatible = [
+            item
+            for item in observations
+            if not item["scope_key"]
+            or _origin_host(item["scope_key"]) == host
+        ]
+        if compatible:
+            chosen = max(compatible, key=_liveness_order_key)
+            projected["liveness_verdict"] = chosen["verdict"]
+            projected["last_probed_at"] = chosen["observed_at"]
+        return projected
+
+    chosen = max(observations, key=_liveness_order_key)
+    if chosen["scope_key"]:
+        # An unscoped list cannot claim that one application-scoped observation
+        # is the identity's global status.  Nor can its timestamp be shown as an
+        # unqualified "last probed" time: doing so beside ``unknown`` still
+        # implies the scoped verdict applies everywhere.
+        projected["liveness_verdict"] = "unknown"
+        projected["last_probed_at"] = None
+    elif chosen["verdict"] == "dead" and material.get("state") != "dead":
+        # ``state=available`` is the lifecycle authority.  A legacy global dead
+        # column beside it is stale/incompatible state (commonly left by an old
+        # probe before refreshed material or scoped liveness existed), never a
+        # current death verdict.
+        projected["liveness_verdict"] = "unknown"
+        projected["last_probed_at"] = None
+    else:
+        projected["liveness_verdict"] = chosen["verdict"]
+        projected["last_probed_at"] = chosen["observed_at"]
+    return projected
+
+
+def _normalized_host(value: str) -> str:
+    raw = str(value or "").strip().rstrip(".")
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw if "://" in raw else f"//{raw}")
+        return str(parsed.hostname or "").rstrip(".").lower()
+    except ValueError:
+        return ""
+
+
+def _origin_host(scope_key: str) -> str:
+    try:
+        parsed = urlparse(scope_key)
+    except ValueError:
+        return ""
+    if parsed.scheme not in {"http", "https"}:
+        return ""
+    return str(parsed.hostname or "").rstrip(".").lower()
+
+
+def _liveness_order_key(item: dict[str, Any]) -> tuple[datetime, bool]:
+    raw = str(item.get("observed_at") or "").replace("Z", "+00:00")
+    try:
+        observed_at = datetime.fromisoformat(raw)
+    except ValueError:
+        observed_at = datetime.min.replace(tzinfo=timezone.utc)
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=timezone.utc)
+    return observed_at.astimezone(timezone.utc), bool(item.get("typed"))
 
 
 def resolve_identity(

@@ -135,6 +135,48 @@ def _apply_output_retention(
     return result
 
 
+def _wrapper_output_truth(
+    *,
+    stdout_bytes: int | None,
+    stderr_bytes: int | None,
+    stdout_sha256: str | None,
+    stderr_sha256: str | None,
+) -> dict[str, Any]:
+    """Columns recording the byte truth a non-host_exec wrapper measured itself.
+
+    Only the ``host_exec`` lane spills through this module's retention
+    machinery. Every other route — ``vigil assess kali/<tool>`` above all —
+    streams its output to a file the CLI wrapper owns, so the wrapper is the
+    only party that can see how many bytes were WRITTEN (the finalize payload
+    carries a head+tail-truncated preview, which would undercount). Without
+    these fields the row keeps the pre-exec insert's placeholders forever, and a
+    run with real output reads as ``stdout_bytes=0`` / ``empty`` — evidence that
+    exists on disk looks destroyed.
+
+    Returns ``{}`` when the wrapper reported nothing, leaving the row untouched
+    rather than guessing.
+    """
+    fields: dict[str, Any] = {}
+    total = 0
+    for stream, size, digest in (
+        ("stdout", stdout_bytes, stdout_sha256),
+        ("stderr", stderr_bytes, stderr_sha256),
+    ):
+        if size is None:
+            continue
+        fields[f"{stream}_bytes"] = int(size)
+        fields[f"{stream}_sha256"] = str(digest or "")
+        total += int(size)
+    if not fields:
+        return {}
+    # ``retained``, not ``artifact``: the full bytes live in the wrapper's own
+    # spill named by this row's ``stdout_path``/``stderr_path``, not in a
+    # backend-published verified-output artifact, and ``artifact`` is the status
+    # readers use to mean the latter.
+    fields["output_retention_status"] = "retained" if total else "empty"
+    return fields
+
+
 def _roll_up_output_retention_status(
     stdout_retention: dict[str, Any],
     stderr_retention: dict[str, Any],
@@ -1667,6 +1709,10 @@ def finalize_command_run(
     duration_ms: int | None = None,
     stdout_preview: str | None = None,
     stderr_preview: str | None = None,
+    stdout_bytes: int | None = None,
+    stderr_bytes: int | None = None,
+    stdout_sha256: str | None = None,
+    stderr_sha256: str | None = None,
     timed_out: bool = False,
     output_quiesced: bool = True,
     partial_results: bool = False,
@@ -1985,6 +2031,15 @@ def finalize_command_run(
             if host_stderr_retention is None and stderr_preview is not None:
                 sets.append("stderr_preview = ?")
                 values.append(stderr_preview)
+            if host_stdout_retention is None and host_stderr_retention is None:
+                for column, value in _wrapper_output_truth(
+                    stdout_bytes=stdout_bytes,
+                    stderr_bytes=stderr_bytes,
+                    stdout_sha256=stdout_sha256,
+                    stderr_sha256=stderr_sha256,
+                ).items():
+                    sets.append(f"{column} = ?")
+                    values.append(value)
             if peak_rss_bytes is not None:
                 sets.append("peak_rss_bytes = ?")
                 values.append(int(peak_rss_bytes))

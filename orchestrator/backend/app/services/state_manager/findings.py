@@ -41,6 +41,7 @@ from ._common import (
     _slugify,
     _stronger_severity,
 )
+from .cvss import CvssVectorError, base_score
 from .links import _is_root_cause_link, _upsert_finding_link
 
 CODE_SNAPSHOT_PROVENANCE_KEY = "code_snapshot"
@@ -709,6 +710,88 @@ def _semantic_finding_match(
     ).fetchone()
     return dict(row) if row is not None else None
 
+
+# CVSS is a PAIR: the vector is the derivation and the score is its result. When
+# they disagree, every downstream consumer that reads only one of them (severity
+# banding, the submission export, the report render) states something the other
+# half contradicts.
+_CVSS_KEYS = ("cvss_score", "cvss_vector")
+# CVSS scores are published to one decimal; anything closer than half a step is
+# float noise, not an authoring error. Same threshold the readiness backstop uses.
+_CVSS_SCORE_TOLERANCE = 0.05
+
+
+def _cvss_pair_disagreement(details: dict[str, Any]) -> tuple[str, str] | None:
+    """Describe how ``details``' CVSS pair contradicts itself, or ``None``.
+
+    Returns ``(kind, message)`` where ``kind`` is ``vector_invalid``,
+    ``score_not_numeric``, or ``score_mismatch``. Kept separate from the
+    write-time gate so the same judgement can be REPORTED instead of enforced
+    where refusing costs more than the contradiction — see ``merge_findings``.
+    """
+    vector = details.get("cvss_vector")
+    if vector is None:
+        return None
+    try:
+        computed = base_score(str(vector))
+    except CvssVectorError as exc:
+        return (
+            "vector_invalid",
+            f"details.cvss_vector '{vector}' is not a valid CVSS v3.1 base "
+            f"vector: {exc}",
+        )
+    score = details.get("cvss_score")
+    if score is None:
+        return None
+    try:
+        stored = float(score)
+    except (TypeError, ValueError):
+        return (
+            "score_not_numeric",
+            f"details.cvss_score must be a number, got {score!r}",
+        )
+    if abs(stored - computed) >= _CVSS_SCORE_TOLERANCE:
+        return (
+            "score_mismatch",
+            f"details.cvss_score={stored} disagrees with details.cvss_vector "
+            f"'{vector}', which computes to {computed}; correct whichever of "
+            "the two is wrong",
+        )
+    return None
+
+
+def _validate_cvss_pair(
+    authored_details: dict[str, Any], effective_details: dict[str, Any]
+) -> None:
+    """Reject a ``cvss_score`` that contradicts its own ``cvss_vector``, on write.
+
+    ``authored_details`` is what this write actually CONTRIBUTES (the caller
+    applies the same empty-value filter the merge write does, so a key whose
+    value never lands is not authored); ``effective_details`` is the pair as it
+    will be stored. The gate fires only when the write authors one of the two
+    keys and judges the EFFECTIVE MERGED pair — so a patch supplying just a
+    score is scored against the stored vector. Deliberately not "recompute and
+    overwrite": a silent correction hides the authoring error that produced it.
+
+    A write authoring neither key is never blocked, so a row that already holds
+    a legacy mismatch stays editable — otherwise the mismatch would trap the
+    very patch that fixes it. The ``cvss_vector_score_mismatch`` /
+    ``cvss_vector_invalid`` report-readiness blockers remain the backstop for
+    those pre-existing rows.
+    """
+    if not any(key in authored_details for key in _CVSS_KEYS):
+        return
+    problem = _cvss_pair_disagreement(effective_details)
+    if problem is None:
+        return
+    kind, message = problem
+    if kind == "vector_invalid" and "cvss_vector" not in authored_details:
+        # The STORED vector was already broken; readiness owns it. Blocking here
+        # would strand every later edit to the finding.
+        return
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=message)
+
+
 def create_finding(
     engagement_id: int,
     *,
@@ -895,6 +978,28 @@ def create_finding(
                     _json_object(existing["details_json"]) if existing is not None else {}
                 ),
             )
+        # Every finding write — record, `finding update` (patch_finding), and the
+        # verify checkpoint — funnels through here, so this is the one layer that
+        # can hold cvss_score and cvss_vector to each other at write time. What
+        # the write AUTHORS has to be computed the same way the write itself
+        # stores it, or a value that never lands would let pre-existing data
+        # reject a patch that never touched the pair.
+        if existing is None or details_mode == "replace":
+            # Both store the payload verbatim (`_json_text(details)`).
+            authored_details = dict(details or {})
+            effective_details = authored_details
+        else:
+            # Merge mode drops empty incoming values, so an empty CVSS key is a
+            # no-op, not an authoring act.
+            authored_details = {
+                key: value
+                for key, value in (details or {}).items()
+                if value not in (None, "", [], {})
+            }
+            effective_details = _json_object(
+                _merge_object_text(existing["details_json"], details)
+            )
+        _validate_cvss_pair(authored_details, effective_details)
         before_state = _finding_state_snapshot(existing) if existing is not None else None
         if existing is None:
             # CR-31: allocate the slug + INSERT under the (engagement_id, slug)
@@ -1452,6 +1557,19 @@ def verify_finding(
         normalized_disposition = _normalize_verification_disposition(disposition)
     if normalized_disposition == "none" and disposition != "disputed":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="verification disposition cannot be none")
+    if new_severity and normalized_disposition != "downgraded":
+        # ``new_severity`` is only ever consumed by the downgraded branch. Any
+        # other disposition silently dropped it, so a verifier who believed they
+        # had re-banded the finding got a 200 and the OLD severity. Verification
+        # is not the severity-editing verb; ``patch_finding`` owns that axis.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"new_severity applies only to disposition='downgraded' (got "
+                f"'{disposition}'); change the band with "
+                f"`vigil assess finding update {slug} --severity {new_severity}`"
+            ),
+        )
 
     with _common.get_connection() as connection:
         slug = _resolve_existing_finding_slug(connection, engagement.id, slug)
@@ -1801,8 +1919,7 @@ def merge_findings(
         # (kept below via `_stronger_severity`), NOT the confidence winner. Otherwise
         # a more-progressed but lower-severity duplicate leaves a higher-severity
         # canonical carrying the duplicate's weaker CVSS and trips the severity↔CVSS
-        # readiness gate. Copy them from the severity-winning side when it actually
-        # has them (never fabricate a missing score — the gate can still flag that).
+        # readiness gate.
         severity_winner_details = (
             source_details
             if (
@@ -1811,10 +1928,37 @@ def merge_findings(
             )
             else target_details
         )
-        for _cvss_key in ("cvss_score", "cvss_vector"):
-            _cvss_value = severity_winner_details.get(_cvss_key)
-            if _cvss_value not in (None, "", [], {}):
-                merged_details_obj[_cvss_key] = _cvss_value
+        # The pair moves ATOMICALLY. Filling only the half the winner lacks from
+        # the loser manufactures a score that its own vector never produced — a
+        # mismatch neither input finding had. Once the winner declares either
+        # half, its absences win too.
+        if any(
+            severity_winner_details.get(key) not in (None, "", [], {})
+            for key in _CVSS_KEYS
+        ):
+            for _cvss_key in _CVSS_KEYS:
+                _cvss_value = severity_winner_details.get(_cvss_key)
+                if _cvss_value not in (None, "", [], {}):
+                    merged_details_obj[_cvss_key] = _cvss_value
+                else:
+                    merged_details_obj.pop(_cvss_key, None)
+        # A pair that still disagrees arrived WHOLE on one of the two inputs —
+        # the atomic move above means merge can never assemble a mismatch that
+        # neither side had. So refusing here would dead-end a correct duplicate
+        # consolidation over a data defect this caller did not author, and the
+        # two duplicates would stay separate in the report. Merge instead, and
+        # say so: `cvss_vector_score_mismatch` / `cvss_vector_invalid` in
+        # report-readiness still block the report until the pair is repaired.
+        merge_warnings: list[str] = []
+        cvss_problem = _cvss_pair_disagreement(merged_details_obj)
+        if cvss_problem is not None:
+            merge_warnings.append(
+                f"merge completed, but {target_slug} carries a contradictory CVSS "
+                f"pair inherited from one of the two findings: {cvss_problem[1]}. "
+                f"Repair it with `vigil assess finding update {target_slug} "
+                "--details-inline '{\"cvss_score\": <n>, \"cvss_vector\": \"<v>\"}'` "
+                "— the report is blocked until the pair agrees."
+            )
         merged_details = _json_text(merged_details_obj)
         merged_provenance_payload = _json_object(target["provenance_json"])
         merged_provenance_payload.update(_json_object(source["provenance_json"]))
@@ -1990,6 +2134,9 @@ def merge_findings(
         "source": _serialize_finding_record(source_row),
         "target": _serialize_finding_record(target_row),
         "link": link,
+        # Always present so a consumer can read it unconditionally; non-empty
+        # only when the merge carried a pre-existing defect into the canonical.
+        "warnings": merge_warnings,
     }
 
 def list_findings(
