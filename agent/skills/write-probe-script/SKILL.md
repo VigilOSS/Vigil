@@ -222,6 +222,7 @@ def main():
     ap.add_argument("--marker", default="root:x:0:0")
     ap.add_argument("--out", default="")
     args = ap.parse_args()
+    # scoped_host(args.target)  ← keep scaffold-probe's scope guard here; elided for length.
 
     good_status, _ = fetch(f"{args.target}?{args.param}={args.good}")
     pay_status, pay_body = fetch(f"{args.target}?{args.param}={args.payload}")
@@ -318,6 +319,25 @@ registered artifact at the end.
 - **Hard-coding the OOB callback host.** Mint a fresh nonce per payload with
   `vigil oob mint` and pass it as an argument. A baked-in host cannot be correlated
   and pollutes the next probe's results.
+- **Letting a caller-supplied host authorize itself.** Nothing below the probe
+  refuses by host — `vigil assess kali` never blocks an outbound request on scope
+  (`agent/shared-constraints.md §1`), so the script's own ALLOW list is the only
+  guard there is. A `--target` / `--tenant` / `--<vendor>-host` argument is untrusted
+  *input*, not an authorization: normalize it to a bare lowercase hostname
+  (`urlsplit` → `.hostname`, strip the trailing dot, drop the port), match it against
+  `scope.json`'s `hosts` + `discovered_hosts` — reading the file directly, stdlib-only
+  — and build the allow list from **that result**, never from argv. `vigil assess
+  scaffold-probe` emits a `scoped_host()` helper that does exactly this; keep it.
+- **Reconfiguring by union instead of by replacement.** When a probe is re-pointed at
+  a different tenant, **replace** the allow list; adding to it leaves every previous
+  tenant permanently authorized, so the script silently accumulates reach nobody
+  re-approved.
+- **Shelling out to `vigil` from inside the script.** There is no `vigil` executable
+  in the runtime container — `command -v vigil` finds nothing, so a `subprocess` call
+  to `vigil assess ...` passes when you test it on the host and dies with exit 127 on
+  the only approved target-execution route. Parse any manifest or scope file with the
+  stdlib off the `/engagements` bind mount, and make the recording calls from the host
+  after the run returns.
 - **Writing outside the engagement.** `/tmp` and `/data` inside the container are
   non-engagement paths — outputs there are invisible from the host and lost on
   restart. Always write under `/engagements/$ENGAGEMENT_KEY/scans/` (and author

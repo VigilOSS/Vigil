@@ -138,7 +138,32 @@ plus `vigil assess` helpers for backend state writes.
 
 If a required target-facing tool is missing from the runtime image, rebuild the
 image rather than falling back to host or Docker-side execution paths — the
-runtime image is the single source of truth for the tool surface.
+runtime image is the single source of truth for the tool surface. A skill's tool
+list is not proof of installation: `vigil assess kali exec ... -- command -v <tool>`
+before you plan a step around a tool you have not run in this engagement.
+
+### What the container has, and what it does not
+
+The runtime is a tool sandbox, not a copy of your host. These gaps fail silently or
+mid-run, so treat them as settled facts rather than rediscovering them:
+
+- **`/engagements` is the bind mount.** `/engagements/$ENGAGEMENT_KEY/...` is the
+  same bytes as the host's `$DIR/...` (§11); it is the only path whose contents
+  survive back to the host.
+- **There is no `vigil` executable in the container** — `command -v vigil` finds
+  nothing. A helper script that shells out to `vigil assess ...` works when you
+  test it on the host and dies with exit 127 on the only approved target-execution
+  route. A script you run inside the runtime must be self-contained — stdlib
+  (preferred) or the image's own installed libraries, **never the CLI**: pass what
+  it needs in as argv, parse manifests and `scope.json` off the bind mount
+  directly, and make the `vigil assess` recording calls from the host once the run
+  returns.
+- **The `aws` binary is installed but holds no credentials.** No `~/.aws`, no
+  `AWS_PROFILE`, no `AWS_ACCESS_KEY_ID` is injected, so every signed call returns
+  `NoCredentials`. Unsigned calls (`--no-sign-request`, unauthenticated Cognito)
+  belong here; signed ones run on the host via `vigil assess host-exec`, which
+  writes the same audit row (`route='host_exec'`) and so is an audited route, not
+  a bypass of §2.
 
 **Reserve `echo` inside `vigil assess kali` commands for functional output only.**
 Stdout is captured to the audit log, not shown to the user, and commentary-echoes
@@ -730,8 +755,9 @@ Engagement artifacts live at one physical location on disk but have two names de
 - **`vigil assess kali ...` invocations MUST reference paths as
   `/engagements/$ENGAGEMENT_KEY/...`** in their command argv — the host path `$DIR` is not valid
   inside the container. Writing to `/tmp` or `/data` for engagement-scoped artifacts loses them:
-  those are container-local scratch paths outside the bind mount, so anything written there
-  doesn't survive outside the shared-infra conventions. (Different `/tmp` than §10's host-side
+  `/tmp` is container-local scratch that dies with the container, and `/data` — while a real bind
+  mount — is the runtime's shared, engagement-agnostic data dir, so anything written there is
+  detached from the engagement and invisible at `$DIR`. (Different `/tmp` than §10's host-side
   `/tmp/<type>-<slug>.json` payload convention above — that one is a transient JSON file for a
   host-side `vigil assess` call, never written inside the Kali container.)
 
