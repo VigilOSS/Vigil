@@ -69,8 +69,37 @@ def _classify_liveness(
     haystack: str | None,
     liveness: dict[str, Any] | None,
 ) -> tuple[str, str]:
-    """Delegate to the assess runtime's single liveness classifier."""
+    """Delegate to the assess runtime's single liveness classifier.
+
+    The full argument list is passed through deliberately: `vigil auth status
+    --probe` / `vigil auth keepalive` and `vigil assess auth status --probe`
+    must not be able to reach DIFFERENT verdicts for the same identity and the
+    same response, so this mirror takes exactly the classifier's parameters —
+    nothing this surface can omit and the other can supply.
+    """
     return _load_liveness_classifier()(status, haystack, liveness)
+
+
+def _probe_scope_key(url: str | None, explicit_scope: str = "") -> str:
+    """Mirror the assess runtime's safe liveness-observation scope."""
+    explicit = str(explicit_scope or "").strip()
+    if explicit:
+        return explicit
+    parsed = urlparse(str(url or ""))
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return ""
+    try:
+        port = parsed.port
+    except ValueError:
+        return ""
+    host = parsed.hostname.rstrip(".").lower()
+    if ":" in host:
+        host = f"[{host}]"
+    default_port = (parsed.scheme == "https" and port == 443) or (
+        parsed.scheme == "http" and port == 80
+    )
+    port_suffix = "" if port is None or default_port else f":{port}"
+    return f"{parsed.scheme}://{host}{port_suffix}"
 
 # HTTP verbs that mutate server state and therefore need a CSRF double-submit
 # header. Duplicated (not imported) from ``assess.lib.kali._STATE_CHANGING_METHODS``
@@ -214,8 +243,25 @@ def _active_material(engagement_dir: Path) -> dict[str, Any]:
     return material if isinstance(material, dict) else {}
 
 
-def status_line(engagement_dir: Path) -> str:
-    material = _active_material(engagement_dir)
+def status_line(
+    engagement_dir: Path,
+    identity: str | None = None,
+    *,
+    scope_key: str = "",
+) -> str:
+    resolved_name: str | None = None
+    if identity is None:
+        material = _active_material(engagement_dir)
+        resolved_name = str(material.get("identity_name") or "") or None
+    else:
+        query = urlencode({"identity": identity, "scope": scope_key})
+        resolved = _api(engagement_dir, "GET", f"/resolve?{query}")
+        raw_material = resolved.get("material") if isinstance(resolved, dict) else None
+        material = raw_material if isinstance(raw_material, dict) else {}
+        resolved_identity = (
+            resolved.get("identity_name") if isinstance(resolved, dict) else None
+        )
+        resolved_name = str(resolved_identity) if resolved_identity else identity
     cookies_val = material.get("cookies")
     cookies = cookies_val if isinstance(cookies_val, dict) else {}
     headers_val = material.get("headers")
@@ -234,7 +280,7 @@ def status_line(engagement_dir: Path) -> str:
     return (
         f"{_key(engagement_dir)}\tmode={material.get('mode', 'none')}"
         f"\tstate={material.get('state', 'none')}"
-        f"\tidentity={material.get('identity_name', '-')}"
+        f"\tidentity={resolved_name or material.get('identity_name', '-')}"
         f"\tcookies={len(cookies)}\theaders={len(headers)}"
         f"\texpires_at={expires_at or '-'}\tstale={stale_repr}"
     )
@@ -255,6 +301,50 @@ def clear_auth(
         resolved = resolved if isinstance(resolved, dict) else {}
         identity = str(resolved.get("identity_name") or DEFAULT_IDENTITY)
     _api(engagement_dir, "DELETE", f"/{identity}")
+
+
+# Keys the runtime can actually replay. The first three are what
+# ``creds_service.upsert_material`` models (an identity with none of them is
+# stored ``state="missing"``); ``host_cookies`` is injected per host by the kali
+# path, and ``token``/``bearer`` are the legacy top-level fields that survive in
+# ``raw_json`` and that ``_bearer_token`` still reads. An import carrying any one
+# of these lands something usable — an import carrying none lands nothing.
+_MATERIAL_KEYS = ("cookies", "headers", "tokens", "host_cookies", "token", "bearer")
+
+# The canonical shape to name back to the caller; the legacy aliases above are
+# accepted but never advertised.
+_MATERIAL_SHAPE = "cookies/headers/tokens"
+
+
+def _material_keys(payload: dict[str, Any]) -> list[str]:
+    """The material-bearing keys actually populated in one identity payload."""
+    return [key for key in _MATERIAL_KEYS if payload.get(key)]
+
+
+def _empty_import_error(incoming: dict[str, Any], target: str) -> str:
+    """Explain an import that would store zero credential material.
+
+    The failure this replaces was silent: a wrapped export (``{"material": {...}}``)
+    reaches the backend intact — the request model allows extra keys — but only
+    top-level material keys are read, so the real cookies land inert in
+    ``raw_json``, the identity is stored ``state="missing"``, and the CLI printed
+    success. Name the wrapper rather than unwrapping it, which would guess at intent.
+    """
+    nested = [
+        key
+        for key, value in incoming.items()
+        if isinstance(value, dict) and _material_keys(value)
+    ]
+    where = (
+        f"material is nested under {nested[0]!r}"
+        if nested
+        else f"no {_MATERIAL_SHAPE} present"
+    )
+    return (
+        f"Auth import for {target!r} would store nothing: {where}. "
+        'Import the material itself — {"cookies": {...}, "headers": {...}, '
+        '"tokens": {...}} — or an identity map under "identities".'
+    )
 
 
 def import_auth(
@@ -293,9 +383,23 @@ def import_auth(
     identities = incoming.get("identities")
     if isinstance(identities, dict) and identities:
         active = str(incoming.get("active_identity") or DEFAULT_IDENTITY)
-        for name, material in identities.items():
-            if not isinstance(material, dict):
-                continue
+        # Only identities that actually carry material are written. An empty one
+        # is dropped rather than created as an inert ``state="missing"`` record —
+        # and if the declared ``active_identity`` is the empty one, no PUT claims
+        # make_active, so the engagement keeps the active pointer it already had
+        # instead of switching to a credential that cannot authenticate anything.
+        importable = {
+            name: material
+            for name, material in identities.items()
+            if isinstance(material, dict) and _material_keys(material)
+        }
+        if not importable:
+            named = ", ".join(sorted(str(name) for name in identities))
+            raise SystemExit(
+                'Auth import would store nothing: every identity under "identities" '
+                f"({named}) is missing {_MATERIAL_SHAPE}."
+            )
+        for name, material in importable.items():
             payload = dict(material)
             payload.setdefault("mode", "manual")
             payload.setdefault("use_for_requests", True)
@@ -303,6 +407,8 @@ def import_auth(
             payload["make_active"] = str(name) == active
             _api(engagement_dir, "PUT", f"/{name}", payload)
         return
+    if not _material_keys(incoming):
+        raise SystemExit(_empty_import_error(incoming, identity))
     incoming.setdefault("mode", "manual")
     incoming.setdefault("use_for_requests", True)
     if mfa_factor:
@@ -548,11 +654,13 @@ def probe_liveness(
     ``{"liveness", "reason", "http_status", "error"}``; any transport error yields
     ``liveness="unknown"`` with a populated ``error`` (never a false verdict).
     """
+    effective_scope = _probe_scope_key(url, scope_key)
     resolved_name: str | None = None
     if identity is None:
         material = _active_material(engagement_dir)
+        resolved_name = str(material.get("identity_name") or "") or None
     else:
-        query = urlencode({"identity": identity, "scope": scope_key})
+        query = urlencode({"identity": identity, "scope": effective_scope})
         resolved = _api(engagement_dir, "GET", f"/resolve?{query}")
         raw_material = resolved.get("material") if isinstance(resolved, dict) else None
         material = raw_material if isinstance(raw_material, dict) else {}
@@ -566,6 +674,7 @@ def probe_liveness(
             "http_status": None,
             "error": f"missing {requested}",
             "identity_name": resolved_name,
+            "scope_key": effective_scope,
         }
     liveness_cfg = material.get("liveness") if isinstance(material, dict) else None
     parsed = urlparse(url)
@@ -576,6 +685,7 @@ def probe_liveness(
             "http_status": None,
             "error": f"invalid probe URL {url!r} (expected an absolute http(s) URL)",
             "identity_name": resolved_name,
+            "scope_key": effective_scope,
         }
     headers = _authed_request_headers(engagement_dir, material, parsed.hostname)
     conn_cls = (
@@ -602,6 +712,7 @@ def probe_liveness(
             "http_status": None,
             "error": f"probe request failed: {exc}",
             "identity_name": resolved_name,
+            "scope_key": effective_scope,
         }
     finally:
         conn.close()
@@ -613,6 +724,7 @@ def probe_liveness(
         "http_status": status,
         "error": None,
         "identity_name": resolved_name,
+        "scope_key": effective_scope,
     }
 
 
