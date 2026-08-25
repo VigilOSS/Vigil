@@ -59,9 +59,15 @@ the rendered DOM + the captured origin status reflect the **real** application.
   `assert` steps. Unknown actions/fields, non-HTTP navigation, and excessive timeouts fail
   before the browser starts.
 - `--storage-state <path>` — explicit engagement-relative Playwright storage-state JSON.
-  Pair it with `--identity <name>`; Vigil resolves that identity and refuses missing, dead, stale,
-  or request-disabled material before replaying the state. Credential records never inject storage
-  state implicitly, and symlinks cannot escape the engagement root.
+  Pair it with `--identity <name>`. Credential records never inject storage state implicitly, and
+  symlinks cannot escape the engagement root.
+- `--identity <name>` — resolve that identity's cookies/headers from the credential store and stamp
+  the run as it. The run is refused rather than downgraded to anonymous when the identity is
+  missing from the store, when the store holds it as `dead` or quarantined
+  (`use_for_requests: false`), or when it carries nothing injectable for this host — a run stamped
+  `auth_context` while carrying no credentials is what destroys cross-identity evidence. An
+  age-flagged `stale` identity IS still replayed, with a warning: the 8-hour flag is advisory, not
+  a verdict. The refusal names the state, the age, and the recovery command.
 - `--har-out <path>` — optional metadata-only HAR.
 - `--capture-bodies --body-dir <path> --max-body-bytes <n>` — opt-in bounded capture of
   document/XHR/fetch response bodies.
@@ -69,10 +75,12 @@ the rendered DOM + the captured origin status reflect the **real** application.
 Attribution routing is installed before the first navigation. Scope decides **only** which
 requests carry the attribution headers — it never aborts, blocks or filters a navigation or a
 request, and the specialist still owns the engagement boundary in `agent/shared-constraints.md`
-§1. An engagement with no mandated header runs unattributed without complaint; the single
-fail-closed case is a program that **does** mandate a header while `scope.json` declares no
-usable `hosts` entry — that run is refused before navigation rather than sending unattributed
-in-scope traffic (declare the hosts, or pass `--attribution-scope all`).
+§1. An engagement with no mandated header runs unattributed without complaint; the only
+fail-closed case on the attribution axis is a program that **does** mandate a header while
+`scope.json` declares no usable `hosts` entry — that run is refused before navigation rather than
+sending unattributed in-scope traffic (declare the hosts, or pass `--attribution-scope all`). The
+verb's other refusal is the `--identity` one above, and it is the same one every `kali` verb
+applies.
 
 The near-miss to watch for: scope is a **predicate, never a gate**, so a run against a host `scope.json` `hosts` does not declare still executes — and under `scope` routing it navigates that host with **no** attribution header. Recon-discovered siblings live in `discovered_hosts`, which does not count. The verb WARNs on stderr naming every such host (the initial URL plus every declared `navigate` step) before launching; declare the host in `hosts`, or pass `--attribution-scope all`, before treating the run as deconflicted traffic.
 

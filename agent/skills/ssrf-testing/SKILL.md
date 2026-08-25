@@ -300,7 +300,7 @@ http://169.254.170.2$AWS_CONTAINER_CREDENTIALS_RELATIVE_URI
 - Read Secrets Manager / Parameter Store values
 - Query RDS, DynamoDB, or other services the role has access to
 
-Always run `aws sts get-caller-identity` with stolen creds to understand what role you have, then enumerate permissions.
+Always run `aws sts get-caller-identity` with stolen creds to understand what role you have, then enumerate permissions. Those calls are signed, so they run on the host through `vigil assess host-exec --tool aws ... -- env AWS_ACCESS_KEY_ID=... aws ...` — the Kali container has the `aws` binary but no credential path. `agent/skills/aws-iam-privesc/SKILL.md` owns the routing and the 14-vector escalation matrix; load it once you hold role credentials.
 
 ### GCP
 

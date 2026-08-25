@@ -7,7 +7,7 @@ vuln_class: bfla
 
 # AWS IAM Privilege Escalation
 
-> **`vigil assess kali` audit flags:** use `--technique AUTH` (cloud IAM privesc maps to the auth/authorization class in this taxonomy). Set `--destructive` whenever the call mutates IAM state (`iam create-*`, `iam attach-*`, `iam put-*`, `iam set-default-policy-version`, or a `sts assume-role` that activates a broader session).
+> **Audit flags:** use `--technique AUTH` (cloud IAM privesc maps to the auth/authorization class in this taxonomy) on both execution routes. On `kali exec`, set `--destructive` whenever the call mutates IAM state (`iam create-*`, `iam attach-*`, `iam put-*`, `iam set-default-policy-version`, or a `sts assume-role` that activates a broader session); the `host-exec` equivalent is `--allow-destructive` (see Tools for exactly when it is required).
 
 ## When to Activate
 
@@ -18,14 +18,45 @@ vuln_class: bfla
 
 ## Tools
 
-- `vigil assess kali exec -- aws ...` (AWS CLI calls against IAM and STS — all target-facing AWS CLI must go through the kali exec wrapper; use `--technique AUTH --probe-kind fingerprint --phase consume-test --timeout 60` for enumeration, and add `--destructive` plus `--probe-kind exploit` for mutating calls like `create-access-key`, `attach-user-policy`, `put-role-policy`)
-- boto3 (Python scripts for authenticated/SigV4 AWS SDK flows — run via `vigil assess kali exec --technique AUTH ... -- python3 ...`. If boto3 is unavailable in the runtime image, this degrades gracefully for unauthenticated calls: e.g. Cognito Identity Pool `GetId`/`GetCredentialsForIdentity` against a pool that allows unauthenticated identities need no SigV4 signing at all and can be issued directly with `curl -X POST` against the `cognito-identity.<region>.amazonaws.com` endpoint. Prefer boto3 whenever the call requires signing or session/credential handling.)
-- Pacu (AWS exploitation framework — run via `vigil assess kali exec --technique AUTH --probe-kind exploit --phase consume-test --timeout 300 --destructive -- ...`)
-- Cloudsplaining (IAM policy analyzer — host-side analysis on downloaded policy JSON)
-- enumerate-iam (permission enumeration — run via kali exec)
-- Principal Mapper (pmapper — run host-side for graph analysis on downloaded IAM data)
+**Signed AWS calls run on the HOST, not in the Kali container.** The runtime image ships the `aws`
+binary, but the container holds no credentials — its only bind mount is `/engagements`, and nothing
+injects `~/.aws`, `AWS_PROFILE`, or `AWS_ACCESS_KEY_ID` into it, so every SigV4-signed call there
+dies with `NoCredentials`. `vigil assess host-exec` writes the same `assessment_command_runs` audit
+row as `kali exec` (`route='host_exec'`), so the host route is audited, not a bypass.
+
+- **Authenticated `aws` CLI — IAM, STS, and every signed service call — via `host-exec`:**
+  ```bash
+  vigil assess host-exec --tool aws --intent "caller identity for <principal>" \
+    --technique AUTH --phase consume-test -- aws sts get-caller-identity
+  ```
+  Point it at a host profile with `aws --profile <name> ...`, or, for keys captured during the
+  engagement, prefix the argv with `env`: `-- env AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
+  AWS_SESSION_TOKEN=... aws iam list-attached-user-policies --user-name <u>` (the wrapper never
+  invokes a shell, so an inline `VAR=... cmd` prefix would not expand). `host-exec` refuses argv
+  carrying a screened destructive token (`delete`, `--force`, `rm -r`, …) unless you pass
+  `--allow-destructive`, so `aws iam delete-*` needs it; a `create-*`/`attach-*`/`put-*` call does
+  not trip the screen but is still a target-state mutation — say so in `--intent`.
+- **boto3 for signed SDK flows** — same route: `vigil assess host-exec --tool python3 --technique AUTH
+  ... -- python3 <script>`. boto3 *is* installed in the runtime image, but in-container it has no
+  credentials to sign with, so there it is only good for unsigned calls.
+- **Unauthenticated AWS calls and all target-facing HTTP — `vigil assess kali exec`**, which is
+  where they belong: the container is the isolation envelope for target traffic and none of these
+  need credentials. Covers `aws ... --no-sign-request`, Cognito Identity Pool
+  `GetId`/`GetCredentialsForIdentity` against a pool that allows unauthenticated identities (no
+  SigV4 signing at all — a plain `curl -X POST` to `cognito-identity.<region>.amazonaws.com` works),
+  and the IMDS curls in §5. Use `--technique AUTH --probe-kind fingerprint --phase consume-test
+  --timeout 60`, `--probe-kind exploit --destructive` when the call writes.
+- **Pacu, enumerate-iam, Cloudsplaining, Principal Mapper (pmapper)** — none of these ship in the
+  runtime image or the host toolchain; check with `command -v` before planning around one. Install
+  what the engagement needs on the host and drive it through `host-exec`. Cloudsplaining and pmapper
+  are offline analyzers over downloaded IAM JSON and never need target network access anyway.
 
 ## Methodology
+
+The `aws`/`jq` snippets below are written bare for readability. Every one of them is a signed call,
+so each runs wrapped in `vigil assess host-exec --tool aws --intent "<why>" --technique AUTH --phase
+<phase> -- ...` (Tools above). The §5 metadata curls are the exception — those are target-facing and
+unsigned, so they go through `kali exec`.
 
 ### 1. Initial Enumeration
 ```bash
