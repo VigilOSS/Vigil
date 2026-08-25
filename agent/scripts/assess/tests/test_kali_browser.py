@@ -11,6 +11,9 @@ flagged. These tests pin the host-side CLI glue WITHOUT a live container:
     honours explicit --screenshot/--dom-out/--wait-selector, attributes the run as
     tool_name='browser', and threads the audit flags through to kali_exec;
   - a missing url is rejected before exec;
+  - program attribution is routed by the SCOPE boundary (the shared
+    ``scope.host_admitted`` semantics, mirrored into the driver) rather than by
+    document origin, and scope data never gates whether a request is sent;
   - the verb is a registered, contract-discoverable KALI_TARGET_VERBS member.
 """
 from __future__ import annotations
@@ -18,6 +21,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import ipaddress
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,6 +29,7 @@ from types import SimpleNamespace
 import pytest
 from assess.commands import kali_browser as kb
 from assess.lib import contracts
+from assess.lib import scope as scope_lib
 from assess.lib.client import AssessError
 from assess.lib.kali_output import KaliResult
 
@@ -55,11 +60,13 @@ def _browser_args(**overrides) -> SimpleNamespace:
         screenshot="",
         dom_out="",
         wait_selector="",
+        wait_state="attached",
+        wait_until="domcontentloaded",
         page_timeout=30.0,
         settle=2.0,
         eval_js="",
         extra_headers=[],
-        attribution_scope="all",
+        attribution_scope="scope",
         steps_file="",
         har_out="",
         capture_bodies=False,
@@ -99,6 +106,33 @@ def _capture_run(monkeypatch, args) -> dict:
         kb.run(args)
     captured["stdout"] = out.getvalue()
     return captured
+
+
+def _driver_host_admitted(allow: list[dict], deny: list[dict]):
+    """Exec the in-container driver's attribution matcher over given scope tables.
+
+    The matcher is the one piece of scope logic that must live inside the driver
+    (request hosts are only known at run time), so it is exercised directly here
+    against the shared primitive it mirrors.
+    """
+    body = kb._BROWSER_DRIVER[
+        kb._BROWSER_DRIVER.index("def entry_matches(entry, host):") : kb._BROWSER_DRIVER.index(
+            "def add_candidate(request):"
+        )
+    ]
+    namespace: dict = {
+        "ipaddress": ipaddress,
+        "allow_entries": allow,
+        "deny_entries": deny,
+    }
+    exec(compile(body, "<browser-driver>", "exec"), namespace)  # noqa: S102
+    return namespace["host_admitted"]
+
+
+def _route_body() -> str:
+    return kb._BROWSER_DRIVER.split("def route_request(route, request):", 1)[1].split(
+        "def capture_failure", 1
+    )[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -197,6 +231,77 @@ def test_run_passes_wait_selector_and_timings(monkeypatch):
     assert config["page_timeout"] == 45.0
     assert config["settle"] == 5.0
     assert config["wait_selector"] == "#app"
+
+
+def test_run_threads_wait_state_and_wait_until(monkeypatch):
+    cap = _capture_run(
+        monkeypatch,
+        _browser_args(wait_selector="#root", wait_state="visible", wait_until="networkidle"),
+    )
+    config = json.loads(cap["cmd"][3])
+    assert config["wait_state"] == "visible"
+    assert config["wait_until"] == "networkidle"
+
+
+def test_driver_initial_navigation_honours_wait_until_and_wait_state():
+    assert 'page.goto(cfg["url"], wait_until=cfg.get("wait_until") or "domcontentloaded"' in (
+        kb._BROWSER_DRIVER
+    )
+    assert 'wait_for(state=cfg.get("wait_state") or "attached"' in kb._BROWSER_DRIVER
+
+
+def test_driver_settles_after_the_selector_resolves():
+    # --wait-selector and --settle compose: an XHR can land (selector attached)
+    # while the DOM it drives keeps mutating, which is the false-negative case.
+    body = kb._BROWSER_DRIVER.split('result["http_status"]', 1)[1].split(
+        'if cfg.get("eval_js")', 1
+    )[0]
+    assert body.index('cfg.get("wait_selector")') < body.index('cfg.get("settle")')
+    # Not the old mutually-exclusive shape, where the settle lived in the
+    # selector's else branch and so could never run after it.
+    assert "else:\n            page.wait_for_timeout" not in kb._BROWSER_DRIVER
+
+
+def test_driver_step_wait_honours_its_state():
+    assert 'wait_for(state=step.get("state") or "attached"' in kb._BROWSER_DRIVER
+
+
+def test_run_warns_when_the_wrapper_timeout_cannot_outlast_the_driver_budget(
+    monkeypatch, capsys
+):
+    # A wrapper kill mid-run writes no DOM/screenshot/HAR, which is structurally
+    # indistinguishable from a clean negative. Say so, loudly, with both numbers
+    # named - but still run: the budget is a ceiling, not a cost.
+    _capture_run(monkeypatch, _browser_args(timeout=60, page_timeout=60.0, settle=2.0))
+    err = capsys.readouterr().err
+    assert "--timeout 60s" in err and "62s" in err
+    assert "ZERO artifacts" in err
+    assert "Raise --timeout above 62s" in err
+
+
+def test_run_never_refuses_a_tight_timeout_budget(monkeypatch, capsys):
+    # The page-timeout values the reference doc steers agents toward (45s load,
+    # 45s selector, 5s settle) budget to 95s while the page typically renders in
+    # seconds. Refusing that pairing dead-ended a working run mid-engagement.
+    cap = _capture_run(
+        monkeypatch,
+        _browser_args(timeout=90, page_timeout=45.0, settle=5.0, wait_selector="#root"),
+    )
+    assert json.loads(cap["cmd"][3])["page_timeout"] == 45.0
+    assert "WARN --timeout 90s" in capsys.readouterr().err
+
+
+def test_run_timeout_budget_counts_the_wait_selector_leg(monkeypatch, capsys):
+    # The selector wait gets its own --page-timeout, so the same numbers that
+    # are comfortable without it are tight with it.
+    _capture_run(monkeypatch, _browser_args(timeout=70, page_timeout=45.0, settle=5.0))
+    assert "WARN" not in capsys.readouterr().err
+    _capture_run(
+        monkeypatch,
+        _browser_args(timeout=70, page_timeout=45.0, settle=5.0, wait_selector="#root"),
+    )
+    err = capsys.readouterr().err
+    assert "--wait-selector" in err and "95s" in err
 
 
 def test_run_missing_url_raises(monkeypatch):
@@ -360,7 +465,7 @@ def test_register_wires_playwright_workflow_flags():
             "browser", "https://t.example/x",
             "--technique", "RECON", "--intent", "workflow",
             "--probe-kind", "baseline", "--phase", "recon", "--timeout", "120",
-            "--attribution-scope", "document-origin",
+            "--attribution-scope", "all",
             "--steps-file", "steps.json",
             "--har-out", "scans/browser/run.har",
             "--capture-bodies",
@@ -368,11 +473,31 @@ def test_register_wires_playwright_workflow_flags():
             "--max-body-bytes", "4096",
         ]
     )
-    assert args.attribution_scope == "document-origin"
+    assert args.attribution_scope == "all"
     assert args.steps_file == "steps.json"
     assert args.har_out.endswith("run.har")
     assert args.capture_bodies is True
     assert args.max_body_bytes == 4096
+
+
+def test_register_defaults_attribution_to_scope_and_waits():
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers()
+    kb.register(sub)
+    args = parser.parse_args(
+        [
+            "browser", "https://t.example/x",
+            "--technique", "RECON", "--intent", "render",
+            "--probe-kind", "baseline", "--phase", "recon", "--timeout", "120",
+            "--wait-selector", "#root", "--wait-state", "visible",
+            "--wait-until", "networkidle",
+        ]
+    )
+    # Scope-bounded attribution is the default; 'all' is the explicit escape hatch.
+    assert args.attribution_scope == "scope"
+    assert (args.wait_selector, args.wait_state, args.wait_until) == (
+        "#root", "visible", "networkidle"
+    )
 
 
 def test_load_steps_accepts_typed_bounded_workflow(tmp_path):
@@ -383,7 +508,7 @@ def test_load_steps_accepts_typed_bounded_workflow(tmp_path):
                 {"action": "navigate", "url": "https://api.example.com/account"},
                 {"action": "fill", "selector": "#q", "value": "needle"},
                 {"action": "click", "selector": "button[type=submit]"},
-                {"action": "wait", "selector": "#results", "timeout_ms": 5000},
+                {"action": "wait", "selector": "#results", "state": "visible", "timeout_ms": 5000},
                 {"action": "eval", "script": "document.title"},
                 {"action": "assert", "selector": "#results", "contains": "needle"},
             ]
@@ -404,6 +529,7 @@ def test_load_steps_accepts_typed_bounded_workflow(tmp_path):
         [{"action": "navigate", "url": "file:///etc/passwd"}],
         [{"action": "click", "selector": "#x", "unexpected": True}],
         [{"action": "wait", "timeout_ms": 999999}],
+        [{"action": "wait", "selector": "#x", "state": "settled"}],
     ],
 )
 def test_load_steps_rejects_untyped_or_unsafe_steps(tmp_path, payload):
@@ -423,7 +549,7 @@ def test_load_steps_enforces_step_cap(tmp_path):
         kb._load_steps(path)
 
 
-def test_run_threads_document_origin_and_steps(tmp_path, monkeypatch):
+def test_run_threads_steps_and_capture_options(tmp_path, monkeypatch):
     steps_file = tmp_path / "steps.json"
     steps_file.write_text(
         json.dumps(
@@ -434,7 +560,6 @@ def test_run_threads_document_origin_and_steps(tmp_path, monkeypatch):
     cap = _capture_run(
         monkeypatch,
         _browser_args(
-            attribution_scope="document-origin",
             steps_file=str(steps_file),
             har_out="scans/browser/run.har",
             capture_bodies=True,
@@ -444,7 +569,7 @@ def test_run_threads_document_origin_and_steps(tmp_path, monkeypatch):
     )
     config = json.loads(cap["cmd"][3])
     assert config["url"] == "https://api.example.com/login"
-    assert config["attribution_scope"] == "document-origin"
+    assert config["attribution_scope"] == "scope"
     assert config["steps"][0]["url"].endswith("/account")
     assert config["har_out"] == "scans/browser/run.har"
     assert config["capture_bodies"] is True
@@ -453,46 +578,150 @@ def test_run_threads_document_origin_and_steps(tmp_path, monkeypatch):
     assert "no_fire_regex" not in config
 
 
-def test_document_origin_driver_records_omitted_cross_origin_attribution():
+def test_run_threads_scope_entries_for_attribution_routing(tmp_path, monkeypatch):
+    # Attribution is a SCOPE decision, so the normalized allow/deny entries travel
+    # in the execution plan and the driver answers per request host.
+    eng_dir = tmp_path / "eng"
+    _write_scope(
+        eng_dir,
+        hosts=["*.example.com", "10.0.0.0/24"],
+        out_of_scope=["blog.example.com"],
+        required_headers={"X-HackerOne": "vigiloss"},
+    )
+    cap = _capture_run(monkeypatch, _browser_args(engagement_dir=str(eng_dir)))
+    config = json.loads(cap["cmd"][3])
+    assert config["attribution_allow"] == [
+        {"entry_kind": "wildcard", "host": "example.com"},
+        {"entry_kind": "cidr", "host": "10.0.0.0/24"},
+    ]
+    assert config["attribution_deny"] == [
+        {"entry_kind": "bare_host", "host": "blog.example.com"}
+    ]
+
+
+@pytest.mark.parametrize(
+    "host,admitted",
+    [
+        ("api.example.com", True),      # in-scope sibling carrying the real traffic
+        ("example.com", True),          # wildcard covers the apex
+        ("blog.example.com", False),    # denylist wins over the wildcard
+        ("www.google-analytics.com", False),  # third party never sees the handle
+        ("notexample.com", False),      # suffix match must not be a substring match
+        ("10.0.0.7", True),
+        ("10.0.1.7", False),
+        ("", False),
+    ],
+)
+def test_driver_attribution_matcher_mirrors_the_shared_scope_primitive(host, admitted):
+    scope = {"hosts": ["*.example.com", "10.0.0.0/24"], "out_of_scope": ["blog.example.com"]}
+    allow = scope_lib.scope_entries(scope)
+    deny = scope_lib.out_of_scope_entries(scope)
+    driver_admitted = _driver_host_admitted(
+        kb._attribution_entries(allow), kb._attribution_entries(deny)
+    )
+    assert driver_admitted(host) is admitted
+    # The in-container matcher must answer exactly what every other scope-reading
+    # surface answers; drift here silently mis-attributes live traffic.
+    assert scope_lib.host_admitted(host, allow, deny) is admitted
+
+
+def test_run_refuses_mandated_attribution_with_an_unresolvable_boundary(tmp_path):
+    # The one fail-closed case: the program mandates a header and scope.json
+    # declares no host, so no request could be attributed. Refuse before
+    # navigating rather than send unattributed in-scope traffic.
+    eng_dir = tmp_path / "eng"
+    _write_scope(eng_dir, hosts=[], required_headers={"X-HackerOne": "vigiloss"})
+    with pytest.raises(AssessError, match="cannot resolve the scope boundary"):
+        kb.run(_browser_args(engagement_dir=str(eng_dir)))
+
+
+def test_run_without_mandated_headers_tolerates_an_empty_scope(tmp_path, monkeypatch):
+    # No mandated header means nothing to misattribute: an empty boundary is not
+    # a reason to refuse a render.
+    eng_dir = tmp_path / "eng"
+    _write_scope(eng_dir, hosts=[])
+    config = json.loads(_capture_run(monkeypatch, _browser_args(engagement_dir=str(eng_dir)))["cmd"][3])
+    assert config["attribution_allow"] == []
+
+
+def test_run_attribution_scope_all_names_the_leak_on_stderr(tmp_path, monkeypatch, capsys):
+    eng_dir = tmp_path / "eng"
+    _write_scope(eng_dir, required_headers={"X-HackerOne": "vigiloss"})
+    cap = _capture_run(
+        monkeypatch,
+        _browser_args(engagement_dir=str(eng_dir), attribution_scope="all"),
+    )
+    assert json.loads(cap["cmd"][3])["attribution_scope"] == "all"
+    err = capsys.readouterr().err
+    assert "X-HackerOne" in err and "leaks off-target" in err
+
+
+def test_run_attribution_scope_all_bypasses_the_boundary_refusal(tmp_path, monkeypatch):
+    # 'all' answers the boundary question by fiat, so it is the documented way
+    # past the refusal rather than a dead end.
+    eng_dir = tmp_path / "eng"
+    _write_scope(eng_dir, hosts=[], required_headers={"X-HackerOne": "vigiloss"})
+    cap = _capture_run(
+        monkeypatch,
+        _browser_args(engagement_dir=str(eng_dir), attribution_scope="all"),
+    )
+    assert json.loads(cap["cmd"][3])["attribution_scope"] == "all"
+
+
+def test_driver_records_origins_it_left_unattributed():
     assert "omitted_attribution_origins" in kb._BROWSER_DRIVER
-    assert "document-origin" in kb._BROWSER_DRIVER
     # The handler must install before the first navigation and fail the process
     # when required-attribution routing cannot be established.
     assert kb._BROWSER_DRIVER.index("context.route") < kb._BROWSER_DRIVER.index("page.goto")
     assert "required attribution routing failed" in kb._BROWSER_DRIVER
+    assert "omitted.add(request_origin)" in _route_body()
 
 
 def test_driver_never_aborts_a_network_request_from_scope_policy():
-    route_body = kb._BROWSER_DRIVER.split("def route_request(route, request):", 1)[1].split(
-        "def capture_failure", 1
-    )[0]
+    route_body = _route_body()
     assert "blocked_request" not in kb._BROWSER_DRIVER
     assert "route.abort" not in route_body
     assert "route.continue_" in route_body
 
 
-def test_driver_does_not_filter_navigations_by_scope():
-    assert "host_allowed" not in kb._BROWSER_DRIVER
-    assert "scope_entries" not in kb._BROWSER_DRIVER
-    assert "scope_enforcement" not in kb._BROWSER_DRIVER
-    assert "no_fire_regex" not in kb._BROWSER_DRIVER
+def test_scope_data_only_decides_attribution_never_whether_a_request_runs():
+    # Scope reaches exactly one consumer in the driver: the attribution-header
+    # branch. Nothing may drop, stub or gate a request or navigation with it.
+    driver = kb._BROWSER_DRIVER
+    assert driver.count("host_admitted(") == 2  # the definition and its one call
+    assert "host_admitted(request_host)" in _route_body()
+    for gating in ("route.abort", "route.fulfill", "blocked_request", "no_fire_regex"):
+        assert gating not in driver
+    goto_call = driver.split("response = page.goto", 1)[1].split("\n", 1)[0]
+    assert "admitted" not in goto_call and "allow_entries" not in goto_call
 
 
-def test_driver_never_sends_identity_headers_to_future_cross_host_navigation():
-    route_body = kb._BROWSER_DRIVER.split("def route_request(route, request):", 1)[1].split(
-        "def capture_failure", 1
-    )[0]
-    assert "identity_hosts = set(cfg.get(\"identity_hosts\") or [])" in kb._BROWSER_DRIVER
+def test_driver_sends_identity_headers_only_to_declared_navigation_hosts():
+    route_body = _route_body()
+    assert 'identity_hosts = set(cfg.get("identity_hosts") or [])' in kb._BROWSER_DRIVER
     assert "if request_host in identity_hosts:" in route_body
-    assert "if request_origin in document_origins:" not in route_body
 
 
-def test_document_navigation_enrolls_origin_for_attribution():
-    route_body = kb._BROWSER_DRIVER.split("def route_request(route, request):", 1)[1].split(
-        "def capture_failure", 1
-    )[0]
-    navigation_check = route_body.index("request.is_navigation_request()")
-    assert "document_origins.add(request_origin)" in route_body[navigation_check:]
+def test_run_identity_hosts_follow_declared_navigate_steps(tmp_path, monkeypatch):
+    # Cookies follow a cross-host navigation through Chromium's own scoping;
+    # bearer/custom identity headers must follow the declared steps too, or a
+    # multi-step workflow silently de-authenticates after the first hop.
+    steps_file = tmp_path / "steps.json"
+    steps_file.write_text(
+        json.dumps(
+            [
+                {"action": "navigate", "url": "https://people.example.com/me"},
+                {"action": "click", "selector": "#go"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cap = _capture_run(
+        monkeypatch,
+        _browser_args(url="https://api.example.com/login", steps_file=str(steps_file)),
+    )
+    config = json.loads(cap["cmd"][3])
+    assert config["identity_hosts"] == ["api.example.com", "people.example.com"]
 
 
 def test_driver_bounds_network_console_and_body_capture():
@@ -711,3 +940,79 @@ def test_browser_contract_resolves():
     assert "--technique" in joined
     rendered = contracts.render_contract("kali browser")
     assert "browser" in rendered.lower()
+
+
+# --------------------------------------------------------------------------- #
+# QC: scope routing must not silently drop attribution from the run's OWN target
+# --------------------------------------------------------------------------- #
+
+
+def test_target_not_declared_in_scope_hosts_warns_before_navigating(tmp_path, monkeypatch, capsys):
+    # Vigil does not gate execution on scope (`host_admitted` is a predicate, not
+    # a gate), and recon-discovered siblings live in `discovered_hosts`, not
+    # `hosts`. Under scope routing such a run navigates the real target with NO
+    # program attribution — and `kali_output` reports `browser` as
+    # self-attributing, so no injection warning fires either. The omission must
+    # be loud at dispatch, not buried in `omitted_attribution_origins`.
+    eng_dir = tmp_path / "eng"
+    _write_scope(eng_dir, hosts=["api.example.com"], required_headers={"X-Bug-Bounty": "vigiloss"})
+    cap = _capture_run(
+        monkeypatch,
+        _browser_args(url="https://app.example.com/dash", engagement_dir=str(eng_dir)),
+    )
+    err = capsys.readouterr().err
+    assert "app.example.com" in err
+    assert "WITHOUT the mandated" in err
+    assert "--attribution-scope all" in err
+    # It stays a warning: the run is still dispatched.
+    config = json.loads(cap["cmd"][3])
+    assert config["url"] == "https://app.example.com/dash"
+
+
+def test_declared_target_navigates_without_the_warning(tmp_path, monkeypatch, capsys):
+    eng_dir = tmp_path / "eng"
+    _write_scope(eng_dir, hosts=["*.example.com"], required_headers={"X-Bug-Bounty": "vigiloss"})
+    _capture_run(
+        monkeypatch,
+        _browser_args(url="https://app.example.com/dash", engagement_dir=str(eng_dir)),
+    )
+    assert "WITHOUT the mandated" not in capsys.readouterr().err
+
+
+def test_attribution_scope_all_suppresses_the_unattributed_warning(tmp_path, monkeypatch, capsys):
+    # `all` attributes every origin, so nothing is left unattributed to warn about.
+    eng_dir = tmp_path / "eng"
+    _write_scope(eng_dir, hosts=["api.example.com"], required_headers={"X-Bug-Bounty": "vigiloss"})
+    _capture_run(
+        monkeypatch,
+        _browser_args(
+            url="https://app.example.com/dash",
+            engagement_dir=str(eng_dir),
+            attribution_scope="all",
+        ),
+    )
+    assert "WITHOUT the mandated" not in capsys.readouterr().err
+
+
+def test_declared_navigate_steps_are_checked_too(tmp_path, monkeypatch, capsys):
+    # Identity headers already follow declared navigate steps; the attribution
+    # check must cover the same hosts or a multi-step workflow leaks an
+    # unattributed leg.
+    eng_dir = tmp_path / "eng"
+    _write_scope(eng_dir, hosts=["app.example.com"], required_headers={"X-Bug-Bounty": "vigiloss"})
+    steps = tmp_path / "steps.json"
+    steps.write_text(
+        json.dumps([{"action": "navigate", "url": "https://admin.example.com/panel"}]),
+        encoding="utf-8",
+    )
+    _capture_run(
+        monkeypatch,
+        _browser_args(
+            url="https://app.example.com/dash",
+            engagement_dir=str(eng_dir),
+            steps_file=str(steps),
+        ),
+    )
+    err = capsys.readouterr().err
+    assert "admin.example.com" in err
+    assert "app.example.com will be" not in err

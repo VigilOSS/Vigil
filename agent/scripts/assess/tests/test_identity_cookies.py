@@ -130,7 +130,7 @@ def test_pairs_without_host_cookies_unchanged() -> None:
 def test_apply_injects_portal_session_for_portal_target() -> None:
     cmd = ["curl", "-s", "https://portal.example.com/my.policy"]
     applied = kali._apply_identity_material(cmd, "curl", _material())
-    assert applied is True
+    assert applied == "injected"
     joined = " ".join(cmd)
     assert "Cookie: " in joined
     assert "JSESSIONID=PORTAL" in joined
@@ -140,12 +140,12 @@ def test_apply_warns_when_host_cookies_unused_for_request_host(capsys) -> None:
     # The identity has buckets for portal/api.example.com but the run targets a
     # host with NO matching bucket. Its only material is those per-host cookies, so
     # nothing rides this request (the cross-host flat union is correctly omitted)
-    # and _apply_identity_material returns False — but the session-stale WARN must
+    # and _apply_identity_material reports "unavailable" — but the session-stale WARN must
     # STILL fire so the operator knows the session did not ride, and no unrelated
     # host's cookie leaks onto the target.
     cmd = ["curl", "-s", "https://nomatch.test/x"]
     applied = kali._apply_identity_material(cmd, "curl", _material())
-    assert applied is False
+    assert applied == "unavailable"
     # No cross-host cookie leaked into the argv.
     assert "Cookie:" not in " ".join(cmd)
     err = capsys.readouterr().err
@@ -159,10 +159,12 @@ def test_apply_no_warn_when_bucket_matches(capsys) -> None:
     assert "carries captured host_cookies" not in capsys.readouterr().err
 
 
-def test_apply_non_injectable_tool_returns_false() -> None:
+def test_apply_non_injectable_tool_reports_no_head() -> None:
     # nmap takes no -H; identity must not be stamped (matches existing contract).
+    # The reason is the ARGV SHAPE, not the credential — the refusal message
+    # branches on that distinction.
     cmd = ["nmap", "-sV", "portal.example.com"]
-    assert kali._apply_identity_material(cmd, "nmap", _material()) is False
+    assert kali._apply_identity_material(cmd, "nmap", _material()) == "no_head"
 
 
 # --------------------------------------------------------------------------- #
@@ -280,7 +282,7 @@ def test_csrf_pre_existing_header_not_overwritten() -> None:
 
 def test_apply_injects_csrf_on_post() -> None:
     cmd = ["curl", "-X", "POST", "-d", "x=1", "https://portal.example.com/api/write"]
-    assert kali._apply_identity_material(cmd, "curl", _csrf_material()) is True
+    assert kali._apply_identity_material(cmd, "curl", _csrf_material()) == "injected"
     assert "PORTAL-X-CSRF-TOKEN: tok123" in " ".join(cmd)
 
 
@@ -314,16 +316,83 @@ def test_classify_liveness_unknown_on_transport_error() -> None:
     assert auth_status._classify_liveness(None, None, {"authed_marker": "Sign out"})[0] == "unknown"
 
 
-def test_classify_liveness_dead_cases() -> None:
+def test_classify_liveness_dead_only_on_positive_evidence_of_death() -> None:
     from assess.commands import auth_status
 
     cl = auth_status._classify_liveness
-    # dead_marker present in haystack.
+    # dead_marker present in haystack — the operator's own death signal.
     assert cl(200, "Please sign in", {"dead_marker": "sign in"})[0] == "dead"
-    # authed_marker absent from haystack.
-    assert cl(200, "anonymous page", {"authed_marker": "Sign out"})[0] == "dead"
-    # expect_status mismatch (marker present, status wrong).
-    assert cl(302, "Sign out", {"authed_marker": "Sign out", "expect_status": 200})[0] == "dead"
+    # The response IS an authentication challenge.
+    assert cl(401, "nope", {"authed_marker": "Sign out"})[0] == "dead"
+    assert cl(407, "nope", {"authed_marker": "Sign out"})[0] == "dead"
+    # A redirect to a login surface is the classic session-expiry bounce.
+    verdict, reason = cl(
+        302,
+        "HTTP 302 Found\nLocation: /my.policy",
+        {"authed_marker": "Sign out", "expect_status": 200},
+    )
+    assert verdict == "dead"
+    assert "login location" in reason
+    # ...but an ordinary redirect is not, and neither is a path that merely
+    # CONTAINS "auth" (``/authors`` must never read as an auth challenge).
+    assert cl(
+        302,
+        "HTTP 302 Found\nLocation: /authors/17",
+        {"authed_marker": "Sign out", "expect_status": 200},
+    )[0] == "unknown"
+
+
+def test_classify_liveness_absent_marker_is_unknown_not_dead() -> None:
+    """A probe that cannot reach a valid authed URL must never say ``dead``.
+
+    ``dead`` hides the identity from the default listing and refuses replay, so
+    a false one costs a credential re-import. When the ONLY evidence is "the
+    configured authed_marker was not found", the far likelier cause is that the
+    probe URL is not an authed page for this identity's signature.
+    """
+    from assess.commands import auth_status
+
+    cl = auth_status._classify_liveness
+    verdict, reason = cl(200, "anonymous page", {"authed_marker": "Sign out"})
+    assert verdict == "unknown"
+    assert "may not be an authed page" in reason
+    # An unexplained status mismatch is not an auth signal either.
+    verdict, reason = cl(500, "Sign out", {"authed_marker": "Sign out", "expect_status": 200})
+    assert verdict == "unknown"
+    assert "not an authentication challenge" in reason
+    # 403 is an AUTHORIZATION verdict — the normal IDOR/BOLA signal, and it must
+    # never kill the identity doing the testing.
+    assert cl(403, "forbidden", {"authed_marker": "Sign out", "expect_status": 200})[0] == "unknown"
+
+
+def test_classify_liveness_signature_is_one_flat_origin_agnostic_rule() -> None:
+    """``material.liveness`` is ONE flat signature; per-host lives elsewhere.
+
+    Per-host modelling already has two owners — ``probe_scope_key`` scopes the
+    recorded observation, and an identity that genuinely differs per host is a
+    separate identity selected by ``--identity-scope``. A third, signature-level
+    per-origin shape would be a second way to say the same thing AND a way for
+    the two CLI surfaces to disagree, since only one of them could pass the
+    scope through. Any shape that is not the flat signature therefore carries
+    none of the three keys and reads as "no signature configured" — ``unknown``
+    with the shape to set, never a verdict borrowed from another host's rule.
+    """
+    from assess.commands import auth_status
+
+    cl = auth_status._classify_liveness
+    # One rule, applied wherever the identity is probed.
+    assert cl(200, "Sign out", {"authed_marker": "Sign out"})[0] == "live"
+    # An origin-keyed shape is not a signature; it never yields a verdict.
+    verdict, reason = cl(
+        200,
+        "Sign out",
+        {
+            "https://app.example.test": {"authed_marker": "Sign out"},
+            "https://admin.example.test": {"authed_marker": "Admin console"},
+        },
+    )
+    assert verdict == "unknown"
+    assert "material.liveness" in reason
 
 
 def test_classify_liveness_live_when_all_checks_pass() -> None:
@@ -340,8 +409,11 @@ def test_classify_liveness_live_when_all_checks_pass() -> None:
 def test_classify_liveness_markers_case_sensitive() -> None:
     from assess.commands import auth_status
 
-    # Case-sensitive substring: "sign out" != "Sign out".
-    assert auth_status._classify_liveness(200, "sign out", {"authed_marker": "Sign out"})[0] == "dead"
+    # Case-sensitive substring: "sign out" != "Sign out", so the marker does not
+    # confirm the session (and, absent death evidence, that is `unknown`).
+    assert auth_status._classify_liveness(200, "sign out", {"authed_marker": "Sign out"})[0] == "unknown"
+    # The dead_marker is matched with the same case sensitivity.
+    assert auth_status._classify_liveness(200, "Sign In", {"dead_marker": "sign in"})[0] != "dead"
 
 
 def test_classify_liveness_mirror_parity_with_cli() -> None:
@@ -368,6 +440,7 @@ def test_classify_liveness_mirror_parity_with_cli() -> None:
         (200, "body", {}),
         (None, None, {"authed_marker": "x"}),
         (500, "Sign out", {"authed_marker": "Sign out", "expect_status": 200}),
+        (401, "denied", {"authed_marker": "Sign out"}),
         (200, "Sign out", {"authed_marker": "Sign out"}),
         (200, "anon", {"authed_marker": "Sign out"}),
         (200, "sign out", {"authed_marker": "Sign out"}),  # case-sensitivity

@@ -28,6 +28,13 @@ fast, and `--max-targets 100`/method caps the list so it completes inside `--sta
 targets are reported, not dropped). Drop to the manual steps below only for `--passive` (single-`-u`)
 harvesting or per-call control.
 
+The verb carries the same exit-code contract as every other kali surface, aggregated
+worst-arm-when-all-failed: it exits non-zero only when **every** method arm produced no usable
+output (the shared status's code, or `3` for a mixed set). A partial failure exits `0` — one dead
+arm out of four is still a useful sweep — and names the dead arms in `failed_methods` in the JSON
+plus a stderr line. Those arms are holes, not negatives; re-run them before reading their absence
+as "no hidden params".
+
 > **A timed-out arjun run is NOT a "no params" negative.** A slow config (low `--rate-limit` ×
 > `--stable` × high `-T`) over a large or junk (`--include-unknown`/Wayback) list gets SIGTERM-killed
 > after only a couple of targets; its empty `-oJ` then masquerades as a clean result. The wrapper now

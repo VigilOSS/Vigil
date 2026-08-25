@@ -68,6 +68,38 @@ class KaliResult:
 
 
 # --------------------------------------------------------------------------- #
+# Terminal status -> process exit code
+# --------------------------------------------------------------------------- #
+#
+# Every `vigil assess kali <verb>` used to exit 0 no matter what happened, so a
+# timed-out run that produced zero artifacts was indistinguishable from a clean
+# negative unless the caller parsed `.status` out of the JSON. These codes put
+# the run's own verdict in `$?`.
+#
+# 0 means "a usable result came back": `completed`, and `waf_challenge` — a WAF
+# challenge IS a complete HTTP exchange (the process exited 0), the body is
+# merely the WAF's rather than the origin's, which is already loud on stderr and
+# in `.status`/`.waf_challenge`, and its documented remedy is to re-render with
+# `kali browser`, not to abort a `&&` chain. Non-zero is reserved for "no
+# complete output exists to interpret".
+#
+# 1 and 2 are deliberately unused here: `cli.main` exits 1 on an AssessError
+# (Vigil refused) and argparse exits 2 on a parse error, so a target-run verdict
+# stays distinguishable from a Vigil-side failure.
+KALI_EXIT_CODES: dict[str, int] = {
+    "failed": 3,
+    "timed_out": 4,
+    "killed": 5,
+    "transport_error": 6,
+}
+
+
+def kali_exit_code(status: str) -> int:
+    """Process exit code for a ``KaliResult.status`` (0 = a usable result)."""
+    return KALI_EXIT_CODES.get(str(status or "").strip().lower(), 0)
+
+
+# --------------------------------------------------------------------------- #
 # CR-36 false-negative (http=000 / connection-failed / DNS-failure) detection
 # --------------------------------------------------------------------------- #
 
@@ -815,6 +847,16 @@ _REQUIRED_HEADER_FLAG_SPECS: dict[str, tuple[str, bool]] = {
     "nikto": ("-Add-header", False),
     "arjun": ("--headers", True),
 }
+# Tools that apply the program-required attribution headers THEMSELVES, outside
+# the argv. The `browser` verb hands them to the Playwright driver as extra HTTP
+# headers, so there is nothing to append to a command line — and warning that
+# injection "failed" on every browser run against a required-headers program
+# taught operators that a real deconfliction rule was being violated when it was
+# not. Deliberately NOT folded into ``_REQUIRED_HEADER_SKIP``: a skip asserts
+# "this tool never speaks HTTP to the target", which is false here and would
+# hide a genuine regression if the driver ever stopped applying them.
+_REQUIRED_HEADER_SELF_ATTRIBUTING = frozenset({"browser"})
+
 _REQUIRED_HEADER_SKIP = frozenset(
     {
         "gau",
@@ -1105,10 +1147,14 @@ def _apply_required_headers(
 ) -> str:
     """Inject program-mandated attribution header(s) into an HTTP command argv.
 
-    Returns one of ``"injected"``, ``"skipped"``, ``"warned"``, ``"noop"``:
+    Returns one of ``"injected"``, ``"self_attributed"``, ``"skipped"``,
+    ``"warned"``, ``"noop"``:
       * ``"noop"``    — no required headers to apply, or every header was
                         already present (idempotent — an identity may have
                         injected the same header on an injectable tool).
+      * ``"self_attributed"`` — the tool applies the headers itself, off the
+                        argv (``browser``, via the Playwright driver). Nothing
+                        to inject here and nothing to warn about.
       * ``"skipped"`` — passive/archive/DNS/L3-L4 tool that does not send HTTP
                         to the in-scope target; nothing applied, no warning.
       * ``"injected"``— at least one header was appended, either as ``-H "Name:
@@ -1150,6 +1196,8 @@ def _apply_required_headers(
         return "warned"
 
     name_lower = tool_name.lower()
+    if name_lower in _REQUIRED_HEADER_SELF_ATTRIBUTING:
+        return "self_attributed"
     if name_lower in _REQUIRED_HEADER_SKIP:
         return "skipped"
     if name_lower in _REQUIRED_HEADER_FLAG_SPECS:
@@ -1199,6 +1247,215 @@ def _apply_identity_headers(
         existing.add(name.lower())
         injected = True
     return "injected" if injected else "noop"
+
+
+# --------------------------------------------------------------------------- #
+# Argv-shape diagnostics
+# --------------------------------------------------------------------------- #
+#
+# Three read-only inspectors that let the caller say something TRUE about an
+# argv instead of refusing it. They never mutate ``cmd``.
+
+
+def shell_script_file_argv(cmd: list[str]) -> str:
+    """The script path when ``cmd`` runs a shell SCRIPT FILE, else ``""``.
+
+    ``bash /engagements/x/poc.sh`` is a shell invocation with no ``-c`` command
+    string, so :func:`_wrapped_shell_script_index` finds nothing to inject into
+    and the derived tool name is ``bash``, which accepts no header flag. That is
+    an argv-SHAPE problem, not a credential problem, and the two need different
+    remedies — appending ``-H`` here would land on the script as ``$1``/``$2``
+    and never reach the requests inside it.
+    """
+    effective = scope_lib._unwrap_launcher_argv([str(token) for token in cmd])
+    if not effective or _wrapped_shell_script_index(cmd) is not None:
+        return ""
+    head = effective[0]
+    if head not in _SHELL_BINARIES and os.path.basename(head) not in _SHELL_BINARIES:
+        return ""
+    for token in effective[1:]:
+        if not token.startswith("-"):
+            return token
+    return ""
+
+
+def shell_script_body_gap(cmd: list[str]) -> str:
+    """Why a ``sh -c`` / ``bash -c`` script BODY could take no injected header.
+
+    ``""`` when ``cmd`` is not a ``-c`` invocation, or its body is injectable.
+    Otherwise a reason-plus-remedy clause, because the two ways
+    :func:`_inject_headers_into_script` declines need opposite fixes — and
+    neither is the "re-shape it as ``bash -c``" advice
+    :func:`shell_script_file_argv` earns, since the caller already IS a ``-c``
+    invocation. Without this the refusal told an operator to do the thing they
+    had just done, and pointed at ``--identity-target``, which is deliberately
+    ignored for this shape: a dead end mid-engagement.
+    """
+    index = _wrapped_shell_script_index(cmd)
+    if index is None:
+        return ""
+    script = cmd[index]
+    try:
+        shlex.split(script)
+    except ValueError:
+        return (
+            "the `-c` script body could not be lexed (an unbalanced quote — most "
+            "often an apostrophe inside a comment), so the injector cannot find "
+            "its sub-command boundaries and refuses to edit a script it cannot "
+            "parse. Balance or drop that quote and re-run"
+        )
+    if not list(_SHELL_SUBCMD_HEAD_RE.finditer(script)):
+        return (
+            "the `-c` script body contains no header-capable sub-command "
+            "(curl/wget) for the injector to attach the header to. Express the "
+            "authenticated requests as curl inside the `-c` body"
+        )
+    return ""
+
+
+# Header names that carry target credentials. A run that writes one of these by
+# hand is authenticating without telling the audit trail who it authenticated as.
+_AUTH_HEADER_NAMES = ("Cookie", "Authorization")
+
+
+def handwritten_auth_headers(cmd: list[str]) -> list[str]:
+    """Credential-bearing header names ``cmd`` carries as literal operator text.
+
+    Covers the argv (``-H 'Cookie: …'``, ``-HCookie:…``, ``--header=…``) and a
+    ``sh -c`` / ``bash -c`` script body, by round-tripping through the same
+    :func:`_segment_has_header` matcher the injector uses. Callers WARN on a hit
+    with no ``--identity``: such a run is recorded as ``auth_context=anonymous``,
+    which voids exactly the cross-identity evidence an IDOR/BOLA finding needs.
+    """
+    haystacks = [shlex.join(str(token) for token in cmd)]
+    script_idx = _wrapped_shell_script_index(cmd)
+    if script_idx is not None:
+        script = cmd[script_idx]
+        try:
+            shlex.split(script)
+        except ValueError:
+            script = ""  # unlexable: do not guess, _segment_has_header says yes
+        if script:
+            haystacks.append(script)
+    return [
+        name
+        for name in _AUTH_HEADER_NAMES
+        if any(_segment_has_header(hay, name) for hay in haystacks)
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# Multi-arm curl last-wins detection
+# --------------------------------------------------------------------------- #
+#
+# Verified against curl 8.7.1: in ONE invocation carrying several `-o file url`
+# pairs, `-o` is per-URL and correct, but `-w` and `-D` are GLOBAL and last-wins
+# — every arm's output is formatted with the LAST `-w`, all response headers land
+# in the LAST `-D` file, and the earlier `-D` paths are never created. That is
+# genuine curl semantics surfaced by verbatim passthrough, not a Vigil bug, so we
+# WARN and never block: an agent reading a per-arm status off its own label gets
+# a wrong answer today with no signal at all.
+
+_URL_ARM_RE = re.compile(r"^https?://", re.IGNORECASE)
+
+# curl flags whose VALUE is a URL but which do not open another transfer arm.
+_CURL_NON_ARM_URL_FLAGS = frozenset(
+    {"-x", "--proxy", "--preproxy", "--proxy1.0", "-e", "--referer"}
+)
+
+# The global, last-wins flags. `--next` / `-:` starts a fresh operation with its
+# own copy of them, which is exactly the fix we point the caller at.
+_CURL_LASTWINS_FLAGS: dict[str, str] = {
+    "-w": "-w",
+    "--write-out": "-w",
+    "-D": "-D",
+    "--dump-header": "-D",
+}
+_CURL_NEXT_FLAGS = frozenset({"--next", "-:"})
+
+
+def _curl_invocations(cmd: list[str]) -> list[list[str]]:
+    """Every curl argv reachable in ``cmd`` — bare, launcher-wrapped, or inside a
+    ``sh -c`` script body."""
+    script_idx = _wrapped_shell_script_index(cmd)
+    if script_idx is not None:
+        script = cmd[script_idx]
+        found: list[list[str]] = []
+        for match in _SHELL_SUBCMD_HEAD_RE.finditer(script):
+            if match.group("cmd").lower() != "curl":
+                continue
+            segment = script[match.start("cmd") : _shell_segment_end(script, match.end("cmd"))]
+            try:
+                found.append(shlex.split(segment))
+            except ValueError:
+                continue
+        return found
+    effective = scope_lib._unwrap_launcher_argv([str(token) for token in cmd])
+    if effective and os.path.basename(effective[0]).lower() == "curl":
+        return [effective]
+    return []
+
+
+def _curl_lastwins_offenders(tokens: list[str]) -> tuple[int, list[str]]:
+    """``(url_arm_count, offending_flags)`` for ONE curl argv.
+
+    ``offending_flags`` is empty when the invocation is single-arm, uses no
+    global last-wins flag, or already separates its arms with ``--next``/``-:``.
+    """
+    arms = 0
+    offenders: list[str] = []
+    skip_next = False
+    for token in tokens[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if token in _CURL_NEXT_FLAGS:
+            return 0, []
+        if token in _CURL_NON_ARM_URL_FLAGS:
+            skip_next = True
+            continue
+        head = token.split("=", 1)[0]
+        canonical = _CURL_LASTWINS_FLAGS.get(head)
+        if canonical is None and len(token) > 2 and not token.startswith("--"):
+            # curl accepts a short option with its value glued on (`-w%{...}`).
+            canonical = _CURL_LASTWINS_FLAGS.get(token[:2])
+        if canonical is not None:
+            if canonical not in offenders:
+                offenders.append(canonical)
+            continue
+        if _URL_ARM_RE.match(token):
+            arms += 1
+    return (arms, offenders if arms > 1 else [])
+
+
+# What last-wins actually costs, per flag — so the warning states the concrete
+# wrong outcome rather than a generic "this may be inaccurate".
+_CURL_LASTWINS_EFFECT = {
+    "-w": "every arm's output is formatted with the LAST -w",
+    "-D": (
+        "all response headers land in the LAST -D file and the earlier -D paths "
+        "are never created"
+    ),
+}
+
+
+def curl_multi_arm_warning(cmd: list[str]) -> str:
+    """One WARN line when a single curl call fans out to several URLs while using
+    a global last-wins flag, or ``""`` when nothing is wrong."""
+    for tokens in _curl_invocations(cmd):
+        arms, offenders = _curl_lastwins_offenders(tokens)
+        if not offenders:
+            continue
+        return (
+            f"warning: this curl call has {arms} URL arms, but "
+            f"{' and '.join(offenders)} {'are' if len(offenders) > 1 else 'is'} "
+            "GLOBAL and last-wins in curl — only -o is per-URL. So "
+            + ", and ".join(_CURL_LASTWINS_EFFECT[flag] for flag in offenders)
+            + ": a per-arm result read off its own label is WRONG. Separate the "
+            "arms with `--next` (each arm then gets its own -w/-D), or fan out "
+            "with `vigil assess kali sweep`."
+        )
+    return ""
 
 
 def _auth_context(engagement_dir: Path) -> str:

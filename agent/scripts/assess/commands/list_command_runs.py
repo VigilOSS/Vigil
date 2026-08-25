@@ -124,7 +124,18 @@ def register(subparsers) -> None:
     )
     p.add_argument("--limit", type=int, default=50)
     p.add_argument("--offset", type=int, default=0)
-    p.add_argument("--include-output", dest="include_output", action="store_true", help="Include stdout/stderr previews in default rendering")
+    p.add_argument(
+        "--include-output",
+        dest="include_output",
+        action="store_true",
+        help=(
+            "Ask the backend for the full stdout/stderr preview TEXT on every row. "
+            "Only --json renders it — the table never has a preview column, it "
+            "shows the out/err character counts instead. Listings are lightweight "
+            "by default on purpose: 50 rows x 64 KiB of preview is a context bomb. "
+            "For one run's output prefer `command-run get <id>`."
+        ),
+    )
     p.add_argument("--json", dest="as_json", action="store_true", help="Emit raw JSON instead of a table")
     p.set_defaults(func=run)
 
@@ -182,6 +193,19 @@ def _build_query(args) -> str:
     return "command-runs?" + urlencode(params, quote_via=quote)
 
 
+def _preview_chars(row: dict, stream: str) -> int:
+    """Characters of retained preview for ``stream`` on one listing row.
+
+    A lightweight row carries the count in ``<stream>_preview_chars`` and an
+    empty preview; a row fetched with --include-output carries the text and no
+    count. Read whichever the backend sent so the column is right either way.
+    """
+    count = row.get(f"{stream}_preview_chars")
+    if isinstance(count, int):
+        return count
+    return len(row.get(f"{stream}_preview") or "")
+
+
 def _render_table(rows: list[dict]) -> str:
     if not rows:
         return "(no command runs matched)"
@@ -197,6 +221,12 @@ def _render_table(rows: list[dict]) -> str:
         "dest",
         "rc",
         "timed_out",
+        # The affordance the lightweight-listing bandwidth control was designed
+        # around: the preview TEXT is withheld, but its size is not, so a caller
+        # can see a run DID produce output and decide whether `command-run get`
+        # is worth the round-trip — instead of reading an empty preview as "no
+        # output" and re-running the command.
+        "out/err",
         "intent",
         "command",
     ]
@@ -242,6 +272,7 @@ def _render_table(rows: list[dict]) -> str:
             dest_str,
             rc_str,
             "yes" if row.get("timed_out") else "no",
+            f"{_preview_chars(row, 'stdout')}/{_preview_chars(row, 'stderr')}",
             intent or "-",
             command,
         ]

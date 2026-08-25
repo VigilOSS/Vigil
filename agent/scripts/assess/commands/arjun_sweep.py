@@ -33,6 +33,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from assess.commands import arjun_select, ingest_arjun
+from assess.commands.kali_sweep import aggregate_exit_code
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 from assess.lib.kali import (
@@ -42,6 +43,7 @@ from assess.lib.kali import (
     kali_args_to_kwargs,
     kali_exec,
 )
+from assess.lib.kali_output import kali_exit_code
 
 # Per-method total target cap. Sized so a sweep at the default config (rate 10,
 # no --stable, -T 7) plausibly FINISHES inside --stage-timeout instead of being
@@ -263,11 +265,34 @@ def run(args: argparse.Namespace) -> None:
         })
 
     any_incomplete = any(r["incomplete"] for r in per_method)
+    # Same worst-arm rule the value sweep uses (one shared implementation): a
+    # per-method arm whose terminal status means "no usable output" is a hole,
+    # not a negative, and a sweep where EVERY method arm died must not exit 0 —
+    # that is the false green this verb is most exposed to, because it is the
+    # one an operator leaves running unattended.
+    exit_code = aggregate_exit_code(r["status"] for r in per_method)
+    failed = [r for r in per_method if kali_exit_code(r["status"])]
     print(json.dumps({
         "verb": "arjun-sweep",
         "selected": len(targets),
         "by_method": {m: len(u) for m, u in sorted(by_method.items())},
         "runs": per_method,
         "incomplete": any_incomplete,
+        "failed_methods": [r["method"] for r in failed],
         "drops": drop_stats,
     }, ensure_ascii=False, indent=2))
+    if failed:
+        breakdown = ", ".join(f"{r['method']}={r['status']}" for r in failed)
+        print(
+            f"arjun-sweep: {len(failed)}/{len(per_method)} method arm(s) produced no "
+            f"usable output ({breakdown}); their hidden-param results are a HOLE, not a "
+            "clean 0."
+            + (
+                f" Every arm died — exiting {exit_code}."
+                if exit_code
+                else " The remaining arm(s) completed, so the exit code stays 0."
+            ),
+            file=sys.stderr,
+        )
+    if exit_code:
+        sys.exit(exit_code)
