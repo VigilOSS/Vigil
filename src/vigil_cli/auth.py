@@ -806,9 +806,38 @@ def _is_stale(value: str) -> bool:
 # path + live/dead classification the LLM authors for the target — is roadmap item R5.)
 
 _HTTP_STATUS_RE = re.compile(r"HTTP/\d(?:\.\d)?\s+(\d{3})")
+# An HTTP egress proxy answers the tunnel setup with its own status line
+# ("HTTP/1.1 200 Connection established") BEFORE the origin's, and 1xx replies
+# (100 Continue, 103 Early Hints) precede it too. Both are preamble, not the
+# origin's verdict — reading the first status line would classify a revoked
+# session LIVE off the proxy's 200. The probe argv suppresses the CONNECT block
+# at the source (see ``_vigil_assess_argv``); this skip is what keeps the parse
+# right when the blob still carries one.
+_TUNNEL_REASON_RE = re.compile(r"connection established", re.IGNORECASE)
 # The userId lands inside the JSON-escaped ``stdout_preview`` of the kali-exec
 # envelope, so its quotes may be backslash-escaped (``\"userId\"``); tolerate both.
 _USER_ID_RE = re.compile(r'\\?"userId\\?"\s*:\s*\\?"([^"\\]*)')
+
+
+def _origin_status_match(raw: str) -> "re.Match[str] | None":
+    """The ORIGIN's status line in a probe blob, skipping any hop preamble.
+
+    Returns the first status-line match that is not a proxy CONNECT tunnel reply
+    or a 1xx informational reply, so a tunnelled probe reports the origin's code
+    rather than the proxy's. Scanning stops at that match, so a status line that
+    merely appears in the response BODY can never win.
+    """
+    for match in _HTTP_STATUS_RE.finditer(raw):
+        code = int(match.group(1))
+        if 100 <= code < 200:
+            continue
+        # The reason phrase is the only thing separating a tunnel 200 from the
+        # origin's 200; bound the window so a body match cannot reach into it.
+        if 200 <= code < 300 and _TUNNEL_REASON_RE.search(raw[match.end():match.end() + 40]):
+            continue
+        return match
+    return None
+
 
 _KEEPALIVE_CAVEATS: tuple[str, ...] = (
     "  keepalive resets the enterprise IDLE timeout only. Hard ceilings it CANNOT defeat:",
@@ -886,14 +915,15 @@ def _parse_probe_blob(
     envelope whose ``stdout_preview`` is a head+tail TRUNCATION of the curl ``-i``
     response; a cut in the middle of that escaped string yields ``Unterminated
     string``, so a ``json.loads`` here is a latent false-negative. Regex the raw
-    text instead. Returns ``{status, status_line, user_id, deleted}`` where
-    ``status`` is the int HTTP code (or ``None`` when unparseable) and ``deleted``
-    is True when the RESPONSE tore the session down (``<anchor>=deleted``
+    text instead, taking the ORIGIN's status line (:func:`_origin_status_match`)
+    rather than the first one in the blob. Returns
+    ``{status, status_line, user_id, deleted}`` where ``status`` is the int HTTP
+    code (or ``None`` when unparseable) and ``deleted`` is True when the RESPONSE tore the session down (``<anchor>=deleted``
     Set-Cookie for one of the operator-declared ``anchor_cookies``), which is a
     server logout regardless of the status code.
     """
     raw = raw or ""
-    m = _HTTP_STATUS_RE.search(raw)
+    m = _origin_status_match(raw)
     status_line = m.group(0) if m else "?"
     status = int(m.group(1)) if m else None
     muid = _USER_ID_RE.search(raw)
@@ -942,7 +972,8 @@ def _vigil_assess_argv(
     identity injection) with an argv LIST — NEVER ``bash -c`` (a shell wrapper eats
     the ``--identity`` flag and the session is not injected). Mirrors
     ``assess.commands.auth_status._run_identity_probe``: a read-only ``curl -sS -i``
-    (status line + headers incl. ``Location``, no ``-L``) tagged ``--technique AUTH``
+    (status line + headers incl. ``Location``, no ``-L``, CONNECT block suppressed)
+    tagged ``--technique AUTH``
     / ``--probe-kind fingerprint`` in the always-allowed ``recon`` phase. Prefers the
     ``vigil`` binary on PATH; falls back to invoking ``agent/scripts/assess.py``
     directly (what the ``vigil assess`` passthrough execs anyway) so PATH is not a
@@ -964,7 +995,10 @@ def _vigil_assess_argv(
         "--phase", "recon",
         "--timeout", "30",
         "--",
-        "curl", "-sS", "-i", probe_url,
+        # --suppress-connect-headers keeps an HTTP egress proxy's CONNECT reply
+        # ("HTTP/1.1 200 Connection established") out of the -i output, so the
+        # only status line in the blob is the origin's.
+        "curl", "-sS", "-i", "--suppress-connect-headers", probe_url,
     ]
 
 

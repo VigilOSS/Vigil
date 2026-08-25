@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
@@ -10,6 +9,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from . import docker
+from . import image_freshness
 from .config import (
     DEFAULT_RUNTIME_PIDS_LIMIT,
     DEFAULT_RUNTIME_SHM_SIZE,
@@ -227,9 +227,6 @@ class RuntimeOptions:
     allow_oversubscribe: bool = False
 
 
-_RUNTIME_INPUTS_LABEL = "com.vigil.runtime-inputs-sha256"
-
-
 def runtime_image_inputs(install_root: Path) -> list[Path]:
     """Files BAKED into the runtime image. A change to one of these (and ONLY
     these) requires ``vigil runtime build``; every other file under
@@ -245,17 +242,14 @@ def runtime_image_inputs(install_root: Path) -> list[Path]:
 
 
 def runtime_inputs_digest(install_root: Path) -> str:
-    digest = hashlib.sha256()
-    for path in runtime_image_inputs(install_root):
-        try:
-            label = path.relative_to(install_root).as_posix()
-        except ValueError:
-            label = str(path)
-        digest.update(label.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes() if path.is_file() else b"<absent>")
-        digest.update(b"\0")
-    return digest.hexdigest()
+    """Content digest of the runtime image's baked inputs.
+
+    Delegates to the shared image-input digest so the runtime and proxy images
+    are judged fresh by exactly one mechanism.
+    """
+    return image_freshness.inputs_digest(
+        runtime_image_inputs(install_root), root=install_root
+    )
 
 
 def runtime_image_build_state(
@@ -265,16 +259,9 @@ def runtime_image_build_state(
     ``unknown``. Compares the current baked-input digest to the digest stamped on
     the image at build time, so it is NOT fooled by ``vigil install`` rewriting
     file mtimes. An image built before digest stamping returns ``unknown``."""
-    if not docker.image_exists(image, runner=runner):
-        return "missing"
-    result = runner([
-        "docker", "image", "inspect", "-f",
-        '{{ index .Config.Labels "' + _RUNTIME_INPUTS_LABEL + '" }}', image,
-    ])
-    baked = (result.stdout or "").strip() if result.returncode == 0 else ""
-    if not baked or baked == "<no value>":
-        return "unknown"
-    return "current" if baked == runtime_inputs_digest(install_root) else "stale"
+    return image_freshness.image_inputs_state(
+        image, runtime_image_inputs(install_root), root=install_root, runner=runner
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -332,7 +319,12 @@ def build_runtime(install_root: Path, *, variant: str = "full", dev: bool = Fals
     image = "vigil-lightweight:latest" if variant == "lightweight" else "vigil:latest"
     argv = ["docker", "build", "-t", image, "-f", str(dockerfile)]
     if variant == "full":
-        argv += ["--label", f"{_RUNTIME_INPUTS_LABEL}={runtime_inputs_digest(install_root)}"]
+        argv += [
+            "--label",
+            image_freshness.inputs_label_arg(
+                runtime_image_inputs(install_root), root=install_root
+            ),
+        ]
     argv.append(str(install_root))
     docker.require_success(runner(argv), argv)
 

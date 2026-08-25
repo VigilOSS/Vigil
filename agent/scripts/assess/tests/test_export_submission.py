@@ -860,6 +860,69 @@ def test_linked_runs_are_reference_not_evidence(tmp_path, monkeypatch, capsys):
     assert not any(g.startswith("command-runs?") for g in fake.gets)
 
 
+def test_retired_links_are_not_exported_as_current_evidence(
+    tmp_path, monkeypatch, capsys
+):
+    """A link the operator RETIRED is history, not evidence.
+
+    ``list_finding_links`` deliberately returns retired rows so the history stays
+    inspectable; the export path is the layer that has to tell "was linked once"
+    from "is evidence now". Without the filter the withdrawn run comes back in
+    OPERATOR DETAILS and steers the report writer at material the operator
+    explicitly invalidated.
+    """
+    links = [
+        {
+            "finding_slug": "VA-047",
+            "target_kind": "command_run",
+            "target_id": 5,
+            "retired_at": None,
+        },
+        {
+            "finding_slug": "VA-047",
+            "target_kind": "command_run",
+            "target_id": 6,
+            "retired_at": "2026-08-01T12:00:00Z",
+        },
+    ]
+    command_runs = {
+        5: {"id": 5, "command": "curl -sk https://app.example.com/orders/1002", "intent": "reproduce IDOR", "return_code": 0},
+        6: {"id": 6, "command": "curl -sk https://app.example.com/retired-probe", "intent": "withdrawn", "return_code": 0},
+    }
+    fake = _FakeClient(_finding(details=_complete_details()), links=links, command_runs=command_runs)
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+    export_submission.run(args)
+    capsys.readouterr()
+
+    body = _submission_path(tmp_path).read_text()
+    assert "orders/1002" in body
+    assert "retired-probe" not in body
+
+    runs = _context(tmp_path)["linked_command_runs"]
+    assert [r["id"] for r in runs] == [5]
+    # The retired run is not even fetched — the filter runs before resolution.
+    assert "command-runs/6" not in fake.gets
+
+
+def test_empty_retired_at_is_treated_as_a_live_link(tmp_path, monkeypatch, capsys):
+    # The backend serializes "never retired" as null, but an empty string is the
+    # same statement; neither may drop a live link out of the submission.
+    links = [
+        {"finding_slug": "VA-047", "target_kind": "command_run", "target_id": 5, "retired_at": ""},
+    ]
+    command_runs = {
+        5: {"id": 5, "command": "curl -sk https://app.example.com/orders/1002", "intent": "reproduce IDOR", "return_code": 0},
+    }
+    fake = _FakeClient(_finding(details=_complete_details()), links=links, command_runs=command_runs)
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+    export_submission.run(args)
+    capsys.readouterr()
+
+    assert [r["id"] for r in _context(tmp_path)["linked_command_runs"]] == [5]
+
+
 # -- repro runs: the audit trail behind Steps to Reproduce --------------------
 
 def test_repro_runs_render_real_argv_separately_from_linked_runs(

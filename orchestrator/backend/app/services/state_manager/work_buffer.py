@@ -149,6 +149,41 @@ def _row_host_filtered_out(host: Any, scope: tuple[list[str], list[str]] | None)
     return not _host_admitted_by_scope(h, scope[0], scope[1])
 
 
+def _scope_excluded_hosts(
+    connection, engagement_id: int, scope: tuple[list[str], list[str]] | None
+) -> list[str]:
+    """The engagement's DISTINCT pending-row hosts that are KNOWN-foreign to scope.
+
+    Every claim path applies these as a ``NOT IN`` BEFORE its ``LIMIT``. Shaping
+    the top-K AFTER the limit lets a block of out-of-scope rows starve the
+    in-scope work ranked beneath them, and because the ordering is deterministic
+    every retry re-selects the same excluded rows — the queue stalls rather than
+    degrades. Excluding by HOST (not by row id) keeps the bound at the handful of
+    foreign hosts an engagement ever observes, however many rows they carry, and
+    covers rows inserted after this read. Out-of-scope hosts are RARE, so the set
+    is usually empty and the claim SQL is unchanged (fast path).
+
+    Values are the RAW stored host strings, so the emitted ``NOT IN`` matches
+    exactly the rows :func:`_row_host_filtered_out` rejects — including its
+    fail-OPEN cases (empty host, undeterminable scope), which are never listed.
+    """
+    if scope is None:
+        return []
+    rows = connection.execute(
+        "SELECT DISTINCT host FROM assessment_work_items "
+        "WHERE engagement_id = ? AND status = 'pending'",
+        (engagement_id,),
+    ).fetchall()
+    return [row["host"] for row in rows if _row_host_filtered_out(row["host"], scope)]
+
+
+def _exclude_hosts_clause(hosts: list[str], *, column: str = "host") -> str:
+    """``AND <column> NOT IN (...)`` for ``hosts`` — empty on the fast path."""
+    if not hosts:
+        return ""
+    return f" AND {column} NOT IN ({','.join('?' * len(hosts))})"
+
+
 # ---------------------------------------------------------------------------
 # Serialization helpers
 # ---------------------------------------------------------------------------
@@ -654,27 +689,12 @@ def fetch_work_items(engagement_id: int, *, type_val: str, limit: int, agent: st
     scope = _work_scope_filter(engagement)
     with _common.get_connection() as connection:
         # I-07: exclude observed-but-not-owned co-tenant / out-of-scope pending
-        # rows from the claim. Out-of-scope rows are RARE, so the excluded set is
-        # usually empty and the claim SQL is unchanged (fast path). The candidate
-        # read and the claim run on the same re-entrant connection; the UPDATE
-        # still re-checks status='pending', so a concurrent claim is never taken
-        # twice even if a row's state shifts between the read and the write.
-        exclude_sql = ""
-        exclude_params: tuple[Any, ...] = ()
-        if scope is not None:
-            candidates = connection.execute(
-                "SELECT id, host FROM assessment_work_items "
-                "WHERE engagement_id = ? AND status = 'pending' AND type = ?",
-                (engagement.id, type_val),
-            ).fetchall()
-            excluded = [
-                row["id"]
-                for row in candidates
-                if _row_host_filtered_out(row["host"], scope)
-            ]
-            if excluded:
-                exclude_sql = f" AND id NOT IN ({','.join('?' * len(excluded))})"
-                exclude_params = tuple(excluded)
+        # rows from the claim, before the LIMIT (see _scope_excluded_hosts). The
+        # exclusion read and the claim run on the same re-entrant connection; the
+        # UPDATE still re-checks status='pending', so a concurrent claim is never
+        # taken twice even if a row's state shifts between read and write.
+        excluded = _scope_excluded_hosts(connection, engagement.id, scope)
+        exclude_sql = _exclude_hosts_clause(excluded)
         rows = connection.execute(
             f"""
             UPDATE assessment_work_items
@@ -691,7 +711,7 @@ def fetch_work_items(engagement_id: int, *, type_val: str, limit: int, agent: st
              )
             RETURNING *
             """,
-            (agent, engagement.id, type_val, *exclude_params, int(limit)),
+            (agent, engagement.id, type_val, *excluded, int(limit)),
         ).fetchall()
         claimed = [dict(r) for r in rows]
     claimed.sort(key=lambda r: (-(r.get("priority_score") or 0), r.get("cluster_key") or "", r.get("id") or 0))
@@ -718,20 +738,20 @@ def fetch_work_items_by_priority(engagement_id: int, *, limit: int, agent: str) 
     type_ph = ",".join("?" * len(allowed_types))
     stamp = _stamp_liveness_sql()
     with _common.get_connection() as connection:
+        excluded = _scope_excluded_hosts(connection, engagement.id, scope)
+        exclude_sql = _exclude_hosts_clause(excluded)
         candidates = connection.execute(
             f"""
             SELECT * FROM assessment_work_items
              WHERE engagement_id = ? AND status = 'pending' AND terminal_reason IS NULL
-               AND type IN ({type_ph})
+               AND type IN ({type_ph}){exclude_sql}
              ORDER BY priority_score DESC, cluster_key, id
              LIMIT ?
             """,
-            (engagement.id, *allowed_types, int(limit)),
+            (engagement.id, *allowed_types, *excluded, int(limit)),
         ).fetchall()
         claimed: list[dict[str, Any]] = []
         for row in candidates:
-            if _row_host_filtered_out(row["host"], scope):
-                continue
             row_agent = _assigned_agent_for_row(row) if auto_route else agent
             if not row_agent:
                 continue
@@ -824,6 +844,13 @@ def fetch_work_items_by_unit(
         # transaction. Serializing before the SELECT prevents two workers from
         # both sizing/claiming the same highest-EV unit from a stale snapshot.
         connection.execute("BEGIN IMMEDIATE")
+        # I-07 scope shaping reaches the UNIT SELECTION as well as the claim: a
+        # unit whose only pending work is out-of-scope must not be selectable,
+        # or the stall the exclusion prevents simply moves up a level (the unit
+        # is re-selected every call and claims nothing).
+        excluded = _scope_excluded_hosts(connection, engagement.id, scope)
+        unit_exclude_sql = _exclude_hosts_clause(excluded, column="wi.host")
+        claim_exclude_sql = _exclude_hosts_clause(excluded)
         unit = connection.execute(
             f"""
             SELECT au.*
@@ -838,6 +865,7 @@ def fetch_work_items_by_unit(
                       AND wi.type IN ({type_ph})
                       {class_sql}
                       {path_sql}
+                      {unit_exclude_sql}
                )
              ORDER BY au.deep_required DESC, au.total_score DESC,
                       au.risk_score DESC, au.structure_score DESC, au.id
@@ -849,6 +877,7 @@ def fetch_work_items_by_unit(
                 *allowed_types,
                 *class_params,
                 *path_params,
+                *excluded,
             ),
         ).fetchone()
         if unit is None:
@@ -883,6 +912,7 @@ def fetch_work_items_by_unit(
                AND type IN ({type_ph})
                {claim_class_sql}
                {claim_path_sql}
+               {claim_exclude_sql}
              ORDER BY priority_score DESC, cluster_key, id
              LIMIT ?
             """,
@@ -892,14 +922,13 @@ def fetch_work_items_by_unit(
                 *allowed_types,
                 *class_params,
                 *path_params,
+                *excluded,
                 effective_limit,
             ),
         ).fetchall()
         stamp = _stamp_liveness_sql()
         claimed: list[dict[str, Any]] = []
         for candidate in candidates:
-            if _row_host_filtered_out(candidate["host"], scope):
-                continue
             row_agent = _assigned_agent_for_row(candidate) if auto_route else normalized_agent
             if not row_agent:
                 continue

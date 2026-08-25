@@ -18,6 +18,57 @@ def target_rate_lease_ttl(ttl_seconds: int) -> int:
     return min(max(int(ttl_seconds), 1), MAX_TARGET_RATE_LEASE_TTL_SECONDS)
 
 
+# Rate flags, de-dashed so the single- and double-dash spellings of the same Go
+# flag collapse to one name (`-rl` / `--rl`, `-rate-limit` / `--rate-limit`).
+_PER_SECOND_RATE_FLAGS = frozenset({"rl", "rate-limit", "rate"})
+# The per-minute family: httpx, nuclei, and katana all accept `-rlm`. A run that
+# configures ONLY this one still has an explicit rate — reserving the per-second
+# tool default for it is what let `httpx -rlm 60000` (1000 rps) reserve 150.
+_PER_MINUTE_RATE_FLAGS = frozenset({"rlm", "rate-limit-minute"})
+
+
+def _split_flag_token(token: str) -> tuple[str, str] | None:
+    """Split one argv token into ``(de-dashed flag, attached value)``.
+
+    Handles the attached Go/pflag form (``--rate-limit=500``) and returns an empty
+    value for the space-separated form (``--rate-limit 500``), whose value is the
+    next token.
+    """
+    if not token.startswith("-"):
+        return None
+    flag, _, attached = token.partition("=")
+    return flag.lstrip("-"), attached
+
+
+def _configured_rates_rps(cmd: list[str]) -> list[float]:
+    """Every request rate the argv explicitly configures, in requests per second.
+
+    Per-minute values are divided by 60: the tools implement them as a token
+    bucket that refills N tokens per minute, so N/60 is the rate the run can
+    sustain — which is what an engagement cap expressed in rps measures.
+    """
+    rates: list[float] = []
+    for index, token in enumerate(cmd):
+        split = _split_flag_token(token)
+        if split is None:
+            continue
+        flag, attached = split
+        if flag in _PER_SECOND_RATE_FLAGS:
+            divisor = 1.0
+        elif flag in _PER_MINUTE_RATE_FLAGS:
+            divisor = 60.0
+        else:
+            continue
+        raw = attached if attached else (cmd[index + 1] if index + 1 < len(cmd) else "")
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            rates.append(value / divisor)
+    return rates
+
+
 def aggregate_rate_reservation(
     engagement_dir: str,
     cmd: list[str],
@@ -31,28 +82,21 @@ def aggregate_rate_reservation(
     aggregate_cap = scope_lib.aggregate_rate_limit(scope_doc)
     if aggregate_cap is None:
         return None
-    rate_flags = ("-rate-limit", "--rate-limit", "-rl", "--rate")
-    for index, token in enumerate(cmd):
-        if token in rate_flags and index + 1 < len(cmd):
-            # Space-separated form: `--rate-limit 500`.
-            try:
-                value = float(cmd[index + 1])
-            except (TypeError, ValueError):
-                continue
-            if value > 0:
-                return value
-        elif token.startswith("-") and "=" in token:
-            # Attached Go/pflag form: `--rate-limit=500`, `-rl=500`. Reserving the
-            # tool default here would silently admit a run above the ROE cap.
-            flag, _, attached = token.partition("=")
-            if flag not in rate_flags:
-                continue
-            try:
-                value = float(attached)
-            except (TypeError, ValueError):
-                continue
-            if value > 0:
-                return value
+    configured = _configured_rates_rps(cmd)
+    if configured:
+        # An argv may carry BOTH families, and the tools do NOT agree on which one
+        # wins — measured in the runtime image, not assumed: httpx and nuclei let
+        # the per-minute limiter REPLACE the per-second one (`-rl 1 -rlm 600` over
+        # 20 URLs finished in ~3s and ~1s, versus ~40s and ~19s for `-rl 1` alone),
+        # while katana ignores `-rlm` entirely because its `-rl` carries a non-zero
+        # default that wins the precedence chain (`-rl 1 -rlm 600` still crawled at
+        # 1 req/s). Reserving the LARGEST configured rate is the only choice that
+        # cannot under-reserve under either precedence, and under-reserving is an
+        # ROE breach while over-reserving only costs a refusal the agent can
+        # re-issue with a corrected argv. Vigil's own emitters are unaffected
+        # either way: `kali katana` sets `-rl` alone and `web-discovery` sets
+        # `-rl N -rlm N*60`, which is the same number.
+        return max(configured)
     defaults = {"httpx": 150.0, "nuclei": 150.0, "katana": 150.0}
     return defaults.get(tool_name.lower(), aggregate_cap)
 

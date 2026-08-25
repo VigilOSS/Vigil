@@ -10,7 +10,7 @@ from . import config as config_module
 from . import docker
 from .image_freshness import image_outdated, proxy_image_drift
 from .install import InstallOptions, install_from_source
-from .mitmproxy import MitmproxyOptions, mitmproxy_image_inputs, start_proxy
+from .mitmproxy import MitmproxyOptions, build_image as build_mitmproxy_image, mitmproxy_image_inputs, start_proxy
 from .oob import OobOptions, oob_options as _oob_options, oob_status, start_oob
 from .orchestrator import OrchestratorOptions, start_orchestrator
 from .paths import default_runtime_container, resolve_source_root
@@ -48,7 +48,9 @@ def run_up(options: UpOptions, *, runner: docker.Runner = docker.run_command) ->
     runtime_built = False
     if options.no_build:
         print("runtime image\tbuild skipped")
-    elif image_outdated("vigil:latest", _runtime_image_inputs(install_root), runner=runner):
+    elif image_outdated(
+        "vigil:latest", _runtime_image_inputs(install_root), root=install_root, runner=runner
+    ):
         print("runtime image\tbuilding")
         build_runtime(install_root, runner=runner)
         runtime_built = True
@@ -59,7 +61,12 @@ def run_up(options: UpOptions, *, runner: docker.Runner = docker.run_command) ->
 
     if options.no_build:
         print("mitmproxy image\tbuild skipped")
-    elif image_outdated("vigil-proxy:latest", mitmproxy_image_inputs(install_root), runner=runner):
+    elif image_outdated(
+        "vigil-proxy:latest",
+        mitmproxy_image_inputs(install_root),
+        root=install_root,
+        runner=runner,
+    ):
         print("mitmproxy image\tbuilding")
         _build_mitmproxy_image(install_root, runner=runner)
     else:
@@ -205,6 +212,10 @@ def _runtime_image_drift(options: RuntimeOptions, *, runner: docker.Runner) -> b
 
 
 def _build_mitmproxy_image(install_root: Path, *, runner: docker.Runner = docker.run_command_streaming) -> None:
-    dockerfile = install_root / "agent" / "docker" / "mitmproxy" / "Dockerfile"
-    argv = ["docker", "build", "-t", "vigil-proxy:latest", "-f", str(dockerfile), str(install_root / "agent")]
-    docker.require_success(runner(argv), argv)
+    """Delegate to the one proxy-image builder.
+
+    `vigil up` used to assemble its own `docker build` argv here, which omitted
+    the input-digest label. An unstamped image can never be proven current, so
+    the very next `vigil up` rebuilt it again — forever.
+    """
+    build_mitmproxy_image(install_root, runner=runner)

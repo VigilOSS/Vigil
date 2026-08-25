@@ -168,6 +168,83 @@ def test_creds_client_resolve_uses_resolve_endpoint(tmp_path, monkeypatch):
     assert calls == [("credentials/resolve", "")]
 
 
+def test_creds_client_resolve_marks_a_read_only_resolve_on_the_wire(
+    tmp_path, monkeypatch
+):
+    """`record_use=False` must reach the backend, not just the client.
+
+    `auth status` without `--probe` only DISPLAYS the record. The backend
+    refreshes `last_seen_at` on every resolve-for-replay, and the 8h stale flag
+    and 5d purge key off that field — so an inspection that forgets to say so
+    keeps an unused session looking fresh forever.
+    """
+    eng = tmp_path / "eng"
+    eng.mkdir()
+    calls = []
+
+    class Backend:
+        def get_engagement(self, endpoint, query=""):
+            calls.append(query)
+            return {"identity_name": "user_b", "material": {"cookies": {"s": "b"}}}
+
+    monkeypatch.setattr(creds_client, "_client", lambda _eng: Backend())
+    creds_client.invalidate_cache()
+
+    creds_client.resolve_identity(str(eng), "user_b", record_use=False)
+    creds_client.active_material(str(eng), record_use=False)
+
+    assert all("record_use=false" in query for query in calls)
+    assert len(calls) == 2
+
+
+def test_creds_client_resolve_for_replay_does_not_mark_read_only(
+    tmp_path, monkeypatch
+):
+    # The default IS the replay contract; the backend's own default records the
+    # use, so the client must not send anything that turns it off.
+    eng = tmp_path / "eng"
+    eng.mkdir()
+    calls = []
+
+    class Backend:
+        def get_engagement(self, endpoint, query=""):
+            calls.append(query)
+            return {"identity_name": "user_b", "material": {"cookies": {"s": "b"}}}
+
+    monkeypatch.setattr(creds_client, "_client", lambda _eng: Backend())
+    creds_client.invalidate_cache()
+
+    creds_client.resolve_identity(str(eng), "user_b")
+    creds_client.active_material(str(eng))
+
+    assert not any("record_use" in query for query in calls)
+
+
+def test_creds_client_read_only_answer_is_not_reused_for_a_replay(
+    tmp_path, monkeypatch
+):
+    # The per-process cache would otherwise let one `auth status` swallow the USE
+    # of every kali exec that follows it inside the TTL.
+    eng = tmp_path / "eng"
+    eng.mkdir()
+    calls = []
+
+    class Backend:
+        def get_engagement(self, endpoint, query=""):
+            calls.append(query)
+            return {"identity_name": "user_b", "material": {"cookies": {"s": "b"}}}
+
+    monkeypatch.setattr(creds_client, "_client", lambda _eng: Backend())
+    creds_client.invalidate_cache()
+
+    creds_client.resolve_identity(str(eng), "user_b", record_use=False)
+    creds_client.resolve_identity(str(eng), "user_b")
+
+    assert len(calls) == 2
+    assert "record_use=false" in calls[0]
+    assert "record_use" not in calls[1]
+
+
 def test_creds_client_resolve_cache_is_short_lived(tmp_path, monkeypatch):
     eng = tmp_path / "eng"
     eng.mkdir()
