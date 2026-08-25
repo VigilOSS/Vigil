@@ -124,7 +124,15 @@ introspection.
 
 ## Interpreting Key Fields
 
-- `output_retention_status`: `retained` (bounded preview retained), `artifact` (bounded preview plus a descriptor-verified snapshot at `stdout_artifact_ref`/`stderr_artifact_ref`), `suppressed` (one-shot inline bytes were discarded), `suppression_pending` (logical suppression committed but post-commit validation did not finish), `suppression_deferred` (logically suppressed and blocked from artifact indexing, while raw 0600 spill bytes may remain), `untrusted` (a host process group could not be quiesced, so no output hash or artifact was claimed), `integrity_failure` (a retained snapshot failed its post-commit identity/content check), or `empty`.
+- `stdout_bytes` / `stderr_bytes` / `stdout_sha256` / `stderr_sha256`: the size and digest of what
+  the run actually WROTE, measured by the wrapper from the file it owns. On `kali` rows (sync and
+  async-job alike) the full bytes live in the wrapper spill named by `stdout_path`/`stderr_path`,
+  not in the bounded preview — so a large scan shows a real byte count here even though the preview
+  is truncated. A row that reports no byte count is one whose wrapper could not read its spill, or
+  one the orphan sweeper finalized without proving the process had quiesced; treat the absence as
+  "not measured", never as "no output".
+- `output_retention_status`: `retained` (bounded preview retained — and, on a `kali` row, the full
+  bytes still on disk at `stdout_path`/`stderr_path`), `artifact` (bounded preview plus a descriptor-verified snapshot at `stdout_artifact_ref`/`stderr_artifact_ref`), `suppressed` (one-shot inline bytes were discarded), `suppression_pending` (logical suppression committed but post-commit validation did not finish), `suppression_deferred` (logically suppressed and blocked from artifact indexing, while raw 0600 spill bytes may remain), `untrusted` (a host process group could not be quiesced, so no output hash or artifact was claimed), `integrity_failure` (a retained snapshot failed its post-commit identity/content check), or `empty`.
 - `output_cleanup_status` / `output_cleanup_warning`: physical-cleanup truth for host spills. `deferred` is not success: raw bytes may remain in the private host-exec directory, and `--require-audit` exits nonzero. `pending` is a crash-recoverable transaction state owned by an exact duplicate terminal PATCH and by `vigil assess kali sweep-orphans` (also run by `resume-brief`); `warning` is terminal and requires operator attention.
 - `output_integrity_status` / `output_integrity_warning`: snapshot publication truth. Trust an artifact ref only when this is `verified`. `pending` has the same deterministic PATCH/sweep recovery owner; `warning` is a terminal audit failure.
 - `output_recovery_observed_at`: backend-owned recovery baseline. New finalizations stamp it in the same transaction as terminal state; migrated terminal-pending rows stamp the time the upgraded backend first observes them, which deliberately starts a fresh grace period without pretending to know their historical commit time. Reconciliation ages pending work only from this field, never client-supplied `completed_at` or process `started_at`.

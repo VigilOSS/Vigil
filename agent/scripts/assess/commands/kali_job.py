@@ -114,6 +114,19 @@ def register(subparsers) -> None:
         default="",
         help="Logical liveness scope used to resolve a scoped identity alias.",
     )
+    start.add_argument(
+        "--identity-target",
+        dest="identity_target",
+        default="",
+        help=(
+            "Name the tool whose header convention this argv follows, when the "
+            "command head is one Vigil cannot classify (a wrapper binary, a "
+            "renamed HTTP client) and --identity would otherwise be refused. "
+            "Same semantics as the synchronous verbs: ignored, with a stderr "
+            "line, whenever Vigil could already inject or the argv runs a shell "
+            "script FILE."
+        ),
+    )
     start.add_argument("--container-name", dest="container_name", default=default_runtime_container())
     start.add_argument(
         "--parent-command-run-id",
@@ -220,6 +233,7 @@ def _run_start(args) -> None:
             engagement_dir=engagement_dir,
             identity=getattr(args, "identity", None),
             identity_scope=getattr(args, "identity_scope", "") or "",
+            identity_target=getattr(args, "identity_target", "") or "",
             prepared_auth_context=getattr(args, "prepared_auth_context", None),
         )
         execution_policy = scope_lib.enforce_execution_policy(

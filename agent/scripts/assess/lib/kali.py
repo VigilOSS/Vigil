@@ -74,8 +74,6 @@ from .kali_audit import (
     _write_failed_audit_marker,
 )
 from .kali_cli import (
-    CRAWL_RATE_DEFAULT,
-    CRAWL_RATE_HARD_CAP,
     ScopedErrorParser,
     add_passthrough_args_flag,
     add_required_kali_flags,
@@ -89,6 +87,8 @@ from .kali_cli import (
     safe_engagement_dir,
 )
 from .kali_output import (
+    KALI_EXIT_CODES,
+    _REQUIRED_HEADER_FLAG_SPECS,
     _REQUIRED_HEADER_INJECTABLE,
     _REQUIRED_HEADER_SKIP,
     KaliResult,
@@ -103,10 +103,15 @@ from .kali_output import (
     _required_headers,
     _scope_version,
     _utcnow_iso,
+    _wrapped_shell_script_index,
+    curl_multi_arm_warning,
     detect_transport_error,
     detect_waf_challenge,
     extract_probe_response_headers,
+    handwritten_auth_headers,
     is_http_prober,
+    shell_script_body_gap,
+    shell_script_file_argv,
 )
 from .kali_runtime_exec import (
     _build_docker_exec,
@@ -535,6 +540,50 @@ def identity_refusal_detail(identity: str, material: dict) -> str:
     )
 
 
+def identity_argv_shape_detail(identity: str, tool_name: str, cmd: list[str]) -> str:
+    """Explain a refusal caused by the ARGV SHAPE rather than the stored material.
+
+    The credential is fine — there is simply no header-capable command head on
+    this argv to attach it to. :func:`identity_refusal_detail` cannot say that:
+    its catch-all reads as a credential problem, which is why agents hitting
+    ``bash /path/poc.sh --identity user_a`` concluded the session was broken and
+    fell back to a hand-written ``-H "Cookie: …"`` — recorded as
+    ``auth_context=anonymous``, destroying the cross-identity evidence the flag
+    exists to protect. Name the real cause and both remedies instead.
+    """
+    injectable = ", ".join(
+        sorted(set(_REQUIRED_HEADER_INJECTABLE) | set(_REQUIRED_HEADER_FLAG_SPECS))
+    )
+    script = shell_script_file_argv(cmd)
+    if script:
+        return (
+            f"the argv runs a shell SCRIPT FILE ('{script}'), not a command "
+            "string: the injector rewrites the requests inside a `-c` script, and "
+            "Vigil deliberately never reads a .sh off disk. Appending a header "
+            "flag here would land on the script as $1/$2 and never reach its "
+            f"requests, so identity '{identity}' has nowhere to go — the stored "
+            "material itself is fine. Re-run the script's requests inline as "
+            "`bash -c '<the curl commands>'`, which injects into each sub-command "
+            "(`--identity-target` cannot rescue this shape)"
+        )
+    body_gap = shell_script_body_gap(cmd)
+    if body_gap:
+        # The argv already IS `sh -c '<script>'`. Telling the operator to
+        # re-shape it that way, and pointing at `--identity-target` (which
+        # `_identity_injection_tool` ignores for this shape), is a dead end.
+        return (
+            f"{body_gap}; identity '{identity}' has nowhere to go until then — "
+            "the stored material itself is fine"
+        )
+    return (
+        f"tool '{tool_name}' accepts no injected auth header, so this argv has "
+        f"nowhere to carry identity '{identity}' — the stored material itself is "
+        "fine. If this really is a header-capable HTTP client under another name, "
+        "say so with `--identity-target <tool>` (one of: "
+        f"{injectable}); otherwise re-shape the run as `bash -c '<curl …>'`"
+    )
+
+
 def prepare_browser_identity_material(
     engagement_dir: str | Path,
     identity_name: str | None,
@@ -616,23 +665,37 @@ def prepare_browser_identity_material(
 
 def _apply_identity_material(
     cmd: list[str], tool_name: str, material: dict, *, probe: bool = False
-) -> bool:
+) -> str:
     """Inject a named identity's auth headers/cookies into an HTTP command argv so
     the request actually runs AS that identity.
 
-    Returns True when the credentials were applied (the caller may then relabel
-    auth_context to the identity); False when there is nothing to apply or the
-    tool can't take injected headers. A False return MUST prevent relabeling, so
-    a run that did not actually carry the identity's credentials is never counted
-    as a distinct identity by the depth ledger's cross-identity rule.
+    Returns WHY the identity did or did not reach the argv:
+
+      * ``"injected"``    — the credentials are on the wire; the caller may
+                            relabel auth_context to the identity.
+      * ``"no_head"``     — the material is fine, but this argv has no
+                            header-capable command head to attach it to
+                            (``bash /path/poc.sh``, nmap, an unknown binary).
+      * ``"unavailable"`` — nothing usable to apply: the store forbids replaying
+                            this material, or it carries no header, no cookie for
+                            the request host and no bearer token, or a header of
+                            that name is already written on the argv (its value
+                            may not be this identity's, so we must not claim it).
+
+    Anything other than ``"injected"`` MUST prevent relabeling, so a run that did
+    not actually carry the identity's credentials is never counted as a distinct
+    identity by the depth ledger's cross-identity rule. The two failure reasons
+    are distinguished because they need OPPOSITE remedies — refresh the
+    credential vs. re-shape the command — and collapsing them into one message
+    is what pushed operators onto the hand-written ``-H "Cookie: …"`` fallback.
 
     ``probe=True`` marks the AUTH liveness-probe path, which may also replay a
     ``dead`` identity (that is how a dead verdict gets re-tested).
     """
     if not isinstance(material, dict):
-        return False
+        return "unavailable"
     if not _identity_material_replayable(material, probe=probe):
-        return False
+        return "unavailable"
     _warn_degraded_identity(material)
     request_host = kali_resolve.target_host_port(tool_name, cmd)[0]
     state_changing = _request_is_state_changing(cmd)
@@ -658,8 +721,11 @@ def _apply_identity_material(
             file=sys.stderr,
         )
     if not pairs:
-        return False
-    return _apply_identity_headers(cmd, tool_name, dict(pairs)) == "injected"
+        return "unavailable"
+    status = _apply_identity_headers(cmd, tool_name, dict(pairs))
+    if status == "injected":
+        return "injected"
+    return "no_head" if status == "warned" else "unavailable"
 
 
 def _nuclei_stages_disable_callbacks(cmd: list[str], *, depth: int = 0) -> bool:
@@ -722,6 +788,90 @@ def _apply_nuclei_oob_safety(cmd: list[str], *, explicit_oob: bool = False) -> N
         )
 
 
+def _warn_handwritten_auth_headers(cmd: list[str]) -> None:
+    """WARN when an anonymous dispatch carries hand-written credentials.
+
+    ``kali_exec`` labels an ``--identity``-less run ``auth_context=anonymous``.
+    That is accurate for a genuinely anonymous probe — but a run that pasted a
+    ``Cookie:`` / ``Authorization:`` header by hand IS authenticated, and
+    recording it as anonymous silently voids the cross-identity evidence the
+    depth ledger credits for IDOR/BOLA/BFLA work. Warn, never block: the header
+    may be a deliberate negative test (a forged/expired token), and a refusal
+    here would be a dead end mid-engagement.
+    """
+    names = handwritten_auth_headers(cmd)
+    if not names:
+        return
+    print(
+        f"warning: this run writes {' and '.join(names)} by hand but passes no "
+        "--identity, so it is recorded as auth_context=anonymous — an "
+        "authenticated request filed as anonymous, which is exactly the evidence "
+        "an access-control finding needs and cannot be reconstructed later. "
+        "Re-run with `--identity <name>` (see `vigil assess auth list`) so the "
+        "audit row names who the request ran as; keep the hand-written header "
+        "only when the point IS an unowned/forged credential.",
+        file=sys.stderr,
+    )
+
+
+def _identity_injection_tool(
+    cmd: list[str], *, tool_name: str, identity_target: str
+) -> str:
+    """The tool name whose header convention identity material is injected under.
+
+    Normally the derived tool name. ``--identity-target`` substitutes it ONLY
+    when Vigil could not inject into the derived name anyway: the flag is an
+    escape hatch for an unclassifiable command head (a wrapper binary, a renamed
+    HTTP client), never a way to override a tool Vigil already handles — aiming
+    ``--identity-target curl`` at an arjun run would append a ``-H`` arjun
+    rejects. It is likewise ignored for a shell SCRIPT FILE, where the appended
+    flag becomes the script's ``$1``/``$2``: honouring it there would stamp
+    ``auth_context=<identity>`` on a request that never carried the credential,
+    which is strictly worse than the refusal it was meant to avoid.
+
+    An override that cannot apply always says so on stderr rather than being
+    dropped silently — the caller needs to know the flag changed nothing.
+    """
+    target = str(identity_target or "").strip().lower()
+    if not target:
+        return tool_name
+    known = set(_REQUIRED_HEADER_INJECTABLE) | set(_REQUIRED_HEADER_FLAG_SPECS)
+    script = shell_script_file_argv(cmd)
+    if target not in known:
+        reason = (
+            f"'{target}' is not a header-injectable tool; known targets: "
+            + ", ".join(sorted(known))
+        )
+    elif _wrapped_shell_script_index(cmd) is not None:
+        # Injection into a `-c` body rewrites the sub-commands INSIDE the script,
+        # never the shell's own argv, so renaming the head changes nothing. Say
+        # that rather than the flatly false "Vigil already knows how to inject
+        # into 'bash'" — which is wrong precisely when the body failed to inject.
+        reason = (
+            "identity headers are injected into the sub-commands INSIDE a `-c` "
+            "script body, not onto the shell's own argv, so naming a different "
+            "head tool changes nothing here"
+        )
+    elif tool_name.lower() in known:
+        reason = f"Vigil already knows how to inject into '{tool_name}' on this argv"
+    elif script:
+        reason = (
+            f"the argv runs a shell script FILE ('{script}'), so an appended header "
+            "flag would become the script's $1/$2 instead of reaching its requests "
+            "— inline them as `bash -c '<the curl commands>'` instead"
+        )
+    else:
+        print(
+            f"warning: injecting identity material with the '{target}' header "
+            f"convention (--identity-target), because tool '{tool_name}' is not one "
+            "Vigil knows how to inject into; confirm resolved_argv on the result.",
+            file=sys.stderr,
+        )
+        return target
+    print(f"warning: --identity-target ignored: {reason}.", file=sys.stderr)
+    return tool_name
+
+
 def prepare_execution_command(
     cmd: list[str],
     *,
@@ -729,6 +879,7 @@ def prepare_execution_command(
     engagement_dir: Path,
     identity: str | None = None,
     identity_scope: str = "",
+    identity_target: str = "",
     nuclei_oob_explicit: bool = False,
     prepared_auth_context: str | None = None,
     identity_probe: bool = False,
@@ -739,11 +890,21 @@ def prepare_execution_command(
     injected when the tool supports them; an unsupported shape emits a warning
     and still runs.
 
+    ``identity_target`` names the tool whose header convention the argv actually
+    follows, for the case where the derived tool name is not one Vigil knows
+    (a wrapper binary, a renamed client). It is only honoured when it can
+    genuinely reach the wire — see :func:`_identity_injection_tool`.
+
     ``identity_probe=True`` is reserved for the AUTH liveness probe
     (``auth status --probe``): it may replay a ``dead`` identity, because a
     probe is how a dead verdict gets re-tested.
     """
     _apply_nuclei_oob_safety(cmd, explicit_oob=nuclei_oob_explicit)
+    multi_arm = curl_multi_arm_warning(cmd)
+    if multi_arm:
+        print(multi_arm, file=sys.stderr)
+    if identity is None:
+        _warn_handwritten_auth_headers(cmd)
     prepared = str(prepared_auth_context or "").strip()
     auth_context = prepared if prepared and prepared != "anonymous" else "anonymous"
     required = _required_headers(engagement_dir)
@@ -769,17 +930,34 @@ def prepare_execution_command(
                 "run anonymously. List what IS stored with `vigil assess auth "
                 "list` (add --include-dead to see probe-proven-dead sessions)."
             )
-        elif _apply_identity_material(cmd, tool_name, material, probe=identity_probe):
-            auth_context = identity_name or auth_context
         else:
-            # Say WHY: state + age + the exact recovery command. A bare
-            # "could not be applied" pushed operators onto the anonymous
-            # `-H "Cookie: ..."` workaround, which mislabels the audit row.
-            raise scope_lib.ScopePolicyError(
-                f"requested identity '{identity}' could not be applied to tool "
-                f"'{tool_name}'; refusing to run anonymously because "
-                f"{identity_refusal_detail(str(identity), material)}."
+            status = _apply_identity_material(
+                cmd,
+                _identity_injection_tool(
+                    cmd, tool_name=tool_name, identity_target=identity_target
+                ),
+                material,
+                probe=identity_probe,
             )
+            if status == "injected":
+                auth_context = identity_name or auth_context
+            elif status == "no_head":
+                # The credential is FINE; the argv has nowhere to put it. That
+                # needs the opposite remedy from a stale session, so say so.
+                raise scope_lib.ScopePolicyError(
+                    f"requested identity '{identity}' could not be applied to tool "
+                    f"'{tool_name}'; refusing to run anonymously because "
+                    f"{identity_argv_shape_detail(str(identity), tool_name, cmd)}."
+                )
+            else:
+                # Say WHY: state + age + the exact recovery command. A bare
+                # "could not be applied" pushed operators onto the anonymous
+                # `-H "Cookie: ..."` workaround, which mislabels the audit row.
+                raise scope_lib.ScopePolicyError(
+                    f"requested identity '{identity}' could not be applied to tool "
+                    f"'{tool_name}'; refusing to run anonymously because "
+                    f"{identity_refusal_detail(str(identity), material)}."
+                )
 
     return auth_context
 
@@ -866,6 +1044,30 @@ def _audit_execution_policy_refusal(
         client.close()
 
 
+def _rotate_failed_attempt(stdout_path: Path, stderr_path: Path) -> None:
+    """Move an abandoned attempt's output aside so the retry owns the run's files.
+
+    The audit row's ``stdout_path``/``stderr_path`` are written ONCE, pre-exec,
+    and are load-bearing downstream: the finalize PATCH hashes exactly those
+    files, ``record_command_run`` registers them in the artifact index, and
+    ``sweep-orphans`` parses ``run_uuid`` back out of the stdout name. If the
+    CR-36 retry streamed into a second, differently-named file, the row would
+    end up naming one attempt while carrying another's bytes, preview and
+    verdict — incoherent evidence, which is worse than none because a later
+    reader cannot tell it is wrong. So the retry re-runs into the SAME files and
+    the losing attempt is preserved next to them as ``<run_uuid>.attempt1.*``.
+
+    Preservation is best-effort: the rotated attempt ended in http=000, so it
+    holds no HTTP answer, and nothing references it. A rotate that fails must
+    never fail the run — the retry simply truncates it.
+    """
+    for path in (stdout_path, stderr_path):
+        try:
+            os.replace(path, path.with_name(f"{path.stem}.attempt1{path.suffix}"))
+        except OSError:
+            pass
+
+
 def kali_exec(
     cmd: list[str],
     *,
@@ -883,6 +1085,7 @@ def kali_exec(
     tool_name: str | None = None,
     identity: str | None = None,
     identity_scope: str = "",
+    identity_target: str = "",
     identity_probe: bool = False,
     rate_override_reason: str = "",
     nuclei_oob_explicit: bool = False,
@@ -956,6 +1159,7 @@ def kali_exec(
             engagement_dir=eng_dir,
             identity=identity,
             identity_scope=identity_scope,
+            identity_target=identity_target,
             nuclei_oob_explicit=nuclei_oob_explicit,
             prepared_auth_context=prepared_auth_context,
             identity_probe=identity_probe,
@@ -1121,14 +1325,13 @@ def kali_exec(
         # One docker-exec attempt + full telemetry snapshot. Factored into a
         # nested closure so the CR-36 false-negative guard can run it a SECOND
         # time (a single host-resolved pinned-IP retry) without duplicating the
-        # kill-cascade / rusage / preview logic. Each attempt streams to its own
-        # {run_uuid}[.retry1].{out,err} so both attempts' bytes survive on disk;
-        # the returned ``out_path``/``err_path`` point at THIS attempt's files.
-        def _execute_and_snapshot(
-            *, attempt_uuid: str, out_path: Path, err_path: Path
-        ) -> SimpleNamespace:
+        # kill-cascade / rusage / preview logic. Every attempt streams to the
+        # SAME {run_uuid}.{out,err} the pre-exec audit row already names — see
+        # ``_rotate_failed_attempt`` for why the retry must not invent a second
+        # name.
+        def _execute_and_snapshot() -> SimpleNamespace:
             # Open output files BEFORE Popen so streaming starts at line 1.
-            with out_path.open("wb") as out_fh, err_path.open("wb") as err_fh:
+            with stdout_path.open("wb") as out_fh, stderr_path.open("wb") as err_fh:
                 try:
                     process = subprocess.Popen(  # noqa: S603 — controlled argv
                         docker_argv,
@@ -1189,7 +1392,7 @@ def kali_exec(
                     # wrapper shell records the in-container PID to a pid file so
                     # we can also send ``docker exec kill`` directly at the user
                     # command across the namespace boundary.
-                    container_pid = _read_container_pid(container_name, attempt_uuid)
+                    container_pid = _read_container_pid(container_name, run_uuid)
                     if container_pid is not None:
                         _kill_in_container(container_name, container_pid, "TERM")
                     else:
@@ -1198,7 +1401,7 @@ def kali_exec(
                         # the shared runtime container; host-side kill plus
                         # sweep-orphans is safer than a broad in-container signal.
                         print(
-                            f"warning: in-container pid file missing for run {attempt_uuid}; "
+                            f"warning: in-container pid file missing for run {run_uuid}; "
                             "using host process-group cleanup only.",
                             file=sys.stderr,
                         )
@@ -1221,12 +1424,12 @@ def kali_exec(
                             a_return_code = process.wait(timeout=2)
                         except subprocess.TimeoutExpired:
                             a_return_code = None
-                    _cleanup_container_pid_file(container_name, attempt_uuid)
+                    _cleanup_container_pid_file(container_name, run_uuid)
 
             # Clean up the pid file on the happy path too so /tmp doesn't grow
             # unboundedly.
             if not a_timed_out:
-                _cleanup_container_pid_file(container_name, attempt_uuid)
+                _cleanup_container_pid_file(container_name, run_uuid)
 
             # Resource snapshot. getrusage(RUSAGE_CHILDREN) accumulates across
             # all waited-for children; for a single-shot CLI call the values are
@@ -1245,8 +1448,8 @@ def kali_exec(
             if proc_peak is not None:
                 a_peak_rss = proc_peak
 
-            a_stdout_preview = _read_safely(out_path)
-            a_stderr_preview = _read_safely(err_path)
+            a_stdout_preview = _read_safely(stdout_path)
+            a_stderr_preview = _read_safely(stderr_path)
 
             if a_timed_out and (a_stdout_preview or a_stderr_preview):
                 a_partial = True
@@ -1260,13 +1463,9 @@ def kali_exec(
                 peak_rss_bytes=a_peak_rss,
                 stdout_preview=a_stdout_preview,
                 stderr_preview=a_stderr_preview,
-                stdout_path=out_path,
-                stderr_path=err_path,
             )
 
-        snap = _execute_and_snapshot(
-            attempt_uuid=run_uuid, out_path=stdout_path, err_path=stderr_path
-        )
+        snap = _execute_and_snapshot()
 
         # CR-36 — HARD false-negative guard. A container HTTP probe that ends in
         # the http=000 / connection-failed / DNS-resolution-failure signature
@@ -1313,7 +1512,8 @@ def kali_exec(
                             pin_host, pin_port, new_pin, all_ips=retry_ips
                         )
                         # Rebuild docker_argv so it carries the freshly injected
-                        # --resolve, then re-run into retry-suffixed files.
+                        # --resolve, rotate the losing attempt aside, then re-run
+                        # into the same files the audit row already names.
                         docker_argv = _build_docker_exec(
                             cmd,
                             container_name=container_name,
@@ -1321,11 +1521,8 @@ def kali_exec(
                             working_dir=container_working_dir,
                             engagement_key=eng_key,
                         )
-                        retry_out = out_dir / f"{run_uuid}.retry1.out"
-                        retry_err = out_dir / f"{run_uuid}.retry1.err"
-                        snap = _execute_and_snapshot(
-                            attempt_uuid=run_uuid, out_path=retry_out, err_path=retry_err
-                        )
+                        _rotate_failed_attempt(stdout_path, stderr_path)
+                        snap = _execute_and_snapshot()
                         is_te, te_detail = detect_transport_error(
                             tool_name=derived_tool_name,
                             return_code=snap.return_code,
@@ -1421,8 +1618,6 @@ def kali_exec(
         peak_rss_bytes = snap.peak_rss_bytes
         stdout_preview = snap.stdout_preview
         stderr_preview = snap.stderr_preview
-        final_stdout_path = snap.stdout_path
-        final_stderr_path = snap.stderr_path
 
         ended_at_iso = _utcnow_iso()
         duration_ms = int((time.monotonic() - started_monotonic) * 1000)
@@ -1467,6 +1662,15 @@ def kali_exec(
                     peak_rss_bytes=peak_rss_bytes,
                     cpu_user_seconds=cpu_user_seconds,
                     cpu_system_seconds=cpu_system_seconds,
+                    # The previews above are head+tail truncations, and only the
+                    # host_exec lane spills through the backend's retention
+                    # machinery — so these paths are the ONLY source of a real
+                    # byte count and digest for a kali run. They are the same
+                    # files the pre-exec row names — the CR-36 retry rotates the
+                    # losing attempt aside instead of writing to a second name —
+                    # so the row hashes exactly what it points at.
+                    stdout_path=stdout_path,
+                    stderr_path=stderr_path,
                 )
                 finalize_ok = True
             except AssessError as exc:
@@ -1480,11 +1684,12 @@ def kali_exec(
                 )
 
             if finalize_ok:
-                # Point evidence at the FINAL attempt's stdout (the retry file
-                # when the http=000 guard re-ran) so the probe-run references the
-                # bytes the verdict was actually derived from.
+                # The run's single stdout file — after a CR-36 retry it holds
+                # the attempt the verdict was actually derived from, so the
+                # probe-run, the audit row and the artifact index all reference
+                # the same bytes.
                 evidence_ref = (
-                    f"{container_working_dir}/scans/kali/{final_stdout_path.name}"
+                    f"{container_working_dir}/scans/kali/{stdout_path.name}"
                 )
                 _emit_probe_run(
                     client,
@@ -1504,8 +1709,8 @@ def kali_exec(
             run_id=run_id,
             status=terminal_status,
             return_code=return_code,
-            stdout_path=str(final_stdout_path),
-            stderr_path=str(final_stderr_path),
+            stdout_path=str(stdout_path),
+            stderr_path=str(stderr_path),
             duration_ms=duration_ms,
             peak_rss_bytes=peak_rss_bytes,
             stdout_preview=stdout_preview,
@@ -1552,17 +1757,21 @@ __all__ = [
     "kali_args_to_kwargs",
     "emit_result",
     "resolve_crawl_rate_limit",
-    "CRAWL_RATE_DEFAULT",
-    "CRAWL_RATE_HARD_CAP",
     "count_list_targets",
     "parse_list_progress",
     "incomplete_list_run_warning",
     "safe_engagement_dir",
     # Output + RSS (from kali_output)
     "KaliResult",
+    "KALI_EXIT_CODES",
+    "_REQUIRED_HEADER_FLAG_SPECS",
     "_REQUIRED_HEADER_INJECTABLE",
     "_REQUIRED_HEADER_SKIP",
     "_apply_required_headers",
+    "curl_multi_arm_warning",
+    "handwritten_auth_headers",
+    "shell_script_body_gap",
+    "shell_script_file_argv",
     "_auth_context",
     "_engagement_type",
     "_existing_header_names",
