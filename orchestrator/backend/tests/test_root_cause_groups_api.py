@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+from app import db as db_module
+
 
 ENGAGEMENT_KEY = "2026-05-05-170700-root-cause"
 
@@ -325,11 +327,12 @@ def test_generic_link_retarget_normalizes_selector_shape(client, isolate_setting
     assert kind_only.status_code == 422, kind_only.text
 
 
-def test_report_readiness_recomputes_cvss_vector_score(
+def test_record_rejects_a_cvss_score_that_contradicts_its_vector(
     client, isolate_settings
 ):
+    """The write path — not just the report gate — holds the pair together."""
     _seed(client, isolate_settings)
-    payload = _finding("RC-070", "CVSS drift", root_key="cvss")
+    payload = _finding("RC-069", "CVSS drift", root_key="cvss")
     payload["severity"] = "low"
     payload["details"]["cvss_score"] = 3.1
     payload["details"]["cvss_vector"] = (
@@ -339,7 +342,40 @@ def test_report_readiness_recomputes_cvss_vector_score(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/findings",
         json=payload,
     )
+    assert response.status_code == 400, response.text
+    detail = response.json()["detail"]
+    assert "3.1" in detail and "4.3" in detail
+
+
+def test_report_readiness_recomputes_cvss_vector_score(
+    client, isolate_settings
+):
+    """The readiness blocker is the backstop for rows written before the
+    write-time check existed, so the mismatch is planted directly in the row."""
+    _seed(client, isolate_settings)
+    payload = _finding("RC-070", "CVSS drift", root_key="cvss")
+    payload["severity"] = "low"
+    payload["details"]["cvss_score"] = 4.3
+    payload["details"]["cvss_vector"] = (
+        "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N"
+    )
+    response = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/findings",
+        json=payload,
+    )
     assert response.status_code == 201, response.text
+    with db_module.get_connection() as connection:
+        stored = json.loads(
+            connection.execute(
+                "SELECT details_json FROM assessment_findings WHERE slug = ?",
+                ("RC-070",),
+            ).fetchone()[0]
+        )
+        stored["cvss_score"] = 3.1
+        connection.execute(
+            "UPDATE assessment_findings SET details_json = ? WHERE slug = ?",
+            (json.dumps(stored), "RC-070"),
+        )
 
     readiness = client.get(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/report-readiness"

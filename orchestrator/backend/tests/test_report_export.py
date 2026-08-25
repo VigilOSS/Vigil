@@ -87,7 +87,7 @@ def _finding(slug: str, title: str, *, severity: str = "high") -> dict:
         "source_name": "test",
         "details": {
             "cvss_score": 8.1,
-            "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+            "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
             "steps_to_reproduce": ["Replay the recorded request."],
             "remediation": "Enforce authorization.",
             "impact": "Unauthorized access.",
@@ -288,14 +288,18 @@ def test_readiness_advises_on_steps_with_no_repro_runs(client, isolate_settings)
     read as ready.
     """
     _seed(client, isolate_settings)
-    # The shared ``_finding`` helper carries a deliberately mismatched
-    # cvss_score/vector (its own gate is tested elsewhere); correct it here so the
-    # only thing separating these two findings is ``repro_runs``.
+    # The shared ``_finding`` helper scores in the `high` band; re-band both to
+    # `critical` (vector AND score together — they are validated as a pair) so
+    # the only thing separating these two findings is ``repro_runs``.
+    critical_cvss = {
+        "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+        "cvss_score": 9.1,
+    }
     unbacked = _finding("VA-060", "Steps with nothing behind them", severity="critical")
-    unbacked["details"]["cvss_score"] = 9.1
+    unbacked["details"].update(critical_cvss)
     _add_finding(client, unbacked)
     backed = _finding("VA-061", "Steps with runs behind them", severity="critical")
-    backed["details"]["cvss_score"] = 9.1
+    backed["details"].update(critical_cvss)
     backed["details"]["repro_runs"] = [56052]
     _add_finding(client, backed)
 

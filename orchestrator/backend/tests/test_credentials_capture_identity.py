@@ -899,3 +899,268 @@ def test_liveness_timestamps_are_normalized_to_utc(client, isolate_settings):
     row = db.list_credential_liveness(eng, "cap-member")[0]
     assert row["observed_at"] == "2026-07-15T07:00:00Z"
     assert row["expires_at"] == "2026-07-15T07:01:00Z"
+
+
+def _credential_with_hosts(eng: int, name: str, *hosts: str):
+    return creds.upsert_material(
+        eng,
+        name,
+        {
+            "cookies": {"sid": name},
+            "host_cookies": [
+                {"host": host, "cookies": {"sid": name}} for host in hosts
+            ],
+        },
+    )
+
+
+def _force_legacy_liveness_projection(
+    eng: int,
+    name: str,
+    *,
+    state: str,
+    verdict: str,
+    probed_at: str,
+) -> None:
+    """Model a pre-scoped-liveness singleton projection left in the database."""
+    with db.get_connection() as connection:
+        connection.execute(
+            "UPDATE engagement_credentials "
+            "SET state=?, liveness_verdict=?, last_probed_at=? "
+            "WHERE engagement_id=? AND identity_name=?",
+            (state, verdict, probed_at, eng, name),
+        )
+
+
+def _recent_liveness_times() -> tuple[str, str, str]:
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    return tuple(
+        (now - timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for minutes in (10, 5, 1)
+    )
+
+
+def test_unscoped_list_projects_newer_live_for_identity_with_one_defensible_host(
+    client, isolate_settings
+):
+    eng = _seed(client, isolate_settings)
+    _credential_with_hosts(eng, "cap-chat", "chat.example.test")
+    legacy_dead_at, scoped_live_at, _ = _recent_liveness_times()
+    _force_legacy_liveness_projection(
+        eng,
+        "cap-chat",
+        state="available",
+        verdict="dead",
+        probed_at=legacy_dead_at,
+    )
+    db.record_credential_liveness(
+        eng,
+        "cap-chat",
+        scope_key="https://chat.example.test",
+        verdict="live",
+        observed_at=scoped_live_at,
+        ttl_seconds=3600,
+        source="auth-status",
+    )
+
+    material = creds.load_identities(eng)["identities"]["cap-chat"]
+
+    assert material["state"] == "available"
+    assert material["liveness_verdict"] == "live"
+    assert material["last_probed_at"] == scoped_live_at
+
+
+def test_unscoped_list_reports_unknown_when_multiple_hosts_have_conflicting_proof(
+    client, isolate_settings
+):
+    eng = _seed(client, isolate_settings)
+    _credential_with_hosts(
+        eng, "cap-multi", "chat.example.test", "api.example.test"
+    )
+    legacy_dead_at, chat_live_at, api_dead_at = _recent_liveness_times()
+    _force_legacy_liveness_projection(
+        eng,
+        "cap-multi",
+        state="available",
+        verdict="dead",
+        probed_at=legacy_dead_at,
+    )
+    db.record_credential_liveness(
+        eng,
+        "cap-multi",
+        scope_key="https://chat.example.test",
+        verdict="live",
+        observed_at=chat_live_at,
+        ttl_seconds=3600,
+        source="auth-status",
+    )
+    db.record_credential_liveness(
+        eng,
+        "cap-multi",
+        scope_key="https://api.example.test",
+        verdict="dead",
+        observed_at=api_dead_at,
+        ttl_seconds=3600,
+        source="auth-status",
+    )
+
+    material = creds.load_identities(eng)["identities"]["cap-multi"]
+
+    assert material["state"] == "available"
+    assert material["liveness_verdict"] == "unknown"
+    assert material["last_probed_at"] is None
+
+
+def test_host_scoped_list_uses_only_newest_matching_origin_and_isolates_identities(
+    client, isolate_settings
+):
+    eng = _seed(client, isolate_settings)
+    _credential_with_hosts(
+        eng, "cap-multi", "chat.example.test", "api.example.test"
+    )
+    _credential_with_hosts(eng, "cap-other", "chat.example.test")
+    older_dead_at, newer_live_at, other_dead_at = _recent_liveness_times()
+    db.record_credential_liveness(
+        eng,
+        "cap-multi",
+        scope_key="http://chat.example.test",
+        verdict="dead",
+        observed_at=older_dead_at,
+        ttl_seconds=3600,
+        source="auth-status",
+    )
+    db.record_credential_liveness(
+        eng,
+        "cap-multi",
+        scope_key="https://chat.example.test",
+        verdict="live",
+        observed_at=newer_live_at,
+        ttl_seconds=3600,
+        source="auth-status",
+    )
+    db.record_credential_liveness(
+        eng,
+        "cap-other",
+        scope_key="https://chat.example.test",
+        verdict="dead",
+        observed_at=other_dead_at,
+        ttl_seconds=3600,
+        source="auth-status",
+    )
+
+    identities = creds.load_identities(
+        eng, host="chat.example.test"
+    )["identities"]
+
+    assert identities["cap-multi"]["liveness_verdict"] == "live"
+    assert identities["cap-multi"]["last_probed_at"] == newer_live_at
+    assert identities["cap-other"]["liveness_verdict"] == "dead"
+    assert identities["cap-other"]["last_probed_at"] == other_dead_at
+
+
+def test_include_dead_list_keeps_newest_compatible_dead_proof_dead(
+    client, isolate_settings
+):
+    eng = _seed(client, isolate_settings)
+    _credential_with_hosts(eng, "cap-dead", "chat.example.test")
+    older_live_at, newer_dead_at, _ = _recent_liveness_times()
+    _force_legacy_liveness_projection(
+        eng,
+        "cap-dead",
+        state="dead",
+        verdict="live",
+        probed_at=older_live_at,
+    )
+    db.record_credential_liveness(
+        eng,
+        "cap-dead",
+        scope_key="https://chat.example.test",
+        verdict="dead",
+        observed_at=newer_dead_at,
+        ttl_seconds=3600,
+        source="auth-status",
+    )
+
+    material = creds.load_identities(
+        eng, include_dead=True
+    )["identities"]["cap-dead"]
+
+    assert material["state"] == "dead"
+    assert material["liveness_verdict"] == "dead"
+    assert material["last_probed_at"] == newer_dead_at
+
+
+def test_available_unscoped_list_drops_unqualified_dead_after_scoped_live_expires(
+    client, isolate_settings
+):
+    eng = _seed(client, isolate_settings)
+    _put_capability(eng, "cap-flat", "user-42")
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    legacy_dead_at = (now - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    scoped_live_at = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _force_legacy_liveness_projection(
+        eng,
+        "cap-flat",
+        state="available",
+        verdict="dead",
+        probed_at=legacy_dead_at,
+    )
+    db.record_credential_liveness(
+        eng,
+        "cap-flat",
+        scope_key="https://chat.example.test",
+        verdict="live",
+        observed_at=scoped_live_at,
+        ttl_seconds=1,
+        source="auth-status",
+    )
+
+    material = creds.load_identities(eng)["identities"]["cap-flat"]
+
+    assert material["state"] == "available"
+    assert material["liveness_verdict"] == "unknown"
+    assert material["last_probed_at"] is None
+
+
+def test_available_unscoped_list_drops_unqualified_dead_without_typed_observation(
+    client, isolate_settings
+):
+    eng = _seed(client, isolate_settings)
+    _put_capability(eng, "cap-flat", "user-42")
+    legacy_dead_at, _, _ = _recent_liveness_times()
+    _force_legacy_liveness_projection(
+        eng,
+        "cap-flat",
+        state="available",
+        verdict="dead",
+        probed_at=legacy_dead_at,
+    )
+
+    material = creds.load_identities(eng)["identities"]["cap-flat"]
+
+    assert material["state"] == "available"
+    assert material["liveness_verdict"] == "unknown"
+    assert material["last_probed_at"] is None
+
+
+def test_explicit_dead_unscoped_list_preserves_legacy_dead_projection(
+    client, isolate_settings
+):
+    eng = _seed(client, isolate_settings)
+    _put_capability(eng, "cap-flat-dead", "user-42")
+    legacy_dead_at, _, _ = _recent_liveness_times()
+    _force_legacy_liveness_projection(
+        eng,
+        "cap-flat-dead",
+        state="dead",
+        verdict="dead",
+        probed_at=legacy_dead_at,
+    )
+
+    material = creds.load_identities(
+        eng, include_dead=True
+    )["identities"]["cap-flat-dead"]
+
+    assert material["state"] == "dead"
+    assert material["liveness_verdict"] == "dead"
+    assert material["last_probed_at"] == legacy_dead_at

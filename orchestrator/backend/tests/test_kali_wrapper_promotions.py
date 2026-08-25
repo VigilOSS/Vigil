@@ -342,7 +342,12 @@ def test_arjun_sweep_caps_max_targets_and_flags_incomplete(monkeypatch, tmp_path
     monkeypatch.setattr(sweep, "kali_exec", lambda cmd, **k: (cmds.append(list(cmd)), _Timed())[1])
     monkeypatch.setattr(sweep.ingest_arjun, "run", lambda ns: None)
 
-    _import("assess.cli").main(["arjun-sweep", "--max-targets", "2", *_AUDIT])
+    # The single GET arm timed out, so EVERY arm of this fan-out produced no
+    # usable output and the aggregate exit-code contract fires with the arm's
+    # own status code. The full summary is still printed before the exit.
+    with pytest.raises(SystemExit) as excinfo:
+        _import("assess.cli").main(["arjun-sweep", "--max-targets", "2", *_AUDIT])
+    assert excinfo.value.code == 4  # KALI_EXIT_CODES["timed_out"]
     out = capsys.readouterr()
     # the cap deferred 3 of 5, and the timed-out run was flagged INCOMPLETE.
     assert "deferring 3" in out.err

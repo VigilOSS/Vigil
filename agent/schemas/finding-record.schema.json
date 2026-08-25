@@ -213,9 +213,9 @@
         },
         "cvss_score": {
           "type": "number",
-          "exclusiveMinimum": 0,
+          "minimum": 0,
           "maximum": 10,
-          "description": "CVSS 3.1 base score (0.1-10.0). Must match cvss_vector."
+          "description": "CVSS 3.1 base score (0.0-10.0). Must match cvss_vector."
         },
         "remediation": {
           "type": "string",
