@@ -126,7 +126,7 @@ The specialist's dispatch context must include both values exactly as registered
 
 ```text
 ## Variant Receipt Authority
-variant_dispatch_id: <numeric id returned by agent start>
+variant_dispatch_id: <the dispatch_id agent start printed>
 parent_finding_slugs: [CH-001, CH-004]  # canonical sorted dispatch set
 ```
 

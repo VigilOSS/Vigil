@@ -32,8 +32,11 @@ _RESOLVE_CACHE_TTL_SECONDS = 1.0
 
 # Per-process cache of load_identities() results, keyed by engagement key.
 _cache: dict[str, dict[str, Any]] = {}
+# Keyed by (engagement key, requested identity, scope key, record_use) — the last
+# element keeps a read-only answer from being handed to a resolve-for-replay caller
+# that must record the USE.
 _resolve_cache: dict[
-    tuple[str, str | None, str],
+    tuple[str, str | None, str, bool],
     tuple[float, tuple[str | None, dict[str, Any]]],
 ] = {}
 _warned: set[str] = set()
@@ -135,12 +138,25 @@ def load_identities(
 
 
 def resolve_identity(
-    engagement_dir: str | Path, requested: str | None, *, scope_key: str = ""
+    engagement_dir: str | Path,
+    requested: str | None,
+    *,
+    scope_key: str = "",
+    record_use: bool = True,
 ) -> tuple[str | None, dict[str, Any]]:
-    """Resolve a ``--identity`` request without loading every stored identity."""
+    """Resolve a ``--identity`` request without loading every stored identity.
+
+    ``record_use`` (default True) marks the resolve as a USE, refreshing the
+    identity's ``last_seen_at`` so a session that is actively being replayed
+    cannot age into ``stale``. Callers that only INSPECT the record — ``auth
+    status`` with no ``--probe`` — pass False, so reading the state does not
+    silently reset the clock the stale flag and the purge backstop key off. It is
+    part of the cache key: a read-only answer must never be served to a caller
+    that is about to put the credential on the wire.
+    """
     requested = requested.strip() if requested is not None else None
     key = _key_for(engagement_dir)
-    cache_key = (key, requested, scope_key)
+    cache_key = (key, requested, scope_key, record_use)
     now = time.monotonic()
     cached = _resolve_cache.get(cache_key)
     if cached is not None and cached[0] > now:
@@ -150,6 +166,8 @@ def resolve_identity(
         query_args = {"scope": scope_key} if scope_key else {}
         if requested:
             query_args["identity"] = requested
+        if not record_use:
+            query_args["record_use"] = "false"
         query = urlencode(query_args, quote_via=quote)
         data = _client(engagement_dir).get_engagement("credentials/resolve", query=query)
     except (AssessError, OSError) as exc:
@@ -179,9 +197,14 @@ def identity_names(engagement_dir: str | Path) -> list[str]:
     return list(load_identities(engagement_dir)["identities"].keys())
 
 
-def active_material(engagement_dir: str | Path) -> dict[str, Any]:
-    """Material for the active identity (``{}`` when none)."""
-    return resolve_identity(engagement_dir, None)[1]
+def active_material(
+    engagement_dir: str | Path, *, record_use: bool = True
+) -> dict[str, Any]:
+    """Material for the active identity (``{}`` when none).
+
+    ``record_use=False`` for read-only inspection — see :func:`resolve_identity`.
+    """
+    return resolve_identity(engagement_dir, None, record_use=record_use)[1]
 
 
 # -- write helpers (CLI) — surface errors -----------------------------------

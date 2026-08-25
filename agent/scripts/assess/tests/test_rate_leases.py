@@ -176,3 +176,82 @@ def test_aggregate_rate_still_parses_spaced_rate_flag(tmp_path):
         str(tmp_path), ["httpx", "-rl", "500"], "httpx", {"target_facing": True}
     )
     assert reserved == 500.0
+
+
+@pytest.mark.parametrize(
+    "cmd,expected",
+    [
+        # The reported breach: a minute-only argv reserving the 150-rps tool
+        # default while actually running at 1000 rps.
+        (["httpx", "-rlm", "60000", "-u", "https://example.test"], 1000.0),
+        (["httpx", "-rlm=60000"], 1000.0),
+        (["nuclei", "--rate-limit-minute", "60000"], 1000.0),
+        (["katana", "--rate-limit-minute=60000"], 1000.0),
+        # Sub-1-rps minute rates stay fractional rather than truncating to 0.
+        (["httpx", "-rlm", "30"], 0.5),
+    ],
+)
+def test_aggregate_rate_parses_minute_rate_flag(tmp_path, cmd, expected):
+    (tmp_path / "scope.json").write_text(
+        '{"hosts":["example.test"],"rate_limit_aggregate_rps":500}',
+        encoding="utf-8",
+    )
+    reserved = rate_leases.aggregate_rate_reservation(
+        str(tmp_path), cmd, cmd[0], {"target_facing": True}
+    )
+    assert reserved == expected
+
+
+@pytest.mark.parametrize(
+    "cmd,expected",
+    [
+        # Both families present: reserve whichever bounds MORE traffic, because
+        # httpx/nuclei let -rlm replace -rl while katana lets -rl win.
+        (["httpx", "-rl", "1", "-rlm", "60000"], 1000.0),
+        (["httpx", "-rlm", "60", "-rl", "900"], 900.0),
+        # What Vigil's own web-discovery katana emitter writes: `-rl N -rlm N*60`
+        # is the same rate either way.
+        (["katana", "-rl", "20", "-rlm", "1200"], 20.0),
+    ],
+)
+def test_aggregate_rate_reserves_the_larger_of_both_rate_families(
+    tmp_path, cmd, expected
+):
+    (tmp_path / "scope.json").write_text(
+        '{"hosts":["example.test"],"rate_limit_aggregate_rps":2000}',
+        encoding="utf-8",
+    )
+    reserved = rate_leases.aggregate_rate_reservation(
+        str(tmp_path), cmd, cmd[0], {"target_facing": True}
+    )
+    assert reserved == expected
+
+
+def test_aggregate_rate_ignores_unrelated_rate_shaped_flags(tmp_path):
+    # `-rld` is nuclei's rate-limit WINDOW, not a rate, and puredns'
+    # `--rate-limit-trusted` caps only the trusted-resolver pool. Reading either
+    # as the run's rate would reserve a number that means something else.
+    (tmp_path / "scope.json").write_text(
+        '{"hosts":["example.test"],"rate_limit_aggregate_rps":400}',
+        encoding="utf-8",
+    )
+    reserved = rate_leases.aggregate_rate_reservation(
+        str(tmp_path),
+        ["nuclei", "-rld", "10", "--rate-limit-trusted", "200"],
+        "nuclei",
+        {"target_facing": True},
+    )
+    assert reserved == 150.0  # nuclei's per-second default, no explicit rate
+
+
+def test_aggregate_rate_skips_a_rate_flag_with_no_value(tmp_path):
+    # A trailing `-rlm` with nothing after it must not crash or reserve garbage;
+    # it falls through to the tool default like any unconfigured run.
+    (tmp_path / "scope.json").write_text(
+        '{"hosts":["example.test"],"rate_limit_aggregate_rps":400}',
+        encoding="utf-8",
+    )
+    reserved = rate_leases.aggregate_rate_reservation(
+        str(tmp_path), ["httpx", "-rlm"], "httpx", {"target_facing": True}
+    )
+    assert reserved == 150.0

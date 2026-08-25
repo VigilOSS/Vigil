@@ -4786,7 +4786,7 @@ def list_credential_liveness(
 
 
 def resolve_credential_alias(
-    engagement_id: int, alias: str, scope_key: str
+    engagement_id: int, alias: str, scope_key: str, *, touch: bool = True
 ) -> dict[str, Any] | None:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with get_connection() as connection:
@@ -4801,9 +4801,13 @@ def resolve_credential_alias(
             "ORDER BY l.observed_at DESC, COALESCE(c.last_seen_at,c.updated_at) DESC LIMIT 1",
             (engagement_id, alias.strip(), scope_key.strip(), now),
         ).fetchone()
-    # An alias resolve is a resolve-for-replay, so it counts as a USE.
+    # An alias resolve is normally a resolve-for-replay, so it counts as a USE.
+    # ``touch=False`` is for the read-only inspection path, which must not refresh
+    # the clock the stale flag and the purge backstop key off.
     return (
-        get_credential(engagement_id, row["identity_name"], touch=True) if row else None
+        get_credential(engagement_id, row["identity_name"], touch=touch)
+        if row
+        else None
     )
 
 

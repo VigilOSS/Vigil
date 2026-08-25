@@ -73,8 +73,8 @@ proof (genuine third-party PII partial-masked, self-owned/synthetic data in full
 so the tool surfaces them ONCE, as reference under the single
 OPERATOR DETAILS section (mirrored by the ``linked_command_runs`` array in the
 context JSON), for the report-writer to author Evidence FROM. Linked runs are
-sourced ONLY from explicit ``finding-links`` (``target_kind="command_run"``) —
-never a fuzzy command search.
+sourced ONLY from explicit, non-retired ``finding-links``
+(``target_kind="command_run"``) — never a fuzzy command search.
 
 THE REPRODUCTION IS TRANSCRIBED, NOT INFERRED. ``details.repro_runs`` names the
 command runs that actually produced ``details.steps_to_reproduce``, in step order,
@@ -502,9 +502,11 @@ def _evaluate(
 def _linked_command_runs(client, slug: str) -> list[dict]:
     """Linked command runs for ``slug`` from EXPLICIT finding-links only.
 
-    Sources command runs strictly from ``finding-links`` rows whose
+    Sources command runs strictly from LIVE ``finding-links`` rows whose
     ``target_kind == "command_run"`` for this finding, then fetches each linked
-    run for its command string. There is deliberately NO fuzzy
+    run for its command string. Rows carrying a ``retired_at`` are skipped — the
+    listing deliberately returns retired history, and only the export path can
+    tell "was linked once" from "is evidence now". There is deliberately NO fuzzy
     ``command-runs?q=`` search here: the report-writer agent
     runs the targeted ``list-command-runs`` search itself and links the exact
     reproducing run; this command only surfaces what was explicitly linked.
@@ -530,6 +532,14 @@ def _linked_command_runs(client, slug: str) -> list[dict]:
         if _nonempty(link.get("finding_slug")) != slug:
             continue
         if _nonempty(link.get("target_kind")) != "command_run":
+            continue
+        if _nonempty(link.get("retired_at")):
+            # RETIRED links are history, not evidence. ``finding-links`` returns
+            # every row on purpose (the retired ones stay inspectable), so the
+            # export path is where a link the operator explicitly invalidated has
+            # to be dropped — otherwise a retired run comes back as current proof
+            # in OPERATOR DETAILS and in every reply thread built from it, steering
+            # the report writer at material that was deliberately withdrawn.
             continue
         target_id = link.get("target_id")
         run_id: int | None = None

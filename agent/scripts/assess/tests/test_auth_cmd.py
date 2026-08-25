@@ -243,13 +243,16 @@ def _install_status(monkeypatch, tmp_path, *, verdict, material=None):
     }
     calls: dict[str, object] = {}
 
-    def fake_resolve(_dir, requested, *, scope_key=""):
+    def fake_resolve(_dir, requested, *, scope_key="", record_use=True):
         calls["resolved"] = requested
         calls["resolved_scope"] = scope_key
+        # The status VIEW is inspection, never a use — see auth_status.run.
+        calls["resolve_record_use"] = record_use
         return (requested, dict(resolved_material))
 
-    def fake_active(_dir):
+    def fake_active(_dir, *, record_use=True):
         calls["active_used"] = True
+        calls["active_record_use"] = record_use
         return dict(resolved_material)
 
     def fake_probe(
@@ -397,6 +400,64 @@ def test_active_identity_probe_does_not_persist(tmp_path, monkeypatch, capsys):
     assert calls.get("active_used") is True  # used the active identity
 
 
+def test_status_view_is_inspection_not_a_use(tmp_path, monkeypatch, capsys):
+    """Reading the record must not reset the clock the stale flag keys off.
+
+    ``resolve_identity`` refreshes ``last_seen_at`` because it is normally the
+    resolve-for-replay path. ``auth status`` only DISPLAYS the record, so a status
+    loop that resolved the same way kept an unused, unprobed session out of the
+    8h stale flag and the 5d purge — and printed a misleading age doing it.
+    """
+    calls = _install_status(monkeypatch, tmp_path, verdict="live")
+    args = _parse_status(["status", "--identity", "cap-target"], str(tmp_path))
+    args.func(args)
+    capsys.readouterr()
+
+    assert calls["resolved"] == "cap-target"
+    assert calls["resolve_record_use"] is False
+    assert "probed_identity" not in calls  # no --probe: nothing went on the wire
+
+
+def test_scoped_status_view_is_inspection_not_a_use(tmp_path, monkeypatch, capsys):
+    # --scope takes the other resolve branch; both are inspection.
+    calls = _install_status(monkeypatch, tmp_path, verdict="live")
+    args = _parse_status(
+        ["status", "--identity", "member", "--scope", "billing"], str(tmp_path)
+    )
+    args.func(args)
+    capsys.readouterr()
+
+    assert calls["resolved_scope"] == "billing"
+    assert calls["resolve_record_use"] is False
+
+
+def test_active_status_view_is_inspection_not_a_use(tmp_path, monkeypatch, capsys):
+    # No --identity: the ACTIVE row is read for display and must not be touched.
+    calls = _install_status(monkeypatch, tmp_path, verdict="live")
+    args = _parse_status(["status"], str(tmp_path))
+    args.func(args)
+    capsys.readouterr()
+
+    assert calls.get("active_used") is True
+    assert calls["active_record_use"] is False
+
+
+def test_probe_still_puts_the_identity_on_the_wire(tmp_path, monkeypatch, capsys):
+    # The status VIEW stays read-only even under --probe; the USE is recorded
+    # where the credential is actually replayed — _run_identity_probe hands the
+    # identity to kali_exec, whose injection path resolves for replay.
+    calls = _install_status(monkeypatch, tmp_path, verdict="live")
+    args = _parse_status(
+        ["status", "--probe", "--identity", "cap-target", "--probe-url", "https://x/y"],
+        str(tmp_path),
+    )
+    args.func(args)
+    capsys.readouterr()
+
+    assert calls["resolve_record_use"] is False
+    assert calls["probed_identity"] == "cap-target"
+
+
 def test_probe_missing_identity_reports_and_does_not_persist(tmp_path, monkeypatch, capsys):
     # A requested identity that resolves to empty material must not probe/persist.
     calls = _install_status(monkeypatch, tmp_path, verdict="live", material={})
@@ -421,8 +482,9 @@ def test_scoped_alias_probes_and_persists_resolved_identity(
     monkeypatch.setattr(auth_status, "AssessmentClient", lambda *a, **k: None)
     calls: dict[str, object] = {}
 
-    def resolve(_dir, requested, *, scope_key=""):
+    def resolve(_dir, requested, *, scope_key="", record_use=True):
         calls["resolved"] = (requested, scope_key)
+        calls["resolve_record_use"] = record_use
         return "cap-billing-42", {
             "identity_name": "cap-billing-42",
             "auth_context": "member",
@@ -542,3 +604,45 @@ def test_an_authentication_challenge_is_positive_evidence_without_expect_status(
     assert classify_liveness(
         401, "Sign out", {"expect_status": 401, "authed_marker": "Sign out"}
     )[0] == "live"
+
+
+# --------------------------------------------------------------------------- #
+# probe argv: an egress proxy's CONNECT block is another hop's text and must not
+# reach this identity's marker haystack.
+# --------------------------------------------------------------------------- #
+
+def test_identity_probe_argv_suppresses_the_proxy_connect_block(tmp_path, monkeypatch):
+    """The numeric status here comes from curl's %{http_code}, which is already
+    the ORIGIN's — but the haystack the authed_marker / dead_marker / Location
+    rules run over is the raw ``-i`` output, and behind an HTTP egress proxy that
+    output starts with the tunnel's own headers.
+    """
+    from assess.lib import kali as kali_lib
+
+    seen: dict[str, object] = {}
+
+    def fake_kali_exec(cmd, **kwargs):
+        seen["cmd"] = list(cmd)
+        seen["identity"] = kwargs.get("identity")
+
+        class _Result:
+            stdout_preview = "HTTP/1.1 200 OK\nSign out\nVIGIL_HTTP_CODE=200\n"
+            stdout_path = ""
+            transport_error = False
+
+        return _Result()
+
+    monkeypatch.setattr(kali_lib, "kali_exec", fake_kali_exec)
+
+    result = auth_status._run_identity_probe(
+        str(tmp_path),
+        "cap-target",
+        "https://app.example.com/me",
+        liveness_cfg={"expect_status": 200, "authed_marker": "Sign out"},
+    )
+
+    assert result["liveness"] == "live"
+    assert "--suppress-connect-headers" in seen["cmd"]
+    # The identity still goes to kali_exec, which resolves it for replay — the
+    # probe is where the USE gets recorded.
+    assert seen["identity"] == "cap-target"

@@ -106,12 +106,18 @@ async def resolve_identity(
     engagement_key: str,
     identity: str | None = Query(default=None),
     scope: str = Query(default=""),
+    # A resolve is normally a resolve-for-replay and records a USE. Read-only
+    # inspection (`auth status` with no probe) passes record_use=false so looking
+    # at a session cannot keep it from aging into `stale` or out to the purge.
+    record_use: bool = Query(default=True),
 ) -> dict[str, Any]:
     engagement = await anyio.to_thread.run_sync(
         lambda: get_engagement_or_404(engagement_key)
     )
     name, material = await anyio.to_thread.run_sync(
-        lambda: creds_service.resolve_identity(engagement.id, identity, scope_key=scope)
+        lambda: creds_service.resolve_identity(
+            engagement.id, identity, scope_key=scope, record_use=record_use
+        )
     )
     return {"identity_name": name, "material": material}
 

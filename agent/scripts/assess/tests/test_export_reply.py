@@ -485,6 +485,37 @@ def test_thread_history_lists_a_linked_run_with_no_command(tmp_path, monkeypatch
     assert "(no command recorded on this run)" in hist
 
 
+def test_thread_history_omits_a_retired_link(tmp_path, monkeypatch, capsys):
+    """A retired link must not survive in the reply thread either.
+
+    ``export reply`` shares ``export submission``'s finding-links resolver exactly
+    so the two renders cannot disagree — a run the operator withdrew from the
+    submission has to be gone from every reply built afterwards too.
+    """
+    links = [
+        {"finding_slug": "VA-047", "target_kind": "command_run", "target_id": 5, "retired_at": None},
+        {"finding_slug": "VA-047", "target_kind": "command_run", "target_id": 6, "retired_at": "2026-08-01T12:00:00Z"},
+    ]
+    command_runs = {
+        5: {"id": 5, "command": "curl -sk https://app.example.com/orders/1002", "intent": "retest as member B", "return_code": 0},
+        6: {"id": 6, "command": "curl -sk https://app.example.com/retired-probe", "intent": "withdrawn", "return_code": 0},
+    }
+    fake = _FakeClient(_finding(), links=links, command_runs=command_runs)
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        ["reply", "VA-047", "--in-response-to", "Please retest", "--draft"],
+        str(tmp_path),
+    )
+
+    export_reply.run(args)
+    capsys.readouterr()
+
+    hist = _thread_history(_reply_path(tmp_path, 1).read_text())
+    assert "retest as member B" in hist
+    assert "retired-probe" not in hist
+    assert "command-runs/6" not in fake.gets
+
+
 # -- new-evidence attachment: internal reference, never pasteable --------------
 
 @pytest.mark.parametrize(

@@ -154,9 +154,22 @@ def _write_all(descriptor: int, payload: bytes) -> None:
 
 
 def _entry_identity(directory_fd: int, name: str) -> tuple[int, int] | None:
+    """Identify a directory entry, or None when it is absent or not a plain file.
+
+    A (device, inode) pair alone does NOT prove an entry is the object that was
+    read: a filesystem is free to hand the just-freed inode number straight to
+    the next created entry, and Linux routinely does. A record replaced by a
+    symlink between the read and the unlink therefore compared EQUAL to the
+    original and was treated as a match. Rejecting anything that is not a
+    regular file closes that hole, because every substitution worth worrying
+    about (symlink, directory, fifo, device node) changes the entry type even
+    when the inode number is recycled.
+    """
     try:
         entry_stat = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
     except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(entry_stat.st_mode):
         return None
     return entry_stat.st_dev, entry_stat.st_ino
 
