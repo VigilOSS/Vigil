@@ -34,23 +34,31 @@ def build_image(
     image: str = "vigil-proxy:latest",
     *,
     force: bool = False,
-    runner: docker.Runner = docker.run_command,
+    runner: docker.Runner | None = None,
 ) -> None:
     """Build the proxy image. ``--force`` rebuilds even if the tag exists."""
     install_root = install_root.expanduser().resolve()
     dockerfile = install_root / "agent" / "docker" / "mitmproxy" / "Dockerfile"
     if not dockerfile.is_file():
         raise SystemExit(f"mitmproxy Dockerfile missing: {dockerfile}")
-    # Only report "current" when the tag exists AND is newer than its build
-    # inputs. A bare tag-exists check (the old behaviour) reported "current"
-    # even after proxy_addon.py / the Dockerfile changed, so a rebuilt addon
-    # never landed until someone passed --force.
-    if (
-        not force
-        and docker.image_exists(image, runner=runner)
-        and not image_freshness.image_outdated(
-            image, mitmproxy_image_inputs(install_root), runner=runner
-        )
+    # Only report "current" when the image is provably built from exactly the
+    # inputs on disk. A bare tag-exists check (the original behaviour) reported
+    # "current" even after proxy_addon.py / the Dockerfile changed; the mtime
+    # check that replaced it reported "outdated" forever, because `.pyc` files
+    # written by ordinary assess runs were always newer than the image.
+    # A metadata query and an image build need different runners. `run_command`
+    # bounds every call with VIGIL_DOCKER_TIMEOUT (20s by default) because it
+    # exists for fast `docker inspect`-shaped queries; a proxy build takes ~18s
+    # and raced that bound. A timed-out build leaves the image unstamped, and an
+    # unstamped image can never be proven current -- which resurrects the
+    # rebuild-every-time loop this freshness work exists to remove. Builds
+    # therefore stream (unbounded), exactly as `build_runtime` already does.
+    # An injected runner is used for both, so tests keep a single seam.
+    meta_runner = runner or docker.run_command
+    build_runner = runner or docker.run_command_streaming
+    inputs = mitmproxy_image_inputs(install_root)
+    if not force and not image_freshness.image_outdated(
+        image, inputs, root=install_root, runner=meta_runner
     ):
         print(f"mitmproxy\timage current (up to date with source)\t{image}")
         return
@@ -61,16 +69,28 @@ def build_image(
         *(["--no-cache"] if force else []),
         "-t",
         image,
+        # Stamp the input digest so the NEXT freshness check has something to
+        # compare against. An unstamped image can never be proven current, so
+        # every later `vigil up` would rebuild it again.
+        "--label",
+        image_freshness.inputs_label_arg(inputs, root=install_root),
         "-f",
         str(dockerfile),
         str(install_root / "agent"),
     ]
-    docker.require_success(runner(argv), argv)
+    docker.require_success(build_runner(argv), argv)
     print(f"mitmproxy\timage built\t{image}")
 
 
 def mitmproxy_image_inputs(install_root: Path) -> list[Path]:
-    """Return every source path copied into the proxy image."""
+    """Every source path copied into the proxy image (see the mitmproxy
+    Dockerfile: it COPYs `scripts/assess` wholesale plus `proxy_addon.py`).
+
+    The whole `assess` package is genuinely baked in, so the directory is the
+    honest input. Build artifacts inside it (`__pycache__`, `.pyc`, tool caches)
+    are excluded centrally by `image_freshness`, not here — the digest walk is
+    the single place that knows what a source file is.
+    """
     return [
         install_root / "agent" / "docker" / "mitmproxy" / "Dockerfile",
         install_root / "agent" / "scripts" / "assess",
@@ -81,7 +101,7 @@ def mitmproxy_image_inputs(install_root: Path) -> list[Path]:
 def start_proxy(
     options: MitmproxyOptions,
     *,
-    runner: docker.Runner = docker.run_command,
+    runner: docker.Runner | None = None,
     verify_port: bool = True,
     verify_running: bool = True,
     force_rebuild: bool = False,
@@ -93,22 +113,21 @@ def start_proxy(
     if not engagements_root.is_dir():
         raise SystemExit(f"Engagements root does not exist: {engagements_root}")
 
-    if (
-        force_rebuild
-        or not docker.image_exists(options.image, runner=runner)
-        or image_freshness.image_outdated(
-            options.image, mitmproxy_image_inputs(install_root), runner=runner
-        )
+    # `runner` stays raw on the build call so build_image can pick the
+    # unbounded streaming runner; every other docker call here is a fast query.
+    exec_runner = runner or docker.run_command
+    if force_rebuild or image_freshness.image_outdated(
+        options.image, mitmproxy_image_inputs(install_root), root=install_root, runner=exec_runner
     ):
         build_image(install_root, options.image, force=force_rebuild, runner=runner)
 
-    if docker.container_running(options.container_name, runner=runner):
+    if docker.container_running(options.container_name, runner=exec_runner):
         print(f"mitmproxy\tstopping\tcontainer={options.container_name}")
-        runner(["docker", "stop", options.container_name])
-    if docker.container_exists(options.container_name, runner=runner):
-        runner(["docker", "rm", options.container_name])
+        exec_runner(["docker", "stop", options.container_name])
+    if docker.container_exists(options.container_name, runner=exec_runner):
+        exec_runner(["docker", "rm", options.container_name])
 
-    runner(["docker", "volume", "create", options.volume_name])
+    exec_runner(["docker", "volume", "create", options.volume_name])
     # The proxy is one process for all engagements, so its backend URL must come
     # from process/install-level configuration. Per-engagement overrides are for
     # engagement-scoped helpers and would make one arbitrary engagement steer all
@@ -147,13 +166,13 @@ def start_proxy(
         "http2=false",
     ]
     print(f"mitmproxy\tstarting\tcontainer={options.container_name}\tport={options.port}")
-    docker.run_with_host_gateway_fallback(argv, runner=runner)
+    docker.run_with_host_gateway_fallback(argv, runner=exec_runner)
     if verify_port and not _wait_for_port("127.0.0.1", options.port):
         # Distinguish "port never opened" from "port opened then container
         # died on addon error" so the operator goes to logs, not to a
         # fictional networking problem.
-        if not docker.container_running(options.container_name, runner=runner):
-            tail = _container_log_tail(options.container_name, runner=runner)
+        if not docker.container_running(options.container_name, runner=exec_runner):
+            tail = _container_log_tail(options.container_name, runner=exec_runner)
             raise SystemExit(
                 f"mitmproxy container exited during startup. Last log lines:\n{tail}\n"
                 f"Re-run `vigil mitmproxy build --force` if the addon imports changed."
@@ -162,8 +181,8 @@ def start_proxy(
     # The port can come up before the addon finishes its lifespan. If the
     # addon crashes a second later, the user sees "started" then nothing
     # works. Verify the container is still running.
-    if verify_running and not docker.container_running(options.container_name, runner=runner):
-        tail = _container_log_tail(options.container_name, runner=runner)
+    if verify_running and not docker.container_running(options.container_name, runner=exec_runner):
+        tail = _container_log_tail(options.container_name, runner=exec_runner)
         raise SystemExit(
             f"mitmproxy container started but exited within seconds. Last log lines:\n{tail}"
         )

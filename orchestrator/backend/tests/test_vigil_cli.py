@@ -1569,6 +1569,139 @@ def test_install_from_source_stamps_every_sync_path(tmp_path: Path, monkeypatch:
     assert (read_install_meta(install) or {})["source_sha"] == advanced
 
 
+def _capture_tenant_route(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+    """Record the ``is_upgrade`` verdict install_from_source hands the OOB layer."""
+    from vigil_cli import install as install_module
+
+    seen: list[bool] = []
+
+    def fake_initialize_tenant_route(install_root, *, is_upgrade, **_kwargs):
+        seen.append(is_upgrade)
+        return None
+
+    monkeypatch.setattr(install_module, "initialize_tenant_route", fake_initialize_tenant_route)
+    return seen
+
+
+def _seed_source_tree(root: Path) -> None:
+    """A pristine source checkout: the managed directories exist, Vigil state does
+    not. `agent/engagements/.gitkeep` is TRACKED in the repo, so the placeholder
+    must not read as a real engagement."""
+    (root / "agent" / "engagements").mkdir(parents=True)
+    (root / "agent" / "engagements" / ".gitkeep").write_text("", encoding="utf-8")
+    (root / "orchestrator" / "backend" / "data").mkdir(parents=True)
+    (root / ".claude").mkdir()
+    (root / ".codex").mkdir()
+
+
+def test_install_in_place_first_run_is_not_an_upgrade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A FIRST in-place install (install root == source checkout) is not an upgrade.
+
+    Upgrade detection used to test for `agent`/`orchestrator`/`.claude`/`.codex`
+    directories, which exist in the checkout itself before Vigil has ever run
+    there. The false "upgrade" made `initialize_tenant_route` pin the legacy
+    SHARED OOB domain and ports 53/8443 instead of allocating a tenant-specific
+    route, so two fresh in-place developer installs collided at the FRP/OOB edge.
+    """
+    from vigil_cli.install import InstallOptions, install_from_source
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    root = tmp_path / "checkout"
+    _seed_source_tree(root)
+    seen = _capture_tenant_route(monkeypatch)
+
+    result = install_from_source(
+        InstallOptions(source_root=root, install_root=root, verify_docker_image=False)
+    )
+
+    assert result.is_upgrade is False
+    assert seen == [False]
+
+
+def test_install_in_place_second_run_is_an_upgrade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The state the first in-place install leaves behind makes the second one
+    an upgrade — the signal is Vigil's own state, not the checkout's layout."""
+    from vigil_cli.install import InstallOptions, install_from_source
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    root = tmp_path / "checkout"
+    _seed_source_tree(root)
+    seen = _capture_tenant_route(monkeypatch)
+    options = InstallOptions(source_root=root, install_root=root, verify_docker_image=False)
+
+    install_from_source(options)
+    result = install_from_source(options)
+
+    assert result.is_upgrade is True
+    assert seen == [False, True]
+
+
+def test_install_out_of_tree_over_existing_install_is_an_upgrade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The normal `~/vigil` upgrade path must still report an upgrade.
+
+    Both markers predate tenant routing, so any install root that could hold a
+    legacy shared route carries at least one of them.
+    """
+    from vigil_cli.install import InstallOptions, install_from_source
+    from vigil_cli.status import INSTALL_META_FILENAME
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    source = tmp_path / "source"
+    _seed_source_tree(source)
+
+    markers = (
+        ("meta", INSTALL_META_FILENAME),
+        ("runtime-data", ".runtime-data/oob"),
+        # An install old enough to predate BOTH stamps still has the operator's
+        # engagements — that is the install the legacy shared route exists for.
+        ("engagements", "agent/engagements/existing"),
+    )
+    for marker, subpath in markers:
+        install_root = tmp_path / f"vigil-{marker}"
+        (install_root / "agent").mkdir(parents=True)
+        target = install_root / subpath
+        if marker == "meta":
+            target.write_text("{}", encoding="utf-8")
+        else:
+            target.mkdir(parents=True)
+        seen = _capture_tenant_route(monkeypatch)
+
+        result = install_from_source(
+            InstallOptions(
+                source_root=source, install_root=install_root, verify_docker_image=False
+            )
+        )
+
+        assert result.is_upgrade is True, marker
+        assert seen == [True], marker
+
+
+def test_install_out_of_tree_into_empty_root_is_not_an_upgrade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli.install import InstallOptions, install_from_source
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    source = tmp_path / "source"
+    _seed_source_tree(source)
+    seen = _capture_tenant_route(monkeypatch)
+
+    result = install_from_source(
+        InstallOptions(
+            source_root=source, install_root=tmp_path / "vigil", verify_docker_image=False
+        )
+    )
+
+    assert result.is_upgrade is False
+    assert seen == [False]
+
+
 def test_install_from_source_dry_run_does_not_stamp(tmp_path: Path) -> None:
     from vigil_cli.install import InstallOptions, install_from_source
     from vigil_cli.status import read_install_meta
@@ -1934,6 +2067,9 @@ def test_mitmproxy_start_uses_install_orchestrator_url_not_engagement_override(
     monkeypatch.setattr(paths_module, "get_config_value", lambda key: None)
     install_root = tmp_path / "install"
     engagements_root = install_root / "agent" / "engagements"
+    # Freshness is content-based: an unstamped image reads as outdated, so the
+    # proxy build inputs must exist for start_proxy to reach the run stage.
+    _make_mitmproxy_inputs(install_root)
     (install_root / ".orchestrator.env").parent.mkdir(parents=True, exist_ok=True)
     (install_root / ".orchestrator.env").write_text(
         "ORCHESTRATOR_BASE_URL=http://127.0.0.1:19001\n",
@@ -1977,6 +2113,9 @@ def test_mitmproxy_start_polls_port_until_ready(tmp_path: Path, monkeypatch: pyt
 
     install_root = tmp_path / "install"
     engagements_root = install_root / "agent" / "engagements"
+    # Freshness is content-based: an unstamped image reads as outdated, so the
+    # proxy build inputs must exist for start_proxy to reach the run stage.
+    _make_mitmproxy_inputs(install_root)
     engagement = engagements_root / "eng-1"
     engagement.mkdir(parents=True)
     (engagement / "scope.json").write_text("{}", encoding="utf-8")
@@ -4998,119 +5137,207 @@ def _make_mitmproxy_inputs(install_root: Path) -> tuple[Path, Path]:
     return dockerfile, addon
 
 
-def test_mitmproxy_build_reports_current_when_image_newer_than_inputs(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    from vigil_cli import mitmproxy as mitmproxy_module
+def _mitmproxy_digest(install_root: Path) -> str:
+    from vigil_cli import image_freshness
+    from vigil_cli.mitmproxy import mitmproxy_image_inputs
+
+    resolved = install_root.expanduser().resolve()
+    return image_freshness.inputs_digest(mitmproxy_image_inputs(resolved), root=resolved)
+
+
+def _label_runner(commands: list[list[str]], label: str):
+    """Fake docker runner: the tag EXISTS and carries ``label`` as its input digest."""
     from vigil_cli.docker import DockerResult
-
-    install_root = tmp_path / "install"
-    dockerfile, addon = _make_mitmproxy_inputs(install_root)
-    # Inputs are OLD (2001); the image Created stamp is NEW (2030).
-    old = 1_000_000_000
-    os.utime(dockerfile, (old, old))
-    os.utime(addon, (old, old))
-
-    commands: list[list[str]] = []
 
     def runner(argv: list[str], **_: object) -> DockerResult:
         commands.append(argv)
         if argv[:4] == ["docker", "image", "inspect", "-f"]:
-            return DockerResult(0, "2030-01-01T00:00:00Z\n", "")
+            return DockerResult(0, f"{label}\n", "")
         if argv[:3] == ["docker", "image", "inspect"]:
             return DockerResult(0, "sha256:image\n", "")
         return DockerResult(0, "", "")
 
-    mitmproxy_module.build_image(install_root, runner=runner)
+    return runner
+
+
+def test_mitmproxy_build_reports_current_when_image_digest_matches_inputs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vigil_cli import mitmproxy as mitmproxy_module
+
+    install_root = tmp_path / "install"
+    _make_mitmproxy_inputs(install_root)
+    commands: list[list[str]] = []
+
+    mitmproxy_module.build_image(
+        install_root, runner=_label_runner(commands, _mitmproxy_digest(install_root))
+    )
 
     out = capsys.readouterr().out
     assert "image current (up to date with source)" in out
     assert not any(cmd[:2] == ["docker", "build"] for cmd in commands)
 
 
-def test_mitmproxy_build_rebuilds_when_inputs_newer_than_image(
+def test_mitmproxy_build_rebuilds_when_inputs_changed(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from vigil_cli import mitmproxy as mitmproxy_module
-    from vigil_cli.docker import DockerResult
 
     install_root = tmp_path / "install"
-    _make_mitmproxy_inputs(install_root)  # written now -> newest mtime
-
+    _, addon = _make_mitmproxy_inputs(install_root)
+    stamped = _mitmproxy_digest(install_root)
+    addon.write_text("# addon changed\n", encoding="utf-8")
     commands: list[list[str]] = []
 
-    def runner(argv: list[str], **_: object) -> DockerResult:
-        commands.append(argv)
-        # The tag EXISTS (image_exists True) but was Created back in 2001, so
-        # the freshly-written addon/Dockerfile are newer -> must rebuild. This
-        # is exactly the false-"current" the bare tag-exists check reported.
-        if argv[:4] == ["docker", "image", "inspect", "-f"]:
-            return DockerResult(0, "2001-01-01T00:00:00Z\n", "")
-        if argv[:3] == ["docker", "image", "inspect"]:
-            return DockerResult(0, "sha256:image\n", "")
-        return DockerResult(0, "", "")
-
-    mitmproxy_module.build_image(install_root, runner=runner)
+    mitmproxy_module.build_image(install_root, runner=_label_runner(commands, stamped))
 
     out = capsys.readouterr().out
     assert "image current" not in out
-    assert any(cmd[:3] == ["docker", "build", "-t"] for cmd in commands)
+    build = next(cmd for cmd in commands if cmd[:3] == ["docker", "build", "-t"])
+    # The rebuild re-stamps the CURRENT digest, so the next check reads `current`
+    # instead of rebuilding again forever.
+    assert build[build.index("--label") + 1] == (
+        f"com.vigil.runtime-inputs-sha256={_mitmproxy_digest(install_root)}"
+    )
     assert "image built" in out
 
 
-def test_mitmproxy_build_rebuilds_when_assess_package_is_newer(
+def test_mitmproxy_build_rebuilds_when_assess_package_changes(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from vigil_cli import mitmproxy as mitmproxy_module
-    from vigil_cli.docker import DockerResult
 
     install_root = tmp_path / "install"
-    dockerfile, addon = _make_mitmproxy_inputs(install_root)
-    old = 1_000_000_000
-    os.utime(dockerfile, (old, old))
-    os.utime(addon, (old, old))
+    _make_mitmproxy_inputs(install_root)
     helper = install_root / "agent" / "scripts" / "assess" / "lib" / "scope.py"
     helper.parent.mkdir(parents=True)
     helper.write_text("# current helper\n", encoding="utf-8")
+    stamped = _mitmproxy_digest(install_root)
+    helper.write_text("# helper changed\n", encoding="utf-8")
     commands: list[list[str]] = []
 
-    def runner(argv: list[str], **_: object) -> DockerResult:
-        commands.append(argv)
-        if argv[:4] == ["docker", "image", "inspect", "-f"]:
-            return DockerResult(0, "2010-01-01T00:00:00Z\n", "")
-        if argv[:3] == ["docker", "image", "inspect"]:
-            return DockerResult(0, "sha256:image\n", "")
-        return DockerResult(0, "", "")
-
-    mitmproxy_module.build_image(install_root, runner=runner)
+    mitmproxy_module.build_image(install_root, runner=_label_runner(commands, stamped))
 
     assert any(command[:3] == ["docker", "build", "-t"] for command in commands)
     assert "image built" in capsys.readouterr().out
+
+
+def test_mitmproxy_freshness_ignores_bytecode_and_cache_churn(tmp_path: Path) -> None:
+    """Regression: the proxy image rebuilt on EVERY `vigil up`, forever.
+
+    Freshness used to be an mtime high-water mark over the whole
+    `agent/scripts/assess` directory, and every ordinary `vigil assess` run
+    rewrites `__pycache__/*.pyc` under the install root — so the newest "input"
+    was always newer than the image Vigil had just built. Bytecode and tool
+    caches are build ARTIFACTS, never inputs, and must not move the digest.
+    """
+    from vigil_cli import mitmproxy as mitmproxy_module
+
+    install_root = tmp_path / "install"
+    _make_mitmproxy_inputs(install_root)
+    assess = install_root / "agent" / "scripts" / "assess" / "lib"
+    assess.mkdir(parents=True)
+    (assess / "scope.py").write_text("# helper\n", encoding="utf-8")
+    stamped = _mitmproxy_digest(install_root)
+
+    # Exactly what an assess run leaves behind, all stamped in the far future.
+    cache = assess / "__pycache__"
+    cache.mkdir()
+    (cache / "scope.cpython-312.pyc").write_bytes(b"\x00bytecode\x00")
+    (assess / "scope.pyc").write_bytes(b"\x00loose\x00")
+    for junk in (".pytest_cache", ".mypy_cache", ".ruff_cache", "node_modules", ".venv"):
+        directory = install_root / "agent" / "scripts" / "assess" / junk
+        directory.mkdir(parents=True)
+        (directory / "artifact").write_text("junk\n", encoding="utf-8")
+    future = 4_000_000_000
+    for path in (install_root / "agent" / "scripts" / "assess").rglob("*"):
+        os.utime(path, (future, future))
+
+    assert _mitmproxy_digest(install_root) == stamped
+    commands: list[list[str]] = []
+    mitmproxy_module.build_image(install_root, runner=_label_runner(commands, stamped))
+    assert not any(cmd[:2] == ["docker", "build"] for cmd in commands)
+
+
+def test_mitmproxy_freshness_detects_deleted_input(tmp_path: Path) -> None:
+    """Regression: deleting a baked input left the image reading as current.
+
+    An mtime high-water mark only stats files that still EXIST, so an upgrade
+    that merely REMOVES an enforcement/classification module under
+    `agent/scripts/assess` never invalidated the image and the deleted code kept
+    running inside the proxy.
+    """
+    from vigil_cli import mitmproxy as mitmproxy_module
+
+    install_root = tmp_path / "install"
+    _make_mitmproxy_inputs(install_root)
+    assess = install_root / "agent" / "scripts" / "assess" / "lib"
+    assess.mkdir(parents=True)
+    (assess / "scope.py").write_text("# helper\n", encoding="utf-8")
+    retired = assess / "retired_classifier.py"
+    retired.write_text("# removed by the upgrade\n", encoding="utf-8")
+    stamped = _mitmproxy_digest(install_root)
+
+    retired.unlink()
+
+    assert _mitmproxy_digest(install_root) != stamped
+    commands: list[list[str]] = []
+    mitmproxy_module.build_image(install_root, runner=_label_runner(commands, stamped))
+    assert any(cmd[:3] == ["docker", "build", "-t"] for cmd in commands)
+
+
+def test_mitmproxy_build_stamps_digest_so_the_next_check_is_current(tmp_path: Path) -> None:
+    """A build must stamp the digest: an UNSTAMPED image can never be proven
+    current, so `vigil up` would rebuild it on every run."""
+    from vigil_cli import mitmproxy as mitmproxy_module
+
+    install_root = tmp_path / "install"
+    _make_mitmproxy_inputs(install_root)
+    commands: list[list[str]] = []
+
+    # No label on the image yet (built before digest stamping) -> must rebuild.
+    mitmproxy_module.build_image(install_root, runner=_label_runner(commands, "<no value>"))
+    build = next(cmd for cmd in commands if cmd[:3] == ["docker", "build", "-t"])
+    stamped = build[build.index("--label") + 1].split("=", 1)[1]
+
+    # Feed that stamp back in: the very next check is `current`, no rebuild.
+    follow_up: list[list[str]] = []
+    mitmproxy_module.build_image(install_root, runner=_label_runner(follow_up, stamped))
+    assert not any(cmd[:2] == ["docker", "build"] for cmd in follow_up)
+
+
+def test_up_mitmproxy_build_stamps_digest_label(tmp_path: Path) -> None:
+    """`vigil up` built the proxy image through its own argv, which omitted the
+    label — so its own rebuild left the image unprovable and the next `vigil up`
+    rebuilt it again. It must go through the one builder."""
+    from vigil_cli import up as up_module
+
+    install_root = tmp_path / "install"
+    _make_mitmproxy_inputs(install_root)
+    commands: list[list[str]] = []
+
+    up_module._build_mitmproxy_image(
+        install_root, runner=_label_runner(commands, "<no value>")
+    )
+
+    build = next(cmd for cmd in commands if cmd[:3] == ["docker", "build", "-t"])
+    assert build[build.index("--label") + 1] == (
+        f"com.vigil.runtime-inputs-sha256={_mitmproxy_digest(install_root)}"
+    )
 
 
 def test_mitmproxy_build_force_uses_no_cache_even_when_fresh(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from vigil_cli import mitmproxy as mitmproxy_module
-    from vigil_cli.docker import DockerResult
 
     install_root = tmp_path / "install"
-    dockerfile, addon = _make_mitmproxy_inputs(install_root)
-    old = 1_000_000_000
-    os.utime(dockerfile, (old, old))
-    os.utime(addon, (old, old))
-
+    _make_mitmproxy_inputs(install_root)
     commands: list[list[str]] = []
 
-    def runner(argv: list[str], **_: object) -> DockerResult:
-        commands.append(argv)
-        if argv[:4] == ["docker", "image", "inspect", "-f"]:
-            return DockerResult(0, "2030-01-01T00:00:00Z\n", "")
-        if argv[:3] == ["docker", "image", "inspect"]:
-            return DockerResult(0, "sha256:image\n", "")
-        return DockerResult(0, "", "")
-
-    mitmproxy_module.build_image(install_root, force=True, runner=runner)
+    mitmproxy_module.build_image(
+        install_root, force=True, runner=_label_runner(commands, _mitmproxy_digest(install_root))
+    )
 
     build_command = next(cmd for cmd in commands if cmd[:2] == ["docker", "build"])
     assert "--no-cache" in build_command
@@ -14244,7 +14471,8 @@ def test_auth_status_reports_bearer_token_and_recommends_refresh(
     monkeypatch.setattr(
         module,
         "active_material",
-        lambda _eng: {
+        # record_use=False: the status VIEW is inspection, not a use.
+        lambda _eng, *, record_use=True: {
             "auth_context": "authenticated",
             "mode": "proxy_capture",
             "use_for_requests": True,
@@ -14327,7 +14555,8 @@ def test_auth_status_flags_expired_token(
     monkeypatch.setattr(
         module,
         "active_material",
-        lambda _eng: {
+        # record_use=False: the status VIEW is inspection, not a use.
+        lambda _eng, *, record_use=True: {
             "auth_context": "authenticated",
             "mode": "proxy_capture",
             "use_for_requests": True,
@@ -14393,7 +14622,8 @@ def test_auth_status_last_probe_uses_assessment_scoped_route(
     monkeypatch.setattr(
         module,
         "active_material",
-        lambda _eng: {
+        # record_use=False: the status VIEW is inspection, not a use.
+        lambda _eng, *, record_use=True: {
             "auth_context": "authenticated",
             "mode": "proxy_capture",
             "use_for_requests": True,

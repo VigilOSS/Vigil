@@ -40,6 +40,40 @@ def _observe(client, *, url, method="GET", case_type="api", **work_item):
     )
 
 
+def _write_scope(isolate_settings, *, hosts, out_of_scope=()) -> None:
+    """Rewrite scope.json with a REAL host allowlist (scope admission ACTIVE)."""
+    eng = isolate_settings["engagements_dir"] / ENGAGEMENT_KEY
+    (eng / "scope.json").write_text(
+        json.dumps(
+            {
+                "engagement_name": "WorkBuf",
+                "targets": [f"https://{hosts[0]}"],
+                "hosts": list(hosts),
+                "out_of_scope": list(out_of_scope),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _seed_scoped(client, isolate_settings, *, hosts) -> None:
+    eng = isolate_settings["engagements_dir"] / ENGAGEMENT_KEY
+    (eng / "sessions").mkdir(parents=True, exist_ok=True)
+    _write_scope(isolate_settings, hosts=hosts)
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+
+
+def _ev_rank(unit) -> tuple:
+    """The claim path's unit ORDER BY, as a Python sort key."""
+    return (
+        -int(unit["deep_required"]),
+        -int(unit["total_score"]),
+        -int(unit["risk_score"]),
+        -int(unit["structure_score"]),
+        int(unit["id"]),
+    )
+
+
 def test_observation_derives_one_work_item(client, isolate_settings):
     _seed(client, isolate_settings)
     resp = _observe(
@@ -558,3 +592,79 @@ def test_resume_brief_reflects_work_buffer(client, isolate_settings):
     wb = brief["work_buffer"]
     assert wb["pending_total"] >= 1
     assert "gf:trust_surface" in wb["by_bucket"]
+
+
+def test_fetch_by_priority_excludes_out_of_scope_before_the_limit(client, isolate_settings):
+    """Top-priority out-of-scope rows must not starve the in-scope work beneath.
+
+    Shaping the top-K AFTER the SQL LIMIT claims nothing here, and because the
+    ordering is deterministic every retry re-selects the same excluded rows —
+    the queue stalls permanently instead of degrading.
+    """
+    _seed_scoped(client, isolate_settings, hosts=["app.example", "cotenant.example"])
+    _observe(client, url="https://cotenant.example/api/a", case_type="api", priority_score=90)
+    _observe(client, url="https://cotenant.example/api/b", case_type="api", priority_score=80)
+    _observe(client, url="https://app.example/api/c", case_type="api", priority_score=10)
+    # The co-tenant is carved out mid-engagement, after its rows were recorded.
+    _write_scope(
+        isolate_settings,
+        hosts=["app.example", "cotenant.example"],
+        out_of_scope=["cotenant.example"],
+    )
+
+    body = client.post(
+        f"{BASE}/work-items/fetch-by-priority", json={"limit": 2, "agent": "auto"}
+    ).json()
+
+    assert [row["url"] for row in body["claimed"]] == ["https://app.example/api/c"]
+    assert {row["url"] for row in client.get(f"{BASE}/work-items?status=pending").json()} == {
+        "https://cotenant.example/api/a",
+        "https://cotenant.example/api/b",
+    }
+
+
+def test_fetch_by_unit_skips_unit_whose_pending_work_is_out_of_scope(client, isolate_settings):
+    """A higher-EV unit with only out-of-scope pending work is not selectable.
+
+    Without scope in the unit-selection EXISTS, that unit is re-selected on every
+    call and claims zero rows, so the lower-EV in-scope unit is never reached.
+    """
+    _seed_scoped(client, isolate_settings, hosts=["app.example", "cotenant.example"])
+    for i in range(14):
+        _observe(
+            client,
+            url=f"https://cotenant.example/api/order{i}",
+            method="POST" if i == 0 else "GET",
+            case_type="api",
+            priority_score=90,
+            cluster_key="gf:trust_surface",
+        )
+    for i in range(3):
+        _observe(
+            client,
+            url=f"https://app.example/shop/item{i}",
+            case_type="api",
+            priority_score=10,
+            cluster_key="gf:idor",
+        )
+    engagement = client.get(f"/engagements/{ENGAGEMENT_KEY}").json()
+    state_manager.score_application_units(int(engagement["id"]))
+    units = {u["host"]: u for u in client.get(f"{BASE}/application-units").json()}
+    # The fixture is only load-bearing if the out-of-scope unit really outranks
+    # the in-scope one under the selection ORDER BY.
+    assert _ev_rank(units["cotenant.example"]) < _ev_rank(units["app.example"])
+
+    _write_scope(
+        isolate_settings,
+        hosts=["app.example", "cotenant.example"],
+        out_of_scope=["cotenant.example"],
+    )
+
+    body = client.post(
+        f"{BASE}/work-items/fetch-by-unit", json={"agent": "auto", "work_class": "api"}
+    ).json()
+
+    assert body["unit"] is not None, body
+    assert body["unit"]["host"] == "app.example"
+    assert body["claimed"]
+    assert all(row["host"] == "app.example" for row in body["claimed"])

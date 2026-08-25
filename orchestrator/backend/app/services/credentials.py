@@ -226,7 +226,11 @@ def _liveness_order_key(item: dict[str, Any]) -> tuple[datetime, bool]:
 
 
 def resolve_identity(
-    engagement_id: int, requested: str | None, *, scope_key: str = ""
+    engagement_id: int,
+    requested: str | None,
+    *,
+    scope_key: str = "",
+    record_use: bool = True,
 ) -> tuple[str | None, dict[str, Any]]:
     """Resolve a ``--identity`` request, matching legacy semantics.
 
@@ -236,21 +240,30 @@ def resolve_identity(
     * unknown identity -> ``(requested, {})`` so the caller can warn while the
       requested name is still recorded as the probe's auth_context.
 
-    This is the resolve-for-replay path (kali identity injection, the browser
-    identity path, ``auth status --probe``), so a hit counts as a USE and
-    refreshes ``last_seen_at`` — an identity that is actively being replayed
-    must not age into ``stale`` while it is in use.
+    ``record_use`` (default True) is the resolve-for-replay contract: this is the
+    path kali identity injection and the browser identity path take before putting
+    the session on the wire, so a hit counts as a USE and refreshes
+    ``last_seen_at`` — an identity that is actively being replayed must not age
+    into ``stale`` while it is in use.
+
+    A caller that only INSPECTS the record (``auth status`` without ``--probe``)
+    passes ``record_use=False``. Recording a use there would be a lie with teeth:
+    the 8-hour stale flag and the 5-day purge both key off ``last_seen_at``, so a
+    status view on a loop would keep an unused, never-probed session looking fresh
+    forever and print a misleading age while doing it.
     """
     if requested is None:
-        material = db.get_active_credential(engagement_id, touch=True)
+        material = db.get_active_credential(engagement_id, touch=record_use)
         if material is None:
             return (None, {})
         return (str(material.get("identity_name") or DEFAULT_IDENTITY), material)
     requested = requested.strip()
-    material = db.get_credential(engagement_id, requested, touch=True)
+    material = db.get_credential(engagement_id, requested, touch=record_use)
     if material is not None:
         return (requested, material)
-    aliased = db.resolve_credential_alias(engagement_id, requested, scope_key)
+    aliased = db.resolve_credential_alias(
+        engagement_id, requested, scope_key, touch=record_use
+    )
     if aliased is not None:
         return (str(aliased["identity_name"]), aliased)
     return (requested, {})

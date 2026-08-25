@@ -10,10 +10,11 @@ from pathlib import Path
 from . import docker
 from . import config as config_module
 from .client_rosters import repair_engagement_client_rosters
+from .image_freshness import is_excluded_input
 from .oob import DEFAULT_OOB_DOMAIN
 from .oob_tenants import initialize_tenant_route
 from .runtime import build_runtime
-from .status import write_install_meta
+from .status import INSTALL_META_FILENAME, write_install_meta
 
 
 def _rmtree(path: Path) -> None:
@@ -46,16 +47,17 @@ ROOT_PRESERVE_NAMES = {
     ".jj",
 }
 
-EXCLUDED_NAMES = {
-    "__pycache__",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-    "node_modules",
-    "dist",
-    ".venv",
-    "*.egg-info",
-}
+# Directories/files only a PRIOR Vigil install or run leaves behind. Source-tree
+# directory names ("agent", "orchestrator", ".claude", ".codex") are NOT a
+# signal: when the install root IS the source checkout they exist before Vigil
+# has ever run there, so the FIRST in-place install reported an upgrade and
+# `initialize_tenant_route` pinned the legacy shared OOB domain (ports 53/8443)
+# instead of allocating a tenant-specific route — two fresh in-place developer
+# installs then collided at the FRP/OOB edge.
+PRIOR_INSTALL_MARKERS = (
+    INSTALL_META_FILENAME,  # stamped by every install_from_source
+    ".runtime-data",  # created by _ensure_install_dirs on every install
+)
 
 LEGACY_INSTALLER_NAME = "install" ".sh"
 
@@ -77,10 +79,40 @@ class InstallResult:
 
 
 def _is_excluded(path: Path) -> bool:
-    name = path.name
-    if name in EXCLUDED_NAMES:
+    """Build artifacts and caches are never copied into an install — and are
+    never image build inputs either. `image_freshness` owns that single
+    judgement so the copier and the freshness digest cannot drift apart."""
+    return is_excluded_input(path.name)
+
+
+def _has_engagement_directories(install_root: Path) -> bool:
+    """True when `agent/engagements/` holds at least one real engagement.
+
+    An engagement is a DIRECTORY created by Vigil at engagement time; a pristine
+    checkout carries only the tracked `.gitkeep` placeholder file. This is the
+    marker that still recognises an install predating `.runtime-data` and the
+    install stamp — the case the legacy shared OOB route exists for.
+    """
+    engagements = install_root / "agent" / "engagements"
+    try:
+        return any(
+            child.is_dir() and not child.name.startswith(".")
+            for child in engagements.iterdir()
+        )
+    except (FileNotFoundError, NotADirectoryError, PermissionError):
+        return False
+
+
+def has_prior_install_state(install_root: Path) -> bool:
+    """True when a previous Vigil install/run left its own state in this root.
+
+    This is the honest upgrade signal: every marker is Vigil-created, so all are
+    absent in a pristine source checkout and at least one is present in any root
+    Vigil has installed into or run an engagement from.
+    """
+    if any((install_root / name).exists() for name in PRIOR_INSTALL_MARKERS):
         return True
-    return name.endswith(".egg-info") or name.endswith(".pyc")
+    return _has_engagement_directories(install_root)
 
 
 def _has_preserved_descendant(child_name: str, preserve_rel_paths: set[Path]) -> bool:
@@ -133,10 +165,10 @@ def install_from_source(options: InstallOptions, *, runner: docker.Runner = dock
     if options.dry_run:
         return InstallResult(install_root=install_root, is_upgrade=False, image_built=False)
 
-    is_upgrade = any(
-        (install_root / name).exists()
-        for name in ("agent", "orchestrator", ".claude", ".codex")
-    )
+    # Computed BEFORE any directory is created below — `_ensure_install_dirs`
+    # creates `.runtime-data`, which would otherwise make every install look
+    # like an upgrade to itself.
+    is_upgrade = has_prior_install_state(install_root)
 
     install_root.mkdir(parents=True, exist_ok=True)
     if source_root == install_root:

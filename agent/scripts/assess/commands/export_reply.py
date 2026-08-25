@@ -57,9 +57,10 @@ from assess.lib.finding_render import (
     poc_lines,
 )
 # ``export-reply`` reuses export-submission's finding-links → command-run resolution
-# so the reply's THREAD HISTORY surfaces the same explicitly-linked reproducing runs
-# the submission does (author NEW evidence from them). No cycle: export_submission does
-# not import export_reply.
+# so the reply's THREAD HISTORY surfaces the same explicitly-linked, non-retired
+# reproducing runs the submission does (author NEW evidence from them) — one helper, so
+# a retired link cannot be dropped from the submission and survive in the reply. No
+# cycle: export_submission does not import export_reply.
 from assess.commands.export_submission import _linked_command_runs
 
 _PLATFORMS = ("bugcrowd", "hackerone", "direct")

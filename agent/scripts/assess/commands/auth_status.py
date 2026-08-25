@@ -135,8 +135,9 @@ def _run_identity_probe(
     SAME injection code the runtime uses, never reinvented here. curl runs with
     ``-i`` (response status line + headers, INCLUDING ``Location``, + body) and no
     ``-L`` so a 302 to a login page is preserved in the haystack as a signal rather
-    than chased. The numeric status is read from the trailing ``-w``
-    ``VIGIL_HTTP_CODE=`` marker; the remaining stdout IS the haystack matched
+    than chased, plus ``--suppress-connect-headers`` so an egress proxy's CONNECT
+    block never enters that haystack. The numeric status is read from the trailing
+    ``-w`` ``VIGIL_HTTP_CODE=`` marker; the remaining stdout IS the haystack matched
     against the operator-configured ``material.liveness`` signature. Any exec /
     transport failure or unparseable status yields ``liveness="unknown"`` with a
     populated ``error`` (never a false verdict).
@@ -148,7 +149,14 @@ def _run_identity_probe(
     except Exception as exc:  # noqa: BLE001 — import guarded so probe never hard-fails
         return {"liveness": "unknown", "reason": "probe unavailable",
                 "http_status": None, "error": f"probe unavailable: {exc}"}
-    cmd = ["curl", "-sS", "-i", "--max-time", str(timeout),
+    # --suppress-connect-headers keeps an HTTP egress proxy's CONNECT reply
+    # ("HTTP/1.1 200 Connection established" + its own headers) out of the -i
+    # output. The numeric status here is read from curl's %{http_code}, which is
+    # already the ORIGIN's, so this is about the HAYSTACK: the proxy's header
+    # block is another hop's text and has no business being matched against this
+    # identity's authed_marker / dead_marker / Location.
+    cmd = ["curl", "-sS", "-i", "--suppress-connect-headers",
+           "--max-time", str(timeout),
            "-w", "\nVIGIL_HTTP_CODE=%{http_code}\n", url]
     try:
         result = kali_exec(
@@ -355,17 +363,27 @@ def run(args) -> None:
         else configured_scope
     )
     resolved_identity: str | None = None
+    # This read is INSPECTION, never a use: `auth status` only looks at the stored
+    # record. Recording a use here would refresh `last_seen_at`, and the 8-hour
+    # stale flag and 5-day purge both key off it — so a status loop would keep an
+    # unused session looking fresh forever and print a misleading age. When
+    # --probe runs, the USE is recorded where the credential actually goes on the
+    # wire: _run_identity_probe shells kali_exec with --identity, and that
+    # injection path resolves for replay.
     if requested_identity:
         if scope_key:
             resolved_identity, auth = resolve_identity(
-                cfg.engagement_dir, requested_identity, scope_key=scope_key
+                cfg.engagement_dir,
+                requested_identity,
+                scope_key=scope_key,
+                record_use=False,
             )
         else:
             resolved_identity, auth = resolve_identity(
-                cfg.engagement_dir, requested_identity
+                cfg.engagement_dir, requested_identity, record_use=False
             )
     else:
-        auth = active_material(cfg.engagement_dir)
+        auth = active_material(cfg.engagement_dir, record_use=False)
     shapes = _token_shapes(auth) if auth else []
 
     expires_at_raw = auth.get("expires_at") if isinstance(auth, dict) else None
