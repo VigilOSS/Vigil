@@ -457,6 +457,7 @@ Where a row's rationale is a reporting rule it cites the rule (`agent/rules/repo
 - [ ] **[both]** The opening does not echo the title — sentence 1 adds the proof, victim scope, or attacker outcome the title does not carry (reporting.md Rule 11)
 - [ ] **[both]** No vulnerability-class definitions — the audience knows XSS/SQLi/IDOR/SSRF; jump to the specifics (reporting.md Rule 11)
 - [ ] **[both]** No banned filler phrases (`Furthermore`, `It is worth noting`, `During the course of our assessment`, `robust`, `comprehensive`, …) (reporting.md Rule 11)
+- [ ] **[both]** No given-property qualifier — an adjective the reader already assumes (`disposable`/`throwaway` organization, `malicious` attacker, `unsuspecting` victim, `carefully crafted` payload, `vulnerable` endpoint); a qualifier stays only when dropping it would let the reader assume something false (`attacker-controlled`, `you control`, `pre-auth`) (reporting.md Rule 11)
 - [ ] **[both]** No narration of the report's own revision history or an earlier investigative pass being wrong (`Earlier revisions of this report carried...`, `An earlier pass... wrongly concluded...`) — state the current, correct fact only (reporting.md Rule 11)
 - [ ] **[both]** Active voice throughout — the subject acts (reporting.md Rule 12)
 - [ ] **[both]** Every sentence is load-bearing — if removing it does not reduce the reader's understanding, cut it (reporting.md Rule 15)
