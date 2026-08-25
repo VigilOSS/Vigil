@@ -37,6 +37,7 @@ def register(subparsers) -> None:
             "  vigil assess intel record tech-component tech.json\n"
             "  vigil assess intel record cve cve-2024-1234.json\n"
             "  vigil assess intel record note catchall.json\n"
+            "  vigil assess contract intel record tech-component   # allowed keys for a type\n"
             f"\nValid types: {types_list}"
         ),
     )
@@ -69,6 +70,10 @@ def _report_validation_errors(intel_type: str, errors: list[str]) -> None:
     print(f"record-intel {intel_type}: payload failed schema validation:", file=sys.stderr)
     for error in errors:
         print(f"  - {error}", file=sys.stderr)
+    print(
+        f"Run `vigil assess contract intel record {intel_type}` for the allowed keys.",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 

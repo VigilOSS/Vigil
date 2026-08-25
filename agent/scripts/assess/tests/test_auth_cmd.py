@@ -243,8 +243,9 @@ def _install_status(monkeypatch, tmp_path, *, verdict, material=None):
     }
     calls: dict[str, object] = {}
 
-    def fake_resolve(_dir, requested):
+    def fake_resolve(_dir, requested, *, scope_key=""):
         calls["resolved"] = requested
+        calls["resolved_scope"] = scope_key
         return (requested, dict(resolved_material))
 
     def fake_active(_dir):
@@ -258,9 +259,16 @@ def _install_status(monkeypatch, tmp_path, *, verdict, material=None):
         calls["probed_scope"] = scope_key
         return {"liveness": verdict, "reason": "stubbed", "http_status": 200, "error": None}
 
-    def fake_persist(_dir, identity, v, probed_at):
-        calls.setdefault("persisted", []).append((identity, v, probed_at))
-        return {"identity_name": identity, "liveness_verdict": v}
+    def fake_persist(_dir, identity, v, probed_at, **kwargs):
+        calls.setdefault("persisted", []).append((identity, v, probed_at, kwargs))
+        state = "available" if v == "live" else resolved_material.get("state", "available")
+        return {
+            **resolved_material,
+            "identity_name": identity,
+            "liveness_verdict": v,
+            "state": state,
+            "last_probed_at": probed_at,
+        }
 
     monkeypatch.setattr(auth_status, "resolve_identity", fake_resolve)
     monkeypatch.setattr(auth_status, "active_material", fake_active)
@@ -309,6 +317,71 @@ def test_probe_no_signature_persists_unknown_not_dead(tmp_path, monkeypatch, cap
     capsys.readouterr()
     assert calls["persisted"][0][1] == "unknown"
     assert calls["persisted"][0][1] != "dead"
+
+
+def test_probe_defaults_observation_scope_to_probe_origin(
+    tmp_path, monkeypatch, capsys
+):
+    calls = _install_status(monkeypatch, tmp_path, verdict="dead")
+    args = _parse_status(
+        [
+            "status",
+            "--json",
+            "--probe",
+            "--identity",
+            "cap-target",
+            "--probe-url",
+            "https://publishing.example.test/account?tab=profile",
+        ],
+        str(tmp_path),
+    )
+
+    args.func(args)
+    out = json.loads(capsys.readouterr().out)
+
+    assert calls["resolved_scope"] == "https://publishing.example.test"
+    assert calls["probed_scope"] == "https://publishing.example.test"
+    assert calls["persisted"][0][3]["scope_key"] == (
+        "https://publishing.example.test"
+    )
+    assert out["identity_name"] == "cap-target"
+    assert out["liveness_probe"]["scope_key"] == (
+        "https://publishing.example.test"
+    )
+
+
+def test_probe_requested_identity_is_the_reported_and_audited_subject(
+    tmp_path, monkeypatch, capsys
+):
+    calls = _install_status(monkeypatch, tmp_path, verdict="live")
+    monkeypatch.setattr(
+        auth_status,
+        "active_material",
+        lambda _dir: {
+            "identity_name": "other-active",
+            "auth_context": "other-active",
+        },
+    )
+    args = _parse_status(
+        [
+            "status",
+            "--json",
+            "--probe",
+            "--identity",
+            "cap-target",
+            "--probe-url",
+            "https://chat.example.test/me",
+        ],
+        str(tmp_path),
+    )
+
+    args.func(args)
+    out = json.loads(capsys.readouterr().out)
+
+    assert calls["probed_identity"] == "cap-target"
+    assert calls["persisted"][0][0] == "cap-target"
+    assert out["identity_name"] == "cap-target"
+    assert out["liveness_probe"]["identity_name"] == "cap-target"
 
 
 def test_active_identity_probe_does_not_persist(tmp_path, monkeypatch, capsys):
@@ -409,3 +482,63 @@ def test_scoped_alias_probes_and_persists_resolved_identity(
         },
     )
     assert out["liveness_probe"]["persisted"] is True
+
+
+# --------------------------------------------------------------------------- #
+# One classifier, one signature: `vigil assess auth status --probe` and
+# `vigil auth status --probe` / `vigil auth keepalive` must never be able to
+# reach different verdicts for the same identity and the same response.
+# --------------------------------------------------------------------------- #
+
+def test_both_cli_surfaces_call_the_classifier_with_the_same_arguments() -> None:
+    """Arity parity is the guard, not just value parity.
+
+    The two surfaces have drifted before by ARGUMENT: the assess command passed
+    a probe scope the ``vigil_cli.auth`` mirror had no way to supply, so the
+    same identity could resolve on one surface and read ``unknown`` on the
+    other. Pinning the classifier's parameter list — and both wrappers against
+    it — makes that drift a test failure rather than a field surprise.
+    """
+    import inspect
+    import sys
+    from pathlib import Path
+
+    repo_src = Path(__file__).resolve().parents[4] / "src"
+    if str(repo_src) not in sys.path:
+        sys.path.insert(0, str(repo_src))
+
+    from assess.lib.auth_liveness import classify_liveness
+
+    from vigil_cli import auth as cli_auth
+
+    expected = ["status", "haystack", "liveness"]
+    assert list(inspect.signature(classify_liveness).parameters) == expected
+    assert list(inspect.signature(cli_auth._classify_liveness).parameters) == expected
+    # The assess command consumes the same canonical function, not a copy.
+    assert auth_status._classify_liveness is classify_liveness
+
+
+def test_an_authentication_challenge_is_positive_evidence_without_expect_status() -> None:
+    """``dead`` needs positive evidence — and a 401 IS that evidence on its own.
+
+    ``expect_status`` is optional, so the challenge check must not be gated on
+    the operator having configured one. It is skipped in exactly one case: the
+    operator's signature names this status as the expected authed response, and
+    their declaration beats the generic rule.
+    """
+    from assess.lib.auth_liveness import classify_liveness
+
+    # A signature with no expect_status still classifies a 401 as death.
+    verdict, reason = classify_liveness(401, "nope", {"authed_marker": "Sign out"})
+    assert verdict == "dead"
+    assert "authentication challenge" in reason
+    # ...but with NO signature at all there is nothing to be dead against: the
+    # probe proved only that this URL is not characterised for this identity.
+    verdict, reason = classify_liveness(401, "nope", None)
+    assert verdict == "unknown"
+    assert "material.liveness" in reason
+    assert classify_liveness(401, "nope", {})[0] == "unknown"
+    # An operator who declares 401 as the authed response is believed.
+    assert classify_liveness(
+        401, "Sign out", {"expect_status": 401, "authed_marker": "Sign out"}
+    )[0] == "live"

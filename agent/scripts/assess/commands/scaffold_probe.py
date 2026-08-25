@@ -174,7 +174,8 @@ def _register_artifact(cfg, relative_path: str, finding_slug: str | None) -> dic
 def _render_template(*, name: str, purpose: str) -> str:
     """Return a minimal-but-real runnable probe skeleton.
 
-    The skeleton: parses ``--target`` (+ ``--out``), does one passive GET, and
+    The skeleton: parses ``--target`` (+ ``--out``), resolves that untrusted
+    argument against ``scope.json``, does one passive GET, and
     prints the finding-return JSON verdict on the LAST stdout line (the
     convention `write-probe-script` SKILL.md defines). The active-payload branch
     and the `vigil oob mint` blind-callback hook are present but commented so the
@@ -197,12 +198,55 @@ Output contract (see agent/skills/write-probe-script/SKILL.md): the LAST stdout
 line is a single JSON object {{"finding": bool, "summary": str, "evidence": {{...}}}}.
 When finding is true that verdict seeds a finding record. Stdlib-only so the
 probe replays on any runtime tier; `requests` is available if you genuinely need it.
+There is no `vigil` executable inside the container — never shell out to the CLI
+from here; make the `vigil assess` recording calls from the host once this returns.
 """
 import argparse
 import json
 import os
 import sys
+import urllib.parse
 import urllib.request
+
+
+def _bare_host(value: str) -> str:
+    """Reduce a URL / authority / bare host to a comparable lowercase hostname."""
+    raw = (value or "").strip()
+    if "//" not in raw:
+        raw = "//" + raw
+    return (urllib.parse.urlsplit(raw).hostname or "").strip(".").lower()
+
+
+def scoped_host(value: str) -> str:
+    """Normalize `value` to a bare hostname and require scope.json to declare it.
+
+    A caller-supplied host / tenant argument is untrusted INPUT, never an
+    authorization: it says WHICH target to act on, not that acting on it is
+    allowed. Resolve it here and build any in-script ALLOW list from the RESULT,
+    never from argv directly — otherwise the caller authorizes itself. When this
+    probe is reconfigured for a different tenant, REPLACE the allow list rather
+    than adding to it, so the retired tenant is revoked instead of accumulating.
+
+    Stdlib + the bind mount only: there is no `vigil` executable inside the
+    runtime container, so a probe can never shell out to the CLI to resolve scope.
+    """
+    host = _bare_host(value)
+    scope_path = "/engagements/" + os.environ.get("ENGAGEMENT_KEY", "") + "/scope.json"
+    with open(scope_path, encoding="utf-8") as fh:
+        scope = json.load(fh)
+    declared = list(scope.get("hosts") or []) + list(scope.get("discovered_hosts") or [])
+    for entry in declared:
+        entry = str(entry).strip().lower()
+        if entry.startswith("*."):
+            apex = _bare_host(entry[2:])
+            if apex and (host == apex or host.endswith("." + apex)):
+                return host
+        elif host and host == _bare_host(entry):
+            return host
+    raise SystemExit(
+        f"{{host!r}} is not declared in {{scope_path}} (hosts / discovered_hosts). "
+        "If it is genuinely in scope, declare it there first rather than widening this check."
+    )
 
 
 def fetch(url: str, *, timeout: int = 15) -> tuple[int, str]:
@@ -215,7 +259,7 @@ def fetch(url: str, *, timeout: int = 15) -> tuple[int, str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="{purpose}")
-    ap.add_argument("--target", required=True, help="Target URL the probe acts on.")
+    ap.add_argument("--target", required=True, help="Target URL the probe acts on (scope-checked below).")
     ap.add_argument("--out", default="", help="Optional path to write the JSON verdict to.")
     # Active-payload knobs — uncomment + use when this is a payload/exploit probe:
     # ap.add_argument("--param", default="q", help="Injected parameter/slot name.")
@@ -227,6 +271,7 @@ def main() -> int:
     #    a bare <nonce>.oob... host never reaches `vigil oob poll`.)
     # ap.add_argument("--callback", default="", help="Exact minted http://<nonce>.<client-id>.oob.../ host from `vigil oob mint`.")
     args = ap.parse_args()
+    host = scoped_host(args.target)  # untrusted argv -> scope-checked hostname
 
     # ---- IMPLEMENT: replace this passive baseline with the real probe logic. --
     status, body = fetch(args.target)
@@ -235,7 +280,7 @@ def main() -> int:
     # mean "the hypothesis held" and put the load-bearing facts in `evidence`.
     finding = False
     summary = f"baseline GET {{args.target}} -> {{status}} (no hypothesis tested yet)"
-    evidence = {{"status": status, "body_prefix": body[:200]}}
+    evidence = {{"host": host, "status": status, "body_prefix": body[:200]}}
     # ---------------------------------------------------------------------------
 
     result = {{"finding": finding, "summary": summary, "evidence": evidence}}

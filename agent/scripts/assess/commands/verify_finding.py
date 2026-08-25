@@ -227,6 +227,20 @@ def run(args) -> None:
     if payload.get("disposition") == "downgraded" and not payload.get("new_severity"):
         print("downgraded verification requires new_severity", file=sys.stderr)
         sys.exit(1)
+    if payload.get("new_severity") and payload.get("disposition") != "downgraded":
+        # Only the downgraded disposition consumes new_severity; anywhere else it
+        # was silently dropped server-side. Fail before the POST with the verb
+        # that actually re-bands a finding (mirrors the backend rejection). The
+        # remedy names EVERY slug in the batch: naming only the first would
+        # re-band one finding and silently leave the rest at the old severity.
+        print(
+            "new_severity applies only to --disposition downgraded (got "
+            f"'{payload.get('disposition')}'); change the band with "
+            f"`vigil assess finding update {' '.join(slugs) or '<slug>'} --severity "
+            f"{payload['new_severity']}`",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     narrative_path = getattr(args, "narrative", "") or ""
     producer_role = str(payload.get("source_name") or getattr(args, "source_name", "") or "")

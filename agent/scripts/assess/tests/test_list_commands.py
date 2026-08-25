@@ -216,6 +216,85 @@ def test_previously_unlisted_code_verb_resolves_as_contract(name):
     assert contract.name == name
 
 
+# State-writing verbs that reached NEITHER discovery surface: no contract at the
+# verb and none at any parent, so `contract <verb>` returned "Unknown contract"
+# AND `list-commands` never listed them. An agent that cannot see a verb's write
+# schema either guesses fields or declines to record legitimate state, so each
+# must now surface in the catalog. (`assess/tests/test_cli_canonical_shapes.py`
+# enforces the general rule against the live argparse tree; these pin the
+# specific verbs the audit found.)
+_PREVIOUSLY_UNLISTED_WRITE_VERBS = (
+    "app-unit",
+    "approve-proposal",
+    "arjun-select",
+    "arjun-sweep",
+    "dns-discovery",
+    "egress-check",
+    "emit-event",
+    "exploit",
+    "gau",
+    "ingest",
+    "js-mining",
+    "log",
+    "post",
+    "recon",
+    "record-chain",
+    "record-reply",
+    "scaffold-probe",
+    "scope filter",
+    "web-discovery",
+)
+
+
+@pytest.mark.parametrize("name", _PREVIOUSLY_UNLISTED_WRITE_VERBS)
+def test_previously_unlisted_write_verb_is_discoverable(name, capsys):
+    rows = _run_json(capsys, ["list-commands", "--json"])
+    names = {row["name"] for row in rows}
+    assert name in names, f"{name!r} is missing from the list-commands catalog"
+
+
+# Namespace children whose PARENT contract explicitly tells the reader to run
+# `vigil assess contract <parent> <action>` — and which used to answer that
+# pointer with "Unknown contract". A broken pointer is worse than a missing one:
+# it spends the agent's attempt and teaches it the surface is unreliable.
+_DOCUMENTED_POINTER_ACTIONS = (
+    ("finding merge", "finding merge"),
+    ("export findings", "export findings"),
+    ("export reply", "export reply"),
+    ("export surfaces", "export surfaces"),
+)
+
+
+@pytest.mark.parametrize("name,expected", _DOCUMENTED_POINTER_ACTIONS)
+def test_namespace_pointer_action_resolves_to_its_own_contract(name, expected):
+    contract = contracts.get_contract(name)
+    assert contract is not None, f"contract lookup for {name!r} returned None"
+    assert contract.name == expected
+    assert contracts.render_contract(name).startswith(f"Command: {expected}")
+
+
+@pytest.mark.parametrize("name,_expected", _DOCUMENTED_POINTER_ACTIONS)
+def test_namespace_child_contracts_do_not_double_count_in_the_catalog(
+    name, _expected, capsys
+):
+    # Per-action contracts under a grouped parent render as part of the ONE
+    # collapsed parent row; adding them must not re-inflate the catalog.
+    rows = _run_json(capsys, ["list-commands", "--json"])
+    assert name not in {row["name"] for row in rows}
+
+
+def test_kali_sweep_is_a_first_class_kali_verb():
+    # `sweep` is registered in cli.py's kali loop; it was missing from
+    # KALI_VERBS, so `contract kali sweep` returned Unknown and --kali-only
+    # dropped it. Its contract must document the surface that actually matters:
+    # the required value list and the `--` command template.
+    assert "sweep" in contracts.KALI_VERBS
+    rendered = contracts.render_contract("kali sweep")
+    assert rendered.startswith("Command: kali sweep")
+    assert "--values" in rendered
+    assert "--placeholder" in rendered
+
+
 def test_code_coverage_contract_documents_gate_flags():
     # code-coverage runs every code Core-Loop iteration; its contract must
     # document the --cwe-matrix and --require-gate-pass flags it accepts.
