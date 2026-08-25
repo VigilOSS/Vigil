@@ -411,6 +411,10 @@ def run(args) -> None:
         print("finding update: payload failed schema validation:", file=sys.stderr)
         for error in schema_errors:
             print(f"  - {error}", file=sys.stderr)
+        print(
+            "Run `vigil assess contract finding update` for the allowed details keys.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     if payload_file:

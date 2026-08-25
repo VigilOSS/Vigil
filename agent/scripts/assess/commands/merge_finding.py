@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
@@ -30,7 +31,7 @@ def run(args) -> None:
     payload = {key: value for key, value in payload.items() if value is not None}
 
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        client.post("findings/merge", payload)
+        result = client.post("findings/merge", payload)
 
     # Emit event
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
@@ -41,5 +42,13 @@ def run(args) -> None:
             "agent_name": "operator",
             "summary": f"Merged {args.source_slug} into {args.target_slug}: {args.reason}",
         })
+
+    # A merge that inherited a contradictory CVSS pair still completes (refusing
+    # would strand two duplicates the agent correctly identified), so the backend
+    # reports the defect instead. Relay it: the API and websocket consumers see
+    # `warnings`, and a CLI agent would otherwise only learn about it much later,
+    # from a blocked report-readiness check.
+    for warning in (result or {}).get("warnings") or []:
+        print(f"finding merge: {warning}", file=sys.stderr)
 
     print(f"Merged {args.source_slug} into {args.target_slug}")

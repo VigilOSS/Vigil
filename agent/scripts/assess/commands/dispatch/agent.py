@@ -133,8 +133,12 @@ def _register_dispatch(args) -> None:
         row = client.record_dispatch(payload)
     finally:
         client.close()
+    # `dispatch_id`, not a bare `id`: this row lives in assessment_dispatches while
+    # `agent handoff` returns an assessment_dispatch_handoffs row. Two unrelated
+    # sequences printed under the same key sent a verifier at the wrong lifecycle
+    # record. `agent_id` remains the addressable key for every other verb.
     print(json.dumps({
-        "id": row.get("id"),
+        "dispatch_id": row.get("id"),
         "agent_id": row.get("agent_id"),
         "status": row.get("status"),
     }, ensure_ascii=False))
@@ -563,7 +567,9 @@ def _record_handoff(args) -> None:
             row = client.update_handoff(agent_id, patch)
     finally:
         client.close()
+    # `handoff_id` names the namespace (assessment_dispatch_handoffs) so it cannot
+    # be confused with the `dispatch_id` that `agent start` prints — see the note there.
     print(json.dumps({
-        "id": row.get("id"),
+        "handoff_id": row.get("id"),
         "agent_id": row.get("agent_id"),
     }, ensure_ascii=False))

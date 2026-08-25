@@ -625,9 +625,12 @@ def _start(args) -> None:
         row = client.record_dispatch(payload)
     finally:
         client.close()
-    _warn_missing_native_wrapper(Path(cfg.engagement_dir), str(row.get("agent_role") or ""))
+    role = str(row.get("agent_role") or "")
+    _warn_missing_native_wrapper(Path(cfg.engagement_dir), role)
+    # `dispatch_id`, not a bare `id` — see _register_dispatch in dispatch/agent.py
+    # for why the namespace is in the key name.
     print(json.dumps({
-        "id": row.get("id"),
+        "dispatch_id": row.get("id"),
         "agent_id": row.get("agent_id"),
         "status": row.get("status"),
     }, ensure_ascii=False))
@@ -651,7 +654,8 @@ def _start(args) -> None:
                 "",
                 "## Next action",
                 "This command records the dispatch only; it does not spawn or launch the specialist.",
-                f"Launch the specialist in your client and pass it the {blocks} above.",
+                f"Launch the specialist with {_spawn_command_hint(Path(cfg.engagement_dir), role)} "
+                f"and pass it the {blocks} above.",
             ]
         )
     )
@@ -903,12 +907,40 @@ def _start_swarm(args) -> None:
     )
 
 
+def _native_wrappers(engagement_dir: Path, role: str) -> tuple[bool, bool]:
+    """Which client's generated per-role wrapper the engagement actually has,
+    as ``(claude, codex)``. The wrappers are what make a role spawnable, so this
+    is the only evidence available for naming a concrete spawn command."""
+    if not role:
+        return (False, False)
+    return (
+        (engagement_dir / ".claude" / "agents" / f"{role}.md").exists(),
+        (engagement_dir / ".codex" / "agents" / f"{role}.toml").exists(),
+    )
+
+
+def _spawn_command_hint(engagement_dir: Path, role: str) -> str:
+    """The concrete spawn line for ``role``, phrased for the wrapper that exists.
+
+    ``agent start`` records the dispatch; the caller performs the spawn. Saying
+    only "in your client" leaves the reader to guess the mechanism — the same
+    mechanism ``_start_swarm`` already names — so name it here from the wrapper
+    on disk, and fall back to naming both when neither is present rather than
+    withholding the line (the stderr WARN already reports the gap)."""
+    claude, codex = _native_wrappers(engagement_dir, role)
+    label = role or "<role>"
+    if claude and not codex:
+        return f"`@{label}` (Claude Code)"
+    if codex and not claude:
+        return f"`spawn_agent {label}` (Codex)"
+    return f"`@{label}` (Claude Code) or `spawn_agent {label}` (Codex)"
+
+
 def _warn_missing_native_wrapper(engagement_dir: Path, role: str) -> None:
     if not role:
         return
-    claude = engagement_dir / ".claude" / "agents" / f"{role}.md"
-    codex = engagement_dir / ".codex" / "agents" / f"{role}.toml"
-    if not claude.exists() and not codex.exists():
+    claude, codex = _native_wrappers(engagement_dir, role)
+    if not claude and not codex:
         print(
             f"WARN agent start: no native wrapper found for role {role!r} under .claude/agents or .codex/agents",
             file=sys.stderr,

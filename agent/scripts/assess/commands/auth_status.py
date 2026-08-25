@@ -22,7 +22,10 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from assess.lib.auth_liveness import classify_liveness as _classify_liveness
+from assess.lib.auth_liveness import (
+    classify_liveness as _classify_liveness,
+    probe_scope_key,
+)
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
@@ -71,10 +74,13 @@ def register_status(subparsers) -> None:
             "Actively verify session liveness: GET --probe-url through the kali "
             "runtime AS the active identity (its cookies are injected by the same "
             "code the runtime uses), then classify the response against the "
-            "identity's operator-configured material.liveness = "
-            "{expect_status, authed_marker, dead_marker} signature. Presence of "
-            "credentials is NOT liveness; without --probe, liveness is 'unknown'. "
-            "Without a material.liveness signature the probe stays 'unknown'."
+            "identity's operator-configured material.liveness signature — either "
+            "{expect_status, authed_marker, dead_marker} or a per-origin map "
+            "{'https://app.example': {...}}. Presence of credentials is NOT "
+            "liveness; without --probe, liveness is 'unknown'. With no signature "
+            "for the probed origin the probe stays 'unknown'. 'dead' needs "
+            "POSITIVE evidence (dead_marker, or an auth challenge); a missing "
+            "authed_marker alone reports 'unknown', not a killed session."
         ),
     )
     p.add_argument(
@@ -90,7 +96,12 @@ def register_status(subparsers) -> None:
     p.add_argument(
         "--scope",
         default="",
-        help="Logical application scope for alias resolution and liveness persistence.",
+        help=(
+            "Logical application scope for alias resolution and liveness "
+            "persistence. Omitted with --probe, the scope defaults to the "
+            "--probe-url origin, so a verdict earned on one host is never "
+            "recorded as a verdict about every host this identity reaches."
+        ),
     )
     p.set_defaults(func=run)
 
@@ -282,10 +293,17 @@ def _refresh_recommendation(auth: dict, token_shapes: list[str]) -> str:
     )
 
 
-def _last_auth_probe(client: AssessmentClient | None) -> dict | None:
+def _last_auth_probe(
+    client: AssessmentClient | None, identity_name: str | None = None
+) -> dict | None:
     """Best-effort fetch of the most recent command-runs row with
     --technique AUTH so the operator sees when the auth was last validated.
-    Returns None on any failure (network, missing endpoint, parse error).
+
+    With ``identity_name`` the newest row FOR THAT IDENTITY is reported: the
+    multi-identity store routinely holds several sessions, and the globally
+    newest AUTH run usually belongs to a different one, which would date the
+    wrong session's last validation. Returns None on any failure (network,
+    missing endpoint, parse error).
     """
     if client is None:
         return None
@@ -294,7 +312,8 @@ def _last_auth_probe(client: AssessmentClient | None) -> dict | None:
         # (/engagements/{key}/assessment/command-runs), so go through
         # `.get()` which carries the /assessment prefix — `.get_engagement()`
         # targets the non-assessment scope and 404s here.
-        rows = client.get("command-runs?technique=AUTH&limit=1")
+        limit = 100 if identity_name else 1
+        rows = client.get(f"command-runs?technique=AUTH&limit={limit}")
     except Exception:  # noqa: BLE001 — best-effort read
         return None
     items: list[dict] = []
@@ -302,6 +321,12 @@ def _last_auth_probe(client: AssessmentClient | None) -> dict | None:
         items = rows.get("items") or rows.get("rows") or []
     elif isinstance(rows, list):
         items = rows
+    if identity_name:
+        items = [
+            row
+            for row in items
+            if str(row.get("auth_context") or "") == identity_name
+        ]
     if not items:
         return None
     row = items[0]
@@ -319,7 +344,16 @@ def run(args) -> None:
     # --identity targets a SPECIFIC stored session (multi-identity store); without
     # it we view/probe the active identity exactly as before.
     requested_identity = getattr(args, "identity", None)
-    scope_key = str(getattr(args, "scope", "") or "")
+    configured_scope = str(getattr(args, "scope", "") or "")
+    probe_url_arg = getattr(args, "probe_url", None)
+    # A probe with no explicit --scope is scoped to the probe URL's own origin,
+    # never to the legacy global scope: a verdict earned on one application host
+    # must not be recorded as a verdict about every host this identity reaches.
+    scope_key = (
+        probe_scope_key(probe_url_arg, configured_scope)
+        if getattr(args, "probe", False)
+        else configured_scope
+    )
     resolved_identity: str | None = None
     if requested_identity:
         if scope_key:
@@ -355,8 +389,14 @@ def run(args) -> None:
         client = AssessmentClient(cfg.base_url, cfg.engagement_key)
     except Exception:  # noqa: BLE001
         client = None
+    subject_identity = str(
+        resolved_identity
+        or (auth.get("identity_name") if isinstance(auth, dict) else "")
+        or requested_identity
+        or ""
+    )
     try:
-        last_probe = _last_auth_probe(client)
+        last_probe = _last_auth_probe(client, subject_identity or None)
     finally:
         if client is not None:
             client.close()
@@ -391,6 +431,8 @@ def run(args) -> None:
                 liveness_cfg=liveness_cfg,
                 scope_key=scope_key,
             )
+            liveness_detail.setdefault("identity_name", str(probe_identity))
+            liveness_detail.setdefault("scope_key", scope_key)
             # WS4 opt-in persistence: only when a SPECIFIC identity was targeted
             # does auth-status write — it persists the classified verdict so a
             # proven-dead session is hidden from the default list and a `live`
@@ -408,13 +450,18 @@ def run(args) -> None:
                             "source": "auth-status",
                             "reason": str(liveness_detail.get("reason") or ""),
                         }
-                    persist_liveness(
+                    persisted_material = persist_liveness(
                         cfg.engagement_dir,
                         str(probe_identity),
                         liveness_detail["liveness"],
                         probed_at,
                         **kwargs,
                     )
+                    # The persist RECONCILES state (a live verdict revives a
+                    # stale/dead projection), so the reconciled material is what
+                    # this view must report — not the pre-probe read.
+                    if isinstance(persisted_material, dict) and persisted_material:
+                        auth = {**auth, **persisted_material}
                     liveness_detail["persisted"] = True
                 except Exception as exc:  # noqa: BLE001 — status view must not crash
                     liveness_detail["persisted"] = False
@@ -423,6 +470,7 @@ def run(args) -> None:
 
     state = {
         "engagement_key": cfg.engagement_key,
+        "identity_name": subject_identity or None,
         "auth_context": auth.get("auth_context") or "anonymous",
         "mode": auth.get("mode") or "none",
         "use_for_requests": bool(auth.get("use_for_requests")),

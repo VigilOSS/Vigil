@@ -55,6 +55,13 @@ def register(subparsers) -> None:
 def _format_row(row: dict) -> str:
     # Compact display that works across intel types — prefer identifying key.
     id_val = row.get("id", "?")
+    # `intel list` includes superseded rows by design (they are the audit trail),
+    # but an unmarked superseded row is byte-identical to the live one and gets
+    # acted on as current. Label it and point at the row that replaced it; the
+    # stored lead_status is left alone — rewriting a historical status to satisfy
+    # a renderer would destroy the record this row exists to be.
+    superseded_by = row.get("superseded_by_id")
+    prefix = f"[SUPERSEDED -> {superseded_by}] " if superseded_by else ""
     for key in (
         "component",
         "name",
@@ -69,8 +76,8 @@ def _format_row(row: dict) -> str:
     ):
         value = row.get(key)
         if value:
-            return f"{id_val} | {key}={value} | source={row.get('source_name', '')}"
-    return json.dumps(row, ensure_ascii=False)
+            return f"{prefix}{id_val} | {key}={value} | source={row.get('source_name', '')}"
+    return f"{prefix}{json.dumps(row, ensure_ascii=False)}"
 
 
 def run(args) -> None:
