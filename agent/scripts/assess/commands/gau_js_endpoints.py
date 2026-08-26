@@ -1,4 +1,4 @@
-"""vigil assess gau-js-endpoints — recover endpoints hidden in minified JS bundles.
+"""vigil assess gau js-endpoints — recover endpoints hidden in minified JS bundles.
 
 LLMs and crawlers consistently miss routes that exist only inside JS bundles
 (`/admin/users/delete` referenced from `app.bundle.js` but never linked in
@@ -11,7 +11,7 @@ HTML). This wrapper closes that gap:
    endpoint strings.
 3. Resolve each extraction against the response's source URL so relative
    paths become absolute.
-4. Pipe the absolute URLs into `vigil assess ingest-endpoints` with
+4. Pipe the absolute URLs into `vigil assess ingest endpoints` with
    `source='js-extract'` so inline classification scores them like any
    other URL and report-writer can audit which work_items came from JS
    extraction.
@@ -39,7 +39,6 @@ from assess.lib.gau_pipeline import (
     extract_js_endpoints,
     gau_cache_key,
     load_cache_meta,
-    resolve_db_path,
     resolve_js_endpoint,
     resolve_pipeline_paths,
     run_uro_dedup,
@@ -49,7 +48,7 @@ from assess.lib.kali import kali_exec
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
-        "gau-js-endpoints",
+        "js-endpoints",
         help=(
             "Extract endpoints hidden in JS bundles (LinkFinder-style "
             "regex over httpx-stored bodies) and ingest them into the "
@@ -113,19 +112,10 @@ def register(subparsers) -> None:
         default=0,
         help="Stop after processing this many JS bodies (0 = no cap).",
     )
-    # This verb is a post-processor over an already-collected gau cache,
-    # so the cache-reuse flags (--refresh, --max-cache-age-hours) that
-    # `add_engagement_flags` would attach do not apply. Only --db is
-    # meaningful here, for live-test routing.
-    p.add_argument(
-        "--db",
-        dest="db_override",
-        default=None,
-        help=(
-            "Override path to cases.db. Defaults to "
-            "<engagement_dir>/cases.db when omitted."
-        ),
-    )
+    # This verb is a post-processor over an already-collected gau cache, so the
+    # cache-reuse flags (--refresh, --max-cache-age-hours) that
+    # `add_engagement_flags` would attach do not apply. The work buffer lives in
+    # the backend now (ADR 0013), so there is no cases.db path to override.
     add_common_audit_defaults(p, default_phase="recon")
     p.set_defaults(func=run)
 
@@ -259,7 +249,7 @@ def _fetch_js_bodies(paths, *, cfg, args) -> int:
             reason = f"cached gau run exited {meta.exit_code}"
         raise AssessError(
             f"no usable cached gau corpus at {paths.output_path}: {reason}. "
-            f"Run `vigil assess gau-endpoints {args.target}` first (with the "
+            f"Run `vigil assess gau endpoints {args.target}` first (with the "
             f"same --subs/--providers values) or pass --bodies-dir to point "
             f"at an existing bodies directory."
         )
@@ -332,7 +322,7 @@ def _fetch_js_bodies(paths, *, cfg, args) -> int:
     return kept
 
 
-def _ingest_extracted_urls(*, db_path: Path, source: str, urls: list[str], engagement_dir: Path) -> int:
+def _ingest_extracted_urls(*, source: str, urls: list[str], engagement_dir: Path) -> int:
     """Write extracted URLs to a temp file and ingest in-process.
 
     `ingest-endpoints` reads stdin when no `--file` is passed, but calling
@@ -353,8 +343,8 @@ def _ingest_extracted_urls(*, db_path: Path, source: str, urls: list[str], engag
         argv = [
             "--engagement-dir",
             str(engagement_dir),
-            "ingest-endpoints",
-            str(db_path),
+            "ingest",
+            "endpoints",
             source,
             "--file",
             tmp.name,
@@ -380,7 +370,6 @@ def run(args: argparse.Namespace) -> None:
         providers=args.providers,
     )
     paths = resolve_pipeline_paths(cfg, target=args.target, cache_key=cache_key)
-    db_path = resolve_db_path(cfg, getattr(args, "db_override", None))
 
     bodies_dir = (
         Path(args.bodies_dir_override).expanduser().resolve()
@@ -394,7 +383,7 @@ def run(args: argparse.Namespace) -> None:
         if not args.fetch_if_missing:
             print(
                 f"gau-js-endpoints: bodies dir {bodies_dir} is empty. "
-                "Either run `vigil assess gau-secrets` first (with the same "
+                "Either run `vigil assess gau secrets` first (with the same "
                 "--subs/--providers values) to populate it, or pass "
                 "--fetch-if-missing to body-fetch the .js subset of the "
                 "cached gau corpus now.",
@@ -455,15 +444,8 @@ def run(args: argparse.Namespace) -> None:
             "resolved_in_scope": body_resolved,
         })
 
-    if not db_path.is_file():
-        from assess.lib.db import db_init
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        db_path.touch()
-        db_init(str(db_path))
-
     try:
         ingested = _ingest_extracted_urls(
-            db_path=db_path,
             source=args.source,
             urls=resolved_unique,
             engagement_dir=Path(cfg.engagement_dir),
@@ -483,7 +465,6 @@ def run(args: argparse.Namespace) -> None:
             "unique_in_scope_urls": len(resolved_unique),
             "ingested_count": ingested,
             "ingest_source": args.source,
-            "db_path": str(db_path),
             "per_body_preview": per_body[:25],
         },
         ensure_ascii=False,

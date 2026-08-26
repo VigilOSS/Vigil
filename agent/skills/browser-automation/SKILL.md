@@ -61,8 +61,9 @@ npm i playwright && npx playwright install chromium
 
 - **Mode A — through-proxy auto-capture.** `vigil mitmproxy start`,
   then launch the browser with `PROXY=http://127.0.0.1:8080`. The proxy addon
-  auto-detects login and POSTs the captured credentials to the backend store /
-  records traffic to `cases.db`. Use when the edge tolerates the proxy.
+  auto-detects login and POSTs the captured credentials to the backend store,
+  and posts request observations that the backend derives into the work buffer
+  (`assessment_work_items`, ADR 0013) server-side. Use when the edge tolerates the proxy.
 - **Mode B — direct + cookie-dump.** Launch headed Chromium with **no** proxy on
   the residential IP; after login, dump `context.cookies()` to a Netscape jar.
   **The MITM proxy in the TLS path can itself trip Akamai** — switch to Mode B

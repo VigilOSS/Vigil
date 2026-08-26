@@ -2,7 +2,7 @@
 
 Validates preconditions before writing the new phase to scope.json.
 Exits non-zero and prints blockers when preconditions fail.
-Pass --force to override blockers (logged but not blocked).
+Pass --force to override ordinary blockers; source-identity integrity blockers remain hard.
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import sys
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import Config, load_config
-
+from assess.lib.scope import mutate_scope
 
 WEB_PHASES = [
     "recon",
@@ -67,7 +67,7 @@ def register(subparsers) -> None:
     p.add_argument(
         "--force",
         action="store_true",
-        help="Override blockers (transition proceeds with warnings)",
+        help="Override ordinary blockers; integrity blockers remain non-overrideable",
     )
     p.add_argument(
         "--reason",
@@ -171,6 +171,7 @@ def run(args) -> None:
 
     hard = [b for b in blockers if b.get("severity", "block") != "advisory"]
     advisory = [b for b in blockers if b.get("severity", "block") == "advisory"]
+    nonoverrideable = [b for b in hard if b.get("overrideable") is False]
 
     if advisory:
         print(
@@ -180,6 +181,16 @@ def run(args) -> None:
         )
         for b in advisory:
             print(f"  - [{b['kind']}] {b['detail']}", file=sys.stderr)
+
+    if nonoverrideable:
+        print(
+            f"transition-phase: {len(nonoverrideable)} integrity blocker(s) for "
+            f"'{target_phase}' cannot be overridden:",
+            file=sys.stderr,
+        )
+        for b in nonoverrideable:
+            print(f"  - [{b['kind']}] {b['detail']}", file=sys.stderr)
+        sys.exit(1)
 
     if hard and not args.force:
         print(f"transition-phase: {len(hard)} blocker(s) for '{target_phase}':", file=sys.stderr)
@@ -201,14 +212,12 @@ def run(args) -> None:
         for b in hard:
             print(f"  - [{b['kind']}] {b['detail']}", file=sys.stderr)
 
-    scope[phase_key] = target_phase
-    if track == "blue" and target_phase == "complete":
-        scope["status"] = "completed"
-    tmp_path = scope_path + ".tmp"
-    with open(tmp_path, "w") as f:
-        json.dump(scope, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-    os.replace(tmp_path, scope_path)
+    def update(latest_scope):
+        latest_scope[phase_key] = target_phase
+        if track == "blue" and target_phase == "complete":
+            latest_scope["status"] = "completed"
+
+    mutate_scope(engagement_dir, update)
 
     print(f"Phase transitioned ({track}): {current_phase or '(none)'} -> {target_phase}")
 
@@ -322,7 +331,7 @@ def _check_preconditions(
         elif track == "blue":
             blockers.extend(_check_blue_preconditions(target_phase, client, engagement_dir))
         else:
-            blockers.extend(_check_web_preconditions(target_phase, engagement_dir, client))
+            blockers.extend(_check_web_preconditions(target_phase, client))
 
     return blockers
 
@@ -335,35 +344,28 @@ def _precondition_check_failed(check_name: str, exc: Exception) -> dict[str, str
     }
 
 
-def _consumption_advisory(engagement_dir: str) -> dict[str, str] | None:
+def _consumption_advisory(client: AssessmentClient) -> dict[str, str] | None:
     """Advisory (never a block) when the consume-test buffer still has genuinely
     un-consumed work at verify time (S2).
 
     Counts only ``pending`` rows with NO ``terminal_reason`` — i.e. items that
     were neither tested nor explicitly deferred/inert — to match the consume
-    gate's honest semantics. Returns None when cases.db is absent or the buffer
-    is essentially worked down.
+    gate's honest semantics. Reads the backend work buffer; returns None when the
+    buffer is essentially worked down. A backend fetch failure surfaces (the
+    client raises) rather than silently reporting "worked down".
     """
-    db_path = os.path.join(engagement_dir, "cases.db")
-    if not os.path.isfile(db_path):
-        return None
-    try:
-        import sqlite3
-        conn = sqlite3.connect(db_path)
-        pending = conn.execute(
-            "SELECT COUNT(*) FROM work_items "
-            "WHERE status = 'pending' AND (terminal_reason IS NULL OR terminal_reason = '')"
-        ).fetchone()[0]
-        conn.close()
-    except Exception:
-        return None
+    pending = sum(
+        1
+        for row in client.get_all_pages("work-items?status=pending")
+        if isinstance(row, dict) and str(row.get("terminal_reason") or "") == ""
+    )
     if pending <= 0:
         return None
     return {
         "kind": "consumption_incomplete",
         "severity": "advisory",
         "detail": (
-            f"{pending} un-consumed work item(s) still pending in cases.db — "
+            f"{pending} un-consumed work item(s) still pending in the work buffer — "
             "verify is being entered over an unfinished consume-test buffer. "
             "Not blocking; finish consumption (or defer those items with a "
             "reason) so verification reflects real testing."
@@ -373,7 +375,6 @@ def _consumption_advisory(engagement_dir: str) -> dict[str, str] | None:
 
 def _check_web_preconditions(
     target_phase: str,
-    engagement_dir: str,
     client: AssessmentClient,
 ) -> list[dict[str, str]]:
     blockers: list[dict[str, str]] = []
@@ -390,27 +391,15 @@ def _check_web_preconditions(
             blockers.append(_precondition_check_failed("collect services", exc))
 
     elif target_phase == "consume-test":
-        db_path = os.path.join(engagement_dir, "cases.db")
-        if not os.path.isfile(db_path):
-            blockers.append({
-                "kind": "no_work_buffer",
-                "detail": "cases.db not found — collection may not have run",
-            })
-        else:
-            try:
-                import sqlite3
-                conn = sqlite3.connect(db_path)
-                count = conn.execute(
-                    "SELECT COUNT(*) FROM work_items WHERE status = 'pending'"
-                ).fetchone()[0]
-                conn.close()
-                if count == 0:
-                    blockers.append({
-                        "kind": "empty_work_buffer",
-                        "detail": "No pending work items in cases.db — nothing to consume",
-                    })
-            except Exception as exc:
-                blockers.append(_precondition_check_failed("consume-test work buffer", exc))
+        try:
+            count = len(client.get_all_pages("work-items?status=pending"))
+            if count == 0:
+                blockers.append({
+                    "kind": "empty_work_buffer",
+                    "detail": "No pending work items in the work buffer — nothing to consume",
+                })
+        except Exception as exc:
+            blockers.append(_precondition_check_failed("consume-test work buffer", exc))
 
     elif target_phase == "verify":
         try:
@@ -424,7 +413,7 @@ def _check_web_preconditions(
                     })
         except Exception as exc:
             blockers.append(_precondition_check_failed("verify findings", exc))
-        consumption = _consumption_advisory(engagement_dir)
+        consumption = _consumption_advisory(client)
         if consumption is not None:
             blockers.append(consumption)
 
@@ -709,18 +698,29 @@ def _blind_triage_blockers(client: AssessmentClient) -> list[dict[str, str]]:
 
 
 def _depth_backstop_blockers(client: AssessmentClient) -> list[dict[str, str]]:
-    """The ONE hard block (Wave 7 / S17 resolution; master plan §1A, depth-gate
-    §5.3): the terminal report/complete edge cannot pass with a high-value app
-    unit that is BOTH unsatisfied AND undeferred AND untouched.
+    """The terminal depth backstop (coverage-grain unbundle / ADR 0012):
+    the report/complete edge
+    cannot pass with a high-value app unit that is left deep-untested.
 
     Calls the read-only ``application-units/terminal-block`` endpoint (mirroring
-    how the report branch calls ``report-readiness``). A non-empty ``blocking``
-    set appends ONE ``depth_unsatisfied_units`` blocker at the DEFAULT
-    ``severity="block"`` (the hard block) with the exact escape valves. The
-    ``warned_under_observed`` units are appended as an ``severity="advisory"``
-    blocker so they are surfaced but NEVER block. The deferral rate is visible
-    in both. WEB-ONLY: the endpoint returns ``skipped=True`` (empty blocking)
-    for code/blue, so this never blocks those tracks even when reached.
+    how the report branch calls ``report-readiness``). The ``blocking`` set spans
+    two grains of the SAME gate, split here into two ``severity="block"`` blockers
+    that both clear via the same ``depth_deferral`` / ``--force --reason`` valves:
+
+      * ``depth_unsatisfied_units`` (grain ``"family"``) — the historical block:
+        a decisive/high-confidence unit left unsatisfied AND undeferred AND
+        UNTOUCHED (names the uncovered BLOCK_HIGH families).
+      * ``depth_uncovered_classes`` (grain ``"class"``) — the coverage-grain
+        block: a decisive/high-confidence unit whose gf coverage_items flagged a
+        specific BLOCK_HIGH *class* never class-specifically covered, which fires
+        even when the family looks covered/touched (the single-class blind spot).
+        The reason names the uncovered classes and the deferral escape.
+
+    The ``warned_under_observed`` units are appended as an ``severity="advisory"``
+    blocker so they are surfaced but NEVER block. The deferral rate is visible in
+    all. WEB-ONLY: the endpoint returns ``skipped=True`` (empty blocking) for
+    code/blue, so this never blocks those tracks even when reached. This extends
+    the ONE gate — it does not add a parallel one.
     """
     out: list[dict[str, str]] = []
     try:
@@ -735,15 +735,28 @@ def _depth_backstop_blockers(client: AssessmentClient) -> list[dict[str, str]]:
     blocking = result.get("blocking") or []
     warned = result.get("warned_under_observed") or []
 
-    if blocking:
-        names = [_unit_label(b.get("unit", {})) for b in blocking]
+    # The block set carries two grains (depth_ledger.terminal_depth_block):
+    #   * "family" — the historical block: a decisive/high-confidence unit left
+    #     untested/undeferred/untouched (names the uncovered BLOCK_HIGH families);
+    #   * "class"  — the coverage-grain-unbundle block (ADR 0012): a decisive/
+    #     high-confidence unit whose gf coverage_items flagged a specific
+    #     BLOCK_HIGH *class* that was never class-specifically covered (a sibling
+    #     class covered the family, so the family gate would pass). Both are ONE
+    #     gate (severity="block") on this same edge — the --force/--reason override
+    #     and the depth_deferral valve clear either.
+    family_blocking = [b for b in blocking if b.get("block_grain") != "class"]
+    class_blocking = [b for b in blocking if b.get("block_grain") == "class"]
+
+    if family_blocking:
+        names = [_unit_label(b.get("unit", {})) for b in family_blocking]
         sample = ", ".join(names[:6]) + (" ..." if len(names) > 6 else "")
         out.append({
             "kind": "depth_unsatisfied_units",
             "severity": "block",
             "detail": (
-                f"{len(blocking)} high-value app unit(s) are untested, undeferred, "
-                f"and untouched (the engagement never went deep on them): {sample}. "
+                f"{len(family_blocking)} high-value app unit(s) are untested, "
+                f"undeferred, and untouched (the engagement never went deep on "
+                f"them): {sample}. "
                 "These carry a high-confidence deep_required tier or a decisive risk "
                 "surface (auth_entry / object_reference / privileged_write / "
                 "api_documentation). Either go deep on them, OR defer with "
@@ -752,6 +765,36 @@ def _depth_backstop_blockers(client: AssessmentClient) -> list[dict[str, str]]:
                 "\"vuln_classes\":[...],\"reason\":\"<why>\"}'` (bounded, recorded), "
                 "OR override with `transition-phase ... --force --reason \"<why>\"`. "
                 f"({deferral_count} depth_deferral(s) already recorded.)"
+            ),
+        })
+
+    if class_blocking:
+        parts = [
+            f"{_unit_label(b.get('unit', {}))} "
+            f"[{', '.join(str(c) for c in (b.get('uncovered_classes') or [])) or '?'}]"
+            for b in class_blocking
+        ]
+        sample = "; ".join(parts[:6]) + (" ..." if len(parts) > 6 else "")
+        all_classes = sorted({
+            str(c) for b in class_blocking for c in (b.get("uncovered_classes") or [])
+        })
+        out.append({
+            "kind": "depth_uncovered_classes",
+            "severity": "block",
+            "detail": (
+                f"{len(class_blocking)} decisive / high-confidence app unit(s) have a "
+                f"BLOCK_HIGH vuln CLASS that was flagged but never class-specifically "
+                f"tested — a sibling class covered the family, but the specific "
+                f"class(es) are still uncovered: {sample}. Uncovered class(es): "
+                f"{', '.join(all_classes)}. Either drain each class with a "
+                "class-specific covering probe / evidence-bearing coverage-item "
+                "(result_status tested/signal — `status=completed` alone never "
+                "counts), OR defer the class(es) with `vigil assess agent decision "
+                "--kind depth_deferral --surfaced-to-user --payload-json "
+                "'{\"host\":\"<host>\",\"path_prefix\":\"<prefix>\","
+                "\"vuln_classes\":[<classes>],\"reason\":\"<why>\"}'` (bounded, "
+                "recorded), OR override with `transition-phase ... --force --reason "
+                f"\"<why>\"`. ({deferral_count} depth_deferral(s) already recorded.)"
             ),
         })
 
@@ -784,174 +827,95 @@ def _check_code_preconditions(
     target_phase: str,
     client: AssessmentClient,
 ) -> list[dict[str, str]]:
-    blockers: list[dict[str, str]] = []
+    """Consume the backend-owned, target-specific code readiness contract.
 
-    if target_phase == "classify-map":
-        try:
-            coverage = client.get("code/coverage")
-            if isinstance(coverage, dict):
-                total = coverage.get("total_files", 0)
-                if total == 0:
-                    blockers.append({
-                        "kind": "no_indexed_files",
-                        "detail": "No files indexed — ingest may be incomplete",
-                    })
-        except Exception as exc:
-            blockers.append(_precondition_check_failed("classify-map coverage", exc))
-
-    elif target_phase == "hunt":
-        try:
-            coverage = client.get("code/coverage")
-            if isinstance(coverage, dict):
-                by_class = coverage.get("by_classification", {})
-                classified = sum(
-                    v.get("count", 0) if isinstance(v, dict) else int(v)
-                    for k, v in by_class.items()
-                    if k != "skip"
-                )
-                if classified == 0:
-                    blockers.append({
-                        "kind": "no_classified_files",
-                        "detail": "No files classified — classify-map may be incomplete",
-                    })
-        except Exception as exc:
-            blockers.append(_precondition_check_failed("hunt coverage", exc))
-
-    elif target_phase == "verify-variant":
-        try:
-            findings = client.get("findings")
-            if isinstance(findings, list):
-                code_findings = [
-                    f for f in findings
-                    if str(f.get("canonical_location", "")).startswith("file:")
-                    and f.get("workflow_status") == "active"
-                ]
-                if len(code_findings) == 0:
-                    blockers.append({
-                        "kind": "no_code_findings",
-                        "detail": "No active code findings to verify — hunt may be incomplete",
-                    })
-        except Exception as exc:
-            blockers.append(_precondition_check_failed("verify-variant findings", exc))
-        blockers.extend(_code_coverage_blockers(client))
-
-    elif target_phase == "complete":
-        try:
-            findings = client.get("findings")
-            if isinstance(findings, list):
-                unverified = [
-                    f for f in findings
-                    if str(f.get("canonical_location", "")).startswith("file:")
-                    and f.get("severity") in ("critical", "high")
-                    and f.get("verification_state") != "verified"
-                    and f.get("workflow_status") == "active"
-                ]
-                if unverified:
-                    slugs = [f.get("slug", "?") for f in unverified[:5]]
-                    blockers.append({
-                        "kind": "unverified_code_findings",
-                        "detail": (
-                            f"{len(unverified)} high/critical code finding(s) unverified: "
-                            f"{', '.join(slugs)}"
-                            + (" ..." if len(unverified) > 5 else "")
-                        ),
-                    })
-        except Exception as exc:
-            blockers.append(_precondition_check_failed("complete code findings", exc))
-        blockers.extend(_code_coverage_blockers(client))
-
-    return blockers
-
-
-def _code_coverage_blockers(client: AssessmentClient) -> list[dict[str, str]]:
-    """CODE-track coverage gate (W3b): the structural completeness checks that
-    must pass before hunt -> verify-variant and before report/complete.
-
-    Wires the existing backend ``code/coverage`` sub-gates into the phase gate at
-    ``severity="block"`` (overridable by ``--force --reason`` with an audited
-    override-decision row, and satisfiable by recording the analysis or an
-    accepted-gap resolution):
-
-      (a) ``code_coverage_incomplete``    — every critical/high file fully
-          analyzed (``by_classification``);
-      (b) ``pending_cross_file_triggers`` — zero still-pending cross-file
-          triggers (``trigger_summary.pending``);
-      (c) ``uncovered_high_risk_file``    — no critical/high file closed with NO
-          function-level analysis, the backend ``gate.uncovered_high_risk_files``
-          structural-verification list (the broad-18 near-miss where high files
-          were closed with ``functions_analyzed=0``).
-
-    The per-family effort thresholds (70/50/30) intentionally stay a WARN: they
-    live in ``gate.effort_warnings`` and are NOT read here, so a shallow-but-
-    nonzero effort score never blocks the transition. Best-effort on read
-    failure: a backend error degrades to a single ``precondition_check_failed``
-    blocker rather than wedging the transition.
+    Source identity and generation currency are backend facts. Keeping their
+    decision logic behind one endpoint prevents the CLI and UI from blessing a
+    stale snapshot differently. A malformed or unavailable readiness response
+    therefore fails closed and is non-overrideable.
     """
+    # ``ingest`` is the reset/source-establishment phase, not a destination with
+    # backend readiness requirements. In particular, a deliberate backward
+    # transition must remain possible so the operator can replace stale source
+    # identity before any later-phase gate could become satisfiable again.
+    if target_phase == "ingest":
+        return []
+
     blockers: list[dict[str, str]] = []
     try:
-        coverage = client.get("code/coverage")
-    except Exception as exc:
-        blockers.append(_precondition_check_failed("code coverage gate", exc))
+        readiness = client.get(f"code/readiness?target_phase={target_phase}")
+    except Exception as exc:  # noqa: BLE001 - readiness transport failures must fail closed
+        blocker = _precondition_check_failed("code readiness", exc)
+        blocker["overrideable"] = False
+        blockers.append(blocker)
         return blockers
-    if not isinstance(coverage, dict):
+    if not isinstance(readiness, dict):
+        blockers.append({
+            "kind": "invalid_code_readiness",
+            "severity": "block",
+            "detail": "Backend returned a non-object code readiness response",
+            "overrideable": False,
+        })
         return blockers
 
-    # (a) critical/high file coverage.
-    by_class = coverage.get("by_classification", {})
-    if isinstance(by_class, dict):
-        for tier in ("critical", "high"):
-            tier_data = by_class.get(tier, {})
-            if not isinstance(tier_data, dict):
-                continue
-            count = int(tier_data.get("count", 0) or 0)
-            analyzed = int(tier_data.get("analyzed", 0) or 0)
-            if count > 0 and analyzed < count:
+    if readiness.get("target_phase") != target_phase:
+        blockers.append({
+            "kind": "invalid_code_readiness",
+            "severity": "block",
+            "detail": (
+                "Backend readiness response was bound to "
+                f"{readiness.get('target_phase')!r}, expected {target_phase!r}"
+            ),
+            "overrideable": False,
+        })
+        return blockers
+
+    raw_blockers = readiness.get("blockers")
+    if not isinstance(raw_blockers, list):
+        blockers.append({
+            "kind": "invalid_code_readiness",
+            "severity": "block",
+            "detail": "Backend readiness response omitted its blocker list",
+            "overrideable": False,
+        })
+        return blockers
+
+    for raw in raw_blockers:
+        if not isinstance(raw, dict) or not raw.get("code") or not raw.get("message"):
+            blockers.append({
+                "kind": "invalid_code_readiness",
+                "severity": "block",
+                "detail": "Backend readiness response contained a malformed blocker",
+                "overrideable": False,
+            })
+            continue
+        blockers.append({
+            "kind": str(raw["code"]),
+            "severity": "block",
+            "detail": str(raw["message"]),
+            # Missing override metadata is treated as an integrity constraint.
+            "overrideable": raw.get("overrideable") is True,
+        })
+
+    if readiness.get("transition_ready") is not True and not raw_blockers:
+        blockers.append({
+            "kind": "invalid_code_readiness",
+            "severity": "block",
+            "detail": "Backend marked the transition unready without naming a blocker",
+            "overrideable": False,
+        })
+
+    quality_gate = readiness.get("quality_gate", {})
+    if isinstance(quality_gate, dict):
+        warnings = quality_gate.get("warnings", [])
+        if isinstance(warnings, list):
+            for warning in warnings:
                 blockers.append({
-                    "kind": "code_coverage_incomplete",
-                    "severity": "block",
-                    "detail": (
-                        f"{tier.capitalize()} files not fully analyzed: "
-                        f"{analyzed}/{count} — analyze (or skip with a reason) the "
-                        "remaining files before advancing. Pass --force --reason "
-                        "\"...\" to override with an audited decision."
-                    ),
+                    "kind": "code_quality_warning",
+                    "severity": "advisory",
+                    "detail": str(warning),
+                    "overrideable": True,
                 })
-
-    # (b) pending cross-file triggers.
-    triggers = coverage.get("trigger_summary", {})
-    pending = int(triggers.get("pending", 0) or 0) if isinstance(triggers, dict) else 0
-    if pending > 0:
-        blockers.append({
-            "kind": "pending_cross_file_triggers",
-            "severity": "block",
-            "detail": (
-                f"{pending} cross-file trigger(s) still pending — resolve each "
-                "(requeue the target file, or mark external_context_unavailable / "
-                "source_equivalent_analyzed / not_applicable with a note) before "
-                "advancing. Pass --force --reason \"...\" to override with an "
-                "audited decision."
-            ),
-        })
-
-    # (c) uncovered high-risk files (function-count structural verification).
-    gate = coverage.get("gate", {})
-    uncovered = gate.get("uncovered_high_risk_files", []) if isinstance(gate, dict) else []
-    if isinstance(uncovered, list) and uncovered:
-        names = [str(u.get("file_path", "?")) for u in uncovered if isinstance(u, dict)]
-        sample = ", ".join(names[:5]) + (" ..." if len(names) > 5 else "")
-        blockers.append({
-            "kind": "uncovered_high_risk_file",
-            "severity": "block",
-            "detail": (
-                f"{len(uncovered)} critical/high file(s) closed with NO "
-                f"function-level analysis (functions_analyzed=0, no linked finding, "
-                f"no accepted-gap): {sample} — the structural index found functions "
-                "but none were analyzed. Record the analysis (functions_analyzed>0 "
-                "or an analysis-result function row), OR mark the applicable "
-                "families not_applicable with a note (accepted gap). Pass --force "
-                "--reason \"...\" to override with an audited decision."
-            ),
-        })
 
     return blockers
 

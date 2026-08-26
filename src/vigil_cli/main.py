@@ -8,6 +8,7 @@ import shlex
 import subprocess
 import sys
 import tarfile
+import time
 import webbrowser
 from dataclasses import asdict
 from pathlib import Path
@@ -28,9 +29,11 @@ from .engagements import (
     current_engagement_path,
     export_pdf,
     list_engagements,
+    mutate_scope_file,
     plan_engagement,
     print_shell_cd_init,
     remove_out_of_scope,
+    resolve_aggregate_rate_limit,
     resolve_current_engagement,
     resolve_engagement_path,
     resolve_out_of_scope,
@@ -52,10 +55,14 @@ from .mitmproxy import (
     stop_proxy,
 )
 from .oob import (
+    MAX_OOB_POLL_RECORDS,
     OOB_ROOT,
     OobOptions,
     callback_urls,
+    clean_oob_clients,
     client_payload_host,
+    interactions_for_domain,
+    is_self_test_interaction,
     list_oob_clients,
     list_running_oob_clients,
     match_interactions_to_nonces,
@@ -63,6 +70,7 @@ from .oob import (
     oob_options as _oob_options,
     oob_status,
     parse_interactsh_log,
+    poll_client_payload_host,
     read_client_log,
     sanitize_name,
     start_oob,
@@ -70,7 +78,9 @@ from .oob import (
     stop_oob,
     stop_oob_client,
     test_oob,
+    verify_oob_channel_cached,
 )
+from .oob_tenants import legacy_tenant_route, render_edge_routing
 from .orchestrator import (
     OrchestratorOptions,
     build_frontend,
@@ -80,8 +90,9 @@ from .orchestrator import (
     stop_orchestrator,
 )
 from .paths import default_runtime_container, resolve_install_root, resolve_source_root
+from .quickstart import QuickstartOptions, run_quickstart
 from .runtime import RuntimeOptions, vigil_runtime_resources, build_runtime, runtime_image_build_state, runtime_status, start_runtime, stop_runtime
-from .status import collect_doctor_checks, collect_status, print_doctor, print_status, write_install_meta
+from .status import collect_doctor_checks, collect_status, install_staleness, print_doctor, print_status
 from .up import UpOptions, run_up
 
 
@@ -121,6 +132,18 @@ def _print_post_install(result: InstallResult) -> None:
     print()
 
 
+def _oob_poll_record_limit(raw: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("OOB poll records must be an integer") from exc
+    if not 1 <= value <= MAX_OOB_POLL_RECORDS:
+        raise argparse.ArgumentTypeError(
+            f"OOB poll records must be between 1 and {MAX_OOB_POLL_RECORDS}"
+        )
+    return value
+
+
 def main(argv: list[str] | None = None) -> None:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     command_idx = _top_level_command_index(raw_argv)
@@ -143,9 +166,52 @@ def main(argv: list[str] | None = None) -> None:
     update_p.add_argument("--force-image", action="store_true")
     update_p.add_argument("--skip-image-check", action="store_true")
 
+    quickstart_p = sub.add_parser(
+        "quickstart",
+        help="Onboarding wizard: probe host prerequisites/recon tools and print the setup checklist",
+        description=(
+            "macOS-first onboarding wizard. Reports the bootstrap prerequisites "
+            "(uv/git/docker/go/npm), detects missing host-side recon tools, and "
+            "prints the ordered next-command checklist for the resolved install "
+            "root. It only mutates the host when --install-host-tools is passed "
+            "(and never under --dry-run); without it the host-tool installs are "
+            "planned/printed, not run."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    quickstart_p.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Never prompt; use flags/defaults only (implied when stdin is not a TTY)",
+    )
+    quickstart_p.add_argument(
+        "--yes",
+        dest="assume_yes",
+        action="store_true",
+        help="Assume yes to prompts (e.g. run the host-tool installs without confirmation)",
+    )
+    quickstart_p.add_argument(
+        "--install-host-tools",
+        action="store_true",
+        help="Actually run the host-tool install commands (default: plan/print only)",
+    )
+    quickstart_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Plan everything, execute nothing (overrides --install-host-tools)",
+    )
+    quickstart_p.add_argument("--target", help="First engagement target URL/host for the checklist")
+    quickstart_p.add_argument("--hosts", help="In-scope hosts (comma-separated) for the checklist")
+    quickstart_p.add_argument("--json", action="store_true", help="Emit the readiness report as JSON")
+
     sub.add_parser("doctor")
     status_p = sub.add_parser("status")
     status_p.add_argument("--json", action="store_true")
+    status_p.add_argument(
+        "--write-check",
+        action="store_true",
+        help="Attempt a short main-database write transaction and roll it back.",
+    )
     up_p = sub.add_parser("up", help="Build stale images and start the local runtime stack")
     # Legacy shims — the proxy now serves every active engagement, so the
     # selector is a no-op. Kept for back-compat with operator scripts that
@@ -176,7 +242,10 @@ def main(argv: list[str] | None = None) -> None:
 
     use_p = sub.add_parser(
         "use",
-        help="Set the active engagement (persisted; honoured by `vigil` verbs and `vigil assess`).",
+        help=(
+            "Set the persisted engagement for global services and non-assess `vigil` verbs; "
+            "`vigil assess` binds to its launched session, CWD, or explicit flag."
+        ),
     )
     use_p.add_argument("key", nargs="?", help="Engagement key to activate")
     use_p.add_argument("--select", action="store_true", help="Pick the engagement interactively")
@@ -302,6 +371,15 @@ def main(argv: list[str] | None = None) -> None:
              "e.g. --rate-limit 5",
     )
     create_p.add_argument(
+        "--aggregate-rate-limit",
+        dest="aggregate_rate_limit",
+        type=float,
+        default=None,
+        metavar="REQ_PER_SEC",
+        help="Engagement-wide ceiling across concurrent target-facing commands. "
+             "Excess requires each command to record --rate-override-reason.",
+    )
+    create_p.add_argument(
         "--no-prompt",
         action="store_true",
         help="Never prompt interactively; fail when required fields are missing",
@@ -339,12 +417,6 @@ def main(argv: list[str] | None = None) -> None:
     path_p = engagement_sub.add_parser("path")
     path_p.add_argument("key", nargs="?")
     path_p.add_argument("--select", action="store_true")
-    eng_use_p = engagement_sub.add_parser(
-        "use", help="Alias for `vigil use`: set the active-engagement pointer."
-    )
-    eng_use_p.add_argument("key", nargs="?")
-    eng_use_p.add_argument("--select", action="store_true")
-    eng_use_p.add_argument("--clear", action="store_true")
     engagement_sub.add_parser(
         "current",
         help="Print the resolved active engagement and which tier won (flag/cwd/pointer/env).",
@@ -373,7 +445,7 @@ def main(argv: list[str] | None = None) -> None:
             "tar.gz; --format markdown-tree writes a diffable per-finding tree "
             "(one dir per finding: draft.md / debate.md / report.md) sourced "
             "from the backend. For a single consolidated findings.md report doc "
-            "instead, use `vigil assess export-findings`."
+            "instead, use `vigil assess export findings`."
         ),
     )
     export_p.add_argument("key", nargs="?")
@@ -385,7 +457,7 @@ def main(argv: list[str] | None = None) -> None:
         default="tar.gz",
         help=(
             "Export format (default: tar.gz archive). markdown-tree = diffable "
-            "per-finding tree (vs `vigil assess export-findings` = single "
+            "per-finding tree (vs `vigil assess export findings` = single "
             "findings.md report doc)."
         ),
     )
@@ -394,24 +466,6 @@ def main(argv: list[str] | None = None) -> None:
     export_pdf_p.add_argument("key", nargs="?")
     export_pdf_p.add_argument("--select", action="store_true")
     export_pdf_p.add_argument("--output", help="Output PDF path (default: <engagement>/report.pdf)")
-    migrate_p = engagement_sub.add_parser(
-        "migrate-scope",
-        help=(
-            "One-shot migration: set code_phase=ingest on legacy "
-            "engagement_type=both engagements created before dual-track "
-            "phase tracking landed. Idempotent."
-        ),
-    )
-    migrate_p.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Report what would change without writing scope.json.",
-    )
-    migrate_p.add_argument(
-        "--json",
-        action="store_true",
-        help="Emit migrated entries as JSON.",
-    )
 
     blue_module.register_blue_parser(sub)
     bench_module.register_bench_parser(sub)
@@ -491,8 +545,6 @@ def main(argv: list[str] | None = None) -> None:
     mitm_routes = mitm_sub.add_parser("routes", help="Print the proxy's loaded engagement→scope mapping.")
     mitm_routes.add_argument("--json", action="store_true")
 
-    # `vigil mcp` retired in the typed-CLI cutover. Keep the parser so calls fail with a clear message
-    # instead of argparse's generic "unknown command" error; downstream handler prints the deprecation note.
     email_p = sub.add_parser(
         "email",
         help="Read recent messages from a local Mail.app mailbox (e.g. fetch a verification code)",
@@ -513,6 +565,12 @@ def main(argv: list[str] | None = None) -> None:
         dest="from_filter",
         default=None,
         help="only messages FROM this address or domain (e.g. security@acme-bank.example or @acme-bank.example)",
+    )
+    email_p.add_argument(
+        "--subject",
+        dest="subject_filter",
+        default=None,
+        help="only messages whose subject contains this text (case-insensitive)",
     )
     email_p.add_argument(
         "--within",
@@ -540,7 +598,7 @@ def main(argv: list[str] | None = None) -> None:
         "--limit",
         type=int,
         default=200,
-        help="maximum Mail.app messages to scan (default: 200)",
+        help="maximum matching messages to return after filtering (default: 200)",
     )
     email_p.add_argument(
         "--timeout-seconds",
@@ -549,22 +607,38 @@ def main(argv: list[str] | None = None) -> None:
         help="timeout for the Mail.app read (default: 30)",
     )
     email_p.add_argument(
+        "--wait-seconds",
+        type=float,
+        default=0.0,
+        help="poll for a delayed matching message for up to N seconds (default: 0)",
+    )
+    email_p.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=2.0,
+        help="seconds between reads while --wait-seconds is active (default: 2)",
+    )
+    email_p.add_argument(
+        "--links",
+        action="store_true",
+        help="include HTTP(S) links decoded from the message's raw MIME source",
+    )
+    email_p.add_argument(
         "--json",
         action="store_true",
         help="emit results as JSON for programmatic parsing",
     )
 
-    mcp_p = sub.add_parser("mcp", help="(removed) Kali MCP support retired; use `vigil assess kali ...`")
-    mcp_p.add_argument("mcp_args", nargs=argparse.REMAINDER)
-
     auth_p = sub.add_parser("auth")
     auth_sub = auth_p.add_subparsers(dest="auth_command", required=True)
-    for auth_name in ("status", "show", "edit", "clear", "export"):
+    for auth_name in ("status", "show", "edit", "clear", "export", "quarantine"):
         auth_cmd = auth_sub.add_parser(auth_name)
         auth_cmd.add_argument("engagement", nargs="?")
         auth_cmd.add_argument("--select", action="store_true")
         auth_cmd.add_argument(
-            "--identity", help="Named identity (default: the active identity)"
+            "--identity",
+            required=auth_name == "quarantine",
+            help="Named identity (default: the active identity)",
         )
         if auth_name == "clear":
             auth_cmd.add_argument(
@@ -572,6 +646,11 @@ def main(argv: list[str] | None = None) -> None:
                 help="Clear ALL identities (default: only the active identity)",
             )
         if auth_name == "status":
+            auth_cmd.add_argument(
+                "--scope",
+                default="",
+                help="Logical application scope for the persisted liveness observation.",
+            )
             auth_cmd.add_argument(
                 "--probe",
                 action="store_true",
@@ -613,17 +692,153 @@ def main(argv: list[str] | None = None) -> None:
                     "`vigil assess kali --identity` injects. Safe methods omit it."
                 ),
             )
-    auth_import = auth_sub.add_parser("import")
+    auth_import = auth_sub.add_parser(
+        "import",
+        help="Import identity material (cookies/headers/tokens) from a JSON file or stdin.",
+        description=(
+            "Import credential material into the engagement's centralized store from a "
+            "JSON file (or '-'/stdin).\n\n"
+            "The JSON MAY also include a `material.liveness` block —\n"
+            '  {"expect_status": 200, "authed_marker": "...", "dead_marker": "sessionExpired"}\n'
+            "(every key optional) — which is stored via the backend's extra-keys "
+            "passthrough and is what makes `vigil auth status --probe` and "
+            "`vigil auth keepalive` return a real live/dead verdict instead of "
+            "'unknown'. Matching is case-sensitive substring against the probe "
+            "response (status line + headers incl. Location + body)."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     auth_import.add_argument("engagement", nargs="?")
     auth_import.add_argument("--source")
     auth_import.add_argument("--select", action="store_true")
     auth_import.add_argument(
         "--identity", default="default", help="Identity to import into (default: default)"
     )
+    auth_import.add_argument(
+        "--factor", default="", help="MFA factor type to store (for example totp or webauthn)."
+    )
+    auth_alias = auth_sub.add_parser("alias")
+    auth_alias.add_argument("engagement", nargs="?")
+    auth_alias.add_argument("--select", action="store_true")
+    auth_alias.add_argument("--name", required=True)
+    auth_alias.add_argument("--principal", required=True)
+    auth_alias.add_argument("--scope", default="")
+    auth_env = auth_sub.add_parser("env-check")
+    auth_env.add_argument("engagement", nargs="?")
+    auth_env.add_argument("--select", action="store_true")
+    auth_env.add_argument("--keys", nargs="+", required=True)
     auth_activate = auth_sub.add_parser("set-active")
     auth_activate.add_argument("engagement", nargs="?")
     auth_activate.add_argument("--select", action="store_true")
     auth_activate.add_argument("--identity", required=True, help="Identity to activate")
+
+    auth_keepalive = auth_sub.add_parser(
+        "keepalive",
+        help=(
+            "Keep long-lived (enterprise SSO / reverse-proxy) sessions live during "
+            "long engagements; name the anchor cookie(s) with --anchor-cookie."
+        ),
+        description=(
+            "Fire ONE read-only authed GET per identity every --interval seconds to "
+            "reset the enterprise IDLE timeout, teeing a LIVE/DEAD + userId verdict to "
+            "a log. Each cycle re-resolves the freshest full-anchor capture per "
+            "distinct login (skipping captured logouts), so re-logins are auto-"
+            "followed; --identity overrides that. The live probe — routed through "
+            "`vigil assess kali exec` for correct egress + audit + identity injection "
+            "— is the AUTHORITATIVE liveness oracle (cookie age is never trusted "
+            "alone).\n\n"
+            "ANCHOR COOKIES ARE ENGAGEMENT-SPECIFIC and REQUIRED: Vigil bakes in NO "
+            "target-specific cookie names. Declare this engagement's session-anchor "
+            "cookie name(s) with --anchor-cookie (repeatable) — their value identifies "
+            "a distinct login (for freshest-per-login dedup) and a Set-Cookie: "
+            "<anchor>=deleted marks a server logout to skip.\n\n"
+            "HARD CEILINGS: this defeats the IDLE timeout ONLY. It does NOT extend the "
+            "absolute/max-session lifetime, and it cannot survive a same-user browser "
+            "re-login (which emits Set-Cookie: <anchor>=deleted and kills the prior "
+            "session). For multi-hour runs you still need a fresh browser login "
+            "periodically.\n\n"
+            "Use --detach to run it as a background daemon (double-fork; PID file "
+            "under <engagement>/pids/) that outlives the launching shell."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    auth_keepalive.add_argument("engagement", nargs="?")
+    auth_keepalive.add_argument("--select", action="store_true")
+    auth_keepalive.add_argument(
+        "--identity",
+        action="append",
+        help=(
+            "Identity to keep alive (repeatable). Omit to auto-resolve the freshest "
+            "--caps captures per session anchor each cycle."
+        ),
+    )
+    auth_keepalive.add_argument(
+        "--anchor-cookie",
+        dest="anchor_cookie",
+        action="append",
+        metavar="NAME",
+        help=(
+            "REQUIRED (repeatable). Name(s) of THIS engagement's session-anchor "
+            "cookie(s) — the cookie whose value identifies a distinct login and that "
+            "the server sets to `deleted` on logout. Engagement-specific: Vigil "
+            "assumes no default. Example: --anchor-cookie SESSIONID --anchor-cookie "
+            "AUTHTOKEN."
+        ),
+    )
+    auth_keepalive.add_argument(
+        "--probe-url",
+        dest="probe_url",
+        help=(
+            "REQUIRED. Authed URL to GET each cycle (an endpoint that returns logged-"
+            "in content). Matched against material.liveness when present; without "
+            "an explicit liveness signature the verdict is unknown."
+        ),
+    )
+    auth_keepalive.add_argument(
+        "--scope",
+        default="",
+        help=(
+            "Durable liveness scope key. Defaults to the probe URL origin; use a "
+            "stable explicit key when several capabilities share one origin."
+        ),
+    )
+    auth_keepalive.add_argument(
+        "--liveness-ttl",
+        type=int,
+        default=900,
+        help="Seconds each persisted keepalive verdict remains fresh (default: 900).",
+    )
+    auth_keepalive.add_argument(
+        "--interval",
+        type=int,
+        default=285,
+        help="Seconds between cycles; keep below the target's idle window (default: 285).",
+    )
+    auth_keepalive.add_argument(
+        "--iters",
+        type=int,
+        default=120,
+        help="Number of cycles to run (default: 120, i.e. ~9.5h at 285s).",
+    )
+    auth_keepalive.add_argument(
+        "--caps",
+        type=int,
+        default=4,
+        help="Freshest captures to probe per cycle when auto-resolving (default: 4).",
+    )
+    auth_keepalive.add_argument(
+        "--log",
+        dest="log",
+        help="Log path (default: <engagement>/tools/keepalive.log).",
+    )
+    auth_keepalive.add_argument(
+        "--detach",
+        action="store_true",
+        help=(
+            "Fork into a background daemon (double-fork), write a PID file under "
+            "<engagement>/pids/, redirect output to the log, and print the PID."
+        ),
+    )
 
     backup_p = sub.add_parser("backup")
     backup_sub = backup_p.add_subparsers(dest="backup_command", required=True)
@@ -671,10 +886,41 @@ def main(argv: list[str] | None = None) -> None:
         help="Report OOB server + client health and the effective callback domain.",
     )
     oob_status_p.add_argument("--json", action="store_true")
+    oob_routing_p = oob_sub.add_parser(
+        "routing",
+        help="Render tenant DNS/Caddy/JSON deployment inputs without applying external changes.",
+    )
+    oob_routing_p.add_argument(
+        "--format", choices=("all", "json", "caddy", "dns"), default="all",
+        help="Output format (default: all as a JSON object).",
+    )
     oob_sub.add_parser(
         "test",
-        help="Fire a self-test callback to confirm the OOB server is reachable end-to-end.",
+        help=(
+            "Use a running registered client to prove the real nonce/client DNS and "
+            "HTTP callback route end-to-end."
+        ),
     )
+    oob_clean_p = oob_sub.add_parser(
+        "clean",
+        help="Remove OOB client logs/metadata for non-running clients older than N days.",
+        description=(
+            "Manual retention cleanup. Deletes the log, metadata, and session files for OOB "
+            "clients that are NOT currently running AND whose every artifact is older than "
+            "--days days. Running clients, and any client touched within the window, are never "
+            "removed. Use --dry-run to preview what would go.\n\n"
+            "  vigil oob clean                 # remove non-running clients idle > 5 days\n"
+            "  vigil oob clean --days 14        # keep the last two weeks\n"
+            "  vigil oob clean --dry-run        # preview only, delete nothing"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    oob_clean_p.add_argument(
+        "--days", type=int, default=5,
+        help="Age threshold in days (default 5); non-running clients idle longer than this are removed.",
+    )
+    oob_clean_p.add_argument("--dry-run", action="store_true", help="List what would be removed without deleting.")
+    oob_clean_p.add_argument("--json", action="store_true", help="Emit the cleanup summary as JSON.")
     oob_mint = oob_sub.add_parser(
         "mint",
         help="Mint a unique OAST nonce callback URL and record a probe to the backend.",
@@ -705,7 +951,15 @@ def main(argv: list[str] | None = None) -> None:
         required=True,
         help="OOB client name whose interaction log to read (see `vigil oob client list`).",
     )
-    oob_poll.add_argument("--lines", type=int, default=2000, help="Tail this many log lines (default 2000).")
+    oob_poll.add_argument(
+        "--lines",
+        type=_oob_poll_record_limit,
+        default=2000,
+        help=(
+            "Read this many newest interaction records, not verbose raw lines "
+            f"(default 2000; max {MAX_OOB_POLL_RECORDS})."
+        ),
+    )
     oob_poll.add_argument("--json", action="store_true", help="Emit matched/unmatched correlation result as JSON.")
     oob_client = oob_sub.add_parser(
         "client",
@@ -761,16 +1015,42 @@ def main(argv: list[str] | None = None) -> None:
         )
         if not args.dry_run:
             config_module.set_config_value("install.root", str(result.install_root))
-            # Stamp the source commit synced into the working root so `vigil
-            # status` can later warn when the install lags its source (I-5).
-            write_install_meta(result.install_root, source_root)
         print(result.install_root)
         if not args.dry_run:
             _print_post_install(result)
     elif args.command == "doctor":
         print_doctor(collect_doctor_checks(install_root, runner=docker_run_command))
     elif args.command == "status":
-        print_status(collect_status(install_root, runner=docker_run_command), json_output=args.json)
+        status = collect_status(
+            install_root,
+            runner=docker_run_command,
+            write_check=args.write_check,
+        )
+        print_status(status, json_output=args.json)
+        write_result = status.get("database_write_check")
+        if (
+            args.write_check
+            and (
+                not isinstance(write_result, dict)
+                or write_result.get("status") != "ok"
+            )
+        ):
+            raise SystemExit(1)
+    elif args.command == "quickstart":
+        exit_code = run_quickstart(
+            QuickstartOptions(
+                install_root=install_root,
+                non_interactive=args.non_interactive,
+                assume_yes=args.assume_yes,
+                install_host_tools=args.install_host_tools,
+                dry_run=args.dry_run,
+                json_output=args.json,
+                target=args.target,
+                hosts=args.hosts,
+            )
+        )
+        if exit_code:
+            raise SystemExit(exit_code)
     elif args.command == "up":
         if args.yes_restart_runtime and args.no_restart_runtime:
             raise SystemExit("Specify only one of --yes-restart-runtime or --no-restart-runtime.")
@@ -809,8 +1089,6 @@ def main(argv: list[str] | None = None) -> None:
         _mitmproxy(args, install_root)
     elif args.command == "email":
         _email(args)
-    elif args.command == "mcp":
-        _mcp(args)
     elif args.command == "auth":
         _auth(args, install_root)
     elif args.command == "backup":
@@ -819,7 +1097,11 @@ def main(argv: list[str] | None = None) -> None:
         _oob(args, install_root)
     elif args.command == "assess":
         assess = install_root / "agent" / "scripts" / "assess.py"
-        os.execv(str(assess), [str(assess), *args.assess_args])
+        os.execvpe(
+            str(assess),
+            [str(assess), *args.assess_args],
+            _assess_exec_environment(install_root),
+        )
 
 
 def _top_level_command_index(raw_argv: list[str]) -> int | None:
@@ -834,6 +1116,33 @@ def _top_level_command_index(raw_argv: list[str]) -> int | None:
             continue
         return i
     return None
+
+
+def _warn_if_install_stale(install_root: Path) -> None:
+    """Emit one non-fatal STDERR line when the assess passthrough execs a lagging root.
+
+    ``vigil assess ...`` execs the INSTALL ROOT's ``assess.py``, so a working root
+    behind its source silently exposes an older verb set — the failure surfaces as
+    "no such verb" rather than "your install lags". Never writes to stdout (callers
+    parse assess JSON there), never raises, and never blocks the exec: the agent
+    stays free to proceed and decide.
+    """
+    try:
+        staleness = install_staleness(install_root)
+    except Exception:  # noqa: BLE001 — a diagnostic must never break the exec
+        return
+    state = str(staleness.get("state") or "")
+    if state not in {"stale", "no-stamp"}:
+        return
+    installed = str(staleness.get("installed_sha") or "unstamped")[:12]
+    current = str(staleness.get("current_source_sha") or "unknown")[:12]
+    print(
+        f"[vigil] WARN: install root {install_root} is {state} "
+        f"(installed {installed}, source {current}); "
+        "run `vigil install` to sync it.",
+        file=sys.stderr,
+        flush=True,  # execvpe replaces this process without flushing Python buffers
+    )
 
 
 def _exec_assess_passthrough(raw_argv: list[str], idx: int) -> None:
@@ -859,11 +1168,27 @@ def _exec_assess_passthrough(raw_argv: list[str], idx: int) -> None:
             continue
         i += 1
     install_root = resolve_install_root(root_value)
+    _warn_if_install_stale(install_root)
     assess = install_root / "agent" / "scripts" / "assess.py"
     if not assess.exists():
         source_root = resolve_source_root(source_value, install_root=install_root)
         assess = source_root / "agent" / "scripts" / "assess.py"
-    os.execv(str(assess), [str(assess), *raw_argv[idx + 1 :]])
+    os.execvpe(
+        str(assess),
+        [str(assess), *raw_argv[idx + 1 :]],
+        _assess_exec_environment(install_root),
+    )
+
+
+def _assess_exec_environment(install_root: Path) -> dict[str, str]:
+    """Export CLI-owned runtime configuration across the assess exec boundary."""
+    env = dict(os.environ)
+    options = _oob_options(install_root)
+    env["VIGIL_OOB_DOMAIN"] = options.oob_domain.strip().rstrip(".")
+    env["VIGIL_OOB_TENANT"] = getattr(options, "tenant_prefix", "legacy")
+    env["VIGIL_OOB_DNS_PORT"] = str(getattr(options, "dns_remote_port", 53))
+    env["VIGIL_OOB_REVERSE_PORT"] = str(getattr(options, "reverse_remote_port", 8443))
+    return env
 
 
 def _config(args: argparse.Namespace) -> None:
@@ -889,8 +1214,9 @@ def _use(args: argparse.Namespace, install_root: Path) -> None:
     """Set (or clear) the persisted active-engagement pointer.
 
     Writes both ~/.config/vigil/config.json:active_engagement_dir and the
-    <engagements_root>/.active mirror. Ranked BELOW cwd walk-up in the resolver,
-    so it is a durable default, never an override of where you actually are.
+    <engagements_root>/.active mirror. This is the durable selector for global
+    services and non-assess commands; assessment state has a session-local
+    resolver so concurrent clients cannot retarget each other.
     """
     if getattr(args, "clear", False):
         clear_active_engagement(install_root)
@@ -991,8 +1317,6 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         print(f"[vigil] {args.key} out_of_scope: {json.dumps(entries)}", file=sys.stderr)
     elif command == "path":
         print(_resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select))
-    elif command == "use":
-        _use(args, install_root)
     elif command == "current":
         _engagement_current(install_root)
     elif command == "cd-init":
@@ -1010,9 +1334,7 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
     elif command == "archive":
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
         scope_path = path / "scope.json"
-        scope = json.loads(scope_path.read_text(encoding="utf-8"))
-        scope["status"] = "archived"
-        scope_path.write_text(json.dumps(scope, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        mutate_scope_file(scope_path, lambda scope: scope.__setitem__("status", "archived"))
         print(path)
     elif command == "export":
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
@@ -1038,22 +1360,6 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
         pdf_output = Path(args.output).expanduser() if args.output else None
         print(export_pdf(path, pdf_output))
-    elif command == "migrate-scope":
-        from .engagements import migrate_legacy_both_engagements
-
-        migrated = migrate_legacy_both_engagements(install_root, dry_run=args.dry_run)
-        if args.json:
-            print(json.dumps(migrated, indent=2))
-        else:
-            prefix = "[dry-run] would migrate" if args.dry_run else "migrated"
-            if not migrated:
-                print(
-                    "No legacy `engagement_type=both` engagements need migration."
-                    + ("" if not args.dry_run else " (dry-run)")
-                )
-            else:
-                for entry in migrated:
-                    print(f"[vigil] {prefix}: {entry['key']} code_phase -> {entry['to']}")
 
 
 def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
@@ -1146,6 +1452,7 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
     required_headers = resolve_required_headers(args.program, args.researcher, args.header)
     out_of_scope = resolve_out_of_scope(args.out_of_scope)
     rate_limit = resolve_rate_limit(args.rate_limit)
+    aggregate_rate_limit = resolve_aggregate_rate_limit(args.aggregate_rate_limit)
 
     # Dry runs skip the summary + confirmation: nothing will be created either
     # way, and the dry-run path prints its own plan summary.
@@ -1161,6 +1468,7 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
             required_headers=required_headers,
             out_of_scope=out_of_scope,
             rate_limit=rate_limit,
+            aggregate_rate_limit=aggregate_rate_limit,
         )
         if not _confirm("Create engagement? [Y/n]"):
             raise SystemExit("aborted: engagement not created")
@@ -1179,6 +1487,7 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
         required_headers=required_headers,
         out_of_scope=out_of_scope,
         rate_limit=rate_limit,
+        rate_limit_aggregate_rps=aggregate_rate_limit,
     )
 
     if args.dry_run:
@@ -1328,6 +1637,7 @@ def _print_create_summary(
     required_headers: dict[str, str] | None = None,
     out_of_scope: list[str] | None = None,
     rate_limit: float | None = None,
+    aggregate_rate_limit: float | None = None,
 ) -> None:
     print("[vigil] engagement summary:", file=sys.stderr)
     print(f"[vigil]   type:      {engagement_type}", file=sys.stderr)
@@ -1352,6 +1662,11 @@ def _print_create_summary(
         print(
             f"[vigil]   rate-limit: {rate_limit:g} req/s "
             "(global per-invocation; bounds per-host as a side effect)",
+            file=sys.stderr,
+        )
+    if aggregate_rate_limit is not None:
+        print(
+            f"[vigil]   aggregate-rate-limit: {aggregate_rate_limit:g} req/s",
             file=sys.stderr,
         )
 
@@ -1518,6 +1833,58 @@ def _print_mitmproxy_status(payload: dict) -> None:
             print(f"  {line}")
 
 
+def _email_json_payload(
+    args: argparse.Namespace,
+    cutoff_iso: str,
+    *,
+    messages: list[dict[str, object]],
+    poll_attempts: int,
+    coverage: email_module.EmailScanCoverage | None,
+    error: str | None = None,
+) -> dict[str, object]:
+    """Build the one `vigil email --json` payload shape, match or no match."""
+    payload: dict[str, object] = {
+        "mailbox": args.mailbox,
+        "from": args.from_filter,
+        "subject": args.subject_filter,
+        "within_minutes": args.within,
+        "cutoff": cutoff_iso,
+        "count": len(messages),
+        "poll_attempts": poll_attempts,
+        "messages": messages,
+    }
+    if coverage is not None:
+        payload["scan_coverage"] = asdict(coverage)
+    if error is not None:
+        payload["error"] = error
+    return payload
+
+
+def _email_coverage_line(coverage: email_module.EmailScanCoverage | None) -> str:
+    """One-line folder-coverage summary for the plain-text path.
+
+    Coverage used to be visible only under ``--json``, so an operator reading the
+    TSV output could not tell a scanned-everything zero from an unscanned-folder
+    zero. Goes to stderr: stdout stays parseable result lines.
+    """
+    if coverage is None:
+        return ""
+    folders = [
+        f"{entry.account}/{entry.mailbox}" if entry.account else entry.mailbox
+        for entry in coverage.mailboxes
+    ]
+    scanned = ", ".join(
+        f"{name}={entry.examined}" + ("" if entry.complete else " (partial)")
+        for name, entry in zip(folders, coverage.mailboxes)
+    )
+    state = (
+        "complete"
+        if coverage.complete
+        else f"INCOMPLETE: {coverage.incomplete_summary()}"
+    )
+    return f"scanned {len(folders)} folder(s) [{state}]: {scanned or 'none'}"
+
+
 def _email(args: argparse.Namespace) -> None:
     """Read recent Mail.app messages for a mailbox and optionally extract a code."""
     if args.within <= 0:
@@ -1526,47 +1893,103 @@ def _email(args: argparse.Namespace) -> None:
         raise SystemExit("--limit must be a positive integer")
     if args.timeout_seconds <= 0:
         raise SystemExit("--timeout-seconds must be > 0")
+    if args.wait_seconds < 0:
+        raise SystemExit("--wait-seconds must be >= 0")
+    if args.poll_seconds <= 0:
+        raise SystemExit("--poll-seconds must be > 0")
 
     cutoff = email_module.cutoff_for_window(args.within)
+    deadline = time.monotonic() + args.wait_seconds
+    poll_attempts = 0
+    last_error: email_module.EmailReadError | None = None
+    matched: list[email_module.EmailMessage] = []
+    while True:
+        poll_attempts += 1
+        try:
+            read_kwargs = {
+                "since": cutoff,
+                "limit": args.limit,
+                "timeout_seconds": args.timeout_seconds,
+            }
+            if args.links:
+                read_kwargs["include_source"] = True
+            messages = email_module.read_messages(**read_kwargs)
+            matched = email_module.filter_messages(
+                messages,
+                mailbox_address=args.mailbox,
+                from_filter=args.from_filter,
+                subject_filter=args.subject_filter,
+                since=cutoff,
+            )
+            last_error = None
+        except email_module.EmailReadError as exc:
+            last_error = exc
+        remaining = deadline - time.monotonic()
+        if matched or remaining <= 0:
+            break
+        time.sleep(min(args.poll_seconds, remaining))
+
+    if not matched and last_error is not None:
+        if not args.json:
+            raise SystemExit(f"error: {last_error}") from last_error
+        # A JSON caller gets JSON on the unauthoritative-empty path too. Emitting
+        # a plain-text error here forced automation to parse stderr, which is how
+        # scan coverage stayed invisible on exactly the answer that needs it.
+        print(
+            json.dumps(
+                _email_json_payload(
+                    args,
+                    cutoff.isoformat(),
+                    messages=[],
+                    poll_attempts=poll_attempts,
+                    coverage=getattr(last_error, "coverage", None),
+                    error=str(last_error),
+                ),
+                indent=2,
+            )
+        )
+        raise SystemExit(1) from last_error
+
     try:
-        messages = email_module.read_messages(
-            since=cutoff,
-            limit=args.limit,
-            timeout_seconds=args.timeout_seconds,
-        )
-        matched = email_module.filter_messages(
-            messages,
-            mailbox_address=args.mailbox,
-            from_filter=args.from_filter,
-            since=cutoff,
-        )
         # Extract when a regex is given, when --extract is set, or always in
         # JSON mode (the automation wants a candidate `extracted` field).
         do_extract = bool(args.match) or args.extract or args.json
         pattern = args.match or email_module.DEFAULT_CODE_PATTERN
         extracted_by_id = {}
+        links_by_id = {}
         if do_extract:
             for index, message in enumerate(matched):
                 extracted_by_id[index] = email_module.extract_token(
                     message.body, pattern=pattern
                 )
+        if args.links:
+            for index, message in enumerate(matched):
+                links_by_id[index] = email_module.extract_links(message)
     except email_module.EmailReadError as exc:
         raise SystemExit(f"error: {exc}") from exc
 
+    scan_coverage = getattr(matched, "coverage", None)
     if args.json:
-        payload = {
-            "mailbox": args.mailbox,
-            "from": args.from_filter,
-            "within_minutes": args.within,
-            "cutoff": cutoff.isoformat(),
-            "count": len(matched),
-            "messages": [
-                email_module.message_to_dict(message, extracted=extracted_by_id.get(index))
+        payload = _email_json_payload(
+            args,
+            cutoff.isoformat(),
+            messages=[
+                email_module.message_to_dict(
+                    message,
+                    extracted=extracted_by_id.get(index),
+                    links=links_by_id.get(index) if args.links else None,
+                )
                 for index, message in enumerate(matched)
             ],
-        }
+            poll_attempts=poll_attempts,
+            coverage=scan_coverage,
+        )
         print(json.dumps(payload, indent=2))
         return
+
+    coverage_line = _email_coverage_line(scan_coverage)
+    if coverage_line:
+        print(coverage_line, file=sys.stderr)
 
     if not matched:
         print(
@@ -1581,41 +2004,84 @@ def _email(args: argparse.Namespace) -> None:
         line = f"{timestamp}\t{message.sender}\t{message.subject}"
         if do_extract:
             line += f"\t{extracted if extracted is not None else '-'}"
+        if args.links:
+            links = links_by_id.get(index) or []
+            line += f"\t{','.join(links) if links else '-'}"
         print(line)
-
-
-def _mcp(args: argparse.Namespace) -> None:
-    """Stub: Kali MCP support was removed in the typed-CLI cutover."""
-    print(
-        "vigil mcp install/status/uninstall/remove/repair were removed in the typed-CLI cutover.",
-        file=sys.stderr,
-    )
-    print(
-        "Use `vigil assess kali ...` for target-facing tool execution and `vigil runtime status` "
-        "or `vigil runtime resources` for runtime visibility.",
-        file=sys.stderr,
-    )
-    raise SystemExit(2)
 
 
 def _auth(args: argparse.Namespace, install_root: Path) -> None:
     engagement = _resolve_command_engagement(install_root, args)
     identity = getattr(args, "identity", None)
     if args.auth_command == "status":
-        print(auth_module.status_line(engagement))
         if getattr(args, "probe", False):
             probe_url = getattr(args, "probe_url", None)
             if not probe_url:
                 raise SystemExit("--probe requires --probe-url <url>")
-            result = auth_module.probe_liveness(engagement, probe_url, identity)
+            result = auth_module.probe_liveness(
+                engagement,
+                probe_url,
+                identity,
+                scope_key=getattr(args, "scope", ""),
+            )
             detail = f"reason={result.get('reason')}"
             if result.get("http_status") is not None:
                 detail += f"\thttp_status={result['http_status']}"
             if result.get("error"):
                 detail += f"\terror={result['error']}"
-            print(f"liveness={result['liveness']}\t{detail}")
+            resolved_scope = str(result.get("scope_key") or "")
+            # WS4 opt-in persistence: when a SPECIFIC identity is probed, persist
+            # the classified verdict (live->available, dead->dead, unknown leaves
+            # state untouched — never a false verdict). The active-identity probe
+            # (no --identity) stays read-only.
+            resolved_identity = result.get("identity_name")
+            if identity and resolved_identity:
+                persisted = auth_module.persist_liveness(
+                    engagement,
+                    str(resolved_identity),
+                    result["liveness"],
+                    scope_key=resolved_scope,
+                    reason=str(result.get("reason") or ""),
+                )
+                detail += f"\tpersisted={bool(persisted)}"
+            elif identity:
+                detail += "\tpersisted=False"
+            print(
+                auth_module.status_line(
+                    engagement,
+                    str(resolved_identity or identity)
+                    if resolved_identity or identity
+                    else None,
+                    scope_key=resolved_scope,
+                )
+            )
+            subject = str(resolved_identity or identity or "-")
+            print(
+                f"liveness={result['liveness']}\tidentity={subject}"
+                f"\tscope={resolved_scope or '-'}\t{detail}"
+            )
+        else:
+            print(
+                auth_module.status_line(
+                    engagement,
+                    identity,
+                    scope_key=getattr(args, "scope", ""),
+                )
+            )
     elif args.auth_command == "show":
-        print(json.dumps(auth_module.read_auth(engagement), indent=2, sort_keys=True))
+        material = (
+            auth_module.read_identity(engagement, identity)
+            if identity
+            else auth_module.read_auth(engagement)
+        )
+        print(json.dumps(material, indent=2, sort_keys=True))
+    elif args.auth_command == "quarantine":
+        assert identity is not None
+        auth_module.quarantine_identity(engagement, identity)
+        print(
+            f"quarantined credential {identity} for {engagement.name}; "
+            "material preserved, request replay disabled"
+        )
     elif args.auth_command == "export":
         print(auth_module.export_curl_args(
             engagement, identity, host=getattr(args, "host", None), method=getattr(args, "method", None)
@@ -1635,8 +2101,36 @@ def _auth(args: argparse.Namespace, install_root: Path) -> None:
         auth_module.set_active(engagement, identity)
         print(f"active identity for {engagement.name}: {identity}")
     elif args.auth_command == "import":
-        auth_module.import_auth(engagement, args.source, identity or auth_module.DEFAULT_IDENTITY)
+        auth_module.import_auth(
+            engagement,
+            args.source,
+            identity or auth_module.DEFAULT_IDENTITY,
+            mfa_factor=getattr(args, "factor", ""),
+        )
         print(f"imported credentials into {engagement.name} (identity={identity or auth_module.DEFAULT_IDENTITY})")
+    elif args.auth_command == "alias":
+        result = auth_module.set_alias(
+            engagement, args.name, args.principal, getattr(args, "scope", "")
+        )
+        print(json.dumps(result, sort_keys=True))
+    elif args.auth_command == "env-check":
+        print(json.dumps(auth_module.env_preflight(args.keys), sort_keys=True))
+    elif args.auth_command == "keepalive":
+        # ``--identity`` is action="append" here, so ``args.identity`` is a list
+        # (or None) — the per-login anchor auto-resolution kicks in when it's empty.
+        auth_module.keepalive(
+            engagement,
+            identities=getattr(args, "identity", None),
+            anchor_cookies=getattr(args, "anchor_cookie", None),
+            interval=args.interval,
+            iters=args.iters,
+            caps=args.caps,
+            probe_url=getattr(args, "probe_url", None),
+            log_path=getattr(args, "log", None),
+            detach=bool(getattr(args, "detach", False)),
+            scope_key=getattr(args, "scope", ""),
+            liveness_ttl=getattr(args, "liveness_ttl", 900),
+        )
 
 
 def _backup(args: argparse.Namespace, install_root: Path) -> None:
@@ -1686,7 +2180,8 @@ def _print_oob_status(payload: dict[str, object], *, as_json: bool) -> None:
         print(
             f"{payload.get('state')}\thealth={health}\tserver={payload.get('server')}\tfrpc={payload.get('frpc')}"
             f"\tclients={client_count}\trunning={len(running)}\tregistered={registered}/{len(running)}"
-            f"\tdomain_resolves={resolves_str}\tdomain={payload.get('domain')}"
+            f"\tdomain_resolves={resolves_str}\ttenant={payload.get('tenant_prefix')}"
+            f"\tports={payload.get('port_range')}\tdomain={payload.get('domain')}"
         )
     issues = payload.get("issues") or []
     if isinstance(issues, list):
@@ -1694,6 +2189,27 @@ def _print_oob_status(payload: dict[str, object], *, as_json: bool) -> None:
             print(f"  ! {issue}", file=sys.stderr)
     if health in {"degraded", "down"}:
         raise SystemExit(1)
+
+
+def _print_oob_clean(payload: dict[str, object], *, as_json: bool) -> None:
+    """Render `vigil oob clean`: a one-line summary plus the pruned client names."""
+    if as_json:
+        print(json.dumps(payload, indent=2))
+        return
+    clients_raw = payload.get("clients")
+    clients = clients_raw if isinstance(clients_raw, list) else []
+    files_raw = payload.get("files")
+    files = files_raw if isinstance(files_raw, list) else []
+    days = payload.get("max_age_days")
+    dry = bool(payload.get("dry_run"))
+    if not clients:
+        print(f"oob clean\tnothing to remove — no non-running clients older than {days}d")
+        return
+    verb = "would remove" if dry else "removed"
+    suffix = " [dry-run]" if dry else ""
+    print(f"oob clean\t{verb} {len(clients)} client(s), {len(files)} file(s) older than {days}d{suffix}")
+    for name in clients:
+        print(f"  - {name}")
 
 
 def _oob(args: argparse.Namespace, install_root: Path) -> None:
@@ -1706,10 +2222,30 @@ def _oob(args: argparse.Namespace, install_root: Path) -> None:
         stop_oob(runner=docker_run_command)
         start_oob(options, runner=docker_run_command)
     elif args.oob_command == "status":
-        payload = oob_status(oob_domain=options.oob_domain, runner=docker_run_command)
+        payload = oob_status(
+            oob_domain=options.oob_domain,
+            tenant_prefix=options.tenant_prefix,
+            dns_remote_port=options.dns_remote_port,
+            reverse_remote_port=options.reverse_remote_port,
+            runner=docker_run_command,
+        )
         _print_oob_status(payload, as_json=args.json)
     elif args.oob_command == "test":
         test_oob(options, runner=docker_run_command)
+    elif args.oob_command == "routing":
+        route = options.tenant_route or legacy_tenant_route(
+            install_root, base_domain=options.oob_domain
+        )
+        rendered = render_edge_routing(route)
+        if args.format == "all":
+            print(json.dumps(rendered, indent=2))
+        elif args.format == "json":
+            print(rendered["routing_json"], end="")
+        else:
+            print(rendered[args.format], end="")
+    elif args.oob_command == "clean":
+        payload = clean_oob_clients(max_age_days=args.days, dry_run=args.dry_run, runner=docker_run_command)
+        _print_oob_clean(payload, as_json=args.json)
     elif args.oob_command == "mint":
         _oob_mint(args, install_root, options)
     elif args.oob_command == "poll":
@@ -1764,10 +2300,9 @@ def _build_assessment_client(install_root: Path, engagement_key: str):
     given engagement, reusing the same orchestrator base-url resolution as
     the rest of the CLI and the assess library shipped under agent/scripts.
 
-    The import is deferred and path-bridged exactly like
-    ``engagements._init_cases_db`` so the installable ``src`` package keeps a
-    single source of truth for the HTTP client without a hard dependency on
-    the agent tree at import time.
+    The import is deferred and path-bridged (via ``paths.add_assess_import_path``)
+    so the installable ``src`` package keeps a single source of truth for the
+    HTTP client without a hard dependency on the agent tree at import time.
     """
     from .paths import add_assess_import_path, resolve_orchestrator_base_url
 
@@ -1849,9 +2384,11 @@ def _oob_mint(args: argparse.Namespace, install_root: Path, options: OobOptions)
                 "param": args.param,
                 "technique": args.technique,
                 "probe_kind": args.probe_kind,
-                "request_hash": args.request_hash,
-                "oob_domain": options.oob_domain,
-                "notes": args.notes,
+            "request_hash": args.request_hash,
+            "oob_domain": options.oob_domain,
+            "client_name": client_name,
+            "client_payload_host": payload_host,
+            "notes": args.notes,
             },
         )
     if args.json:
@@ -1873,9 +2410,36 @@ def _oob_poll(args: argparse.Namespace, install_root: Path, options: OobOptions)
     engagement_key = engagement_path.name
     log_text = read_client_log(args.client, runner=docker_run_command, lines=args.lines)
     interactions = parse_interactsh_log(log_text)
+    payload_host = poll_client_payload_host(
+        options,
+        args.client,
+        engagement=engagement_key,
+        runner=docker_run_command,
+    )
+    interactions = interactions_for_domain(
+        interactions,
+        options.oob_domain,
+        client_payload_host=payload_host,
+    )
+    # Drop Vigil's own channel-verification markers. The zero-match verification
+    # below fires a real DNS+HTTP round trip whose callback lands in THIS log, so
+    # without this every empty poll permanently adds two synthetic entries that
+    # the next poll reports as unclaimed callbacks — the check would pollute the
+    # evidence surface it exists to qualify.
+    interactions = [item for item in interactions if not is_self_test_interaction(item)]
     with _build_assessment_client(install_root, engagement_key) as client:
         probes = client.get("oob-probes")
-        nonces = [str(p.get("nonce", "")) for p in probes if p.get("nonce")]
+        owned_probes = [
+            probe
+            for probe in probes
+            if probe.get("client_name") == sanitize_name(args.client)
+            and probe.get("client_payload_host") == payload_host
+        ]
+        nonces = [
+            str(probe.get("nonce", ""))
+            for probe in owned_probes
+            if probe.get("nonce")
+        ]
         matched_interactions, unmatched_interactions = match_interactions_to_nonces(interactions, nonces)
         matched_pairs: list[dict] = []
         for interaction in matched_interactions:
@@ -1888,9 +2452,28 @@ def _oob_poll(args: argparse.Namespace, install_root: Path, options: OobOptions)
                     "query_type": interaction.query_type,
                     "raw_request": interaction.raw_line,
                     "observed_at": interaction.observed_at,
+                    "client_name": sanitize_name(args.client),
+                    "client_payload_host": payload_host,
                 },
             )
             matched_pairs.append({"interaction": interaction, "result": result})
+
+    # A zero match is used as evidence ("the payload produced no callback"), so it
+    # has to be qualified: a clean zero from a live channel and a zero from a
+    # channel that could never have carried a callback are otherwise identical.
+    # Only the zero path pays for the round trip — a correlation already proves
+    # the channel works. Polling for a blind callback is a LOOP, so the proof
+    # runs on a cadence (`verify_oob_channel_cached`) rather than once per empty
+    # poll: the verdict still comes from a real end-to-end round trip, and a
+    # reused one says so in `cached`/`age_seconds`. This never refuses; it
+    # reports and lets the caller decide.
+    verification = (
+        None
+        if matched_pairs
+        else verify_oob_channel_cached(
+            options, client=args.client, runner=docker_run_command
+        )
+    )
 
     if args.json:
         payload = {
@@ -1916,7 +2499,10 @@ def _oob_poll(args: argparse.Namespace, install_root: Path, options: OobOptions)
                 }
                 for item in unmatched_interactions
             ],
+            "channel_verified": None if verification is None else verification.verified,
         }
+        if verification is not None:
+            payload["channel_check"] = verification.as_dict()
         print(json.dumps(payload, indent=2))
         return
 
@@ -1936,6 +2522,20 @@ def _oob_poll(args: argparse.Namespace, install_root: Path, options: OobOptions)
         print("unmatched interactions:")
         for item in unmatched_interactions:
             print(f"  {item.full_host}\t{item.protocol}\tfrom={item.remote_address or '-'}")
+    if verification is not None:
+        checked = verification.describe_freshness()
+        if verification.verified:
+            print(
+                f"channel\tverified\tmarker={verification.marker}"
+                f"\tdns={verification.dns_address}\thttp={verification.http_status}"
+                f"\tchecked={checked}"
+            )
+        else:
+            print(f"channel\tUNVERIFIED\t{verification.reason}\tchecked={checked}")
+            print(
+                "A zero match from an unverified channel is not evidence that no "
+                "callback occurred."
+            )
 
 
 def _resolve_command_engagement(install_root: Path, args: argparse.Namespace) -> Path:

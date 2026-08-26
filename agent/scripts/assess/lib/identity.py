@@ -51,6 +51,33 @@ def identity_names(engagement_dir: str | Path) -> list[str]:
     return creds_client.identity_names(engagement_dir)
 
 
+def _matching_host_cookie_buckets(
+    material: dict[str, Any], host: str
+) -> list[tuple[int, str, dict[str, str]]]:
+    raw = material.get("host_cookies")
+    target = (host or "").strip().rstrip(".").lower()
+    if not isinstance(raw, list) or not target:
+        return []
+    matched: list[tuple[int, str, dict[str, str]]] = []
+    for bucket in raw:
+        if not isinstance(bucket, dict):
+            continue
+        bhost = str(bucket.get("host", "")).strip().rstrip(".").lower()
+        cookies = bucket.get("cookies")
+        if not bhost or not isinstance(cookies, dict):
+            continue
+        if target == bhost:
+            specificity = 2
+        elif target.endswith("." + bhost):
+            specificity = 1
+        else:
+            continue
+        matched.append(
+            (specificity, bhost, {str(k): str(v) for k, v in cookies.items()})
+        )
+    return sorted(matched, key=lambda match: match[0])
+
+
 def host_cookies_for(material: dict[str, Any], host: str) -> dict[str, str]:
     """Return the cookies captured for ``host`` from an identity's per-host jar.
 
@@ -67,31 +94,35 @@ def host_cookies_for(material: dict[str, Any], host: str) -> dict[str, str]:
     the flat (mismatched/empty) cookie view and read the request as "session
     stale" — a fail-closed false negative.
     """
-    raw = material.get("host_cookies")
-    target = (host or "").strip().rstrip(".").lower()
-    if not isinstance(raw, list) or not target:
-        return {}
-    # (specificity, cookies) — exact host = 2, parent domain = 1. Applied in
-    # ascending specificity so the exact-host bucket wins on key collisions.
-    matched: list[tuple[int, dict[str, str]]] = []
-    for bucket in raw:
-        if not isinstance(bucket, dict):
-            continue
-        bhost = str(bucket.get("host", "")).strip().rstrip(".").lower()
-        cookies = bucket.get("cookies")
-        if not bhost or not isinstance(cookies, dict):
-            continue
-        if target == bhost:
-            specificity = 2
-        elif target.endswith("." + bhost):
-            specificity = 1
-        else:
-            continue
-        matched.append((specificity, {str(k): str(v) for k, v in cookies.items()}))
     out: dict[str, str] = {}
-    for _specificity, cookies in sorted(matched, key=lambda m: m[0]):
+    for _specificity, _bucket_host, cookies in _matching_host_cookie_buckets(
+        material, host
+    ):
         out.update(cookies)
     return out
+
+
+def browser_cookies_for(material: dict[str, Any], host: str) -> list[dict[str, str]]:
+    """Return matching host-cookie buckets as Playwright cookie records.
+
+    Parent-domain buckets keep their domain scope so the session continues to
+    ride sibling-host redirects. Exact-host cookies still overlay parent-domain
+    cookies with the same name, matching :func:`host_cookies_for`.
+    """
+    target = (host or "").strip().rstrip(".").lower()
+    cookies_by_name: dict[str, dict[str, str]] = {}
+    for specificity, bucket_host, cookies in _matching_host_cookie_buckets(
+        material, target
+    ):
+        domain = bucket_host if specificity == 2 else f".{bucket_host}"
+        for name, value in cookies.items():
+            cookies_by_name[name] = {
+                "name": name,
+                "value": value,
+                "domain": domain,
+                "path": "/",
+            }
+    return list(cookies_by_name.values())
 
 
 def host_cookie_hosts(material: dict[str, Any]) -> list[str]:
@@ -112,7 +143,7 @@ def host_cookie_hosts(material: dict[str, Any]) -> list[str]:
 
 
 def resolve_identity(
-    engagement_dir: str | Path, requested: str | None
+    engagement_dir: str | Path, requested: str | None, *, scope_key: str = ""
 ) -> tuple[str | None, dict[str, Any]]:
     """Resolve a ``--identity`` request against the engagement's credentials.
 
@@ -123,4 +154,8 @@ def resolve_identity(
       * UNKNOWN identity -> ``(requested, {})`` so the caller can warn while the
         requested name is still recorded as the probe's auth_context.
     """
+    if scope_key:
+        return creds_client.resolve_identity(
+            engagement_dir, requested, scope_key=scope_key
+        )
     return creds_client.resolve_identity(engagement_dir, requested)

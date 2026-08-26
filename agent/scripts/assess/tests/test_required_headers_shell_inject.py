@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import shlex
 
+import pytest
 from assess.lib import kali, kali_output
-
 
 HDR = {"X-Bug-Bounty": "vigiloss"}
 
@@ -234,7 +234,7 @@ def test_direct_non_injectable_still_warns() -> None:
     # wafw00f IS an HTTP-to-target tool but its ``-H``/``--headers`` flag reads a
     # FILE, not an inline ``Name: Value`` (verified: an inline value errors
     # "Headers file ... does not exist"), so it cannot carry the attribution
-    # header on the argv — it WARNs (and the Layer-2 backstop is its safety net).
+    # header on the argv — it warns without blocking execution.
     cmd = ["wafw00f", "https://example.com"]
     status = kali_output._apply_required_headers(cmd, "wafw00f", dict(HDR))
     assert status == "warned"
@@ -359,3 +359,37 @@ def test_apply_required_headers_never_raises_on_odd_inputs() -> None:
     for cmd in samples:
         # Must not raise.
         kali_output._apply_required_headers(list(cmd), "curl", dict(HDR))
+
+
+@pytest.mark.parametrize(
+    ("tool", "cmd", "flag"),
+    [
+        ("whatweb", ["whatweb", "https://example.com"], "--header"),
+        ("nikto", ["nikto", "-h", "https://example.com"], "-Add-header"),
+        ("arjun", ["arjun", "-u", "https://example.com"], "--headers"),
+        ("dalfox", ["dalfox", "url", "https://example.com"], "-H"),
+    ],
+)
+def test_identity_headers_use_verified_typed_tool_flags(tool, cmd, flag) -> None:
+    status = kali_output._apply_identity_headers(cmd, tool, {"Cookie": "sid=abc"})
+    assert status == "injected"
+    assert flag in cmd
+    assert "Cookie: sid=abc" in cmd
+
+
+def test_identity_and_required_headers_share_shell_transformer() -> None:
+    cmd = ["sudo", "env", "X=1", "bash", "-lc", "curl https://example.com"]
+    assert kali_output._apply_identity_headers(cmd, "curl", {"Cookie": "sid=abc"}) == "injected"
+    assert "Cookie: sid=abc" in cmd[-1]
+
+
+def test_required_attribution_header_wins_identity_conflict() -> None:
+    cmd = ["curl", "https://example.com"]
+    assert kali_output._apply_required_headers(cmd, "curl", {"X-Researcher": "required"}) == "injected"
+    assert kali_output._apply_identity_headers(
+        cmd, "curl", {"X-Researcher": "identity", "Cookie": "sid=abc"}
+    ) == "injected"
+    joined = " ".join(cmd)
+    assert "X-Researcher: required" in joined
+    assert "X-Researcher: identity" not in joined
+    assert "Cookie: sid=abc" in joined

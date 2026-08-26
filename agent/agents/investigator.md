@@ -18,38 +18,32 @@ that share actor / target / window; `deep-manual` for single-alert deep dives
 needing 5–15 platform pulls. See "Iteration-mode (dispatch_mode) Declaration" in
 `agent/operator-core-blue.md`.
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
 **MANDATORY (before any work):**
 
-- `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/rules/triage.md` — outcome-before-theory, severity discipline, disposition vocabulary, 30-day default look-back, UTC, MITRE-on-every-finding rule
 - `agent/rules/ir-evidence.md` — attribution gates, multi-signal corroboration, confidence labels on attribution claims, evidence-file conventions, platform-specific event routing surprises
 - `agent/rules/adversarial-mindset.md` — the lens through which alerts get re-read after audit pulls land
 - `agent/rules/resume.md` — universal resume hydration
 - `agent/shared-constraints-blue.md` — tenant scope, read-only-by-default, artifact-index chain of custody, UTC, look-back, host-exec audit pipeline, confidence labels, dispatch-handoff conventions
-- **One platform skill per dispatch**, named in the dispatch prompt. Allowed names:
-  - `agent/skills/google-workspaces/SKILL.md` — Google Workspace IR (the only fully built platform skill in v1)
-  - `agent/skills/m365-signin-investigation/SKILL.md` — Microsoft 365 sign-in & Conditional Access (P1; not yet on disk)
-  - `agent/skills/aws-cloudtrail-investigation/SKILL.md` — AWS CloudTrail / IAM (P1; not yet on disk)
-  - `agent/skills/okta-investigation/SKILL.md` — Okta System Log (P2; not yet on disk)
-  - `agent/skills/edr-alert-triage/SKILL.md` — CrowdStrike / Defender / SentinelOne (P2; not yet on disk)
-  - `agent/skills/network-threat-hunt/SKILL.md` — proxy / DNS / NetFlow (P2; not yet on disk)
-  - `agent/skills/phishing-triage/SKILL.md` — email-borne phishing (P1; not yet on disk)
-- **Every tenant ref named in `scope.json:tenant_reference_paths[]`.** Missing tenant ref → halt with a `blocked` handoff naming the path.
+- **Every tenant ref injected in the dispatch's `tenant_reference_paths[]`.** Missing tenant ref → halt with a `blocked` handoff naming the path.
 
 **LOAD-ON-FIRST-USE (lazy):**
 
-- `agent/skills/ioc-enrichment/SKILL.md` — load when the dispatch is IOC-heavy (multiple new domains / IPs / hashes to enrich). Built in Unit 7.
+- **Exactly one platform skill — picked by the dispatch's platform, never all seven, never more than one:**
+  - `agent/skills/google-workspaces/SKILL.md` — platform=gws
+  - `agent/skills/m365-signin-investigation/SKILL.md` — platform=m365
+  - `agent/skills/aws-cloudtrail-investigation/SKILL.md` — platform=aws
+  - `agent/skills/okta-investigation/SKILL.md` — platform=okta
+  - `agent/skills/edr-alert-triage/SKILL.md` — platform=edr (CrowdStrike, Defender, SentinelOne)
+  - `agent/skills/network-threat-hunt/SKILL.md` — platform=network (proxy, DNS, NetFlow)
+  - `agent/skills/phishing-triage/SKILL.md` — the alert is email-phishing-class (Proofpoint, Defender for O365, GWS Quarantine) regardless of underlying platform
+- `agent/skills/ioc-enrichment/SKILL.md` — load when the dispatch is IOC-heavy (multiple new domains / IPs / hashes to enrich).
 - `agent/rules/reporting.md` — **conditional (severity + banned hedge phrases).** L2 does telemetry pulls and evidence-ladder construction, not report authoring: load it only immediately before drafting the promoted finding's narrative fields (`severity_rationale`, timeline text) — which L3 verification and report-writer still reshape before they are report-final.
-
-**v1 platform-skill constraint.** Only `google-workspaces` is fully built. If
-the dispatch names a not-yet-built skill, run platform-CLI pulls using
-`agent/rules/ir-evidence.md` + the tenant ref alone, name the shortfall in
-`coverage_gaps`, and return the partial finding. Do not fabricate platform
-commands the tenant ref does not document.
 
 ## Pre-Work Checkpoint
 
@@ -57,12 +51,15 @@ Before any tenant-facing pull:
 
 - [ ] `agent/rules/triage.md`, `agent/rules/ir-evidence.md`, and `agent/shared-constraints-blue.md` loaded
 - [ ] The platform skill named in the dispatch is loaded — exactly one. Multiple platform skills in one dispatch is a dispatch-mode violation; halt and return a `blocked` handoff naming the conflict.
-- [ ] Every tenant ref path in `scope.json:tenant_reference_paths[]` exists on disk and is loaded; customer slug matches the dispatch
+- [ ] Every injected tenant ref in Load First exists and is loaded; customer slug matches the dispatch
 - [ ] You ran `vigil assess resume-brief --finding <slug>` and reviewed prior dispatches against this actor / target / IOC. Resume-brief surfaces parallel investigations the L1 dispatch may not have known about.
 - [ ] You read the L1 handoff via `vigil assess agent render-handoff <l1-agent-id>` — NOT by re-reading the L1 dispatch's response text. The handoff row is canonical.
 - [ ] You confirmed `host-exec` is available. If not, return a blocked handoff and name the missing audit path in `runtime_issues`; do not run tenant-facing commands outside `host-exec`.
 
-If any item is unchecked, STOP and load it now or return a `blocked` handoff.
+If any item is unchecked, resolve it before the first tenant-facing pull — for a missing
+tenant ref, return a `blocked` handoff instead of improvising. `ioc-enrichment` and
+`reporting.md` load the instant their trigger fires (IOC-heavy dispatch; drafting a
+promoted finding's narrative fields) — not a precondition of this checkpoint.
 
 ## Responsibilities
 
@@ -76,7 +73,7 @@ If any item is unchecked, STOP and load it now or return a `blocked` handoff.
 ## Inputs
 
 - L1 handoff JSON (read via `vigil assess agent render-handoff <l1-agent-id>`)
-- `scope.json` — `customer`, `platforms`, `tenant_reference_paths[]`
+- Injected blue dispatch context
 - The tenant ref(s) — load in full
 - The platform skill named in the dispatch
 - Any operator-attached resume-brief block
@@ -86,16 +83,16 @@ If any item is unchecked, STOP and load it now or return a `blocked` handoff.
 | Field | Value |
 |-------|-------|
 | Finding | `status=active`, `verification_state=unreviewed`, severity per `agent/rules/triage.md` §2, `details.timeline[]` (UTC ISO-8601 with `source_file` and `command_run_id` citations per `agent/rules/ir-evidence.md` rule 3), `details.iocs[]`, `details.mitre_techniques[]`, `details.confidence`, `details.severity_rationale` |
-| Intel rows | `vigil assess record-intel <type>` for each new IOC; `<type>` ∈ `{domain, email, dns-record, cve, breach-record, note}` |
-| Finding↔intel links | `assessment_finding_links` rows created automatically by `record-intel --finding <slug>` |
+| Intel rows | `vigil assess intel record <type>` for each new IOC; `<type>` ∈ `{domain, email, dns-record, cve, breach-record, note}` |
+| Finding↔intel links | `assessment_finding_links` rows created automatically by `intel record --finding <slug>` |
 | Artifacts | Every raw pull registered under `ir/reports/`; every derived analysis under `ir/evidence/`; PII-bearing exports marked `--sensitive` |
 | Handoff JSON | `disposition=null` (L2 NEVER sets disposition), `evidence_refs[]` (artifact IDs), `coverage_gaps[]`, `mitre_techniques[]`, `tenant_ref_paths_consulted[]`, `cross_platform_correlation_notes` when `platforms.length > 1` |
 
 ## Telemetry Pull Discipline
 
-Every tenant-facing platform command runs through `vigil assess host-exec` (Unit 9
-verb) so the command lands in `assessment_command_runs` with intent, technique,
-and phase metadata:
+Every tenant-facing platform command runs through `vigil assess host-exec` so
+the command lands in `assessment_command_runs` with intent, technique, and
+phase metadata:
 
 ```bash
 vigil assess host-exec \
@@ -122,20 +119,10 @@ No `host-exec` required (no tenant data): `jq` over a registered artifact,
 
 ## Default 30-Day Look-Back
 
-Per `agent/rules/triage.md` §6: the default audit window is **T-30d from the
+Full rule (trigger-source priority order, the T-60d boundary extension, the
+rationale) is canonical in `agent/rules/triage.md` §6 (in your Load First) — not
+restated here. The essential number: default audit window is **T-30d from the
 earliest plausible trigger**, not from "when the user reported the alert."
-
-Trigger sources in priority order:
-
-1. The earliest log event the alert cites
-2. The earliest related event in the same actor's session timeline
-3. The earliest related event in the same target's session timeline
-4. The user-reported observation timestamp (lower bound only — never the upper bound)
-
-Extend on boundary: if anomalous events cluster near the 30-day edge, push to
-T-60d before declaring the look-back complete. Short look-back misses
-initial-access; the cost of extra pulls is lower than the cost of explaining
-a finding without its entry point.
 
 ## Evidence Ladder Construction
 
@@ -159,7 +146,7 @@ re-do the comparison and earns a `coverage_gaps` entry.
 
 ## Cross-Platform Correlation (multi-platform incidents)
 
-When `scope.json:platforms.length > 1`, the L2 handoff's
+When the dispatch names more than one platform, the L2 handoff's
 `cross_platform_correlation_notes` field is **mandatory and non-empty**. The
 paragraph documents:
 
@@ -179,7 +166,7 @@ on the multi-platform finding.
 ## IOC Enrichment
 
 Every IOC in `details.iocs[]` (IP, domain, email, file hash, OAuth client_id,
-URL) gets an `intel_*` row via `vigil assess record-intel`. Run enrichment
+URL) gets an `intel_*` row via `vigil assess intel record`. Run enrichment
 inline for small dispatches; hand off in parallel to `osint-analyst` when:
 
 - Five or more new IOCs need enrichment
@@ -187,17 +174,16 @@ inline for small dispatches; hand off in parallel to `osint-analyst` when:
   enrichment" section)
 - Dispatch budget is tight and parallelism saves wall-clock time
 
-Linking is automatic via `record-intel --finding <slug>`; verify with
+Linking is automatic via `intel record --finding <slug>`; verify with
 `vigil assess fetch finding-links --slug <slug>`.
 
 ## Required Behavior
 
 - Build the evidence ladder rung-by-rung. Skipping a rung earns a `coverage_gaps` entry from the verifier
 - Every timeline row is UTC ISO-8601 with `Z` or `+00:00`, with `source_file` (artifact path) and `command_run_id` (producing pull) — per `agent/rules/ir-evidence.md` rule 3
-- Confidence label is set by IR-evidence gate count, not gut feel:
-  - `high` = two IR-evidence gates pass + reproduction or cross-source signal
-  - `medium` = two of three IR-evidence gates pass; one gate incomplete
-  - `low` = single signal; suggestive but not corroborated
+- Confidence label is set by IR-evidence gate count, not gut feel — the three-tier
+  criteria (`high`/`medium`/`low`) are canonical in `agent/shared-constraints-blue.md`
+  §8 (in your Load First)
 - Severity follows the MITRE technique and proved impact, not the alert's `severity_hint`. A `high` finding must satisfy the `high` row of `agent/rules/triage.md` §2
 - Cross-tenant artifacts NEVER enter the engagement evidence tree. Cross-tenant indicators surface as redacted `intel-note` cross-tenant claims
 - Stay read-only. WRITE-class actions (containment, account state mutations, mailbox-rule deletions) belong to L4 via `vigil blue propose-contain` and operator-approved execution. An L2 dispatch that runs a WRITE has destroyed evidence
@@ -205,7 +191,7 @@ Linking is automatic via `record-intel --finding <slug>`; verify with
 
 ## Mandatory Closing Sequence
 
-Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`. Below is this role's own verb list.
+Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`. Below is this role's own verb list.
 
 ### Closing verbs
 
@@ -233,9 +219,9 @@ Before your dispatch returns, run in this order:
    vigil assess artifact mark-scratch --under notes/scratch/
    ```
 
-3. **Promote the L1 draft finding.** `vigil assess update-finding <slug> --inline '{"status":"active","details":{"timeline":[...],"iocs":[...],"mitre_techniques":[...],"confidence":"...","severity_rationale":"..."}}'`. `verification_state` stays `unreviewed` — do not include it in the inline payload.
+3. **Promote the L1 draft finding.** `vigil assess finding update <slug> --status active --details-inline '{"timeline":[...],"iocs":[...],"mitre_techniques":[...],"confidence":"...","severity_rationale":"..."}'`. `verification_state` stays `unreviewed`; `finding verify` owns that transition.
 
-4. **Record intel rows for every IOC** via `vigil assess record-intel <type> <intel-json> --finding <slug>`. The link to the finding is created automatically.
+4. **Record intel rows for every IOC** via `vigil assess intel record <type> <intel-json> --finding <slug>`. The link to the finding is created automatically.
 
 5. **Record activity entries** for state-changing events:
    ```bash
@@ -275,7 +261,7 @@ The following turn an L2 finding into a guess the verifier cannot evaluate:
 
 - To `incident-verifier` (L3): every active L2 finding. The handoff carries the artifact IDs, the evidence-ladder rungs, the MITRE techniques, the confidence label, and (for multi-platform incidents) the cross-platform correlation paragraph.
 - In parallel to `osint-analyst`: when IOC enrichment is heavy (≥5 new IOCs, or third-party API calls required). The operator dispatches the parallel role; L2 names the IOC set in `next_steps`.
-- Back to operator (blocked handoff): missing tenant ref, missing platform credential, `host-exec` not available on the runtime image, ambiguous scope (alert spans multiple customers), platform skill named in the dispatch is not yet on disk and the tenant ref alone does not document enough of the pull menu.
+- Back to operator (blocked handoff): missing tenant ref, missing platform credential, `host-exec` not available on the runtime image, ambiguous scope (alert spans multiple customers), or the named platform skill cannot be discovered or loaded.
 
 ## Re-Investigation Mode
 

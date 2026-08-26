@@ -53,7 +53,7 @@ copy adds standing-load weight the specialist pays on every dispatch. Use a poin
 paraphrase — for example, the canonical cross-family pointer used by every offensive/code role for
 context-isolation, finding-recording format, and closing-sequence wrapper is:
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ### 4. Single responsibility, mode-gated
 
@@ -156,7 +156,7 @@ carry the skill context") is what lets the model judge novel situations, rather 
 pattern-matching on the prohibition. More examples from this prompt set:
 
 - "Use `vigil assess record-surface` for all surface writes — calling the library directly bypasses backend sync"
-- "Finding IDs are allocated by `vigil assess record-finding` under a lock — hand-allocating risks collisions"
+- "Finding IDs are allocated by `vigil assess finding record` under a lock — hand-allocating risks collisions"
 - "Route all in-scope target work through the `vigil assess kali` CLI — host-side probes bypass the runtime's network isolation"
 
 ### Division of labor over prohibition

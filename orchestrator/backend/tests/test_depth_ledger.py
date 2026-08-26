@@ -1,4 +1,4 @@
-"""Wave 6c — the depth ledger (depth-gate §5.3).
+"""The depth-ledger regression suite.
 
 These tests seed a deep_required app unit and assert the executable §5.3
 predicate table, the Covered definition, the STRUCTURED dedicated-dispatch
@@ -12,8 +12,8 @@ Scenarios:
   * params present                           -> injection EXPECTED
   * disclosure NOT satisfied by a bare probe; only by a gau-secrets/trufflehog
     (or JS-source) probe tied to the unit's host
-  * completed `variant-rotation` dispatch with vuln_classes=idor + matching
-    scope_path_prefix AND a covering probe -> dedicated-dispatch satisfied
+  * completed dispatch attributed to the application unit with a covering
+    probe -> dedicated-dispatch satisfied
   * status=completed ALONE (no work evidence) -> NOT satisfied
   * depth_deferral for unit+class -> covered-or-deferred
   * the ledger never hard-blocks / exits non-zero
@@ -90,6 +90,14 @@ def _by_host_prefix(ledger, host, prefix):
         if u["unit"]["host"] == host and u["unit"]["path_prefix"] == prefix:
             return u
     raise AssertionError(f"no ledger unit for {host}{prefix}")
+
+
+def _unit_id_for(engagement_id: int, host: str, prefix: str) -> int:
+    state_manager.score_application_units(engagement_id)
+    for unit in state_manager.list_application_units(engagement_id):
+        if unit["host"] == host and unit["path_prefix"] == prefix:
+            return int(unit["id"])
+    raise AssertionError(f"no application unit for {host}{prefix}")
 
 
 def _expected_families(unit_ledger) -> set[str]:
@@ -207,11 +215,12 @@ def test_disclosure_requires_concrete_signal(client, isolate_settings):
 
 def test_dedicated_dispatch_requires_work_evidence(client, isolate_settings):
     eng_id = _seed_giving_unit(client, isolate_settings, "2026-06-09-200004-disp")
+    unit_id = _unit_id_for(eng_id, "rock.example.com", "/giving")
 
     state_manager.record_dispatch(
         eng_id, agent_id="va-1", agent_role="vulnerability-analyst",
-        task="rotate IDOR variants", scope_host="rock.example.com",
-        scope_path_prefix="/giving", vuln_classes="idor,auth-bypass,sqli",
+        task="rotate IDOR variants", application_unit_id=unit_id,
+        vuln_classes="idor,auth-bypass,sqli",
         status_value="completed",
     )
     state_manager.update_dispatch(eng_id, agent_id="va-1", status_value="completed",
@@ -245,10 +254,10 @@ def test_dedicated_dispatch_requires_work_evidence(client, isolate_settings):
 def test_dispatch_skills_resolve_to_classes(client, isolate_settings):
     eng_id = _seed_giving_unit(client, isolate_settings, "2026-06-09-200005-skill")
     vid = _variant_id_for(eng_id, "/giving/account")
+    unit_id = _unit_id_for(eng_id, "rock.example.com", "/giving")
     state_manager.record_dispatch(
         eng_id, agent_id="va-2", agent_role="vulnerability-analyst",
-        task="idor pass", scope_host="rock.example.com",
-        scope_path_prefix="/giving", skills="idor-testing",
+        task="idor pass", application_unit_id=unit_id, skills="idor-testing",
         status_value="completed",
     )
     _probe(eng_id, attack_family="idor", result_status="tested", variant_id=vid,

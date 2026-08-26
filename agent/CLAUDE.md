@@ -8,7 +8,7 @@
      this file. It is the OPERATOR prompt and its startup/runtime banner must not bleed
      into your context. Load ONLY your own role file and every entry in its `Load First`.
      Auto-loaded CLAUDE.md/AGENTS.md pointers up the directory tree do not apply to you.
-     See agent/shared-constraints-core.md ("Specialist Context Isolation") for why. -->
+     See agent/shared-specialist-core.md ("Specialist Context Isolation") for why. -->
 
 # Vigil — Operator Instructions
 

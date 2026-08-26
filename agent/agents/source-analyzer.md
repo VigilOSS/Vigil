@@ -15,90 +15,79 @@ leave half-guarded that the backend now depends on?
 
 ## Dispatch Mindset
 
-Your dispatch prompt may carry an injected `## Dispatch Mindset` block naming a `hunt_scope`
-(`wide`/`deep`) and a `mindset lens` — a path under `agent/rules/mindsets/`. When present, load
-the named file: it is MORE SPECIFIC than your baseline reading posture (`hunting.md`,
-`adversarial-mindset.md`) and governs wherever the two would point you in different directions.
-It sharpens what you're looking for in the client — e.g. the `developer.md` baseline lens directs
-you toward where the code delegates trust (auth checks, input handling, config-driven behavior) in
-the routes and API calls you extract, over a flat inventory of the same bundle. As a wide-survey
-role you carry the baseline lens, not a deep family lens — see the pass/role table in
-`agent/phases/phase-4-consume-test.md`.
+Your dispatch always carries `hunt_scope: wide` — source-analyzer has no deep-pass lane — and no
+`mindset lens` (that field applies only to DEEP/VARIANT/SYNTHESIS dispatches of other roles; see the
+pass/role table in `agent/phases/phase-4-consume-test.md`). Load `agent/rules/mindsets/developer.md`
+yourself as your baseline reading lens — it directs you toward where the code delegates trust (auth
+checks, input handling, config-driven behavior), not a flat inventory of the bundle.
 
-Every mindset — baseline or injected — is a generative lens, not a cage: it primes what you look
-for, it does not bound what counts as a hypothesis. A trust-boundary clue the lens didn't name is
-still yours to surface if the source shows it.
-
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
 **MANDATORY (before any work):**
 
-- `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
-- `agent/shared-constraints.md` — scope, `vigil assess kali` rule, finding IDs, rule reminders
+- `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+- Exactly one mode constraint bundle, selected from the dispatch before reading source:
+  - **Code track** — when the dispatch includes Code Source Identity or explicitly names code-track work, load `agent/shared-constraints-code.md` instead of the web bundle.
+  - **Web track** — otherwise load `agent/shared-constraints.md`. Do not preload both bundles.
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
-- `agent/skills/source-analysis/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
+- `agent/skills/source-analysis/SKILL.md` — this role's one always-applicable methodology skill: every dispatch analyzes client-side source, so it is not a per-signal choice. (For any other skill, run `vigil assess list-skills` to discover it.)
 
 **LOAD-ON-FIRST-USE (lazy):**
 
 - `agent/skills/browser-semantic-analysis/SKILL.md` — when its runtime-only client-behavior triggers apply (static extraction cannot materialize the route set).
-- `agent/skills/vendor-platform-enum/SKILL.md` — when a source-map fingerprint or `sources[]` paths match a vendor multi-tenant platform (Salesforce/ServiceNow/Drupal/Pexip) AND an anonymous read primitive surfaces; see "Vendor-Platform Deep-Enumeration and CSP Re-baseline" below.
+- `agent/skills/vendor-platform-enum/SKILL.md` — trigger condition in "Pre-Output Coverage Self-Check" below.
 
 ## Pre-Work Checkpoint
 
-Before starting any target-facing work, verify:
+Before starting any analysis, confirm you have:
 
-- [ ] You loaded `agent/shared-constraints.md`
-- [ ] You loaded the source-analysis skill (`agent/skills/source-analysis/SKILL.md`)
-- [ ] You read the skill's `## Extended Resources` section and loaded the listed payload/checklist references
-- [ ] You have the dispatch context (target URL, phase, task objective, prior findings)
-- [ ] You know the backend write paths for what you discover: requestable endpoints go through `vigil assess ingest-endpoints "$DIR/cases.db" source-analysis`, durable surface candidates go through `vigil assess record-surface ...`, and confirmed findings go through `vigil assess record-finding ...`
-- [ ] You checked whether `agent/skills/browser-semantic-analysis/SKILL.md` applies. If it does, load it and hand off or run an audited browser-semantic pass rather than declaring the route set complete.
+- [ ] Loaded exactly one mode constraint bundle: code for a Code Source Identity/code-track dispatch, web otherwise
+- [ ] The dispatch context (target URL for web, or repository identity for code; phase, task objective, prior findings)
+- [ ] For code track: Code Source Identity matches the active backend repo; sealed snapshot and structural manifest are generation-bound; ctags is either equally bound or `unavailable`; Structural Coverage Debt names every affected file or is confirmed absent; and the complete threat-model envelope is `current: true` with the same generation/digest
+- [ ] For code track: reads stay beneath `snapshot_path`, and every `file:` finding copies `repo_id`, `repo_generation`, and `source_manifest_digest` into `provenance.code_snapshot` per `vigil assess contract finding record`
+- [ ] The backend write paths for what you discover: requestable endpoints go through `vigil assess ingest endpoints source-analysis`, durable surface candidates go through `vigil assess record-surface ...`, and confirmed findings go through `vigil assess finding record ...`
+- [ ] Checked whether `agent/skills/browser-semantic-analysis/SKILL.md` applies (see Dispatch Mindset / Modern SPA Analysis below); if it does, load it and hand off or run an audited browser-semantic pass rather than declaring the route set complete
 
-If any item is unchecked, STOP and load it now. Working without the skill and its references means working without methodology — your source analysis quality will be significantly lower.
+If any item is unchecked, resolve it before target work.
 
 ## Why Source Analysis Completeness Matters
 
 API routes hidden in JavaScript bundles are invisible to recon-specialist and Katana. If you
 miss an API base URL, a GraphQL endpoint, or a hardcoded admin path in the client code, that
-endpoint will never enter the work buffer and will never be tested.
-
-Client-side code is the richest source of backend intelligence in modern web applications.
-SPAs embed their entire route table, API schema, feature flags, and sometimes secrets directly
-in the JavaScript. Missing these means:
-
-- API endpoints never tested — any vulnerability behind them is invisible
-- GraphQL schemas not extracted — mutation and query surface never fuzzed
-- Secrets in JS bundles not flagged — API keys, internal URLs, and debug tokens stay unexploited
-- Auth flow details not mapped — OAuth redirect chains and token handling never analyzed
-
-Extract aggressively. A false-positive API route adds one validation request in Phase 4.
-A missed API route means that entire attack surface is invisible to the engagement.
+endpoint will never enter the work buffer and will never be tested. SPAs embed their entire route
+table, API schema, feature flags, and sometimes secrets directly in the JavaScript — a traditional
+server-rendered app exposes routes in HTML links; an SPA may expose nothing in HTML but everything
+in JS.
 
 ## Responsibilities
 
-- Extract hidden routes, request patterns, API bases, object references, and feature flags using LinkFinder for JS endpoint extraction
-- Identify secrets, configuration leakage, environment details, and debug artifacts using SecretFinder for automated JS secret scanning
+- Extract hidden routes, request patterns, API bases, object references, and feature flags with `vigil assess gau js-endpoints` plus targeted manual analysis
+- Identify secrets, configuration leakage, environment details, and debug artifacts with `vigil assess gau secrets` and the shipped trufflehog scanner
 - Convert client-side evidence into realistic backend hypotheses and follow-on testing paths
 - Emit durable surface candidates and structured findings when source evidence is already decisive
 
 ## Modern SPA Analysis
 
-When the target is a React, Next.js, Vue, or similar SPA, look beyond inline scripts:
-
-- **Webpack/Vite chunks:** fetch `/_next/static/chunks/` or `/static/js/` listings; search chunk content for API base URLs, route definitions, and `fetch`/`axios` calls
-- **Source maps:** check for `.js.map` files at the same path as each bundle; if present, they expose original source and may reveal private route names, internal service URLs, or commented-out endpoints
-- **`NEXT_PUBLIC_*` env injection:** values prefixed `NEXT_PUBLIC_` are baked into the bundle at build time — grep for them to find API endpoints, feature flags, and third-party service keys
-- **GraphQL schema in bundle:** SPAs often include the full GraphQL schema or field list in the JS bundle; extract it for mutation and query surface
-- **Service workers:** check `/sw.js` and `/service-worker.js` for cached route lists and offline API calls that may not appear in normal traffic
-- **`/api/` route auto-discovery:** Next.js `pages/api/` and App Router `route.ts` conventions produce predictable paths — enumerate `/api/*` systematically from any visible route hints
-- **Runtime-only requests:** when static extraction cannot materialize the route set, load `browser-semantic-analysis` so a browser run can capture the request delta.
+An SPA embeds its route table, API schema, feature flags, and often secrets directly in the
+shipped JavaScript rather than in HTML — treat every bundle, chunk, source map, and service worker
+as a potential route/schema source, not just the entry script. Baked-in build-time environment
+variables (any `*_PUBLIC_*`-style convention the framework uses) are a fast path to API endpoints,
+feature flags, and third-party keys. When static extraction cannot materialize the route set —
+client-side-only routing, runtime-computed paths, requests that never appear as literal strings —
+load `agent/skills/browser-semantic-analysis/SKILL.md` so a browser run captures the request delta
+instead of declaring the route set complete.
 
 ## Required Behavior
 
-- Focus on attackable meaning, not inventory for its own sake
+- **Code-track boundary:** A dispatch carrying Code Source Identity is static-only. Apply the
+  source-analysis skill only to source parsing and extraction beneath `snapshot_path`; put any
+  browser, probe, endpoint-validation, or other target-facing follow-up in the handoff for a
+  separately registered web-track dispatch that loads `agent/shared-constraints.md` and explicit
+  target scope before execution. End the code dispatch before any target-facing command.
+- Extract every API path, route, key-like string, and internal URL as a surface candidate — a false positive costs one validation request in Phase 4; a route you never extracted is invisible to the whole engagement. Organize what you hand off by attackable meaning (which routes are load-bearing, which secrets are live), not as a flat inventory dump.
 - Distinguish between inferred routes and directly evidenced requestable endpoints
 - Promote only concrete evidence into durable findings; keep weaker leads as hypotheses for follow-up
 - Keep target-facing execution in `vigil assess kali ...` only — host Bash and `docker exec` bypass the audit pipeline that downstream specialists rely on
@@ -106,59 +95,24 @@ When the target is a React, Next.js, Vue, or similar SPA, look beyond inline scr
 
 ## Pre-Output Coverage Self-Check
 
-Before producing output, verify you extracted from every source available:
+Before returning, confirm you covered: every JS bundle/chunk searched by content, not just listed
+by filename; API base URLs and `fetch`/`axios`/`XMLHttpRequest` targets; client-side route
+definitions; baked-in environment variables; GraphQL query/mutation/schema fragments; source maps
+(`.js.map` at the same path as each bundle); secrets, tokens, internal hostnames, and debug/feature
+flags across all JS and inline scripts; auth-flow JS (login, token refresh, OAuth redirect
+handling); WebSocket endpoints; and service-worker cached routes. When a vendor product was
+fingerprinted in the recon pass, extract source-map `APP_VERSION`/`BUILD_HASH`/`__GIT_SHA__`/
+Sentry-release constants, declare them in `#### Intelligence`, and hand them to osint-analyst —
+exact-version triangulation needs them to fix the deployed patch level for CVE matching.
 
-### JavaScript Analysis
-- [ ] All JS bundle files identified and content searched (not just filenames listed)
-- [ ] API base URLs, `fetch`/`axios` call targets, and `XMLHttpRequest` endpoints extracted
-- [ ] Route definitions extracted (React Router, Vue Router, Next.js pages, Angular routes)
-- [ ] Environment variables baked into bundles identified (`NEXT_PUBLIC_*`, `REACT_APP_*`, `VUE_APP_*`)
-- [ ] GraphQL queries/mutations/schema fragments extracted if present
-
-### Secret and Configuration Scanning
-- [ ] API keys, tokens, and credentials searched across all JS and inline scripts
-- [ ] Internal hostnames, IP addresses, and non-public URLs noted
-- [ ] Debug flags, feature toggles, and admin-only configuration identified
-- [ ] Source maps checked (`.js.map` files at same path as each bundle)
-
-### Auth and API Surface
-- [ ] Auth flow JavaScript identified (login, token refresh, OAuth redirect handling)
-- [ ] WebSocket endpoints identified if present
-- [ ] Service worker cached routes checked
-
-### Vendor Version Fingerprinting
-- [ ] When a vendor product was fingerprinted in the recon pass, source-map APP_VERSION
-      / BUILD_HASH / `__GIT_SHA__` / Sentry-release constants extracted from the bundle
-      and source-map. Declare the discovered values in `#### Intelligence` and pass them
-      to osint-analyst — exact-version triangulation cross-references them against
-      package-registry sister-version dates and vendor changelogs to fix the deployed
-      version's exact patch level for CVE matching.
-
-### Vendor-Platform Deep-Enumeration and CSP Re-baseline
-
-The mechanics for both checks below — when they fire, the exact probes, the per-vendor
-playbooks, and the IDOR-boundedness test — live in the skills. Load
-`agent/skills/source-analysis/SKILL.md` §6b (vendor-product CSP/CORS re-baseline + deep-enum
-handoff) and `agent/skills/vendor-platform-enum/SKILL.md` (Salesforce Aura / ServiceNow
-GlideRecord / Drupal JSON:API / Pexip admin-API playbooks) when the source-map fingerprint
-flags a vendor multi-tenant platform. The role-side rule is the trigger: when the trigger
-fires, run the matching skill's procedure in the same dispatch — surfacing one anonymous
-read primitive without sweeping the namespace misses the systemic exposure.
-
-- [ ] **Vendor-platform deep-enum playbook run when one Salesforce / ServiceNow / Drupal /
-      Pexip leak is found in source-map fingerprint.** Trigger: source-map fingerprint or
-      `sources[]` paths match a vendor multi-tenant platform AND any anonymous read
-      primitive surfaces from the source analysis. Procedure (namespace enumeration,
-      tenant-singleton reads, chain-walks, IDOR boundedness test) lives in
-      `agent/skills/vendor-platform-enum/SKILL.md`; stopping at the first leak misses the
-      full anonymous-readable namespace.
-- [ ] **Vendor-template CSP / CORS re-baseline check run when a vendor-product fingerprint
-      matches.** Trigger: a fingerprinted vendor product (Salesforce Communities,
-      ServiceNow, Drupal, Pexip, Cisco appliance). Procedure (header re-pull + placeholder
-      literal grep + `'unsafe-inline'` + `'unsafe-eval'` combo check + overly-broad
-      wildcard check + vendor hardening-checklist cross-reference) lives in
-      `agent/skills/source-analysis/SKILL.md` §6b "Vendor-product CSP / CORS re-baseline";
-      payload regex set lives in `agent/references/payloads/csp-default-grep.md`.
+- [ ] **Vendor-platform deep-enum + CSP/CORS re-baseline.** When a source-map fingerprint or
+      `sources[]` paths match a vendor multi-tenant platform (Salesforce/ServiceNow/Drupal/Pexip)
+      AND an anonymous read primitive surfaces, run `agent/skills/vendor-platform-enum/SKILL.md`'s
+      namespace-enumeration playbook in the same dispatch — stopping at the first leak misses the
+      full anonymous-readable namespace. When any vendor-product fingerprint matches (Salesforce
+      Communities, ServiceNow, Drupal, Pexip, Cisco appliance), run the CSP/CORS re-baseline check
+      in `agent/skills/source-analysis/SKILL.md` §6b. Both procedures — the exact probes and
+      per-vendor playbooks — live in the skills; this is the trigger, not the method.
 
 ### Coverage Gaps
 For any analysis you could NOT complete (minified code too opaque, files behind auth, etc.),
@@ -170,37 +124,29 @@ declare it in `#### Coverage Gaps` so the operator can decide whether to re-disp
 
 Before your dispatch returns, run in this order:
 
-1. `vigil assess record-finding source-analyzer <finding-json>` for each finding (already required)
-2. `vigil assess record-intel <type> <intel-json>` for each intel row (tech-component for fingerprints, note for prose, etc.)
+1. `vigil assess finding record source-analyzer <finding-json>` for each finding (already required)
+2. `vigil assess intel record <type> <intel-json>` for each intel row (tech-component for fingerprints, note for prose, etc.)
 3. `vigil assess record-surface <type> <target> <source> [--rationale TEXT]` for each surface candidate
-4. `vigil assess ingest-endpoints "$DIR/cases.db" source-analysis` for newly extracted requestable endpoints
+4. `vigil assess ingest endpoints source-analysis` for newly extracted requestable endpoints
 5. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (e.g. `routes_extracted`, `secrets_found`, `app_version`)
 6. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
-Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
+Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`. Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
 ## Output Contract
 
-Reason through the analysis in your response — what the bundle reveals about the
-app's structure, which routes look load-bearing, what the secret patterns
-suggest, which extraction calls are worth retrying with different selectors.
-Backend writes via the Mandatory Closing Sequence above are what makes the state
-durable; the response is your reflection on top of that.
-
-Don't truncate reasoning to be brief — careful analysis of minified bundles and
-SPA route tables directly improves source-analysis hypotheses (see
-`agent/shared-constraints-core.md` "Reasoning quality > response brevity"). Follow-on hypotheses live in the handoff
-`next_steps` field, coverage gaps in `coverage_gaps`, and the
-extracted-route/secret artifacts under `$DIR/scans/` should appear in
-`working_artifacts` — meaning the response can stay focused on reasoning rather
-than enumerating canonical state.
+Reasoning quality over response brevity: see `agent/shared-specialist-core.md`. Reason through what
+the bundle reveals about the app's structure, which routes look load-bearing, and what the secret
+patterns suggest — follow-on hypotheses live in the handoff `next_steps`, coverage gaps in
+`coverage_gaps`, and extracted-route/secret artifacts under `$DIR/scans/` in `working_artifacts`, so
+the response can stay focused on reasoning rather than restating canonical state.
 
 ## Key Principles
 
 - **Read the code, don't just grep it**: Minified JS reveals structure when you trace `fetch()` calls, route registrations, and module imports. Pattern matching alone misses dynamic route construction and computed API paths.
 - **Extract aggressively, validate later**: Every API path, every key-like string, every internal URL goes into Surface Candidates. Phase 4 validates cheaply; you cannot validate what you did not extract.
 - **Source maps are gold**: A `.js.map` file turns opaque minified bundles into readable source with original filenames, function names, and comments — often revealing private routes, internal APIs, and commented-out debug endpoints.
-- **SPAs hide more than traditional apps**: The entire route table, API schema, and often the auth flow live in JavaScript. A traditional server-rendered app exposes routes in HTML links; an SPA may expose nothing in HTML but everything in JS.
+- **SPAs hide more than traditional apps**: The entire route table, API schema, and often the auth flow live in JavaScript.
 
 ## Handoffs
 

@@ -1,17 +1,19 @@
 """Regression tests for ``agent/scripts/assess/lib/scope.py`` admission rules.
 
-Wave 1 (unchoke the hot path) fixes three silent-drop bugs in scope parsing.
-The doctrine is "no silent drops": a scope entry the operator authored must
+These regressions cover three formerly silent-drop bugs in scope parsing. The
+doctrine is "no silent drops": a scope entry the operator authored must
 either be admitted or WARN — never vanish. Each test below feeds an input that
-was *previously dropped* and asserts it is now admitted (or warned), per the
-master plan's "verify a choke fix is real" guidance.
+was *previously dropped* and asserts it is now admitted (or warned).
 
 Loaded in-process via importlib so the suite stays hermetic (no FastAPI).
 """
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -82,6 +84,55 @@ def test_single_label_host_matches_itself():
     entries = scope.scope_entries({"hosts": ["intranet"]})
     assert scope.host_in_scope("intranet", entries)
     assert not scope.host_in_scope("other", entries)
+
+
+def test_discovered_hosts_inventory_does_not_expand_scope_entries():
+    entries = scope.scope_entries(
+        {
+            "hosts": ["*.example.com"],
+            "discovered_hosts": ["api.example.com", "unrelated.test"],
+        }
+    )
+
+    assert [entry["scope_entry"] for entry in entries] == ["*.example.com"]
+    assert not scope.host_in_scope("unrelated.test", entries)
+
+
+def test_scope_mutations_are_serialized_without_losing_fields(tmp_path):
+    scope_path = tmp_path / "scope.json"
+    scope_path.write_text(
+        '{"engagement_type":"web","hosts":["*.example.com"]}',
+        encoding="utf-8",
+    )
+    first_inside = threading.Event()
+    release_first = threading.Event()
+
+    def add_inventory(doc):
+        first_inside.set()
+        assert release_first.wait(timeout=2)
+        doc["discovered_hosts"] = ["api.example.com"]
+        return True
+
+    def add_approval(doc):
+        doc["exploit_review_state"] = "approved"
+        return True
+
+    first = threading.Thread(target=scope.mutate_scope, args=(str(tmp_path), add_inventory))
+    second = threading.Thread(target=scope.mutate_scope, args=(str(tmp_path), add_approval))
+    first.start()
+    assert first_inside.wait(timeout=2)
+    second.start()
+    time.sleep(0.05)
+    assert second.is_alive()
+    release_first.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    updated = json.loads(scope_path.read_text(encoding="utf-8"))
+    assert updated["discovered_hosts"] == ["api.example.com"]
+    assert updated["exploit_review_state"] == "approved"
 
 
 def test_free_text_token_parsing_still_rejects_bare_single_label():
@@ -168,3 +219,69 @@ def test_host_admitted_absent_out_of_scope_matches_legacy_behavior():
 def test_out_of_scope_non_list_raises_system_exit():
     with pytest.raises(SystemExit):
         scope.out_of_scope_entries({"out_of_scope": "appointments.acme-regional.example"})
+
+
+def test_scope_enforcement_defaults_to_enforce_and_only_explicit_bypass_disables_it():
+    assert scope.scope_enforcement({}) == "enforce"
+    assert scope.scope_enforcement({"scope_enforcement": "enforce"}) == "enforce"
+    assert scope.scope_enforcement({"scope_enforcement": "bypass"}) == "bypass"
+    # Typos and unknown values must never become an implicit bypass.
+    assert scope.scope_enforcement({"scope_enforcement": "disabled"}) == "enforce"
+
+
+def test_target_admission_enforces_allow_and_deny_lists_by_default():
+    scope_doc = {
+        "hosts": ["*.example.test"],
+        "out_of_scope": ["admin.example.test"],
+    }
+
+    admitted = scope.target_admission(scope_doc, "https://api.example.test/v1")
+    carved_out = scope.target_admission(scope_doc, "admin.example.test")
+    unrelated = scope.target_admission(scope_doc, "other.test")
+
+    assert admitted["admitted"] is True
+    assert admitted["scope_enforcement"] == "enforce"
+    assert admitted["bypassed"] is False
+    assert carved_out["admitted"] is False
+    assert "out-of-scope" in carved_out["reason"]
+    assert unrelated["admitted"] is False
+
+
+def test_target_admission_global_bypass_allows_every_parseable_target_and_marks_verdict():
+    scope_doc = {
+        "hosts": ["example.test"],
+        "out_of_scope": ["blocked.test"],
+        "scope_enforcement": "bypass",
+    }
+
+    verdict = scope.target_admission(scope_doc, "https://blocked.test/path")
+
+    assert verdict["admitted"] is True
+    assert verdict["scope_enforcement"] == "bypass"
+    assert verdict["bypassed"] is True
+    assert "global scope bypass" in verdict["reason"]
+
+
+def test_denied_tools_are_normalized_deduplicated_and_invalid_shapes_fail_closed():
+    assert scope.denied_tools({"denied_tools": [" Nuclei ", "nuclei", "SQLMAP", 7]}) == {
+        "nuclei",
+        "sqlmap",
+    }
+    with pytest.raises(SystemExit, match="denied_tools.*list"):
+        scope.denied_tools({"denied_tools": "nuclei"})
+
+
+def test_denied_tools_reads_canonical_nested_tool_policy():
+    assert scope.denied_tools(
+        {"tool_policy": {"denied_tools": [" Nuclei ", "SQLMAP"]}}
+    ) == {"nuclei", "sqlmap"}
+
+    with pytest.raises(SystemExit, match="tool_policy.*object"):
+        scope.denied_tools({"tool_policy": ["nuclei"]})
+
+
+def test_aggregate_rate_limit_parses_positive_number_and_rejects_invalid_values():
+    assert scope.aggregate_rate_limit({"rate_limit_aggregate_rps": 12.5}) == 12.5
+    assert scope.aggregate_rate_limit({}) is None
+    assert scope.aggregate_rate_limit({"rate_limit_aggregate_rps": 0}) is None
+    assert scope.aggregate_rate_limit({"rate_limit_aggregate_rps": "fast"}) is None

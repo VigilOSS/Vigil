@@ -315,7 +315,7 @@ If the application does type checking, operator injection is blocked. Look for e
 
 - Injection point (endpoint, parameter, Content-Type variant that worked)
 - Operator syntax accepted (e.g., `$ne`, `$gt`, `$regex`, `$where`)
-- Proof of exploitation — confirming a different response to operator vs string input is not enough; you must show the **attacker outcome** (e.g., `{"username":"admin","password":{"$ne":""}}` logged in as admin without credentials and the session token granted access to `/admin/users` listing 1,500 accounts; `$regex` blind extraction recovered the admin password `Hunter2!` after 340 requests, and the password authenticated via the normal login flow; auth bypass via `$gt: ""` confirmed by the response containing the admin JWT with `role: "admin"` claim)
+- Proof of exploitation — prove the attacker outcome (`agent/rules/hunting.md` §2), e.g., `{"username":"admin","password":{"$ne":""}}` logged in as admin without credentials and the session token granted access to `/admin/users` listing 1,500 accounts; `$regex` blind extraction recovered the admin password `Hunter2!` after 340 requests, and the password authenticated via the normal login flow; auth bypass via `$gt: ""` confirmed by the response containing the admin JWT with `role: "admin"` claim
 - Extraction speed and feasibility (requests/second, characters/minute)
 - MongoDB version indicators (from error messages or behavior differences)
 - Severity: Critical (auth bypass → admin access), High (data extraction), Medium (confirmed injection, limited extraction)

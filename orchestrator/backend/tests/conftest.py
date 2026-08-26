@@ -81,3 +81,20 @@ def isolate_settings(test_root):
 def client(isolate_settings):
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.fixture(autouse=True)
+def _isolate_vigil_config(tmp_path, monkeypatch):
+    """Redirect ``$VIGIL_CONFIG`` at a fresh per-test temp path so the persisted
+    active-engagement pointer in the operator's ``~/.config/vigil/config.json``
+    cannot leak into engagement resolution.
+
+    Several CLI regressions here exercise the engagement resolver
+    (``assess.lib.config`` / ``vigil_cli``), whose pointer tier reads
+    ``active_engagement_dir`` from that file. On an operator's machine the
+    pointer is a live engagement root, so without isolation it wins the resolver
+    and those tests see the wrong engagement (or fail to raise). Pointing the
+    config at an absent temp file makes the pointer tier read empty. Tests that
+    manage ``$ENGAGEMENT_DIR`` or ``$VIGIL_CONFIG`` themselves via monkeypatch
+    still override this cleanly (later setenv wins, LIFO teardown restores)."""
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "vigil-config.json"))

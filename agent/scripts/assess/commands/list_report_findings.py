@@ -1,4 +1,4 @@
-"""vigil assess list-report-findings - grouped report finding projection."""
+"""vigil assess finding report - grouped report finding projection."""
 from __future__ import annotations
 
 import argparse
@@ -12,10 +12,10 @@ from assess.lib.contracts import render_contract_epilog
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
-        "list-report-findings",
+        "report",
         help="Show grouped findings; final mode is report-readiness gated, draft mode is for inspection",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=render_contract_epilog("list-report-findings"),
+        epilog=render_contract_epilog("finding report"),
     )
     p.add_argument(
         "--mode",
@@ -107,6 +107,6 @@ def _print_readiness_conflict(exc: AssessError) -> None:
         print(f"  - ... and {len(blockers) - 10} more", file=sys.stderr)
     print(
         "Run `vigil assess check-phase-readiness --phase report` for full blockers, or "
-        "`vigil assess list-report-findings --mode draft` to inspect grouped output before final readiness passes.",
+        "`vigil assess finding report --mode draft` to inspect grouped output before final readiness passes.",
         file=sys.stderr,
     )

@@ -290,21 +290,19 @@ When PII or sensitive data is detected, report as:
 
 ```markdown
 #### Sensitive Data Detected
-| Type | Value (truncated) | Location | Severity | Count |
-|------|-------------------|----------|----------|-------|
-| Credit Card (Visa) | 4532****1234 | /api/Users response | CRITICAL | 3 |
-| Email Address | a***@example.com | /rest/memories | MEDIUM | 42 |
-| Password Hash (MD5) | 0192023a7b... | SQLi extraction | CRITICAL | 42 |
-| Internal IP | 10.0.*.* | JS config object | HIGH | 2 |
-| AWS Key | AKIA****WXYZ | .env in FTP backup | CRITICAL | 1 |
-
-**Truncation rules**: Always truncate sensitive values in output.
-- Credit cards: show first 4 + last 4, mask middle
-- Emails: show first char + domain
-- Passwords: show first 8 chars of hash
-- IDs: show first 4 + last 2, mask middle
-- Keys: show prefix + last 4 chars
+| Type | Value | Location | Severity | Count |
+|------|-------|----------|----------|-------|
+| Credit Card (Visa) | 4532015112831234 | /api/Users response | CRITICAL | 3 |
+| Email Address | alice@example.com | /rest/memories | MEDIUM | 42 |
+| Password Hash (MD5) | 0192023a7bbd73250516f069df18b500 | SQLi extraction | CRITICAL | 42 |
+| Internal IP | 10.0.4.17 | JS config object | HIGH | 2 |
+| AWS Key | AKIAIOSFODNN7EXAMPLE | .env in FTP backup | CRITICAL | 1 |
 ```
+
+Record the detected value as evidence — it is self-owned local working state (see
+`agent/shared-constraints.md`, "Credentials and Local State Are Self-Owned"). Masking third-party
+PII for a *published* report is the report-writer's job at submission time
+(`agent/references/submission-format.md`), not yours.
 
 ## Priority Order
 
@@ -318,12 +316,12 @@ When PII or sensitive data is detected, report as:
 
 ## Integration with Backend Intel Tables
 
-Detected PII feeds into the backend intel tables via `vigil assess record-intel <type> <json-file>`:
-- Email addresses → `record-intel email` (intel_emails)
-- People names + roles → `record-intel person` (intel_people)
-- Internal IPs / domains → `record-intel domain` (intel_domains, use the right `kind`: `subdomain`/`ip`/`asn`/...)
-- Credentials → `vigil assess post credentials <credential-json-file>` (assessment_credentials — NOT record-intel; credentials live in the assessment domain with their own schema)
-- Bulk PII exposure → durable finding via `vigil assess record-finding`
+Detected PII feeds into the backend intel tables via `vigil assess intel record <type> <json-file>`:
+- Email addresses → `intel record email` (intel_emails)
+- People names + roles → `intel record person` (intel_people)
+- Internal IPs / domains → `intel record domain` (intel_domains, use the right `kind`: `subdomain`/`ip`/`asn`/...)
+- Credentials → `vigil assess post credentials <credential-json-file>` (assessment_credentials — NOT intel record; credentials live in the assessment domain with their own schema)
+- Bulk PII exposure → durable finding via `vigil assess finding record`
 
 ## Cryptographic Weakness Checks
 

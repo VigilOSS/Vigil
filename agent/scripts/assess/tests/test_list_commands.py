@@ -63,7 +63,7 @@ def test_json_round_trips_and_carries_contract_pointer(capsys):
     # Round-trip: re-serializing the parsed rows yields the same structure.
     assert json.loads(json.dumps(rows)) == rows
     for row in rows:
-        assert set(row) == {"name", "summary", "phases", "kali", "contract"}
+        assert set(row) == {"name", "summary", "phases", "goals", "kali", "contract"}
         assert row["contract"] == f"vigil assess contract {row['name']}"
         assert isinstance(row["phases"], list)
 
@@ -79,7 +79,75 @@ def test_kali_only_filter_returns_only_kali_rows(capsys):
     rows = _run_json(capsys, ["list-commands", "--kali-only", "--json"])
     assert rows
     assert all(row["kali"] for row in rows)
+    # --kali-only EXPANDS the collapsed dispatcher into per-tool `kali <verb>`
+    # rows: every name is a two-token `kali <verb>`, and the collapsed root row
+    # (bare "kali") is NOT part of the expansion.
     assert all(row["name"].startswith("kali ") for row in rows)
+    assert "kali" not in {row["name"] for row in rows}
+    # One row per registered kali verb — no tool is dropped from the drill-down.
+    assert len(rows) == len(contracts.KALI_VERBS)
+    names = {row["name"] for row in rows}
+    for verb in ("kali sqlmap", "kali exec", "kali nuclei", "kali browser"):
+        assert verb in names, f"{verb!r} missing from --kali-only expansion"
+
+
+def test_default_catalog_collapses_kali_to_a_single_row(capsys):
+    # Tier 0: the default catalog must render `kali` as ONE dispatcher row, not
+    # one row per tool. This is the measurement-artifact fix — the per-verb
+    # `kali <verb>` rows only surface under --kali-only.
+    rows = _run_json(capsys, ["list-commands", "--json"])
+    kali_rows = [r for r in rows if r["kali"]]
+    assert [r["name"] for r in kali_rows] == ["kali"], (
+        "the default catalog must contain exactly one kali row (the collapsed "
+        "dispatcher), never the flattened per-tool wrappers"
+    )
+    assert not any(r["name"].startswith("kali ") for r in rows), (
+        "no per-tool `kali <verb>` row should appear in the default catalog"
+    )
+    # The single row carries a drill-down hint (count + both expansion paths) so
+    # the tool wrappers stay discoverable without inflating the default view.
+    (kali_row,) = kali_rows
+    assert str(len(contracts.KALI_VERBS)) in kali_row["summary"]
+    assert "--kali-only" in kali_row["summary"]
+    assert "contract kali" in kali_row["summary"]
+
+
+def test_kali_root_carries_union_of_verb_phases(capsys):
+    # The collapsed kali row must be tagged with the union of every kali verb's
+    # phase, so `list-commands --phase <p>` still surfaces the dispatcher for the
+    # phases ONLY kali covers (recon-pivot / exploit-recon). Otherwise those
+    # phase filters would go empty when the per-verb rows are collapsed.
+    rows = _run_json(capsys, ["list-commands", "--json"])
+    (kali_row,) = [r for r in rows if r["name"] == "kali"]
+    for phase in ("recon", "collect", "consume-test", "recon-pivot", "exploit-recon"):
+        assert phase in kali_row["phases"], f"kali row missing phase {phase!r}"
+    for phase in ("recon-pivot", "exploit-recon"):
+        filtered = _run_json(capsys, ["list-commands", "--phase", phase, "--json"])
+        assert "kali" in {r["name"] for r in filtered}
+
+
+@pytest.mark.parametrize("verb", ["kali sqlmap", "kali exec", "kali nuclei", "kali browser"])
+def test_collapsed_kali_verbs_still_resolve_as_contracts(verb):
+    # Collapsing the catalog must NOT drop any kali contract data — every
+    # `kali <verb>` stays fully resolvable via `contract kali <verb>`.
+    contract = contracts.get_contract(verb)
+    assert contract is not None, f"contract lookup for {verb!r} returned None"
+    assert contract.name == verb
+    rendered = contracts.render_contract(verb)
+    assert rendered.startswith(f"Command: {verb}")
+
+
+@pytest.mark.parametrize("name", ["auth status", "auth list"])
+def test_auth_two_token_resolves_to_auth_contract(name):
+    # `auth` is one contract documenting the `list`/`status` subcommands, so the
+    # two-token form `contract auth status` / `contract auth list` must resolve to
+    # it (mirroring `contract resolve <target>`) instead of returning None ->
+    # "Unknown contract".
+    contract = contracts.get_contract(name)
+    assert contract is not None, f"contract lookup for {name!r} returned None"
+    assert contract.name == "auth"
+    rendered = contracts.render_contract(name)
+    assert rendered.startswith("Command: auth")
 
 
 def test_grep_filter_matches_name_or_summary(capsys):
@@ -110,14 +178,134 @@ def test_grouped_text_output_has_phase_headers(capsys):
 
 def test_catalog_lists_every_registered_contract_command(capsys):
     # Completeness: the unfiltered catalog must surface EVERY command in the
-    # contract registry (the `_CONTRACTS` registry + the kali verb table via
-    # `all_command_contracts`). A command that has a contract but never reaches
-    # `list-commands` is a discovery hole; a name in the output with no backing
-    # contract is drift. The two name sets must be identical.
+    # contract registry (the `_CONTRACTS` registry + the SINGLE collapsed `kali`
+    # dispatcher row via `all_command_contracts`; the per-tool `kali <verb>`
+    # rows live behind --kali-only). A command that has a contract but never
+    # reaches `list-commands` is a discovery hole; a name in the output with no
+    # backing contract is drift. The two name sets must be identical.
     rows = _run_json(capsys, ["list-commands", "--json"])
     catalog_names = {row["name"] for row in rows}
     registry_names = {c.name for c in contracts.all_command_contracts()}
     assert catalog_names == registry_names
+
+
+# Registered argparse subcommands that previously had NO CommandContract entry,
+# so `list-commands` never surfaced them and `contract <verb>` returned
+# "Unknown contract" (regression B-Q1b). Each must now resolve through BOTH the
+# list-commands catalog and the contract registry.
+_PREVIOUSLY_UNLISTED_CODE_VERBS = (
+    "code-coverage",
+    "code-ingest",
+    "code-index sync",
+    "code-size-summary",
+)
+
+
+@pytest.mark.parametrize("name", _PREVIOUSLY_UNLISTED_CODE_VERBS)
+def test_previously_unlisted_code_verb_is_discoverable(name, capsys):
+    rows = _run_json(capsys, ["list-commands", "--json"])
+    names = {row["name"] for row in rows}
+    assert name in names, f"{name!r} is missing from the list-commands catalog"
+
+
+@pytest.mark.parametrize("name", _PREVIOUSLY_UNLISTED_CODE_VERBS)
+def test_previously_unlisted_code_verb_resolves_as_contract(name):
+    # `vigil assess contract <verb>` must no longer return "Unknown contract".
+    contract = contracts.get_contract(name)
+    assert contract is not None, f"contract lookup for {name!r} returned None"
+    assert contract.name == name
+
+
+# State-writing verbs that reached NEITHER discovery surface: no contract at the
+# verb and none at any parent, so `contract <verb>` returned "Unknown contract"
+# AND `list-commands` never listed them. An agent that cannot see a verb's write
+# schema either guesses fields or declines to record legitimate state, so each
+# must now surface in the catalog. (`assess/tests/test_cli_canonical_shapes.py`
+# enforces the general rule against the live argparse tree; these pin the
+# specific verbs the audit found.)
+_PREVIOUSLY_UNLISTED_WRITE_VERBS = (
+    "app-unit",
+    "approve-proposal",
+    "arjun-select",
+    "arjun-sweep",
+    "dns-discovery",
+    "egress-check",
+    "emit-event",
+    "exploit",
+    "gau",
+    "ingest",
+    "js-mining",
+    "log",
+    "post",
+    "recon",
+    "record-chain",
+    "record-reply",
+    "scaffold-probe",
+    "scope filter",
+    "web-discovery",
+)
+
+
+@pytest.mark.parametrize("name", _PREVIOUSLY_UNLISTED_WRITE_VERBS)
+def test_previously_unlisted_write_verb_is_discoverable(name, capsys):
+    rows = _run_json(capsys, ["list-commands", "--json"])
+    names = {row["name"] for row in rows}
+    assert name in names, f"{name!r} is missing from the list-commands catalog"
+
+
+# Namespace children whose PARENT contract explicitly tells the reader to run
+# `vigil assess contract <parent> <action>` — and which used to answer that
+# pointer with "Unknown contract". A broken pointer is worse than a missing one:
+# it spends the agent's attempt and teaches it the surface is unreliable.
+_DOCUMENTED_POINTER_ACTIONS = (
+    ("finding merge", "finding merge"),
+    ("export findings", "export findings"),
+    ("export reply", "export reply"),
+    ("export surfaces", "export surfaces"),
+)
+
+
+@pytest.mark.parametrize("name,expected", _DOCUMENTED_POINTER_ACTIONS)
+def test_namespace_pointer_action_resolves_to_its_own_contract(name, expected):
+    contract = contracts.get_contract(name)
+    assert contract is not None, f"contract lookup for {name!r} returned None"
+    assert contract.name == expected
+    assert contracts.render_contract(name).startswith(f"Command: {expected}")
+
+
+@pytest.mark.parametrize("name,_expected", _DOCUMENTED_POINTER_ACTIONS)
+def test_namespace_child_contracts_do_not_double_count_in_the_catalog(
+    name, _expected, capsys
+):
+    # Per-action contracts under a grouped parent render as part of the ONE
+    # collapsed parent row; adding them must not re-inflate the catalog.
+    rows = _run_json(capsys, ["list-commands", "--json"])
+    assert name not in {row["name"] for row in rows}
+
+
+def test_kali_sweep_is_a_first_class_kali_verb():
+    # `sweep` is registered in cli.py's kali loop; it was missing from
+    # KALI_VERBS, so `contract kali sweep` returned Unknown and --kali-only
+    # dropped it. Its contract must document the surface that actually matters:
+    # the required value list and the `--` command template.
+    assert "sweep" in contracts.KALI_VERBS
+    rendered = contracts.render_contract("kali sweep")
+    assert rendered.startswith("Command: kali sweep")
+    assert "--values" in rendered
+    assert "--placeholder" in rendered
+
+
+def test_code_coverage_contract_documents_gate_flags():
+    # code-coverage runs every code Core-Loop iteration; its contract must
+    # document the --cwe-matrix and --require-gate-pass flags it accepts.
+    contract = contracts.get_contract("code-coverage")
+    assert contract is not None
+    blob = " ".join(contract.preferred_invocations)
+    blob += " " + " ".join(contract.notes)
+    blob += " " + " ".join(default for _, default in contract.helper_defaults)
+    assert "--cwe-matrix" in blob
+    assert "--require-gate-pass" in blob
+    assert "--require-transition-ready" in blob
 
 
 # The discovery / navigation / core-query commands a specialist reaches for.
@@ -135,19 +323,21 @@ _MUST_BE_DISCOVERABLE = (
     "transition-phase",
     # core read/query primitives
     "coverage",
-    "list-findings",
-    "list-intel",
-    "list-command-runs",
-    "get-command-run",
     "resume-brief",
     "artifact",
+    # Grouped subcommands render as ONE collapsed catalog row each (like
+    # `kali`); their per-action verbs resolve via `contract <parent> <action>`.
+    "finding",
+    "intel",
+    "export",
+    "command-run",
     # representative write/probe verbs across phases
-    "record-finding",
-    "verify-finding",
-    "record-attempt",
+    "record-probe",
+    "resolve",
     "block-technique",
-    "kali sqlmap",
-    "kali exec",
+    # the kali dispatcher is ONE collapsed catalog row; its per-tool wrappers
+    # are asserted discoverable under --kali-only elsewhere in this module.
+    "kali",
 )
 
 

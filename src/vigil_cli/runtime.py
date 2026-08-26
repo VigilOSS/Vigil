@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
@@ -10,6 +9,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from . import docker
+from . import image_freshness
 from .config import (
     DEFAULT_RUNTIME_PIDS_LIMIT,
     DEFAULT_RUNTIME_SHM_SIZE,
@@ -21,9 +21,7 @@ from .config import (
 from .paths import (
     container_host_url,
     default_runtime_container,
-    engagements_root,
     read_env_file,
-    resolve_install_root,
     resolve_orchestrator_base_url,
 )
 
@@ -229,9 +227,6 @@ class RuntimeOptions:
     allow_oversubscribe: bool = False
 
 
-_RUNTIME_INPUTS_LABEL = "com.vigil.runtime-inputs-sha256"
-
-
 def runtime_image_inputs(install_root: Path) -> list[Path]:
     """Files BAKED into the runtime image. A change to one of these (and ONLY
     these) requires ``vigil runtime build``; every other file under
@@ -247,17 +242,14 @@ def runtime_image_inputs(install_root: Path) -> list[Path]:
 
 
 def runtime_inputs_digest(install_root: Path) -> str:
-    digest = hashlib.sha256()
-    for path in runtime_image_inputs(install_root):
-        try:
-            label = path.relative_to(install_root).as_posix()
-        except ValueError:
-            label = str(path)
-        digest.update(label.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes() if path.is_file() else b"<absent>")
-        digest.update(b"\0")
-    return digest.hexdigest()
+    """Content digest of the runtime image's baked inputs.
+
+    Delegates to the shared image-input digest so the runtime and proxy images
+    are judged fresh by exactly one mechanism.
+    """
+    return image_freshness.inputs_digest(
+        runtime_image_inputs(install_root), root=install_root
+    )
 
 
 def runtime_image_build_state(
@@ -267,16 +259,9 @@ def runtime_image_build_state(
     ``unknown``. Compares the current baked-input digest to the digest stamped on
     the image at build time, so it is NOT fooled by ``vigil install`` rewriting
     file mtimes. An image built before digest stamping returns ``unknown``."""
-    if not docker.image_exists(image, runner=runner):
-        return "missing"
-    result = runner([
-        "docker", "image", "inspect", "-f",
-        '{{ index .Config.Labels "' + _RUNTIME_INPUTS_LABEL + '" }}', image,
-    ])
-    baked = (result.stdout or "").strip() if result.returncode == 0 else ""
-    if not baked or baked == "<no value>":
-        return "unknown"
-    return "current" if baked == runtime_inputs_digest(install_root) else "stale"
+    return image_freshness.image_inputs_state(
+        image, runtime_image_inputs(install_root), root=install_root, runner=runner
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -334,7 +319,12 @@ def build_runtime(install_root: Path, *, variant: str = "full", dev: bool = Fals
     image = "vigil-lightweight:latest" if variant == "lightweight" else "vigil:latest"
     argv = ["docker", "build", "-t", image, "-f", str(dockerfile)]
     if variant == "full":
-        argv += ["--label", f"{_RUNTIME_INPUTS_LABEL}={runtime_inputs_digest(install_root)}"]
+        argv += [
+            "--label",
+            image_freshness.inputs_label_arg(
+                runtime_image_inputs(install_root), root=install_root
+            ),
+        ]
     argv.append(str(install_root))
     docker.require_success(runner(argv), argv)
 
@@ -438,6 +428,27 @@ def start_runtime(
     data_dir.mkdir(parents=True, exist_ok=True)
     engagements_dir.mkdir(parents=True, exist_ok=True)
 
+    # Fail fast with an accurate message when the Docker daemon is unresponsive
+    # or not running. Without this, the first metadata query below
+    # (``image_exists``) returns empty against a wedged daemon — the bounded
+    # ``run_command`` timeout keeps it from hanging (I-02) — and start_runtime
+    # would raise the MISLEADING "Missing runtime image" instead of naming the
+    # real problem. Distinguish a hung daemon (timed out) from an absent one.
+    health = docker.daemon_status(runner=runner)
+    if not health.responsive:
+        headline = (
+            "Docker is not responding (the daemon/VM appears wedged)"
+            if health.timed_out
+            else "Docker does not appear to be running"
+        )
+        detail = f"\n  {health.detail}" if health.detail else ""
+        raise SystemExit(
+            f"{headline} — cannot start the runtime.{detail}\n"
+            "  Start or restart Docker (on macOS: launch Docker Desktop, or quit and reopen it "
+            "if it is hung), then retry. Confirm with `docker info`.\n"
+            "  Set VIGIL_DOCKER_TIMEOUT (seconds) if a slow-but-healthy daemon needs longer to respond."
+        )
+
     if not docker.image_exists(options.image, runner=runner):
         raise SystemExit(
             f"Missing runtime image: {options.image}. Run `vigil runtime build` first.\n"
@@ -539,6 +550,7 @@ def start_bench_runtime(
     container_name: str,
     *,
     net: str,
+    engagement_dir: Path | None = None,
     image: str = "vigil:latest",
     runner: docker.Runner = docker.run_command,
 ) -> None:
@@ -553,16 +565,16 @@ def start_bench_runtime(
 
     The bench runtime makes ZERO backend calls (the host-side ``vigil`` CLI does
     every backend write and merely ``docker exec``s into this container), so it
-    needs the FRONT net and the ``/engagements`` mount and NOTHING else — no
-    ``--add-host`` host gateway, no ``--env-file``, no ``ORCHESTRATOR_BASE_URL``,
-    and no ``--restart`` (it is reaped at teardown, never meant to survive).
+    needs the FRONT net and, for an agent attempt, only that attempt's engagement
+    directory. Factory verification passes no ``engagement_dir`` and gets no host
+    filesystem mount. The whole engagements root is never exposed. There is no
+    ``--add-host`` host gateway, ``--env-file``, ``ORCHESTRATOR_BASE_URL``, or
+    ``--restart`` (it is reaped at teardown, never meant to survive).
     Runs at the lightweight ``BENCH_RUNTIME_RESOURCES`` tier, not the 8 GB
     operator tier, so many attempts can fan out concurrently on one Docker VM.
     The keep-alive is the image's own default CMD (``sleep infinity``), same as
     the shared runtime.
     """
-    engagements_dir = engagements_root(resolve_install_root()).expanduser().resolve()
-    engagements_dir.mkdir(parents=True, exist_ok=True)
     resources = BENCH_RUNTIME_RESOURCES
     argv = [
         "docker",
@@ -582,10 +594,31 @@ def start_bench_runtime(
         f"--pids-limit={resources.pids_limit}",
         f"--shm-size={resources.shm_size}",
         "--oom-score-adj=-500",
-        "-v",
-        f"{engagements_dir}:/engagements",
-        image,
     ]
+    if engagement_dir is not None:
+        mount_error = (
+            "bench runtime engagement_dir must be one engagement directory "
+            "under engagements/ with a scope.json and a safe key"
+        )
+        try:
+            resolved = Path(engagement_dir).expanduser().resolve(strict=True)
+        except OSError as exc:
+            raise ValueError(mount_error) from exc
+        key = resolved.name
+        valid_key = bool(key) and all(char.isalnum() or char == "-" for char in key)
+        if (
+            not resolved.is_dir()
+            or resolved.parent.name != "engagements"
+            or not valid_key
+            or not (resolved / "scope.json").is_file()
+            or "," in str(resolved)
+        ):
+            raise ValueError(mount_error)
+        argv.extend([
+            "--mount",
+            f"type=bind,source={resolved},target=/engagements/{key}",
+        ])
+    argv.append(image)
     # Raise a RuntimeError (not require_success's SystemExit) so a start failure
     # surfaces as a regular Exception, homogeneous with the network.create/connect
     # failures staging already handles on its one cleanup path.
@@ -615,7 +648,16 @@ def stop_bench_runtime(container_name: str, *, runner: docker.Runner = docker.ru
 
 def runtime_status(container_name: str | None = None, *, runner: docker.Runner = docker.run_command) -> str:
     container_name = container_name or default_runtime_container()
-    return "running" if docker.container_running(container_name, runner=runner) else "stopped"
+    if docker.container_running(container_name, runner=runner):
+        return "running"
+    # Not listed as running. Distinguish a genuinely stopped container from an
+    # unresponsive/absent Docker daemon so `vigil runtime status` (and the
+    # `vigil status` snapshot) never reports a wedged VM as a benign "stopped"
+    # (I-02). The daemon probe is bounded by run_command's timeout, so this
+    # degrades instead of hanging.
+    if not docker.daemon_available(runner=runner):
+        return "docker-unavailable"
+    return "stopped"
 
 
 def _already_running_message(container_name: str, install_root: Path) -> str:

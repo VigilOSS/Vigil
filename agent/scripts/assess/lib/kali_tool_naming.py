@@ -121,6 +121,17 @@ def _analyze_tool_name(cmd: list[str]) -> tuple[str, dict[str, Any]]:
     """
     if not cmd:
         return "command", {}
+    # Keep launcher option knowledge in the execution-policy parser so audit
+    # naming, denied-tool enforcement, and OOB safety cannot drift apart.
+    from . import scope as scope_lib
+
+    effective = scope_lib._unwrap_launcher_argv(cmd)
+    if effective != cmd:
+        name, meta = _analyze_tool_name(effective)
+        return name, {
+            **meta,
+            "transparent_launchers": [cmd[0]],
+        }
     first = cmd[0]
     if first not in _SHELL_BINARIES:
         return first, {}

@@ -5,7 +5,7 @@ state is ``request_variant_id`` (the value the backend returns when a request
 observation is posted) — NOT the local work_item row id, which is ephemeral and
 re-created per engagement run. This helper posts that linkage to the backend so
 both ``ingest-candidates`` (auto-linking from ``surface_refs``) and the
-``link-surface-work-items`` CLI command share one HTTP call site.
+``work-buffer link-surface`` CLI command share one HTTP call site.
 """
 from __future__ import annotations
 

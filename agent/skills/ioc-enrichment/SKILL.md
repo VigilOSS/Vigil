@@ -26,8 +26,8 @@ origin: Vigil
 This skill is **support-class** — it does not produce findings on its
 own. IOC reputation lookups feed the investigator's evidence_refs, the
 verifier's check outcomes, and the ir-lead's containment proposals.
-Record reputation as intel via `vigil assess record-intel`, link intel
-to findings via `vigil assess link-finding`.
+Record reputation as intel via `vigil assess intel record`, link intel
+to findings via `vigil assess finding link`.
 
 ## Always-active references
 
@@ -82,7 +82,7 @@ MAXMIND_LICENSE_KEY=<maxmind-key>
 ```
 
 The actual key values do NOT enter the engagement repository, the
-`host-exec` `--intent` field, or the `record-intel` payload. Missing
+`host-exec` `--intent` field, or the `intel record` payload. Missing
 API keys for a given source surface as `coverage_gaps` in the dispatch
 handoff so the operator can decide whether to re-dispatch with
 credentials.
@@ -91,13 +91,13 @@ credentials.
 
 These touch no external services and do not need the audit envelope:
 
-- `vigil assess record-intel <type> <json-file>` — record reputation
+- `vigil assess intel record <type> <json-file>` — record reputation
   results into the appropriate `intel_*` table
-- `vigil assess link-finding <finding> --intel <intel-id>` —
+- `vigil assess finding link <finding> --intel <intel-id>` —
   associate enriched IOC with a finding; `--intel` may be repeated to
   attach multiple intel rows in one call (the verb merges with any
   existing `details.related_intel_ids[]` on the finding)
-- `vigil assess list-intel <type>` — query existing intel records to
+- `vigil assess intel list <type>` — query existing intel records to
   avoid duplicate enrichment
 - `vigil assess artifact register` / `artifact search` — register IOC
   dump artifacts
@@ -119,8 +119,8 @@ touch no tenant data.
 Before enriching, query existing intel for de-duplication:
 
 ```bash
-vigil assess list-intel domain --q "<domain>" --json | jq '.[]'
-vigil assess list-intel dns-record --q "<ip>" --json | jq '.[]'
+vigil assess intel list domain --q "<domain>" --json | jq '.[]'
+vigil assess intel list dns-record --q "<ip>" --json | jq '.[]'
 ```
 
 An IOC already recorded from a prior dispatch does not need re-enrichment
@@ -196,23 +196,23 @@ allowlist sections:
 Tenant-ref-matched IOCs record as intel WITHOUT an adversarial tag —
 the record exists for audit, not for finding evidence. Use
 `--intent "<ioc> matches tenant ref allowlist — recorded for audit"`
-on the record-intel step.
+on the intel record step.
 
 ### Step 5 — Record findings to `intel_*` tables
 
 Reputation results land in the existing intel schema. There is **no**
 `intel_iocs` table; map by IOC kind to the appropriate existing table:
 
-| IOC kind | Table | record-intel verb |
+| IOC kind | Table | intel record verb |
 |----------|-------|--------------------|
-| `domain` | `intel_domains` | `record-intel domain` |
-| `ip` / `dns_record` / URL | `intel_dns_records` | `record-intel dns-record` |
-| `email` (address) | `intel_emails` | `record-intel email` |
-| `breach-record` (credential leak) | `intel_breach_records` | `record-intel breach-record` |
-| `cve` (vendor advisory hit, e.g., on a hash that matches a known CVE-affected binary) | `intel_cves` | `record-intel cve` |
-| `social-profile` (sender-reputation cross-ref to Twitter/LinkedIn) | `intel_social_profiles` | `record-intel social-profile` |
-| `org-fact` (ASN ownership → company name) | `intel_org_facts` | `record-intel org-fact` |
-| `note` (free-form reputation summary; ASN reputation; hash reputation; anything that doesn't fit a structured row) | `intel_notes` | `record-intel note` |
+| `domain` | `intel_domains` | `intel record domain` |
+| `ip` / `dns_record` / URL | `intel_dns_records` | `intel record dns-record` |
+| `email` (address) | `intel_emails` | `intel record email` |
+| `breach-record` (credential leak) | `intel_breach_records` | `intel record breach-record` |
+| `cve` (vendor advisory hit, e.g., on a hash that matches a known CVE-affected binary) | `intel_cves` | `intel record cve` |
+| `social-profile` (sender-reputation cross-ref to Twitter/LinkedIn) | `intel_social_profiles` | `intel record social-profile` |
+| `org-fact` (ASN ownership → company name) | `intel_org_facts` | `intel record org-fact` |
+| `note` (free-form reputation summary; ASN reputation; hash reputation; anything that doesn't fit a structured row) | `intel_notes` | `intel record note` |
 
 The intel schema is documented in `orchestrator/backend/app/db.py:2145-2413`
 (the `CREATE TABLE` blocks). The schema files in `agent/schemas/intel-*.schema.json`
@@ -241,13 +241,13 @@ cat > /tmp/dns-record.json <<JSON
 }
 JSON
 
-vigil assess record-intel dns-record /tmp/dns-record.json
+vigil assess intel record dns-record /tmp/dns-record.json
 ```
 
 For `domain` records, set `record_type` to the WHOIS+VT shape (registrar,
 registered_utc, domain_age_days, virustotal_malicious_count, otx_pulse_count,
 ns_records, mx_records, category). For `asn` reputation, drop into
-`record-intel note` with `topic: "ASN reputation"` and the ASN + owner +
+`intel record note` with `topic: "ASN reputation"` and the ASN + owner +
 country in `details` — there is no dedicated ASN table.
 
 The schema slots above (`details.*`) are the conventional extension
@@ -257,12 +257,12 @@ for required-field validation; the extensions live in `details`.
 
 ### Step 6 — Link enriched IOCs back to the finding
 
-After `record-intel` returns the intel row's ID, link it to the
+After `intel record` returns the intel row's ID, link it to the
 finding:
 
 ```bash
-vigil assess link-finding <finding-slug> --intel <intel-id> \
-  --note "IP <ip> recorded as DNS record intel; reputation supports adversarial classification"
+vigil assess finding link <finding-slug> --intel <intel-id> \
+  --reason "IP <ip> recorded as DNS record intel; reputation supports adversarial classification"
 ```
 
 `--intel` may be repeated to attach multiple intel ids in one call.
@@ -333,7 +333,7 @@ this pass; missing providers (no API key, rate-limited) surface as
 
 - **Recording reputation as a finding instead of intel.** This skill
   produces intel; the L2 investigator records findings. Calling
-  `record-finding` from IOC enrichment violates the no-theoretical-
+  `finding record` from IOC enrichment violates the no-theoretical-
   findings rule analog (red mode's `agent/rules/hunting.md`; blue
   mode's `agent/rules/triage.md` rule 1 — outcome before theory).
 - **Skipping the tenant-ref allowlist check.** Public reputation flags
@@ -368,7 +368,7 @@ this pass; missing providers (no API key, rate-limited) surface as
   reputation-verified key).
 - `agent/scripts/assess/lib/intel_types.py` — canonical intel-type ↔
   schema-file mapping; the list there is the source of truth for
-  `record-intel <type>` verbs.
+  `intel record <type>` verbs.
 - `orchestrator/backend/app/db.py:2145-2413` — schema source of truth
   for `intel_*` tables (intel_tech_components, intel_people,
   intel_emails, intel_domains, intel_cves, intel_dns_records,

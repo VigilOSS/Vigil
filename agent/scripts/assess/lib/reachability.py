@@ -1,7 +1,7 @@
 """Single source of truth for turning one host probe into a reachability verdict.
 
 Both the egress self-test (`vigil assess egress-check`) and httpx ingestion
-(`vigil assess ingest-httpx`) classify probes identically by importing
+(`vigil assess ingest httpx`) classify probes identically by importing
 ``classify_probe`` here, so the two cannot drift.
 
 The verdict logic encodes the hard-won §9 engagement lesson: a bare

@@ -3,6 +3,7 @@ name: gf-patterns:jwt
 description: JWT/bearer-token surface patterns (access_token, refresh_token, id_token param keys)
 origin: local overlay (gf upstream had interestingparams at weight 15; this adds path coverage)
 bucket: jwt
+skill: jwt-testing
 weight: 30
 ---
 

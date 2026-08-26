@@ -10,7 +10,7 @@ For live engagement targets, run `nuclei` via `vigil assess kali nuclei` (typed 
 
 Per-target rate calibration: `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy". Pull `--rate-limit / -bs / -c` from the matching trait row before running broad sweeps.
 
-Run all nuclei probes via `vigil assess kali nuclei` — the typed verb passes audit flags and writes the coverage row. Pass the required audit flags (`--technique`, `--intent`, `--probe-kind`, `--phase`, `--timeout`) per `shared-constraints.md §2`. See `agent/skills/kali-exec/SKILL.md` "Examples per verb — kali nuclei" for complete invocation profiles with OOB configuration.
+Run all nuclei probes via `vigil assess kali nuclei` — the typed verb passes audit flags and writes the coverage row. Pass the required audit flags (`--technique`, `--intent`, `--probe-kind`, `--phase`, `--timeout`) per `shared-constraints.md §2`. Use `vigil assess contract kali nuclei` for the current invocation profiles and wrapper-owned OOB policy.
 
 ## Basic Scanning
 
@@ -40,13 +40,16 @@ Note: Template paths use protocol prefix (e.g., `http/cves/`, `dns/`, `network/`
 
 ## OOB Callbacks
 
-OOB callbacks use the shared interactsh infrastructure — agents do not pass raw interactsh URLs directly. Instead:
-1. `vigil oob status --json` — confirm `server=true`, `frpc=true`.
-2. `vigil oob client start <name> --engagement <key> --agent <role>` — start the listener client.
-3. Pass the configured OOB server domain (`domain` from step 1, e.g. `oob.example.com`) as `-interactsh-url <domain>` so nuclei's own per-template callbacks land on the shared listener. Nuclei appends its own unique id per probe; `vigil oob poll` extracts that label.
-4. `vigil oob poll --client <name>` — correlate probe<->callback after probes fire; a matched row is the confirmed hit. `vigil oob client logs <name> --lines 80` is a raw listener tail for infra debugging only, not a correlation source.
+OOB callbacks use the persisted Vigil tenant route. The operator first checks the output of
+`vigil oob status --json` for `server=true`, `frpc=true`, `route_matches=true`, and a resolving
+tenant domain. Then run the typed verb with `--oob-mode vigil`; the wrapper supplies that tenant
+domain to Nuclei and rejects raw `-interactsh-url` / `-interactsh-server` flags so ambient
+configuration cannot redirect callbacks. Nuclei's own JSONL finding is the correlation source for Nuclei-managed callback IDs.
+Operator-provisioned `vigil oob client` + `mint` + `poll` remains the path for manual callback
+probes; a separate Vigil client does not replace Nuclei's internal callback tracking.
 
-**Disable interactsh (when OOB unavailable):** `-no-interactsh`
+**Disable interactsh:** omit the flag or pass `--oob-mode none` (the default). Use
+`--oob-mode public` only for an explicit public-Interactsh data-egress decision.
 
 ## Rate Limiting & Performance
 

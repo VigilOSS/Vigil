@@ -22,6 +22,12 @@ _SCRIPTS_ROOT = Path(__file__).resolve().parents[2]  # agent/scripts
 if str(_SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_ROOT))
 
+# The tests directory is on sys.path (pytest prepend import mode; no __init__.py
+# here), so the shared, backend-less fake for AssessmentClient imports as a
+# top-level module. Re-exported here so `from conftest import FakeAssessmentClient`
+# also resolves and so the module is always loaded for the suite.
+from _fake_client import FakeAssessmentClient  # noqa: E402,F401
+
 
 @pytest.fixture(autouse=True)
 def _isolate_vigil_config(tmp_path, monkeypatch):
@@ -29,9 +35,8 @@ def _isolate_vigil_config(tmp_path, monkeypatch):
     engagement resolver never reads the developer's real
     ~/.config/vigil/config.json.
 
-    The active-engagement pointer (resolver tier 3) lives in that file and now
-    out-ranks $ENGAGEMENT_DIR (tier 4); without this isolation a real pointer on
-    the developer's machine would silently win over an $ENGAGEMENT_DIR-based test
-    and flip its result. A test that needs a pointer writes to this same path.
+    Assessment state no longer resolves through the active pointer, but other
+    helpers still read this config and must not observe the developer's state.
     """
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "vigil-config.json"))
+    monkeypatch.delenv("VIGIL_SESSION_ENGAGEMENT_DIR", raising=False)

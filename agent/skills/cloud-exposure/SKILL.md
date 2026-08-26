@@ -2,6 +2,7 @@
 name: cloud-exposure
 description: Exposed cloud storage triage — S3/GCS/Azure buckets, severity escalation, swarm-dispatch over corpus
 origin: Vigil
+vuln_class: info-disclosure
 ---
 
 # Cloud Exposure Investigation
@@ -23,7 +24,8 @@ A public bucket is not automatically critical. Severity rides on **what is in th
 - `vigil assess kali exec -- cloud_enum -k <keyword>` to **discover** unknown bucket/blob/host names across AWS, Azure, and GCP from an org/brand/product keyword — reach for it when recon has a company name but no concrete bucket yet, because it mutates the keyword against its built-in fuzz list and probes all three clouds in one pass instead of you hand-guessing one name at a time (use `--technique OSINT --probe-kind fingerprint --phase recon`)
 - `vigil assess kali exec -- s3scanner -bucket <name>` (or `-bucket-file <list>`) to **scan a known/candidate S3 bucket** for existence, region, and per-grant permissions (READ / WRITE / READ_ACP / WRITE_ACP) without AWS creds — it deterministically reports the open/closed and `bucket_not_found` state, which is the screening input the takeover-claimability check in Step 2 needs (a `bucket_not_found` is a *screening* signal, not a takeover verdict — see `agent/references/subdomain-takeover.md`)
 - `vigil assess kali exec -- curl ...` for the bucket listing and sample object pulls (use `--technique INFO-DISCLOSURE --probe-kind fingerprint --phase recon --timeout 60`)
-- `vigil assess kali exec -- aws s3 ls s3://<bucket> --no-sign-request` and `aws s3 cp` for AWS listings (or `gsutil ls` / `az storage blob list` for GCS/Azure)
+- `vigil assess kali exec -- aws s3 ls s3://<bucket> --no-sign-request` and `aws s3 cp --no-sign-request` for AWS listings — `--no-sign-request` is load-bearing here: the runtime container ships the `aws` binary but holds no credentials, so a signed call fails with `NoCredentials`. (Anything that *does* need signing runs on the host through `vigil assess host-exec --tool aws ...`; see `agent/skills/aws-iam-privesc/SKILL.md`.)
+- GCS and Azure have no CLI in the runtime image (`gsutil` and `az` are not installed) — list them anonymously over HTTPS with `vigil assess kali exec -- curl`: `https://storage.googleapis.com/<bucket>?prefix=` for GCS, `https://<account>.blob.core.windows.net/<container>?restype=container&comp=list` for Azure
 - `vigil assess kali exec -- trufflehog filesystem <dir>` for offline secret scanning over a downloaded sample (host-side tool, not target-facing)
 - `vigil assess agent start-swarm` for fanning corpus-scale source review out to many parallel `code-vuln-hunter` workers — see "Swarm Dispatch" below
 
@@ -95,6 +97,12 @@ Bucket content falls into one of four classes; the dispatch shape changes with e
 
 The classification comes from the actual sample, not the bucket name. A bucket called `internal-prod-secrets` may turn out to hold only product imagery; a bucket called `marketing-assets` may turn out to hold an archived source tarball.
 
+When the credentials/secrets sample is an AWS access key, session token, or role-assumable ARN,
+`exploit-developer` loads `agent/skills/aws-iam-privesc/SKILL.md` before testing the key live —
+that skill's methodology (the 14-vector privesc matrix, cross-account role assumption, IMDS
+exploitation) is what turns "the key authenticates" into a proved blast radius, rather than a
+single `get-caller-identity` call.
+
 ### Step 4 — Swarm dispatch for large source corpora
 
 When Step 3 lands the corpus in the "Source code / repos" class and the listing shows 100+ source files, **do not** dispatch one `code-vuln-hunter` at full reasoning over the whole corpus — that runs out of context. Use the swarm helper:
@@ -150,11 +158,11 @@ CRITICAL requires exploit-developer proving the keys work against the live provi
 
 ## What to Record
 
-- `record-intel note` with the bucket name, region, listing-URL, consumer mapping from Step 2, and a one-line content classification from Step 3.
-- `record-finding info-disclosure-testing` for LOW–MEDIUM disclosures (public logs, schemas, internal docs).
-- `record-finding code-vuln-hunter` for HIGH source-disclosure (the swarm workers record these per-batch).
-- `record-finding exploit-developer` for CRITICAL credential exposures **after** target-proven replay.
-- `record-intel cve` if the exposed source matches a known vulnerable version.
+- `intel record note` with the bucket name, region, listing-URL, consumer mapping from Step 2, and a one-line content classification from Step 3.
+- `finding record info-disclosure-testing` for LOW–MEDIUM disclosures (public logs, schemas, internal docs).
+- `finding record code-vuln-hunter` for HIGH source-disclosure (the swarm workers record these per-batch).
+- `finding record exploit-developer` for CRITICAL credential exposures **after** target-proven replay.
+- `intel record cve` if the exposed source matches a known vulnerable version.
 
 Cleanup obligation: any object downloaded to the runtime container or the host should land in `/engagements/$ENGAGEMENT_KEY/scans/cloud-exposure/<bucket>/` so the engagement directory captures the evidence with the audit row. Do not delete the listing after recording — it is the durable proof of exposure shape at the time of the finding.
 

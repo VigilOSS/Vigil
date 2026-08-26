@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import re
-import sqlite3
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -75,6 +75,21 @@ def test_agent_action_help_is_action_specific(capsys) -> None:
     assert "start-swarm" not in captured.out
 
 
+def test_agent_list_accepts_json_flag(monkeypatch, capsys) -> None:
+    """JSON-producing list verbs accept --json consistently."""
+    root = str(_scripts_root())
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    import assess.cli as cli
+    from assess.commands import dispatch
+
+    monkeypatch.setattr(dispatch, "_list_dispatches", lambda args: print("{}"))
+
+    cli.main(["agent", "list", "--limit", "5", "--json"])
+
+    assert capsys.readouterr().out.strip() == "{}"
+
+
 def test_get_command_run_accepts_json_flag(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_script_module(
         "test_get_command_run_module",
@@ -111,12 +126,114 @@ def test_get_command_run_accepts_json_flag(monkeypatch, tmp_path: Path, capsys) 
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command")
     module.register(sub)
-    args = parser.parse_args(["get-command-run", "123", "--json"])
+    args = parser.parse_args(["get", "123", "--json"])
     args.engagement_dir = tmp_path
     args.func(args)
 
     assert captured_endpoints == ["command-runs/123"]
     assert json.loads(capsys.readouterr().out) == {"id": 123, "stdout_preview": "ok"}
+
+
+def test_get_command_run_live_reads_current_on_disk_tails(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_script_module(
+        "test_get_command_run_live_module",
+        "agent/scripts/assess/commands/get_command_run.py",
+    )
+    output_dir = tmp_path / "scans" / "kali"
+    output_dir.mkdir(parents=True)
+    stdout = output_dir / "run.out"
+    stderr = output_dir / "run.err"
+    stdout.write_text("still running\nlatest stdout\n", encoding="utf-8")
+    stderr.write_text("latest stderr\n", encoding="utf-8")
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+
+    class FakeClient:
+        def __init__(self, *args):
+            pass
+
+        def get(self, endpoint: str):
+            return {
+                "id": 123,
+                "status": "running",
+                "stdout_path": str(stdout),
+                "stderr_path": str(stderr),
+                "stdout_preview": "old preview",
+            }
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command")
+    module.register(sub)
+    args = parser.parse_args(["get", "123", "--live"])
+    args.engagement_dir = tmp_path
+
+    args.func(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["live_output"]["stdout"] == "still running\nlatest stdout\n"
+    assert payload["live_output"]["stderr"] == "latest stderr\n"
+
+
+def test_get_command_run_live_refuses_paths_outside_engagement(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_script_module(
+        "test_get_command_run_live_refusal_module",
+        "agent/scripts/assess/commands/get_command_run.py",
+    )
+    outside = tmp_path.parent / "outside-secret.txt"
+    outside.write_text("must not leak", encoding="utf-8")
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+
+    class FakeClient:
+        def __init__(self, *args):
+            pass
+
+        def get(self, endpoint: str):
+            return {"id": 123, "stdout_path": str(outside), "stderr_path": None}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command")
+    module.register(sub)
+    args = parser.parse_args(["get", "123", "--live"])
+    args.engagement_dir = tmp_path
+
+    args.func(args)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["live_output"]["stdout"] == "[refused: path outside engagement]"
+    assert "must not leak" not in json.dumps(payload)
 
 
 def test_fetch_auto_pages_bounded_assessment_lists(capsys) -> None:
@@ -140,6 +257,36 @@ def test_fetch_auto_pages_bounded_assessment_lists(capsys) -> None:
     assert "auto-paging surfaces with page_size=5000" in err
     assert "stdout will be one combined JSON array" in err
     assert "fetched 5001 surfaces row(s) across all pages" in err
+
+
+def test_fetch_auto_pages_variant_receipts_at_backend_max(capsys) -> None:
+    from app.services import code_analysis
+
+    module = _load_script_module(
+        "test_fetch_module_variant_receipt_pages",
+        "agent/scripts/assess/commands/fetch.py",
+    )
+    page_size = code_analysis.MAX_VARIANT_RECEIPT_PAGE
+    assert module.MAX_VARIANT_RECEIPT_PAGE == page_size
+    assert module._PAGED_ASSESSMENT_ENDPOINTS["code/variant-checks"] == page_size
+    calls: list[str] = []
+
+    class FakeClient:
+        def get_all_pages(self, endpoint: str, *, page_size: int = 5000):
+            calls.append(endpoint)
+            assert page_size == code_analysis.MAX_VARIANT_RECEIPT_PAGE
+            return [{"id": i} for i in range(501)]
+
+    rows = module._fetch_assessment_endpoint(
+        FakeClient(),
+        "code/variant-checks?repo_id=7",
+    )
+
+    assert len(rows) == 501
+    assert calls == ["code/variant-checks?repo_id=7"]
+    err = capsys.readouterr().err
+    assert f"auto-paging code/variant-checks with page_size={page_size}" in err
+    assert "fetched 501 code/variant-checks row(s) across all pages" in err
 
 
 def test_fetch_respects_explicit_pagination_query(capsys) -> None:
@@ -259,7 +406,10 @@ def test_check_phase_readiness_scope_gate_fetches_all_surfaces(monkeypatch, tmp_
         return {"ready": True}
 
     monkeypatch.setattr(module.cc, "_vendor_saas_decided_hosts", lambda _client: set())
-    monkeypatch.setattr(module.cc, "_load_work_items_by_host", lambda _path: {})
+    # `_load_work_items_by_host` now takes an AssessmentClient (it rolls the work
+    # buffer up from the backend via `client.get_all_pages("work-items")`), not a
+    # cases.db Path.
+    monkeypatch.setattr(module.cc, "_load_work_items_by_host", lambda _client: {})
     monkeypatch.setattr(module.cc, "build_scope_coverage_report", fake_build_scope_coverage_report)
 
     cfg = SimpleNamespace(engagement_key="eng", engagement_dir=str(tmp_path))
@@ -427,63 +577,6 @@ def test_list_intel_search_uses_canonical_entity_type(monkeypatch, tmp_path: Pat
     assert "[]" in capsys.readouterr().out
 
 
-def test_record_proposal_rejects_invalid_finding_payload(tmp_path: Path, capsys) -> None:
-    module = _load_script_module(
-        "test_record_proposal_module",
-        "agent/scripts/assess/commands/record_proposal.py",
-    )
-    session_dir = tmp_path / "session-a"
-    session_dir.mkdir()
-    payload_path = tmp_path / "proposal.json"
-    payload_path.write_text(
-        json.dumps({"type": "finding_record", "payload": {"severity": "high"}}),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(SystemExit) as excinfo:
-        module.run(SimpleNamespace(session_dir=str(session_dir), json_file=str(payload_path)))
-
-    assert excinfo.value.code == 1
-    assert "payload.title is required" in capsys.readouterr().err
-    assert not (session_dir / "proposals" / "proposals.jsonl").exists()
-
-
-def test_record_proposal_accepts_valid_credential_payload(tmp_path: Path, capsys) -> None:
-    module = _load_script_module(
-        "test_record_proposal_valid_module",
-        "agent/scripts/assess/commands/record_proposal.py",
-    )
-    session_dir = tmp_path / "session-a"
-    session_dir.mkdir()
-    payload_path = tmp_path / "proposal.json"
-    payload_path.write_text(
-        json.dumps(
-            {
-                "type": "credential",
-                "payload": {
-                    "credential_key": "vpn-admin",
-                    "kind": "password",
-                    "principal": "admin@example.com",
-                    "secret": "hunter2",
-                    "status": "discovered",
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    module.run(SimpleNamespace(session_dir=str(session_dir), json_file=str(payload_path)))
-    output = capsys.readouterr().out
-    proposals_file = session_dir / "proposals" / "proposals.jsonl"
-
-    assert "Recorded proposal" in output
-    lines = proposals_file.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 1
-    recorded = json.loads(lines[0])
-    assert recorded["type"] == "credential"
-    assert recorded["payload"]["credential_key"] == "vpn-admin"
-
-
 def test_proxy_addon_loads_legacy_scope_keys(tmp_path: Path) -> None:
     """The filesystem fallback supports the same legacy scope-key aliases as
     before (``hosts`` / ``scope_hosts`` / ``scope`` plus ``hostname``)."""
@@ -640,29 +733,8 @@ def test_ingest_candidates_preserve_metadata_and_route(
         "test_ingest_candidates_module",
         "agent/scripts/assess/commands/ingest_candidates.py",
     )
-    dispatch_module = _load_script_module(
-        "test_ingest_candidate_dispatch_module",
-        "agent/scripts/assess/commands/dispatch/__init__.py",
-    )
-    db_module = _load_script_module(
-        "test_ingest_candidate_db_module",
-        "agent/scripts/assess/lib/db.py",
-    )
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
-    db_path = engagement_dir / "cases.db"
-    db_path.touch()
-    db_module.db_init(str(db_path))
-    db_module.db_insert_work_item(
-        str(db_path),
-        queue_key="variant:701:unknown",
-        request_variant_id=701,
-        method="GET",
-        url="https://portal.acme-agency.example/svc-core/api/logout",
-        url_path="/svc-core/api/logout",
-        case_type="unknown",
-        source="plain-url-ingest",
-    )
 
     candidate_path = tmp_path / "candidate_records.jsonl"
     candidate_path.write_text(
@@ -725,58 +797,43 @@ def test_ingest_candidates_preserve_metadata_and_route(
 
     ingest_module.run(
         SimpleNamespace(
-            db_path=str(db_path),
             source="surface-collector-curated",
             records_file=str(candidate_path),
             engagement_dir=engagement_dir,
         )
     )
 
-    conn = sqlite3.connect(str(db_path))
-    try:
-        row = conn.execute(
-            """SELECT type, status, priority_score, priority_reason, cluster_key,
-                      signals, selected_by, triage_rationale, live_status
-               FROM work_items
-               WHERE queue_key = ?""",
-            ("variant:701:auth_entry",),
-        ).fetchone()
-        row_count = conn.execute("SELECT COUNT(*) FROM work_items").fetchone()[0]
-    finally:
-        conn.close()
+    # The command no longer writes a local cases.db; it POSTs one
+    # request-observation per candidate carrying the curated work-item
+    # derivation block (the backend derives the assessment_work_items row +
+    # routing server-side, ADR 0013). Assert on the captured observation payload
+    # instead of on cases.db rows — the candidate's metadata is preserved and its
+    # case_type/cluster_key (which drive server-side routing to the
+    # vulnerability-analyst) are correct.
+    assert len(posts) == 1
+    endpoint, observation = posts[0]
+    assert endpoint == "request-observations"
+    assert observation["url"] == "https://portal.acme-agency.example/svc-core/api/logout"
+    assert observation["method"] == "GET"
 
-    assert row_count == 1
-    assert row[0:5] == (
-        "auth_entry",
-        "pending",
-        245,
-        "TAAP auth API workflow",
-        "gf:auth_workflow",
+    work_item = observation["work_item"]
+    assert work_item["url_path"] == "/svc-core/api/logout"
+    assert work_item["case_type"] == "auth_entry"
+    assert work_item["status"] == "pending"
+    assert work_item["priority_score"] == 245
+    assert work_item["priority_reason"] == "TAAP auth API workflow"
+    assert work_item["cluster_key"] == "gf:auth_workflow"
+    assert json.loads(work_item["signals"]) == ["api", "auth", "workflow"]
+    assert work_item["selected_by"] == "auth"
+    assert (
+        work_item["triage_rationale"]
+        == "Selected from GAU because it is an auth workflow endpoint."
     )
-    assert json.loads(row[5]) == ["api", "auth", "workflow"]
-    assert row[6:] == (
-        "auth",
-        "Selected from GAU because it is an auth workflow endpoint.",
-        "live",
+    assert work_item["live_status"] == "live"
+    assert (
+        observation["observation_payload"]["candidate_metadata"]["priority_score"]
+        == 245
     )
-    assert posts[0][1]["observation_payload"]["candidate_metadata"]["priority_score"] == 245
-
-    capsys.readouterr()
-    dispatch_module.run(
-        SimpleNamespace(
-            db_path=str(db_path),
-            action="fetch-by-priority",
-            extra=["10", "auto"],
-            by="status",
-            reason="",
-            max_lines=40,
-            include_evidence=False,
-        )
-    )
-
-    payload = json.loads(capsys.readouterr().out)
-    assert [item["queue_key"] for item in payload] == ["variant:701:auth_entry"]
-    assert payload[0]["assigned_agent"] == "vulnerability-analyst"
 
 
 def test_ingest_candidates_route_real_bia_candidate_shapes(
@@ -788,19 +845,8 @@ def test_ingest_candidates_route_real_bia_candidate_shapes(
         "test_ingest_real_candidate_shapes_module",
         "agent/scripts/assess/commands/ingest_candidates.py",
     )
-    dispatch_module = _load_script_module(
-        "test_ingest_real_candidate_shapes_dispatch_module",
-        "agent/scripts/assess/commands/dispatch/__init__.py",
-    )
-    db_module = _load_script_module(
-        "test_ingest_real_candidate_shapes_db_module",
-        "agent/scripts/assess/lib/db.py",
-    )
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
-    db_path = engagement_dir / "cases.db"
-    db_path.touch()
-    db_module.db_init(str(db_path))
 
     candidate_path = tmp_path / "candidate_records.jsonl"
     records = [
@@ -853,6 +899,8 @@ def test_ingest_candidates_route_real_bia_candidate_shapes(
     )
     monkeypatch.setattr(ingest_module, "auth_active_context", lambda _eng_dir: "anonymous")
 
+    posts: list[dict[str, object]] = []
+
     class FakeClient:
         def __init__(self, base_url: str, engagement_key: str) -> None:
             self.base_url = base_url
@@ -862,7 +910,8 @@ def test_ingest_candidates_route_real_bia_candidate_shapes(
         def post(self, endpoint: str, payload: dict[str, object]):
             if endpoint == "request-observations/bulk":
                 records = []
-                for _item in payload.get("items", []):
+                for item in payload.get("items", []):
+                    posts.append(item)
                     self.next_id += 1
                     records.append({"request_variant": {"id": self.next_id}})
                 return {"count": len(records), "records": records}
@@ -881,71 +930,59 @@ def test_ingest_candidates_route_real_bia_candidate_shapes(
 
     ingest_module.run(
         SimpleNamespace(
-            db_path=str(db_path),
             source="surface-collector-curated",
             records_file=str(candidate_path),
             engagement_dir=engagement_dir,
         )
     )
 
-    conn = sqlite3.connect(str(db_path))
-    try:
-        rows = {
-            row[0]: row[1:]
-            for row in conn.execute(
-                """SELECT url, type, priority_score, priority_reason, cluster_key,
-                          signals, selected_by, triage_rationale
-                   FROM work_items
-                   ORDER BY url"""
-            ).fetchall()
-        }
-    finally:
-        conn.close()
+    # No cases.db: each candidate is POSTed as a request-observation whose
+    # work_item derivation block carries the curated type/score/reason/cluster.
+    # Assert the per-URL classification + metadata on the captured observations
+    # (the case_type/cluster_key are what route each to the vulnerability-analyst
+    # server-side).
+    rows = {
+        observation["url"]: observation["work_item"] for observation in posts
+    }
+    assert set(rows) == {
+        "https://www.acme-agency.example/org-event-feed/37221",
+        "https://www.acme-agency.example/fb.log",
+        "https://www.acme-agency.example/web-guidance",
+    }
 
-    assert rows["https://www.acme-agency.example/org-event-feed/37221"][0:4] == (
-        "event_feed",
-        95,
-        "current Drupal workflow/auth route; operator/Phase 1 artifact; source-map/source-analysis route",
-        "gf:current_drupal_workflow_auth_route",
+    feed = rows["https://www.acme-agency.example/org-event-feed/37221"]
+    assert feed["case_type"] == "event_feed"
+    assert feed["priority_score"] == 95
+    assert feed["priority_reason"] == (
+        "current Drupal workflow/auth route; operator/Phase 1 artifact; "
+        "source-map/source-analysis route"
     )
-    assert rows["https://www.acme-agency.example/fb.log"][0:4] == (
-        "debug_config",
-        80,
-        "admin/debug/config/secret signal",
-        "gf:backup_config",
+    assert feed["cluster_key"] == "gf:current_drupal_workflow_auth_route"
+
+    debug = rows["https://www.acme-agency.example/fb.log"]
+    assert debug["case_type"] == "debug_config"
+    assert debug["priority_score"] == 80
+    assert debug["priority_reason"] == "admin/debug/config/secret signal"
+    assert debug["cluster_key"] == "gf:backup_config"
+
+    guidance = rows["https://www.acme-agency.example/web-guidance"]
+    assert guidance["case_type"] == "unknown"
+    assert guidance["priority_score"] == 105
+    assert guidance["priority_reason"] == (
+        "OSINT priority URL; operator/Phase 1 artifact; "
+        "source-map/source-analysis route"
     )
-    assert rows["https://www.acme-agency.example/web-guidance"][0:4] == (
-        "unknown",
-        105,
-        "OSINT priority URL; operator/Phase 1 artifact; source-map/source-analysis route",
-        "gf:osint_priority_url",
-    )
-    assert json.loads(rows["https://www.acme-agency.example/web-guidance"][4]) == [
+    assert guidance["cluster_key"] == "gf:osint_priority_url"
+    assert json.loads(guidance["signals"]) == [
         "osint_priority_url",
         "operator_phase_1_artifact",
         "source-map_source-analysis_route",
     ]
-    assert rows["https://www.acme-agency.example/web-guidance"][5:] == (
-        "osint_priority_url",
-        "OSINT priority URL; operator/Phase 1 artifact; source-map/source-analysis route",
+    assert guidance["selected_by"] == "osint_priority_url"
+    assert guidance["triage_rationale"] == (
+        "OSINT priority URL; operator/Phase 1 artifact; "
+        "source-map/source-analysis route"
     )
-
-    capsys.readouterr()
-    dispatch_module.run(
-        SimpleNamespace(
-            db_path=str(db_path),
-            action="fetch-by-priority",
-            extra=["10", "auto"],
-            by="status",
-            reason="",
-            max_lines=40,
-            include_evidence=False,
-        )
-    )
-
-    payload = json.loads(capsys.readouterr().out)
-    assert len(payload) == 3
-    assert {item["assigned_agent"] for item in payload} == {"vulnerability-analyst"}
 
 
 def test_code_ingest_posts_backend_contract_fields(monkeypatch, tmp_path: Path) -> None:
@@ -976,10 +1013,25 @@ def test_code_ingest_posts_backend_contract_fields(monkeypatch, tmp_path: Path) 
 
         def post(self, endpoint: str, payload: dict[str, object]):
             calls.append((endpoint, payload))
-            if endpoint == "code/repos":
+            if endpoint == "code/repos/refresh/start":
+                return {"repo_id": 41, "refresh_token": "refresh-41"}
+            if endpoint == "code/repos/41/refresh/files":
+                return {"staged": len(payload["files"])}
+            if endpoint == "code/repos/41/refresh/commit":
+                return {
+                    "inserted": 1,
+                    "changed": 0,
+                    "renamed": 0,
+                    "deleted": 0,
+                    "repo_generation": 1,
+                    "source_manifest_digest": "d" * 64,
+                }
+            if endpoint == "code/repos/41/lsp-config":
+                assert payload["repo_generation"] == 1
+                assert payload["source_manifest_digest"] == "d" * 64
+                assert payload["lsp_config"]["ctags"]["repo_generation"] == 1
+                assert payload["lsp_config"]["ctags"]["source_manifest_digest"] == "d" * 64
                 return {"id": 41}
-            if endpoint == "code/files":
-                return {"inserted": len(payload["files"])}
             raise AssertionError(f"unexpected endpoint: {endpoint}")
 
         def close(self) -> None:
@@ -1002,8 +1054,8 @@ def test_code_ingest_posts_backend_contract_fields(monkeypatch, tmp_path: Path) 
         )
     )
 
-    repo_call = next(payload for endpoint, payload in calls if endpoint == "code/repos")
-    files_call = next(payload for endpoint, payload in calls if endpoint == "code/files")
+    repo_call = next(payload for endpoint, payload in calls if endpoint == "code/repos/refresh/start")
+    files_call = next(payload for endpoint, payload in calls if endpoint == "code/repos/41/refresh/files")
 
     assert "repo_key" in repo_call
     assert "repo_path" in repo_call
@@ -1048,10 +1100,25 @@ def test_code_ingest_records_skipped_minified_manifest(monkeypatch, tmp_path: Pa
 
         def post(self, endpoint: str, payload: dict[str, object]):
             calls.append((endpoint, payload))
-            if endpoint == "code/repos":
+            if endpoint == "code/repos/refresh/start":
+                return {"repo_id": 41, "refresh_token": "refresh-41"}
+            if endpoint == "code/repos/41/refresh/files":
+                return {"staged": len(payload["files"])}
+            if endpoint == "code/repos/41/refresh/commit":
+                return {
+                    "inserted": 1,
+                    "changed": 0,
+                    "renamed": 0,
+                    "deleted": 0,
+                    "repo_generation": 1,
+                    "source_manifest_digest": "d" * 64,
+                }
+            if endpoint == "code/repos/41/lsp-config":
+                assert payload["repo_generation"] == 1
+                assert payload["source_manifest_digest"] == "d" * 64
+                assert payload["lsp_config"]["ctags"]["repo_generation"] == 1
+                assert payload["lsp_config"]["ctags"]["source_manifest_digest"] == "d" * 64
                 return {"id": 41}
-            if endpoint == "code/files":
-                return {"inserted": len(payload["files"])}
             raise AssertionError(f"unexpected endpoint: {endpoint}")
 
         def close(self) -> None:
@@ -1079,11 +1146,24 @@ def test_code_ingest_records_skipped_minified_manifest(monkeypatch, tmp_path: Pa
         )
     )
 
-    files_call = next(payload for endpoint, payload in calls if endpoint == "code/files")
+    files_call = next(payload for endpoint, payload in calls if endpoint == "code/repos/41/refresh/files")
     assert [row["file_path"] for row in files_call["files"]] == ["app.js"]
-    manifest_path = engagement_dir / "tools" / "analysis-state" / "skipped-artifacts" / "demo.json"
+    repo_call = next(payload for endpoint, payload in calls if endpoint == "code/repos/refresh/start")
+    manifest_path = (
+        engagement_dir
+        / "tools"
+        / "analysis-state"
+        / "skipped-artifacts"
+        / "41"
+        / "1"
+        / f"{'d' * 64}-{repo_call['snapshot_digest']}.json"
+    )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    skipped_paths = {row["path"]: row for row in manifest["skipped_artifacts"]}
+    assert manifest["repo_id"] == 41
+    assert manifest["repo_generation"] == 1
+    assert manifest["source_manifest_digest"] == "d" * 64
+    assert manifest["snapshot_digest"] == repo_call["snapshot_digest"]
+    skipped_paths = {row["path"]: row for row in manifest["excluded_entries"]}
     assert skipped_paths["app.min.js"]["reason"] == "minified_or_bundle"
     assert skipped_paths["app.min.js"]["source_equivalent_candidate"] == "app.js"
     assert skipped_paths["build"]["reason"] == "skipped_dir:build"
@@ -1120,10 +1200,25 @@ def test_code_ingest_include_path_can_queue_security_relevant_build_artifact(mon
 
         def post(self, endpoint: str, payload: dict[str, object]):
             calls.append((endpoint, payload))
-            if endpoint == "code/repos":
+            if endpoint == "code/repos/refresh/start":
+                return {"repo_id": 42, "refresh_token": "refresh-42"}
+            if endpoint == "code/repos/42/refresh/files":
+                return {"staged": len(payload["files"])}
+            if endpoint == "code/repos/42/refresh/commit":
+                return {
+                    "inserted": 2,
+                    "changed": 0,
+                    "renamed": 0,
+                    "deleted": 0,
+                    "repo_generation": 1,
+                    "source_manifest_digest": "d" * 64,
+                }
+            if endpoint == "code/repos/42/lsp-config":
+                assert payload["repo_generation"] == 1
+                assert payload["source_manifest_digest"] == "d" * 64
+                assert payload["lsp_config"]["ctags"]["repo_generation"] == 1
+                assert payload["lsp_config"]["ctags"]["source_manifest_digest"] == "d" * 64
                 return {"id": 42}
-            if endpoint == "code/files":
-                return {"inserted": len(payload["files"])}
             raise AssertionError(f"unexpected endpoint: {endpoint}")
 
         def close(self) -> None:
@@ -1151,7 +1246,7 @@ def test_code_ingest_include_path_can_queue_security_relevant_build_artifact(mon
         )
     )
 
-    files_call = next(payload for endpoint, payload in calls if endpoint == "code/files")
+    files_call = next(payload for endpoint, payload in calls if endpoint == "code/repos/42/refresh/files")
     paths = {row["file_path"] for row in files_call["files"]}
     assert paths == {"app.js", "build/ResetPassword.min.js"}
 
@@ -1173,7 +1268,7 @@ def test_export_findings_uses_canonical_findings_and_renders_details(monkeypatch
             engagement_dir=str(engagement_dir),
         ),
     )
-    monkeypatch.setattr(module, "load_scope", lambda engagement_dir: {"engagement_name": "Demo Engagement"})
+    monkeypatch.setattr(module, "load_scope", lambda engagement_dir, **kwargs: {"engagement_name": "Demo Engagement"})
 
     class FakeClient:
         def __init__(self, base_url: str, engagement_key: str) -> None:
@@ -1242,8 +1337,10 @@ def test_export_findings_uses_canonical_findings_and_renders_details(monkeypatch
     assert "- **Entry Point**: parse_input" in findings_md
     assert "- **Sink**: render_output" in findings_md
     assert "- **References**: https://example.test/advisory, {'id': 7}, 42" in findings_md
-    assert "1. send payload" in findings_md
-    assert "2. 2" in findings_md
+    # Steps render exactly as authored: no counter and no list marker are added, so
+    # authored text is never rewritten. A list renders one step per paragraph (a
+    # non-string entry is still coerced to text by ``string_list``).
+    assert "**Steps to Reproduce:**\nsend payload\n\n2" in findings_md
 
 
 def test_export_findings_separates_sections_with_blank_line(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -1266,7 +1363,7 @@ def test_export_findings_separates_sections_with_blank_line(monkeypatch, tmp_pat
             engagement_dir=str(engagement_dir),
         ),
     )
-    monkeypatch.setattr(module, "load_scope", lambda engagement_dir: {"engagement_name": "Demo"})
+    monkeypatch.setattr(module, "load_scope", lambda engagement_dir, **kwargs: {"engagement_name": "Demo"})
 
     class FakeClient:
         def __init__(self, base_url: str, engagement_key: str) -> None:
@@ -1416,6 +1513,39 @@ def test_export_findings_preserves_legacy_non_mapping_poc_headers() -> None:
     assert "Content-Type: text/plain" in rendered
 
 
+def test_render_finding_accepts_poc_response_body_as_well_as_body_excerpt() -> None:
+    """A response body under either key reaches the render — it is the proof.
+
+    Recorders write ``body_excerpt``; a hand-authored or tool-captured response
+    often carries plain ``body``. ``export submission``'s structured-proof block
+    reads both keys, and this renderer must agree, or one finding's response body
+    appears in the submission reference and vanishes from ``findings.md``.
+    """
+    module = _load_script_module(
+        "test_export_findings_body_key_module",
+        "agent/scripts/assess/commands/export_findings.py",
+    )
+
+    rendered = module._render_finding(
+        {
+            "slug": "finding-001",
+            "title": "Plain body key",
+            "details_json": json.dumps(
+                {
+                    "poc_response": {
+                        "status": 200,
+                        "headers": {"Content-Type": "application/json"},
+                        "body": '{"owner":"someone-else"}',
+                    },
+                }
+            ),
+        }
+    )
+
+    assert "**PoC Response:**" in rendered
+    assert '{"owner":"someone-else"}' in rendered
+
+
 def test_render_finding_widens_fence_when_poc_code_contains_backtick_run() -> None:
     """``_fence_for`` must widen the markdown code fence past the longest
     backtick run inside the fenced content. A ``poc_code`` that itself contains
@@ -1450,7 +1580,172 @@ def test_render_finding_widens_fence_when_poc_code_contains_backtick_run() -> No
     assert rendered.count(f"\n{fence}") >= 2
 
 
-def test_code_index_sync_requires_repo_id_for_multi_repo_engagement(monkeypatch, tmp_path: Path, capsys) -> None:
+def _write_bound_structural_fixture(
+    manifest_dir: Path,
+    *,
+    repo_id: int,
+    repo_key: str,
+    digest: str,
+    total_functions: int,
+) -> dict[str, object]:
+    from assess.lib.code_snapshot import SnapshotBuilder, capture_regular_file
+    from assess.lib.code_structural_identity import (
+        bind_structural_inputs,
+        structural_input_digest,
+    )
+
+    raw = f"# {repo_key}\n".encode()
+    origin = manifest_dir / "origins" / repo_key
+    origin.mkdir(parents=True)
+    origin_file = origin / "shared.py"
+    origin_file.write_bytes(raw)
+    builder = SnapshotBuilder(manifest_dir / "code-snapshots", repo_key)
+    builder.add("shared.py", capture_regular_file(origin_file), language="python")
+    sealed = builder.finish(
+        repo_key=repo_key,
+        repo_name=repo_key,
+        source_origin_path=str(origin.resolve()),
+        git={"head": "", "branch": "", "dirty": None},
+    )
+    source = sealed.source_path
+    source_sha = hashlib.sha256(raw).hexdigest()
+    generation = 3
+    backend_file = {
+        "id": 200 + repo_id,
+        "repo_id": repo_id,
+        "file_path": "shared.py",
+        "file_hash": source_sha,
+        "language": "python",
+    }
+    source_manifest = json.loads(sealed.manifest_path.read_text(encoding="utf-8"))
+    bound = bind_structural_inputs(
+        source_manifest["files"],
+        {"shared.py": backend_file},
+        repo_id=repo_id,
+    )
+    input_digest = structural_input_digest(
+        bound,
+        repo_id=repo_id,
+        repo_generation=generation,
+        source_manifest_digest=digest,
+    )
+    index_root = manifest_dir / "structural-index"
+    generation_dir = (
+        index_root / str(repo_id) / str(generation) / "v5" / digest / input_digest
+    )
+    files_dir = generation_dir / "files"
+    files_dir.mkdir(parents=True)
+    index_payload = {
+        "file_path": "shared.py",
+        "language": "python",
+        "repo_id": repo_id,
+        "repo_generation": generation,
+        "source_manifest_digest": digest,
+        "structural_input_digest": input_digest,
+        "source_sha256": source_sha,
+        "total_functions": total_functions,
+        "total_exports": 0,
+        "total_lines": 1,
+        "functions": [],
+        "entry_points": [],
+        "security_sinks": [],
+        "security_sources": [],
+        "call_sites": [],
+        "imports": [],
+        "import_targets": [],
+        "exports": [],
+        "classes": [],
+        "structural_index_available": True,
+        "analysis_status": "complete",
+        "analysis_mode": "tree_sitter",
+        "degradation_reason": None,
+        "source_size": len(raw),
+        "bytes_scanned": len(raw),
+        "unavailable_dimensions": [],
+        "artifact_truncated": False,
+        "truncated_dimensions": [],
+        "signal_counts": {
+            "entry_points": 0,
+            "imports": 0,
+            "security_sinks": 0,
+            "security_sources": 0,
+        },
+    }
+    index_bytes = json.dumps(index_payload).encode()
+    index_path = files_dir / "shared.json"
+    index_path.write_bytes(index_bytes)
+    manifest_path = generation_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema": "structural-index/v5",
+                "repo_id": repo_id,
+                "repo_key": repo_key,
+                "repo_generation": generation,
+                "source_manifest_digest": digest,
+                "structural_input_digest": input_digest,
+                "source_path": str(source.resolve()),
+                "source_snapshot_manifest_path": str(sealed.manifest_path),
+                "snapshot_digest": sealed.snapshot_digest,
+                "manifest_path": str(manifest_path.resolve()),
+                "files": {
+                    "shared.py": {
+                        "index_path": str(index_path.relative_to(index_root)),
+                        "source_sha256": source_sha,
+                        "language": "python",
+                        "index_sha256": hashlib.sha256(index_bytes).hexdigest(),
+                        "analysis_status": "complete",
+                        "analysis_mode": "tree_sitter",
+                        "artifact_truncated": False,
+                    }
+                },
+                "path_to_index": {
+                    "shared.py": str(index_path.relative_to(index_root)),
+                },
+                "degraded_files": 0,
+                "degraded_file_paths": [],
+                "artifact_truncated_files": 0,
+                "artifact_truncated_file_paths": [],
+                "analysis_status_counts": {
+                    "complete": 1,
+                    "degraded": 0,
+                    "unsupported": 0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "summary": {
+            "repo_id": repo_id,
+            "repo_generation": generation,
+            "source_manifest_digest": digest,
+            "structural_input_digest": input_digest,
+            "manifest_path": str(manifest_path.relative_to(manifest_dir)),
+            "degraded_files": 0,
+            "degraded_file_paths": [],
+            "artifact_truncated_files": 0,
+            "artifact_truncated_file_paths": [],
+            "analysis_status_counts": {
+                "complete": 1,
+                "degraded": 0,
+                "unsupported": 0,
+            },
+        },
+        "backend_repo": {
+            "id": repo_id,
+            "repo_key": repo_key,
+            "repo_path": str(source.resolve()),
+            "active_generation": generation,
+            "source_manifest_digest": digest,
+        },
+        "source_sha": source_sha,
+        "source_size": len(raw),
+        "backend_file": backend_file,
+    }
+
+
+def test_code_index_sync_rejects_legacy_unbound_manifest(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_script_module(
         "test_code_index_sync_multi_repo_module",
         "agent/scripts/assess/commands/code_index_sync.py",
@@ -1503,7 +1798,7 @@ def test_code_index_sync_requires_repo_id_for_multi_repo_engagement(monkeypatch,
         )
 
     assert excinfo.value.code == 1
-    assert "--repo-id" in capsys.readouterr().err
+    assert "rebuild with code-index" in capsys.readouterr().err
 
 
 def test_code_index_sync_repo_id_scopes_aggregate_to_matching_manifest(
@@ -1517,36 +1812,27 @@ def test_code_index_sync_repo_id_scopes_aggregate_to_matching_manifest(
     )
     engagement_dir = tmp_path / "engagement"
     manifest_dir = engagement_dir / "tools" / "analysis-state"
-    index_dir = manifest_dir / "structural-index"
-    (index_dir / "repo-a").mkdir(parents=True)
-    (index_dir / "repo-b").mkdir(parents=True)
-    (index_dir / "repo-a" / "a.json").write_text(
-        json.dumps(
-            {"total_functions": 99, "entry_points": [], "security_sinks": [], "exports": []}
-        ),
-        encoding="utf-8",
+    repo_a = _write_bound_structural_fixture(
+        manifest_dir,
+        repo_id=1,
+        repo_key="repo-a",
+        digest="a" * 64,
+        total_functions=99,
     )
-    (index_dir / "repo-b" / "b.json").write_text(
-        json.dumps(
-            {"total_functions": 7, "entry_points": [], "security_sinks": [], "exports": []}
-        ),
-        encoding="utf-8",
-    )
-    (index_dir / "repo-a-manifest.json").write_text(
-        json.dumps({"repo_key": "repo-a", "path_to_index": {"shared.py": "repo-a/a.json"}}),
-        encoding="utf-8",
-    )
-    (index_dir / "repo-b-manifest.json").write_text(
-        json.dumps({"repo_key": "repo-b", "path_to_index": {"shared.py": "repo-b/b.json"}}),
-        encoding="utf-8",
+    repo_b = _write_bound_structural_fixture(
+        manifest_dir,
+        repo_id=2,
+        repo_key="repo-b",
+        digest="b" * 64,
+        total_functions=7,
     )
     (manifest_dir / "structural-index-manifest.json").write_text(
         json.dumps(
             {
-                "schema": "structural-index-aggregate/v1",
+                "schema": "structural-index-aggregate/v4",
                 "repos": {
-                    "repo-a": {"manifest_path": "structural-index/repo-a-manifest.json"},
-                    "repo-b": {"manifest_path": "structural-index/repo-b-manifest.json"},
+                    "1": repo_a["summary"],
+                    "2": repo_b["summary"],
                 },
             }
         ),
@@ -1573,13 +1859,10 @@ def test_code_index_sync_repo_id_scopes_aggregate_to_matching_manifest(
 
         def get(self, endpoint: str):
             if endpoint == "code/repos":
-                return [
-                    {"id": 1, "repo_key": "repo-a", "name": "repo-a"},
-                    {"id": 2, "repo_key": "repo-b", "name": "repo-b"},
-                ]
+                return [repo_a["backend_repo"], repo_b["backend_repo"]]
             self.file_requests.append(endpoint)
             assert endpoint == "code/files?limit=5000&offset=0&repo_id=2"
-            return [{"id": 202, "file_path": "shared.py"}]
+            return [dict(repo_b["backend_file"])]
 
         def post(self, endpoint: str, payload: dict[str, object]):
             self.posts.append((endpoint, payload))
@@ -1610,16 +1893,133 @@ def test_code_index_sync_repo_id_scopes_aggregate_to_matching_manifest(
     assert FakeClient.file_requests == ["code/files?limit=5000&offset=0&repo_id=2"]
     assert len(FakeClient.posts) == 1
     _, payload = FakeClient.posts[0]
+    assert payload["structural_index_schema"] == "structural-index/v5"
+    assert payload["structural_input_digest"] == repo_b["summary"][
+        "structural_input_digest"
+    ]
     assert payload["updates"] == [
         {
             "file_id": 202,
+            "source_sha256": repo_b["source_sha"],
+            "indexed_language": "python",
             "total_functions": 7,
             "total_entry_points": 0,
             "total_sinks": 0,
             "total_exports": 0,
+            "structural_analysis_status": "complete",
+            "structural_analysis_mode": "tree_sitter",
+            "structural_degradation_reason": None,
+            "structural_source_size": repo_b["source_size"],
+            "structural_bytes_scanned": repo_b["source_size"],
+            "structural_unavailable_dimensions": [],
+            "structural_artifact_truncated": False,
+            "structural_truncated_dimensions": [],
+            "structural_signal_counts": {
+                "entry_points": 0,
+                "imports": 0,
+                "security_sinks": 0,
+                "security_sources": 0,
+            },
         }
     ]
     assert "across 1 repos" in capsys.readouterr().err
+
+
+def test_code_index_sync_rejects_late_repo_debt_shape_before_any_post(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_script_module(
+        "test_code_index_sync_late_invalid_debt_module",
+        "agent/scripts/assess/commands/code_index_sync.py",
+    )
+    engagement_dir = tmp_path / "engagement"
+    manifest_dir = engagement_dir / "tools" / "analysis-state"
+    repo_a = _write_bound_structural_fixture(
+        manifest_dir,
+        repo_id=1,
+        repo_key="repo-a",
+        digest="a" * 64,
+        total_functions=1,
+    )
+    repo_b = _write_bound_structural_fixture(
+        manifest_dir,
+        repo_id=2,
+        repo_key="repo-b",
+        digest="b" * 64,
+        total_functions=1,
+    )
+    aggregate_path = manifest_dir / "structural-index-manifest.json"
+    aggregate_path.write_text(
+        json.dumps(
+            {
+                "schema": "structural-index-aggregate/v4",
+                "repos": {"1": repo_a["summary"], "2": repo_b["summary"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    repo_b_manifest_path = manifest_dir / repo_b["summary"]["manifest_path"]
+    repo_b_manifest = json.loads(repo_b_manifest_path.read_text(encoding="utf-8"))
+    binding = repo_b_manifest["files"]["shared.py"]
+    artifact_path = manifest_dir / "structural-index" / binding["index_path"]
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    artifact["analysis_mode"] = "none"
+    artifact_bytes = json.dumps(artifact).encode()
+    artifact_path.write_bytes(artifact_bytes)
+    binding["index_sha256"] = hashlib.sha256(artifact_bytes).hexdigest()
+    binding["analysis_mode"] = "none"
+    repo_b_manifest_path.write_text(json.dumps(repo_b_manifest), encoding="utf-8")
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+
+    class FakeClient:
+        posts: list[tuple[str, dict[str, object]]] = []
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def get(self, endpoint: str):
+            if endpoint == "code/repos":
+                return [repo_a["backend_repo"], repo_b["backend_repo"]]
+            repo_id = int(endpoint.rsplit("=", 1)[1])
+            selected = repo_a if repo_id == 1 else repo_b
+            return [dict(selected["backend_file"])]
+
+        def post(self, endpoint: str, payload: dict[str, object]):
+            self.posts.append((endpoint, payload))
+            return {"updated": 1, "skipped": 0}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    FakeClient.posts = []
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    with pytest.raises(SystemExit):
+        module.run(
+            SimpleNamespace(
+                engagement_dir=engagement_dir,
+                manifest=str(aggregate_path),
+                index_dir=None,
+                repo_id=None,
+                repo_key=None,
+            )
+        )
+
+    assert FakeClient.posts == []
 
 
 def test_code_index_sync_rejects_mismatched_repo_id_and_repo_key(
@@ -1633,19 +2033,27 @@ def test_code_index_sync_rejects_mismatched_repo_id_and_repo_key(
     )
     engagement_dir = tmp_path / "engagement"
     manifest_dir = engagement_dir / "tools" / "analysis-state"
-    index_dir = manifest_dir / "structural-index"
-    index_dir.mkdir(parents=True)
-    (index_dir / "repo-a-manifest.json").write_text(
-        json.dumps({"repo_key": "repo-a", "path_to_index": {"shared.py": "repo-a/a.json"}}),
-        encoding="utf-8",
+    repo_a = _write_bound_structural_fixture(
+        manifest_dir,
+        repo_id=1,
+        repo_key="repo-a",
+        digest="a" * 64,
+        total_functions=1,
+    )
+    repo_b = _write_bound_structural_fixture(
+        manifest_dir,
+        repo_id=2,
+        repo_key="repo-b",
+        digest="b" * 64,
+        total_functions=1,
     )
     (manifest_dir / "structural-index-manifest.json").write_text(
         json.dumps(
             {
-                "schema": "structural-index-aggregate/v1",
+                "schema": "structural-index-aggregate/v4",
                 "repos": {
-                    "repo-a": {"manifest_path": "structural-index/repo-a-manifest.json"},
-                    "repo-b": {"manifest_path": "structural-index/repo-b-manifest.json"},
+                    "1": repo_a["summary"],
+                    "2": repo_b["summary"],
                 },
             }
         ),
@@ -1696,7 +2104,7 @@ def test_code_index_sync_rejects_mismatched_repo_id_and_repo_key(
         )
 
     assert excinfo.value.code == 1
-    assert "does not match per-repo manifest repo-a" in capsys.readouterr().err
+    assert "No structural manifest matched" in capsys.readouterr().err
 
 
 def test_code_record_modules_rejects_auto_derived_key_collisions(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -1895,142 +2303,6 @@ def test_code_record_modules_accepts_meaningful_labels(
     assert len(posted["payload"]["modules"]) == 2
 
 
-def test_merge_session_posts_workflow_status_without_legacy_status(monkeypatch, tmp_path: Path) -> None:
-    module = _load_script_module(
-        "test_merge_session_module",
-        "agent/scripts/assess/commands/merge_session.py",
-    )
-    engagement_dir = tmp_path / "engagement"
-    session_dir = engagement_dir / "sessions" / "session-a"
-    proposals_dir = session_dir / "proposals"
-    proposals_dir.mkdir(parents=True)
-    (proposals_dir / "proposals.jsonl").write_text(
-        json.dumps(
-            {
-                "type": "finding_record",
-                "payload": {
-                    "title": "Parser trust boundary bypass",
-                    "status": "confirmed",
-                },
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    (engagement_dir / "sessions" / "index.json").write_text(
-        json.dumps(
-            [{"session_id": "session-a", "status": "open", "assigned_targets": ["EX-001"]}]
-        ),
-        encoding="utf-8",
-    )
-
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
-    monkeypatch.setattr(module, "session_dir_path", lambda eng_dir, session_id: str(session_dir))
-    monkeypatch.setattr(module, "finding_lock_path", lambda eng_dir: str(engagement_dir / ".findings.lock"))
-    monkeypatch.setattr(module, "next_finding_id", lambda base_url, engagement_key, source_name: "EX-001")
-
-    captured: list[tuple[str, dict[str, object]]] = []
-
-    class FakeClient:
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            self.base_url = base_url
-            self.engagement_key = engagement_key
-
-        def post(self, endpoint: str, payload: dict[str, object]):
-            captured.append((endpoint, payload))
-            return {"finding": {"slug": payload["slug"], "title": payload["title"]}}
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
-    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
-
-    module.run(SimpleNamespace(engagement_dir=engagement_dir, session_id="session-a", yes=True))
-
-    endpoint, payload = captured[0]
-    assert endpoint == "findings"
-    assert payload["workflow_status"] == "active"
-    assert "status" not in payload
-    session_index = json.loads((engagement_dir / "sessions" / "index.json").read_text(encoding="utf-8"))
-    assert session_index[0]["assigned_targets"] == ["EX-001"]
-    assert "assigned_findings" not in session_index[0]
-
-
-def test_merge_session_validates_session_index_before_backend_posts(monkeypatch, tmp_path: Path) -> None:
-    module = _load_script_module(
-        "test_merge_session_prevalidate_module",
-        "agent/scripts/assess/commands/merge_session.py",
-    )
-    engagement_dir = tmp_path / "engagement"
-    session_dir = engagement_dir / "sessions" / "session-a"
-    proposals_dir = session_dir / "proposals"
-    proposals_dir.mkdir(parents=True)
-    (proposals_dir / "proposals.jsonl").write_text(
-        json.dumps(
-            {
-                "type": "finding_record",
-                "payload": {
-                    "title": "Parser trust boundary bypass",
-                    "status": "confirmed",
-                },
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    (engagement_dir / "sessions" / "index.json").write_text(
-        json.dumps(
-            [{"session_id": "session-a", "status": "open", "assigned_findings": ["EX-001"]}]
-        ),
-        encoding="utf-8",
-    )
-
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
-    monkeypatch.setattr(module, "session_dir_path", lambda eng_dir, session_id: str(session_dir))
-
-    class FakeClient:
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            self.base_url = base_url
-            self.engagement_key = engagement_key
-
-        def post(self, endpoint: str, payload: dict[str, object]):
-            raise AssertionError("should validate session index before backend posts")
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
-    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
-
-    with pytest.raises(SystemExit, match="assigned_findings is no longer supported"):
-        module.run(SimpleNamespace(engagement_dir=engagement_dir, session_id="session-a", yes=True))
-
-
 def test_list_command_runs_failed_excludes_timeouts_by_default() -> None:
     module = _load_script_module(
         "test_list_command_runs_module",
@@ -2153,40 +2425,6 @@ def test_list_command_runs_failed_with_timed_out_preserves_timeout_filter() -> N
     assert "timed_out=false" not in query
 
 
-def test_session_index_rejects_legacy_assigned_findings_key(tmp_path: Path) -> None:
-    module = _load_script_module(
-        "test_sessions_module",
-        "agent/scripts/assess/lib/sessions.py",
-    )
-    engagement_dir = tmp_path / "engagement"
-    sessions_dir = engagement_dir / "sessions"
-    sessions_dir.mkdir(parents=True)
-    (sessions_dir / "index.json").write_text(
-        json.dumps(
-            [{"session_id": "session-a", "status": "open", "assigned_findings": ["EX-001"]}]
-        ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(SystemExit, match="assigned_findings is no longer supported"):
-        module.load_session_index(str(engagement_dir))
-
-
-def test_save_session_index_rejects_legacy_assigned_findings_key(tmp_path: Path) -> None:
-    module = _load_script_module(
-        "test_sessions_save_module",
-        "agent/scripts/assess/lib/sessions.py",
-    )
-    engagement_dir = tmp_path / "engagement"
-    (engagement_dir / "sessions").mkdir(parents=True)
-
-    with pytest.raises(SystemExit, match="assigned_findings is no longer supported"):
-        module.save_session_index(
-            str(engagement_dir),
-            [{"session_id": "session-a", "status": "open", "assigned_findings": ["EX-001"]}],
-        )
-
-
 def test_review_exploits_lists_backend_candidates(monkeypatch, tmp_path: Path, capsys) -> None:
     module = _load_script_module(
         "test_review_exploits_module",
@@ -2205,7 +2443,7 @@ def test_review_exploits_lists_backend_candidates(monkeypatch, tmp_path: Path, c
     monkeypatch.setattr(
         module,
         "load_scope",
-        lambda engagement_dir: {
+        lambda engagement_dir, **kwargs: {
             "current_phase": "exploit",
             "exploit_policy": "selected",
             "exploit_review_state": "pending",
@@ -2247,134 +2485,6 @@ def test_review_exploits_lists_backend_candidates(monkeypatch, tmp_path: Path, c
     assert "CHAIN-001 | info | active | downgraded | verified_chain_required | Chain-only primitive" in output
 
 
-def test_launch_session_prompt_uses_workflow_status(monkeypatch, tmp_path: Path) -> None:
-    module = _load_script_module(
-        "test_launch_session_module",
-        "agent/scripts/assess/commands/launch_session.py",
-    )
-    engagement_dir = tmp_path / "engagement"
-    (engagement_dir / "sessions").mkdir(parents=True)
-    (engagement_dir / "scope.json").write_text(
-        json.dumps(
-            {
-                "current_phase": "exploit",
-                "exploit_policy": "selected",
-                "exploit_review_state": "approved",
-                "approved_targets": ["ACTIVE-001"],
-            }
-        ),
-        encoding="utf-8",
-    )
-    (engagement_dir / "sessions" / "index.json").write_text("[]", encoding="utf-8")
-
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
-    monkeypatch.setattr(module, "ensure_session_index", lambda eng_dir: None)
-    monkeypatch.setattr(module, "resolve_approved_target_slugs", lambda cfg, scope: ["ACTIVE-001"])
-
-    class FakeClient:
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            self.base_url = base_url
-            self.engagement_key = engagement_key
-
-        def get(self, endpoint: str):
-            assert endpoint == "findings"
-            return [
-                {
-                    "slug": "ACTIVE-001",
-                    "severity": "high",
-                    "workflow_status": "active",
-                    "title": "Live issue",
-                }
-            ]
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
-    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
-
-    module.run(
-        SimpleNamespace(
-            engagement_dir=engagement_dir,
-            session_id="session-a",
-            slugs=["ACTIVE-001"],
-        )
-    )
-
-    prompt = (engagement_dir / "sessions" / "session-a" / "prompt.md").read_text(encoding="utf-8")
-    assignment = json.loads(
-        (engagement_dir / "sessions" / "session-a" / "assignment.json").read_text(encoding="utf-8")
-    )
-    session_index = json.loads((engagement_dir / "sessions" / "index.json").read_text(encoding="utf-8"))
-    assert "ACTIVE-001 | high | active | Live issue" in prompt
-    assert assignment["assigned_targets"] == ["ACTIVE-001"]
-    assert session_index[0]["assigned_targets"] == ["ACTIVE-001"]
-
-
-def test_launch_session_rejects_existing_session_without_truncating_proposals(monkeypatch, tmp_path: Path, capsys) -> None:
-    module = _load_script_module(
-        "test_launch_session_existing_module",
-        "agent/scripts/assess/commands/launch_session.py",
-    )
-    engagement_dir = tmp_path / "engagement"
-    session_dir = engagement_dir / "sessions" / "session-a"
-    proposals_dir = session_dir / "proposals"
-    proposals_dir.mkdir(parents=True)
-    proposals_file = proposals_dir / "proposals.jsonl"
-    proposals_file.write_text('{"type":"finding_record"}\n', encoding="utf-8")
-    (engagement_dir / "scope.json").write_text(
-        json.dumps(
-            {
-                "current_phase": "exploit",
-                "exploit_policy": "selected",
-                "exploit_review_state": "approved",
-                "approved_targets": ["ACTIVE-001"],
-            }
-        ),
-        encoding="utf-8",
-    )
-    (engagement_dir / "sessions" / "index.json").write_text(
-        json.dumps([{"session_id": "session-a", "status": "active"}]),
-        encoding="utf-8",
-    )
-
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
-    monkeypatch.setattr(module, "resolve_approved_target_slugs", lambda cfg, scope: ["ACTIVE-001"])
-
-    with pytest.raises(SystemExit) as excinfo:
-        module.run(
-            SimpleNamespace(
-                engagement_dir=engagement_dir,
-                session_id="session-a",
-                slugs=["ACTIVE-001"],
-            )
-        )
-
-    assert excinfo.value.code == 1
-    assert "session already exists: session-a" in capsys.readouterr().err
-    assert proposals_file.read_text(encoding="utf-8") == '{"type":"finding_record"}\n'
-
-
 def _run_phase_report(monkeypatch, tmp_path: Path, payload: dict):
     """Drive ``check-phase-readiness --phase report`` against a report payload."""
     module = _load_script_module(
@@ -2405,6 +2515,13 @@ def _run_phase_report(monkeypatch, tmp_path: Path, payload: dict):
                               "open_high_cves": [], "open_leads": [],
                               "exploited_unlinked_cves": [], "dangling_links": []},
                 }
+            # report is a depth phase (ADR 0012): the report gate now PREVIEWS the
+            # depth ledger + the would-block set. Both are web-only skipped here.
+            if endpoint == "application-units/depth-ledger":
+                return {"skipped": True, "units": [], "summary": {}}
+            if endpoint == "application-units/terminal-block":
+                return {"skipped": True, "blocking": [], "warned_under_observed": [],
+                        "deferred": [], "deferral_count": 0}
             raise AssertionError(f"unexpected endpoint {endpoint}")
 
         def get_engagement(self, endpoint: str, query: str = ""):
@@ -2571,7 +2688,8 @@ def test_specialist_loads_adversarial_mindset(role: str) -> None:
 @pytest.mark.parametrize("role", sorted(_ADVERSARIAL_MINDSET_EXCLUDED))
 def test_specialist_does_not_load_adversarial_mindset(role: str) -> None:
     """Explicitly excluded roles must NOT load adversarial-mindset.md.
-    See C3 rationale in TODOv2.md V14."""
+    These roles summarize or operate infrastructure; injecting an offensive
+    ideation stance would push them toward inflation or speculation."""
     body = (_agents_dir() / f"{role}.md").read_text(encoding="utf-8")
     assert "agent/rules/adversarial-mindset.md" not in body, (
         f"{role} should NOT load adversarial-mindset.md "
@@ -2614,6 +2732,21 @@ def test_start_swarm_records_N_rows_with_worker_encoded_task(
                 "status": "in-progress",
             }
 
+        def get(self, endpoint: str):
+            assert endpoint == "code/repos"
+            return [
+                {
+                    "id": 17,
+                    "repo_key": "swarm-repo",
+                    "repo_path": "/sealed/swarm-repo/source",
+                    "active_generation": 4,
+                    "source_manifest_digest": "c" * 64,
+                    "structural_index_schema": "structural-index/v5",
+                    "structural_index_manifest_path": "/sealed/swarm-repo/index/manifest.json",
+                    "lsp_config": {},
+                }
+            ]
+
         def close(self) -> None:
             return None
 
@@ -2648,6 +2781,7 @@ def test_start_swarm_records_N_rows_with_worker_encoded_task(
         swarm_items_file=str(items_path),
         finding_slugs=None,
         engagement_dir=str(tmp_path),
+        code_repo_id=17,
         extra=[],
     )
 
@@ -2672,6 +2806,8 @@ def test_start_swarm_records_N_rows_with_worker_encoded_task(
     assert "## Swarm Dispatch Table" in out
     assert "workers: 3" in out
     assert "batch_size: 5" in out
+    assert "## Code Source Identity" in out
+    assert "repo_id: 17" in out
 
 
 def test_start_swarm_rejects_empty_items_file(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -2705,6 +2841,142 @@ def test_start_swarm_rejects_empty_items_file(monkeypatch, tmp_path: Path, capsy
         agent_mod._start_swarm(args)  # noqa: SLF001
     assert excinfo.value.code == 1
     assert "items file is empty" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# C4c — dispatch honesty: terminal handoff-less dispatches
+#
+# A dispatch that lands on a terminal status (failed/aborted) with NO handoff
+# row at all is silent state-loss: resume-brief's terminal_no_handoff list and
+# `agent reconcile-stale` can only ever report the bare fact afterward, never
+# why the dispatch died. `agent done` is the last chance to warn the operator
+# before that context is gone. WARN-only (never a hard gate) — crash-recovery
+# force-close must stay possible.
+# ---------------------------------------------------------------------------
+
+
+class _NoHandoffAssessmentClient:
+    """Fake AssessmentClient: no handoff exists for any agent_id."""
+
+    def __init__(self, *_a, **_k) -> None:
+        pass
+
+    def get_handoff(self, agent_id: str):
+        return None
+
+    def update_dispatch(self, agent_id: str, patch: dict) -> dict:
+        return {"agent_id": agent_id, **patch}
+
+    def close(self) -> None:
+        return None
+
+
+def _patch_dispatch_client(monkeypatch, module, client_cls) -> None:
+    """Patch the AssessmentClient class + load_config at their home module
+    (``dispatch.agent``, i.e. ``agent/scripts/assess/commands/dispatch/agent.py``).
+
+    `_client_for` is defined once in that module and re-exported by name onto
+    the `dispatch` package (`from .agent import _client_for`); every caller —
+    whether it reaches it as `dispatch._client_for` or as a bare `_client_for`
+    call from inside `dispatch.agent` itself (e.g. `_update_dispatch_status`)
+    — is the SAME function object, and it always resolves `AssessmentClient`
+    via its home module's globals. Patching `dispatch._client_for` directly
+    would miss the latter call path (used internally by `agent done`).
+    """
+    monkeypatch.setattr(module.dispatch.agent, "AssessmentClient", client_cls)
+    monkeypatch.setattr(
+        module.dispatch.agent,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir="/tmp/eng",
+            engagement_key="eng",
+            agent_root="/tmp",
+        ),
+    )
+
+
+def test_agent_done_status_failed_warns_when_no_handoff_exists(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_script_module(
+        "test_agent_done_no_handoff_warn_module",
+        "agent/scripts/assess/commands/agent.py",
+    )
+    _patch_dispatch_client(monkeypatch, module, _NoHandoffAssessmentClient)
+
+    module.run(
+        SimpleNamespace(
+            action="done",
+            extra=["recon-died-1"],
+            agent_id=None,
+            dispatch_status="failed",
+            completed_at=None,
+            finding_slugs=None,
+            engagement_dir="/tmp/eng",
+        )
+    )
+
+    err = capsys.readouterr().err
+    assert "WARN agent done: no handoff found for recon-died-1 closing as 'failed'" in err
+    assert "silent state-loss" in err
+
+
+def test_agent_done_status_aborted_warns_when_no_handoff_exists(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Same WARN fires for `--status aborted`, matching the `terminal_no_handoff`
+    scope (failed/aborted) used by resume-brief and `reconcile-stale`."""
+    module = _load_script_module(
+        "test_agent_done_no_handoff_warn_aborted_module",
+        "agent/scripts/assess/commands/agent.py",
+    )
+    _patch_dispatch_client(monkeypatch, module, _NoHandoffAssessmentClient)
+
+    module.run(
+        SimpleNamespace(
+            action="done",
+            extra=["recon-died-2"],
+            agent_id=None,
+            dispatch_status="aborted",
+            completed_at=None,
+            finding_slugs=None,
+            engagement_dir="/tmp/eng",
+        )
+    )
+
+    err = capsys.readouterr().err
+    assert "WARN agent done: no handoff found for recon-died-2 closing as 'aborted'" in err
+
+
+def test_agent_done_status_completed_warns_when_no_handoff_exists(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Completed-without-handoff is still unaccounted specialist output."""
+    module = _load_script_module(
+        "test_agent_done_no_handoff_completed_module",
+        "agent/scripts/assess/commands/agent.py",
+    )
+    _patch_dispatch_client(monkeypatch, module, _NoHandoffAssessmentClient)
+
+    module.run(
+        SimpleNamespace(
+            action="done",
+            extra=["recon-finished-1"],
+            agent_id=None,
+            dispatch_status="completed",
+            completed_at=None,
+            finding_slugs=None,
+            engagement_dir="/tmp/eng",
+        )
+    )
+
+    err = capsys.readouterr().err
+    assert "no handoff found" in err
+    assert "dispatch_reconciliation" in err
 
 
 # ---------------------------------------------------------------------------
@@ -3046,7 +3318,7 @@ def test_resume_brief_renders_read_first_intel_notes(monkeypatch, tmp_path, caps
 
 # ---------------------------------------------------------------------------
 # Engagement-dir / key resolution hardening + relative cases.db anchoring.
-# Regression for: `cd scans/ ; ENGAGEMENT_DIR=$(pwd)` deriving key="scans", and
+# Regression for: a scope-less explicit selector deriving key="scans", and
 # a bare relative cases.db opening the wrong (empty) DB from a drifted cwd.
 # ---------------------------------------------------------------------------
 
@@ -3063,7 +3335,7 @@ def test_resolve_engagement_dir_rejects_scopeless_subdir(monkeypatch, tmp_path):
     eng = tmp_path / "2026-05-29-eng"
     (eng / "scans").mkdir(parents=True)
     (eng / "scope.json").write_text("{}", encoding="utf-8")
-    monkeypatch.delenv("ENGAGEMENT_DIR", raising=False)
+    monkeypatch.delenv("VIGIL_SESSION_ENGAGEMENT_DIR", raising=False)
 
     # The engagement root (has scope.json) resolves and the key is its basename.
     assert config.resolve_engagement_dir(str(eng)) == str(eng.resolve())
@@ -3072,18 +3344,18 @@ def test_resolve_engagement_dir_rejects_scopeless_subdir(monkeypatch, tmp_path):
     with pytest.raises(SystemExit):
         config.resolve_engagement_dir(str(eng / "scans"))
 
-    # Same trap via $ENGAGEMENT_DIR=$(pwd)-from-scans.
-    monkeypatch.setenv("ENGAGEMENT_DIR", str(eng / "scans"))
+    # Same trap via a malformed launcher-session binding.
+    monkeypatch.setenv("VIGIL_SESSION_ENGAGEMENT_DIR", str(eng / "scans"))
     with pytest.raises(SystemExit):
         config.resolve_engagement_dir(None)
 
 
-def test_anchor_engagement_relative_uses_engagement_dir(monkeypatch, tmp_path):
+def test_anchor_engagement_relative_uses_session_engagement(monkeypatch, tmp_path):
     config = _import_assess_config()
     eng = tmp_path / "2026-05-29-eng2"
     eng.mkdir()
     (eng / "scope.json").write_text("{}", encoding="utf-8")
-    monkeypatch.setenv("ENGAGEMENT_DIR", str(eng))
+    monkeypatch.setenv("VIGIL_SESSION_ENGAGEMENT_DIR", str(eng))
 
     # Relative cases.db anchors to the engagement dir even when cwd is elsewhere.
     other = tmp_path / "elsewhere"
@@ -3152,7 +3424,9 @@ def test_evidence_ref_missing_path_warns_not_rejects(tmp_path, capsys):
         {"evidence_ref": "scans/does-not-exist.txt"},
         eng_dir=str(tmp_path), engagement_key="eng", allow_unindexed=False,
     )
-    assert "no file exists" in capsys.readouterr().err
+    # "nothing exists", not "no file exists": a DIRECTORY is a valid
+    # evidence_ref too, so the warning must not imply only a file would count.
+    assert "nothing exists there" in capsys.readouterr().err
 
 
 def test_evidence_ref_empty_warns_not_rejects(tmp_path, capsys):
@@ -3224,22 +3498,24 @@ def test_update_finding_notes_replace_without_notes_errors():
 
 
 def _run_ingest_spec(monkeypatch, tmp_path: Path, spec: dict, scope: dict):
-    """Drive ingest-spec.run against an in-process FakeClient, returning the
-    list of posted observation payloads and the ingested work_items rows."""
+    """Drive ingest-spec.run against an in-process FakeClient.
+
+    ingest-spec no longer writes a local cases.db; it POSTs one
+    request-observation per operation (in bulk) whose ``work_item`` derivation
+    block carries the per-op url/method/params (ADR 0013 — the backend derives
+    the assessment_work_items row). Returns ``(posts, rows)`` where ``posts`` is
+    the list of captured observation payloads and ``rows`` reconstructs the
+    ``(url, method, query_params, body_params, path_params, cookie_params)``
+    tuples the old cases.db ``work_items`` SELECT produced (params as JSON text),
+    so the S10/S11 callers assert unchanged.
+    """
     module = _load_script_module(
         "test_ingest_spec_module",
         "agent/scripts/assess/commands/ingest_spec.py",
     )
-    db_module = _load_script_module(
-        "test_ingest_spec_db_module",
-        "agent/scripts/assess/lib/db.py",
-    )
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
     (engagement_dir / "scope.json").write_text(json.dumps(scope), encoding="utf-8")
-    db_path = engagement_dir / "cases.db"
-    db_path.touch()
-    db_module.db_init(str(db_path))
 
     spec_path = tmp_path / "spec.json"
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
@@ -3259,11 +3535,20 @@ def _run_ingest_spec(monkeypatch, tmp_path: Path, spec: dict, scope: dict):
 
     class FakeClient:
         def __init__(self, *a, **k) -> None:
-            pass
+            self._next_id = 200
 
         def post(self, endpoint, payload):
+            if endpoint == "request-observations/bulk":
+                records = []
+                for observation in payload.get("items", []):
+                    posts.append(observation)
+                    self._next_id += 1
+                    records.append({"request_variant": {"id": self._next_id}})
+                return {"count": len(records), "records": records}
+            # Individual-fallback path (bulk endpoint missing / payload error).
             posts.append(payload)
-            return {"request_variant": {"id": 200 + len(posts)}}
+            self._next_id += 1
+            return {"request_variant": {"id": self._next_id}}
 
         def close(self) -> None:
             return None
@@ -3278,20 +3563,22 @@ def _run_ingest_spec(monkeypatch, tmp_path: Path, spec: dict, scope: dict):
 
     module.run(
         SimpleNamespace(
-            db_path=str(db_path),
             spec_file=str(spec_path),
             engagement_dir=str(engagement_dir),
         )
     )
 
-    conn = sqlite3.connect(str(db_path))
-    try:
-        rows = conn.execute(
-            "SELECT url, method, query_params, body_params, path_params, cookie_params "
-            "FROM work_items ORDER BY id"
-        ).fetchall()
-    finally:
-        conn.close()
+    rows = [
+        (
+            observation["url"],
+            observation["method"],
+            observation["work_item"]["query_params"],
+            observation["work_item"]["body_params"],
+            observation["work_item"]["path_params"],
+            observation["work_item"]["cookie_params"],
+        )
+        for observation in posts
+    ]
     return posts, rows
 
 

@@ -1,4 +1,4 @@
-"""Wave 6a — app-unit prefix discovery + depth scorer (depth-gate §5.2).
+"""App-unit prefix discovery and depth scoring.
 
 An **app unit** is an APPLICATION boundary keyed ``(host, port-class,
 path-prefix)`` — a finer, orthogonal grain to a network service
@@ -9,10 +9,10 @@ campaign?* It produces a gated ``structure × risk − suppressors`` score, a
 ``deep_required`` boolean, a sample-size ``confidence``, and per-signal
 ``evidence_json`` source counts.
 
-DOCTRINE (master plan §0, depth-gate §5.2 "Calibration"):
+INVARIANTS:
   * **WARN-FIRST.** This is a stored, transparent, advisory signal. It does NOT
-    hard-block anything (the terminal block is a later wave). Nothing here
-    raises to refuse a transition.
+    hard-block anything. Terminal enforcement is owned by the separate depth
+    backstop; nothing here raises to refuse a transition.
   * **WEB-ONLY.** ``score_application_units`` no-ops for code/blue engagements
     (they carry no request_variants anyway, but we guard explicitly so an
     app unit is never persisted for a non-web track).
@@ -23,15 +23,15 @@ DOCTRINE (master plan §0, depth-gate §5.2 "Calibration"):
     ZERO request_variants scores as UNDER-OBSERVED (low confidence, WARN),
     never a ``thin`` auto-pass.
 
-CALIBRATION-PENDING: the §5.2 weights/thresholds encoded below are a starting
-rubric. They must be tuned against a real finished engagement's backend DB
-(master plan §6 "Scorer calibration data") before app-unit *detection* is ever
-allowed to hard-block. Treat every numeric constant here as calibrated, not
-sacred.
+The weights and thresholds below are a transparent heuristic rubric. Re-evaluate
+them against finished-engagement data before changing them; treat every numeric
+constant as calibrated, not sacred.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
+import re
 from typing import Any
 from urllib.parse import urlparse
 
@@ -293,7 +293,50 @@ def _params_match_tokens(variant: dict[str, Any], tokens: tuple[str, ...]) -> bo
     return False
 
 
-def _surface_host_path(descriptor: str) -> tuple[str, str]:
+_HOSTNAME_LABEL_RE = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$")
+
+
+def _is_valid_hostname(host: str) -> bool:
+    """Backend hostname-validation predicate — DNS-label / IP-literal shape.
+
+    Mirrors the agent-side ``scope.looks_like_host`` contract WITHOUT importing
+    agent code (the backend must not depend on the agent tree): admits an
+    IPv4/IPv6 literal, ``localhost``, or a multi-label DNS hostname (every label
+    a valid RFC-1123 DNS label AND at least one dot). REJECTS a bare single label
+    (``us-east-1`` / a region / service / placeholder token), a path fragment, or
+    any string carrying a character no hostname may hold.
+
+    :func:`_split_host_path` is maximally lenient (it treats the first whitespace
+    token as the host even with no scheme), so without this gate descriptors like
+    ``us-east-1`` become bogus host keys that materialize ``deep_required`` app
+    units and hard-block the terminal report edge on garbage (I-08).
+    """
+    h = (host or "").strip().strip(".").lower()
+    if not h or len(h) > 253:
+        return False
+    if h == "localhost":
+        return True
+    try:
+        ipaddress.ip_address(h.strip("[]"))
+        return True
+    except ValueError:
+        pass
+    labels = h.split(".")
+    if len(labels) < 2:
+        return False
+    return all(_HOSTNAME_LABEL_RE.match(label) for label in labels)
+
+
+def _split_host_path(descriptor: str) -> tuple[str, str]:
+    """RAW ``(host, path)`` split of a surface descriptor — maximally lenient, NO
+    hostname validation.
+
+    Comparison helpers that match a parsed host against an ALREADY-TRUSTED
+    app-unit host (the depth ledger's finding / deferral / credential mappers)
+    use THIS directly, so a trusted single-label or IP unit host still matches;
+    ingest paths that MINT unit keys go through :func:`_surface_host_path`, which
+    adds the hostname gate.
+    """
     raw = (descriptor or "").strip()
     if not raw:
         return "", "/"
@@ -317,6 +360,20 @@ def _surface_host_path(descriptor: str) -> tuple[str, str]:
     if len(parts) == 2 and parts[1].startswith("/"):
         path = parts[1].split()[0]
     return host.lower(), path or "/"
+
+
+def _surface_host_path(descriptor: str) -> tuple[str, str]:
+    """``(host, path)`` for a surface descriptor with the host HOSTNAME-VALIDATED.
+
+    A descriptor whose host is not a syntactic hostname/IP (``us-east-1``, a bare
+    path, a service label, a placeholder) yields an EMPTY host, so every ingest
+    site that guards on a truthy host skips it — the gate that stops garbage
+    descriptors from minting bogus ``deep_required`` app units (I-08).
+    """
+    host, path = _split_host_path(descriptor)
+    if host and not _is_valid_hostname(host):
+        return "", path
+    return host, path
 
 
 def _prefix_from_path(path: str) -> str:
@@ -601,6 +658,23 @@ def score_application_units(engagement_id: int) -> dict[str, Any]:
         }
 
     eng_id = engagement.id
+
+    # I-07 scope admission: exclude out-of-scope hosts (SSO/CDN/vendor and
+    # wildcard co-tenants) from EVERY host source that mints a unit key, through
+    # the SAME primitive ``web_uncovered_high_route_hosts`` uses. Lazy import
+    # avoids the app_units<->coverage module cycle (coverage imports this module).
+    # ``scope_admission`` is None when scope cannot be determined / has no
+    # allowlist — then ``_in_scope`` fails OPEN (keeps every host), never silently
+    # dropping all units.
+    from .coverage import _engagement_scope_admission, _host_admitted_by_scope
+
+    scope_admission = _engagement_scope_admission(engagement)
+
+    def _in_scope(host: str) -> bool:
+        if scope_admission is None:
+            return True
+        return _host_admitted_by_scope(host, scope_admission[0], scope_admission[1])
+
     with _common.get_connection() as connection:
         variants = _fetch_all(
             connection,
@@ -667,14 +741,16 @@ def score_application_units(engagement_id: int) -> dict[str, Any]:
 
     parsed_surfaces: list[tuple[str, str, str]] = []
     for s in surfaces:
+        # _surface_host_path validates the hostname (I-08); _in_scope drops
+        # out-of-scope hosts (I-07).
         host, path = _surface_host_path(str(s.get("target_descriptor") or ""))
-        if host:
+        if host and _in_scope(host):
             parsed_surfaces.append((host, path, str(s.get("surface_type") or "")))
 
     authorities: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for v in variants:
         host = str(v.get("host") or "").lower()
-        if not host:
+        if not host or not _in_scope(host):
             continue
         pc = _port_class(str(v.get("scheme") or ""), int(v.get("port") or 0))
         authorities.setdefault((host, pc), []).append(v)
@@ -783,11 +859,14 @@ def score_application_units(engagement_id: int) -> dict[str, Any]:
                                   "collection before trusting 'thin'.",
                     })
 
-        touched_hosts = {
-            str(r.get("target_host") or "").lower()
-            for r in probe_hosts
-            if str(r.get("target_host") or "").strip()
-        }
+        # Probe target_host is a lenient free-text column: hostname-validate it
+        # (I-08 — drop `us-east-1` / label / placeholder targets) and scope-admit
+        # it (I-07) before it can mint an under-observed unit.
+        touched_hosts: set[str] = set()
+        for r in probe_hosts:
+            host = str(r.get("target_host") or "").strip().lower()
+            if host and _is_valid_hostname(host) and _in_scope(host):
+                touched_hosts.add(host)
         for host in sorted(touched_hosts - variant_hosts):
             if not host:
                 continue
@@ -1006,6 +1085,10 @@ def _recompute_unit_links(
         "UPDATE assessment_probe_runs SET application_unit_id = NULL WHERE engagement_id = ?",
         (engagement_id,),
     )
+    connection.execute(
+        "UPDATE assessment_work_items SET application_unit_id = NULL WHERE engagement_id = ?",
+        (engagement_id,),
+    )
 
     cov = _fetch_all(
         connection,
@@ -1021,6 +1104,32 @@ def _recompute_unit_links(
             connection.execute(
                 "UPDATE assessment_coverage_items SET application_unit_id = ? WHERE id = ?",
                 (unit_id_by_key[key], row["id"]),
+            )
+
+    work_items = _fetch_all(
+        connection,
+        "SELECT id, request_variant_id, coverage_item_id FROM assessment_work_items "
+        "WHERE engagement_id = ?",
+        (engagement_id,),
+    )
+    coverage_unit_by_id = {
+        int(row["id"]): row.get("application_unit_id")
+        for row in _fetch_all(
+            connection,
+            "SELECT id, application_unit_id FROM assessment_coverage_items WHERE engagement_id = ?",
+            (engagement_id,),
+        )
+    }
+    for row in work_items:
+        unit_id = coverage_unit_by_id.get(int(row["coverage_item_id"])) if row.get("coverage_item_id") else None
+        if unit_id is None and row.get("request_variant_id") is not None:
+            key = prefix_for_variant.get(int(row["request_variant_id"]))
+            if key:
+                unit_id = unit_id_by_key.get(key)
+        if unit_id is not None:
+            connection.execute(
+                "UPDATE assessment_work_items SET application_unit_id = ? WHERE id = ?",
+                (unit_id, row["id"]),
             )
 
     probes = _fetch_all(

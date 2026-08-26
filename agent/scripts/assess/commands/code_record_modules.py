@@ -1,4 +1,4 @@
-"""vigil assess code-record-modules — POST module definitions for a code repository."""
+"""vigil assess code-record modules — POST module definitions for a code repository."""
 from __future__ import annotations
 
 import json
@@ -68,7 +68,7 @@ def _check_auto_derived_key_collisions(modules: list[dict], existing_modules: li
 
 
 def register(subparsers) -> None:
-    p = subparsers.add_parser("code-record-modules", help="Record module definitions for a code repository")
+    p = subparsers.add_parser("modules", help="Record module definitions for a code repository")
     p.add_argument("repo_id", help="Repository ID")
     p.add_argument("modules_json", help="Path to JSON file with array of module objects")
     p.set_defaults(func=run)

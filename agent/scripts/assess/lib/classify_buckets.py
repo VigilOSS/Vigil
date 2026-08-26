@@ -1,10 +1,10 @@
 """Shared gf-style bucket classification used by both ingestion and re-runs.
 
 This module is the single source of truth for the priority/cluster assignments
-that `db_insert_work_item()` writes inline at insert time and that
-`vigil assess classify-work` re-applies idempotently. Keeping the logic in one
+that the ingest producers compute inline (into the work_item block the backend
+derives) and that `vigil assess work-buffer reclassify` re-applies idempotently. Keeping the logic in one
 place ensures the two paths cannot drift — operators forgetting to run
-`classify-work` after an ingest used to leave the work buffer unscored, which
+`work-buffer reclassify` after an ingest used to leave the work buffer unscored, which
 broke priority-mode dispatch silently.
 
 Design notes:
@@ -129,6 +129,18 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         # `redirect`): these name a URL the SERVER fetches (SSRF), as opposed to
         # the `redirect` family which names a URL the BROWSER follows. Both
         # `snake_case` and `concatenated` (camelCase-lowercased) forms are listed.
+        # Deepened (vuln-taxonomy-audit 2026-07): image/avatar-fetch compound
+        # family. "SSRF via avatar/profile-picture URL" (the server
+        # downloads a user-supplied image URL server-side to resize/host it) is
+        # one of the most frequently reported bug-bounty SSRF variants and was
+        # entirely absent from the curated `_url` families below — the bare
+        # `image`/`photo`/`avatar` keys exist only in `img_traversal` (local
+        # path traversal) and `upload_fields` (multipart upload), neither of
+        # which carries the server-fetch-a-remote-URL semantics. Both
+        # `snake_case` and concatenated forms, mirroring the existing
+        # `webhook_url`/`webhookurl` idiom; none collide with any other
+        # bucket's key set (`avatar`/`image`/`photo` bare are used elsewhere,
+        # but the `_url` compound forms here are novel).
         40,
         frozenset({
             "url", "uri", "host", "port", "feed", "window",
@@ -136,6 +148,10 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
             "remote_url", "remoteurl", "webhook_url", "webhookurl",
             "feed_url", "feedurl", "dest_uri", "desturi",
             "target_uri", "targeturi", "request_uri", "requesturi",
+            "image_url", "imageurl", "avatar_url", "avatarurl",
+            "photo_url", "photourl", "picture_url", "pictureurl",
+            "logo_url", "logourl", "thumbnail_url", "thumbnailurl",
+            "icon_url", "iconurl",
         }),
         ("/proxy/", "/fetch/"),
     ),
@@ -168,12 +184,24 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         # `column`,`field`,`from`,`row`,`sleep`,`fetch`. `where`/`select` also
         # overlap the `nosqli` bucket via `$`-operators; both firing is fine (the
         # reason chain is multi-bucket).
+        # Deepened (vuln-taxonomy-audit 2026-07): ORM sort/group compound
+        # family. "SQLi via sort/orderBy parameter" (an ORM building
+        # `ORDER BY <param>` or `GROUP BY <param>` directly from a request
+        # value, unparameterizable because column names cannot be bound) is a
+        # recurring bug-bounty pattern and a direct extension of the same
+        # rationale already used for the bare `where`/`select`/`sleep`/`fetch`
+        # additions above ("a param literally named after a SQL clause/function
+        # is a genuine injection signal" — see `sqli.md`). `order`/`sort` bare
+        # keys already exist; the compound `_by` forms and `having` do not, and
+        # none collide with any other bucket.
         40,
         frozenset({
             "id", "uid", "pid", "sid", "tid", "order", "sort", "filter",
             "q", "search", "query", "category",
             "where", "select", "table", "column", "field", "from", "row",
             "sleep", "fetch",
+            "order_by", "orderby", "sort_by", "sortby",
+            "group_by", "groupby", "having",
         }),
         (),
     ),
@@ -256,6 +284,27 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
             ".axd", ".ashx", ".asmx", ".svc", "/_vti_bin/", "/trace.axd",
             "/elmah.axd",
         ),
+    ),
+    (
+        "xxe",
+        # NEW (vuln-taxonomy-audit 2026-07) → class `xxe` (already canonical;
+        # `xxe-testing` skill already exists — this bucket was the classifier's
+        # one confirmed gap: the class had a skill but no gf-style signal).
+        # XML/SOAP surfaces that accept attacker-controlled XML are the classic
+        # XXE entry point (external entity / DTD abuse, blind OOB exfil, SSRF via
+        # entity expansion). Weight 40 (tied with ssrf/sqli/lfi/auth/deserialization/
+        # dotnet_handler) reflects real severity; declared AFTER `dotnet_handler`
+        # so a future shared fragment would keep that bucket's existing tie-break
+        # win. Every key/fragment below is DELIBERATELY NOVEL (verified against
+        # no other bucket) so this addition cannot recluster any existing row:
+        # `.svc`/`.asmx` (also classic SOAP endpoints) already belong to
+        # `dotnet_handler` and `/xmlrpc.php` already belongs to `wordpress` — both
+        # are real adjacent XXE surfaces, cross-referenced in
+        # `agent/references/gf-patterns/xxe.md` rather than re-declared here, so
+        # this bucket cannot change either bucket's pinned `cluster_key`.
+        40,
+        frozenset({"xml", "soap", "wsdl", "rss"}),
+        ("/soap", ".wsdl"),
     ),
     (
         "img_traversal",
@@ -461,6 +510,27 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         ("/_search", "/aggregate", "/_msearch"),
     ),
     (
+        "prototype-pollution",
+        # NEW (vuln-taxonomy-audit 2026-07) → class `prototype-pollution`
+        # (already canonical; the `prototype-pollution` skill already exists).
+        # PortSwigger's server-side prototype-pollution research (Gareth Heyes,
+        # portswigger.net/research/server-side-prototype-pollution) shows the
+        # gadget is triggered by literal `__proto__`/`constructor`/`prototype`
+        # keys reaching an object-merge sink; a captured request whose JSON body
+        # already carries one of these keys (often as a compound bracket path
+        # like `constructor[prototype][x]`, decomposed by `expand_compound_key`)
+        # is a strong, low-FP signal — these are not normal application
+        # parameter names. Param-only (no path fragment carries the signal),
+        # mirroring `ssti`/`cors`/`sqli`. Weight 35 (nosqli/idor tier): real
+        # severity (server-side PP can reach RCE via gadget chains) but keyed on
+        # rare literal names rather than a proven interpreter sink. All three
+        # keys are DELIBERATELY NOVEL (verified against every other bucket) so
+        # this addition cannot recluster any existing row.
+        35,
+        frozenset({"__proto__", "constructor", "prototype"}),
+        (),
+    ),
+    (
         "upload_fields",
         # NEW (review-and-merge): parameter-level signal for upload surfaces
         # that may not match the `trust_surface` path heuristic (e.g.,
@@ -616,6 +686,36 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         (),
     ),
     (
+        "mass-assignment",
+        # NEW (vuln-taxonomy-audit 2026-07) → class `mass-assignment` (already
+        # canonical; `bff-parameter-override`/`mass-assignment` skills already
+        # exist). OWASP API Security Top 10:2023 folds mass assignment into
+        # API3:2023 "Broken Object Property Level Authorization" — a top-3 API
+        # risk. Autobinding frameworks (Rails/Spring MVC/ASP.NET MVC/Node ORMs)
+        # bind body keys straight onto a model, so a captured request whose body
+        # already carries a privilege-shaped key (`isAdmin`, `role`, `verified`,
+        # `access_level`, ...) is real over-posting signal — the canonical
+        # example is the 2012 GitHub mass-assignment breach via a public-key
+        # upload endpoint. Param-only (body-shape issue, no distinctive path).
+        # Weight 30 (privileged_action/servicenow tier — bfla-adjacent
+        # authorization risk); declared AFTER `privileged_action` so a shared
+        # weight never disturbs its existing wins. Every key below is
+        # DELIBERATELY NOVEL (verified against every other bucket, including
+        # oauth-oidc's `scope` and privileged_action's own verb set) so this
+        # addition cannot recluster any existing row.
+        30,
+        frozenset({
+            "role", "roles", "admin", "isadmin", "is_admin",
+            "permissions", "permission",
+            "verified", "is_verified", "isverified",
+            "approved", "is_approved", "isapproved",
+            "access_level", "accesslevel", "privilege", "privileges",
+            "account_type", "accounttype", "user_type", "usertype",
+            "user_role", "userrole", "is_active", "isactive",
+        }),
+        (),
+    ),
+    (
         "devops_console",
         # NEW (classify-context-and-surface 2026-06, Part 3 §A.7) → class
         # `debug-exposure`. Ops dashboards / metrics & registry planes that are
@@ -636,6 +736,27 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
             "/kibana", "/_cat/", "/solr/", "/druid", "/debug/pprof",
             "/v2/_catalog", "/api/v4/projects",
         ),
+    ),
+    (
+        "ssi",
+        # NEW (vuln-taxonomy-audit 2026-07) → NEW class `ssi-injection` (OWASP
+        # WSTG 4.7.8 "Testing for SSI Injection"; www-community "Server-Side
+        # Includes (SSI) Injection"). SSI directives (`<!--#exec cmd="..."-->`)
+        # can reach OS command execution when a server parses these extensions
+        # and echoes unsanitized input. Extension-only detection mirrors
+        # `dotnet_handler`'s `.axd`/`.asmx` idiom: a hit on one of these rare,
+        # largely-legacy extensions is a low-FP signal even without a param key.
+        # No skill exists yet for this rare/legacy class — allowlisted
+        # skill-less in `test_vuln_taxonomy.KNOWN_SKILLLESS_CLASSES`, mirroring
+        # `ldap-injection`/`path-authz`. Weight 30 (below `dotnet_handler`'s 40 —
+        # SSI is rarer/lower-triage-priority in 2026 stacks than ASP.NET
+        # handlers, but still real when present). All three extensions are
+        # DELIBERATELY NOVEL (verified against `interestingext`'s extension list
+        # and every other bucket) so this addition cannot recluster any
+        # existing row.
+        30,
+        frozenset(),
+        (".shtml", ".shtm", ".stm"),
     ),
     (
         "redirect",
@@ -1091,13 +1212,13 @@ BUCKET_SKILLS: dict[str, tuple[str, ...]] = vuln_taxonomy.derive_bucket_skills()
 # across the codebase. Every consumer that needs the same set imports
 # `INERT_TYPES` from this module:
 #
-# - `agent/scripts/assess/lib/db.py:db_insert_work_item()` reads it to stamp
-#   `status='skipped'` at insert time so inert rows never enter the dispatch
-#   queue.
+# - the ingest producers (`ingest_endpoints`/`ingest_candidates`/`ingest_spec`,
+#   the proxy addon) read it to set `status='skipped'` in the work_item block
+#   they POST, so inert rows never enter the dispatch queue.
 # - `agent/scripts/assess/lib/classify_buckets.py:classify_row()` (this file)
 #   reads it to stamp `terminal_reason='inert_type'` so `fetch-by-priority`
 #   excludes them with one predicate.
-# - `agent/scripts/assess/commands/classify_work.py` reads it to scope the
+# - `agent/scripts/assess/commands/dispatch/work_items.py` reads it to scope the
 #   `--reclassify-all` WHERE clause to the same set the inline classifier
 #   skips on insert.
 # Adding a new inert type means editing this one place — every consumer
@@ -1124,8 +1245,7 @@ _INERT_TYPES = INERT_TYPES
 # `_FULL_URL_REGEX_BUCKETS`, the object-ref / api-version / cluster regexes and
 # `_PLACEHOLDER_TOKENS` / `_CLUSTER_PLACEHOLDERS`), the boost-only context tables
 # (`_NONPROD_HOST_LABEL_RE`, `_NONDEFAULT_PORTS`, `_LIVE_STATUS_TOKENS`), the
-# dead-archive demotion tables (`_GAU_ARCHIVE_SOURCE`, `_DEAD_LIVE_STATUS_TOKENS`),
-# the weak-token cap / fragment boundary / camelCase splitter, the SAML-auth
+# weak-token cap / fragment boundary / camelCase splitter, the SAML-auth
 # fragments, the upload-shadow set, AND a hand-maintained `_CLASSIFIER_LOGIC_REVISION`
 # integer that maintainers MUST bump for any `classify_row` LOGIC change not
 # captured by one of those data tables (e.g. an edit to the +15/+5 context
@@ -1133,9 +1253,9 @@ _INERT_TYPES = INERT_TYPES
 # (`_IDOR_WEIGHT`, `_PRIVILEGED_ACTION_WEIGHT`, `_INTERESTINGEXT_WEIGHT`,
 # `_AUTH_KEY_SET`, `_SSO_PATH_FRAGMENTS`) are covered transitively — they cannot
 # change without `_BUCKETS` itself changing — so they are not re-listed.
-# `db_insert_work_item()` stamps it inline at ingest and
-# `classify-work` re-stamps it on every re-classification, so a later
-# `classify-work --reclassify-stale` can tell rows scored under an OLD taxonomy
+# the ingest producers stamp it inline at ingest and
+# `work-buffer reclassify` re-stamps it on every re-classification, so a later
+# `work-buffer reclassify --reclassify-stale` can tell rows scored under an OLD taxonomy
 # from rows already at the current one — restamping only the stale
 # ones instead of the all-or-nothing `--reclassify-all`. A taxonomy edit to ANY
 # of the above tables bumps the digest so `--reclassify-stale` picks up the rows
@@ -1183,7 +1303,7 @@ def _canonicalize(obj: Any) -> Any:
 # `_CLASSIFIER_VERSION_INPUTS` and `CLASSIFIER_VERSION` are assembled at the END
 # of this module (see "Classifier version stamp — digest assembly" below): the
 # input set intentionally spans tables/regexes/scalars declared throughout the
-# file (context/demotion tables, weak-token cap, cluster placeholders, ...), so
+# file (context tables, weak-token cap, cluster placeholders, ...), so
 # the dict cannot be built here without forward-referencing names that do not
 # exist yet. `_canonicalize` (above) is the only piece needed at this point.
 
@@ -1191,7 +1311,7 @@ def _canonicalize(obj: Any) -> Any:
 # NOT a real digest, so it never equals `CLASSIFIER_VERSION` and is protected
 # from `--reclassify-stale` (which excludes it explicitly). `work-buffer
 # mark-manual <id>` stamps it; `--reclassify-all` is the only path that
-# overwrites it. Single source of truth so `classify_work.py` and the
+# overwrites it. Single source of truth so `dispatch/work_items.py` and the
 # `mark-manual` verb reference the same string.
 MANUAL_CLASSIFIER_VERSION: str = "manual"
 
@@ -1207,7 +1327,15 @@ MANUAL_CLASSIFIER_VERSION: str = "manual"
 # unauthorized host (gau/wayback historical URLs routinely surface these) is
 # recorded skipped instead of admitted to the work buffer.
 SKIP_REASON_TAGS: frozenset[str] = frozenset(
-    {"out-of-scope", "blackholed", "dead-host", "low-signal-cluster", "duplicate", "egress-blocked"}
+    {
+        "already-covered",
+        "out-of-scope",
+        "blackholed",
+        "dead-host",
+        "low-signal-cluster",
+        "duplicate",
+        "egress-blocked",
+    }
 )
 
 
@@ -1277,39 +1405,6 @@ _NONDEFAULT_PORTS: frozenset[str] = frozenset(
 # Live-status tokens that indicate a reachable surface (vs a dead/archive URL).
 _LIVE_STATUS_TOKENS: frozenset[str] = frozenset({"live", "200"})
 
-# Dead-archive demotion (classify-context-and-surface 2026-06, Part 4 "Fix 6";
-# Issue H). The work buffer is dominated by `gau-archive`-sourced URLs, much of
-# which is dead (404/gone) and matched no `gf:*` bucket — pure noise that still
-# competes with live surfaces in priority mode. `_is_dead_archive_noise`
-# identifies exactly that intersection (archive source AND not live AND no
-# bucket) so a STRICTLY OPT-IN demotion can park it. It is symmetric to the type
-# floor but in the demotion direction, so it stays behind a default-OFF flag
-# (`demote_dead_archive`): with the flag off, scoring is byte-identical.
-_GAU_ARCHIVE_SOURCE = "gau-archive"
-# `live_status` values that count as NOT-live for the demotion predicate. A
-# row is demotable only when its liveness is unknown/absent or explicitly dead —
-# never when it is live/200 (those keep their score, and also earn the +5 live
-# context bonus above).
-_DEAD_LIVE_STATUS_TOKENS: frozenset[str] = frozenset({"", "dead", "blackholed"})
-
-
-def _is_dead_archive_noise(source: str | None, live_status: str | None) -> bool:
-    """True when a row is dead `gau-archive` noise eligible for demotion (Fix 6).
-
-    The predicate is the AND of three signals the plan names:
-      * the ingest `source` is exactly ``gau-archive``;
-      * `live_status` is null/dead (absent, ``dead``, or ``blackholed``) — NOT
-        live/200;
-    The caller additionally gates on "matched NO ``gf:*`` bucket" (it only
-    consults this on the bucket-less fallback branch), so this helper does not
-    re-check the bucket condition. Generic: keys off the archive source label and
-    liveness only — no host/product/path literal.
-    """
-    if (source or "").strip().lower() != _GAU_ARCHIVE_SOURCE:
-        return False
-    return str(live_status or "").strip().lower() in _DEAD_LIVE_STATUS_TOKENS
-
-
 def _context_bonus(
     url: str | None = None,
     source: str | None = None,
@@ -1358,7 +1453,6 @@ def classify_row(
     url: str | None = None,
     source: str | None = None,
     live_status: str | None = None,
-    demote_dead_archive: bool = False,
 ) -> dict[str, Any]:
     """Return the per-row assignment dict (always present, never None).
 
@@ -1368,14 +1462,8 @@ def classify_row(
     wins; the path fallback gives operators a coarse grouping when no bucket
     fires.
 
-    `demote_dead_archive` (Fix 6, Issue H) is a STRICTLY OPT-IN, default-OFF
-    flag. When True, a row that reaches the bucket-less `path:*` fallback AND is
-    dead `gau-archive` noise (`_is_dead_archive_noise`) is parked: its score is
-    forced to 0 and a structured `terminal_reason` is stamped with the existing
-    `low-signal-cluster` skip tag (no new terminal vocabulary). It only ever
-    touches the no-bucket / no-floor fallback, so it can never lower a
-    bucket-driven or floor-driven score; with the flag off scoring is
-    byte-identical.
+    Context is boost-only. Bucket-less rows use the ordinary ``path:*`` fallback;
+    source/liveness context never demotes or terminally skips them.
     """
     case_type = (row["type"] or "").lower()
     if case_type in _INERT_TYPES:
@@ -1574,26 +1662,8 @@ def classify_row(
             "secondary_buckets": [],
         }
 
-    # Bucket-less, floor-less, weak-less fallback. This is the ONLY branch the
-    # dead-archive demotion (Fix 6, default-OFF) can touch: by construction no
-    # `gf:*` bucket matched, no type floor fired, AND no weak inner-token matched
-    # here (the weak rescue above returns first), so the "matched NO gf:* bucket"
-    # condition holds. When the opt-in flag is set and the row is dead
-    # `gau-archive` noise, park it at 0 with the existing `low-signal-cluster`
-    # skip tag so the archive tail stops competing with live surfaces in
-    # priority mode. The bonus still applies otherwise (byte-identical when off).
-    if demote_dead_archive and _is_dead_archive_noise(source, live_status):
-        return {
-            "priority_score": 0,
-            "priority_reason": None,
-            "cluster_key": f"path:{normalize_path_for_cluster(url_path)}",
-            "terminal_reason": tagged_terminal_reason(
-                "low-signal-cluster", "gau-archive dead, no gf bucket"
-            ),
-            "matched_buckets": [],
-            "secondary_buckets": [],
-        }
-
+    # Bucket-less, floor-less, weak-less fallback. Context remains boost-only:
+    # no source or liveness value can lower the score or stamp a terminal skip.
     return {
         "priority_score": max(0, 0 + bonus),
         "priority_reason": None,
@@ -1921,22 +1991,18 @@ def classify_from_fields(
     url: str | None = None,
     source: str | None = None,
     live_status: str | None = None,
-    demote_dead_archive: bool = False,
 ) -> dict[str, Any]:
-    """Adapter for ingest paths that don't have a sqlite Row yet.
+    """Adapter for ingest paths that classify from raw fields (no row yet).
 
-    `db_insert_work_item()` calls this immediately after the INSERT so it can
-    write `priority_score` / `priority_reason` / `cluster_key` /
-    `terminal_reason` in the same connection without round-tripping through
-    a SELECT. Returns the same shape as `classify_row()`.
+    The ingest producers call this while building the work_item block they POST
+    so the backend-derived row carries `priority_score` / `priority_reason` /
+    `cluster_key` / `terminal_reason`. Returns the same shape as `classify_row()`.
 
     `url`/`source`/`live_status` are the optional boost-only context inputs
     (Fix 1). They default to None so the legacy 5-keyword call convention (and
     every pinned arithmetic test) stays byte-identical: with no context the
     `_context_bonus` is 0 and `max(base, base + 0) == base`.
 
-    `demote_dead_archive` (Fix 6) is the optional, default-OFF dead-archive
-    demotion gate, passed straight through to `classify_row`.
     """
     fake_row: dict[str, Any] = {
         "type": case_type,
@@ -1950,7 +2016,6 @@ def classify_from_fields(
         url=url,
         source=source,
         live_status=live_status,
-        demote_dead_archive=demote_dead_archive,
     )
 
 
@@ -1958,8 +2023,8 @@ def classify_from_fields(
 # Classifier version stamp — digest assembly.
 #
 # Assembled here, at the module's end, because a complete `classify_row` digest
-# must reference constants declared throughout the file (the context/demotion
-# tables, `WEAK_TOKEN_CAP`, `_CLUSTER_PLACEHOLDERS`, `_AUTH_SAML_FRAGMENTS`, ...).
+# must reference constants declared throughout the file (the context tables,
+# `WEAK_TOKEN_CAP`, `_CLUSTER_PLACEHOLDERS`, `_AUTH_SAML_FRAGMENTS`, ...).
 # See the "Classifier version stamp" comment near `_canonicalize` for the intent
 # and the determinism contract. Every entry below is a classification-affecting
 # module-level constant; compiled `re.Pattern` values are digested via their
@@ -2005,9 +2070,6 @@ _CLASSIFIER_VERSION_INPUTS: dict[str, Any] = {
     "nonprod_host_label_re": _NONPROD_HOST_LABEL_RE.pattern,
     "nondefault_ports": _NONDEFAULT_PORTS,
     "live_status_tokens": _LIVE_STATUS_TOKENS,
-    # Dead-archive demotion path (`_is_dead_archive_noise`).
-    "gau_archive_source": _GAU_ARCHIVE_SOURCE,
-    "dead_live_status_tokens": _DEAD_LIVE_STATUS_TOKENS,
     # Logic-revision escape hatch (see above).
     "logic_revision": _CLASSIFIER_LOGIC_REVISION,
 }

@@ -5,8 +5,6 @@ into safe defaults so depth no longer rides in a hand-quoted ``--extra-args``
 blob the LLM has to remember:
 
   * deep by default (``-d 5``) — depth is decoupled from politeness;
-  * scope-safe by default (``-fs fqdn``) — an active crawler never wanders to
-    out-of-scope sibling subdomains it finds in links;
   * disk-bounded by default (``-or -ob``) — a deep crawl streams routes, not the
     multi-GB body/raw blobs that fill the runtime disk;
   * JS-aware by default — the wrapper sends raw katana ``-jc -jsl`` unless disabled;
@@ -82,13 +80,12 @@ def register(subparsers) -> None:
                         "is auto-raised to fit it. (For request RATE, use -rl.)")
     p.add_argument("--allow-fast-crawl", dest="allow_fast_crawl", action="store_true",
                    help="Permit -rl above the 20 req/s safety cap (operator opt-in).")
-    p.add_argument("-fs", dest="field_scope", default="fqdn",
-                   help="-fs field-scope (default 'fqdn' — crawl only the exact seeded hosts). "
-                        "Pass 'rdn' ONLY when every seed root is a wildcard-scoped in-scope entry.")
+    p.add_argument("-fs", dest="field_scope", default="",
+                   help="Explicit Katana -fs field-scope.")
     p.add_argument("-kf", dest="known_files", default="",
                    help="-kf known-files expansion (e.g. 'all' for robots/sitemap/well-known).")
     p.add_argument("-cos", dest="crawl_out_scope", default="",
-                   help="-cos crawl-out-of-scope regex (path-level OOS carve-out scope.json cannot express).")
+                   help="Explicit Katana -cos crawl-out-of-scope regex.")
     p.add_argument("-H", dest="headers", action="append", default=None,
                    help="Extra request header (repeatable), e.g. -H 'Cookie: s=...'. Program "
                         "attribution headers are injected automatically on top of these.")
@@ -152,14 +149,13 @@ def run(args) -> None:
     )
     cmd.extend(["-rl", str(rl)])
 
-    # Scope-safe field-scope (default fqdn) so the active crawler does not probe
-    # out-of-scope sibling subdomains it discovers in links.
     if args.field_scope:
         cmd.extend(["-fs", str(args.field_scope)])
     if args.known_files:
         cmd.extend(["-kf", str(args.known_files)])
-    if args.crawl_out_scope:
-        cmd.extend(["-cos", str(args.crawl_out_scope)])
+    authored_exclusion = str(args.crawl_out_scope or "").strip()
+    if authored_exclusion:
+        cmd.extend(["-cos", authored_exclusion])
     for header in args.headers or []:
         cmd.extend(["-H", header])
 

@@ -8,10 +8,9 @@ silently "done".
 
 This module asserts two backend contracts W2 adds:
 
-1. ``state_manager.per_host_coverage`` (and the sibling
-   ``per_host_finding_verdicts``) expose a per-host ``finding_verdict`` plus a
-   top-level ``finding_verdicts`` map that also covers finding-only hosts (a
-   host with a finding but no recon service/surface). Existing per-host fields
+1. ``state_manager.per_host_coverage`` exposes a per-host ``finding_verdict``
+   plus a top-level ``finding_verdicts`` map that also covers finding-only hosts
+   (a host with a finding but no recon service/surface). Existing per-host fields
    are unchanged.
 2. ``GET /findings`` filters server-side by ``auth_context`` and
    ``verification_state`` so the ledger can drill into a host's verdict without
@@ -164,22 +163,6 @@ def test_merged_finding_excluded_from_verdict(client, isolate_settings):
     verdict = rows["api.target.example"]["finding_verdict"]
     assert verdict["has_finding"] is False
     assert verdict["finding_count"] == 0
-
-
-def test_per_host_finding_verdicts_sibling(client, isolate_settings):
-    engagement_id = _seed(client, isolate_settings)
-    _create_finding(
-        client,
-        slug="VA-004",
-        canonical_location="https://shop.target.example/search?q=1",
-        severity="critical",
-        auth_context="anonymous",
-    )
-
-    verdicts = state_manager.per_host_finding_verdicts(engagement_id)
-    assert "shop.target.example" in verdicts
-    assert verdicts["shop.target.example"]["has_finding"] is True
-    assert verdicts["shop.target.example"]["max_severity"] == "critical"
 
 
 def test_existing_per_host_fields_unchanged_by_verdict_join(client, isolate_settings):

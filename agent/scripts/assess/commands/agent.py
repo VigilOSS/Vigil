@@ -41,6 +41,17 @@ _ACTION_HELP: dict[str, str] = {
     ),
 }
 
+_CODE_SOURCE_IDENTITY_ROLES = frozenset(
+    {
+        "code-architect",
+        "code-fuzz-engineer",
+        "code-variant-hunter",
+        "code-vuln-hunter",
+        "code-vuln-verifier",
+    }
+)
+_IMMUTABLE_DISPATCH_FINDING_SCOPE_ROLES = frozenset({"code-variant-hunter"})
+
 
 def maybe_print_action_help(tokens: list[str]) -> None:
     if len(tokens) >= 2 and any(token in {"-h", "--help"} for token in tokens[1:]):
@@ -76,7 +87,23 @@ def register(subparsers) -> None:
     p.add_argument("--role", dest="agent_role", default=None, help="Agent role for start/handoff.")
     p.add_argument("--agent-role", dest="agent_role_alias", default=None, help="Alias for --role.")
     p.add_argument("--task", dest="task", default=None)
-    p.add_argument("--scope-host", dest="scope_host", default=None)
+    p.add_argument(
+        "--application-unit-id",
+        dest="application_unit_id",
+        type=int,
+        default=None,
+        help="(start) Concrete application-unit id for depth attribution.",
+    )
+    p.add_argument(
+        "--code-repo-id",
+        dest="code_repo_id",
+        type=int,
+        default=None,
+        help=(
+            "(start) Backend repository id used to render Code Source Identity. "
+            "Required for code roles when more than one active repository exists."
+        ),
+    )
     p.add_argument("--model", dest="dispatch_model", default=None)
     p.add_argument("--reasoning", dest="reasoning", default=None,
                    choices=("low", "medium", "high", "xhigh", "max"))
@@ -95,12 +122,6 @@ def register(subparsers) -> None:
         help="(start) Blue specialist tier label recorded on the dispatch row.",
     )
     p.add_argument(
-        "--scope-path-prefix",
-        dest="scope_path_prefix",
-        default=None,
-        help="(start) App-unit path-prefix this dispatch covers (pairs with --scope-host).",
-    )
-    p.add_argument(
         "--vuln-classes",
         dest="vuln_classes",
         default=None,
@@ -116,12 +137,6 @@ def register(subparsers) -> None:
     p.add_argument("--from-json", dest="from_json", default=None)
     p.add_argument("--allow-duplicate", dest="allow_duplicate", action="store_true")
     p.add_argument(
-        "--allow-no-skills",
-        dest="allow_no_skills",
-        action="store_true",
-        help="(start) Allow a specialist dispatch with no --skills; emits a WARN instead of erroring.",
-    )
-    p.add_argument(
         "--check-overlap",
         dest="check_overlap",
         action="store_true",
@@ -135,6 +150,12 @@ def register(subparsers) -> None:
     p.add_argument("--since", dest="filter_since", default=None)
     p.add_argument("--task-q", dest="task_q", default=None)
     p.add_argument("--limit", dest="dispatch_limit", default=None, type=int)
+    p.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="No-op: agent list already emits JSONL; accepted for list-verb symmetry.",
+    )
     p.add_argument("--max-lines", type=int, default=40)
     p.add_argument("--include-evidence", action="store_true")
     p.add_argument("--kind", dest="decision_kind", default=None)
@@ -233,16 +254,21 @@ def _agent_id_extra(args) -> list[str]:
 
 
 def _done(args) -> None:
-    if not getattr(args, "agent_id", None):
-        if args.extra:
-            args.agent_id = args.extra[0]
-        else:
-            print("agent done: agent id required as positional arg or --agent-id", file=sys.stderr)
-            sys.exit(1)
+    # Batch: `agent done a b c` closes all three with the same shared flags. Collect
+    # every positional id (falling back to --agent-id) and hand the full list to the
+    # dispatch handler, which iterates with a per-id failure tally.
+    ids = [str(x).strip() for x in (getattr(args, "extra", None) or []) if str(x).strip()]
+    if not ids and getattr(args, "agent_id", None):
+        ids = [str(args.agent_id).strip()]
+    if not ids:
+        print("agent done: agent id required as positional arg or --agent-id", file=sys.stderr)
+        sys.exit(1)
     if not getattr(args, "dispatch_status", None):
         args.dispatch_status = "completed"
-    _warn_if_handoff_is_closable(args)
-    dispatch._update_dispatch_status(args, [])  # noqa: SLF001
+    for agent_id in ids:
+        args.agent_id = agent_id
+        _warn_if_handoff_is_closable(args)
+    dispatch._update_dispatch_status(args, ids)  # noqa: SLF001
 
 
 def _warn_if_handoff_is_closable(args) -> None:
@@ -267,6 +293,22 @@ def _warn_if_handoff_is_closable(args) -> None:
         except Exception:  # noqa: BLE001
             pass
     if not handoff:
+        # C4c: closing straight to a terminal status with NO handoff at all is
+        # silent state-loss — resume-brief's `terminal_no_handoff` list and
+        # `agent reconcile-stale` can only report this after the fact; there
+        # is no summary, no coverage_gaps, no next_steps. WARN only (never
+        # block) so a crash-recovery force-close stays possible.
+        if str(getattr(args, "dispatch_status", "") or "") in {
+            "completed", "blocked", "failed", "aborted"
+        }:
+            print(
+                f"WARN agent done: no handoff found for {args.agent_id} closing as "
+                f"{args.dispatch_status!r}; this is silent state-loss — resume-brief and "
+                "`agent reconcile-stale` will see a bare terminal_no_handoff row, not what "
+                "the specialist produced. Write `vigil assess agent handoff ...` first, or "
+                "record a kind=dispatch_reconciliation decision naming this agent_id.",
+                file=sys.stderr,
+            )
         return
     status_value = str(handoff.get("handoff_status") or "")
     if status_value in {"ready", "blocked"}:
@@ -284,10 +326,44 @@ def _utcnow_iso() -> str:
 
 
 def _close(args) -> None:
-    agent_id = getattr(args, "agent_id", None) or (args.extra[0] if args.extra else "")
-    if not agent_id:
+    # Batch: `agent close a b c` closes each ready/blocked handoff. A single id keeps
+    # the detailed non-closable guidance below; multiple ids run a resilient loop
+    # where a non-closable/checkpointed dispatch is reported and skipped, not fatal.
+    ids = [str(x).strip() for x in (getattr(args, "extra", None) or []) if str(x).strip()]
+    if not ids and getattr(args, "agent_id", None):
+        ids = [str(args.agent_id).strip()]
+    if not ids:
         print("agent close: agent id required as positional arg or --agent-id", file=sys.stderr)
         sys.exit(1)
+    if len(ids) == 1:
+        _close_one(args, ids[0])
+        return
+    client, _ = dispatch._client_for(args)  # noqa: SLF001
+    closed = 0
+    failed = 0
+    reason = getattr(args, "reason", "") or "agent close"
+    try:
+        for agent_id in ids:
+            try:
+                result = _close_via_client(client, agent_id, reason=reason)
+            except _ReconcileSkipped as exc:
+                failed += 1
+                print(f"agent close: {agent_id} skipped: {exc}", file=sys.stderr)
+                continue
+            except Exception as exc:  # noqa: BLE001 - one bad id must not drop the rest
+                failed += 1
+                print(f"agent close: {agent_id} failed: {exc}", file=sys.stderr)
+                continue
+            closed += 1
+            print(json.dumps({"dispatch": result["dispatch"], "decision": result["decision"]}, ensure_ascii=False))
+    finally:
+        client.close()
+    print(f"[agent close] closed {closed} dispatch(es); {failed} failed/skipped.", file=sys.stderr)
+    if failed:
+        sys.exit(1)
+
+
+def _close_one(args, agent_id: str) -> None:
     client, _ = dispatch._client_for(args)  # noqa: SLF001
     try:
         handoff = client.get_handoff(agent_id)
@@ -325,7 +401,10 @@ def _close(args) -> None:
             "status": target_status,
             "completed_at": getattr(args, "completed_at", None) or _utcnow_iso(),
         }
-        if handoff.get("finding_slugs"):
+        if (
+            handoff.get("finding_slugs")
+            and dispatch_row.get("agent_role") not in _IMMUTABLE_DISPATCH_FINDING_SCOPE_ROLES
+        ):
             patch["finding_slugs"] = handoff.get("finding_slugs")
         updated = client.update_dispatch(agent_id, patch)
         decision = client.record_decision(
@@ -388,7 +467,18 @@ def _reconcile_stale(args) -> None:
     try:
         dispatches = client.list_dispatches(status="in-progress", limit=1000)
         handoffs = {row.get("agent_id"): row for row in client.list_handoffs(limit=1000)}
+        reconciliation_decisions = client.list_decisions(
+            kind="dispatch_reconciliation", limit=1000
+        )
+        reconciled_agent_ids = {
+            str(payload.get("agent_id") or "")
+            for row in reconciliation_decisions
+            for payload in [row.get("payload")]
+            if isinstance(payload, dict) and payload.get("agent_id")
+        }
         for row in dispatches:
+            if str(row.get("status") or "") != "in-progress":
+                continue
             agent_role = row.get("agent_role")
             cutoff_hours = _stale_threshold_for(agent_role, override=cutoff_override)
             started = _parse_iso(str(row.get("dispatched_at") or ""))
@@ -430,6 +520,43 @@ def _reconcile_stale(args) -> None:
                     else "handoff is checkpointed; specialist must mark ready|blocked before close"
                 )
             rows_out.append(item)
+        # A terminal dispatch with no handoff is missing durable specialist
+        # output regardless of whether it completed or died. A
+        # dispatch_reconciliation decision is the explicit, auditable way to
+        # adjudicate a dispatch that genuinely produced nothing. This mirrors
+        # assessment_memory._recent_dispatch_picture's `terminal_no_handoff`
+        # list so `reconcile-stale` is a complete picture on its own. Unlike
+        # the in-progress rows above, these have no ready/blocked handoff to
+        # consume, so they can never be "closed" here — this is read-only
+        # reporting, dry_run or not.
+        for terminal_status in ("completed", "blocked", "failed", "aborted"):
+            for row in client.list_dispatches(status=terminal_status, limit=1000):
+                # Defensive re-check: don't trust every client/backend combo to
+                # have filtered server-side by `status`.
+                if str(row.get("status") or "") != terminal_status:
+                    continue
+                agent_id = row.get("agent_id")
+                if handoffs.get(agent_id):
+                    continue
+                if str(agent_id or "") in reconciled_agent_ids:
+                    continue
+                rows_out.append(
+                    {
+                        "agent_id": agent_id,
+                        "agent_role": row.get("agent_role"),
+                        "age_hours": None,
+                        "threshold_hours": None,
+                        "category": "terminal_no_handoff",
+                        "handoff_status": "none",
+                        "dispatch_status": terminal_status,
+                        "closed": False,
+                        "closed_status": None,
+                        "skip_reason": (
+                            "terminal dispatch has no handoff; not closable via reconcile "
+                            "(informational only — silent state-loss, see resume-brief)"
+                        ),
+                    }
+                )
     finally:
         client.close()
     print(json.dumps(rows_out, indent=2, ensure_ascii=False))
@@ -459,7 +586,10 @@ def _close_via_client(client, agent_id: str, *, reason: str) -> dict:
     if target_status not in {"completed", "blocked", "failed", "aborted"}:
         raise _ReconcileSkipped(f"invalid closed status {target_status}")
     patch: dict = {"status": target_status, "completed_at": _utcnow_iso()}
-    if handoff.get("finding_slugs"):
+    if (
+        handoff.get("finding_slugs")
+        and dispatch_row.get("agent_role") not in _IMMUTABLE_DISPATCH_FINDING_SCOPE_ROLES
+    ):
         patch["finding_slugs"] = handoff.get("finding_slugs")
     updated = client.update_dispatch(agent_id, patch)
     decision = client.record_decision(
@@ -485,27 +615,151 @@ def _start(args) -> None:
     payload = dispatch._build_register_payload(args)  # noqa: SLF001
     client, cfg = dispatch._client_for(args)  # noqa: SLF001
     try:
+        source_identity = _code_source_identity_lines(
+            client,
+            agent_role=str(payload.get("agent_role") or ""),
+            requested_repo_id=getattr(args, "code_repo_id", None),
+        )
         if getattr(args, "check_overlap", False) and not getattr(args, "allow_duplicate", False):
             dispatch._warn_on_overlapping_dispatch(client, payload)  # noqa: SLF001
         row = client.record_dispatch(payload)
     finally:
         client.close()
-    _warn_missing_native_wrapper(Path(cfg.engagement_dir), str(row.get("agent_role") or ""))
+    role = str(row.get("agent_role") or "")
+    _warn_missing_native_wrapper(Path(cfg.engagement_dir), role)
+    # `dispatch_id`, not a bare `id` — see _register_dispatch in dispatch/agent.py
+    # for why the namespace is in the key name.
     print(json.dumps({
-        "id": row.get("id"),
+        "dispatch_id": row.get("id"),
         "agent_id": row.get("agent_id"),
         "status": row.get("status"),
     }, ensure_ascii=False))
+    identity_lines = [
+        "## Runtime Identity",
+        f"agent_id: {row.get('agent_id')}",
+        f"agent_role: {row.get('agent_role')}",
+        "authorized_phase: <set-by-operator>",
+    ]
+    if source_identity:
+        identity_lines.extend(["", *source_identity])
+    blocks = (
+        "Runtime Identity and Code Source Identity blocks"
+        if source_identity
+        else "Runtime Identity block"
+    )
     print(
         "\n".join(
             [
-                "## Runtime Identity",
-                f"agent_id: {row.get('agent_id')}",
-                f"agent_role: {row.get('agent_role')}",
-                "authorized_phase: <set-by-operator>",
+                *identity_lines,
+                "",
+                "## Next action",
+                "This command records the dispatch only; it does not spawn or launch the specialist.",
+                f"Launch the specialist with {_spawn_command_hint(Path(cfg.engagement_dir), role)} "
+                f"and pass it the {blocks} above.",
             ]
         )
     )
+
+
+def _code_source_identity_lines(
+    client,
+    *,
+    agent_role: str,
+    requested_repo_id: int | None,
+) -> list[str]:
+    if agent_role not in _CODE_SOURCE_IDENTITY_ROLES and requested_repo_id is None:
+        return []
+
+    repos = client.get("code/repos")
+    if not isinstance(repos, list):
+        print("agent start: code repository listing returned an invalid payload", file=sys.stderr)
+        raise SystemExit(1)
+    active_repos = [
+        repo
+        for repo in repos
+        if isinstance(repo, dict) and int(repo.get("active_generation") or 0) > 0
+    ]
+    if requested_repo_id is not None:
+        active_repos = [
+            repo for repo in active_repos if int(repo.get("id") or 0) == requested_repo_id
+        ]
+        if not active_repos:
+            print(
+                f"agent start: --code-repo-id {requested_repo_id} does not identify an active repository",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+    elif len(active_repos) > 1:
+        choices = ", ".join(
+            f"{repo.get('id')}:{repo.get('repo_key')}" for repo in active_repos
+        )
+        print(
+            "agent start: multiple active code repositories exist; pass "
+            f"--code-repo-id to select exactly one ({choices})",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    elif not active_repos:
+        print(
+            "agent start: code role requires one active indexed repository",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    repo = active_repos[0]
+    repo_id = int(repo.get("id") or 0)
+    generation = int(repo.get("active_generation") or 0)
+    digest = str(repo.get("source_manifest_digest") or "")
+    required = {
+        "repo_id": repo_id,
+        "repo_key": str(repo.get("repo_key") or ""),
+        "repo_generation": generation,
+        "source_manifest_digest": digest,
+        "snapshot_path": str(repo.get("repo_path") or ""),
+        "structural_index_schema": str(repo.get("structural_index_schema") or ""),
+        "structural_index_manifest_path": str(
+            repo.get("structural_index_manifest_path") or ""
+        ),
+    }
+    missing = [key for key, value in required.items() if not value]
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        missing.append("source_manifest_digest")
+    if missing:
+        print(
+            "agent start: active code repository has incomplete source identity: "
+            + ", ".join(sorted(set(missing))),
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    ctags_path = "unavailable"
+    lsp_config = repo.get("lsp_config")
+    ctags = lsp_config.get("ctags") if isinstance(lsp_config, dict) else None
+    if isinstance(ctags, dict):
+        try:
+            ctags_generation = int(ctags.get("repo_generation") or 0)
+        except (TypeError, ValueError):
+            ctags_generation = 0
+        if (
+            ctags.get("available") is True
+            and ctags_generation == generation
+            and str(ctags.get("source_manifest_digest") or "") == digest
+            and str(ctags.get("tags_path") or "")
+        ):
+            ctags_path = str(ctags["tags_path"])
+
+    return [
+        "## Code Source Identity",
+        f"repo_id: {repo_id}",
+        f"repo_key: {required['repo_key']}",
+        f"repo_generation: {generation}",
+        f"source_manifest_digest: {digest}",
+        f"snapshot_path: {required['snapshot_path']}",
+        f"structural_index_schema: {required['structural_index_schema']}",
+        "structural_index_manifest_path: "
+        f"{required['structural_index_manifest_path']}",
+        f"ctags_path: {ctags_path}",
+    ]
 
 
 def _start_swarm(args) -> None:
@@ -522,7 +776,7 @@ def _start_swarm(args) -> None:
     ``item-iterating`` agent runs out of context at 30-100 items; doing it
     with one ``hypothesis-driven`` agent picks the wrong shape (there is no
     hypothesis, there is a corpus). The helper writes the audit trail up
-    front so list-command-runs / dispatch list show the full swarm
+    front so command-run list / dispatch list show the full swarm
     immediately, even if the operator dispatches the workers staggered.
     """
     role = getattr(args, "agent_role", None)
@@ -584,6 +838,11 @@ def _start_swarm(args) -> None:
     client, cfg = dispatch._client_for(args)  # noqa: SLF001
     rows_emitted: list[dict[str, str | int | None]] = []
     try:
+        source_identity = _code_source_identity_lines(
+            client,
+            agent_role=str(role),
+            requested_repo_id=getattr(args, "code_repo_id", None),
+        )
         base_uuid_short = uuid.uuid4().hex[:6]
         role_slug = role.replace("_", "-").replace(" ", "-")
         for worker_idx, batch in enumerate(batches, start=1):
@@ -631,21 +890,57 @@ def _start_swarm(args) -> None:
     print("|---|---|---|---|")
     for r in rows_emitted:
         print(f"| {r['worker']} | {r['agent_id']} | {r['items']} | {r['status']} |")
+    if source_identity:
+        print("")
+        print("\n".join(source_identity))
     print("")
+    identity_instruction = (
+        "passing the row's agent_id in Runtime Identity plus the printed Code Source Identity block"
+        if source_identity
+        else "passing the row's agent_id in the Runtime Identity block"
+    )
     print(
         "Next: fire one specialist per row using your runtime's wrapper "
-        "(@<role> in Claude Code, or spawn_agent in Codex), passing the row's "
-        "agent_id in the Runtime Identity block. The specialist reads its "
+        "(@<role> in Claude Code, or spawn_agent in Codex), "
+        f"{identity_instruction}. The specialist reads its "
         "batch range from its own dispatch row via `vigil assess agent get <agent_id>`."
     )
+
+
+def _native_wrappers(engagement_dir: Path, role: str) -> tuple[bool, bool]:
+    """Which client's generated per-role wrapper the engagement actually has,
+    as ``(claude, codex)``. The wrappers are what make a role spawnable, so this
+    is the only evidence available for naming a concrete spawn command."""
+    if not role:
+        return (False, False)
+    return (
+        (engagement_dir / ".claude" / "agents" / f"{role}.md").exists(),
+        (engagement_dir / ".codex" / "agents" / f"{role}.toml").exists(),
+    )
+
+
+def _spawn_command_hint(engagement_dir: Path, role: str) -> str:
+    """The concrete spawn line for ``role``, phrased for the wrapper that exists.
+
+    ``agent start`` records the dispatch; the caller performs the spawn. Saying
+    only "in your client" leaves the reader to guess the mechanism — the same
+    mechanism ``_start_swarm`` already names — so name it here from the wrapper
+    on disk, and fall back to naming both when neither is present rather than
+    withholding the line (the stderr WARN already reports the gap)."""
+    claude, codex = _native_wrappers(engagement_dir, role)
+    label = role or "<role>"
+    if claude and not codex:
+        return f"`@{label}` (Claude Code)"
+    if codex and not claude:
+        return f"`spawn_agent {label}` (Codex)"
+    return f"`@{label}` (Claude Code) or `spawn_agent {label}` (Codex)"
 
 
 def _warn_missing_native_wrapper(engagement_dir: Path, role: str) -> None:
     if not role:
         return
-    claude = engagement_dir / ".claude" / "agents" / f"{role}.md"
-    codex = engagement_dir / ".codex" / "agents" / f"{role}.toml"
-    if not claude.exists() and not codex.exists():
+    claude, codex = _native_wrappers(engagement_dir, role)
+    if not claude and not codex:
         print(
             f"WARN agent start: no native wrapper found for role {role!r} under .claude/agents or .codex/agents",
             file=sys.stderr,

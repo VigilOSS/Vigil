@@ -18,7 +18,7 @@ vuln_class: xxe
 - `vigil assess kali exec -- curl ...` (send crafted XML — all target-facing curl must go through the kali exec wrapper; use `--technique XXE --probe-kind payload --phase consume-test --timeout 30` for XXE attempts)
 - Burp Suite Repeater (craft XML payloads — then replay via kali exec for audit pipeline coverage)
 - XXEinjector (run via `vigil assess kali exec --technique XXE --probe-kind payload --phase consume-test --timeout 300 -- ...`)
-- OOB callbacks: verify readiness with `vigil oob status --json`, then `vigil oob mint --client <name>` (binds the nonce under a running interactsh client's id and prints the exact callback host; `--client <name>` required when several clients run) — embed the EXACT host it prints (`$OOB_HOST`) in the external-DTD chain and `vigil oob poll --client <name>` to correlate the hit — see §4 Blind XXE. This replaces reading the listener log by hand. Fall back to time-based detection when OOB is unavailable.
+- OOB callbacks: verify readiness with `vigil oob status --json`, then `vigil oob mint --client <name>` (binds the nonce under a running interactsh client's id and prints the exact callback host; `--client <name>` required when several clients run) — embed the EXACT host it prints (`$OOB_HOST`) in the external-DTD chain and `vigil oob poll --client <name>` to correlate the hit — see §4 Blind XXE. Fall back to time-based detection when OOB is unavailable.
 
 ## Methodology
 
@@ -115,7 +115,7 @@ vigil oob mint --client <name> --technique xxe --target-url "https://target/api/
 - Payload used and data exfiltrated
 - Blind vs reflected
 - Out-of-band callback evidence from `vigil oob poll --client <name>` (the matched probe<->callback pair, including the exfiltrated label)
-- Internal resources accessed (files, metadata, services) — confirming the OOB callback fires is not enough; you must show the **attacker outcome** (e.g., `/etc/passwd` contents were returned in the response or exfiltrated via OOB DTD chain, AWS IAM credentials were read from the metadata endpoint via SSRF-XXE chain, file read primitive was demonstrated on a meaningful secret file)
+- Internal resources accessed (files, metadata, services) — prove the attacker outcome (`agent/rules/hunting.md` §2), e.g., `/etc/passwd` contents were returned in the response or exfiltrated via OOB DTD chain, AWS IAM credentials were read from the metadata endpoint via SSRF-XXE chain, file read primitive was demonstrated on a meaningful secret file
 - Severity: Critical (file read/SSRF) or High (blind confirmed)
 - Remediation: disable DTD processing, disable external entities, use JSON
 

@@ -11,8 +11,8 @@ Use when `vigil assess kali --help` errors, a verb fails unexpectedly, or an aud
 
 1. **Local readiness and live state.** `vigil doctor` and `vigil status`. `vigil doctor` checks dtach reachability inside the runtime, the orchestrator backend on the configured base URL, the engagement directory layout, and orphaned `<run_uuid>.failed-audit` markers per engagement under `scans/kali/` (a non-empty marker list means the pre-exec audit POST failed for those runs and the operator should investigate connectivity). `vigil status` shows the configured runtime resource tier and live cgroup state.
 2. **Runtime container state.** `vigil runtime status` confirms the container is up, the image ID matches the configured tag, and the `/engagements` bind mount is current.
-3. **Configured resource tier.** `vigil runtime resources` prints the tier (`Lab/CTF` / `Standard` / `Heavy` / `Comfortable`) and the live cgroup values from inside the container (`/sys/fs/cgroup/memory.max`, `cpu.max`). When OOM events show up in audit rows, this is the first thing to check.
-4. **Engagement context.** If `vigil assess kali --help` errors with an engagement-not-found message, run `vigil engagement list` to confirm `ENGAGEMENT_DIR` is set and the engagement has a backend record. The CLI reads `engagement.json` from the engagement directory; missing or stale `engagement.json` breaks the audit POST. The orchestrator base URL is resolved through `ORCHESTRATOR_BASE_URL` (env var, highest precedence), then a per-engagement `.orchestrator.env`, then `vigil config get orchestrator_base_url`, then the hardcoded default `http://127.0.0.1:18000`. To change the port persistently without editing code or env files, run `vigil config set orchestrator_base_url http://127.0.0.1:<port>`.
+3. **Configured resource tier.** `vigil runtime resources` prints the configured numeric values (memory/cpus/pids/shm) and the live cgroup values from inside the container (`/sys/fs/cgroup/memory.max`, `cpu.max`) — match those numbers against the `Lab/CTF` / `Standard` / `Heavy` / `Comfortable` sizing vocabulary in `agent/references/runtime-guides/dispatch-resource-policy.md` to name the tier; the command itself does not print a tier name. When OOM events show up in audit rows, this is the first thing to check.
+4. **Engagement context.** If `vigil assess kali --help` errors with an engagement-not-found message, start the client through `vigil engagement start`, work inside its engagement tree, or pass a valid `--engagement-dir`; the launcher-owned session binding is independent of the global `vigil use` pointer and `ENGAGEMENT_DIR` path variable. The engagement must also have a backend record. The orchestrator base URL is resolved through `ORCHESTRATOR_BASE_URL` (env var, highest precedence), then a per-engagement `.orchestrator.env`, then `vigil config get orchestrator_base_url`, then the hardcoded default `http://127.0.0.1:18000`. To change the port persistently without editing code or env files, run `vigil config set orchestrator_base_url http://127.0.0.1:<port>`.
 5. **Restart the runtime if unhealthy.** `vigil runtime restart` recreates the container with the current image and bind mount. No engagement data moves; only the container is replaced.
 6. **Inspect runtime logs when needed.** `vigil logs runtime --lines 120` tails container stdout/stderr.
 
@@ -68,12 +68,12 @@ sibling specialists' jobs are not touched.
 
 Synchronous `kali exec` runs and every typed verb write the in-container
 PID to `/tmp/vigil-pid-<run_uuid>.pid` for the duration of the run. The
-`run_uuid` is the audit row's run UUID — pull it from `list-command-runs`
+`run_uuid` is the audit row's run UUID — pull it from `command-run list`
 if you need to signal a still-running synchronous call from another shell:
 
 ```bash
 # Find the running call (look for status=running).
-vigil assess list-command-runs --q ffuf --json | jq -r '.[]
+vigil assess command-run list --q ffuf --json | jq -r '.[]
   | select(.status=="running") | .run_uuid'
 
 # Signal only that run.
@@ -120,7 +120,7 @@ catching a sibling agent's later parallel run of the same binary.
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `vigil assess kali --help` errors with `engagement directory not set` | `ENGAGEMENT_DIR` env var missing or pointing at a non-existent path | `vigil engagement list` to confirm engagement keys; export `ENGAGEMENT_DIR=$(vigil engagement path <key>)` or `cd` into the engagement directory |
+| `vigil assess kali --help` errors with `engagement directory not set` | No valid explicit flag, engagement-tree CWD, or launcher session binding | Start through `vigil engagement start`, `cd` into the engagement directory, or pass `--engagement-dir <path>` |
 | `dtach: command not found` inside the runtime | Image was built before Phase 3 added `dtach` to the package list | Rebuild the runtime image: `docker build -t vigil:latest -f agent/docker/runtime-full/Dockerfile .` then `vigil runtime restart` |
 | `audit POST 404` after a kali verb runs | Orchestrator backend not running | `vigil orchestrator start`, then re-check with `vigil status` |
 | `audit POST 422` with `phase required` | Agent forgot to pass `--phase` (or passed an unknown value) | Add `--phase <enum>` to the invocation — the canonical values are listed by `vigil assess list-commands --phase` (authoritative source: `kali_audit.ALLOWED_PHASES`). The CLI fails closed on unknown phases so the backend never sees a malformed row |
@@ -164,4 +164,4 @@ cheap to inspect and never finalizes a row whose process is still alive.
 ## See also
 
 - `agent/skills/kali-exec/SKILL.md` — verb menu, audit-flag mapping, sync-vs-async decision, examples per verb.
-- `agent/references/runtime-guides/command-history-auditing.md` — how to read `vigil assess list-command-runs` as a coverage map.
+- `agent/references/runtime-guides/command-history-auditing.md` — how to read `vigil assess command-run list` as a coverage map.

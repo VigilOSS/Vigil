@@ -7,22 +7,22 @@ investigate → verify → respond → report) while every durable write still
 lands through the existing red-team backend (assessment_findings,
 assessment_dispatches, activity_entries, assessment_artifacts).
 
-Plan reference: ``Blue Team Engagement.plan.md`` §8.3 (CLI surface) and §8.4
-(scope.json shape).
+Operator prompt / lifecycle reference: ``agent/operator-core-blue.md`` (canonical
+blue operator core) and the blue section of the repo ``README.md``.
 
-Critical CLI-verb drift handled here (per Unit 7 audit):
+Critical CLI-verb drift handled here:
 
 * ``vigil assess log-entry`` does NOT exist — the real verb is ``vigil assess log``.
-* ``vigil assess verify-finding --disposition`` accepts CLI vocab
+* ``vigil assess finding verify --disposition`` accepts CLI vocab
   ``{confirmed | downgraded | false_positive | disputed}`` while blue
   specialists speak ``{verified | false_positive | downgraded | escalated}``.
   ``vigil blue verify`` translates blue → CLI for the storage row and
   separately stamps the blue word into ``details.disposition`` so the
   report-writer sees the blue vocabulary verbatim.
-* ``vigil assess link-finding --intel <id>`` attaches one or more intel
+* ``vigil assess finding link --intel <id>`` attaches one or more intel
   rows to a finding's ``details.related_intel_ids[]`` (merges with the
   existing list, dedupe-preserve-order). ``vigil blue`` does not wrap
-  this directly; specialists call ``vigil assess link-finding`` from the
+  this directly; specialists call ``vigil assess finding link`` from the
   ioc-enrichment skill.
 """
 from __future__ import annotations
@@ -32,6 +32,7 @@ import email
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import uuid
@@ -45,6 +46,8 @@ from .engagements import (
     current_engagement_path,
     list_engagements,
     resolve_engagement_path,
+    start_engagement,
+    write_opencode_reasoning_config,
 )
 
 # Platform → tenant-file suffix. The historical AcmeCorp tenant lives at
@@ -111,28 +114,81 @@ KEBAB_SLUG_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
 def register_blue_parser(sub: argparse._SubParsersAction) -> None:
     """Register the ``vigil blue`` subcommand group on the top-level parser."""
-    blue_p = sub.add_parser("blue", help="Incident-response engagement flow (alert intake, triage, contain)")
+    blue_p = sub.add_parser(
+        "blue",
+        help="Incident-response engagement flow (alert intake, triage, contain)",
+        description=(
+            "Incident-response (blue-team) engagement surface. Lifecycle: "
+            "intake -> triage -> investigate -> verify -> respond -> report."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "lifecycle: intake -> triage -> investigate -> verify -> respond -> report\n"
+            "\n"
+            "HUMAN verbs (you, the operator, run these directly):\n"
+            "  engage         create a blue engagement (interactive picker if no --customer/--platform)\n"
+            "  customers      list customers with tenant references available\n"
+            "  tenant init    scaffold a new <customer>-<platform> tenant reference\n"
+            "  list           list blue engagements\n"
+            "  show           show a blue engagement's status\n"
+            "\n"
+            "OPERATOR verbs (the LLM operator runs these inside the session):\n"
+            "  alert record   record the pasted alert body into scope.json + artifact index\n"
+            "  dispatch       dispatch a blue specialist with tenant ref(s) auto-injected\n"
+            "  tier           record the current tier on a finding\n"
+            "  verify         verify a finding (blue vocab -> CLI storage)\n"
+            "  propose-contain  record a containment proposal (operator-approved before execute)\n"
+            "  contain        record an approved, already-executed containment action\n"
+            "  report         dispatch report-writer to render the incident report\n"
+            "  closeout       dispatch report-writer to render a customer-facing closeout\n"
+            "\n"
+            "Typical human start:\n"
+            "  vigil blue engage                                   # interactive picker\n"
+            "  vigil blue engage --customer <c> --platform gws --severity high --start codex\n"
+        ),
+    )
     blue_sub = blue_p.add_subparsers(dest="blue_command", required=True)
 
-    engage_p = blue_sub.add_parser("engage", help="Create a new blue (incident) engagement")
-    engage_p.add_argument("--customer", required=True, help="Customer kebab-case slug, e.g. 'acme-corp'")
+    engage_p = blue_sub.add_parser("engage", help="(human) Create a new blue (incident) engagement")
+    engage_p.add_argument(
+        "--customer",
+        required=False,
+        default=None,
+        help="Customer kebab-case slug, e.g. 'acme-corp' (omit for interactive picker)",
+    )
     engage_p.add_argument(
         "--platform",
-        required=True,
-        help="Comma-separated platforms: gws,m365,aws,okta,edr,network,generic",
+        required=False,
+        default=None,
+        help="Comma-separated platforms: gws,m365,aws,okta,edr,network,generic (omit for interactive picker)",
     )
     engage_p.add_argument("--severity", default=None, help="Alert severity hint (low|medium|high|critical|info)")
     engage_p.add_argument("--source", default="operator_chat", help="Alert source (default: operator_chat)")
     engage_p.add_argument("--skip-permissions", action="store_true")
+    engage_p.add_argument(
+        "--start",
+        choices=("codex", "claude", "opencode", "goose"),
+        default=None,
+        help=(
+            "After creating the engagement, immediately launch the operator session "
+            "(replaces this process). CAVEAT: this execs an interactive client, so do "
+            "NOT combine it with command substitution — eng=$(vigil blue engage ... --start codex) "
+            "would feed the captured path to the client. Scripts capturing the path must omit --start."
+        ),
+    )
 
-    customers_p = blue_sub.add_parser("customers", help="List customers with tenant references available for blue engagements")
+    customers_p = blue_sub.add_parser("customers", help="(human) List customers with tenant references available for blue engagements")
     customers_p.add_argument("--platform", default=None, help="Filter to a platform: gws,m365,aws,okta,edr,network,generic")
     customers_p.add_argument("--json", action="store_true")
 
-    alert_p = blue_sub.add_parser("alert", help="Manage alert intake on a blue engagement")
+    alert_p = blue_sub.add_parser("alert", help="(operator) Manage alert intake on a blue engagement")
     alert_sub = alert_p.add_subparsers(dest="alert_command", required=True)
-    alert_record_p = alert_sub.add_parser("record", help="Record a pasted alert body from a file into scope.json + artifact index")
-    alert_record_p.add_argument("--body-file", required=True, help="Path containing the raw alert text from the operator chat")
+    alert_record_p = alert_sub.add_parser("record", help="(operator) Record a pasted alert body from a file into scope.json + artifact index")
+    alert_record_p.add_argument(
+        "--body-file",
+        required=True,
+        help="Path containing the raw alert text from the operator chat, or '-' to read from stdin (heredoc/pipe)",
+    )
     alert_record_p.add_argument("-k", "--engagement-key", default=None)
     alert_record_p.add_argument("--select", action="store_true")
     alert_record_p.add_argument("--external-id", default=None)
@@ -140,17 +196,17 @@ def register_blue_parser(sub: argparse._SubParsersAction) -> None:
     alert_record_p.add_argument("--source", default=None, help="Alert source override (default: operator_chat)")
     alert_record_p.add_argument("--replace", action="store_true", help="Replace existing alert metadata while preserving prior raw alert files")
 
-    list_p = blue_sub.add_parser("list", help="List blue engagements")
+    list_p = blue_sub.add_parser("list", help="(human) List blue engagements")
     list_p.add_argument("--customer", default=None)
     list_p.add_argument("--status", default=None)
     list_p.add_argument("--phase", default=None)
     list_p.add_argument("--json", action="store_true")
 
-    show_p = blue_sub.add_parser("show", help="Show blue engagement status")
+    show_p = blue_sub.add_parser("show", help="(human) Show blue engagement status")
     show_p.add_argument("engagement_key", nargs="?")
     show_p.add_argument("--select", action="store_true")
 
-    dispatch_p = blue_sub.add_parser("dispatch", help="Dispatch a blue specialist with tenant ref(s) auto-injected")
+    dispatch_p = blue_sub.add_parser("dispatch", help="(operator) Dispatch a blue specialist with tenant ref(s) auto-injected")
     dispatch_p.add_argument("--role", required=True, help=f"Blue role: {sorted(BLUE_ROLES)}")
     dispatch_p.add_argument("--skills", required=True, help="Comma-separated skills")
     dispatch_p.add_argument("--tier", choices=("L1", "L2", "L3", "L4"), default=None)
@@ -167,14 +223,14 @@ def register_blue_parser(sub: argparse._SubParsersAction) -> None:
     dispatch_p.add_argument("-k", "--engagement-key", default=None)
     dispatch_p.add_argument("--select", action="store_true")
 
-    tier_p = blue_sub.add_parser("tier", help="Record current tier on a finding's details_json")
+    tier_p = blue_sub.add_parser("tier", help="(operator) Record current tier on a finding's details_json")
     tier_p.add_argument("finding_slug")
     tier_p.add_argument("--tier", choices=("L1", "L2", "L3", "L4"), required=True)
     tier_p.add_argument("--notes", default=None)
     tier_p.add_argument("-k", "--engagement-key", default=None)
     tier_p.add_argument("--select", action="store_true")
 
-    verify_p = blue_sub.add_parser("verify", help="Verify a finding (blue vocab → CLI storage)")
+    verify_p = blue_sub.add_parser("verify", help="(operator) Verify a finding (blue vocab → CLI storage)")
     verify_p.add_argument("finding_slug")
     verify_p.add_argument(
         "--disposition",
@@ -190,7 +246,7 @@ def register_blue_parser(sub: argparse._SubParsersAction) -> None:
     verify_p.add_argument("-k", "--engagement-key", default=None)
     verify_p.add_argument("--select", action="store_true")
 
-    propose_p = blue_sub.add_parser("propose-contain", help="Record a containment proposal (operator-approved before execute)")
+    propose_p = blue_sub.add_parser("propose-contain", help="(operator) Record a containment proposal (operator-approved before execute)")
     propose_p.add_argument("finding_slug")
     propose_p.add_argument("--action", required=True, help="Containment verb (revoke_session, reset_cred, disable_account, isolate_host, block_ioc, ...)")
     propose_p.add_argument("--target", required=True, help="Target id (user email, host id, IOC value, ...)")
@@ -207,7 +263,7 @@ def register_blue_parser(sub: argparse._SubParsersAction) -> None:
 
     contain_p = blue_sub.add_parser(
         "contain",
-        help="Record an approved containment action that was already executed and log the action",
+        help="(operator) Record an approved containment action that was already executed and log the action",
     )
     contain_p.add_argument("finding_slug")
     contain_p.add_argument(
@@ -231,19 +287,19 @@ def register_blue_parser(sub: argparse._SubParsersAction) -> None:
     contain_p.add_argument("-k", "--engagement-key", default=None)
     contain_p.add_argument("--select", action="store_true")
 
-    report_p = blue_sub.add_parser("report", help="Dispatch report-writer to render the blue incident report")
+    report_p = blue_sub.add_parser("report", help="(operator) Dispatch report-writer to render the blue incident report")
     report_p.add_argument("-k", "--engagement-key", default=None)
     report_p.add_argument("--select", action="store_true")
     report_p.add_argument("--template", default=None)
 
-    closeout_p = blue_sub.add_parser("closeout", help="Dispatch report-writer to render a customer-facing closeout summary")
+    closeout_p = blue_sub.add_parser("closeout", help="(operator) Dispatch report-writer to render a customer-facing closeout summary")
     closeout_p.add_argument("-k", "--engagement-key", default=None)
     closeout_p.add_argument("--select", action="store_true")
     closeout_p.add_argument("--agent-id", default=None)
 
-    tenant_p = blue_sub.add_parser("tenant", help="Manage tenant reference scaffolds")
+    tenant_p = blue_sub.add_parser("tenant", help="(human) Manage tenant reference scaffolds")
     tenant_sub = tenant_p.add_subparsers(dest="tenant_command", required=True)
-    tenant_init_p = tenant_sub.add_parser("init", help="Copy a tenant template to a new <customer>-<platform>.md ref")
+    tenant_init_p = tenant_sub.add_parser("init", help="(human) Copy a tenant template to a new <customer>-<platform>.md ref")
     tenant_init_p.add_argument("--customer", required=True)
     tenant_init_p.add_argument("--platform", required=True)
     tenant_init_p.add_argument("--force", action="store_true")
@@ -297,7 +353,111 @@ def run_blue(args: argparse.Namespace, install_root: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _pick_option(items: list[str], title: str) -> str:
+    """Interactive single-select over ``items`` (fzf, else numbered stderr menu).
+
+    Modeled on ``engagements._select_engagement``: prefer ``fzf`` when present,
+    otherwise print a numbered menu to stderr and read a 1-based index from
+    ``input``. Kept local to blue.py — the row shapes differ from
+    ``EngagementRow`` and a shared refactor buys nothing.
+    """
+    if not items:
+        raise SystemExit(f"{title}: no options available")
+    if shutil.which("fzf"):
+        result = subprocess.run(
+            ["fzf", "--prompt", f"{title}> "],
+            input="\n".join(items),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            choice = result.stdout.strip().splitlines()[0]
+            if choice in items:
+                return choice
+    print(f"{title}:", file=sys.stderr)
+    for idx, item in enumerate(items, start=1):
+        print(f"{idx}. {item}", file=sys.stderr)
+    choice = input("> ").strip()
+    if not choice.isdigit() or not (1 <= int(choice) <= len(items)):
+        raise SystemExit("Invalid selection")
+    return items[int(choice) - 1]
+
+
+def _run_engage_picker(args: argparse.Namespace, install_root: Path) -> None:
+    """Fill in missing ``--customer``/``--platform``/``--severity`` on ``args``.
+
+    Non-TTY: raise a ``SystemExit`` listing the available customer/platform
+    combinations (or pointing at ``vigil blue tenant init`` when none exist).
+    TTY: run an interactive picker.
+    """
+    rows = _discover_blue_customers(install_root)
+
+    if not sys.stdin.isatty():
+        lines = [
+            "vigil blue engage: --customer and --platform are required when stdin is not a TTY.",
+        ]
+        if rows:
+            lines.append("Available customer/platform combinations:")
+            for row in rows:
+                lines.append(f"  {row['customer']}: {','.join(row['platforms'])}")
+            example = rows[0]
+            lines.append("")
+            lines.append(
+                f"Example: vigil blue engage --customer {example['customer']} "
+                f"--platform {example['platforms'][0]}"
+            )
+        else:
+            lines.append("No tenant references found. Scaffold one first:")
+            lines.append("  vigil blue tenant init --customer <slug> --platform <platform>")
+        raise SystemExit("\n".join(lines))
+
+    if not rows:
+        raise SystemExit(
+            "No tenant references found. Scaffold one first:\n"
+            "  vigil blue tenant init --customer <slug> --platform <platform>"
+        )
+
+    customer = (args.customer or "").strip()
+    if not customer:
+        customer = _pick_option([str(row["customer"]) for row in rows], "Select customer")
+    args.customer = customer
+
+    if not (args.platform or "").strip():
+        matching = [r for r in rows if r["customer"] == customer]
+        raw_platforms = matching[0]["platforms"] if matching else None
+        platforms = (
+            list(raw_platforms)
+            if isinstance(raw_platforms, list)
+            else sorted(PLATFORM_TO_TENANT_SUFFIX)
+        )
+        if len(platforms) == 1:
+            platform = platforms[0]
+            print(f"[vigil blue] platform: {platform} (only option)", file=sys.stderr)
+        else:
+            platform = _pick_option(platforms, "Select platform")
+        args.platform = platform
+
+    if not args.severity:
+        allowed = ("low", "medium", "high", "critical", "info")
+        prompt = "severity (low|medium|high|critical|info, blank = none) > "
+        for attempt in range(2):
+            raw = input(prompt).strip()
+            if not raw:
+                break  # blank = no severity hint
+            if raw in allowed:
+                args.severity = raw
+                break
+            if attempt == 1:
+                raise SystemExit(
+                    f"invalid severity {raw!r}; expected one of {', '.join(allowed)} or blank"
+                )
+
+
 def _cmd_engage(args: argparse.Namespace, install_root: Path) -> None:
+    if not args.customer or not args.platform:
+        _run_engage_picker(args, install_root)
+
     customer = (args.customer or "").strip()
     if not customer:
         raise SystemExit("--customer is required")
@@ -362,11 +522,34 @@ def _cmd_engage(args: argparse.Namespace, install_root: Path) -> None:
         skip_permissions=getattr(args, "skip_permissions", False),
     )
     created = create_engagement(options)
+
+    if getattr(args, "start", None):
+        # Chain straight into the operator session. stdout stays the bare path
+        # (the eng=$(vigil blue engage …) contract), then launch hints go to
+        # stderr — everything is printed and flushed BEFORE start_engagement,
+        # which does os.chdir + os.execv and never returns.
+        print(created.path)
+        sys.stdout.flush()
+        print(f"[vigil blue] engagement: {created.key}", file=sys.stderr)
+        print(f"[vigil blue] launching operator session ({args.start})…", file=sys.stderr)
+        print("  Paste the alert into the operator chat; the operator records intake", file=sys.stderr)
+        print("  (vigil blue alert record) and dispatches triage (vigil blue dispatch).", file=sys.stderr)
+        sys.stderr.flush()
+        if args.start == "opencode":
+            # Mirror main.py: ensure the opencode permission block exists. A
+            # blank level leaves provider options untouched.
+            write_opencode_reasoning_config(created.path, "")
+        # MUST be the final statement — os.chdir + os.execv, never returns.
+        start_engagement(install_root, created.path, args.start, [])
+        return
+
     print(created.path)
-    print("\nnext:", file=sys.stderr)
-    print(f"  cd {created.path}", file=sys.stderr)
-    print(f"  vigil engagement start {created.key} --client codex", file=sys.stderr)
-    print("  Paste the alert into the operator chat; the operator will record intake.", file=sys.stderr)
+    print(f"[vigil blue] engagement: {created.key}", file=sys.stderr)
+    print("next:", file=sys.stderr)
+    print(f"  vigil engagement start {created.key} --client codex   (or --client claude)", file=sys.stderr)
+    print("  Then paste the alert into the operator chat; the operator records intake", file=sys.stderr)
+    print("  (vigil blue alert record) and dispatches triage (vigil blue dispatch).", file=sys.stderr)
+    print(f"  Shortcut next time: vigil blue engage --customer {customer} --platform {','.join(raw_platforms)} --start codex", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -466,12 +649,24 @@ def _cmd_alert_record(args: argparse.Namespace, install_root: Path) -> None:
             "Create a new engagement for a separate alert, or pass --replace to correct the intake record."
         )
 
-    body_file = Path(args.body_file)
-    if not body_file.is_file():
-        raise SystemExit(f"alert record: --body-file not found: {body_file}")
-    body = body_file.read_text(encoding="utf-8")
-    if not body.strip():
-        raise SystemExit(f"alert record: --body-file was empty: {body_file}")
+    if args.body_file == "-":
+        if sys.stdin.isatty():
+            print(
+                "[vigil blue] reading alert body from stdin; finish with Ctrl-D",
+                file=sys.stderr,
+            )
+        body = sys.stdin.read()
+        if not body.strip():
+            raise SystemExit(
+                "alert record: stdin body was empty (heredoc/pipe the alert, or pass --body-file <path>)"
+            )
+    else:
+        body_file = Path(args.body_file)
+        if not body_file.is_file():
+            raise SystemExit(f"alert record: --body-file not found: {body_file}")
+        body = body_file.read_text(encoding="utf-8")
+        if not body.strip():
+            raise SystemExit(f"alert record: --body-file was empty: {body_file}")
 
     parsed = _parse_alert_body(body)
     now_iso = _utc_now_iso()
@@ -658,7 +853,7 @@ def _cmd_show(args: argparse.Namespace, install_root: Path) -> None:
                     print(f"    {key}: {headers[key]}")
     print()
     print("## Findings")
-    _run_assess(install_root, eng_dir, ["list-findings"], check=False)
+    _run_assess(install_root, eng_dir, ["finding", "list"], check=False)
     print()
     print("## Resume brief (tenant scope)")
     _run_assess(install_root, eng_dir, ["resume-brief"], check=False)
@@ -782,7 +977,8 @@ def _cmd_tier(args: argparse.Namespace, install_root: Path) -> None:
         install_root,
         eng_dir,
         [
-            "update-finding",
+            "finding",
+            "update",
             args.finding_slug,
             "--details-inline",
             json.dumps(details),
@@ -822,15 +1018,19 @@ def _cmd_verify(args: argparse.Namespace, install_root: Path) -> None:
         if not args.kill_reason or args.kill_check is None:
             raise SystemExit(
                 "verify --disposition false_positive requires both --kill-reason and --kill-check "
-                "(kill-finding contract). Example: --kill-check 5 --kill-reason 'documented benign pattern in tenant ref'"
+                "(finding verify contract). Example: --kill-check 5 "
+                "--kill-reason 'documented benign pattern in tenant ref'"
             )
         details = {
             "disposition": blue_disp,  # preserve blue vocab verbatim for report-writer
             "evidence_refs": evidence_refs,
         }
         assess_args = [
-            "kill-finding",
+            "finding",
+            "verify",
             args.finding_slug,
+            "--disposition",
+            cli_disp,
             "--reason",
             args.reason,
             "--kill-reason",
@@ -846,7 +1046,8 @@ def _cmd_verify(args: argparse.Namespace, install_root: Path) -> None:
             "evidence_refs": evidence_refs,
         }
         assess_args = [
-            "verify-finding",
+            "finding",
+            "verify",
             args.finding_slug,
             "--disposition",
             cli_disp,
@@ -1211,7 +1412,8 @@ def _cmd_contain(args: argparse.Namespace, install_root: Path) -> None:
         install_root,
         eng_dir,
         [
-            "update-finding",
+            "finding",
+            "update",
             args.finding_slug,
             "--status",
             "contained",
@@ -1242,7 +1444,7 @@ def _cmd_report(args: argparse.Namespace, install_root: Path) -> None:
     _read_scope(eng_dir / "scope.json", require_blue=True)
     # Pre-flight: emit the gathered report-findings table so the operator sees
     # the input set before report-writer is dispatched.
-    preflight_rc = _run_assess(install_root, eng_dir, ["list-report-findings", "--mode", "final"], check=False)
+    preflight_rc = _run_assess(install_root, eng_dir, ["finding", "report", "--mode", "final"], check=False)
     if preflight_rc != 0:
         raise SystemExit(preflight_rc)
     template_hint = (
@@ -1291,7 +1493,7 @@ def _cmd_report(args: argparse.Namespace, install_root: Path) -> None:
 def _cmd_closeout(args: argparse.Namespace, install_root: Path) -> None:
     eng_dir = _resolve_blue_engagement(install_root, args)
     _read_scope(eng_dir / "scope.json", require_blue=True)
-    preflight_rc = _run_assess(install_root, eng_dir, ["list-report-findings", "--mode", "final"], check=False)
+    preflight_rc = _run_assess(install_root, eng_dir, ["finding", "report", "--mode", "final"], check=False)
     if preflight_rc != 0:
         raise SystemExit(preflight_rc)
     task = (
@@ -1351,8 +1553,8 @@ def _cmd_tenant_init(args: argparse.Namespace, install_root: Path) -> None:
     if not template.is_file():
         raise SystemExit(
             f"Tenant template not found at {template}. "
-            "Plan unit 12 owns the template content; create it (or copy from "
-            "agent/references/tenants/acme-corp-workspace.md as a starting point) before retrying."
+            "Restore the matching agent/references/tenants/_template-<platform>.md "
+            "file before retrying."
         )
     if dest.exists() and not args.force:
         raise SystemExit(f"Tenant ref already exists at {dest}. Pass --force to overwrite.")

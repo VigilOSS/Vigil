@@ -146,10 +146,12 @@ def _finding_base() -> dict:
     }
 
 
-def test_finding_rejects_empty_cvss_vector_and_zero_score_when_present():
-    """L4-6: an empty cvss_vector or a cvss_score of 0 produced meaningless
-    records that nonetheless satisfied the schema. They must now be rejected
-    WHEN PRESENT (minLength:1 / exclusiveMinimum:0).
+def test_finding_rejects_empty_cvss_vector_but_accepts_a_zero_score():
+    """An empty cvss_vector is a meaningless record and stays rejected
+    (minLength:1). A cvss_score of 0.0 is NOT: an all-N vector genuinely
+    computes to it, and it is the only score the `info` severity band (< 0.1)
+    can hold, so excluding it made an informational finding unrepresentable.
+    Below zero is still off the CVSS scale.
     """
     module = _validation_module()
     schema = module.load_schema("finding-record.schema.json")
@@ -161,10 +163,18 @@ def test_finding_rejects_empty_cvss_vector_and_zero_score_when_present():
     errors = module.collect_validation_errors(empty_vector, schema)
     assert any("cvss_vector" in e for e in errors), errors
 
-    zero_score = dict(base)
-    zero_score["details"] = {**base["details"], "cvss_score": 0}
-    errors = module.collect_validation_errors(zero_score, schema)
-    assert any("cvss_score" in e and "> 0" in e for e in errors), errors
+    info_finding = dict(base)
+    info_finding["details"] = {
+        **base["details"],
+        "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N",
+        "cvss_score": 0,
+    }
+    assert module.collect_validation_errors(info_finding, schema) == []
+
+    negative_score = dict(base)
+    negative_score["details"] = {**base["details"], "cvss_score": -0.1}
+    errors = module.collect_validation_errors(negative_score, schema)
+    assert any("cvss_score" in e for e in errors), errors
 
 
 def test_finding_accepts_valid_cvss_and_no_cvss_at_record_time():

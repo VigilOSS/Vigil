@@ -1,7 +1,14 @@
 # ADR 0010 — Fail-closed attribution for required-header engagements
 
-- Status: Accepted
+- Status: Superseded
 - Date: 2026-06-30
+
+> **Superseded (2026-07-28):** required-header injection remains, but the
+> host-membership-dependent Layer 2 refusal described below has been removed.
+> `scope.json` may shape collected datasets and supply headers, but it does not
+> admit or refuse outbound execution. An injector that cannot safely add a
+> marker now warns and lets the command run. The remainder of this ADR records
+> the former decision for history.
 
 ## Context
 

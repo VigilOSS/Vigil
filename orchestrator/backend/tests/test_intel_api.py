@@ -598,6 +598,43 @@ def test_note_post_get_upsert_and_extra_forbid(client, isolate_settings):
     assert _assert_present_in_search(client, "Recon")
 
 
+def test_supersede_note_with_rationale_appends_to_body_markdown(client, isolate_settings):
+    # Regression: `supersede-intel note --rationale` 500'd because the rationale
+    # was appended to a `notes` column that intel_notes does not have (its free
+    # text is body_markdown). The note type must append to body_markdown; every
+    # other intel type keeps using its `notes` column (covered above).
+    _seed_engagement(client, isolate_settings)
+    created = client.post(
+        f"{INTEL_BASE}/notes",
+        json={"title": "Lead v1", "body_markdown": "## Lead\n- initial", "source_agent": "operator"},
+    )
+    assert created.status_code == 201, created.text
+    old_id = created.json()["id"]
+
+    # A DIFFERENT title is a supersede (same title would upsert in place -> 409).
+    superseded = client.post(
+        f"{INTEL_BASE}/notes/{old_id}/supersede",
+        json={
+            "payload": {
+                "title": "Lead v2",
+                "body_markdown": "## Lead\n- refined",
+                "source_agent": "operator",
+            },
+            "rationale": "Re-scoped after source-map pass",
+        },
+    )
+    assert superseded.status_code == 201, superseded.text  # regression: previously 500
+    body = superseded.json()
+    new_id = body["current"]["id"]
+    assert new_id != old_id
+    old = body["superseded"]
+    assert old["superseded_by_id"] == new_id
+    assert old["superseded_at"]
+    # The rationale landed in body_markdown (the column that exists), not `notes`.
+    assert "[superseded-by id=" in old["body_markdown"]
+    assert "Re-scoped after source-map pass" in old["body_markdown"]
+
+
 def test_note_lead_status_lifecycle(client, isolate_settings):
     """A note with lead_status is a tracked lead; list_leads(open_only) is the
     worklist; PATCH to a terminal status drops it; bad status is 422; the migration
@@ -1255,3 +1292,116 @@ def test_intel_record_schemas_omit_superseded_by_id():
         "superseded_by_id is server-managed (supersede-intel); it must not be a "
         f"record-schema property. Offending schemas: {offenders}"
     )
+
+
+# ──────────────────────────────────────────────────────────────
+# supersede --to-existing (I-15)
+# ──────────────────────────────────────────────────────────────
+
+
+def _post_tech(client, component: str, version: str, **extra: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {"component": component, "version": version}
+    payload.update(extra)
+    response = client.post(f"{INTEL_BASE}/tech-components", json=payload)
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def test_supersede_to_existing_sets_fk_without_mutating_canonical(client, isolate_settings):
+    """I-15: --to-existing points the stale row at an EXISTING same-type
+    canonical row, setting ``superseded_by_id`` WITHOUT re-upserting — so the
+    canonical's own fields are never overwritten."""
+    _seed_engagement(client, isolate_settings)
+    canonical = _post_tech(client, "nginx", "1.25.0", source_name="canon", notes="keep me")
+    stale = _post_tech(client, "nginx", "1.25", source_name="stale")
+    assert canonical["id"] != stale["id"]
+
+    resp = client.post(
+        f"{INTEL_BASE}/tech-components/{stale['id']}/supersede",
+        json={"to_existing_id": canonical["id"], "rationale": "duplicate banner"},
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+
+    # Stale row now defers to the canonical, with the rationale appended.
+    assert body["superseded"]["id"] == stale["id"]
+    assert body["superseded"]["superseded_by_id"] == canonical["id"]
+    assert body["superseded"]["superseded_at"]
+    assert "[superseded-by id=" in body["superseded"]["notes"]
+    assert "duplicate banner" in body["superseded"]["notes"]
+
+    # Canonical returned as "current" and its own fields are untouched.
+    assert body["current"]["id"] == canonical["id"]
+    assert body["current"]["component"] == "nginx"
+    assert body["current"]["version"] == "1.25.0"
+    assert body["current"]["notes"] == "keep me"
+    assert body["current"].get("superseded_by_id") is None
+
+    # No re-upsert happened: still exactly the two original rows (the audit
+    # listing keeps superseded rows), and the stale row's canonical_id chases to
+    # the canonical leaf while the canonical stays its own leaf.
+    listing = client.get(f"{INTEL_BASE}/tech-components")
+    assert listing.status_code == 200, listing.text
+    rows = {row["id"]: row for row in listing.json()}
+    assert set(rows) == {canonical["id"], stale["id"]}
+    assert rows[stale["id"]]["canonical_id"] == canonical["id"]
+    assert rows[canonical["id"]]["canonical_id"] == canonical["id"]
+
+
+def test_supersede_to_existing_rejects_self(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+    row = _post_tech(client, "redis", "7.2")
+    resp = client.post(
+        f"{INTEL_BASE}/tech-components/{row['id']}/supersede",
+        json={"to_existing_id": row["id"]},
+    )
+    assert resp.status_code == 400, resp.text
+    assert "itself" in resp.json()["detail"]
+
+
+def test_supersede_to_existing_rejects_missing_target(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+    row = _post_tech(client, "redis", "7.2")
+    resp = client.post(
+        f"{INTEL_BASE}/tech-components/{row['id']}/supersede",
+        json={"to_existing_id": 999999},
+    )
+    assert resp.status_code == 404, resp.text
+    assert "999999" in resp.json()["detail"]
+
+
+def test_supersede_to_existing_rejects_replacement_payload(client, isolate_settings):
+    """--to-existing and a replacement payload are mutually exclusive."""
+    _seed_engagement(client, isolate_settings)
+    canonical = _post_tech(client, "nginx", "1.25.0")
+    stale = _post_tech(client, "nginx", "1.25")
+    resp = client.post(
+        f"{INTEL_BASE}/tech-components/{stale['id']}/supersede",
+        json={
+            "to_existing_id": canonical["id"],
+            "payload": {"component": "nginx", "version": "1.25"},
+        },
+    )
+    assert resp.status_code == 400, resp.text
+    assert "payload" in resp.json()["detail"].lower()
+
+
+def test_supersede_to_existing_rejects_cycle(client, isolate_settings):
+    """If B already supersedes into A, pointing A --to-existing B closes a
+    loop (A -> B -> A) and must be rejected."""
+    _seed_engagement(client, isolate_settings)
+    b_row = _post_tech(client, "nginx", "1.24")
+    # Payload supersede B -> A: creates the canonical A (nginx 1.25).
+    a_created = client.post(
+        f"{INTEL_BASE}/tech-components/{b_row['id']}/supersede",
+        json={"payload": {"component": "nginx", "version": "1.25"}, "rationale": "re-fingerprint"},
+    )
+    assert a_created.status_code == 201, a_created.text
+    a_id = a_created.json()["current"]["id"]
+
+    resp = client.post(
+        f"{INTEL_BASE}/tech-components/{a_id}/supersede",
+        json={"to_existing_id": b_row["id"]},
+    )
+    assert resp.status_code == 409, resp.text
+    assert "cycle" in resp.json()["detail"].lower()

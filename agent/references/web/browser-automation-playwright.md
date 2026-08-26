@@ -53,9 +53,10 @@ proxy trips the edge.
 ### Mode A — through-proxy (auto-capture into the engagement)
 
 Route the headed browser through `vigil mitmproxy` so the proxy addon
-auto-detects the login and POSTs the captured credentials to the backend store /
-records traffic to `cases.db`. This is the clean path *when the edge tolerates
-the proxy* — you get engagement-pipeline capture for free.
+auto-detects the login and POSTs the captured credentials to the backend store,
+and posts request observations that the backend derives into the work buffer
+(`assessment_work_items`, ADR 0013) server-side. This is the clean path *when
+the edge tolerates the proxy* — you get engagement-pipeline capture for free.
 
 ```bash
 vigil mitmproxy start
@@ -211,8 +212,8 @@ node agent/scripts/browser/playwright-login.js
 
 ## Authorization + stop conditions
 
-This is target-facing, authenticated work. Stay inside `scope.json`. Stop and ask
-the operator when:
+This is target-facing, authenticated work. Follow the engagement boundary in
+`agent/shared-constraints.md` §1. Stop and ask the operator when:
 
 - a CAPTCHA / proof-of-human / device-binding / policy-acceptance prompt appears
   that the engagement authorization does not cover;

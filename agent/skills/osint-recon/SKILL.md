@@ -8,7 +8,7 @@ origin: Vigil
 
 ## When to Activate
 
-- After TEST phase, the backend intel tables (`intel_tech_components`, `intel_people`, `intel_domains`, and `assessment_credentials`) have accumulated tech stack, people, domains, and credentials — query via `vigil assess list-intel <type>` or `vigil assess fetch intel`
+- After TEST phase, the backend intel tables (`intel_tech_components`, `intel_people`, `intel_domains`, and `assessment_credentials`) have accumulated tech stack, people, domains, and credentials — query via `vigil assess intel list <type>` or `vigil assess fetch intel`
 - Parallel with exploit phase to enrich attack context
 
 ## Tools
@@ -43,7 +43,7 @@ the container, because anything under `/tmp` disappears on container recreate.
 
 ### 1. CVE & Exploit Lookup
 
-Pull the tech stack from the backend (`vigil assess list-intel tech-component`) — for each component+version:
+Pull the tech stack from the backend (`vigil assess intel list tech-component`) — for each component+version:
 
 ```bash
 # Exploit-DB local search (canonical wrapped form — copy this for every other tool below)
@@ -65,7 +65,7 @@ vigil assess kali exec \
     curl -s "https://api.github.com/search/repositories?q=CVE+<component>+poc&sort=updated&per_page=5" \
       | jq '.items[] | {name, html_url, description}'
 
-For every component+version row in the tech stack, the four lookups above are **mandatory** (not "if you have time"). Specialists historically rediscovered CVEs via initiative when the OSINT pass should have surfaced them. Walk the full `list-intel tech-component` output before moving to step 2.
+For every component+version row in the tech stack, the four lookups above are **mandatory** (not "if you have time"). Specialists historically rediscovered CVEs via initiative when the OSINT pass should have surfaced them. Walk the full `intel list tech-component` output before moving to step 2.
 
 **Systematic nuclei CVE-template pass** — for containerized app platforms and well-known products with public CVE templates (ShinyProxy, R-Shiny, Jenkins, Confluence, GitLab, Grafana, Argo CD, Sentry, MinIO, Splunk Web, Spring Boot Actuator, anything with `http/cves/` template coverage), record the tech-component intel, then trigger a targeted nuclei pass scoped to that product:
 
@@ -84,14 +84,14 @@ This is **not** the reactive Phase 1c sweep (which is `-as` against all live hos
 **Recording rule.** After the CVE lookup + targeted nuclei pass, record each version-matched CVE as intel:
 
 ```bash
-vigil assess record-intel cve <cve-json-file>
+vigil assess intel record cve <cve-json-file>
 ```
 
-Then the operator dispatches `exploit-developer` to validate. Version-matched CVE is **intel, not finding** until the exploit-developer pass produces target-proven evidence. Do NOT call `record-finding` from the osint-recon pass — that breaks the no-theoretical-findings rule in `agent/rules/hunting.md`.
+Then the operator dispatches `exploit-developer` to validate. Version-matched CVE is **intel, not finding** until the exploit-developer pass produces target-proven evidence. Do NOT call `finding record` from the osint-recon pass — that breaks the no-theoretical-findings rule in `agent/rules/hunting.md`.
 
 ### 2. Breach & Credential Intelligence
 
-Pull emails and domains from the backend (`vigil assess list-intel email` and `vigil assess list-intel domain`):
+Pull emails and domains from the backend (`vigil assess intel list email` and `vigil assess intel list domain`):
 
 ```bash
 # theHarvester wrapped form — note --technique RECON when modules touch target DNS.
@@ -117,7 +117,7 @@ vigil assess kali exec \
 
 ### 3. DNS & Infrastructure History
 
-Pull domains from the backend (`vigil assess list-intel domain`):
+Pull domains from the backend (`vigil assess intel list domain`):
 
 ```bash
 # WHOIS wrapped form (illustrative — every tool in this section follows the same wrap pattern).
@@ -163,7 +163,7 @@ vigil assess kali exec \
 
 ### 4. Social & Organizational Intelligence
 
-Pull people and org facts from the backend (`vigil assess list-intel person` and `vigil assess list-intel org-fact`):
+Pull people and org facts from the backend (`vigil assess intel list person` and `vigil assess intel list org-fact`):
 
 ```bash
 # theHarvester social wrapped form. Use --technique OSINT here — the
@@ -265,7 +265,7 @@ in `agent/references/payloads/version-fingerprint-probes.md`. Wrap every HTTP pr
 ## CVE Validation Gate
 
 CVE recording rules are defined in `agent/agents/osint-analyst.md` § Finding Recording.
-In short: version-only CVE matches are intel, not findings — record via `vigil assess record-intel cve <cve-json-file>` and list them under `#### Intelligence` in your output. The operator dispatches exploit-developer to validate before any CVE becomes a durable finding via `record-finding`.
+In short: version-only CVE matches are intel, not findings — record via `vigil assess intel record cve <cve-json-file>` and list them under `#### Intelligence` in your output. The operator dispatches exploit-developer to validate before any CVE becomes a durable finding via `finding record`.
 
 ## Priority Order
 
@@ -278,31 +278,31 @@ In short: version-only CVE matches are intel, not findings — record via `vigil
 ## Output Contract
 
 The skill produces these structured sections in the osint-analyst's return payload.
-Backend writes (`record-intel <type>`, `record-finding` for target-proven results) are
+Backend writes (`intel record <type>`, `finding record` for target-proven results) are
 the durable record; this contract names what each markdown section should hold so
 the operator and downstream specialists can parse the output consistently. The
 "Output Integration" table below this section maps each section's intel rows to the
-specific `record-intel <type>` call.
+specific `intel record <type>` call.
 
 | Section | Holds |
 |---|---|
 | `#### Summary` | One-paragraph headline: tech components researched, CVE matches, breach hits, GitHub orgs enumerated, exact-version triangulation outcomes. |
-| `#### Findings` | Decisive findings the OSINT pass already proved against the live target (e.g., a breach-leaked credential validated to log in, a CVE PoC reproduced). Each must also be recorded via `vigil assess record-finding`. CVE matches without target-specific proof stay in `#### Intelligence` per the CVE Validation Gate. |
-| `#### Intelligence` | The bulk of OSINT output. CVE matches → `record-intel cve`. Breach records → `record-intel breach-record`. Historical URLs → `record-intel dns-record`. Social profiles → `record-intel social-profile`. Org facts → `record-intel org-fact`. Tech-component fingerprints → `record-intel tech-component`. Free-form prose → `record-intel note`. See "Output Integration" below for the per-type mapping. |
-| `#### Surface Candidates` | Historical URLs / hidden endpoints surfaced via `gau` / `waymore` / SecurityTrails that warrant active probing, fed back via `vigil assess ingest-endpoints` so they enter the work buffer. |
+| `#### Findings` | Decisive findings the OSINT pass already proved against the live target (e.g., a breach-leaked credential validated to log in, a CVE PoC reproduced). Each must also be recorded via `vigil assess finding record`. CVE matches without target-specific proof stay in `#### Intelligence` per the CVE Validation Gate. |
+| `#### Intelligence` | The bulk of OSINT output. CVE matches → `intel record cve`. Breach records → `intel record breach-record`. Historical URLs → `intel record dns-record`. Social profiles → `intel record social-profile`. Org facts → `intel record org-fact`. Tech-component fingerprints → `intel record tech-component`. Free-form prose → `intel record note`. See "Output Integration" below for the per-type mapping. |
+| `#### Surface Candidates` | Historical URLs / hidden endpoints surfaced via `gau` / `waymore` / SecurityTrails that warrant active probing, fed back via `vigil assess ingest endpoints` so they enter the work buffer. |
 | `#### Coverage Gaps` | API keys missing for SecurityTrails / Hunter / HIBP, rate-limited GitHub queries that did not complete, theHarvester modules that errored, exact-version triangulation that could not pin a single patch level. The operator uses this section to decide whether to re-dispatch with credentials. |
 
 ## Output Integration
 
-Raw OSINT collection is recorded via `vigil assess record-intel <type> <json-file>` so the
+Raw OSINT collection is recorded via `vigil assess intel record <type> <json-file>` so the
 backend intel tables (`intel_cves`, `intel_breach_records`, `intel_dns_records`,
 `intel_social_profiles`, etc.) are the canonical destination. CVE matches stay as intel until
 exploit-developer validates them.
-- CVE matches → `record-intel cve` + `#### Intelligence` (NOT findings — needs validation)
-- Breached credentials → `record-intel breach-record`; credentials with target-specific proof additionally go to `vigil assess post credentials <json-file>` and a finding
-- Historical URLs → `record-intel dns-record` (record-type=URL or equivalent), then ingest confirmed or high-value paths into backend coverage state via `vigil assess ingest-endpoints`
-- Social/org intel → `record-intel social-profile` for platform accounts, `record-intel org-fact` for structured organizational metadata
-- Free-form prose intel that doesn't fit a structured row → `record-intel note`
+- CVE matches → `intel record cve` + `#### Intelligence` (NOT findings — needs validation)
+- Breached credentials → `intel record breach-record`; credentials with target-specific proof additionally go to `vigil assess post credentials <json-file>` and a finding
+- Historical URLs → `intel record dns-record` (record-type=URL or equivalent), then ingest confirmed or high-value paths into backend coverage state via `vigil assess ingest endpoints`
+- Social/org intel → `intel record social-profile` for platform accounts, `intel record org-fact` for structured organizational metadata
+- Free-form prose intel that doesn't fit a structured row → `intel record note`
 - For each meaningful lead, record the hypothesis it supports: vulnerable component, reachable hidden surface, reusable credential, or escalation path
 
 ## Extended Resources

@@ -6,7 +6,6 @@ import sys
 import time
 
 from assess.lib.client import AssessError
-from assess.lib.config import load_config
 from assess.lib.kali import (
     add_passthrough_args_flag,
     add_required_kali_flags,
@@ -39,19 +38,11 @@ def _default_output_dir() -> str:
 
     bbot's final txt output is crash-truncated (I-011: v2.6.0 dnsresolve
     crash-loop), so a JSON output module + a deterministic output dir is the
-    default. Resolve the engagement key for the canonical
-    /engagements/<key>/scans/... path; fall back to a working-dir-relative
-    path (kali_exec runs with cwd=/engagements/<key>) when config is
-    unavailable.
+    default. Keep this relative because ``kali_exec`` always runs with
+    ``cwd=/engagements/<resolved-key>``; deriving an absolute path separately
+    could disagree with an explicit ``--engagement-dir`` selector.
     """
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    try:
-        cfg = load_config(None)
-        key = cfg.engagement_key
-    except SystemExit:
-        key = ""
-    if key:
-        return f"/engagements/{key}/scans/bbot_{stamp}"
     return f"scans/bbot_{stamp}"
 
 
@@ -123,7 +114,7 @@ def register(subparsers) -> None:
         default="",
         help=(
             "bbot output directory. When unset, defaults to "
-            "/engagements/<key>/scans/bbot_<ts>. The wrapper always emits JSON "
+            "scans/bbot_<ts> under the resolved engagement. The wrapper always emits JSON "
             "(-om json) into this dir — harvest DNS_NAME events from output.json, "
             "not the crash-truncated final txt (CR-24)."
         ),

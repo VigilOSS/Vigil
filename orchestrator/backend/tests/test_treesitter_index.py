@@ -2,7 +2,10 @@
 plus structural enrichment (exports, import targets, passes_caller_params)."""
 from __future__ import annotations
 
+import re
 import sys
+import tomllib
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
@@ -22,6 +25,19 @@ needs_treesitter = pytest.mark.skipif(
     reason="tree-sitter not installed in this environment",
 )
 
+_PARSER_DISTRIBUTIONS = {
+    "tree-sitter",
+    "tree-sitter-c",
+    "tree-sitter-cpp",
+    "tree-sitter-go",
+    "tree-sitter-java",
+    "tree-sitter-javascript",
+    "tree-sitter-php",
+    "tree-sitter-python",
+    "tree-sitter-ruby",
+    "tree-sitter-typescript",
+}
+
 
 # ---------------------------------------------------------------------------
 # language_for_file
@@ -33,6 +49,9 @@ needs_treesitter = pytest.mark.skipif(
     ("index.php", "php"),
     ("main.py", "python"),
     ("util.java", "java"),
+    ("native.hh", "cpp"),
+    ("module.mjs", "javascript"),
+    ("legacy.cjs", "javascript"),
     # Lightweight (regex-based) extractors are now first-class languages.
     ("style.css", "css"),
     ("theme.scss", "css"),
@@ -62,6 +81,29 @@ def test_supported_languages_includes_new():
 def test_supported_languages_includes_lightweight():
     for lang in ("dockerfile", "shell", "lua", "html", "css"):
         assert lang in SUPPORTED_LANGUAGES
+
+
+def test_assess_parser_dependencies_match_ci_versions():
+    repo_root = Path(__file__).resolve().parent.parent.parent.parent
+    assess_script = (repo_root / "agent" / "scripts" / "assess.py").read_text()
+    production_pins = dict(
+        re.findall(r'^#\s+"(tree-sitter[^"=<>]*)==([^"=<>]+)",$', assess_script, re.M)
+    )
+    backend_config = tomllib.loads(
+        (repo_root / "orchestrator" / "backend" / "pyproject.toml").read_text()
+    )
+    backend_pins = dict(
+        dependency.split("==", 1)
+        for dependency in backend_config["project"]["optional-dependencies"]["dev"]
+        if dependency.startswith("tree-sitter")
+    )
+
+    assert set(production_pins) == _PARSER_DISTRIBUTIONS
+    assert backend_pins == production_pins
+    assert production_pins == {
+        distribution: version(distribution)
+        for distribution in sorted(_PARSER_DISTRIBUTIONS)
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +164,17 @@ def test_go_sinks():
 
 
 @needs_treesitter
+def test_exact_python_index_detects_security_sources_with_real_tree_sitter():
+    source = b"def handler(request):\n    return request.args['name']\n"
+    idx = index_file("handler.py", "python", source=source)
+
+    assert idx["analysis_mode"] == "tree_sitter"
+    assert idx["analysis_status"] == "complete"
+    assert idx["signal_counts"]["security_sources"] == 1
+    assert idx["security_sources"][0]["line"] == 2
+
+
+@needs_treesitter
 def test_go_exports():
     idx = index_file("main.go", "go", source=GO_SOURCE)
     export_names = {e["name"] for e in idx.get("exports", [])}
@@ -140,6 +193,376 @@ def test_go_classes():
 def test_go_imports():
     idx = index_file("main.go", "go", source=GO_SOURCE)
     assert len(idx["imports"]) >= 2
+
+
+# ---------------------------------------------------------------------------
+# C++ declarations
+# ---------------------------------------------------------------------------
+
+CPP_HEADER_SOURCE = b"""\
+extern "C" {
+size_t AcmeClient_write_data_cb(void *ptr, size_t size);
+size_t AcmeClient_read_data_cb(void *ptr, size_t size);
+}
+
+class AcmeClient {
+public:
+    class Exception {
+    public:
+        Exception(const char* message) {}
+        Exception(int error) {}
+    };
+
+    AcmeClient(const char* url);
+    ~AcmeClient();
+    const char* fetch();
+    const char* post(const char* data);
+    const char* put(const char* data);
+    bool isHTTPError() const;
+    size_t append_data(void* ptr, size_t size);
+    size_t upload_data(void* ptr, size_t size);
+
+private:
+    AcmeClient(const AcmeClient&);
+    void setOptions();
+    void setHTTPHeaders() const;
+    void curlPerform();
+};
+"""
+
+
+@needs_treesitter
+def test_cpp_header_indexes_function_and_method_declarations():
+    idx = index_file("AcmeClient.h", "cpp", source=CPP_HEADER_SOURCE)
+    functions = idx["functions"]
+    names = [function["name"] for function in functions]
+
+    assert set(names) == {
+        "AcmeClient_write_data_cb",
+        "AcmeClient_read_data_cb",
+        "Exception",
+        "AcmeClient",
+        "~AcmeClient",
+        "fetch",
+        "post",
+        "put",
+        "isHTTPError",
+        "append_data",
+        "upload_data",
+        "setOptions",
+        "setHTTPHeaders",
+        "curlPerform",
+    }
+    assert names.count("Exception") == 2
+    assert names.count("AcmeClient") == 2
+    assert len(functions) == 16
+    assert {
+        function["qualified_name"]
+        for function in functions
+        if function["name"] in {"fetch", "~AcmeClient", "setHTTPHeaders"}
+    } == {
+        "AcmeClient.fetch",
+        "AcmeClient.~AcmeClient",
+        "AcmeClient.setHTTPHeaders",
+    }
+
+
+@needs_treesitter
+def test_cpp_declarations_do_not_turn_calls_or_function_pointers_into_functions():
+    source = b"""\
+int declared(int value);
+int (*function_pointer)(int);
+
+class Service {
+public:
+    void method();
+    void (*callback)(int);
+    int inline_method(int value) { return declared(value); }
+};
+
+int defined(int value) {
+    Service service;
+    service.method();
+    return declared(value);
+}
+"""
+    idx = index_file("service.hpp", "cpp", source=source)
+
+    assert [function["name"] for function in idx["functions"]] == [
+        "declared",
+        "method",
+        "inline_method",
+        "defined",
+    ]
+    assert [function["qualified_name"] for function in idx["functions"]] == [
+        "declared",
+        "Service.method",
+        "Service.inline_method",
+        "defined",
+    ]
+
+
+@needs_treesitter
+def test_cpp_declarations_preserve_overloads_and_prefer_matching_definitions():
+    source = b"""\
+class Left {
+public:
+    class Worker {
+    public:
+        void inspect(int value);
+        void inspect(const char* value);
+    };
+};
+
+class Right {
+public:
+    class Worker {
+    public:
+        void inspect(int value);
+    };
+};
+
+int evaluate(int value);
+int evaluate(int value) {
+    return value;
+}
+"""
+    idx = index_file("overloads.hpp", "cpp", source=source)
+    functions = idx["functions"]
+
+    inspections = [function for function in functions if function["name"] == "inspect"]
+    assert [function["qualified_name"] for function in inspections] == [
+        "Left.Worker.inspect",
+        "Left.Worker.inspect",
+        "Right.Worker.inspect",
+    ]
+    assert [function["params"] for function in inspections] == [
+        ["int value"],
+        ["const char* value"],
+        ["int value"],
+    ]
+
+    evaluations = [function for function in functions if function["name"] == "evaluate"]
+    assert len(evaluations) == 1
+    assert evaluations[0]["is_declaration"] is False
+    assert evaluations[0]["line_start"] == 19
+    assert evaluations[0]["line_end"] == 21
+
+
+@needs_treesitter
+def test_cpp_declarator_walk_distinguishes_callable_and_pointer_objects():
+    source = b"""\
+int *returns_pointer(int value);
+int (*pointer_object)(int value);
+int (*factory())(double value);
+int first() { return 1; } int second() { return 2; }
+int alpha(), beta(int value);
+"""
+    idx = index_file("declarators.hpp", "cpp", source=source)
+
+    assert [function["name"] for function in idx["functions"]] == [
+        "returns_pointer",
+        "factory",
+        "first",
+        "second",
+        "alpha",
+        "beta",
+    ]
+
+
+@needs_treesitter
+def test_cpp_dedup_keeps_distinct_conditional_definitions():
+    source = b"""\
+#if USE_FIRST
+int branch(int value) { return first(value); }
+#else
+int branch(int value) { return second(value); }
+#endif
+"""
+    idx = index_file("conditional.cpp", "cpp", source=source)
+
+    branches = [function for function in idx["functions"] if function["name"] == "branch"]
+    assert [function["line_start"] for function in branches] == [2, 4]
+    assert {call["callee"] for call in idx["call_sites"]} == {"first", "second"}
+
+
+@needs_treesitter
+def test_cpp_namespace_prototypes_retain_qualified_identity():
+    source = b"""\
+namespace left { int parse(int value); }
+namespace right { int parse(int value); }
+namespace outer::inner { int nested(); }
+"""
+    idx = index_file("namespaces.hpp", "cpp", source=source)
+
+    assert [function["qualified_name"] for function in idx["functions"]] == [
+        "left.parse",
+        "right.parse",
+        "outer.inner.nested",
+    ]
+
+
+@needs_treesitter
+def test_cpp_conversion_and_operator_declarations_are_indexed():
+    source = b"""\
+class Value {
+public:
+    operator bool() const;
+    operator const char*() const;
+    explicit operator std::string() const;
+    Value& operator=(const Value& other);
+    int operator()(int value) const;
+    int operator[](int index) const;
+    friend Value operator+(const Value& left, const Value& right);
+};
+"""
+    idx = index_file("operators.hpp", "cpp", source=source)
+
+    assert [function["qualified_name"] for function in idx["functions"]] == [
+        "Value.operator bool",
+        "Value.operator const char*",
+        "Value.operator std::string",
+        "Value.operator=",
+        "Value.operator()",
+        "Value.operator[]",
+        "operator+",
+    ]
+    assert all(function["is_declaration"] for function in idx["functions"])
+    assert idx["call_sites"] == []
+
+
+@needs_treesitter
+def test_cpp_friend_operator_matches_its_namespace_definition():
+    source = b"""\
+namespace math {
+class Value {
+public:
+    friend Value operator+(const Value& left, const Value& right);
+};
+
+Value operator+(const Value& lhs, const Value& rhs) {
+    return lhs;
+}
+}
+"""
+    idx = index_file("friend_operator.cpp", "cpp", source=source)
+    additions = [
+        function for function in idx["functions"] if function["name"] == "operator+"
+    ]
+
+    assert len(additions) == 1
+    assert additions[0]["qualified_name"] == "math.operator+"
+    assert additions[0]["is_declaration"] is False
+    assert additions[0]["line_start"] == 7
+
+
+@needs_treesitter
+def test_cpp_definitions_keep_canonical_leaf_and_dotted_identity():
+    source = b"""\
+namespace alpha {
+class Value {
+public:
+    Value();
+    ~Value();
+    void run();
+    Value& operator+=(const Value& other);
+    operator bool() const;
+    operator const char *() const;
+    int operator()(int value) const;
+};
+
+Value::Value() {}
+Value::~Value() {}
+void Value::run() {}
+Value& Value::operator+=(const Value& rhs) { return *this; }
+Value::operator bool() const { return true; }
+Value::operator const char*() const { return nullptr; }
+int Value::operator()(int input) const { return input; }
+}
+"""
+    idx = index_file("canonical_symbols.cpp", "cpp", source=source)
+
+    assert [function["name"] for function in idx["functions"]] == [
+        "Value",
+        "~Value",
+        "run",
+        "operator+=",
+        "operator bool",
+        "operator const char*",
+        "operator()",
+    ]
+    assert [function["qualified_name"] for function in idx["functions"]] == [
+        "alpha.Value.Value",
+        "alpha.Value.~Value",
+        "alpha.Value.run",
+        "alpha.Value.operator+=",
+        "alpha.Value.operator bool",
+        "alpha.Value.operator const char*",
+        "alpha.Value.operator()",
+    ]
+    assert all(not function["is_declaration"] for function in idx["functions"])
+
+
+@needs_treesitter
+def test_cpp_signature_text_does_not_create_calls_or_sinks():
+    source = b"""\
+class Value {
+public:
+    ~Value();
+    int operator()(int value) const;
+};
+
+Value::~Value() {}
+int Value::operator()(int input) const { return input; }
+void system(const char* command) {}
+"""
+    idx = index_file("signature_only.cpp", "cpp", source=source)
+
+    assert idx["call_sites"] == []
+    assert idx["security_sinks"] == []
+
+
+@needs_treesitter
+def test_cpp_same_line_body_calls_and_sinks_remain_visible():
+    source = b"""\
+void wrapper(const char* command) { system(command); }
+"""
+    idx = index_file("same_line_body.cpp", "cpp", source=source)
+
+    assert idx["call_sites"] == [{
+        "caller": "wrapper",
+        "callee": "system",
+        "line": 1,
+        "passes_caller_params": True,
+    }]
+    assert [sink["kind"] for sink in idx["security_sinks"]] == ["process_exec"]
+    assert idx["security_sinks"][0]["function"] == "wrapper"
+    assert idx["security_sinks"][0]["line"] == 1
+
+
+@needs_treesitter
+def test_cpp_constructor_initializer_calls_and_sinks_remain_visible():
+    source = b"""\
+class Widget {
+public:
+    Widget(const char* command);
+private:
+    int member;
+    int status;
+};
+
+Widget::Widget(const char* command)
+    : member(transform(command)), status(system(command)) {}
+"""
+    idx = index_file("constructor_initializer.cpp", "cpp", source=source)
+
+    assert {call["callee"] for call in idx["call_sites"]} == {"transform", "system"}
+    assert all(call["passes_caller_params"] for call in idx["call_sites"])
+    assert not {"Widget", "member", "status"} & {
+        call["callee"] for call in idx["call_sites"]
+    }
+    assert [sink["kind"] for sink in idx["security_sinks"]] == ["process_exec"]
+    assert idx["security_sinks"][0]["line"] == 10
 
 
 # ---------------------------------------------------------------------------
@@ -209,8 +632,50 @@ def test_ruby_sinks():
 @needs_treesitter
 def test_ruby_entry_points():
     idx = index_file("app.rb", "ruby", source=RUBY_SOURCE)
-    ep_kinds = {e["kind"] for e in idx["entry_points"]}
-    assert "main_guard" in ep_kinds
+    main_guards = [
+        entry for entry in idx["entry_points"] if entry["kind"] == "main_guard"
+    ]
+    assert main_guards == [{
+        "name": "<top-level>",
+        "line": 20,
+        "kind": "main_guard",
+        "annotation": "",
+    }]
+    assert not any(entry["name"] == "main_helper" for entry in main_guards)
+
+
+@needs_treesitter
+def test_ruby_nested_main_guard_is_not_a_top_level_entry_point():
+    source = b"""\
+def helper
+if __FILE__ == $0
+puts "inside method"
+end
+end
+
+class Runner
+if $PROGRAM_NAME == __FILE__
+puts "inside class"
+end
+end
+
+runner = proc do
+if __FILE__ == $0
+puts "inside deferred block"
+end
+end
+
+1.times do
+if $PROGRAM_NAME == __FILE__
+puts "inside iteration block"
+end
+end
+"""
+    idx = index_file("nested_guard.rb", "ruby", source=source)
+
+    assert not any(
+        entry["kind"] == "main_guard" for entry in idx["entry_points"]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -359,7 +824,7 @@ def test_typescript_eval_sink_requires_string_timer_callback():
     idx = index_file("timers.ts", "typescript", source=TS_ASYNC_AND_TIMER_SOURCE)
     eval_sinks = [sink for sink in idx["security_sinks"] if sink["kind"] == "eval_exec"]
     assert len(eval_sinks) == 1
-    assert eval_sinks[0]["line"] == 5
+    assert eval_sinks[0]["line"] == 6
     assert "setTimeout(\"refreshPage()\"" in eval_sinks[0]["snippet"]
 
 

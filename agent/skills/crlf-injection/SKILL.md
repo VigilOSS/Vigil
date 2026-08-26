@@ -116,7 +116,7 @@ curl --http2 -H ":path: /page%0d%0aInjected:value" https://target/
 - Injection point (URL parameter, header, logged field)
 - Exact payload including encoding variant that succeeded
 - Evidence of injected header in response (curl -v output or DevTools screenshot)
-- Impact: session fixation, XSS via response splitting, open redirect, log forging — confirming the header is injected is not enough; you must show the **attacker outcome** (e.g., session cookie replaced to attacker-controlled value enabling session fixation, XSS payload executes in victim browser via poisoned response, Referer-based token leaks via open redirect)
+- Impact: session fixation, XSS via response splitting, open redirect, log forging — prove the attacker outcome (`agent/rules/hunting.md` §2), e.g., session cookie replaced to attacker-controlled value enabling session fixation, XSS payload executes in victim browser via poisoned response, Referer-based token leaks via open redirect
 - Whether filter bypass was required and which encoding worked
 - Full request/response for reproducibility
 

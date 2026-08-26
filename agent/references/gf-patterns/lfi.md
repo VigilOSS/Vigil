@@ -3,6 +3,7 @@ name: gf-patterns:lfi
 description: File-handling parameter patterns that signal local file inclusion and path traversal surfaces
 origin: 1ndianl33t/Gf-Patterns (+ local overlay)
 bucket: lfi
+skill: file-inclusion
 weight: 40
 ---
 

@@ -1,4 +1,4 @@
-"""Tests for the per-scope-entry coverage gate (Wave 6d).
+"""Tests for the per-scope-entry coverage gate.
 
 Originally ``vigil assess check-scope-coverage``; that standalone command was
 folded into ``vigil assess check-phase-readiness --phase recon|collect|consume``
@@ -7,25 +7,28 @@ These tests now drive the consolidated command and the shared helper module,
 preserving the per-scope-entry stage-gate assertions verbatim.
 
 The CLI reads scope.json, calls the backend for services and surfaces, and
-reads the local cases.db work_items table. We drive it in-process via a
-monkeypatched ``AssessmentClient`` and a real SQLite cases.db so the tests
-stay hermetic and don't spin up FastAPI. That mirrors the pattern used in
+reads the backend ``work_items`` rollup (formerly the per-engagement local
+SQLite ``cases.db``; that table was folded into the orchestrator backend as
+``assessment_work_items``). We drive it in-process via a monkeypatched
+``AssessmentClient`` (``FakeClient``) that serves fixture services / surfaces /
+decisions / dispatches AND work-item row dicts via ``get_all_pages`` so the
+tests stay hermetic and don't spin up FastAPI. That mirrors the pattern used in
 `test_agent_script_regressions.py::test_check_report_readiness_surfaces_backend_blockers`
 so readers can locate prior art without searching.
 
-The new implementation no longer parses command-run shell/argv. Coverage is
-read directly from durable state — `GET /services`, `GET /surfaces`, and the
-local cases.db `work_items` rollup. These tests exercise that contract and
-will scream if the module ever tries to fetch `command-runs` or `summary`
-again (``FakeClient.get`` raises on any endpoint other than the two allowed
-ones).
+The new implementation no longer parses command-run shell/argv, and no longer
+reads a local cases.db. Coverage is read directly from durable state —
+`GET /services`, `GET /surfaces`, and the backend `work_items` rollup fetched
+via ``client.get_all_pages("work-items")``. These tests exercise that contract
+and will scream if the module ever tries to fetch `command-runs` or `summary`
+again (``FakeClient.get`` raises on any endpoint other than the allowed ones).
 """
 from __future__ import annotations
 
 import importlib.util
 import json
-import sqlite3
 import sys
+import urllib.parse
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -53,13 +56,6 @@ def _load_script_module(name: str, relative_path: str):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-
-
-def _load_db_module():
-    return _load_script_module(
-        "test_check_scope_coverage_db_module",
-        "agent/scripts/assess/lib/db.py",
-    )
 
 
 def _load_module():
@@ -91,18 +87,19 @@ def _load_module():
 _STAGE_TO_PHASE = {"enum": "recon", "collection": "collect", "consumption": "consume"}
 
 
-def _make_cases_db(tmp_path: Path) -> Path:
-    db_path = tmp_path / "cases.db"
-    db_path.touch()
-    db_module = _load_db_module()
-    db_module.db_init(str(db_path))
-    return db_path
+def _host_from_url(url: str) -> str:
+    """Compute the stored ``host`` column for a work-item row.
+
+    Mirrors the backend's ``assessment_work_items.host`` derivation: the bare
+    lowercased hostname with NO port and NO IPv6 brackets. ``urlparse().hostname``
+    already strips the port and the ``[...]`` brackets and lowercases the host.
+    """
+    hostname = urllib.parse.urlparse(url).hostname or ""
+    return hostname.lower()
 
 
-def _insert_work_item(
-    db_path: Path,
+def _work_item(
     *,
-    queue_key: str,
     url: str,
     url_path: str,
     status: str = "pending",
@@ -110,19 +107,32 @@ def _insert_work_item(
     terminal_reason: str | None = None,
     query_params: str = "{}",
     cluster_key: str | None = None,
-) -> None:
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute(
-            """INSERT INTO work_items
-            (queue_key, method, url, url_path, query_params, body_params,
-             type, source, status, priority_score, cluster_key, terminal_reason)
-            VALUES (?, 'GET', ?, ?, ?, '{}', ?, 'test', ?, 0, ?, ?)""",
-            (queue_key, url, url_path, query_params, case_type, status, cluster_key, terminal_reason),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    **extra: Any,
+) -> dict[str, Any]:
+    """Build a backend work-item row dict (a row from ``get_all_pages("work-items")``).
+
+    Replaces the old sqlite ``_insert_work_item`` writer. The coverage code now
+    reads these row dicts directly; ``host`` is the load-bearing field it groups
+    on (a row without a truthy ``host`` is SKIPPED), so we compute it here from
+    the URL exactly as the backend would.
+    """
+    row: dict[str, Any] = {
+        "method": "GET",
+        "url": url,
+        "url_path": url_path,
+        "query_params": query_params,
+        "body_params": "{}",
+        "path_params": "{}",
+        "type": case_type,
+        "source": "test",
+        "status": status,
+        "priority_score": 0,
+        "cluster_key": cluster_key,
+        "terminal_reason": terminal_reason,
+        "host": _host_from_url(url),
+    }
+    row.update(extra)
+    return row
 
 
 def _write_scope(
@@ -147,12 +157,14 @@ def _write_scope(
 class FakeClient:
     """In-process stand-in for AssessmentClient that serves fixture data.
 
-    Only ``services`` and ``surfaces`` are valid endpoints. Anything else
-    — including the removed ``command-runs`` and ``summary`` endpoints —
-    raises ``AssertionError``. That is intentional: the new implementation
-    must not call those endpoints, and a regression that re-adds the call
-    should fail the test suite loudly rather than silently receive an
-    empty list.
+    ``get`` serves only the allowed read endpoints (``services`` / ``surfaces``
+    plus the per-host / phase-readiness projections). Anything else — including
+    the removed ``command-runs`` and ``summary`` endpoints — raises
+    ``AssertionError``. That is intentional: the new implementation must not call
+    those endpoints, and a regression that re-adds the call should fail the test
+    suite loudly rather than silently receive an empty list. The backend
+    ``work_items`` rollup is served separately via ``get_all_pages`` from the
+    injected ``work_items`` row dicts.
 
     ``list_decisions`` stands in for the assessment_dispatch_decisions table —
     vendor-SaaS scope decisions come from the backend.
@@ -168,6 +180,8 @@ class FakeClient:
         dispatches_error: bool = False,
         endpoint_handler=None,
         per_host_payload: dict[str, Any] | None = None,
+        work_items: list[dict[str, Any]] | None = None,
+        work_items_error: str | None = None,
     ) -> None:
         self._services = services or []
         self._surfaces = surfaces or []
@@ -176,6 +190,8 @@ class FakeClient:
         self._dispatches_error = dispatches_error
         self._endpoint_handler = endpoint_handler
         self._per_host_payload = per_host_payload
+        self._work_items = work_items or []
+        self._work_items_error = work_items_error
         self.calls: list[str] = []
 
     def get(self, endpoint: str) -> Any:
@@ -203,6 +219,29 @@ class FakeClient:
         if endpoint == "application-units/depth-ledger":
             return {"skipped": True, "units": [], "summary": {}}
         raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+    def get_all_pages(self, endpoint: str, *, page_size: int = 5000) -> list[Any]:
+        """Equivalent of the real ``AssessmentClient.get_all_pages``.
+
+        The ``work-items`` endpoint is served straight from the injected row
+        dicts (this is the backend ``assessment_work_items`` rollup the coverage
+        code now reads instead of a local cases.db). ``work_items_error`` makes
+        the fetch raise ``AssessError`` so the fail-closed path can be exercised.
+
+        For any other list endpoint (e.g. ``surfaces``) we delegate to ``get``
+        so its "unexpected endpoint raises" guard stays intact — a regression
+        that fetches a removed endpoint through the pager still fails loudly.
+        NOTE: work-item fetches are intentionally NOT recorded in ``self.calls``;
+        the calls-safelist assertions track the ``get`` endpoint contract only.
+        """
+        if str(endpoint).startswith("work-items"):
+            if self._work_items_error is not None:
+                from assess.lib.client import AssessError
+
+                raise AssessError(self._work_items_error)
+            return list(self._work_items)
+        result = self.get(endpoint)
+        return result if isinstance(result, list) else []
 
     def get_engagement(self, endpoint: str, query: str = "") -> Any:
         self.calls.append(f"engagement:{endpoint}")
@@ -281,11 +320,14 @@ def _patch_client(
     dispatches_error=False,
     endpoint_handler=None,
     per_host_payload=None,
+    work_items=None,
+    work_items_error=None,
 ) -> list[FakeClient]:
     fake_services = services or []
     fake_surfaces = surfaces or []
     fake_decisions = decisions or []
     fake_dispatches = dispatches or []
+    fake_work_items = work_items or []
     created: list[FakeClient] = []
 
     def _factory(base_url: str, engagement_key: str) -> FakeClient:
@@ -297,6 +339,8 @@ def _patch_client(
             dispatches_error=dispatches_error,
             endpoint_handler=endpoint_handler,
             per_host_payload=per_host_payload,
+            work_items=fake_work_items,
+            work_items_error=work_items_error,
         )
         created.append(client)
         return client
@@ -337,6 +381,8 @@ def _run(
     auto_redispatch: bool = False,
     max_recommendations: int = 10,
     per_host_payload=None,
+    work_items=None,
+    work_items_error=None,
     _module=None,
 ) -> FakeClient | None:
     module = _module if _module is not None else _load_module()
@@ -351,6 +397,8 @@ def _run(
         dispatches_error=dispatches_error,
         endpoint_handler=endpoint_handler,
         per_host_payload=per_host_payload,
+        work_items=work_items,
+        work_items_error=work_items_error,
     )
     phase = _STAGE_TO_PHASE.get(require_stage or "", "verify")
     import contextlib
@@ -425,9 +473,10 @@ def test_apex_host_full_coverage(monkeypatch, tmp_path: Path, capsys) -> None:
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    db = _make_cases_db(eng)
-    _insert_work_item(db, queue_key="v:1", url="https://target.example/api/one", url_path="/api/one", status="done")
-    _insert_work_item(db, queue_key="v:2", url="https://target.example/api/two", url_path="/api/two", status="done")
+    work_items = [
+        _work_item(queue_key="v:1", url="https://target.example/api/one", url_path="/api/one", status="done"),
+        _work_item(queue_key="v:2", url="https://target.example/api/two", url_path="/api/two", status="done"),
+    ]
 
     services = [
         {"endpoint": "target.example", "state": "up"},
@@ -438,7 +487,7 @@ def test_apex_host_full_coverage(monkeypatch, tmp_path: Path, capsys) -> None:
         {"target_descriptor": "https://target.example/api/two"},
     ]
 
-    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption")
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption", work_items=work_items)
 
     out = capsys.readouterr().out
     report = json.loads(out)
@@ -465,7 +514,6 @@ def test_wildcard_zero_live_hosts(monkeypatch, tmp_path: Path, capsys) -> None:
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["*.target.example"])
-    _make_cases_db(eng)
 
     # One surface recorded under a subdomain but the service list is empty —
     # nothing resolved to a live host.
@@ -495,10 +543,11 @@ def test_wildcard_partial_collection(monkeypatch, tmp_path: Path, capsys) -> Non
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["*.target.example"])
-    db = _make_cases_db(eng)
     # Work items under two of the five live subdomains.
-    _insert_work_item(db, queue_key="w:1", url="https://api.target.example/v1", url_path="/v1", status="pending")
-    _insert_work_item(db, queue_key="w:2", url="https://admin.target.example/login", url_path="/login", status="pending")
+    work_items = [
+        _work_item(queue_key="w:1", url="https://api.target.example/v1", url_path="/v1", status="pending"),
+        _work_item(queue_key="w:2", url="https://admin.target.example/login", url_path="/login", status="pending"),
+    ]
 
     services = [
         {"endpoint": "api.target.example", "state": "up"},
@@ -512,7 +561,7 @@ def test_wildcard_partial_collection(monkeypatch, tmp_path: Path, capsys) -> Non
         {"target_descriptor": "https://admin.target.example/login"},
     ]
 
-    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="collection")
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="collection", work_items=work_items)
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is True
     entry = report["entries"][0]
@@ -537,22 +586,22 @@ def test_host_explicitly_deferred(monkeypatch, tmp_path: Path, capsys) -> None:
         hosts=["skip.target.example", "target.example"],
         deferred_hosts=["skip.target.example"],
     )
-    db = _make_cases_db(eng)
 
-    # skip.target.example has outstanding pending items but is deferred in scope.
-    _insert_work_item(db, queue_key="s:1", url="https://skip.target.example/x", url_path="/x", status="pending")
-    _insert_work_item(db, queue_key="s:2", url="https://skip.target.example/y", url_path="/y", status="pending")
-
-    # target.example has pending items but each one carries a terminal_reason, which
-    # is how classify-work marks "processed but not worth testing".
-    _insert_work_item(
-        db, queue_key="t:1", url="https://target.example/a", url_path="/a",
-        status="pending", terminal_reason="inert_type",
-    )
-    _insert_work_item(
-        db, queue_key="t:2", url="https://target.example/b", url_path="/b",
-        status="pending", terminal_reason="inert_type",
-    )
+    work_items = [
+        # skip.target.example has outstanding pending items but is deferred in scope.
+        _work_item(queue_key="s:1", url="https://skip.target.example/x", url_path="/x", status="pending"),
+        _work_item(queue_key="s:2", url="https://skip.target.example/y", url_path="/y", status="pending"),
+        # target.example has pending items but each one carries a terminal_reason,
+        # which is how classify-work marks "processed but not worth testing".
+        _work_item(
+            queue_key="t:1", url="https://target.example/a", url_path="/a",
+            status="pending", terminal_reason="inert_type",
+        ),
+        _work_item(
+            queue_key="t:2", url="https://target.example/b", url_path="/b",
+            status="pending", terminal_reason="inert_type",
+        ),
+    ]
 
     services = [
         {"endpoint": "skip.target.example", "state": "up"},
@@ -563,7 +612,7 @@ def test_host_explicitly_deferred(monkeypatch, tmp_path: Path, capsys) -> None:
         {"target_descriptor": "https://skip.target.example/x"},
     ]
 
-    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption")
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption", work_items=work_items)
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is True, report
     by_entry = {e["scope_entry"]: e for e in report["entries"]}
@@ -578,13 +627,13 @@ def test_out_of_scope_host_excluded(monkeypatch, tmp_path: Path, capsys) -> None
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    db = _make_cases_db(eng)
-
-    # In-scope work
-    _insert_work_item(db, queue_key="in:1", url="https://target.example/ok", url_path="/ok", status="done")
-    # Out-of-scope: different apex. Should not be counted against target.example.
-    _insert_work_item(db, queue_key="out:1", url="https://evil.example/zzz", url_path="/zzz", status="pending")
-    _insert_work_item(db, queue_key="out:2", url="https://target.co.uk/zzz", url_path="/zzz", status="pending")
+    work_items = [
+        # In-scope work
+        _work_item(queue_key="in:1", url="https://target.example/ok", url_path="/ok", status="done"),
+        # Out-of-scope: different apex. Should not be counted against target.example.
+        _work_item(queue_key="out:1", url="https://evil.example/zzz", url_path="/zzz", status="pending"),
+        _work_item(queue_key="out:2", url="https://target.co.uk/zzz", url_path="/zzz", status="pending"),
+    ]
 
     services = [
         {"endpoint": "target.example", "state": "up"},
@@ -597,7 +646,7 @@ def test_out_of_scope_host_excluded(monkeypatch, tmp_path: Path, capsys) -> None
         {"target_descriptor": "https://sub.target.example/"},  # out of scope vs bare-host entry
     ]
 
-    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="enum")
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="enum", work_items=work_items)
     report = json.loads(capsys.readouterr().out)
     entry = report["entries"][0]
     assert entry["total_services"] == 1
@@ -624,10 +673,11 @@ def test_out_of_scope_carveout_not_counted_under_in_scope_wildcard(monkeypatch, 
         hosts=["*.acme-regional.example"],
         out_of_scope=["appointments.acme-regional.example", "*.mobile.acme-regional.example"],
     )
-    db = _make_cases_db(eng)
     # Work items under one in-scope subdomain and one OOS carve-out.
-    _insert_work_item(db, queue_key="w:1", url="https://api.acme-regional.example/v1", url_path="/v1", status="pending")
-    _insert_work_item(db, queue_key="w:2", url="https://appointments.acme-regional.example/book", url_path="/book", status="pending")
+    work_items = [
+        _work_item(queue_key="w:1", url="https://api.acme-regional.example/v1", url_path="/v1", status="pending"),
+        _work_item(queue_key="w:2", url="https://appointments.acme-regional.example/book", url_path="/book", status="pending"),
+    ]
 
     services = [
         {"endpoint": "api.acme-regional.example", "state": "up"},          # in scope
@@ -639,7 +689,7 @@ def test_out_of_scope_carveout_not_counted_under_in_scope_wildcard(monkeypatch, 
         {"target_descriptor": "https://appointments.acme-regional.example/book"},
     ]
 
-    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="enum")
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="enum", work_items=work_items)
     report = json.loads(capsys.readouterr().out)
     entry = report["entries"][0]
     # Only api.acme-regional.example counts; both carve-outs are excluded.
@@ -656,7 +706,6 @@ def test_require_stage_enum_fails_when_missing(monkeypatch, tmp_path: Path, caps
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["*.target.example"])
-    _make_cases_db(eng)
 
     # Nothing — no services, no surfaces, no work_items under *.target.example.
     with pytest.raises(SystemExit) as excinfo:
@@ -682,20 +731,21 @@ def test_require_stage_consumption_passes_when_all_done_or_skipped(monkeypatch, 
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    db = _make_cases_db(eng)
 
-    _insert_work_item(db, queue_key="d:1", url="https://target.example/a", url_path="/a", status="done")
-    _insert_work_item(db, queue_key="d:2", url="https://target.example/b", url_path="/b", status="done")
-    # classify-work marks inert images as skipped + terminal_reason="inert_type".
-    _insert_work_item(
-        db, queue_key="d:3", url="https://target.example/logo.png", url_path="/logo.png",
-        status="skipped", case_type="image", terminal_reason="inert_type",
-    )
+    work_items = [
+        _work_item(queue_key="d:1", url="https://target.example/a", url_path="/a", status="done"),
+        _work_item(queue_key="d:2", url="https://target.example/b", url_path="/b", status="done"),
+        # classify-work marks inert images as skipped + terminal_reason="inert_type".
+        _work_item(
+            queue_key="d:3", url="https://target.example/logo.png", url_path="/logo.png",
+            status="skipped", case_type="image", terminal_reason="inert_type",
+        ),
+    ]
 
     services = [{"endpoint": "target.example", "state": "up"}]
     surfaces = [{"target_descriptor": "https://target.example/a"}]
 
-    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption")
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption", work_items=work_items)
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is True, report
     assert report["overall_gaps"] == []
@@ -710,7 +760,6 @@ def test_collection_gate_ignores_superdomain_substring_false_positive(monkeypatc
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    _make_cases_db(eng)
 
     # Service keeps enum gate satisfied for target.example itself so the test is
     # specifically about collection evidence.
@@ -740,22 +789,33 @@ def test_collection_gate_ignores_superdomain_substring_false_positive(monkeypatc
     assert "no-collection" in entry["gaps"]
 
 
-def test_old_cases_db_schema_fails_closed_instead_of_claiming_readiness(monkeypatch, tmp_path: Path, capsys) -> None:
-    """Legacy/malformed work buffer schemas must abort the audit instead of silently passing."""
+def test_unreadable_work_buffer_fails_closed_instead_of_claiming_readiness(monkeypatch, tmp_path: Path, capsys) -> None:
+    """An unreadable/malformed backend work buffer must abort the audit instead
+    of silently passing.
+
+    The legacy subject was a broken LOCAL cases.db schema; that store no longer
+    exists — work items live in the backend ``assessment_work_items`` table,
+    fetched via ``client.get_all_pages("work-items")``. The fail-closed intent is
+    preserved by making that fetch raise ``AssessError`` (as a backend read of a
+    legacy/broken schema missing the ``terminal_reason`` column would): the
+    command must exit non-zero and name the failure rather than claim readiness.
+    See tests/test_work_buffer_backend.py for the backend-side schema coverage.
+    """
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    db_path = eng / "cases.db"
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute("CREATE TABLE work_items (url TEXT NOT NULL, status TEXT NOT NULL)")
-        conn.execute("INSERT INTO work_items (url, status) VALUES ('https://target.example/a', 'pending')")
-        conn.commit()
-    finally:
-        conn.close()
 
     with pytest.raises(SystemExit) as excinfo:
-        _run(monkeypatch, eng, services=[], surfaces=[], require_stage="enum")
+        _run(
+            monkeypatch,
+            eng,
+            services=[],
+            surfaces=[],
+            require_stage="enum",
+            work_items_error=(
+                "HTTP 500:\nfailed to read work buffer: no such column: terminal_reason"
+            ),
+        )
     assert excinfo.value.code == 1
 
     captured = capsys.readouterr()
@@ -772,13 +832,14 @@ def test_deferred_url_metadata_normalizes_trailing_dot(monkeypatch, tmp_path: Pa
         hosts=["https://api.target.example./health"],
         deferred_hosts=["https://api.target.example./defer"],
     )
-    db = _make_cases_db(eng)
-    _insert_work_item(db, queue_key="u:1", url="https://api.target.example/work", url_path="/work", status="pending")
+    work_items = [
+        _work_item(queue_key="u:1", url="https://api.target.example/work", url_path="/work", status="pending"),
+    ]
 
     services = [{"endpoint": "https://api.target.example/health", "state": "up"}]
     surfaces = [{"target_descriptor": "https://api.target.example/work"}]
 
-    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption")
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption", work_items=work_items)
     report = json.loads(capsys.readouterr().out)
     entry = report["entries"][0]
     assert entry["host"] == "api.target.example"
@@ -795,13 +856,14 @@ def test_url_scope_entry_accepts_host_keyed_deferral(monkeypatch, tmp_path: Path
         hosts=["https://api.target.example/v1"],
         deferred_hosts=["api.target.example"],
     )
-    db = _make_cases_db(eng)
-    _insert_work_item(db, queue_key="u:2", url="https://api.target.example/work", url_path="/work", status="pending")
+    work_items = [
+        _work_item(queue_key="u:2", url="https://api.target.example/work", url_path="/work", status="pending"),
+    ]
 
     services = [{"endpoint": "https://api.target.example/health", "state": "up"}]
     surfaces = [{"target_descriptor": "https://api.target.example/work"}]
 
-    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption")
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption", work_items=work_items)
     report = json.loads(capsys.readouterr().out)
     entry = report["entries"][0]
     assert entry["host"] == "api.target.example"
@@ -814,14 +876,15 @@ def test_bare_scope_host_with_port_matches_host_keyed_services_and_work(monkeypa
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["api.target.example:8443"])
-    db = _make_cases_db(eng)
-    _insert_work_item(db, queue_key="hp:1", url="https://api.target.example/work", url_path="/work", status="pending")
+    work_items = [
+        _work_item(queue_key="hp:1", url="https://api.target.example/work", url_path="/work", status="pending"),
+    ]
 
     services = [{"endpoint": "https://api.target.example:8443/health", "state": "up"}]
     surfaces = [{"target_descriptor": "https://api.target.example:8443/work"}]
 
     with pytest.raises(SystemExit) as excinfo:
-        _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption")
+        _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption", work_items=work_items)
     assert excinfo.value.code == 1
 
     report = json.loads(capsys.readouterr().out)
@@ -862,21 +925,20 @@ def test_ipv6_scope_hosts_match_services_surfaces_and_work(monkeypatch, tmp_path
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["2001:db8::1", "[2001:db8::2]"])
-    db = _make_cases_db(eng)
-    _insert_work_item(
-        db,
-        queue_key="ip6:1",
-        url="https://[2001:db8::1]/work",
-        url_path="/work",
-        status="done",
-    )
-    _insert_work_item(
-        db,
-        queue_key="ip6:2",
-        url="https://[2001:db8::2]/work",
-        url_path="/work",
-        status="done",
-    )
+    work_items = [
+        _work_item(
+            queue_key="ip6:1",
+            url="https://[2001:db8::1]/work",
+            url_path="/work",
+            status="done",
+        ),
+        _work_item(
+            queue_key="ip6:2",
+            url="https://[2001:db8::2]/work",
+            url_path="/work",
+            status="done",
+        ),
+    ]
 
     services = [
         {"endpoint": "2001:db8::1:443", "state": "up"},
@@ -887,7 +949,7 @@ def test_ipv6_scope_hosts_match_services_surfaces_and_work(monkeypatch, tmp_path
         {"target_descriptor": "https://[2001:db8::2]:8443/work"},
     ]
 
-    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="collection")
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="collection", work_items=work_items)
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is True, report
 
@@ -912,8 +974,9 @@ def test_host_metadata_status_beats_deferred_hosts(monkeypatch, tmp_path: Path, 
         host_metadata={"target.example": {"status": "active"}},
         deferred_hosts=["target.example"],
     )
-    db = _make_cases_db(eng)
-    _insert_work_item(db, queue_key="p:1", url="https://target.example/work", url_path="/work", status="pending")
+    work_items = [
+        _work_item(queue_key="p:1", url="https://target.example/work", url_path="/work", status="pending"),
+    ]
 
     services = [{"endpoint": "target.example", "state": "up"}]
     surfaces = [{"target_descriptor": "https://target.example/work"}]
@@ -925,6 +988,7 @@ def test_host_metadata_status_beats_deferred_hosts(monkeypatch, tmp_path: Path, 
             services=services,
             surfaces=surfaces,
             require_stage="consumption",
+            work_items=work_items,
         )
     assert excinfo.value.code == 1
 
@@ -943,7 +1007,6 @@ def test_wildcard_scope_normalizes_trailing_dot_for_metadata_and_matching(monkey
         hosts=["*.target.example."],
         host_metadata={"*.target.example.": {"status": "active"}},
     )
-    _make_cases_db(eng)
 
     services = [
         {"endpoint": "api.target.example", "state": "up"},
@@ -971,8 +1034,9 @@ def test_wildcard_and_bare_entries_keep_distinct_metadata_status(monkeypatch, tm
         hosts=["target.example", "*.target.example"],
         deferred_hosts=["*.target.example"],
     )
-    db = _make_cases_db(eng)
-    _insert_work_item(db, queue_key="b:1", url="https://target.example/work", url_path="/work", status="pending")
+    work_items = [
+        _work_item(queue_key="b:1", url="https://target.example/work", url_path="/work", status="pending"),
+    ]
 
     services = [
         {"endpoint": "target.example", "state": "up"},
@@ -984,7 +1048,7 @@ def test_wildcard_and_bare_entries_keep_distinct_metadata_status(monkeypatch, tm
     ]
 
     with pytest.raises(SystemExit) as excinfo:
-        _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption")
+        _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption", work_items=work_items)
     assert excinfo.value.code == 1
 
     report = json.loads(capsys.readouterr().out)
@@ -1005,7 +1069,6 @@ def test_surface_under_wildcard_satisfies_enum_without_services(monkeypatch, tmp
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["*.target.example"])
-    _make_cases_db(eng)
 
     services: list[dict[str, Any]] = []
     surfaces = [{"target_descriptor": "https://api.target.example/login"}]
@@ -1025,13 +1088,14 @@ def test_work_item_under_wildcard_satisfies_enum_without_services(monkeypatch, t
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["*.target.example"])
-    db = _make_cases_db(eng)
-    _insert_work_item(db, queue_key="we:1", url="https://api.target.example/x", url_path="/x", status="pending")
+    work_items = [
+        _work_item(queue_key="we:1", url="https://api.target.example/x", url_path="/x", status="pending"),
+    ]
 
     services: list[dict[str, Any]] = []
     surfaces: list[dict[str, Any]] = []
 
-    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="enum")
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="enum", work_items=work_items)
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is True
     entry = report["entries"][0]
@@ -1046,7 +1110,6 @@ def test_collection_gate_fails_when_no_surfaces_or_work_items(monkeypatch, tmp_p
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    _make_cases_db(eng)
 
     services = [{"endpoint": "target.example", "state": "up"}]
     surfaces: list[dict[str, Any]] = []
@@ -1080,17 +1143,17 @@ def test_wildcard_admits_apex(monkeypatch, tmp_path: Path, capsys) -> None:
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["*.example.test"])
-    db = _make_cases_db(eng)
-    _insert_work_item(
-        db, queue_key="apex:1", url="https://example.test/", url_path="/", status="pending"
-    )
-    _insert_work_item(
-        db,
-        queue_key="sub:1",
-        url="https://corp.example.test/api",
-        url_path="/api",
-        status="pending",
-    )
+    work_items = [
+        _work_item(
+            queue_key="apex:1", url="https://example.test/", url_path="/", status="pending"
+        ),
+        _work_item(
+            queue_key="sub:1",
+            url="https://corp.example.test/api",
+            url_path="/api",
+            status="pending",
+        ),
+    ]
 
     services = [
         {"endpoint": "example.test", "state": "up"},
@@ -1101,7 +1164,7 @@ def test_wildcard_admits_apex(monkeypatch, tmp_path: Path, capsys) -> None:
         {"target_descriptor": "https://corp.example.test/api"},
     ]
 
-    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="enum")
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="enum", work_items=work_items)
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is True, report
     entry = report["entries"][0]
@@ -1118,17 +1181,17 @@ def test_explicit_apex_plus_wildcard(monkeypatch, tmp_path: Path, capsys) -> Non
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["example.test", "*.example.test"])
-    db = _make_cases_db(eng)
-    _insert_work_item(
-        db, queue_key="apex:1", url="https://example.test/", url_path="/", status="done"
-    )
-    _insert_work_item(
-        db,
-        queue_key="sub:1",
-        url="https://vendor-saas.example.test/api",
-        url_path="/api",
-        status="done",
-    )
+    work_items = [
+        _work_item(
+            queue_key="apex:1", url="https://example.test/", url_path="/", status="done"
+        ),
+        _work_item(
+            queue_key="sub:1",
+            url="https://vendor-saas.example.test/api",
+            url_path="/api",
+            status="done",
+        ),
+    ]
 
     services = [
         {"endpoint": "example.test", "state": "up"},
@@ -1139,7 +1202,7 @@ def test_explicit_apex_plus_wildcard(monkeypatch, tmp_path: Path, capsys) -> Non
         {"target_descriptor": "https://vendor-saas.example.test/api"},
     ]
 
-    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption")
+    _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption", work_items=work_items)
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is True, report
     by_scope = {entry["scope_entry"]: entry for entry in report["entries"]}
@@ -1179,14 +1242,14 @@ def test_vendor_saas_reports_pending_under_wildcard_expansion_by_default(monkeyp
     # an explicit literal — that is the genuinely ambiguous case the
     # checkpoint exists to resolve.
     _write_scope(eng, hosts=["*.example.test"])
-    db = _make_cases_db(eng)
-    _insert_work_item(
-        db,
-        queue_key="vs:1",
-        url="https://vendor-saas-platform.example.test/api/health",
-        url_path="/api/health",
-        status="done",
-    )
+    work_items = [
+        _work_item(
+            queue_key="vs:1",
+            url="https://vendor-saas-platform.example.test/api/health",
+            url_path="/api/health",
+            status="done",
+        ),
+    ]
 
     _patch_vendor_saas_suffix(monkeypatch, "vendor-saas-platform", ".example.test")
 
@@ -1203,6 +1266,7 @@ def test_vendor_saas_reports_pending_under_wildcard_expansion_by_default(monkeyp
         services=services,
         surfaces=surfaces,
         require_stage="enum",
+        work_items=work_items,
     )
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is True, report
@@ -1224,6 +1288,7 @@ def test_vendor_saas_reports_pending_under_wildcard_expansion_by_default(monkeyp
             surfaces=surfaces,
             require_stage="enum",
             strict_vendor_saas=True,
+            work_items=work_items,
         )
     assert excinfo.value.code == 1
     report = json.loads(capsys.readouterr().out)
@@ -1259,6 +1324,7 @@ def test_vendor_saas_reports_pending_under_wildcard_expansion_by_default(monkeyp
         surfaces=surfaces,
         decisions=decisions,
         require_stage="enum",
+        work_items=work_items,
     )
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is True, report
@@ -1276,14 +1342,14 @@ def test_vendor_saas_explicit_literal_in_scope_skips_gate(monkeypatch, tmp_path:
     eng.mkdir()
     # Explicit literal entry — the operator typed the host directly.
     _write_scope(eng, hosts=["vendor-saas-platform.example.test"])
-    db = _make_cases_db(eng)
-    _insert_work_item(
-        db,
-        queue_key="vs:1",
-        url="https://vendor-saas-platform.example.test/api/health",
-        url_path="/api/health",
-        status="done",
-    )
+    work_items = [
+        _work_item(
+            queue_key="vs:1",
+            url="https://vendor-saas-platform.example.test/api/health",
+            url_path="/api/health",
+            status="done",
+        ),
+    ]
 
     _patch_vendor_saas_suffix(monkeypatch, "vendor-saas-platform", ".example.test")
 
@@ -1299,6 +1365,7 @@ def test_vendor_saas_explicit_literal_in_scope_skips_gate(monkeypatch, tmp_path:
         services=services,
         surfaces=surfaces,
         require_stage="enum",
+        work_items=work_items,
     )
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is True, report
@@ -1337,7 +1404,6 @@ def test_by_host_renders_outcome_table_and_warns_on_unmet(monkeypatch, tmp_path:
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["api.target.example"])
-    _make_cases_db(eng)
 
     services = [{"endpoint": "api.target.example", "state": "up"}]
     surfaces = [{"target_descriptor": "https://api.target.example/v1"}]
@@ -1403,7 +1469,6 @@ def test_by_host_deferral_clears_warning(monkeypatch, tmp_path: Path, capsys) ->
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["api.target.example"])
-    _make_cases_db(eng)
 
     services = [{"endpoint": "api.target.example", "state": "up"}]
     surfaces = [{"target_descriptor": "https://api.target.example/v1"}]
@@ -1466,7 +1531,6 @@ def test_by_host_does_not_query_command_runs_endpoint(monkeypatch, tmp_path: Pat
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    _make_cases_db(eng)
 
     services = [{"endpoint": "target.example", "state": "up"}]
     surfaces = [{"target_descriptor": "https://target.example/"}]
@@ -1520,7 +1584,6 @@ def test_by_host_without_flag_skips_per_host_section(monkeypatch, tmp_path: Path
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    _make_cases_db(eng)
 
     services = [{"endpoint": "target.example", "state": "up"}]
     surfaces = [{"target_descriptor": "https://target.example/"}]
@@ -1591,7 +1654,6 @@ def test_by_host_default_filters_wildcard_discovered_into_summary(
     # Scope.json: one literal host + one wildcard. The wildcard's expansions
     # should NOT show up in the matrix by default.
     _write_scope(eng, hosts=["api.target.example", "*.target.example"])
-    _make_cases_db(eng)
 
     host_payload = _per_host_payload(
         hosts=[
@@ -1671,7 +1733,6 @@ def test_by_host_include_discovered_keeps_full_matrix(
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["api.target.example", "*.target.example"])
-    _make_cases_db(eng)
 
     host_payload = _per_host_payload(
         hosts=[
@@ -1728,7 +1789,6 @@ def test_by_host_wildcard_only_scope_skips_filtering(
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["*.target.example"])  # wildcard only — no literals
-    _make_cases_db(eng)
 
     host_payload = _per_host_payload(
         hosts=[
@@ -1766,7 +1826,6 @@ def test_by_host_no_discovered_hosts_skips_summary(
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["api.target.example", "edge.target.example"])
-    _make_cases_db(eng)
 
     host_payload = _per_host_payload(
         hosts=[
@@ -1834,7 +1893,7 @@ def _recs(report: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _rec_for_host(report: dict[str, Any], host: str) -> dict[str, Any]:
-    matches = [r for r in _recs(report) if r["scope_host"] == host]
+    matches = [r for r in _recs(report) if r["host"] == host]
     assert matches, (host, _recs(report))
     return matches[0]
 
@@ -1845,7 +1904,6 @@ def test_auto_redispatch_enum_gap_recommends_recon(monkeypatch, tmp_path: Path, 
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["*.target.example"])
-    _make_cases_db(eng)
 
     with pytest.raises(SystemExit) as excinfo:
         _run(
@@ -1866,10 +1924,10 @@ def test_auto_redispatch_enum_gap_recommends_recon(monkeypatch, tmp_path: Path, 
     assert rec["confidence"] == "high"
     assert rec["skills"] == ["web-recon", "subdomain-enumeration"]
     assert rec["parallel_role"] == "source-analyzer"
-    # The ready-to-run command line must encode the role/scope-host/mode/skills.
+    # The ready-to-run command encodes execution intent, not scope authorization.
     assert "vigil assess agent start" in rec["command"]
     assert "--role recon-specialist" in rec["command"]
-    assert "--scope-host target.example" in rec["command"]
+    assert "--scope-host" not in rec["command"]
     assert "--dispatch-mode hypothesis-driven" in rec["command"]
     assert "--skills web-recon,subdomain-enumeration" in rec["command"]
     # Task skeleton names the host + stage.
@@ -1884,7 +1942,6 @@ def test_auto_redispatch_collection_gap_recommends_surface_collector(
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    _make_cases_db(eng)
 
     with pytest.raises(SystemExit) as excinfo:
         _run(
@@ -1910,24 +1967,22 @@ def test_auto_redispatch_collection_gap_recommends_surface_collector(
 
 
 def test_auto_redispatch_consumption_dominant_idor(monkeypatch, tmp_path: Path, capsys) -> None:
-    """A consumption gap whose dominant pending bucket is idor recommends the
-    vulnerability-analyst + idor-testing(+split-brain-idor), correct scope-host,
-    and item-iterating mode, at confidence=high."""
+    """A dominant IDOR gap recommends the matching role, skills, and mode."""
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    db = _make_cases_db(eng)
     # Three untested pending IDOR-shaped items (the `user` param uniquely keys
     # the idor bucket; `id` would also hit the higher-weight sqli bucket).
-    for i in range(3):
-        _insert_work_item(
-            db,
+    work_items = [
+        _work_item(
             queue_key=f"idor:{i}",
             url=f"https://target.example/api/profile/{i}",
             url_path="/api/profile",
             status="pending",
             query_params='{"user": "5"}',
         )
+        for i in range(3)
+    ]
 
     # The audit fails the consumption gate -> SystemExit(1); the JSON report is
     # printed before the exit so we read it after catching.
@@ -1939,6 +1994,7 @@ def test_auto_redispatch_consumption_dominant_idor(monkeypatch, tmp_path: Path, 
             surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
             require_stage="consumption",
             auto_redispatch=True,
+            work_items=work_items,
         )
     report = json.loads(capsys.readouterr().out)
     rec = _rec_for_host(report, "target.example")
@@ -1948,9 +2004,9 @@ def test_auto_redispatch_consumption_dominant_idor(monkeypatch, tmp_path: Path, 
     assert rec["confidence"] == "high"
     assert rec["dominant_bucket"] == "idor"
     assert rec["skills"] == ["idor-testing", "split-brain-idor"]
-    assert rec["scope_host"] == "target.example"
+    assert rec["host"] == "target.example"
     assert "--role vulnerability-analyst" in rec["command"]
-    assert "--scope-host target.example" in rec["command"]
+    assert "--scope-host" not in rec["command"]
     assert "--skills idor-testing,split-brain-idor" in rec["command"]
     # Task skeleton names host + dominant cluster + pending count.
     assert "target.example" in rec["task_skeleton"]
@@ -1965,15 +2021,15 @@ def test_auto_redispatch_consumption_dominant_idor_exit_code(
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    db = _make_cases_db(eng)
-    _insert_work_item(
-        db,
-        queue_key="idor:0",
-        url="https://target.example/api/profile/0",
-        url_path="/api/profile",
-        status="pending",
-        query_params='{"user": "5"}',
-    )
+    work_items = [
+        _work_item(
+            queue_key="idor:0",
+            url="https://target.example/api/profile/0",
+            url_path="/api/profile",
+            status="pending",
+            query_params='{"user": "5"}',
+        ),
+    ]
 
     with pytest.raises(SystemExit) as excinfo:
         _run(
@@ -1983,6 +2039,7 @@ def test_auto_redispatch_consumption_dominant_idor_exit_code(
             surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
             require_stage="consumption",
             auto_redispatch=True,
+            work_items=work_items,
         )
     assert excinfo.value.code == 1
     capsys.readouterr()
@@ -1996,21 +2053,22 @@ def test_auto_redispatch_ambiguous_pending_emits_low_confidence_shortlist(
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    db = _make_cases_db(eng)
     # One item each in three distinct mapped buckets: idor (user), xss (name),
     # ssrf (url). No single dominant -> ambiguous.
-    _insert_work_item(
-        db, queue_key="a:1", url="https://target.example/p1", url_path="/p1",
-        status="pending", query_params='{"user": "1"}',
-    )
-    _insert_work_item(
-        db, queue_key="a:2", url="https://target.example/p2", url_path="/p2",
-        status="pending", query_params='{"name": "x"}',
-    )
-    _insert_work_item(
-        db, queue_key="a:3", url="https://target.example/p3", url_path="/p3",
-        status="pending", query_params='{"url": "http://x"}',
-    )
+    work_items = [
+        _work_item(
+            queue_key="a:1", url="https://target.example/p1", url_path="/p1",
+            status="pending", query_params='{"user": "1"}',
+        ),
+        _work_item(
+            queue_key="a:2", url="https://target.example/p2", url_path="/p2",
+            status="pending", query_params='{"name": "x"}',
+        ),
+        _work_item(
+            queue_key="a:3", url="https://target.example/p3", url_path="/p3",
+            status="pending", query_params='{"url": "http://x"}',
+        ),
+    ]
 
     with pytest.raises(SystemExit):
         _run(
@@ -2020,6 +2078,7 @@ def test_auto_redispatch_ambiguous_pending_emits_low_confidence_shortlist(
             surfaces=[{"target_descriptor": "https://target.example/p1"}],
             require_stage="consumption",
             auto_redispatch=True,
+            work_items=work_items,
         )
 
     report = json.loads(capsys.readouterr().out)
@@ -2042,17 +2101,20 @@ def test_auto_redispatch_generic_dominant_bucket_is_low_confidence(
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    db = _make_cases_db(eng)
     # Three interestingparams (token) + one idor (user). Generic bucket
     # dominates -> low confidence, shortlist of the mapped buckets present.
-    for i in range(3):
-        _insert_work_item(
-            db, queue_key=f"ip:{i}", url=f"https://target.example/g{i}", url_path=f"/g{i}",
+    work_items = [
+        _work_item(
+            queue_key=f"ip:{i}", url=f"https://target.example/g{i}", url_path=f"/g{i}",
             status="pending", query_params='{"token": "x"}',
         )
-    _insert_work_item(
-        db, queue_key="id:1", url="https://target.example/h1", url_path="/h1",
-        status="pending", query_params='{"user": "1"}',
+        for i in range(3)
+    ]
+    work_items.append(
+        _work_item(
+            queue_key="id:1", url="https://target.example/h1", url_path="/h1",
+            status="pending", query_params='{"user": "1"}',
+        )
     )
 
     with pytest.raises(SystemExit):
@@ -2063,6 +2125,7 @@ def test_auto_redispatch_generic_dominant_bucket_is_low_confidence(
             surfaces=[{"target_descriptor": "https://target.example/g0"}],
             require_stage="consumption",
             auto_redispatch=True,
+            work_items=work_items,
         )
 
     report = json.loads(capsys.readouterr().out)
@@ -2076,23 +2139,27 @@ def test_auto_redispatch_generic_dominant_bucket_is_low_confidence(
 def test_auto_redispatch_dedup_suppresses_when_prior_dispatch_exists(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
-    """A recommendation is suppressed when a prior dispatch already covers the
-    same (role, scope_host)."""
+    """A recommendation is suppressed on an exact active role/task duplicate."""
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    db = _make_cases_db(eng)
-    _insert_work_item(
-        db, queue_key="idor:0", url="https://target.example/api/profile/0",
-        url_path="/api/profile", status="pending", query_params='{"user": "5"}',
-    )
+    work_items = [
+        _work_item(
+            queue_key="idor:0", url="https://target.example/api/profile/0",
+            url_path="/api/profile", status="pending", query_params='{"user": "5"}',
+        ),
+    ]
 
     # Prior dispatch: a vulnerability-analyst already in flight against the host.
     dispatches = [
         {
             "agent_id": "va-001",
             "agent_role": "vulnerability-analyst",
-            "scope_host": "target.example",
+            "task": (
+                "Test target.example: 1 untested pending item(s), dominant cluster "
+                "'idor'. Validate the surface, produce durable evidence, defer "
+                "the rest with a reason."
+            ),
             "status": "in-progress",
         }
     ]
@@ -2106,17 +2173,49 @@ def test_auto_redispatch_dedup_suppresses_when_prior_dispatch_exists(
             require_stage="consumption",
             auto_redispatch=True,
             dispatches=dispatches,
+            work_items=work_items,
         )
 
     report = json.loads(capsys.readouterr().out)
     block = _redispatch(report)
     # No live recommendation for target.example — it was suppressed.
-    assert not any(r["scope_host"] == "target.example" for r in block["recommendations"])
+    assert not any(r["host"] == "target.example" for r in block["recommendations"])
     suppressed = block["suppressed"]
     assert len(suppressed) == 1
-    assert suppressed[0]["scope_host"] == "target.example"
+    assert suppressed[0]["host"] == "target.example"
     assert suppressed[0]["role"] == "vulnerability-analyst"
     assert "va-001" in suppressed[0]["reason"]
+
+
+def test_auto_redispatch_command_does_not_pass_scope_authorization(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    eng = tmp_path / "engagement"
+    eng.mkdir()
+    _write_scope(eng, hosts=["target.example"])
+    work_items = [
+        _work_item(
+            queue_key="idor:0",
+            url="https://target.example/api/profile/0",
+            url_path="/api/profile",
+            status="pending",
+            query_params='{"user": "5"}',
+        ),
+    ]
+
+    with pytest.raises(SystemExit):
+        _run(
+            monkeypatch,
+            eng,
+            services=[{"endpoint": "target.example", "state": "up"}],
+            surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
+            require_stage="consumption",
+            auto_redispatch=True,
+            work_items=work_items,
+        )
+
+    recommendation = _rec_for_host(json.loads(capsys.readouterr().out), "target.example")
+    assert "--scope-host" not in recommendation["command"]
 
 
 @pytest.mark.parametrize("terminal_status", ["completed", "failed", "aborted", "blocked"])
@@ -2137,18 +2236,23 @@ def test_auto_redispatch_terminal_prior_dispatch_does_not_suppress_retry(
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    db = _make_cases_db(eng)
-    _insert_work_item(
-        db, queue_key="idor:0", url="https://target.example/api/profile/0",
-        url_path="/api/profile", status="pending", query_params='{"user": "5"}',
-    )
+    work_items = [
+        _work_item(
+            queue_key="idor:0", url="https://target.example/api/profile/0",
+            url_path="/api/profile", status="pending", query_params='{"user": "5"}',
+        ),
+    ]
 
-    # The only prior dispatch for this (role, host) already terminated.
+    # The only identical prior dispatch already terminated.
     dispatches = [
         {
             "agent_id": "va-terminal",
             "agent_role": "vulnerability-analyst",
-            "scope_host": "target.example",
+            "task": (
+                "Test target.example: 1 untested pending item(s), dominant cluster "
+                "'idor'. Validate the surface, produce durable evidence, defer "
+                "the rest with a reason."
+            ),
             "status": terminal_status,
         }
     ]
@@ -2162,6 +2266,7 @@ def test_auto_redispatch_terminal_prior_dispatch_does_not_suppress_retry(
             require_stage="consumption",
             auto_redispatch=True,
             dispatches=dispatches,
+            work_items=work_items,
         )
 
     report = json.loads(capsys.readouterr().out)
@@ -2188,18 +2293,23 @@ def test_auto_redispatch_active_prior_dispatch_without_agent_id_suppresses(
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    db = _make_cases_db(eng)
-    _insert_work_item(
-        db, queue_key="idor:0", url="https://target.example/api/profile/0",
-        url_path="/api/profile", status="pending", query_params='{"user": "5"}',
-    )
+    work_items = [
+        _work_item(
+            queue_key="idor:0", url="https://target.example/api/profile/0",
+            url_path="/api/profile", status="pending", query_params='{"user": "5"}',
+        ),
+    ]
 
     # In-flight dispatch keyed by `id` only (no `agent_id`).
     dispatches = [
         {
             "id": "dispatch-42",
             "agent_role": "vulnerability-analyst",
-            "scope_host": "target.example",
+            "task": (
+                "Test target.example: 1 untested pending item(s), dominant cluster "
+                "'idor'. Validate the surface, produce durable evidence, defer "
+                "the rest with a reason."
+            ),
             "status": "in-progress",
         }
     ]
@@ -2213,14 +2323,15 @@ def test_auto_redispatch_active_prior_dispatch_without_agent_id_suppresses(
             require_stage="consumption",
             auto_redispatch=True,
             dispatches=dispatches,
+            work_items=work_items,
         )
 
     report = json.loads(capsys.readouterr().out)
     block = _redispatch(report)
-    assert not any(r["scope_host"] == "target.example" for r in block["recommendations"])
+    assert not any(r["host"] == "target.example" for r in block["recommendations"])
     suppressed = block["suppressed"]
     assert len(suppressed) == 1
-    assert suppressed[0]["scope_host"] == "target.example"
+    assert suppressed[0]["host"] == "target.example"
     # The id-only fallback is reflected in the reason string.
     assert "dispatch-42" in suppressed[0]["reason"]
 
@@ -2233,11 +2344,12 @@ def test_auto_redispatch_dedup_degrades_gracefully_on_backend_error(
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    db = _make_cases_db(eng)
-    _insert_work_item(
-        db, queue_key="idor:0", url="https://target.example/api/profile/0",
-        url_path="/api/profile", status="pending", query_params='{"user": "5"}',
-    )
+    work_items = [
+        _work_item(
+            queue_key="idor:0", url="https://target.example/api/profile/0",
+            url_path="/api/profile", status="pending", query_params='{"user": "5"}',
+        ),
+    ]
 
     with pytest.raises(SystemExit):
         _run(
@@ -2248,12 +2360,13 @@ def test_auto_redispatch_dedup_degrades_gracefully_on_backend_error(
             require_stage="consumption",
             auto_redispatch=True,
             dispatches_error=True,
+            work_items=work_items,
         )
 
     report = json.loads(capsys.readouterr().out)
     block = _redispatch(report)
     # Recommendation still emitted (not deduped) ...
-    assert any(r["scope_host"] == "target.example" for r in block["recommendations"])
+    assert any(r["host"] == "target.example" for r in block["recommendations"])
     # ... with a note that dedup degraded.
     assert any("dedup degraded" in note for note in block["notes"])
 
@@ -2264,11 +2377,12 @@ def test_auto_redispatch_drops_non_resolving_skill(monkeypatch, tmp_path: Path, 
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    db = _make_cases_db(eng)
-    _insert_work_item(
-        db, queue_key="idor:0", url="https://target.example/api/profile/0",
-        url_path="/api/profile", status="pending", query_params='{"user": "5"}',
-    )
+    work_items = [
+        _work_item(
+            queue_key="idor:0", url="https://target.example/api/profile/0",
+            url_path="/api/profile", status="pending", query_params='{"user": "5"}',
+        ),
+    ]
 
     module = _load_module()
     # Point idor at a real skill + a bogus one; the bogus name must be dropped.
@@ -2286,6 +2400,7 @@ def test_auto_redispatch_drops_non_resolving_skill(monkeypatch, tmp_path: Path, 
             surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
             require_stage="consumption",
             auto_redispatch=True,
+            work_items=work_items,
             _module=module,
         )
 
@@ -2300,7 +2415,7 @@ def test_auto_redispatch_drops_non_resolving_skill(monkeypatch, tmp_path: Path, 
 def test_auto_redispatch_no_op_without_require_stage(monkeypatch, tmp_path: Path, capsys) -> None:
     """--auto-redispatch on a phase with NO stage gate produces no recommendations.
 
-    Wave 6d: the consolidated command always relays a --phase. On a stage-gated
+    The consolidated command always relays a --phase. On a stage-gated
     phase (recon/collect/consume) --auto-redispatch recommends against failing
     entries; on a phase with no stage gate (verify/exploit/report, exercised here
     via the None→verify mapping) there is no scope gate at all, so there is
@@ -2309,11 +2424,12 @@ def test_auto_redispatch_no_op_without_require_stage(monkeypatch, tmp_path: Path
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    db = _make_cases_db(eng)
-    _insert_work_item(
-        db, queue_key="p:0", url="https://target.example/api/profile/0",
-        url_path="/api/profile", status="pending", query_params='{"user": "5"}',
-    )
+    work_items = [
+        _work_item(
+            queue_key="p:0", url="https://target.example/api/profile/0",
+            url_path="/api/profile", status="pending", query_params='{"user": "5"}',
+        ),
+    ]
 
     _run(
         monkeypatch,
@@ -2322,6 +2438,7 @@ def test_auto_redispatch_no_op_without_require_stage(monkeypatch, tmp_path: Path
         surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
         auto_redispatch=True,
         require_stage=None,
+        work_items=work_items,
     )
     report = json.loads(capsys.readouterr().out)
     assert "redispatch" not in report or report["redispatch"]["recommendations"] == []
@@ -2334,7 +2451,6 @@ def test_auto_redispatch_respects_max_recommendations(monkeypatch, tmp_path: Pat
     # Three independent wildcard entries, all with an enum gap (no evidence).
     # Wildcards (unlike bare hosts) do not satisfy the enum gate trivially.
     _write_scope(eng, hosts=["*.a.example.test", "*.b.example.test", "*.c.example.test"])
-    _make_cases_db(eng)
 
     with pytest.raises(SystemExit):
         _run(
@@ -2362,10 +2478,9 @@ def test_auto_redispatch_clean_entries_emit_no_recommendations(
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    db = _make_cases_db(eng)
-    _insert_work_item(
-        db, queue_key="d:1", url="https://target.example/a", url_path="/a", status="done"
-    )
+    work_items = [
+        _work_item(queue_key="d:1", url="https://target.example/a", url_path="/a", status="done"),
+    ]
 
     _run(
         monkeypatch,
@@ -2374,6 +2489,7 @@ def test_auto_redispatch_clean_entries_emit_no_recommendations(
         surfaces=[{"target_descriptor": "https://target.example/a"}],
         require_stage="consumption",
         auto_redispatch=True,
+        work_items=work_items,
     )
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is True
@@ -2387,7 +2503,7 @@ def test_bucket_skills_mapping_resolves_on_disk():
     real agent/skills/<name>/SKILL.md. Catches a typo'd or stale skill name in
     the (now taxonomy-derived) mapping before it reaches an operator.
 
-    Strengthened (Wave 4): BUCKET_SKILLS is no longer a hand-maintained literal
+    BUCKET_SKILLS is no longer a hand-maintained literal
     — it is derived from the canonical taxonomy + skill `vuln_class:`
     frontmatter at import time. So we also assert the derivation is not
     trivially empty (a broken skills-dir read or empty frontmatter would yield
@@ -2429,7 +2545,6 @@ def test_auto_redispatch_human_output_is_recommendation_only(
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["*.target.example"])
-    _make_cases_db(eng)
 
     with pytest.raises(SystemExit):
         _run(
@@ -2444,7 +2559,7 @@ def test_auto_redispatch_human_output_is_recommendation_only(
     out = capsys.readouterr().out
     assert "RECOMMENDATION-ONLY" in out
     assert "vigil assess agent start --role recon-specialist" in out
-    assert "--scope-host target.example" in out
+    assert "--scope-host" not in out
     # The parallel-role note and the task skeleton are both present.
     assert "source-analyzer" in out
     assert "task:" in out
@@ -2460,19 +2575,19 @@ def test_auto_redispatch_consumption_high_volume_swaps_to_fuzzer(
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    db = _make_cases_db(eng)
     # 120 untested pending IDOR-shaped items under a single host (the `user`
     # param uniquely keys the idor bucket). 120 >= _FUZZER_VOLUME_THRESHOLD
     # (100), so the single-dominant-bucket pick swaps va -> fuzzer.
-    for i in range(120):
-        _insert_work_item(
-            db,
+    work_items = [
+        _work_item(
             queue_key=f"idor:{i}",
             url=f"https://target.example/api/profile/{i}",
             url_path="/api/profile",
             status="pending",
             query_params='{"user": "5"}',
         )
+        for i in range(120)
+    ]
 
     # The audit fails the consumption gate -> SystemExit(1); the JSON report is
     # printed before the exit so we read it after catching.
@@ -2484,6 +2599,7 @@ def test_auto_redispatch_consumption_high_volume_swaps_to_fuzzer(
             surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
             require_stage="consumption",
             auto_redispatch=True,
+            work_items=work_items,
         )
     assert excinfo.value.code == 1
 
@@ -2514,18 +2630,18 @@ def test_auto_redispatch_consumption_no_mapped_bucket_omits_skills(
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    db = _make_cases_db(eng)
     # A `token` param classifies as the generic `interestingparams` bucket,
     # which is intentionally NOT in BUCKET_SKILLS — so nothing maps to a
     # testing skill and the recommendation must not guess one.
-    _insert_work_item(
-        db,
-        queue_key="ip:0",
-        url="https://target.example/g0",
-        url_path="/g0",
-        status="pending",
-        query_params='{"token": "x"}',
-    )
+    work_items = [
+        _work_item(
+            queue_key="ip:0",
+            url="https://target.example/g0",
+            url_path="/g0",
+            status="pending",
+            query_params='{"token": "x"}',
+        ),
+    ]
 
     with pytest.raises(SystemExit) as excinfo:
         _run(
@@ -2535,6 +2651,7 @@ def test_auto_redispatch_consumption_no_mapped_bucket_omits_skills(
             surfaces=[{"target_descriptor": "https://target.example/g0"}],
             require_stage="consumption",
             auto_redispatch=True,
+            work_items=work_items,
         )
     assert excinfo.value.code == 1
 
@@ -2549,7 +2666,7 @@ def test_auto_redispatch_consumption_no_mapped_bucket_omits_skills(
     # The command must omit --skills when there is nothing to recommend.
     assert "--skills" not in rec["command"]
     assert "--role vulnerability-analyst" in rec["command"]
-    assert "--scope-host target.example" in rec["command"]
+    assert "--scope-host" not in rec["command"]
 
 
 
@@ -2562,18 +2679,17 @@ def test_consumption_not_satisfied_when_work_stuck_in_processing(
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    db = _make_cases_db(eng)
 
-    _insert_work_item(db, queue_key="d:1", url="https://target.example/a", url_path="/a", status="done")
-    _insert_work_item(
-        db, queue_key="p:1", url="https://target.example/b", url_path="/b", status="processing"
-    )
+    work_items = [
+        _work_item(queue_key="d:1", url="https://target.example/a", url_path="/a", status="done"),
+        _work_item(queue_key="p:1", url="https://target.example/b", url_path="/b", status="processing"),
+    ]
 
     services = [{"endpoint": "target.example", "state": "up"}]
     surfaces = [{"target_descriptor": "https://target.example/a"}]
 
     with pytest.raises(SystemExit) as excinfo:
-        _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption")
+        _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption", work_items=work_items)
     assert excinfo.value.code == 1
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is False
@@ -2590,18 +2706,17 @@ def test_consumption_not_satisfied_when_work_in_error(
     eng = tmp_path / "engagement"
     eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    db = _make_cases_db(eng)
 
-    _insert_work_item(db, queue_key="d:1", url="https://target.example/a", url_path="/a", status="done")
-    _insert_work_item(
-        db, queue_key="e:1", url="https://target.example/b", url_path="/b", status="error"
-    )
+    work_items = [
+        _work_item(queue_key="d:1", url="https://target.example/a", url_path="/a", status="done"),
+        _work_item(queue_key="e:1", url="https://target.example/b", url_path="/b", status="error"),
+    ]
 
     services = [{"endpoint": "target.example", "state": "up"}]
     surfaces = [{"target_descriptor": "https://target.example/a"}]
 
     with pytest.raises(SystemExit) as excinfo:
-        _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption")
+        _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption", work_items=work_items)
     assert excinfo.value.code == 1
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is False
@@ -2616,22 +2731,23 @@ def test_advisory_bucket_tally_surfaces_stuck_processing_and_error(
     """S8 — the advisory/EV-ranked bucket tally must ALSO see processing/error
     rows, not just pending; otherwise stuck work is hidden from the harness view
     even though the boolean flipped."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
-    db = _make_cases_db(eng)
-
-    _insert_work_item(
-        db, queue_key="p:1", url="https://target.example/u", url_path="/users/1",
-        status="processing", cluster_key="gf:idor",
-    )
-    _insert_work_item(
-        db, queue_key="e:1", url="https://target.example/v", url_path="/users/2",
-        status="error", cluster_key="gf:idor",
-    )
+    work_items = [
+        _work_item(
+            queue_key="p:1", url="https://target.example/u", url_path="/users/1",
+            status="processing", cluster_key="gf:idor",
+        ),
+        _work_item(
+            queue_key="e:1", url="https://target.example/v", url_path="/users/2",
+            status="error", cluster_key="gf:idor",
+        ),
+    ]
+    # `_pending_buckets_for_host` now reads the backend work buffer via the
+    # client, not a sqlite Path — drive it with a FakeClient serving the rows.
+    client = FakeClient(work_items=work_items)
 
     module = _load_module()
     entry = module.classify_scope_entry("target.example")
-    tally = module._pending_buckets_for_host(db, entry)
+    tally = module._pending_buckets_for_host(client, entry)
     assert tally.get("idor", 0) == 2
 
 

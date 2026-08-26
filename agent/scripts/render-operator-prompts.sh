@@ -22,7 +22,7 @@ SOURCE_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 # Special cases:
 #   - `check` (or `render-check`) with NO --type runs BOTH red and blue
 #     checks. Blue is skipped (with stderr warning) if any of its required
-#     specialist source files are missing (e.g. Unit 6 not yet run).
+#     specialist source files are missing.
 #   - `repo --type blue` against the agent/ SOURCE_DIR refuses to overwrite
 #     agent/AGENTS.md (which is the canonical red rendering checked into the
 #     repo). Blue is rendered per-engagement only.
@@ -131,8 +131,7 @@ AGENT_NAMES=(
 
 # Blue specialist roster. Note that `operator`, `osint-analyst`, and
 # `report-writer` are shared with red and their source files live under
-# agent/agents/<name>.md exactly as before. The other four are blue-only and
-# are created by Unit 6 of the Blue Team Engagement plan.
+# agent/agents/<name>.md exactly as before. The other four are blue-only.
 BLUE_AGENT_NAMES=(
   operator
   alert-triage-specialist
@@ -156,7 +155,7 @@ agent_description() {
     report-writer) printf '%s\n' "Human-first reporting specialist for concise, evidence-backed reporting." ;;
     code-architect) printf '%s\n' "Architecture reconnaissance, threat modeling, and file classification for source code repositories." ;;
     code-vuln-hunter) printf '%s\n' "Deep vulnerability analysis specialist for function-level code review and exploitability assessment." ;;
-    code-variant-hunter) printf '%s\n' "Systematic variant scanner for confirmed code vulnerability patterns." ;;
+    code-variant-hunter) printf '%s\n' "Systematic scanner for historical bug shapes and variants of current code findings." ;;
     code-vuln-verifier) printf '%s\n' "False-positive elimination specialist for code findings using full entry-to-sink validation." ;;
     code-fuzz-engineer) printf '%s\n' "AI-driven fuzz campaign orchestration for memory-safety vulnerability discovery." ;;
     alert-triage-specialist) printf '%s\n' "L1 alert triage. Normalize, classify, auto-close mechanical noise with cited tenant-ref pattern, dispatch to L2 with platform skill named." ;;
@@ -291,7 +290,7 @@ agent_prompt_body() {
 # CLAUDE.md/AGENTS.md walking up the dir tree, so a DISPATCHED SPECIALIST subagent
 # inherits these operator pointers before it reaches its own Specialist-Context-Isolation
 # rule. This banner is the harness-injection stop-sign: authored ONCE here and reused
-# by every operator-prompt + pointer render below (DRY). See agent/shared-constraints-core.md
+# by every operator-prompt + pointer render below (DRY). See agent/shared-specialist-core.md
 # ("Specialist Context Isolation") for why.
 render_specialist_stop_sign() {
   cat <<'EOF'
@@ -300,7 +299,7 @@ render_specialist_stop_sign() {
      this file. It is the OPERATOR prompt and its startup/runtime banner must not bleed
      into your context. Load ONLY your own role file and every entry in its `Load First`.
      Auto-loaded CLAUDE.md/AGENTS.md pointers up the directory tree do not apply to you.
-     See agent/shared-constraints-core.md ("Specialist Context Isolation") for why. -->
+     See agent/shared-specialist-core.md ("Specialist Context Isolation") for why. -->
 EOF
 }
 
@@ -378,14 +377,11 @@ EOF
     cat "$CORE_FILE"
     cat <<'EOF'
 
-## macOS/zsh Compatibility
+## macOS Shell Note
 
-- Use absolute paths: `/usr/bin/curl`, `/bin/cat`, `/usr/bin/grep`, etc.
-- Do NOT use `grep -P` (Perl regex). Use `grep -E` (extended) or `rg` instead.
-- HEREDOC: Use unquoted delimiter (`<< EOF`), NOT single-quoted (`<< 'EOF'`).
-- Make file edits through the active coding environment's patch/edit tool. Avoid shell
-  redirection (`cat >`, `echo >`) for manual file creation or modification because it
-  bypasses reviewable patch diffs and is easy to quote incorrectly in zsh.
+- `grep -P` (Perl regex) is unavailable on macOS: BSD grep has no `-P`. Use `grep -E` or `rg`.
+- Make file edits through the coding environment's patch/edit tool rather than shell redirection
+  (`cat >`, `echo >`), so every change lands as a reviewable diff.
 
 ## Tool Promotion Workflow
 
@@ -699,7 +695,7 @@ render_all_wrappers() {
 }
 
 # Return 0 if all blue specialist sources exist on disk, 1 otherwise. Used by
-# render-check to skip the blue check gracefully before Unit 6 has run.
+# render-check to skip the blue check gracefully when a source is unavailable.
 # Note: `operator` is rendered from a hardcoded template inside
 # render_claude_wrapper/render_codex_wrapper, so it does not need a source
 # file under agent/agents/.
@@ -855,7 +851,7 @@ check_render() {
   if [[ "$TYPE_EXPLICIT" -eq 1 ]]; then
     if [[ "$TYPE" == "blue" ]]; then
       if ! blue_sources_ready; then
-        echo "render-check (blue): SKIPPED — blue specialist source files not yet present (Unit 6 not yet run)." >&2
+        echo "render-check (blue): SKIPPED — required blue specialist source files are missing." >&2
         return 0
       fi
       check_render_one blue || any_failed=1
@@ -869,7 +865,7 @@ check_render() {
     if blue_sources_ready; then
       check_render_one blue || any_failed=1
     else
-      echo "render-check (blue): SKIPPED — blue specialist source files not yet present (Unit 6 not yet run)." >&2
+      echo "render-check (blue): SKIPPED — required blue specialist source files are missing." >&2
     fi
   fi
   if [[ "$any_failed" -ne 0 ]]; then
@@ -895,7 +891,6 @@ case "$MODE" in
     fi
     if [[ "$TYPE" == "blue" ]] && ! blue_sources_ready; then
       echo "Cannot render blue: required source files missing under agent/." >&2
-      echo "Unit 6 of the Blue Team Engagement plan has not yet run." >&2
       exit 1
     fi
     if [[ "$SOURCE_TREE_BLUE" -eq 1 ]]; then

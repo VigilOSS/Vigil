@@ -1,4 +1,4 @@
-"""vigil assess list-intel — read-only intel listing / search.
+"""vigil assess intel list — read-only intel listing / search.
 
 If ``<type>`` is given, list rows of that type (backed by
 ``GET /engagements/{key}/intel/{type-plural}``). If ``<type>`` is omitted,
@@ -33,15 +33,15 @@ INTEL_ENTITY_TYPES = {
 def register(subparsers) -> None:
     types_list = ", ".join(sorted(INTEL_TYPES.keys()))
     p = subparsers.add_parser(
-        "list-intel",
+        "list",
         help="List intel records (per-type or FTS search)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  vigil assess list-intel                           # counts per type (summary)\n"
-            "  vigil assess list-intel tech-component            # all tech components\n"
-            "  vigil assess list-intel --q 'nginx'               # FTS search across all intel\n"
-            "  vigil assess list-intel cve --q '2024'            # FTS search narrowed to cves\n"
+            "  vigil assess intel list                           # counts per type (summary)\n"
+            "  vigil assess intel list tech-component            # all tech components\n"
+            "  vigil assess intel list --q 'nginx'               # FTS search across all intel\n"
+            "  vigil assess intel list cve --q '2024'            # FTS search narrowed to cves\n"
             f"\nValid types: {types_list}"
         ),
     )
@@ -55,6 +55,13 @@ def register(subparsers) -> None:
 def _format_row(row: dict) -> str:
     # Compact display that works across intel types — prefer identifying key.
     id_val = row.get("id", "?")
+    # `intel list` includes superseded rows by design (they are the audit trail),
+    # but an unmarked superseded row is byte-identical to the live one and gets
+    # acted on as current. Label it and point at the row that replaced it; the
+    # stored lead_status is left alone — rewriting a historical status to satisfy
+    # a renderer would destroy the record this row exists to be.
+    superseded_by = row.get("superseded_by_id")
+    prefix = f"[SUPERSEDED -> {superseded_by}] " if superseded_by else ""
     for key in (
         "component",
         "name",
@@ -69,8 +76,8 @@ def _format_row(row: dict) -> str:
     ):
         value = row.get(key)
         if value:
-            return f"{id_val} | {key}={value} | source={row.get('source_name', '')}"
-    return json.dumps(row, ensure_ascii=False)
+            return f"{prefix}{id_val} | {key}={value} | source={row.get('source_name', '')}"
+    return f"{prefix}{json.dumps(row, ensure_ascii=False)}"
 
 
 def run(args) -> None:

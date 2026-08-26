@@ -1,17 +1,55 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
+
 from fastapi import HTTPException, status
 
-from ..events import _engagement_or_404
+from ...finding_merge import strict_finding_id
 from ..artifact_index import _normalize_relative_path
-
+from ..events import _engagement_or_404
 from . import _common
-from ._common import ROOT_CAUSE_LINK_KIND, SEVERITY_RANK, _json_object, _serialize_finding_record
-from .links import _root_cause_link_metadata
+from ._common import (
+    ROOT_CAUSE_LINK_KIND,
+    SEVERITY_RANK,
+    _json_object,
+    _serialize_finding_record,
+)
 from .coverage import coverage_readiness, web_uncovered_high_route_hosts
+from .cvss import CvssVectorError, base_score
+from .findings import (
+    finding_code_snapshot_status,
+    is_file_finding,
+    load_code_repo_snapshot_states,
+)
+from .links import _root_cause_link_metadata
+
+_MARKDOWN_PATH_REFERENCE_RE = re.compile(
+    r"(?<![A-Za-z0-9_:/.-])"
+    r"((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:md|markdown))"
+    r"(?![A-Za-z0-9_.-])",
+    re.IGNORECASE,
+)
+
+
+def _is_durable_markdown_path(path: str) -> bool:
+    lower_path = path.lower()
+    return lower_path.endswith((".md", ".markdown")) and (
+        lower_path.startswith("notes/") or "/" not in lower_path
+    )
+
+
+def _cited_markdown_exists(engagement_root: Path, cited_path: str) -> bool:
+    """Return true only for a real citation contained by the engagement."""
+    root = engagement_root.resolve()
+    candidate = (root / cited_path).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return False
+    return candidate.is_file()
 
 
 
@@ -48,6 +86,129 @@ def _report_candidate_records(engagement_id: int) -> list[dict[str, Any]]:
         if record.get("verification_disposition") != "blocked"
     ]
 
+
+def _finding_merge_integrity_blockers(engagement_id: int) -> list[dict[str, Any]]:
+    with _common.get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, engagement_id, slug, status, merged_into_finding_id
+            FROM assessment_findings
+            WHERE engagement_id = ?
+            ORDER BY id
+            """,
+            (engagement_id,),
+        ).fetchall()
+        by_id = {int(row["id"]): dict(row) for row in rows}
+        referenced_ids = {
+            target_id
+            for row in rows
+            if (target_id := strict_finding_id(row["merged_into_finding_id"]))
+            is not None
+            and target_id not in by_id
+        }
+        if referenced_ids:
+            placeholders = ",".join("?" for _ in referenced_ids)
+            referenced_rows = connection.execute(
+                f"""
+                SELECT id, engagement_id, '' AS slug, status, merged_into_finding_id
+                FROM assessment_findings
+                WHERE id IN ({placeholders})
+                """,
+                tuple(sorted(referenced_ids)),
+            ).fetchall()
+            by_id.update({int(row["id"]): dict(row) for row in referenced_rows})
+    blockers: list[dict[str, Any]] = []
+
+    for source in rows:
+        source_id = int(source["id"])
+        slug = str(source["slug"] or "")
+        workflow_status = str(source["status"] or "")
+        pointer = source["merged_into_finding_id"]
+        if workflow_status == "merged" and pointer is None:
+            blockers.append(
+                {
+                    "kind": "finding_merge_integrity",
+                    "slug": slug,
+                    "detail": f"merged finding {slug} has no merge target",
+                }
+            )
+            continue
+        if workflow_status != "merged" and pointer is not None:
+            blockers.append(
+                {
+                    "kind": "finding_merge_integrity",
+                    "slug": slug,
+                    "detail": f"non-merged finding {slug} carries a merge target pointer",
+                }
+            )
+            continue
+        if pointer is None:
+            continue
+
+        seen = {source_id}
+        path = [slug]
+        target_id = strict_finding_id(pointer)
+        if target_id is None:
+            blockers.append(
+                {
+                    "kind": "finding_merge_integrity",
+                    "slug": slug,
+                    "detail": f"merge target pointer {pointer!r} is not a valid finding id",
+                }
+            )
+            continue
+        depth = 0
+        detail = ""
+        while True:
+            target = by_id.get(target_id)
+            if target is None:
+                detail = f"merge target id {target_id} does not exist"
+                break
+            if int(target["engagement_id"]) != engagement_id:
+                detail = "merge target belongs to another engagement"
+                break
+            target_slug = str(target["slug"] or target_id)
+            path.append(target_slug)
+            depth += 1
+            if target_id == source_id and depth == 1:
+                detail = f"finding {slug} is merged into itself"
+                break
+            if target_id in seen:
+                detail = f"merge cycle detected: {' -> '.join(path)}"
+                break
+            seen.add(target_id)
+            next_pointer = target["merged_into_finding_id"]
+            target_status = str(target["status"] or "")
+            if target_status != "merged":
+                if next_pointer is not None:
+                    detail = (
+                        f"merge path enters non-merged finding {target_slug} "
+                        "that carries a merge target pointer"
+                    )
+                elif depth > 1:
+                    detail = f"merge depth {depth} exceeds one hop: {' -> '.join(path)}"
+                break
+            if next_pointer is None:
+                detail = f"merge path ends at merged finding {target_slug} with no merge target"
+                break
+            target_id = strict_finding_id(next_pointer)
+            if target_id is None:
+                detail = (
+                    f"merged finding {target_slug} has merge target pointer "
+                    f"{next_pointer!r}, which is not a valid finding id"
+                )
+                break
+
+        if detail:
+            blockers.append(
+                {
+                    "kind": "finding_merge_integrity",
+                    "slug": slug,
+                    "detail": detail,
+                }
+            )
+    return blockers
+
 def report_readiness(engagement_id: int) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     engagement_type = str(getattr(engagement, "engagement_type", "") or "").lower()
@@ -62,6 +223,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
     coverage = coverage_readiness(engagement_id)
     blockers: list[dict[str, Any]] = []
     advisories: list[dict[str, Any]] = []
+    blockers.extend(_finding_merge_integrity_blockers(engagement_id))
     if not coverage["ready"]:
         blockers.append(
             {
@@ -79,20 +241,150 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
         if row.get("workflow_status") in reportable_statuses
     ]
 
+    draft_snapshot_statuses: dict[str, str] = {}
+    with _common.get_connection() as connection:
+        repo_states = load_code_repo_snapshot_states(connection, engagement.id)
+        for row in candidate_records:
+            snapshot_status = finding_code_snapshot_status(
+                connection,
+                engagement.id,
+                row,
+                repo_states=repo_states,
+            )
+            if row.get("workflow_status") == "draft":
+                draft_snapshot_statuses[str(row.get("slug", ""))] = snapshot_status
+            if row.get("workflow_status") not in reportable_statuses:
+                continue
+            if snapshot_status not in {"stale", "unbound"}:
+                continue
+            blockers.append(
+                {
+                    "kind": "finding_code_snapshot",
+                    "slug": row.get("slug", ""),
+                    "title": row.get("title", ""),
+                    "snapshot_status": snapshot_status,
+                    "detail": (
+                        "reportable finding is not bound to the current verified "
+                        f"repository snapshot: {snapshot_status}; re-review it and "
+                        "use finding verify with current provenance.code_snapshot"
+                    ),
+                }
+            )
+
+    # Import lazily: code_analysis imports the finding snapshot helpers from this
+    # package, so a module-level import would create a package initialization
+    # cycle. The code-analysis service remains the owner of receipt currency and
+    # candidate-file selection; report readiness only renders its obligations.
+    from .. import code_analysis as code_analysis_service
+
+    for obligation in code_analysis_service.unresolved_suspicious_analysis_obligations(
+        engagement.id
+    ):
+        suspicious_count = int(obligation["suspicious_count"])
+        blockers.append(
+            {
+                "kind": "unresolved_suspicious_analysis",
+                "repo_id": int(obligation["repo_id"]),
+                "suspicious_count": suspicious_count,
+                "detail": (
+                    f"repository has {suspicious_count} current suspicious "
+                    "code-analysis attempt(s); promote each to a finding or "
+                    "complete a clean terminal reanalysis"
+                ),
+            }
+        )
+
+    for obligation in code_analysis_service.report_durable_finding_variant_receipt_obligations(
+        engagement.id
+    ):
+        finding_slugs = list(obligation["finding_slugs"])
+        missing_file_ids = list(obligation["missing_file_ids"])
+        missing_file_paths = list(obligation["missing_file_paths"])
+        path_sample = ", ".join(missing_file_paths[:5])
+        if len(missing_file_paths) > 5:
+            path_sample += f", and {len(missing_file_paths) - 5} more"
+        blockers.append(
+            {
+                "kind": "finding_variant_receipts_incomplete",
+                "repo_id": int(obligation["repo_id"]),
+                "slugs": finding_slugs,
+                "missing_file_count": len(missing_file_ids),
+                "missing_file_ids": missing_file_ids,
+                "missing_file_paths": missing_file_paths,
+                "detail": (
+                    "report-durable current code finding(s) "
+                    f"{', '.join(finding_slugs)} have no complete current "
+                    f"variant-scan receipt for {len(missing_file_ids)} "
+                    f"admitted current repository file(s): {path_sample}"
+                ),
+            }
+        )
+
+    from .. import code_fuzz_completion
+
+    for fuzz_state in code_fuzz_completion.fuzz_states(engagement.id):
+        if not fuzz_state["applicability_ready"]:
+            blockers.append(
+                {
+                    "kind": "fuzz_decision_missing",
+                    "repo_id": int(fuzz_state["repo_id"]),
+                    "detail": (
+                        "repository has no evidence-backed current-source fuzz "
+                        "applicability decision; record required targets or a "
+                        "not-required rationale"
+                    ),
+                }
+            )
+            continue
+        if fuzz_state["completion_ready"]:
+            continue
+        blockers.append(
+            {
+                "kind": "fuzz_campaign_incomplete",
+                "repo_id": int(fuzz_state["repo_id"]),
+                "pending_target_ids": list(fuzz_state["pending_target_ids"]),
+                "pending_finding_slugs": list(
+                    fuzz_state["pending_finding_slugs"]
+                ),
+                "detail": (
+                    "required current-source fuzzing lacks covering terminal "
+                    "campaign receipts for "
+                    f"{len(fuzz_state['pending_target_ids'])} target(s) and "
+                    f"{len(fuzz_state['pending_finding_slugs'])} confirmed "
+                    "memory-safety finding(s)"
+                ),
+            }
+        )
+
     for row in candidate_records:
         if row.get("workflow_status") != "draft":
             continue
         slug = str(row.get("slug", ""))
-        advisories.append(
+        snapshot_status = draft_snapshot_statuses.get(slug, "not_applicable")
+        destination = (
+            blockers
+            if is_file_finding(str(row.get("canonical_location", "") or ""))
+            else advisories
+        )
+        destination.append(
             {
                 "kind": "draft_finding_needs_disposition",
                 "slug": slug,
                 "title": row.get("title", ""),
+                "snapshot_status": snapshot_status,
                 "detail": (
                     f"finding {slug} is parked in workflow_status='draft' and will NOT appear in "
                     f"the report or export. Disposition it: promote to active with "
-                    f"`vigil assess update-finding {slug} --workflow-status active` so it reports, "
-                    f"or kill it with `vigil assess kill-finding {slug}` if it is not real."
+                    f"`vigil assess finding update {slug} --status active` so it reports, "
+                    f"or verify it false positive with `vigil assess finding verify {slug} "
+                    f"--disposition false_positive --reason \"...\" --kill-reason \"...\" "
+                    f"--kill-check <index>` after documenting the failed check."
+                    + (
+                        " The code finding is not bound to the current verified source; "
+                        "re-review and rebind it before promotion."
+                        if snapshot_status in {"stale", "unbound"}
+                        else ""
+                    )
                 ),
             }
         )
@@ -106,6 +398,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
             WHERE links.engagement_id = ?
               AND links.link_kind = ?
               AND links.target_kind = 'finding'
+              AND links.retired_at IS NULL
             """,
             (engagement_id, ROOT_CAUSE_LINK_KIND),
         ).fetchall()
@@ -171,8 +464,63 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                     "detail": f"missing structured fields: {', '.join(missing_fields)}",
                 }
             )
+        # Reproduction steps with no audit row behind them. ADVISORY, not a
+        # blocker: the empty-``steps_to_reproduce`` blocker above already stops a
+        # finding that carries no reproduction at all, while this one says the
+        # steps cannot be told apart from a reconstruction — real, but not worth
+        # gating every finding recorded before ``repro_runs`` existed. It fires
+        # only where there is something to back up.
+        if not is_blue and details.get("steps_to_reproduce") and not details.get("repro_runs"):
+            advisories.append(
+                {
+                    "kind": "finding_repro_runs_missing",
+                    "slug": slug,
+                    "title": title,
+                    "detail": (
+                        f"finding {slug} has authored steps_to_reproduce but no "
+                        "details.repro_runs, so no command run stands behind the steps and "
+                        "nobody can diff them against what was actually executed. Find the "
+                        'runs with `vigil assess command-run list --q "<url/param/payload>"` '
+                        f"and record their ids in step order: `vigil assess finding update {slug} "
+                        "--details-inline '{\"repro_runs\": [<run_id>, ...]}'`."
+                    ),
+                }
+            )
         cvss_score = details.get("cvss_score")
+        cvss_vector = details.get("cvss_vector")
         severity = str(row.get("severity", "")).lower()
+        if not is_blue and cvss_vector:
+            try:
+                computed_score = base_score(str(cvss_vector))
+            except CvssVectorError as exc:
+                blockers.append(
+                    {
+                        "kind": "cvss_vector_invalid",
+                        "slug": slug,
+                        "title": title,
+                        "detail": f"cvss_vector is invalid: {exc}",
+                    }
+                )
+            else:
+                try:
+                    stored_score = float(cvss_score)
+                except (TypeError, ValueError):
+                    stored_score = None
+                if (
+                    stored_score is not None
+                    and abs(stored_score - computed_score) >= 0.05
+                ):
+                    blockers.append(
+                        {
+                            "kind": "cvss_vector_score_mismatch",
+                            "slug": slug,
+                            "title": title,
+                            "detail": (
+                                f"cvss_score={stored_score} but cvss_vector "
+                                f"computes to {computed_score}"
+                            ),
+                        }
+                    )
         if not is_blue and cvss_score is not None and severity:
             try:
                 score = float(cvss_score)
@@ -250,9 +598,9 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 (engagement_id,),
             ).fetchall()
         }
+        missing_citations: dict[str, set[str]] = {}
         for artifact_path, artifact in artifact_rows.items():
-            lower_path = artifact_path.lower()
-            if not (lower_path.startswith("notes/") and lower_path.endswith((".md", ".markdown"))):
+            if not _is_durable_markdown_path(artifact_path):
                 continue
             if not bool(artifact.get("present")):
                 continue
@@ -285,6 +633,27 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                         ),
                     }
                 )
+            for cited_path in _MARKDOWN_PATH_REFERENCE_RE.findall(
+                str(artifact.get("indexed_text") or "")
+            ):
+                if cited_path == artifact_path or _cited_markdown_exists(
+                    engagement_root, cited_path
+                ):
+                    continue
+                missing_citations.setdefault(cited_path, set()).add(artifact_path)
+        for cited_path, citing_paths in sorted(missing_citations.items()):
+            advisories.append(
+                {
+                    "kind": "missing_cited_markdown_artifact",
+                    "path": cited_path,
+                    "cited_by": sorted(citing_paths),
+                    "detail": (
+                        f"markdown artifact '{cited_path}' is cited by durable engagement state "
+                        f"but is absent on disk. Restore it or correct the citations before treating "
+                        "the referenced backlog or evidence as empty."
+                    ),
+                }
+            )
         artifact_rows_by_id = {int(a["id"]): a for a in artifact_rows.values() if a.get("id")}
         for row in candidates:
             slug = str(row.get("slug", ""))
@@ -300,12 +669,21 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                             "kind": "finding_evidence_missing_artifact",
                             "slug": slug,
                             "title": row.get("title", ""),
+                            # Wording matters here: this fires against real
+                            # evidence directories and captures. "Restore the
+                            # file" reads as an instruction to recreate or
+                            # overwrite it, which would destroy the evidence the
+                            # finding rests on. Say VERIFY first, and never
+                            # imply re-authoring.
                             "detail": (
-                                f"finding {slug} evidence artifact id={evidence_artifact_id} is indexed "
-                                f"but the file is missing on disk. Restore the file and re-register with "
-                                f"`vigil assess artifact register {linked_evidence_artifact.get('relative_path', '')} --finding {slug}`, "
-                                f"or repoint the finding via "
-                                f"`vigil assess update-finding {slug} --evidence-ref <relative-path>`."
+                                f"finding {slug} evidence artifact id={evidence_artifact_id} "
+                                f"({linked_evidence_artifact.get('relative_path', '')!r}) is indexed but the "
+                                f"index last saw nothing at that path. VERIFY the path first — do NOT recreate "
+                                f"or overwrite anything there. If the evidence IS present, re-index it with "
+                                f"`vigil assess artifact register {linked_evidence_artifact.get('relative_path', '')} --finding {slug}` "
+                                f"(a directory of captured evidence is valid). If it genuinely moved, repoint "
+                                f"the finding via "
+                                f"`vigil assess finding update {slug} --evidence-ref <relative-path>`."
                             ),
                         }
                     )
@@ -319,7 +697,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                         "title": row.get("title", ""),
                         "detail": (
                             f"active/reportable finding {slug} has no evidence_ref. "
-                            f"Fix with `vigil assess update-finding {slug} --evidence-ref <relative-path>` "
+                            f"Fix with `vigil assess finding update {slug} --evidence-ref <relative-path>` "
                             "after writing the evidence artifact to disk."
                         ),
                     }
@@ -345,12 +723,17 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                         "kind": "finding_evidence_missing_artifact",
                         "slug": slug,
                         "title": row.get("title", ""),
+                        # See the wording note on the sibling blocker above:
+                        # never phrase this as "restore the file", which invites
+                        # overwriting live evidence.
                         "detail": (
-                            f"finding {slug} evidence_ref={evidence_ref!r} is indexed but the file is "
-                            f"missing on disk. Restore the file and re-register with "
-                            f"`vigil assess artifact register {indexed_evidence_ref} --finding {slug}`, "
-                            f"or repoint the finding via "
-                            f"`vigil assess update-finding {slug} --evidence-ref <relative-path>`."
+                            f"finding {slug} evidence_ref={evidence_ref!r} is indexed but the index "
+                            f"last saw nothing at that path. VERIFY the path first — do NOT recreate or "
+                            f"overwrite anything there. If the evidence IS present, re-index it with "
+                            f"`vigil assess artifact register {indexed_evidence_ref} --finding {slug}` "
+                            f"(a directory of captured evidence is valid). If it genuinely moved, repoint "
+                            f"the finding via "
+                            f"`vigil assess finding update {slug} --evidence-ref <relative-path>`."
                         ),
                     }
                 )
@@ -368,17 +751,23 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                             f"id={artifact.get('id')}, but evidence_artifact_id points to "
                             f"id={evidence_artifact_id} ({linked_evidence_artifact.get('relative_path', '')!r}). "
                             f"Refresh the finding link with "
-                            f"`vigil assess update-finding {slug} --evidence-ref {indexed_evidence_ref}`."
+                            f"`vigil assess finding update {slug} --evidence-ref {indexed_evidence_ref}`."
                         ),
                     }
                 )
 
+        # Only STEP links represent the ordered attack path and must each resolve
+        # to a reportable finding slug. The schema legitimately permits
+        # evidence/access/credential links (relation != 'step'); those attach
+        # supporting context, not path steps, so they must NOT be flagged as
+        # unlinked finding-steps.
         chain_links = connection.execute(
             """
             SELECT chains.chain_key, links.entity_kind, links.entity_ref
             FROM assessment_attack_chain_links AS links
             JOIN assessment_attack_chains AS chains ON chains.id = links.chain_id
             WHERE links.engagement_id = ?
+              AND links.relation = 'step'
             """,
             (engagement_id,),
         ).fetchall()
@@ -521,7 +910,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                     "detail": (
                         f"finding {slug} (severity={row['severity']}) is verification_state="
                         f"'unreviewed' and must be graded before the final report. Grade it with "
-                        f"`vigil assess verify-finding {slug} --disposition confirmed|downgraded|disputed "
+                        f"`vigil assess finding verify {slug} --disposition confirmed|downgraded|disputed "
                         f"--reason-text ...` (records a verification verdict)."
                     ),
                 }
@@ -560,6 +949,9 @@ def _report_record(record: dict[str, Any], report_id: str) -> dict[str, Any]:
     item["cvss_score"] = details.get("cvss_score")
     item["remediation"] = details.get("remediation", "")
     item["steps_to_reproduce"] = _as_string_list(details.get("steps_to_reproduce"))
+    # The command-run ids behind those steps, projected alongside them so a report
+    # renderer can show what backs each reproduction without re-parsing details_json.
+    item["repro_runs"] = _as_string_list(details.get("repro_runs"))
     item["cwe_id"] = details.get("cwe_id", "")
     item["owasp_category"] = details.get("owasp_category", "")
     item["impact"] = details.get("impact", item.get("summary", ""))
@@ -584,9 +976,9 @@ def _report_finding_records(engagement_id: int, *, mode: str = "draft") -> list[
         # leak it into draft reports; mirror how ``final`` mode keeps only
         # {confirmed, downgraded} dispositions. There is no chain_required bypass
         # in ``final`` — a held finding is never report-durable. Also drop
-        # ``workflow_status == "draft"`` findings: ``report_readiness()`` never
-        # gates them (draft is not a reportable status) and ``final`` mode already
-        # excludes them, so they must not leak into the draft projection either.
+        # ``workflow_status == "draft"`` findings: readiness blocks them until
+        # triage closes, while both report projections intentionally omit unresolved
+        # work so a renderer cannot mistake it for report-durable content.
         rows = [
             row
             for row in rows
@@ -635,8 +1027,9 @@ def list_report_findings(engagement_id: int, *, mode: str = "draft") -> list[dic
     Excludes merged and false-positive findings, orders by severity (critical
     first), and extracts structured fields from the ``details_json`` blob so
     the report-writer has them at the top level without manual JSON parsing:
-    CVSS, remediation, steps_to_reproduce, CWE, OWASP, impact, evidence,
-    entry_point, sink, poc_code, poc_request, poc_response, and references.
+    CVSS, remediation, steps_to_reproduce, repro_runs, CWE, OWASP, impact,
+    evidence, entry_point, sink, poc_code, poc_request, poc_response, and
+    references.
     """
     return _report_finding_records(engagement_id, mode=mode)
 
@@ -652,6 +1045,7 @@ def list_report_finding_groups(engagement_id: int, *, mode: str = "draft") -> di
             WHERE links.engagement_id = ?
               AND links.link_kind = ?
               AND links.target_kind = 'finding'
+              AND links.retired_at IS NULL
             """,
             (engagement_id, ROOT_CAUSE_LINK_KIND),
         ).fetchall()

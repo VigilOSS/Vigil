@@ -24,6 +24,8 @@ from ._common import (
     _scalar_row,
 )
 from .dispatches import _serialize_decision
+from .work_buffer import _derive_work_item, mark_work_items_done
+from .app_units import _surface_host_path, _path_under_prefix
 
 
 
@@ -50,6 +52,29 @@ _COVERAGE_STATUS_SYNONYMS = {
 
 # Derived membership set (frozenset of members, NOT an alias of the class).
 COVERAGE_STATUSES = frozenset(CoverageStatus)
+
+
+class SurfaceStatus(enum.StrEnum):
+    """Per-surface resolution status. ``StrEnum`` so members serialize/compare
+    as their bare string identically to the prior raw-string constants and to
+    the values already stored in ``assessment_surfaces.status`` — no migration."""
+
+    DISCOVERED = "discovered"
+    COVERED = "covered"
+    NOT_APPLICABLE = "not_applicable"
+    DEFERRED = "deferred"
+    PARTIALLY_COVERED = "partially-covered"
+    # Queue closeout without probe/evidence. Deliberately excluded from every
+    # covered/not-applicable predicate so administrative cleanup cannot
+    # masquerade as tested coverage.
+    ADMINISTRATIVELY_CLOSED = "administratively-closed"
+
+
+# Full membership set (frozenset of members, NOT an alias of the class).
+SURFACE_STATUSES = frozenset(SurfaceStatus)
+# Resolution set drops the seed state: ``discovered`` is assigned at ingest,
+# and operators resolve a surface to one of the remaining four.
+SURFACE_RESOLUTION_STATUSES = SURFACE_STATUSES - {SurfaceStatus.DISCOVERED}
 
 PROBE_RESULT_STATUSES: tuple[str, ...] = (
     "tested",
@@ -227,12 +252,20 @@ def _upsert_request_variant(
     notes: str,
 ) -> dict[str, Any]:
     scheme, host, port, normalized_path = _parse_url(url)
+    # Backend enforcement keeps the durable schema name-only even when a caller
+    # accidentally submits captured values. Values (tokens, tenant ids, CSRF
+    # secrets) never participate in deduplication or persistence.
+    normalized_header_schema = (
+        {str(name).strip(): "" for name in header_schema if str(name).strip()}
+        if isinstance(header_schema, dict)
+        else {}
+    )
     params_schema_hash = _hash_json(
         {
             "query": query_schema or {},
             "path": path_schema or {},
             "cookie": cookie_schema or {},
-            "headers": header_schema or {},
+            "headers": normalized_header_schema,
         }
     )
     body_schema_hash = _hash_json(body_schema or {})
@@ -277,7 +310,7 @@ def _upsert_request_variant(
             _json_text(body_schema),
             _json_text(path_schema),
             _json_text(cookie_schema),
-            _json_text(header_schema),
+            _json_text(normalized_header_schema),
             params_schema_hash,
             body_schema_hash,
             discovery_source,
@@ -338,6 +371,20 @@ def _upsert_coverage_item(
     refresh_service_status: bool = True,
 ) -> dict[str, Any]:
     normalized_status = _normalize_coverage_status(status_value)
+    if (
+        normalized_status == CoverageStatus.COVERED
+        and input_slot.startswith("header:")
+        and attack_family == "identity-header-review"
+    ):
+        _require_identity_header_write_coverage(
+            connection,
+            engagement_id,
+            {
+                "request_variant_id": request_variant_id,
+                "input_slot": input_slot,
+                "attack_family": attack_family,
+            },
+        )
     cursor = connection.execute(
         """
         INSERT OR IGNORE INTO assessment_coverage_items (
@@ -463,6 +510,7 @@ def _upsert_probe_run(
     signal_type: str,
     evidence_ref: str,
     notes: str,
+    outcome_assertion: str = "",
     target_host: str = "",
     target_path: str = "",
     target_port: int | None = None,
@@ -504,15 +552,20 @@ def _upsert_probe_run(
         INSERT INTO assessment_probe_runs (
             engagement_id, request_variant_id, service_id, coverage_item_id, auth_context, input_slot, attack_family,
             payload_family, payload_value_hash, probe_key, tool_name, agent_name, result_status,
-            observed_http_status, signal_type, evidence_ref, notes, target_host, target_path, target_port,
+            observed_http_status, signal_type, outcome_assertion, evidence_ref, notes,
+            target_host, target_path, target_port,
             lens, finding_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(engagement_id, probe_key) DO UPDATE SET
             agent_name = COALESCE(NULLIF(excluded.agent_name, ''), assessment_probe_runs.agent_name),
             result_status = excluded.result_status,
             observed_http_status = COALESCE(excluded.observed_http_status, assessment_probe_runs.observed_http_status),
             signal_type = COALESCE(NULLIF(excluded.signal_type, ''), assessment_probe_runs.signal_type),
+            -- result_status and its application-level assertion are one
+            -- adjudication. A later inconclusive/attempted re-run must clear a
+            -- stale positive assertion instead of inheriting it.
+            outcome_assertion = excluded.outcome_assertion,
             evidence_ref = COALESCE(NULLIF(excluded.evidence_ref, ''), assessment_probe_runs.evidence_ref),
             target_host = COALESCE(NULLIF(excluded.target_host, ''), assessment_probe_runs.target_host),
             target_path = COALESCE(NULLIF(excluded.target_path, ''), assessment_probe_runs.target_path),
@@ -543,6 +596,7 @@ def _upsert_probe_run(
             result_status,
             observed_http_status,
             signal_type,
+            outcome_assertion,
             evidence_ref,
             notes,
             target_host,
@@ -621,9 +675,70 @@ def _auto_request_coverage_candidates(
         candidates.append({"input_slot": "path", "attack_family": "parameter-review", "status": "pending", "notes": "Auto-generated from request observation"})
     if cookie_schema:
         candidates.append({"input_slot": "cookie", "attack_family": "session-review", "status": "pending", "notes": "Auto-generated from request observation"})
-    if header_schema:
-        candidates.append({"input_slot": "header", "attack_family": "header-review", "status": "pending", "notes": "Auto-generated from request observation"})
+    for header_name in _security_relevant_header_names(header_schema):
+        candidates.append(
+            {
+                "input_slot": f"header:{header_name}",
+                "attack_family": "identity-header-review",
+                "status": "pending",
+                "notes": "Auto-generated name-only trust-header obligation from request observation",
+            }
+        )
     return candidates
+
+
+_IDENTITY_HEADER_TOKENS = (
+    "api-key", "apikey", "auth", "token", "csrf", "xsrf", "tenant",
+    "user", "account", "principal", "role", "group", "org", "permission",
+    "privilege", "forwarded", "original", "rewrite", "method-override",
+    "admin", "internal", "client-id", "impersonat", "acting",
+)
+_HEADER_NOISE_TOKENS = ("trace", "request-id", "correlation", "b3", "sentry")
+_COMMODITY_TRUST_HEADERS = frozenset(
+    {
+        "host",
+        "x-forwarded-for",
+        "x-forwarded-proto",
+    }
+)
+
+
+def _security_relevant_header_names(header_schema: Any) -> list[str]:
+    """Return canonical names for app-specific identity/trust header inputs.
+
+    The request-schema owner has already removed transport/browser noise. This
+    second, intentionally conservative filter materializes only identity,
+    authorization, routing-trust, or method-override names as obligations; it
+    avoids turning observability ids into fake security work.
+    """
+    if not isinstance(header_schema, dict):
+        return []
+    names: set[str] = set()
+    for raw_name in header_schema:
+        name = str(raw_name).strip().lower()
+        if (
+            not name
+            or name in _COMMODITY_TRUST_HEADERS
+            or any(token in name for token in _HEADER_NOISE_TOKENS)
+        ):
+            continue
+        if any(token in name for token in _IDENTITY_HEADER_TOKENS):
+            names.add(name)
+    return sorted(names)
+
+
+def _slot_class(input_slot: str | None) -> str:
+    """Base slot class of an ``input_slot``, tolerating the ``slot:name`` probe
+    convention (``header:X-Forwarded-Host`` -> ``header``).
+
+    Coverage-item candidates are always coarse today (``endpoint|query|body|path|
+    cookie|header|service``), so this is a forward guard, not a live-bug fix: if a
+    prefixed slot ever reaches candidate linkage, the service-vs-request-variant
+    decision still keys on the base class instead of mis-linking on the full
+    string. For a coarse value with no ``:`` it returns the value unchanged, so
+    existing behavior is preserved exactly.
+    """
+    return str(input_slot or "unknown").split(":", 1)[0]
 
 def record_target(
     engagement_id: int,
@@ -840,6 +955,7 @@ def _ingest_request_observation(
     banner: str,
     coverage_candidates: list[dict[str, Any]] | None,
     auto_generate_coverage: bool,
+    work_item: dict[str, Any] | None = None,
     deferred_service_refreshes: set[int] | None = None,
 ) -> dict[str, Any]:
     scheme, host, _, _ = _parse_url(url)
@@ -918,9 +1034,10 @@ def _ingest_request_observation(
     coverage_items: list[dict[str, Any]] = []
     seen_keys: set[tuple[int | None, int | None, str, str, str]] = set()
     for candidate in candidates:
+        is_service = _slot_class(candidate.get("input_slot")) == "service"
         key = (
-            request_variant["id"] if candidate.get("input_slot") != "service" else None,
-            service["id"] if candidate.get("input_slot") == "service" else None,
+            request_variant["id"] if not is_service else None,
+            service["id"] if is_service else None,
             auth_context,
             str(candidate.get("input_slot", "unknown")),
             str(candidate.get("attack_family", "review")),
@@ -944,12 +1061,23 @@ def _ingest_request_observation(
         if deferred_service_refreshes is not None and coverage_item["service_id"] is not None:
             deferred_service_refreshes.add(int(coverage_item["service_id"]))
         coverage_items.append(coverage_item)
+    derived_work_item = _derive_work_item(
+        connection,
+        engagement_id,
+        request_variant=request_variant,
+        service=service,
+        coverage_items=coverage_items,
+        auth_context=auth_context,
+        discovery_source=discovery_source,
+        work_item=work_item,
+    )
     return {
         "target": target,
         "service": service,
         "request_variant": request_variant,
         "request_observation": observation,
         "coverage_items": coverage_items,
+        "work_item": derived_work_item,
     }
 
 
@@ -979,6 +1107,7 @@ def ingest_request_observation(
     banner: str,
     coverage_candidates: list[dict[str, Any]] | None,
     auto_generate_coverage: bool,
+    work_item: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
@@ -1008,6 +1137,7 @@ def ingest_request_observation(
             banner=banner,
             coverage_candidates=coverage_candidates,
             auto_generate_coverage=auto_generate_coverage,
+            work_item=work_item,
         )
 
 
@@ -1120,6 +1250,78 @@ def list_coverage_items(
         ).fetchall()
     return [dict(row) for row in rows]
 
+def _pending_work_item_ids_for_coverage_item(
+    connection, engagement_id: int, coverage_item_id: int
+) -> list[int]:
+    """Ids of still-actionable work-items FK-linked to a coverage-item (1b drain).
+
+    The default FK-derived drain target. An ingested observation links its work
+    item to the deterministic endpoint-slot coverage item
+    (``work_buffer._pick_coverage_item_id``), so a covering probe carrying that
+    ``coverage_item_id`` drains exactly the buffered work it satisfies. Only
+    ``pending``/``processing`` rows are returned — a ``done``/``skipped``/``error``
+    row is already terminal and re-draining it would inflate ``affected`` with no
+    state change.
+    """
+    rows = connection.execute(
+        "SELECT id FROM assessment_work_items "
+        "WHERE engagement_id = ? AND coverage_item_id = ? "
+        "AND status IN ('pending', 'processing')",
+        (engagement_id, coverage_item_id),
+    ).fetchall()
+    return [int(r["id"]) for r in rows]
+
+
+def _advance_surfaces_for_request_variant(
+    connection,
+    engagement_id: int,
+    request_variant_id: int,
+    *,
+    attack_family: str,
+    result_status: str,
+    notes: str,
+) -> list[dict[str, Any]]:
+    """Advance every DISCOVERED surface FK-linked to a request variant to
+    ``partially-covered`` (1b default surface advance).
+
+    Surfaces are linked to request variants through
+    ``surface_request_variant_links`` (``work-buffer link-surface`` / ingest
+    auto-linking). A covering probe carrying the variant id advances each surface
+    still in the seed ``discovered`` state — a single probe partially covers, so
+    ``partially-covered`` + a synthesized followup. A surface already resolved by
+    a HUMAN verdict (``covered`` / ``not_applicable`` / ``deferred``) or already
+    ``partially-covered`` is LEFT UNTOUCHED, so the default cascade can never
+    regress a deliberate verdict (surface→``covered`` stays a rationale-bearing
+    human decision, ADR 0001 d3).
+    """
+    link_rows = connection.execute(
+        "SELECT DISTINCT link.surface_id AS surface_id, surfaces.status AS status "
+        "FROM surface_request_variant_links AS link "
+        "JOIN assessment_surfaces AS surfaces ON surfaces.id = link.surface_id "
+        "WHERE link.engagement_id = ? AND link.request_variant_id = ?",
+        (engagement_id, request_variant_id),
+    ).fetchall()
+    rationale = notes.strip() or f"probe recorded: {attack_family} {result_status}"
+    followup = (
+        f"partially covered by a {attack_family} probe ({result_status}); "
+        "remaining vuln families for this surface still need coverage"
+    )
+    advanced: list[dict[str, Any]] = []
+    for row in link_rows:
+        if str(row["status"] or "") != "discovered":
+            continue
+        advanced.append(
+            update_surface(
+                engagement_id,
+                int(row["surface_id"]),
+                status_value="partially-covered",
+                rationale=rationale,
+                followup_condition=followup,
+            )
+        )
+    return advanced
+
+
 def record_probe_run(
     engagement_id: int,
     *,
@@ -1136,6 +1338,7 @@ def record_probe_run(
     result_status: str,
     observed_http_status: int | None,
     signal_type: str,
+    outcome_assertion: str = "",
     evidence_ref: str,
     notes: str,
     target_host: str = "",
@@ -1143,10 +1346,21 @@ def record_probe_run(
     target_port: int | None = None,
     lens: str = "",
     finding_id: int | None = None,
+    work_item_ids: list[int] | None = None,
+    resolve_surface_id: int | None = None,
+    no_drain: bool = False,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+    outcome_assertion = (outcome_assertion or "").strip()
+    if result_status == "signal" and not outcome_assertion:
+        result_status = "attempted"
+        demotion_note = (
+            "Signal demoted to attempted: no application-level outcome assertion "
+            "was supplied; HTTP status or response size alone is inconclusive."
+        )
+        notes = f"{notes.rstrip()}\n{demotion_note}".lstrip()
     with _common.get_connection() as connection:
-        return _upsert_probe_run(
+        record = _upsert_probe_run(
             connection,
             engagement.id,
             request_variant_id=request_variant_id,
@@ -1162,6 +1376,7 @@ def record_probe_run(
             result_status=result_status,
             observed_http_status=observed_http_status,
             signal_type=signal_type,
+            outcome_assertion=outcome_assertion,
             evidence_ref=evidence_ref,
             notes=notes,
             target_host=target_host,
@@ -1170,27 +1385,285 @@ def record_probe_run(
             lens=lens,
             finding_id=finding_id,
         )
+        # 1b — DEFAULT-ON FK-derived cascade (the coverage-state write-unification
+        # fix). A covering probe (normalized ``result_status`` in
+        # PROBE_RESULT_STATUSES_COVERING) that carries a coverage-item / request-
+        # variant link BY DEFAULT (a) drains the work-items linked to that
+        # coverage-item and (b) advances the mapped surface(s) to
+        # ``partially-covered`` — the SAME writes the former opt-in path did, made
+        # the default so the write-side ledgers (work_items.status, surfaces.status)
+        # stop disagreeing with the probe-derived truth the depth ledger already
+        # computes. ``get_connection`` is re-entrant and commits at the outermost
+        # depth, so the nested drains/advances commit atomically with the probe.
+        #
+        # Gate + valves (hard invariants):
+        #   * COVERING-GATED: a non-covering attempt (attempted/blocked/no-signal/
+        #     error) never auto-cascades — only whitelisted tested/signal counts;
+        #     ``status="completed"`` alone never counts.
+        #   * ``no_drain`` suppresses the whole default cascade.
+        #   * EXPLICIT ``work_item_ids`` / ``resolve_surface_id`` OVERRIDE the
+        #     derivation (narrow to those exact ids) and fire regardless of the
+        #     covering gate — an operator can always drain/advance explicitly.
+        #   * coverage_items.status is NEVER auto-promoted, and the surface advance
+        #     only touches ``discovered`` surfaces (no regression of a human
+        #     covered/not_applicable/deferred verdict).
+        #
+        # Unknown work-item ids are silently skipped (mirrors POST /work-items/done)
+        # so a stale id never rolls the probe write back; the ``affected`` count
+        # surfaces a short drain.
+        covering = str(record.get("result_status") or "") in PROBE_RESULT_STATUSES_COVERING
+
+        drain_ids: list[int] = []
+        if work_item_ids:
+            drain_ids = [int(x) for x in work_item_ids]
+        elif covering and not no_drain and coverage_item_id is not None:
+            drain_ids = _pending_work_item_ids_for_coverage_item(
+                connection, engagement.id, int(coverage_item_id)
+            )
+        if drain_ids:
+            record["work_items_done"] = mark_work_items_done(engagement.id, drain_ids)
+
+        # A bad explicit surface id 404s and rolls the whole txn back; the probe
+        # upsert is idempotent on its probe_key, so a corrected re-run is safe.
+        if resolve_surface_id is not None:
+            record["surface_resolved"] = update_surface(
+                engagement.id,
+                resolve_surface_id,
+                status_value="partially-covered",
+                rationale=(notes.strip() or f"probe recorded: {attack_family} {result_status}"),
+                followup_condition=(
+                    f"partially covered by a {attack_family} probe ({result_status}); "
+                    "remaining vuln families for this surface still need coverage"
+                ),
+            )
+        elif covering and not no_drain and request_variant_id is not None:
+            advanced = _advance_surfaces_for_request_variant(
+                connection,
+                engagement.id,
+                int(request_variant_id),
+                attack_family=attack_family,
+                result_status=str(record.get("result_status") or ""),
+                notes=notes,
+            )
+            if advanced:
+                record["surfaces_advanced"] = advanced
+        return record
 
 def list_probe_runs(
     engagement_id: int,
     *,
+    attack_family: str = "",
+    target_host: str = "",
+    target_path: str = "",
+    auth_context: str = "",
+    result_status: str = "",
     limit: int = DEFAULT_PROBE_RUN_LIMIT,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
     limit, offset = _bounded_probe_run_window(limit, offset)
+    # Optional exact-match filters (empty string = no filter). Column names are a
+    # fixed allowlist, never caller text, so the f-string interpolation is safe;
+    # every value is bound. Lets `fetch probe-runs?attack_family=sqli` return only
+    # that family instead of the full unfiltered set (the silent no-op it was).
+    clauses = ["engagement_id = ?"]
+    params: list[Any] = [engagement.id]
+    for column, value in (
+        ("attack_family", attack_family),
+        ("target_host", target_host),
+        ("target_path", target_path),
+        ("auth_context", auth_context),
+        ("result_status", result_status),
+    ):
+        if value:
+            clauses.append(f"{column} = ?")
+            params.append(value)
+    params.extend([limit, offset])
     with _common.get_connection() as connection:
         return _fetch_all(
             connection,
-            """
+            f"""
             SELECT *
             FROM assessment_probe_runs
-            WHERE engagement_id = ?
+            WHERE {" AND ".join(clauses)}
             ORDER BY created_at DESC, id DESC
             LIMIT ? OFFSET ?
             """,
-            (engagement.id, limit, offset),
+            tuple(params),
         )
+
+
+_ATTEMPT_FIELDS: tuple[str, ...] = (
+    "id", "target_host", "target_path", "target_port", "auth_context",
+    "attack_family", "lens", "result_status", "observed_http_status",
+    "signal_type", "outcome_assertion", "tool_name", "agent_name",
+    "finding_id", "finding_slug",
+    "finding_title", "finding_severity", "created_at",
+)
+
+
+def _serialize_attempt(row: dict[str, Any]) -> dict[str, Any]:
+    """Project a probe-run⋈finding row onto the pinned ``/attempts`` shape.
+
+    ``finding_*`` fields are ``None`` for probes with no linked finding (the
+    LEFT JOIN yields nulls). ``request_variant_id`` is read for the surface
+    containment test but never emitted — the wire shape carries only the
+    finding-joined attempt fields the CLI groups by lens × result_status.
+    """
+    return {field: row.get(field) for field in _ATTEMPT_FIELDS}
+
+
+def _attempt_matches_surface(
+    row: dict[str, Any],
+    *,
+    linked_variant_ids: set[int],
+    surface_host: str,
+    surface_path: str,
+) -> bool:
+    """A probe belongs to ``surface`` when EITHER its ``request_variant_id`` is
+    FK-linked to the surface (``surface_request_variant_links``) OR its
+    ``target_host``/``target_path`` is contained by the surface descriptor.
+
+    The containment arm is load-bearing: most CLI-recorded probes carry a null
+    ``request_variant_id`` (raw/list-mode), so a link-table-only match would
+    silently under-count them. Reuses the same host-equality + prefix-containment
+    helpers the depth ledger uses for probe→unit mapping.
+    """
+    vid = row.get("request_variant_id")
+    if vid is not None and int(vid) in linked_variant_ids:
+        return True
+    if not surface_host:
+        return False
+    t_host = str(row.get("target_host") or "").strip().lower()
+    if not t_host or t_host != surface_host:
+        return False
+    t_path = str(row.get("target_path") or "/") or "/"
+    return _path_under_prefix(t_path, surface_path)
+
+
+def list_attempts(
+    engagement_id: int,
+    *,
+    finding: str = "",
+    surface_id: int | None = None,
+    target_host: str = "",
+    attack_family: str = "",
+    result_status: str = "",
+    lens: str = "",
+    limit: int = DEFAULT_PROBE_RUN_LIMIT,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Finding-joined, surface-aware read of recorded probe attempts (A4a).
+
+    A "what has actually been tried against this finding / surface / host, and did
+    it land" view so a specialist does not re-run an already-walled probe. Additive
+    to ``list_probe_runs`` (that raw read is unchanged): this LEFT JOINs
+    ``assessment_findings`` so each attempt carries the linked finding's
+    slug/title/severity (null when unlinked), and supports a ``finding`` SLUG filter
+    (resolved slug→id server-side) and a ``surface`` filter that matches BOTH
+    FK-linked and target-descriptor-contained probes.
+
+    Returns ``{"attempts": [...], "count": <len>}`` — a flat, ordered
+    (created_at DESC) list; grouping by lens × result_status is done CLI-side.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    limit, offset = _bounded_probe_run_window(limit, offset)
+
+    with _common.get_connection() as connection:
+        finding_id_filter: int | None = None
+        if finding:
+            frow = connection.execute(
+                "SELECT id FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+                (engagement.id, finding),
+            ).fetchone()
+            if frow is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"finding slug '{finding}' not found",
+                )
+            finding_id_filter = int(frow["id"])
+
+        # Resolve the surface row ONCE: its linked variant ids + parsed host/path.
+        surface_active = surface_id is not None
+        linked_variant_ids: set[int] = set()
+        surface_host = ""
+        surface_path = "/"
+        if surface_active:
+            srow = connection.execute(
+                "SELECT target_descriptor FROM assessment_surfaces WHERE engagement_id = ? AND id = ?",
+                (engagement.id, surface_id),
+            ).fetchone()
+            if srow is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"surface id={surface_id} not found",
+                )
+            surface_host, surface_path = _surface_host_path(str(srow["target_descriptor"] or ""))
+            link_rows = connection.execute(
+                "SELECT request_variant_id FROM surface_request_variant_links "
+                "WHERE engagement_id = ? AND surface_id = ?",
+                (engagement.id, surface_id),
+            ).fetchall()
+            linked_variant_ids = {int(r["request_variant_id"]) for r in link_rows}
+
+        # SQL applies the exact-match column filters (fixed allowlist, every value
+        # bound). The surface filter cannot be a WHERE clause (path containment is
+        # segment-wise), so when it is active the window is sliced in Python after
+        # filtering (so ``count`` and the window stay consistent). When it is NOT
+        # active there is no post-fetch filter, so bound the window in SQL (like
+        # ``list_probe_runs``) instead of loading every matching probe row.
+        clauses = ["probe.engagement_id = ?"]
+        params: list[Any] = [engagement.id]
+        if finding_id_filter is not None:
+            clauses.append("probe.finding_id = ?")
+            params.append(finding_id_filter)
+        for column, value in (
+            ("probe.target_host", target_host),
+            ("probe.attack_family", attack_family),
+            ("probe.result_status", result_status),
+            ("probe.lens", lens),
+        ):
+            if value:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+
+        sql = f"""
+            SELECT
+                probe.id, probe.target_host, probe.target_path, probe.target_port,
+                probe.auth_context, probe.attack_family, probe.lens, probe.result_status,
+                probe.observed_http_status, probe.signal_type, probe.tool_name,
+                probe.agent_name, probe.request_variant_id, probe.finding_id, probe.created_at,
+                finding.slug AS finding_slug,
+                finding.title AS finding_title,
+                finding.severity AS finding_severity
+            FROM assessment_probe_runs AS probe
+            LEFT JOIN assessment_findings AS finding
+                ON probe.finding_id = finding.id
+            WHERE {" AND ".join(clauses)}
+            ORDER BY probe.created_at DESC, probe.id DESC
+            """
+        fetch_params = list(params)
+        if not surface_active:
+            sql += "            LIMIT ? OFFSET ?\n            "
+            fetch_params.extend([limit, offset])
+        rows = _fetch_all(connection, sql, tuple(fetch_params))
+
+    if surface_active:
+        rows = [
+            row for row in rows
+            if _attempt_matches_surface(
+                row,
+                linked_variant_ids=linked_variant_ids,
+                surface_host=surface_host,
+                surface_path=surface_path,
+            )
+        ]
+        window = rows[offset:offset + limit]
+    else:
+        window = rows  # already bounded by SQL LIMIT/OFFSET above
+    attempts = [_serialize_attempt(row) for row in window]
+    return {"attempts": attempts, "count": len(attempts)}
+
 
 def record_surface(
     engagement_id: int,
@@ -1267,11 +1740,10 @@ def update_surface(
     ``_upsert_surface``) so the audit trail accumulates context.
     """
     engagement = _engagement_or_404(engagement_id)
-    valid_statuses = {"covered", "not_applicable", "deferred", "discovered", "partially-covered"}
-    if status_value is not None and status_value not in valid_statuses:
+    if status_value is not None and status_value not in SURFACE_STATUSES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"invalid surface status '{status_value}'; allowed: {sorted(valid_statuses)}",
+            detail=f"invalid surface status '{status_value}'; allowed: {sorted(s.value for s in SURFACE_STATUSES)}",
         )
     # Empty strings for source_name / evidence_ref are not a valid clear
     # signal: callers must pass null to leave the field untouched, or a
@@ -1625,8 +2097,8 @@ def coverage_readiness(engagement_id: int) -> dict[str, Any]:
     engagement_type-gated. The CODE track has no surfaces, so ``list_surfaces``
     returns ``[]`` and every bucket below is empty → ``ready=True`` trivially.
     The return SHAPE is load-bearing (``report_readiness`` relays ``ready`` /
-    ``blocker_count`` and the surface buckets); keys are preserved. Wave-2
-    softening (L1-2/L1-9/L1-10) only changes WHICH surfaces count toward
+    ``blocker_count`` and the surface buckets); keys are preserved. Advisory
+    handling only changes WHICH surfaces count toward
     ``blocker_count`` and adds advisory buckets — it never changes the shape.
     """
     surfaces = list_surfaces(engagement_id, limit=None)
@@ -1651,6 +2123,11 @@ def coverage_readiness(engagement_id: int) -> dict[str, Any]:
         for row in surfaces
         if row.get("status") == "deferred"
         and row.get("surface_type") in HIGH_RISK_DEFERRED_SURFACE_TYPES
+    ]
+    administratively_closed = [
+        row
+        for row in surfaces
+        if row.get("status") == SurfaceStatus.ADMINISTRATIVELY_CLOSED.value
     ]
 
     unresolved_blocking = [
@@ -1685,7 +2162,10 @@ def coverage_readiness(engagement_id: int) -> dict[str, Any]:
         len(unresolved_blocking) + len(partial_blocking) + len(deferred_blocking)
     )
     advisory_surfaces = (
-        unresolved_advisory + partial_advisory + deferred_advisory
+        unresolved_advisory
+        + partial_advisory
+        + deferred_advisory
+        + administratively_closed
     )
 
     return {
@@ -2066,26 +2546,6 @@ def _build_finding_verdicts_by_host(
     return by_host
 
 
-def per_host_finding_verdicts(engagement_id: int) -> dict[str, dict[str, Any]]:
-    """Standalone per-host finding-VERDICT projection (sibling of
-    :func:`per_host_coverage`).
-
-    Exposed for callers that only need the verdict join (and for direct test
-    coverage). ``per_host_coverage`` reuses the same builder so the inline
-    ``finding_verdict`` and this map never drift.
-    """
-    engagement = _engagement_or_404(engagement_id)
-    with _common.get_connection() as connection:
-        finding_rows = _fetch_all(
-            connection,
-            "SELECT slug, canonical_location, status, verification_state, "
-            "verification_disposition, severity, auth_context, merged_into_finding_id "
-            "FROM assessment_findings WHERE engagement_id = ?",
-            (engagement.id,),
-        )
-    return _build_finding_verdicts_by_host(finding_rows)
-
-
 def per_host_coverage(engagement_id: int) -> dict[str, Any]:
     """Outcome-based per-host coverage projection (C40).
 
@@ -2418,9 +2878,9 @@ def _web_path_is_high_value(path: str) -> bool:
 def _scope_pattern_apex(pattern: str) -> str:
     """Apex of a scope.json host pattern: strips a leading ``*.`` wildcard.
 
-    Both a literal (``example.com``) and a wildcard (``*.example.com``) entry
-    cover the apex AND every subdomain (the HackerOne/Bugcrowd convention the
-    CLI ``scope.entry_matches_host`` encodes), so they reduce to the same apex.
+    ``*.example.com`` and ``example.com`` both reduce to ``example.com``; what
+    the apex then COVERS differs by side (see ``_host_matches_scope_pattern``
+    vs ``_host_matches_deny_pattern``).
     """
     p = (pattern or "").strip().lower()
     if p.startswith("*."):
@@ -2428,12 +2888,51 @@ def _scope_pattern_apex(pattern: str) -> str:
     return p
 
 
+def _scope_pattern_is_wildcard(pattern: str) -> bool:
+    """True for a ``*.example.com``-shaped entry (the only subdomain-expanding
+    entry kind the CLI ``scope.classify_scope_entry`` recognises)."""
+    p = (pattern or "").strip().lower()
+    return p.startswith("*.") and len(p) > 2
+
+
 def _host_matches_scope_pattern(host: str, pattern: str) -> bool:
-    """True when ``host`` is the apex of ``pattern`` or a subdomain of it."""
+    """ALLOWLIST match: ``host`` is the apex of ``pattern`` or a subdomain of it.
+
+    A literal allow entry expands to its subtree here (the HackerOne/Bugcrowd
+    reading of a bare program-scope host). That is deliberately permissive: an
+    over-broad ALLOW only ever ADDS coverage obligations, so it fails in the
+    safe direction for a completeness gate. The denylist does NOT mirror it —
+    see :func:`_host_matches_deny_pattern`.
+    """
     apex = _scope_pattern_apex(pattern)
     if not apex or not host:
         return False
     return host == apex or host.endswith("." + apex)
+
+
+def _host_matches_deny_pattern(host: str, pattern: str) -> bool:
+    """DENYLIST match — asymmetric with the allowlist ON PURPOSE.
+
+    A wildcard carve-out (``*.staging.example.com``) covers its apex and every
+    subdomain, exactly as on the allow side. A LITERAL carve-out
+    (``example.com``) covers ONLY that one host: the CLI's canonical
+    :func:`scope.entry_matches_host` matches a ``bare_host`` entry by equality,
+    and a scope.json that carves out an apex while listing two dozen of its
+    subdomains as in-scope means the apex host and nothing else.
+
+    The asymmetry is the point. The denylist WINS, so an over-broad deny
+    silently ERASES coverage obligations while an over-broad allow only adds
+    them. Apex-expanding a literal carve-out is what dropped 155 of 176
+    deep-required app units on 2026-07-24: the single ``acme-planner.example``
+    carve-out swallowed every explicitly in-scope ``*.acme-planner.example``
+    product host, leaving only the non-product hosts behind.
+    """
+    apex = _scope_pattern_apex(pattern)
+    if not apex or not host:
+        return False
+    if _scope_pattern_is_wildcard(pattern):
+        return host == apex or host.endswith("." + apex)
+    return host == apex
 
 
 def _host_admitted_by_scope(
@@ -2443,13 +2942,14 @@ def _host_admitted_by_scope(
 
     Mirrors the CLI ``scope.host_admitted`` contract (the denylist always wins)
     so the W3 gate filters route hosts through the same allow/deny semantics the
-    rest of the engagement trusts.
+    rest of the engagement trusts. Allow and deny matching are NOT the same
+    predicate: only ``*.`` carve-outs extend a denial to a subtree.
     """
     if not host:
         return False
     if not any(_host_matches_scope_pattern(host, p) for p in allow_patterns):
         return False
-    if any(_host_matches_scope_pattern(host, p) for p in deny_patterns):
+    if any(_host_matches_deny_pattern(host, p) for p in deny_patterns):
         return False
     return True
 
@@ -2595,17 +3095,117 @@ def update_coverage_item_status(
         ).fetchone()
         if row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="coverage item not found")
+        if (
+            normalized_status == CoverageStatus.COVERED
+            and str(row["input_slot"]).startswith("header:")
+            and str(row["attack_family"]) == "identity-header-review"
+        ):
+            _require_identity_header_write_coverage(
+                connection, engagement.id, dict(row)
+            )
         connection.execute(
             "UPDATE assessment_coverage_items SET status = ?, notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND engagement_id = ?",
             (normalized_status, _common._append_notes(row["notes"], notes), coverage_item_id, engagement.id),
         )
+        # I-09: resolving a coverage item to covered/not_applicable drains the
+        # FK-linked pending/processing work items — the SAME drain the covering
+        # probe path runs (``_pending_work_item_ids_for_coverage_item`` +
+        # ``mark_work_items_done`` at :1393-1403). Without it, work buffered for an
+        # endpoint slot the operator has explicitly closed stays dispatchable
+        # forever. ``get_connection`` is re-entrant and commits at the outermost
+        # depth, so the drain commits atomically with this status write.
+        drained: dict[str, Any] | None = None
+        if normalized_status in {CoverageStatus.COVERED, CoverageStatus.NOT_APPLICABLE}:
+            drain_ids = _pending_work_item_ids_for_coverage_item(
+                connection, engagement.id, coverage_item_id
+            )
+            if drain_ids:
+                drained = mark_work_items_done(engagement.id, drain_ids)
         if row["service_id"] is not None:
             _refresh_service_coverage_status(connection, engagement.id, int(row["service_id"]))
         updated = connection.execute(
             "SELECT * FROM assessment_coverage_items WHERE id = ?", (coverage_item_id,)
         ).fetchone()
     assert updated is not None
-    return dict(updated)
+    result = dict(updated)
+    if drained is not None:
+        result["work_items_done"] = drained
+    return result
+
+
+_STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _require_identity_header_write_coverage(
+    connection, engagement_id: int, coverage_item: dict[str, Any]
+) -> None:
+    """Refuse a false 'covered' verdict without cross-principal WRITE evidence."""
+    variant_id = coverage_item.get("request_variant_id")
+    variant = connection.execute(
+        "SELECT scheme, host, port, normalized_path, method FROM assessment_request_variants "
+        "WHERE id = ? AND engagement_id = ?",
+        (variant_id, engagement_id),
+    ).fetchone()
+    if variant is None or str(variant["method"]).upper() not in _STATE_CHANGING_METHODS:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "identity-header coverage requires a WRITE request variant "
+                "(POST/PUT/PATCH/DELETE) before it can be marked covered"
+            ),
+        )
+    placeholders = ",".join("?" for _ in PROBE_RESULT_STATUSES_COVERING)
+    # Count only DURABLE principals: distinct non-empty ``principal_id`` values.
+    # Cookie-only / legacy / manual identities carry an empty principal_id; falling
+    # back to identity_name would let two sessions (or re-logins) for the SAME
+    # account count as two principals and falsely satisfy the cross-principal WRITE
+    # gate. An unanchored identity contributes nothing until a durable principal is
+    # established (JWT capture or an operator-set principal_id).
+    principal_count = int(
+        connection.execute(
+            f"""
+            SELECT COUNT(DISTINCT NULLIF(trim(credentials.principal_id), ''))
+              FROM assessment_probe_runs pr
+              JOIN assessment_request_variants rv
+                ON rv.id = pr.request_variant_id
+               AND rv.engagement_id = pr.engagement_id
+              JOIN assessment_coverage_items ci
+                ON ci.engagement_id = pr.engagement_id
+               AND ci.request_variant_id = pr.request_variant_id
+               AND ci.input_slot = pr.input_slot
+               AND ci.attack_family = pr.attack_family
+              LEFT JOIN engagement_credentials credentials
+                ON credentials.engagement_id = pr.engagement_id
+               AND credentials.identity_name = pr.auth_context
+             WHERE pr.engagement_id = ?
+               AND rv.scheme = ? AND rv.host = ? AND rv.port = ?
+               AND rv.normalized_path = ? AND rv.method = ?
+               AND pr.input_slot = ?
+               AND pr.attack_family = 'identity-header-review'
+               AND pr.result_status IN ({placeholders})
+               AND pr.auth_context NOT IN ('', 'anonymous')
+               AND pr.evidence_ref != ''
+            """,
+            (
+                engagement_id,
+                variant["scheme"],
+                variant["host"],
+                variant["port"],
+                variant["normalized_path"],
+                variant["method"],
+                coverage_item["input_slot"],
+                *sorted(PROBE_RESULT_STATUSES_COVERING),
+            ),
+        ).fetchone()[0]
+    )
+    if principal_count < 2:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "identity-header coverage requires evidence-backed WRITE probes "
+                "from two distinct principals"
+            ),
+        )
 
 _VENDOR_SAAS_HOST_SUFFIXES: list[tuple[str, str]] = [
     # Mirror of agent/scripts/assess/lib/scope.py:_VENDOR_SAAS_SUFFIXES so the

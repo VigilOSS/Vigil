@@ -124,7 +124,7 @@ vigil oob poll --client <name>     # matched row = the poisoned redirect was fol
 - Cache layer identified (CDN, reverse proxy, product name and version if known)
 - Unkeyed input that influences response (header, cookie, body) — the `anomaly-score` ranking that isolated it from the baseline is good corroborating evidence
 - Exact request that poisons the cache
-- Evidence that poisoned response is served to other users (second request without the unkeyed input) — confirming the primitive exists is not enough; you must show the **attacker outcome**: what a victim receives when they hit the poisoned cache entry (e.g., malicious script executes in victim's browser, victim is redirected to attacker-controlled domain, victim's sensitive data is served to an unauthenticated requester). For a redirect poison, the matched probe<->callback from `vigil oob poll --client <name> --json` on a header-free request IS that cross-user proof.
+- Evidence that poisoned response is served to other users (second request without the unkeyed input) — prove the attacker outcome (`agent/rules/hunting.md` §2): what a victim receives when they hit the poisoned cache entry (e.g., malicious script executes in victim's browser, victim is redirected to attacker-controlled domain, victim's sensitive data is served to an unauthenticated requester). For a redirect poison, the matched probe<->callback from `vigil oob poll --client <name> --json` on a header-free request IS that cross-user proof.
 - Impact: XSS via poisoned response, redirect to attacker domain, sensitive data exposure via cache deception
 - Full request/response pairs for both poisoning and victim requests
 

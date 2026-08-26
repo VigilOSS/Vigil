@@ -52,4 +52,8 @@ guarantee a limit enforced per account implies — multiple sessions, multiple i
 that reads before a concurrent request writes are the standard ways "one per customer" turns out to
 be "one per request."
 
-This is a lens, not a checklist; the sibling, variant, and adjacent class is still yours to find.
+---
+
+This is guidance, not a cage or a checklist: it does not restrict which candidates you may pursue,
+and it does not enumerate every case you will find — the sibling, variant, or adjacent case is
+still yours to find.

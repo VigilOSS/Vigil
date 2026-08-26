@@ -21,10 +21,10 @@ SameSite=Lax is now the browser default (Chrome since 2020, Firefox since 2023).
 
 ## Tools
 
-- `curl` (manual request replay, cookie and header inspection)
-- Burp Suite (generate CSRF PoC, intercept and modify requests)
-- Browser DevTools (inspect cookies, SameSite attributes, CORS headers)
-- Custom HTML PoC pages (proof of exploitation)
+Route every target-facing probe through `vigil assess kali exec --technique CSRF` —
+`agent/references/payloads/csrf-payloads.md` "Useful Curl for Testing" has the exact
+invocation shape (token-removal, method-switch, and Referer-bypass templates ready to
+adapt). PoC HTML pages are host-side artifacts, not kali-routed.
 
 ---
 
@@ -52,15 +52,7 @@ These combinations effectively kill CSRF. If all are present, move on:
 
 ### GET-Based State Changes
 
-Still common in legacy apps, admin panels, and internal tools. Any state change triggered by a GET request is trivially CSRFable because SameSite=Lax explicitly allows cookies on top-level GET navigations.
-
-```html
-<!-- Image tag fires GET silently -->
-<img src="https://target.example/admin/delete-user?id=42">
-
-<!-- Link-based (requires click, but trivial in phishing) -->
-<a href="https://target.example/settings/disable-2fa">Click here for your prize</a>
-```
+Still common in legacy apps, admin panels, and internal tools. Any state change triggered by a GET request is trivially CSRFable because SameSite=Lax explicitly allows cookies on top-level GET navigations — `agent/references/payloads/csrf-payloads.md` "Auto-Submit Forms" has the image-tag and link templates.
 
 **Where to look:** Admin panels, account settings pages, API endpoints that accept GET for mutations (`/api/transfer?amount=1000&to=attacker`), single-click action links in email notifications.
 
@@ -129,16 +121,7 @@ Many developers add `X-Requested-With: XMLHttpRequest` or `X-CSRF-Token: <value>
 
 ### Content-Type: text/plain with JSON Body
 
-HTML forms can only send three Content-Types without triggering a preflight: `application/x-www-form-urlencoded`, `multipart/form-data`, and `text/plain`. If the server accepts JSON in the request body but does not enforce the `Content-Type` header:
-
-```html
-<form action="https://target.example/api/change-email" method="POST" enctype="text/plain">
-  <input name='{"email":"attacker@evil.example","x":"' value='"}' type="hidden">
-</form>
-<script>document.forms[0].submit()</script>
-```
-
-The browser sends `Content-Type: text/plain` with the body `{"email":"attacker@evil.example","x":"="}`. If the server parses the body as JSON regardless of Content-Type, the attack succeeds.
+HTML forms can only send three Content-Types without triggering a preflight: `application/x-www-form-urlencoded`, `multipart/form-data`, and `text/plain`. If the server accepts JSON in the request body but does not enforce the `Content-Type` header, a form with `enctype="text/plain"` and a crafted single hidden-field name/value pair sends a body the server parses as JSON while the browser sends `Content-Type: text/plain` — see `agent/references/payloads/csrf-payloads.md` "Form-Based JSON (Content-Type Trick)" for the exact template.
 
 **Gate question:** Does the API return the same response when you change `Content-Type: application/json` to `Content-Type: text/plain` and keep the JSON body? If yes, JSON CSRF via form is possible.
 
@@ -203,28 +186,18 @@ ws.onmessage = function(e) {
 
 ---
 
-## Token Validation Testing
+## Token and Referer/Origin Validation Testing
 
-Before building PoCs, determine if the CSRF defense actually works:
-
-- [ ] Remove the CSRF token entirely — does the request succeed?
-- [ ] Submit an empty token value
-- [ ] Use a token from a different user's session
-- [ ] Reuse an expired or old token (from hours/days ago)
-- [ ] Change the token to an arbitrary string of the same length
-- [ ] Check if the token is tied to the session or is a static value
-- [ ] Swap HTTP method: POST to GET (may bypass token check for GET requests)
-- [ ] For double-submit cookies: can you set the cookie via subdomain or CRLF injection to match an arbitrary token value?
-
-## Referer/Origin Header Bypass
-
-Some applications validate Referer or Origin instead of (or in addition to) tokens:
-
-- [ ] Remove the Referer header: `<meta name="referrer" content="no-referrer">` then submit the form
-- [ ] Set Origin to `null` (sandboxed iframe: `<iframe sandbox="allow-scripts allow-forms" src="data:text/html,...">`)
-- [ ] Subdomain match bypass: if validation checks `endsWith('target.example')`, use `attackertarget.example`
-- [ ] Path prefix: if validation checks `startsWith('https://target.example')`, use `https://target.example.evil.example`
-- [ ] Regex errors: missing anchors, dot not escaped (`target.example` matches `targetXcom`)
+Before building the final PoC, determine whether the CSRF defense actually works rather
+than just being present. `agent/references/payloads/csrf-payloads.md` "Token Bypass
+Techniques" and "Referer Header Bypass" carry the concrete templates (token removed,
+token from another session, method-switch, duplicate-cookie pattern, stripped Referer).
+Beyond those templates, the two bypass classes worth checking by hand are: an
+allowlist-style Referer/Origin check that uses `endsWith`/`startsWith` string matching
+instead of full-origin parsing (`attackertarget.example`, `https://target.example.evil.example`
+each break a naive check), and a double-submit cookie whose value you can set
+independently of the form field (subdomain-scoped cookie, CRLF injection) — these are
+implementation-specific bugs no template enumerates in advance.
 
 ---
 
@@ -255,12 +228,9 @@ Ordered by impact. If you find CSRF on any of these, it is worth reporting even 
 
 ## What to Record
 
-- Endpoint and HTTP method vulnerable to CSRF
-- Which protection was missing or bypassable (no token, no SameSite, broken validation)
-- Working PoC HTML that demonstrates the forged action
-- Business impact of the specific action being forged
-- Severity: Medium (settings change) to High (account takeover) to Critical (admin action + no interaction beyond visiting attacker page)
-- If CSWSH: what data is accessible and what commands can be sent through the hijacked connection
+Standard finding-record fields (`agent/shared-specialist-core.md`) plus which protection
+was missing or bypassable (no token, no SameSite, broken validation) and, for CSWSH,
+what data was accessible and what commands the hijacked connection could send.
 
 ## Kill Signals — Stop Testing When
 - SameSite=Strict on all session cookies → CSRF not possible via any vector, skip entirely

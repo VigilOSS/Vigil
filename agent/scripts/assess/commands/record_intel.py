@@ -1,4 +1,4 @@
-"""vigil assess record-intel — multiplexed intel-type recorder.
+"""vigil assess intel record — multiplexed intel-type recorder.
 
 Replaces the old ``intel.md`` append pattern. Validates payload against the
 matching ``agent/schemas/intel-<type>.schema.json`` then POSTs to
@@ -7,7 +7,7 @@ Emits an ``intel.recorded`` event on success.
 
 Usage::
 
-    vigil assess record-intel <type> <json-file>
+    vigil assess intel record <type> <json-file>
 
 ``<type>`` is one of: tech-component, person, email, domain, cve,
 dns-record, social-profile, breach-record, org-fact, note.
@@ -29,14 +29,15 @@ from assess.lib.schema_validation import collect_validation_errors, load_schema
 def register(subparsers) -> None:
     types_list = ", ".join(sorted(INTEL_TYPES.keys()))
     p = subparsers.add_parser(
-        "record-intel",
+        "record",
         help="Record a structured intel record (replaces intel.md appends)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  vigil assess record-intel tech-component tech.json\n"
-            "  vigil assess record-intel cve cve-2024-1234.json\n"
-            "  vigil assess record-intel note catchall.json\n"
+            "  vigil assess intel record tech-component tech.json\n"
+            "  vigil assess intel record cve cve-2024-1234.json\n"
+            "  vigil assess intel record note catchall.json\n"
+            "  vigil assess contract intel record tech-component   # allowed keys for a type\n"
             f"\nValid types: {types_list}"
         ),
     )
@@ -69,6 +70,10 @@ def _report_validation_errors(intel_type: str, errors: list[str]) -> None:
     print(f"record-intel {intel_type}: payload failed schema validation:", file=sys.stderr)
     for error in errors:
         print(f"  - {error}", file=sys.stderr)
+    print(
+        f"Run `vigil assess contract intel record {intel_type}` for the allowed keys.",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 

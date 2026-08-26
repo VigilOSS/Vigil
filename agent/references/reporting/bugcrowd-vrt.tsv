@@ -1,0 +1,440 @@
+# bugcrowd-vrt.tsv | source: bugcrowd/vulnerability-rating-taxonomy@v1.19 (release 2026-06-24, 438 leaves) | regen: tools/flatten_vrt.py
+priority	vrt_path	cvss_v3
+P4	AI Application Security > Adversarial Example Injection > AI Misclassification Attacks	AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:L/A:L
+P4	AI Application Security > AI Safety > Misinformation / Wrong Factual Data	AV:N/AC:L/PR:N/UI:R/S:C/C:N/I:L/A:N
+P2	AI Application Security > Denial-of-Service (DoS) > Application-Wide	AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:H
+P4	AI Application Security > Denial-of-Service (DoS) > Tenant-Scoped	AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:L
+P5	AI Application Security > Improper Input Handling > ANSI Escape Codes	AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:L
+P5	AI Application Security > Improper Input Handling > RTL Overrides	AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:L
+P5	AI Application Security > Improper Input Handling > Unicode Confusables	AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:L
+P3	AI Application Security > Improper Output Handling > Cross-Site Scripting (XSS)	AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N
+P4	AI Application Security > Improper Output Handling > Markdown/HTML Injection	AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N
+P4	AI Application Security > Insufficient Rate Limiting > Query Flooding / API Token Abuse	AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:H
+P1	AI Application Security > Model Extraction > API Query-Based Model Reconstruction	AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N
+P2	AI Application Security > Prompt Injection > System Prompt Leakage	AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:N/A:N
+P1	AI Application Security > Remote Code Execution > Full System Compromise	AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H
+P2	AI Application Security > Remote Code Execution > Sandboxed Container Code Execution	AV:N/AC:H/PR:L/UI:N/S:C/C:L/I:H/A:H
+P1	AI Application Security > Sensitive Information Disclosure > Cross-Tenant PII Leakage/Exposure	AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N
+P1	AI Application Security > Sensitive Information Disclosure > Key Leak	AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N
+P1	AI Application Security > Training Data Poisoning > Backdoor Injection / Bias Manipulation	AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:H/A:H
+P2	AI Application Security > Vector and Embedding Weaknesses > Embedding Exfiltration / Model Extraction	AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:N/A:N
+P3	AI Application Security > Vector and Embedding Weaknesses > Semantic Indexing	AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N
+varies	Algorithmic Biases > Aggregation Bias	
+varies	Algorithmic Biases > Processing Bias	
+P5	Application-Level Denial-of-Service (DoS) > App Crash > Malformed Android Intents	
+P5	Application-Level Denial-of-Service (DoS) > App Crash > Malformed iOS URL Schemes	
+P2	Application-Level Denial-of-Service (DoS) > Critical Impact and/or Easy Difficulty	AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H
+varies	Application-Level Denial-of-Service (DoS) > Excessive Resource Consumption > Injection (Prompt)	AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N
+P3	Application-Level Denial-of-Service (DoS) > High Impact and/or Medium Difficulty	AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H
+P3	Automotive Security Misconfiguration > Automatic Braking System (ABS) > Unintended Acceleration / Brake	AV:P/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:H
+P3	Automotive Security Misconfiguration > Battery Management System > Firmware Dump	AV:P/AC:H/PR:N/UI:R/S:U/C:H/I:H/A:H
+P4	Automotive Security Misconfiguration > Battery Management System > Fraudulent Interface	AV:P/AC:H/PR:N/UI:R/S:U/C:L/I:H/A:H
+P3	Automotive Security Misconfiguration > CAN > Injection (Basic Safety Message)	AV:P/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:H
+P3	Automotive Security Misconfiguration > CAN > Injection (Battery Management System)	AV:P/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:H
+P4	Automotive Security Misconfiguration > CAN > Injection (Disallowed Messages)	AV:P/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H
+P4	Automotive Security Misconfiguration > CAN > Injection (DoS)	AV:P/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H
+P3	Automotive Security Misconfiguration > CAN > Injection (Headlights)	AV:P/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:H
+P3	Automotive Security Misconfiguration > CAN > Injection (Powertrain)	AV:P/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:H
+P3	Automotive Security Misconfiguration > CAN > Injection (Pyrotechnical Device Deployment Tool)	AV:P/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:H
+P3	Automotive Security Misconfiguration > CAN > Injection (Sensors)	AV:P/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:H
+P3	Automotive Security Misconfiguration > CAN > Injection (Steering Control)	AV:P/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:H
+P3	Automotive Security Misconfiguration > CAN > Injection (Vehicle Anti-theft Systems)	AV:P/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:H
+P4	Automotive Security Misconfiguration > GNSS / GPS > Spoofing	AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:H
+P3	Automotive Security Misconfiguration > Immobilizer > Engine Start	AV:P/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:H
+P2	Automotive Security Misconfiguration > Infotainment, Radio Head Unit > Code Execution (CAN Bus Pivot)	AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H
+P3	Automotive Security Misconfiguration > Infotainment, Radio Head Unit > Code Execution (No CAN Bus Pivot)	AV:N/AC:H/PR:N/UI:N/S:C/C:L/I:L/A:L
+P4	Automotive Security Misconfiguration > Infotainment, Radio Head Unit > Default Credentials	AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N
+P4	Automotive Security Misconfiguration > Infotainment, Radio Head Unit > Denial of Service (DoS / Brick)	AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:L
+P2	Automotive Security Misconfiguration > Infotainment, Radio Head Unit > OTA Firmware Manipulation	AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:L
+P1	Automotive Security Misconfiguration > Infotainment, Radio Head Unit > Sensitive data Leakage/Exposure	AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H
+P4	Automotive Security Misconfiguration > Infotainment, Radio Head Unit > Source Code Dump	AV:P/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:L
+P3	Automotive Security Misconfiguration > Infotainment, Radio Head Unit > Unauthorized Access to Services (API / Endpoints)	AV:N/AC:H/PR:N/UI:N/S:C/C:L/I:L/A:L
+P2	Automotive Security Misconfiguration > RF Hub > CAN Injection / Interaction	AV:P/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N
+P3	Automotive Security Misconfiguration > RF Hub > Data Leakage / Pull Encryption Mechanism	AV:A/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:L
+P1	Automotive Security Misconfiguration > RF Hub > Key Fob Cloning	AV:A/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H
+P5	Automotive Security Misconfiguration > RF Hub > Relay	AV:A/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:N
+P5	Automotive Security Misconfiguration > RF Hub > Replay	AV:A/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:N
+P5	Automotive Security Misconfiguration > RF Hub > Roll Jam	AV:A/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:N
+P4	Automotive Security Misconfiguration > RF Hub > Unauthorized Access / Turn On	AV:A/AC:H/PR:N/UI:R/S:U/C:N/I:L/A:L
+P4	Automotive Security Misconfiguration > Roadside Unit (RSU) > Sybil Attack	AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:H/A:H
+varies	Blockchain Infrastructure Misconfiguration > Improper Bridge Validation and Verification Logic	
+P4	Broken Access Control (BAC) > Bypass of Password Confirmation > Change Password	
+varies	Broken Access Control (BAC) > Exposed Sensitive Android Intent	AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N
+varies	Broken Access Control (BAC) > Exposed Sensitive iOS URL Scheme	AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N
+P2	Broken Access Control (BAC) > Insecure Direct Object References (IDOR) > Modify Sensitive Information(Iterable Object Identifiers)	
+P4	Broken Access Control (BAC) > Insecure Direct Object References (IDOR) > Modify/View Sensitive Information(Complex Object Identifiers GUID/UUID)	
+P1	Broken Access Control (BAC) > Insecure Direct Object References (IDOR) > Modify/View Sensitive Information(Iterable Object Identifiers)	
+P5	Broken Access Control (BAC) > Insecure Direct Object References (IDOR) > View Non-Sensitive Information	
+P3	Broken Access Control (BAC) > Insecure Direct Object References (IDOR) > View Sensitive Information(Iterable Object Identifiers)	
+varies	Broken Access Control (BAC) > Privilege Escalation	AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N
+P4	Broken Access Control (BAC) > Username/Email Enumeration > Non-Brute Force	
+P1	Broken Authentication and Session Management > Authentication Bypass	AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:L
+P4	Broken Authentication and Session Management > Cleartext Transmission of Session Token	AV:A/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:N
+P5	Broken Authentication and Session Management > Concurrent Logins	AV:N/AC:H/PR:H/UI:N/S:U/C:N/I:N/A:N
+P5	Broken Authentication and Session Management > Failure to Invalidate Session > Concurrent Sessions On Logout	AV:N/AC:L/PR:H/UI:N/S:U/C:N/I:N/A:N
+P5	Broken Authentication and Session Management > Failure to Invalidate Session > Long Timeout	AV:N/AC:L/PR:H/UI:N/S:U/C:N/I:N/A:N
+P5	Broken Authentication and Session Management > Failure to Invalidate Session > On Email Change	AV:N/AC:L/PR:H/UI:N/S:U/C:N/I:N/A:N
+P4	Broken Authentication and Session Management > Failure to Invalidate Session > On Logout (Client and Server-Side)	AV:N/AC:L/PR:H/UI:N/S:U/C:L/I:L/A:N
+P5	Broken Authentication and Session Management > Failure to Invalidate Session > On Logout (Server-Side Only)	AV:N/AC:L/PR:H/UI:N/S:U/C:N/I:N/A:N
+P4	Broken Authentication and Session Management > Failure to Invalidate Session > On Password Reset and/or Change	AV:N/AC:L/PR:H/UI:N/S:U/C:L/I:L/A:N
+P5	Broken Authentication and Session Management > Failure to Invalidate Session > On 2FA Activation/Change	AV:N/AC:L/PR:H/UI:N/S:U/C:N/I:N/A:N
+varies	Broken Authentication and Session Management > Failure to Invalidate Session > On Permission Change	
+P5	Broken Authentication and Session Management > SAML Replay	AV:N/AC:H/PR:N/UI:R/S:C/C:H/I:H/A:H
+P5	Broken Authentication and Session Management > Session Fixation > Local Attack Vector	AV:P/AC:H/PR:L/UI:R/S:U/C:H/I:L/A:N
+P3	Broken Authentication and Session Management > Session Fixation > Remote Attack Vector	AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:L/A:N
+P3	Broken Authentication and Session Management > Second Factor Authentication (2FA) Bypass	AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N
+P5	Broken Authentication and Session Management > Weak Login Function > Not Operational or Intended Public Access	
+P4	Broken Authentication and Session Management > Weak Login Function > Other Plaintext Protocol with no Secure Alternative	AV:A/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:N
+P4	Broken Authentication and Session Management > Weak Login Function > Over HTTP	AV:A/AC:H/PR:N/UI:R/S:U/C:L/I:L/A:N
+P4	Broken Authentication and Session Management > Weak Registration Implementation > Over HTTP	
+P5	Broken Authentication and Session Management > Excessive JSON Web Token (JWT) Lifetime	AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N
+P5	Broken Authentication and Session Management > Secret Questions Used for Account Verification	AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N
+P5	Client-Side Injection > Binary Planting > No Privilege Escalation	AV:L/AC:H/PR:H/UI:N/S:U/C:N/I:N/A:N
+P5	Client-Side Injection > Binary Planting > Non-Default Folder Privilege Escalation	AV:L/AC:H/PR:L/UI:R/S:U/C:L/I:L/A:N
+P3	Client-Side Injection > Binary Planting > Default Folder Privilege Escalation	AV:L/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:N
+P2	Cloud Security > Identity and Access Management (IAM) Misconfigurations > Overly Permissive IAM Roles	AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H
+P1	Cloud Security > Identity and Access Management (IAM) Misconfigurations > Publicly Accessible IAM Credentials	AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H
+P5	Cloud Security > Logging and Monitoring Issues > Disabled or Insufficient Logging	AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N
+varies	Cloud Security > Misconfigured Services and APIs > Exposed Debug or Admin Interfaces	AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H
+P4	Cloud Security > Misconfigured Services and APIs > Insecure API Endpoints	AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:N
+P3	Cloud Security > Network Configuration Issues > Lack of Network Segmentation	AV:N/AC:H/PR:H/UI:N/S:C/C:L/I:L/A:L
+P3	Cloud Security > Network Configuration Issues > Open Management Ports to the Internet	AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:L
+varies	Cloud Security > Storage Misconfigurations > Publicly Accessible Cloud Storage	AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N
+P2	Cloud Security > Storage Misconfigurations > Unencrypted Sensitive Data at Rest	AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N
+varies	Cross-Site Request Forgery (CSRF) > Action-Specific > Authenticated Action	
+P5	Cross-Site Request Forgery (CSRF) > Action-Specific > Logout	AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:N
+varies	Cross-Site Request Forgery (CSRF) > Action-Specific > Unauthenticated Action	
+P2	Cross-Site Request Forgery (CSRF) > Application-Wide	AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:L
+P5	Cross-Site Request Forgery (CSRF) > CSRF Token Not Unique Per Request	AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:N
+P5	Cross-Site Request Forgery (CSRF) > Flash-Based	AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:N
+P5	Cross-Site Scripting (XSS) > Cookie-Based	AV:N/AC:H/PR:N/UI:R/S:C/C:N/I:N/A:N
+P5	Cross-Site Scripting (XSS) > Flash-Based	AV:N/AC:H/PR:N/UI:R/S:C/C:N/I:N/A:N
+P5	Cross-Site Scripting (XSS) > IE-Only	AV:N/AC:H/PR:N/UI:R/S:C/C:L/I:L/A:N
+P4	Cross-Site Scripting (XSS) > Off-Domain > Data URI	
+P4	Cross-Site Scripting (XSS) > Referer	AV:N/AC:H/PR:N/UI:R/S:C/C:L/I:L/A:N
+P3	Cross-Site Scripting (XSS) > Reflected > Non-Self	AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N
+P5	Cross-Site Scripting (XSS) > Reflected > Self	
+P2	Cross-Site Scripting (XSS) > Stored > Non-Privileged User to Anyone	AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N
+P4	Cross-Site Scripting (XSS) > Stored > Privileged User to No Privilege Elevation	AV:N/AC:L/PR:H/UI:N/S:C/C:L/I:L/A:N
+P3	Cross-Site Scripting (XSS) > Stored > Privileged User to Privilege Elevation	AV:N/AC:L/PR:H/UI:N/S:C/C:H/I:H/A:N
+P5	Cross-Site Scripting (XSS) > Stored > Self	
+P3	Cross-Site Scripting (XSS) > Stored > CSRF/URL-Based	AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N
+P5	Cross-Site Scripting (XSS) > TRACE Method	
+P4	Cross-Site Scripting (XSS) > Universal (UXSS)	AV:N/AC:H/PR:N/UI:R/S:C/C:L/I:L/A:N
+P3	Cryptographic Weakness > Broken Cryptography > Use of Broken Cryptographic Primitive	AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N
+P4	Cryptographic Weakness > Broken Cryptography > Use of Vulnerable Cryptographic Library	AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:H/A:N
+P5	Cryptographic Weakness > Incomplete Cleanup of Keying Material	AV:L/AC:H/PR:L/UI:R/S:U/C:L/I:L/A:L
+varies	Cryptographic Weakness > Insecure Implementation > Improper Following of Specification (Other)	
+varies	Cryptographic Weakness > Insecure Implementation > Missing Cryptographic Step	
+varies	Cryptographic Weakness > Insecure Key Generation > Improper Asymmetric Exponent Selection	
+varies	Cryptographic Weakness > Insecure Key Generation > Improper Asymmetric Prime Selection	
+P3	Cryptographic Weakness > Insecure Key Generation > Insufficient Key Space	AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N
+varies	Cryptographic Weakness > Insecure Key Generation > Insufficient Key Stretching	
+P4	Cryptographic Weakness > Insecure Key Generation > Key Exchage Without Entity Authentication	AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:H/A:N
+P5	Cryptographic Weakness > Insufficient Entropy > Initialization Vector (IV) Reuse	AV:L/AC:H/PR:L/UI:N/S:U/C:L/I:L/A:N
+P4	Cryptographic Weakness > Insufficient Entropy > Limited Random Number Generator (RNG) Entropy Source	AV:L/AC:H/PR:L/UI:N/S:U/C:L/I:L/A:N
+P4	Cryptographic Weakness > Insufficient Entropy > Predictable Initialization Vector (IV)	AV:N/AC:H/PR:L/UI:N/S:U/C:L/I:L/A:N
+P4	Cryptographic Weakness > Insufficient Entropy > Predictable Pseudo-Random Number Generator (PRNG) Seed	AV:N/AC:H/PR:L/UI:N/S:U/C:L/I:L/A:N
+P5	Cryptographic Weakness > Insufficient Entropy > Pseudo-Random Number Generator (PRNG) Seed Reuse	AV:L/AC:H/PR:L/UI:N/S:U/C:L/I:L/A:N
+P4	Cryptographic Weakness > Insufficient Entropy > Small Seed Space in Pseudo-Random Number Generator (PRNG)	AV:N/AC:H/PR:L/UI:N/S:U/C:L/I:L/A:N
+P5	Cryptographic Weakness > Insufficient Entropy > Use of True Random Number Generator (TRNG) for Non-Security Purpose	AV:L/AC:H/PR:L/UI:N/S:U/C:N/I:N/A:H
+varies	Cryptographic Weakness > Insufficient Verification of Data Authenticity > Cryptographic Signature	
+P4	Cryptographic Weakness > Insufficient Verification of Data Authenticity > Integrity Check Value (ICV)	AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:H/A:N
+P2	Cryptographic Weakness > Key Reuse > Inter-Environment	AV:A/AC:H/PR:N/UI:R/S:C/C:H/I:H/A:H
+P5	Cryptographic Weakness > Key Reuse > Intra-Environment	AV:L/AC:H/PR:N/UI:R/S:U/C:L/I:L/A:L
+P4	Cryptographic Weakness > Key Reuse > Lack of Perfect Forward Secrecy	AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N
+varies	Cryptographic Weakness > Side-Channel Attack > Differential Fault Analysis	
+P5	Cryptographic Weakness > Side-Channel Attack > Emanations Attack	AV:L/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:N
+P4	Cryptographic Weakness > Side-Channel Attack > Padding Oracle Attack	AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:N
+P5	Cryptographic Weakness > Side-Channel Attack > Power Analysis Attack	AV:P/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:N
+P4	Cryptographic Weakness > Side-Channel Attack > Timing Attack	AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:N
+P4	Cryptographic Weakness > Use of Expired Cryptographic Key (or Certificate)	AV:N/AC:H/PR:L/UI:N/S:U/C:L/I:L/A:L
+varies	Cryptographic Weakness > Weak Hash > Lack of Salt	
+varies	Cryptographic Weakness > Weak Hash > Predictable Hash Collision	
+P5	Cryptographic Weakness > Weak Hash > Use of Predictable Salt	AV:N/AC:H/PR:N/UI:N/S:C/C:L/I:L/A:N
+varies	Data Biases > Pre-existing Bias	
+varies	Data Biases > Representation Bias	
+varies	Decentralized Application Misconfiguration > DeFi Security > Flash Loan Attack	
+varies	Decentralized Application Misconfiguration > DeFi Security > Function-Level Accounting Error	
+varies	Decentralized Application Misconfiguration > DeFi Security > Improper Implementation of Governance	
+varies	Decentralized Application Misconfiguration > DeFi Security > Pricing Oracle Manipulation	
+varies	Decentralized Application Misconfiguration > Improper Authorization > Insufficient Signature Validation	
+P1	Decentralized Application Misconfiguration > Insecure Data Storage > Plaintext Private Key	
+varies	Decentralized Application Misconfiguration > Insecure Data Storage > Sensitive Information Exposure	
+varies	Decentralized Application Misconfiguration > Marketplace Security > Denial of Service	
+varies	Decentralized Application Misconfiguration > Marketplace Security > Improper Validation and Checks For Deposits and Withdrawals	
+P2	Decentralized Application Misconfiguration > Marketplace Security > Malicious Order Offer	
+varies	Decentralized Application Misconfiguration > Marketplace Security > Miscalculated Accounting Logic	
+P3	Decentralized Application Misconfiguration > Marketplace Security > OFAC Bypass	
+P1	Decentralized Application Misconfiguration > Marketplace Security > Orderbook Manipulation	
+P2	Decentralized Application Misconfiguration > Marketplace Security > Price or Fee Manipulation	
+P1	Decentralized Application Misconfiguration > Marketplace Security > Signer Account Takeover	
+P1	Decentralized Application Misconfiguration > Marketplace Security > Unauthorized Asset Transfer	
+P1	Decentralized Application Misconfiguration > Protocol Security Misconfiguration > Node-level Denial of Service	
+varies	Developer Biases > Implicit Bias	
+P5	External Behavior > Browser Feature > Aggressive Offline Caching	
+P5	External Behavior > Browser Feature > Autocomplete Enabled	
+P5	External Behavior > Browser Feature > Autocorrect Enabled	
+P5	External Behavior > Browser Feature > Plaintext Password Field	
+P5	External Behavior > Browser Feature > Save Password	
+P5	External Behavior > Captcha Bypass > Crowdsourcing	
+P5	External Behavior > CSV Injection	
+P5	External Behavior > System Clipboard Leak > Shared Links	
+P5	External Behavior > User Password Persisted in Memory	
+varies	Indicators of Compromise	AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N
+P5	Insecure Data Storage > Non-Sensitive Application Data Stored Unencrypted	
+P5	Insecure Data Storage > Screen Caching Enabled	
+P4	Insecure Data Storage > Sensitive Application Data Stored Unencrypted > On External Storage	AV:P/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N
+P5	Insecure Data Storage > Sensitive Application Data Stored Unencrypted > On Internal Storage	
+P4	Insecure Data Storage > Server-Side Credentials Storage > Plaintext	AV:N/AC:H/PR:H/UI:N/S:U/C:H/I:L/A:N
+varies	Insecure Data Transport > Cleartext Transmission of Sensitive Data	
+P4	Insecure Data Transport > Executable Download > No Secure Integrity Check	AV:N/AC:H/PR:N/UI:N/S:C/C:N/I:L/A:N
+P5	Insecure Data Transport > Executable Download > Secure Integrity Check	AV:N/AC:H/PR:N/UI:N/S:C/C:N/I:N/A:N
+P1	Insecure OS/Firmware > Command Injection	AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:L
+P5	Insecure OS/Firmware > Data not encrypted at rest > Non sensitive	AV:P/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:N
+varies	Insecure OS/Firmware > Data not encrypted at rest > Sensitive	
+varies	Insecure OS/Firmware > Failure to Remove Sensitive Artifacts from Disk	
+P2	Insecure OS/Firmware > Hardcoded Password > Non-Privileged User	AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N
+P1	Insecure OS/Firmware > Hardcoded Password > Privileged User	AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:L
+varies	Insecure OS/Firmware > Kiosk Escape or Breakout	
+P2	Insecure OS/Firmware > Local Administrator on default environment	AV:L/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H
+P2	Insecure OS/Firmware > Over-Permissioned Credentials on Storage	AV:L/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L
+varies	Insecure OS/Firmware > Poorly Configured Disk Encryption	
+varies	Insecure OS/Firmware > Poorly Configured Operating System Security	
+varies	Insecure OS/Firmware > Recovery of Disk Contains Sensitive Material	
+P3	Insecure OS/Firmware > Shared Credentials on Storage	AV:L/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L
+varies	Insecure OS/Firmware > Weakness in Firmware Updates > Firmware cannot be updated	
+P3	Insecure OS/Firmware > Weakness in Firmware Updates > Firmware does not validate update integrity	AV:N/AC:H/PR:H/UI:R/S:C/C:H/I:H/A:H
+P5	Insecure OS/Firmware > Weakness in Firmware Updates > Firmware is not encrypted	AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N
+P5	Insufficient Security Configurability > Lack of Notification Email	
+P4	Insufficient Security Configurability > No Password Policy	AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:L/A:N
+P5	Insufficient Security Configurability > Password Policy Bypass	
+P5	Insufficient Security Configurability > Verification of Contact Method not Required	
+P5	Insufficient Security Configurability > Weak Password Policy	
+P5	Insufficient Security Configurability > Weak Password Reset Implementation > Token Has Long Timed Expiry	
+P5	Insufficient Security Configurability > Weak Password Reset Implementation > Token is Not Invalidated After Email Change	
+P5	Insufficient Security Configurability > Weak Password Reset Implementation > Token is Not Invalidated After Login	
+P5	Insufficient Security Configurability > Weak Password Reset Implementation > Token is Not Invalidated After New Token is Requested	
+P5	Insufficient Security Configurability > Weak Password Reset Implementation > Token is Not Invalidated After Password Change	
+P4	Insufficient Security Configurability > Weak Password Reset Implementation > Token is Not Invalidated After Use	AV:N/AC:H/PR:L/UI:N/S:U/C:L/I:L/A:N
+P5	Insufficient Security Configurability > Weak Registration Implementation > Allows Disposable Email Addresses	
+P5	Insufficient Security Configurability > Weak 2FA Implementation > Missing Failsafe	
+P5	Insufficient Security Configurability > Weak 2FA Implementation > Old 2FA Code is Not Invalidated After New Code is Generated	
+P5	Insufficient Security Configurability > Weak 2FA Implementation > 2FA Code is Not Updated After New Code is Requested	
+P4	Insufficient Security Configurability > Weak 2FA Implementation > 2FA Secret Cannot be Rotated	AV:P/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:N
+P4	Insufficient Security Configurability > Weak 2FA Implementation > 2FA Secret Remains Obtainable After 2FA is Enabled	AV:P/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:N
+P5	Insufficient Security Configurability > No 2FA Implementation	AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N
+P5	Insufficient Security Configurability > No Account Lockout	AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N
+P5	Insufficient Security Configurability > Weak JSON Web Token (JWT) Hashing Algorithm	AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N
+P5	Lack of Binary Hardening > Lack of Exploit Mitigations	
+P5	Lack of Binary Hardening > Lack of Jailbreak Detection	
+P5	Lack of Binary Hardening > Lack of Obfuscation	
+P5	Lack of Binary Hardening > Runtime Instrumentation-Based	
+varies	Misinterpretation Biases > Context Ignorance	
+P5	Mobile Security Misconfiguration > Auto Backup Allowed by Default	AV:P/AC:L/PR:H/UI:N/S:U/C:H/I:N/A:N
+P5	Mobile Security Misconfiguration > Clipboard Enabled	AV:L/AC:H/PR:N/UI:R/S:C/C:L/I:N/A:N
+P5	Mobile Security Misconfiguration > SSL Certificate Pinning > Absent	
+P5	Mobile Security Misconfiguration > SSL Certificate Pinning > Defeatable	
+P5	Mobile Security Misconfiguration > Tapjacking	
+P5	Network Security Misconfiguration > Telnet Enabled	
+varies	Physical Security Issues > Bypass of physical access control	
+varies	Physical Security Issues > Weakness in physical access control > Cloneable Key	
+P2	Physical Security Issues > Weakness in physical access control > Commonly Keyed System	AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N
+varies	Physical Security Issues > Weakness in physical access control > Master Key Identification	
+P4	Privacy Concerns > Unnecessary Data Collection > WiFi SSID+Password	AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N
+P2	Protocol Specific Misconfiguration > Frontrunning-Enabled Attack	
+varies	Protocol Specific Misconfiguration > Improper Validation and Finalization Logic	
+varies	Protocol Specific Misconfiguration > Misconfigured Staking Logic	
+P2	Protocol Specific Misconfiguration > Sandwich-Enabled Attack	
+P5	Sensitive Data Exposure > Disclosure of Known Public Information	
+P5	Sensitive Data Exposure > Disclosure of Secrets > Data/Traffic Spam	
+P3	Sensitive Data Exposure > Disclosure of Secrets > For Internal Asset	AV:A/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:L
+P1	Sensitive Data Exposure > Disclosure of Secrets > For Publicly Accessible Asset	AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:L
+P5	Sensitive Data Exposure > Disclosure of Secrets > Intentionally Public, Sample or Invalid	
+P5	Sensitive Data Exposure > Disclosure of Secrets > Non-Corporate User	
+P4	Sensitive Data Exposure > Disclosure of Secrets > Pay-Per-Use Abuse	AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L
+varies	Sensitive Data Exposure > Disclosure of Secrets > PII Leakage/Exposure	
+P5	Sensitive Data Exposure > Disclosure of Secrets > Sensitive Information Disclosed in JSON Web Token (JWT)	AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N
+P5	Sensitive Data Exposure > Disclosure of Secrets > Publicly accessible Robots.txt	AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N
+P3	Sensitive Data Exposure > EXIF Geolocation Data Not Stripped From Uploaded Images > Automatic User Enumeration	AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N
+P4	Sensitive Data Exposure > EXIF Geolocation Data Not Stripped From Uploaded Images > Manual User Enumeration	AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N
+P5	Sensitive Data Exposure > GraphQL Introspection Enabled	AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N
+P5	Sensitive Data Exposure > Internal IP Disclosure	
+P5	Sensitive Data Exposure > JSON Hijacking	AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:N
+P5	Sensitive Data Exposure > Mixed Content (HTTPS Sourcing HTTP)	AV:N/AC:H/PR:N/UI:N/S:C/C:N/I:N/A:N
+P5	Sensitive Data Exposure > Non-Sensitive Token in URL	AV:P/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N
+P5	Sensitive Data Exposure > Sensitive Data Hardcoded > File Paths	
+P5	Sensitive Data Exposure > Sensitive Data Hardcoded > OAuth Secret	
+P5	Sensitive Data Exposure > Sensitive Token in URL > In the Background	
+P5	Sensitive Data Exposure > Sensitive Token in URL > On Password Reset	
+P4	Sensitive Data Exposure > Sensitive Token in URL > User Facing	
+P4	Sensitive Data Exposure > Token Leakage via Referer > Over HTTP	AV:N/AC:H/PR:L/UI:R/S:U/C:H/I:H/A:N
+P5	Sensitive Data Exposure > Token Leakage via Referer > Password Reset Token	AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N
+P5	Sensitive Data Exposure > Token Leakage via Referer > Trusted 3rd Party	AV:N/AC:H/PR:H/UI:N/S:U/C:N/I:N/A:N
+P4	Sensitive Data Exposure > Token Leakage via Referer > Untrusted 3rd Party	AV:N/AC:H/PR:H/UI:N/S:U/C:H/I:H/A:N
+P5	Sensitive Data Exposure > Via localStorage/sessionStorage > Non-Sensitive Token	AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:N
+P4	Sensitive Data Exposure > Via localStorage/sessionStorage > Sensitive Token	AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N
+P5	Sensitive Data Exposure > Visible Detailed Error/Debug Page > Descriptive Stack Trace	
+P4	Sensitive Data Exposure > Visible Detailed Error/Debug Page > Detailed Server Configuration	AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N
+P5	Sensitive Data Exposure > Visible Detailed Error/Debug Page > Full Path Disclosure	
+P4	Sensitive Data Exposure > Weak Password Reset Implementation > Password Reset Token Sent Over HTTP	
+P2	Sensitive Data Exposure > Weak Password Reset Implementation > Token Leakage via Host Header Poisoning	AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:L
+varies	Sensitive Data Exposure > Cross Site Script Inclusion (XSSI)	
+P5	Server Security Misconfiguration > Bitsquatting	AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N
+varies	Server Security Misconfiguration > Cache Deception	
+varies	Server Security Misconfiguration > Cache Poisoning	
+P5	Server Security Misconfiguration > CAPTCHA > Brute Force	AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:N
+P4	Server Security Misconfiguration > CAPTCHA > Implementation Vulnerability	AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:L
+P5	Server Security Misconfiguration > CAPTCHA > Missing	
+P5	Server Security Misconfiguration > Clickjacking > Form Input	AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:L/A:N
+P5	Server Security Misconfiguration > Clickjacking > Non-Sensitive Action	AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:N/A:N
+P4	Server Security Misconfiguration > Clickjacking > Sensitive Click-Based Action	AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N
+P5	Server Security Misconfiguration > Cookie Scoped to Parent Domain	
+P4	Server Security Misconfiguration > Database Management System (DBMS) Misconfiguration > Excessively Privileged User / DBA	AV:N/AC:H/PR:H/UI:N/S:U/C:L/I:L/A:N
+P5	Server Security Misconfiguration > Directory Listing Enabled > Non-Sensitive Data Exposure	
+varies	Server Security Misconfiguration > Directory Listing Enabled > Sensitive Data Exposure	
+P5	Server Security Misconfiguration > Email Verification Bypass	AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:N
+P1	Server Security Misconfiguration > Exposed Portal > Admin Portal	AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H
+P3	Server Security Misconfiguration > Exposed Portal > Non-Admin Portal	AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N
+P5	Server Security Misconfiguration > Exposed Portal > Protected	AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:N
+P5	Server Security Misconfiguration > Fingerprinting/Banner Disclosure	
+P5	Server Security Misconfiguration > Fingerprinting/Banner Disclosure > Software Versions Disclosed in Response Headers	AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N
+P5	Server Security Misconfiguration > Insecure SSL > Certificate Error	
+P5	Server Security Misconfiguration > Insecure SSL > Insecure Cipher Suite	
+P5	Server Security Misconfiguration > Insecure SSL > Lack of Forward Secrecy	
+P5	Server Security Misconfiguration > Lack of Password Confirmation > Change Email Address	
+P5	Server Security Misconfiguration > Lack of Password Confirmation > Change Password	
+P4	Server Security Misconfiguration > Lack of Password Confirmation > Delete Account	
+P5	Server Security Misconfiguration > Lack of Password Confirmation > Manage 2FA	AV:P/AC:L/PR:H/UI:N/S:U/C:N/I:N/A:L
+P5	Server Security Misconfiguration > Lack of Security Headers > Cache-Control for a Non-Sensitive Page	
+P4	Server Security Misconfiguration > Lack of Security Headers > Cache-Control for a Sensitive Page	AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N
+P5	Server Security Misconfiguration > Lack of Security Headers > Content-Security-Policy	
+P5	Server Security Misconfiguration > Lack of Security Headers > Content-Security-Policy-Report-Only	
+P5	Server Security Misconfiguration > Lack of Security Headers > Public-Key-Pins	
+P5	Server Security Misconfiguration > Lack of Security Headers > Strict-Transport-Security	
+P5	Server Security Misconfiguration > Lack of Security Headers > X-Content-Security-Policy	
+P5	Server Security Misconfiguration > Lack of Security Headers > X-Content-Type-Options	
+P5	Server Security Misconfiguration > Lack of Security Headers > X-Frame-Options	
+P5	Server Security Misconfiguration > Lack of Security Headers > X-Webkit-CSP	
+P5	Server Security Misconfiguration > Lack of Security Headers > X-XSS-Protection	
+P5	Server Security Misconfiguration > Mail Server Misconfiguration > Email Spoofing on Non-Email Domain	
+P4	Server Security Misconfiguration > Mail Server Misconfiguration > Email Spoofing to Inbox due to Missing or Misconfigured DMARC on Email Domain	AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:L/A:N
+P5	Server Security Misconfiguration > Mail Server Misconfiguration > Email Spoofing to Spam Folder	
+P5	Server Security Misconfiguration > Mail Server Misconfiguration > Missing or Misconfigured SPF and/or DKIM	
+P3	Server Security Misconfiguration > Mail Server Misconfiguration > No Spoofing Protection on Email Domain	AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:N
+P5	Server Security Misconfiguration > Misconfigured DNS > Missing Certification Authority Authorization (CAA) Record	AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:N
+P3	Server Security Misconfiguration > Misconfigured DNS > Subdomain Takeover	AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N
+P4	Server Security Misconfiguration > Misconfigured DNS > Zone Transfer	AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N
+P5	Server Security Misconfiguration > Missing DNSSEC	AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:N
+P5	Server Security Misconfiguration > Missing Secure or HTTPOnly Cookie Flag > Non-Session Cookie	
+P4	Server Security Misconfiguration > Missing Secure or HTTPOnly Cookie Flag > Session Token	AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N
+P5	Server Security Misconfiguration > Missing Subresource Integrity	AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:N
+P5	Server Security Misconfiguration > No Rate Limiting on Form > Change Password	AV:P/AC:L/PR:H/UI:N/S:U/C:N/I:L/A:L
+P4	Server Security Misconfiguration > No Rate Limiting on Form > Email-Triggering	
+P4	Server Security Misconfiguration > No Rate Limiting on Form > Login	AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:N
+P4	Server Security Misconfiguration > No Rate Limiting on Form > Registration	
+P4	Server Security Misconfiguration > No Rate Limiting on Form > SMS-Triggering	
+P4	Server Security Misconfiguration > OAuth Misconfiguration > Account Squatting	AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:N/A:N
+P2	Server Security Misconfiguration > OAuth Misconfiguration > Account Takeover	AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H
+varies	Server Security Misconfiguration > OAuth Misconfiguration > Insecure Redirect URI	AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N
+varies	Server Security Misconfiguration > OAuth Misconfiguration > Missing/Broken State Parameter	AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N
+varies	Server Security Misconfiguration > Path Traversal	
+P5	Server Security Misconfiguration > Potentially Unsafe HTTP Method Enabled > OPTIONS	
+P5	Server Security Misconfiguration > Potentially Unsafe HTTP Method Enabled > TRACE	
+varies	Server Security Misconfiguration > Race Condition	
+varies	Server Security Misconfiguration > HTTP Request Smuggling	
+P5	Server Security Misconfiguration > Reflected File Download (RFD)	AV:N/AC:H/PR:N/UI:R/S:C/C:N/I:L/A:N
+P5	Server Security Misconfiguration > Same-Site Scripting	AV:L/AC:H/PR:L/UI:R/S:C/C:L/I:L/A:N
+P5	Server Security Misconfiguration > Server-Side Request Forgery (SSRF) > External - DNS Query Only	AV:N/AC:H/PR:N/UI:N/S:C/C:N/I:N/A:L
+P5	Server Security Misconfiguration > Server-Side Request Forgery (SSRF) > External - Low impact	AV:N/AC:H/PR:N/UI:N/S:C/C:N/I:N/A:L
+P2	Server Security Misconfiguration > Server-Side Request Forgery (SSRF) > Internal Secrets Exposure	AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:L/A:N
+P3	Server Security Misconfiguration > Server-Side Request Forgery (SSRF) > Internal Data Exposure	AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N
+P3	Server Security Misconfiguration > Server-Side Request Forgery (SSRF) > Internal Port Service Scan	AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N
+P4	Server Security Misconfiguration > Server-Side Request Forgery (SSRF) > Internal Exposure of the Presence of Data/Secrets	AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N
+P4	Server Security Misconfiguration > Server-Side Request Forgery (SSRF) > Internal Port Scan Only	AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:N/A:N
+varies	Server Security Misconfiguration > Software Package Takeover	
+varies	Server Security Misconfiguration > SSL Attack (BREACH, POODLE etc.)	
+varies	Server Security Misconfiguration > Unsafe Cross-Origin Resource Sharing	
+P5	Server Security Misconfiguration > Unsafe File Upload > File Extension Filter Bypass	
+P5	Server Security Misconfiguration > Unsafe File Upload > No Antivirus	AV:N/AC:H/PR:N/UI:R/S:C/C:N/I:L/A:N
+P5	Server Security Misconfiguration > Unsafe File Upload > No Size Limit	AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:L
+P5	Server Security Misconfiguration > Username/Email Enumeration > Brute Force	
+P1	Server Security Misconfiguration > Using Default Credentials	AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:L
+P4	Server Security Misconfiguration > Web Application Firewall (WAF) Bypass > Direct Server Access	AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:L
+varies	Server Security Misconfiguration > Misconfigured File Share > Anonymous FTP Enabled	AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N
+varies	Server Security Misconfiguration > Misconfigured File Share > Anonymous SMB Enabled	AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N
+P5	Server Security Misconfiguration > Misconfigured File Share > Non-Sensitive Data Exposure via Anonymous FTP/SMB Enabled	AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N
+P5	Server Security Misconfiguration > Misconfigured Security Headers  > Insecure Content-Security-Policy	AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N
+P4	Server-Side Injection > Content Spoofing > Email HTML Injection	AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:L/A:N
+P5	Server-Side Injection > Content Spoofing > Email Hyperlink Injection Based on Email Provider	
+P4	Server-Side Injection > Content Spoofing > External Authentication Injection	AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:L/A:N
+P5	Server-Side Injection > Content Spoofing > Flash Based External Authentication Injection	
+P5	Server-Side Injection > Content Spoofing > Homograph/IDN-Based	
+P5	Server-Side Injection > Content Spoofing > HTML Content Injection	AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N
+P3	Server-Side Injection > Content Spoofing > iframe Injection	AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:L/A:N
+P4	Server-Side Injection > Content Spoofing > Impersonation via Broken Link Hijacking	AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N
+P5	Server-Side Injection > Content Spoofing > Right-to-Left Override (RTLO)	
+P5	Server-Side Injection > Content Spoofing > Text Injection	
+P5	Server-Side Injection > Content Spoofing > Self Email HTML Injection	AV:N/AC:L/PR:L/UI:R/S:U/C:N/I:N/A:N
+P5	Server-Side Injection > Exposed Data > Non Sensitive Data	
+varies	Server-Side Injection > Exposed Data > Sensitive Data	
+P1	Server-Side Injection > File Inclusion > Local	
+P3	Server-Side Injection > HTTP Response Manipulation > Response Splitting (CRLF)	
+varies	Server-Side Injection > LDAP Injection	
+P5	Server-Side Injection > Parameter Pollution > Social Media Sharing Buttons	
+P1	Server-Side Injection > Remote Code Execution (RCE)	AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H
+P1	Server-Side Injection > SQL Injection	AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:L/A:N
+P4	Server-Side Injection > Server-Side Template Injection (SSTI) > Basic	AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N
+varies	Server-Side Injection > Server-Side Template Injection (SSTI) > Custom	
+P1	Server-Side Injection > XML External Entity Injection (XXE)	AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:L/A:L
+varies	Smart Contract Misconfiguration > Bypass of Function Modifiers and Checks	
+P3	Smart Contract Misconfiguration > Function-level Denial of Service	
+P4	Smart Contract Misconfiguration > Improper Decimals Implementation	
+P3	Smart Contract Misconfiguration > Improper Fee Implementation	
+P4	Smart Contract Misconfiguration > Improper Use of Modifier	
+varies	Smart Contract Misconfiguration > Inaccurate Rounding Calculation	
+P2	Smart Contract Misconfiguration > Integer Overflow / Underflow	
+P3	Smart Contract Misconfiguration > Irreversible Function Call	
+P3	Smart Contract Misconfiguration > Malicious Superuser Risk	
+P1	Smart Contract Misconfiguration > Reentrancy Attack	
+P1	Smart Contract Misconfiguration > Smart Contract Owner Takeover	
+P2	Smart Contract Misconfiguration > Unauthorized Smart Contract Approval	
+P1	Smart Contract Misconfiguration > Unauthorized Transfer of Funds	
+P1	Smart Contract Misconfiguration > Uninitialized Variables	
+varies	Societal Biases > Confirmation Bias	
+varies	Societal Biases > Systemic Bias	
+P5	Unvalidated Redirects and Forwards > Lack of Security Speed Bump Page	
+P5	Unvalidated Redirects and Forwards > Open Redirect > Flash-Based	
+P4	Unvalidated Redirects and Forwards > Open Redirect > GET-Based	AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N
+P5	Unvalidated Redirects and Forwards > Open Redirect > Header-Based	
+P5	Unvalidated Redirects and Forwards > Open Redirect > POST-Based	
+P5	Unvalidated Redirects and Forwards > Tabnabbing	
+P5	Using Components with Known Vulnerabilities > Captcha Bypass > OCR (Optical Character Recognition)	
+P5	Using Components with Known Vulnerabilities > Outdated Software Version	
+P5	Using Components with Known Vulnerabilities > Rosetta Flash	AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:N
+P5	Using Components with Known Vulnerabilities > Unpatched Javascript Libraries	AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N
+P1	Zero Knowledge Security Misconfiguration > Deanonymization of Data	
+P1	Zero Knowledge Security Misconfiguration > Improper Proof Validation and Finalization Logic	
+varies	Zero Knowledge Security Misconfiguration > Misconfigured Trusted Setup	
+varies	Zero Knowledge Security Misconfiguration > Mismatching Bit Lengths	
+varies	Zero Knowledge Security Misconfiguration > Missing Constraint	
+varies	Zero Knowledge Security Misconfiguration > Missing Range Check	
+varies	Active Directory (AD) > SCCM Abuse > PXE Boot Media Theft	AV:A/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:N
+varies	Active Directory (AD) > SCCM Abuse > Distribution Point Permits Anonymous Access	AV:A/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N
+varies	Active Directory (AD) > SCCM Abuse > Automatic Device Approval Enabled	AV:A/AC:L/PR:N/UI:N/S:C/C:L/I:H/A:N
+varies	Active Directory (AD) > SCCM Abuse > NTLM Relay From Management Point to Site Database	AV:A/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:N
+varies	Active Directory (AD) > SCCM Abuse > NTLM Relay From Site Server To Site Systems	AV:A/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:N
+varies	Active Directory (AD) > SCCM Abuse > NTLM Relay Via Automatic Client Push Installation	AV:A/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H
+varies	Active Directory (AD) > SCCM Abuse > Privileged Credentials Exposed In Task Sequences, Collection Variables or Network Access Account	AV:A/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:N
+P1	Active Directory (AD) > Kerberos Abuse > Domain Compromise via Unconstrained Delegated	AV:A/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H
+P2	Active Directory (AD) > Kerberos Abuse > Insecure Service Account Management (Kerberoasting)	AV:A/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:N
+P2	Active Directory (AD) > Kerberos Abuse > User Does Not Require Pre-authentication (ASREPRoasting)	AV:A/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N
+varies	Active Directory (AD) > Misconfigured Active Directory Certificate Services (ADCS)	AV:A/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:N
+varies	Active Directory (AD) > Configuration Weaknesses > Passwords Found within Domain User Account Description	AV:A/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:N
+P2	Active Directory (AD) > Configuration Weaknesses > Weak Domain Password Policy	AV:A/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N
+P2	Active Directory (AD) > Configuration Weaknesses > Shared Administrator Passwords	AV:A/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H
+P3	Active Directory (AD) > Configuration Weaknesses > Excessive Domain Admin Membership	AV:A/AC:L/PR:L/UI:N/S:C/C:L/I:L/A:N
+P3	Active Directory (AD) > Configuration Weaknesses > Dormant / Inactive User Accounts Enabled in the Domain	AV:A/AC:L/PR:L/UI:N/S:C/C:L/I:L/A:N
+varies	Active Directory (AD) > Sensitive Data Exposure > LDAP Anonymous Bind Enabled	AV:A/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N
+varies	Active Directory (AD) > Sensitive Data Exposure > Sensitive Data in Open File Shares	AV:A/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N
+varies	Active Directory (AD) > DACL Abuse	AV:A/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:N

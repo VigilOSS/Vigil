@@ -235,7 +235,7 @@ Pexip configuration namespaces are admin-tier endpoints — assume the managemen
 
 ## Recording the deep-enum result
 
-For each vendor class, record one or more findings via `vigil assess record-finding <agent> <finding-json-file>`:
+For each vendor class, record one or more findings via `vigil assess finding record <agent> <finding-json-file>`:
 
 - One finding per **bounded** anonymous-read primitive (org-singleton + chain-walk graph of length ≥ 1).
 - One finding per **systemic** anonymous-read primitive (the bounded-vs-systemic test returned 200 on adjacent IDs).
@@ -251,7 +251,7 @@ The `details` block should include:
 - `bounded_or_systemic` — verdict from §1.5 / §2.4 / §3.4.
 - `installed_packages_or_namespaces` — for Salesforce, the `<PKG>__` set fingerprinted in §1.4; for ServiceNow, the table-prefix set; for Drupal, the bundle-prefix set; for Pexip, the namespaces returning 200.
 
-Record intelligence rows for adjacent assets the chain walk surfaced (DNS records, internal user names, internal hostnames) via `vigil assess record-intel`.
+Record intelligence rows for adjacent assets the chain walk surfaced (DNS records, internal user names, internal hostnames) via `vigil assess intel record`.
 
 ## What to Record
 

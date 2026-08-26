@@ -9,8 +9,12 @@ from __future__ import annotations
 
 import re
 import warnings
-from pathlib import Path
 from typing import Any
+
+from assess.lib.code_languages import (
+    STRUCTURAL_SUPPORTED_LANGUAGES,
+    structural_language_for_file,
+)
 
 # ---------------------------------------------------------------------------
 # Guarded tree-sitter imports
@@ -75,42 +79,6 @@ def _ts_query_captures(lang_obj: Any, query_str: str, root_node: Any) -> dict[st
     return query.captures(root_node)  # type: ignore[return-value]
 
 
-# ---------------------------------------------------------------------------
-# Extension → language mapping (for tree-sitter supported families only)
-# ---------------------------------------------------------------------------
-
-EXTENSION_LANG_MAP: dict[str, str] = {
-    ".java": "java",
-    ".c": "c",
-    ".h": "c",
-    ".cpp": "cpp",
-    ".cc": "cpp",
-    ".cxx": "cpp",
-    ".hpp": "cpp",
-    ".hh": "cpp",
-    ".py": "python",
-    ".js": "javascript",
-    ".jsx": "javascript",
-    ".mjs": "javascript",
-    ".cjs": "javascript",
-    ".ts": "typescript",
-    ".tsx": "typescript",
-    ".go": "go",
-    ".rb": "ruby",
-    ".php": "php",
-    # Lightweight (regex-based) extractors -- not tree-sitter
-    ".sh": "shell",
-    ".bash": "shell",
-    ".zsh": "shell",
-    ".lua": "lua",
-    ".html": "html",
-    ".htm": "html",
-    ".tpl": "html",
-    ".twig": "html",
-    ".css": "css",
-    ".scss": "css",
-}
-
 # Tree-sitter backed languages (full structural parsing)
 _TS_SUPPORTED_LANGUAGES = frozenset({
     "java", "c", "cpp", "python", "javascript", "typescript",
@@ -125,7 +93,7 @@ LIGHTWEIGHT_LANGUAGES = frozenset({
 # Combined set used by consumers (code_index.py / code_index_sync.py / assess
 # backend) to gate which files are indexed. Anything not in this set is
 # skipped silently with skipped_unsupported++.
-SUPPORTED_LANGUAGES = _TS_SUPPORTED_LANGUAGES | LIGHTWEIGHT_LANGUAGES
+SUPPORTED_LANGUAGES = STRUCTURAL_SUPPORTED_LANGUAGES
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +191,11 @@ _FUNCTION_QUERIES: dict[str, str] = {
         (method_declaration) @func
     """,
 }
+
+_CPP_DECLARATION_QUERY = """
+    (declaration) @decl
+    (field_declaration) @decl
+"""
 
 _CLASS_QUERIES: dict[str, str] = {
     "java": """(class_declaration) @cls""",
@@ -547,9 +520,6 @@ _ENTRY_LINE_PATTERNS: dict[str, list[dict[str, str]]] = {
         {"pattern": r"\bexport\s+default\s+function\b", "kind": "default_export"},
         {"pattern": r"\bmodule\.exports\b", "kind": "module_exports"},
     ],
-    "python": [
-        {"pattern": r"if\s+__name__\s*==\s*['\"]__main__['\"]", "kind": "main_guard"},
-    ],
     "c": [
         {"pattern": r"\b\w+_handler\s*\(", "kind": "handler_callback"},
         {"pattern": r"\b\w+_callback\s*\(", "kind": "handler_callback"},
@@ -570,13 +540,21 @@ _ENTRY_LINE_PATTERNS: dict[str, list[dict[str, str]]] = {
         {"pattern": r"\bpost\s+['\"/]", "kind": "sinatra_route"},
         {"pattern": r"\bput\s+['\"/]", "kind": "sinatra_route"},
         {"pattern": r"\bdelete\s+['\"/]", "kind": "sinatra_route"},
-        {"pattern": r"if\s+__FILE__\s*==\s*\$0", "kind": "main_guard"},
-        {"pattern": r"if\s+\$PROGRAM_NAME\s*==\s*__FILE__", "kind": "main_guard"},
     ],
     "php": [
         {"pattern": r"\bRoute::\w+\s*\(", "kind": "laravel_route"},
         {"pattern": r"\$app->\w+\s*\(", "kind": "slim_route"},
         {"pattern": r"\$router->\w+\s*\(", "kind": "framework_route"},
+    ],
+}
+
+_GLOBAL_ENTRY_LINE_PATTERNS: dict[str, list[dict[str, str]]] = {
+    "python": [
+        {"pattern": r"^\s*if\s+__name__\s*==\s*['\"]__main__['\"]", "kind": "main_guard"},
+    ],
+    "ruby": [
+        {"pattern": r"^\s*if\s+__FILE__\s*==\s*\$0", "kind": "main_guard"},
+        {"pattern": r"^\s*if\s+\$PROGRAM_NAME\s*==\s*__FILE__", "kind": "main_guard"},
     ],
 }
 
@@ -609,8 +587,309 @@ def _query_language_family(language: str) -> str:
     return language
 
 
+_CPP_NAME_NODE_TYPES = frozenset({
+    "conversion_operator",
+    "destructor_name",
+    "field_identifier",
+    "identifier",
+    "literal_operator_name",
+    "operator_name",
+    "qualified_identifier",
+    "template_function",
+})
+_CPP_OBJECT_DECLARATOR_TYPES = frozenset({
+    "abstract_array_declarator",
+    "abstract_pointer_declarator",
+    "abstract_reference_declarator",
+    "array_declarator",
+    "pointer_declarator",
+    "reference_declarator",
+})
+_CPP_SIGNATURE_QUALIFIER_TYPES = frozenset({
+    "noexcept",
+    "ref_qualifier",
+    "requires_clause",
+    "type_qualifier",
+})
+
+
+def _field_children(node: Any, field_name: str) -> list[Any]:
+    """Return direct children carrying *field_name* across tree-sitter APIs."""
+    return [
+        child
+        for index, child in enumerate(node.children)
+        if node.field_name_for_child(index) == field_name
+    ]
+
+
+def _cpp_declarator_child(node: Any) -> Any | None:
+    child = node.child_by_field_name("declarator")
+    if child is not None:
+        return child
+    if node.type in {
+        "abstract_pointer_declarator",
+        "abstract_reference_declarator",
+        "parenthesized_declarator",
+        "pointer_declarator",
+        "reference_declarator",
+    }:
+        named_children = list(node.named_children)
+        if len(named_children) == 1:
+            return named_children[0]
+    return None
+
+
+def _cpp_declarator_path(declarator: Any) -> list[Any]:
+    """Follow only the declared-name spine, excluding params and initializers."""
+    path = [declarator]
+    current = declarator
+    while current.type not in _CPP_NAME_NODE_TYPES:
+        current = _cpp_declarator_child(current)
+        if current is None:
+            return []
+        path.append(current)
+    return path
+
+
+def _cpp_conversion_callable(
+    declarator: Any,
+    source: bytes,
+) -> tuple[Any, str, str] | None:
+    scope = ""
+    conversion = declarator
+    if declarator.type == "qualified_identifier":
+        conversion = declarator.child_by_field_name("name")
+        scope_node = declarator.child_by_field_name("scope")
+        if scope_node is not None:
+            scope = _node_text(scope_node, source)
+    if conversion is None or conversion.type != "operator_cast":
+        return None
+
+    function_declarator = conversion.child_by_field_name("declarator")
+    while function_declarator is not None and function_declarator.type not in {
+        "abstract_function_declarator",
+        "function_declarator",
+    }:
+        function_declarator = _cpp_declarator_child(function_declarator)
+    operator_node = next(
+        (child for child in conversion.children if child.type == "operator"),
+        None,
+    )
+    if function_declarator is None or operator_node is None:
+        return None
+    target_type = source[operator_node.end_byte:function_declarator.start_byte].decode(
+        "utf-8", errors="replace"
+    ).strip()
+    if not target_type:
+        return None
+    name = f"operator {target_type}"
+    return function_declarator, name, scope
+
+
+def _cpp_callable_declarator(
+    declarator: Any,
+    source: bytes,
+) -> tuple[Any, str, str] | None:
+    """Return the function declarator and name for an actual callable symbol.
+
+    Walking from the declared name outward distinguishes a function returning
+    a pointer from a pointer object whose pointee is a function: the nearest
+    meaningful wrapper decides which one was declared.
+    """
+    conversion = _cpp_conversion_callable(declarator, source)
+    if conversion is not None:
+        return conversion
+
+    path = _cpp_declarator_path(declarator)
+    if not path:
+        return None
+    name_node = path[-1]
+    for wrapper in reversed(path[:-1]):
+        if wrapper.type == "function_declarator":
+            scope = ""
+            leaf_node = name_node
+            if name_node.type == "qualified_identifier":
+                scope_node = name_node.child_by_field_name("scope")
+                qualified_leaf = name_node.child_by_field_name("name")
+                if scope_node is not None:
+                    scope = _node_text(scope_node, source)
+                if qualified_leaf is not None:
+                    leaf_node = qualified_leaf
+            return wrapper, _node_text(leaf_node, source), scope
+        if wrapper.type in _CPP_OBJECT_DECLARATOR_TYPES:
+            return None
+    return None
+
+
+def _cpp_namespace_qualifier(node: Any, source: bytes) -> str:
+    namespaces: list[str] = []
+    current = node.parent
+    while current is not None:
+        if current.type == "namespace_definition":
+            name_node = current.child_by_field_name("name")
+            namespaces.append(
+                _node_text(name_node, source) if name_node is not None else "<anonymous>"
+            )
+        current = current.parent
+    return "::".join(reversed(namespaces))
+
+
+def _cpp_has_ancestor(node: Any, node_type: str) -> bool:
+    current = node.parent
+    while current is not None:
+        if current.type == node_type:
+            return True
+        current = current.parent
+    return False
+
+
+def _cpp_parameter_signature(params_node: Any, source: bytes) -> tuple[str, ...]:
+    """Build a name-insensitive parameter signature for declaration dedup."""
+    signatures: list[str] = []
+    for parameter in params_node.named_children:
+        if parameter.type == "comment":
+            continue
+        start = parameter.start_byte
+        end = parameter.end_byte
+        default_value = parameter.child_by_field_name("default_value")
+        if default_value is not None:
+            end = default_value.start_byte
+
+        declarator = parameter.child_by_field_name("declarator")
+        path = _cpp_declarator_path(declarator) if declarator is not None else []
+        name_node = path[-1] if path else None
+        if name_node is not None and name_node.start_byte < end:
+            raw = source[start:name_node.start_byte] + source[name_node.end_byte:end]
+        else:
+            raw = source[start:end]
+        canonical = re.sub(rb"\s+", b"", raw).rstrip(b"=").decode(
+            "utf-8", errors="replace"
+        )
+        signatures.append(canonical)
+    return tuple(signatures)
+
+
+def _cpp_qualifier_signature(function_declarator: Any, source: bytes) -> tuple[str, ...]:
+    return tuple(
+        re.sub(r"\s+", "", _node_text(child, source))
+        for child in function_declarator.named_children
+        if child.type in _CPP_SIGNATURE_QUALIFIER_TYPES
+    )
+
+
+def _source_character_column(source: bytes, byte_offset: int) -> int:
+    line_start = source.rfind(b"\n", 0, byte_offset) + 1
+    return len(source[line_start:byte_offset].decode("utf-8", errors="replace"))
+
+
+def _node_character_range(node: Any, source: bytes) -> tuple[int, int, int, int]:
+    return (
+        node.start_point[0] + 1,
+        _source_character_column(source, node.start_byte),
+        node.end_point[0] + 1,
+        _source_character_column(source, node.end_byte),
+    )
+
+
+def _parse_cpp_callable(
+    *,
+    container: Any,
+    declarator: Any,
+    source: bytes,
+    is_declaration: bool,
+) -> dict[str, Any] | None:
+    callable_parts = _cpp_callable_declarator(declarator, source)
+    if callable_parts is None:
+        return None
+    function_declarator, name, declared_scope = callable_parts
+    params_node = function_declarator.child_by_field_name("parameters")
+    start_line, end_line = _node_lines(container)
+    parsed = {
+        "name": name,
+        "qualified_name": name,
+        "line_start": start_line,
+        "line_end": end_line,
+        "params": _extract_params(params_node, source) if params_node else [],
+        "modifiers": [],
+        "annotations": [],
+        "is_entry_point": False,
+        "is_declaration": is_declaration,
+        "_start_byte": container.start_byte,
+        "_end_byte": container.end_byte,
+        "_cpp_is_friend": _cpp_has_ancestor(container, "friend_declaration"),
+        "_cpp_declared_scope": declared_scope,
+        "_cpp_namespace": _cpp_namespace_qualifier(container, source),
+        "_cpp_parameter_signature": (
+            _cpp_parameter_signature(params_node, source) if params_node else ()
+        ),
+        "_cpp_qualifier_signature": _cpp_qualifier_signature(
+            function_declarator, source
+        ),
+    }
+    body = container.child_by_field_name("body")
+    if body is not None:
+        (
+            parsed["_body_start_line"],
+            parsed["_body_start_column"],
+            parsed["_body_end_line"],
+            parsed["_body_end_column"],
+        ) = _node_character_range(body, source)
+
+    initializer_ranges: list[tuple[int, int, int, int]] = []
+    for child in container.named_children:
+        if child.type != "field_initializer_list":
+            continue
+        for initializer in child.named_children:
+            if initializer.type != "field_initializer":
+                continue
+            initializer_children = list(initializer.named_children)
+            if len(initializer_children) >= 2:
+                initializer_ranges.append(
+                    _node_character_range(initializer_children[-1], source)
+                )
+    if initializer_ranges:
+        parsed["_initializer_ranges"] = initializer_ranges
+    return parsed
+
+
+def _extract_cpp_declarations(
+    tree: Any,
+    language: str,
+    source: bytes,
+) -> list[dict[str, Any]]:
+    parser = _get_parser(language)
+    if parser is None:
+        return []
+    captures = _ts_query_captures(
+        parser.language,
+        _CPP_DECLARATION_QUERY,
+        tree.root_node,
+    )
+    declarations: list[dict[str, Any]] = []
+    seen_declarators: set[tuple[int, int]] = set()
+    for node in captures.get("decl", []):
+        for declarator in _field_children(node, "declarator"):
+            callable_parts = _cpp_callable_declarator(declarator, source)
+            if callable_parts is None:
+                continue
+            function_declarator, _name, _scope = callable_parts
+            source_range = (function_declarator.start_byte, function_declarator.end_byte)
+            if source_range in seen_declarators:
+                continue
+            seen_declarators.add(source_range)
+            parsed = _parse_cpp_callable(
+                container=node,
+                declarator=declarator,
+                source=source,
+                is_declaration=True,
+            )
+            if parsed is not None:
+                declarations.append(parsed)
+    return declarations
+
+
 def _extract_functions_ts(tree: Any, language: str, source: bytes) -> list[dict[str, Any]]:
-    """Extract function/method definitions using tree-sitter queries."""
+    """Extract function/method definitions and C++ declarations."""
     query_language = _query_language_family(language)
     query_str = _FUNCTION_QUERIES.get(query_language)
     if not query_str:
@@ -629,14 +908,17 @@ def _extract_functions_ts(tree: Any, language: str, source: bytes) -> list[dict[
     nodes = captures.get("func", [])
 
     for node in nodes:
-        start_line, end_line = _node_lines(node)
-        if (start_line, end_line) in seen_ranges:
+        source_range = (node.start_byte, node.end_byte)
+        if source_range in seen_ranges:
             continue
-        seen_ranges.add((start_line, end_line))
+        seen_ranges.add(source_range)
 
         func_info = _parse_function_node(node, language, source)
         if func_info:
             functions.append(func_info)
+
+    if query_language == "cpp":
+        functions.extend(_extract_cpp_declarations(tree, language, source))
 
     return functions
 
@@ -663,10 +945,18 @@ def _parse_function_node(node: Any, language: str, source: bytes) -> dict[str, A
                         annotations.append(txt.split("(")[0])
                     else:
                         modifiers.append(txt)
-    elif language in ("c", "cpp"):
+    elif language == "cpp":
+        decl = node.child_by_field_name("declarator")
+        if decl is not None:
+            return _parse_cpp_callable(
+                container=node,
+                declarator=decl,
+                source=source,
+                is_declaration=False,
+            )
+    elif language == "c":
         decl = node.child_by_field_name("declarator")
         if decl:
-            # function_declarator -> identifier + parameter_list
             for child in decl.children:
                 if child.type == "identifier":
                     name = _node_text(child, source)
@@ -674,7 +964,6 @@ def _parse_function_node(node: Any, language: str, source: bytes) -> dict[str, A
                     params = _extract_params(child, source)
                 elif child.type == "field_identifier":
                     name = _node_text(child, source)
-                # Handle qualified identifiers (ns::func)
                 elif child.type == "qualified_identifier":
                     name = _node_text(child, source)
     elif language == "python":
@@ -751,7 +1040,8 @@ def _extract_params(params_node: Any, source: bytes) -> list[str]:
                           "required_parameter", "optional_parameter",
                           "typed_parameter", "default_parameter",
                           "identifier", "typed_default_parameter",
-                          "parameter_declaration", "simple_parameter",
+                          "parameter_declaration", "optional_parameter_declaration",
+                          "simple_parameter",
                           "variadic_parameter", "optional_parameter",
                           "keyword_parameter", "block_parameter",
                           "splat_parameter", "hash_splat_parameter"):
@@ -872,13 +1162,18 @@ def _parse_class_node(node: Any, language: str, source: bytes) -> dict[str, Any]
     if not name:
         return None
 
-    return {
+    parsed_class = {
         "name": name,
         "extends": extends,
         "implements": implements,
         "line_start": start_line,
         "line_end": end_line,
+        "_start_byte": node.start_byte,
+        "_end_byte": node.end_byte,
     }
+    if language == "cpp":
+        parsed_class["_cpp_namespace"] = _cpp_namespace_qualifier(node, source)
+    return parsed_class
 
 
 _RUBY_REQUIRE_RE = re.compile(
@@ -941,6 +1236,37 @@ def _extract_ruby_imports(source: bytes) -> list[str]:
         for m in _RUBY_REQUIRE_RE.finditer(line):
             imports.append(m.group(1))
     return imports
+
+
+def _detect_top_level_entry_points(
+    tree: Any,
+    language: str,
+    source_lines: list[str],
+) -> list[dict[str, Any]]:
+    """Detect guards whose conditional node is a direct program child."""
+    entry_points: list[dict[str, Any]] = []
+    seen: set[tuple[int, str]] = set()
+    patterns = _GLOBAL_ENTRY_LINE_PATTERNS.get(language, [])
+    if not patterns:
+        return entry_points
+
+    for node in getattr(tree.root_node, "named_children", ()):
+        line_number = node.start_point[0] + 1
+        if line_number > len(source_lines):
+            continue
+        line = source_lines[line_number - 1]
+        for pattern in patterns:
+            identity = (line_number, pattern["kind"])
+            if identity in seen or not re.search(pattern["pattern"], line):
+                continue
+            entry_points.append({
+                "name": "<top-level>",
+                "line": line_number,
+                "kind": pattern["kind"],
+                "annotation": "",
+            })
+            seen.add(identity)
+    return entry_points
 
 
 def _detect_entry_points(
@@ -1058,6 +1384,39 @@ def _detect_entry_points(
     return entry_points
 
 
+def _function_scan_lines(
+    function: dict[str, Any],
+    source_lines: list[str],
+) -> list[tuple[int, str]]:
+    """Return source segments that execute as part of a function definition."""
+    body_start_line = function.get("_body_start_line")
+    if body_start_line is None:
+        start = max(0, function["line_start"] - 1)
+        end = min(len(source_lines), function["line_end"])
+        return [(line_index, source_lines[line_index]) for line_index in range(start, end)]
+
+    lines: list[tuple[int, str]] = []
+    ranges = [
+        *function.get("_initializer_ranges", []),
+        (
+            body_start_line,
+            function["_body_start_column"],
+            function["_body_end_line"],
+            function["_body_end_column"],
+        ),
+    ]
+    for start_line, start_column, end_line, end_column in ranges:
+        for line_number in range(start_line, end_line + 1):
+            line_index = line_number - 1
+            if not 0 <= line_index < len(source_lines):
+                continue
+            line = source_lines[line_index]
+            segment_start = start_column if line_number == start_line else 0
+            segment_end = end_column if line_number == end_line else len(line)
+            lines.append((line_index, line[segment_start:segment_end]))
+    return lines
+
+
 def _detect_sinks(
     functions: list[dict[str, Any]],
     language: str,
@@ -1067,15 +1426,15 @@ def _detect_sinks(
     sinks: list[dict[str, Any]] = []
 
     for func in functions:
-        start_idx = max(0, func["line_start"] - 1)
-        end_idx = min(len(source_lines), func["line_end"])
+        if func.get("is_declaration", False):
+            continue
+        scan_lines = _function_scan_lines(func, source_lines)
 
         for sink_def in _SINK_DEFINITIONS:
             lang_patterns = sink_def["patterns"].get(language, [])
             for pat in lang_patterns:
                 compiled = re.compile(pat)
-                for line_idx in range(start_idx, end_idx):
-                    line_text = source_lines[line_idx]
+                for line_idx, line_text in scan_lines:
                     # Skip comment-only lines
                     stripped = line_text.strip()
                     if stripped.startswith("//") or stripped.startswith("#") or stripped.startswith("*"):
@@ -1130,8 +1489,8 @@ def _detect_call_sites(
 
     calls: list[dict[str, Any]] = []
     for func in functions:
-        start_idx = max(0, func["line_start"] - 1)
-        end_idx = min(len(source_lines), func["line_end"])
+        if func.get("is_declaration", False):
+            continue
         seen_callees: set[str] = set()
 
         param_names: set[str] = set()
@@ -1142,8 +1501,7 @@ def _detect_call_sites(
                 if tok and tok not in noise and len(tok) > 1:
                     param_names.add(tok)
 
-        for line_idx in range(start_idx, end_idx):
-            line_text = source_lines[line_idx]
+        for line_idx, line_text in _function_scan_lines(func, source_lines):
             stripped = line_text.strip()
             if stripped.startswith("//") or stripped.startswith("#") or stripped.startswith("*"):
                 continue
@@ -1288,15 +1646,143 @@ def _resolve_import_targets(
     return targets
 
 
+def _cpp_qualified_name(
+    namespace: str,
+    declared_scope: str,
+    name: str,
+) -> str:
+    if namespace and (
+        declared_scope == namespace or declared_scope.startswith(f"{namespace}::")
+    ):
+        symbol_scope = declared_scope
+    else:
+        symbol_scope = "::".join(
+            part for part in (namespace, declared_scope) if part
+        )
+    dotted_scope = symbol_scope.replace("::", ".")
+    return f"{dotted_scope}.{name}" if dotted_scope else name
+
+
 def _enrich_qualified_names(
     functions: list[dict[str, Any]],
     classes: list[dict[str, Any]],
+    language: str,
 ) -> None:
     """Set qualified_name to ClassName.method for methods inside classes."""
+    if language == "cpp":
+        for cls in classes:
+            containers = [
+                candidate
+                for candidate in classes
+                if candidate is not cls
+                and candidate["_start_byte"] <= cls["_start_byte"]
+                and cls["_end_byte"] <= candidate["_end_byte"]
+            ]
+            containers.sort(key=lambda candidate: candidate["_start_byte"])
+            namespace = cls.get("_cpp_namespace", "").replace("::", ".")
+            class_parts = [
+                *(candidate["name"] for candidate in containers),
+                cls["name"],
+            ]
+            cls["_qualified_name"] = ".".join(
+                [*([namespace] if namespace else []), *class_parts]
+            )
+
+        for func in functions:
+            containers = [
+                cls
+                for cls in classes
+                if cls["_start_byte"] <= func["_start_byte"]
+                and func["_end_byte"] <= cls["_end_byte"]
+            ]
+            if containers and not func.get("_cpp_is_friend", False):
+                containers.sort(
+                    key=lambda candidate: (
+                        candidate["_end_byte"] - candidate["_start_byte"]
+                    )
+                )
+                func["qualified_name"] = (
+                    f"{containers[0]['_qualified_name']}.{func['name']}"
+                )
+            else:
+                func["qualified_name"] = _cpp_qualified_name(
+                    func.get("_cpp_namespace", ""),
+                    func.get("_cpp_declared_scope", ""),
+                    func["name"],
+                )
+        return
+
     for cls in classes:
         for func in functions:
             if cls["line_start"] <= func["line_start"] <= func["line_end"] <= cls["line_end"]:
                 func["qualified_name"] = f"{cls['name']}.{func['name']}"
+
+
+def _cpp_function_identity(function: dict[str, Any]) -> tuple[Any, ...]:
+    qualified_name = re.sub(
+        r"\s*([*&<>,()\[\]])\s*",
+        r"\1",
+        re.sub(
+            r"\s+",
+            " ",
+            function["qualified_name"].replace("::", ".").strip(),
+        ),
+    )
+    return (
+        qualified_name,
+        function["_cpp_parameter_signature"],
+        function["_cpp_qualifier_signature"],
+    )
+
+
+def _deduplicate_cpp_functions(
+    functions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Collapse repeated declarations, retaining every distinct definition."""
+    by_identity: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for function in functions:
+        identity = _cpp_function_identity(function)
+        by_identity.setdefault(identity, []).append(function)
+
+    retained: list[dict[str, Any]] = []
+    for matching_functions in by_identity.values():
+        definitions = [
+            function
+            for function in matching_functions
+            if not function["is_declaration"]
+        ]
+        retained.extend(definitions or matching_functions[:1])
+    return sorted(retained, key=lambda function: function["_start_byte"])
+
+
+def _remove_internal_structural_fields(
+    functions: list[dict[str, Any]],
+    classes: list[dict[str, Any]],
+) -> None:
+    for function in functions:
+        for field_name in (
+            "_body_end_column",
+            "_body_end_line",
+            "_body_start_column",
+            "_body_start_line",
+            "_initializer_ranges",
+            "_cpp_parameter_signature",
+            "_cpp_qualifier_signature",
+            "_cpp_declared_scope",
+            "_cpp_is_friend",
+            "_cpp_namespace",
+            "_end_byte",
+            "_start_byte",
+        ):
+            function.pop(field_name, None)
+    for cls in classes:
+        for field_name in (
+            "_cpp_namespace",
+            "_end_byte",
+            "_qualified_name",
+            "_start_byte",
+        ):
+            cls.pop(field_name, None)
 
 
 # ---------------------------------------------------------------------------
@@ -1988,6 +2474,520 @@ def _extract_css(
 # Public API
 # ---------------------------------------------------------------------------
 
+STREAMING_SCAN_WINDOW_BYTES = 64 * 1024
+STREAMING_SCAN_OVERLAP_BYTES = 512
+STRUCTURAL_SIGNAL_LIMIT = 2_000
+STREAMING_FALLBACK_BASELINE_UNAVAILABLE = frozenset({
+    "call_sites",
+    "classes",
+    "dataflow",
+    "exports",
+    "functions",
+})
+_UNSUPPORTED_UNAVAILABLE_DIMENSIONS = [
+    "call_sites",
+    "classes",
+    "dataflow",
+    "entry_points",
+    "exports",
+    "functions",
+    "imports",
+    "security_sinks",
+    "security_sources",
+]
+_SIGNAL_DIMENSIONS = (
+    "entry_points",
+    "imports",
+    "security_sinks",
+    "security_sources",
+)
+_CAPPED_INDEX_LISTS = (
+    "call_sites",
+    "classes",
+    "entry_points",
+    "exports",
+    "functions",
+    "import_targets",
+    "imports",
+    "security_sinks",
+    "security_sources",
+)
+
+_STREAM_SOURCE_PATTERNS: dict[str, list[tuple[str, str, list[str]]]] = {
+    "python": [
+        ("http_request_input", r"\brequest\.(?:args|form|json|values|files|headers)\b", ["tainted-input"]),
+        ("process_input", r"\b(?:sys\.argv|os\.environ|getenv\s*\(|input\s*\()", ["tainted-input"]),
+    ],
+    "javascript": [
+        ("http_request_input", r"\breq\.(?:params|query|body|headers|cookies)\b", ["tainted-input"]),
+        ("process_input", r"\bprocess\.(?:argv|env)\b", ["tainted-input"]),
+    ],
+    "typescript": [
+        ("http_request_input", r"\breq\.(?:params|query|body|headers|cookies)\b", ["tainted-input"]),
+        ("process_input", r"\bprocess\.(?:argv|env)\b", ["tainted-input"]),
+    ],
+    "java": [
+        ("http_request_input", r"\bget(?:Parameter|Header|InputStream)\s*\(", ["tainted-input"]),
+        ("process_input", r"\bSystem\.getenv\s*\(", ["tainted-input"]),
+    ],
+    "go": [
+        ("http_request_input", r"\br\.(?:URL\.Query|FormValue|Header\.Get)\s*\(", ["tainted-input"]),
+        ("process_input", r"\bos\.(?:Args|Getenv)\b", ["tainted-input"]),
+    ],
+    "ruby": [
+        ("http_request_input", r"\b(?:params\s*\[|request\.)", ["tainted-input"]),
+        ("process_input", r"\b(?:ENV\s*\[|ARGV\b)", ["tainted-input"]),
+    ],
+    "php": [
+        ("http_request_input", r"\$_(?:GET|POST|REQUEST|COOKIE|FILES|SERVER)\b", ["tainted-input"]),
+        ("process_input", r"\bgetenv\s*\(", ["tainted-input"]),
+    ],
+    "c": [
+        ("process_input", r"\b(?:argv\s*\[|getenv\s*\(|read\s*\(|recv\s*\()", ["tainted-input"]),
+    ],
+    "cpp": [
+        ("process_input", r"\b(?:argv\s*\[|getenv\s*\(|read\s*\(|recv\s*\()", ["tainted-input"]),
+    ],
+    "shell": [
+        ("positional_parameter", r"\$(?:[1-9]|@|\*)\b", ["tainted-input"]),
+        ("environment_input", r"\$\{?[A-Z_][A-Z0-9_]*\}?", ["tainted-input"]),
+    ],
+    "dockerfile": [
+        ("build_argument", r"^\s*(?:ARG|ENV)\s+[A-Za-z_][A-Za-z0-9_]*", ["tainted-input"]),
+    ],
+    "lua": [
+        ("script_argument", r"\b(?:ARGV|KEYS)\s*\[", ["tainted-input"]),
+    ],
+    "html": [
+        ("template_input", r"\{\{[^}\r\n]+\}\}|<%[^%\r\n]+%>", ["tainted-input"]),
+    ],
+    "css": [
+        ("template_input", r"\{\{[^}\r\n]+\}\}|<%[^%\r\n]+%>", ["tainted-input"]),
+    ],
+}
+
+_STREAM_IMPORT_PATTERNS: dict[str, list[str]] = {
+    "python": [r"\b(?:from\s+[\w.]+\s+import\b[^\r\n]*|import\s+[^\r\n]+)"],
+    "javascript": [r"\bimport\b[^\r\n]*", r"\brequire\s*\([^\r\n]*"],
+    "typescript": [r"\bimport\b[^\r\n]*", r"\brequire\s*\([^\r\n]*"],
+    "java": [r"\bimport\s+[\w.*]+"],
+    "go": [r"\bimport\s*(?:\([^\r\n]*|[\"`][^\"`]+[\"`])"],
+    "ruby": [r"\b(?:require|require_relative|load)\s*\(?\s*['\"][^'\"]+"],
+    "php": [r"\b(?:include|include_once|require|require_once|use)\b[^\r\n;]*"],
+    "c": [r"#\s*include\s*[<\"][^>\"]+[>\"]"],
+    "cpp": [r"#\s*include\s*[<\"][^>\"]+[>\"]"],
+    "lua": [r"\brequire\s*\(?\s*['\"][^'\"]+"],
+    "dockerfile": [r"^\s*(?:FROM|ADD)\s+[^\r\n]+"],
+    "shell": [r"^\s*(?:\.|source)\s+[^\r\n]+"],
+    "html": [r"<(?:script|link|iframe)\b[^>]*(?:src|href)\s*=\s*['\"]?[^'\"\s>]+"],
+    "css": [r"@import\s+(?:url\()?\s*['\"]?[^'\"\s)]+"],
+}
+
+_STREAM_EXTRA_SINK_PATTERNS: dict[str, list[tuple[str, str, list[str]]]] = {
+    "dockerfile": [
+        ("remote_pipe_to_shell", r"\b(?:curl|wget)\b[^\r\n|;]*\|\s*(?:sh|bash|zsh)\b", ["supply-chain", "injection"]),
+        ("permissive_chmod", r"\bchmod\s+(?:-R\s+)?[0-7]*777\b", ["privilege-escalation"]),
+    ],
+    "shell": [
+        ("shell_eval", r"\beval\b", ["injection"]),
+        ("remote_pipe_to_shell", r"\b(?:curl|wget)\b[^\r\n|;]*\|\s*(?:sh|bash|zsh)\b", ["supply-chain", "injection"]),
+    ],
+    "lua": [
+        ("dynamic_code_load", r"\b(?:loadstring|load)\s*\(", ["injection"]),
+        ("os_execute", r"\bos\.execute\s*\(", ["injection"]),
+    ],
+    "html": [
+        ("inline_event_handler", r"\bon[a-z]+\s*=\s*['\"][^'\"]+['\"]", ["xss"]),
+        ("template_interpolation", r"\{\{[^}\r\n]+\}\}", ["xss", "ssti"]),
+    ],
+    "css": [
+        ("css_expression", r"\bexpression\s*\(", ["xss"]),
+        ("css_behavior", r"\bbehavior\s*:", ["xss"]),
+    ],
+}
+
+_STREAM_EXTRA_ENTRY_PATTERNS: dict[str, list[tuple[str, str]]] = {
+    "shell": [("shell_script", r"^#!")],
+    "dockerfile": [
+        ("container_cmd", r"^\s*CMD\b"),
+        ("container_entrypoint", r"^\s*ENTRYPOINT\b"),
+    ],
+    "html": [("html_form", r"<form\b[^>]*\baction\s*=")],
+}
+
+
+def _byte_pattern(pattern: str) -> re.Pattern[bytes]:
+    return re.compile(pattern.encode("ascii"), re.IGNORECASE)
+
+
+class StreamingSecurityScanner:
+    """Bounded line/window scanner used when exact structural parsing is unavailable."""
+
+    def __init__(
+        self,
+        file_path: str,
+        language: str,
+        *,
+        signal_limit: int = STRUCTURAL_SIGNAL_LIMIT,
+        window_bytes: int = STREAMING_SCAN_WINDOW_BYTES,
+        overlap_bytes: int = STREAMING_SCAN_OVERLAP_BYTES,
+    ) -> None:
+        if signal_limit < 1:
+            raise ValueError("signal_limit must be positive")
+        if overlap_bytes < 1 or window_bytes <= overlap_bytes:
+            raise ValueError("streaming scan window must exceed its positive overlap")
+        self.file_path = file_path
+        self.language = language
+        self.signal_limit = signal_limit
+        self.window_bytes = window_bytes
+        self.overlap_bytes = overlap_bytes
+        self._stride = window_bytes - overlap_bytes
+        self._line_buffer = bytearray()
+        self._line_number = 1
+        self._line_had_bytes = False
+        self._line_comment: bool | None = None
+        self._pending_cr = False
+        self.bytes_scanned = 0
+        self.total_lines = 0
+        self.entry_points: list[dict[str, Any]] = []
+        self.imports: list[str] = []
+        self.import_targets: list[dict[str, Any]] = []
+        self.security_sinks: list[dict[str, Any]] = []
+        self.security_sources: list[dict[str, Any]] = []
+        self.signal_counts = {dimension: 0 for dimension in _SIGNAL_DIMENSIONS}
+        self._truncated: set[str] = set()
+        self._sink_patterns = self._compile_sink_patterns()
+        self._source_patterns = [
+            (kind, _byte_pattern(pattern), vuln_classes)
+            for kind, pattern, vuln_classes in _STREAM_SOURCE_PATTERNS.get(language, [])
+        ]
+        self._entry_patterns = [
+            (item["kind"], _byte_pattern(item["pattern"]))
+            for item in (
+                _ENTRY_ANNOTATIONS.get(language, []) + _ENTRY_LINE_PATTERNS.get(language, [])
+            )
+        ] + [
+            (kind, _byte_pattern(pattern))
+            for kind, pattern in _STREAM_EXTRA_ENTRY_PATTERNS.get(language, [])
+        ]
+        self._import_patterns = [
+            _byte_pattern(pattern) for pattern in _STREAM_IMPORT_PATTERNS.get(language, [])
+        ]
+
+    def _compile_sink_patterns(
+        self,
+    ) -> list[tuple[str, re.Pattern[bytes], list[str]]]:
+        patterns: list[tuple[str, re.Pattern[bytes], list[str]]] = []
+        for definition in _SINK_DEFINITIONS:
+            for pattern in definition["patterns"].get(self.language, []):
+                patterns.append(
+                    (
+                        str(definition["kind"]),
+                        _byte_pattern(pattern),
+                        list(definition["vuln_classes"]),
+                    )
+                )
+        for kind, pattern, vuln_classes in _STREAM_EXTRA_SINK_PATTERNS.get(
+            self.language, []
+        ):
+            patterns.append((kind, _byte_pattern(pattern), vuln_classes))
+        return patterns
+
+    def feed(self, chunk: bytes) -> None:
+        """Consume a fixed source chunk without retaining an attacker-sized line."""
+        if not chunk:
+            return
+        self.bytes_scanned += len(chunk)
+        position = 0
+        if self._pending_cr:
+            if chunk.startswith(b"\n"):
+                position = 1
+            self._pending_cr = False
+        while position < len(chunk):
+            carriage = chunk.find(b"\r", position)
+            newline = chunk.find(b"\n", position)
+            separators = [value for value in (carriage, newline) if value >= 0]
+            if not separators:
+                self._append_line_bytes(chunk[position:])
+                return
+            separator = min(separators)
+            self._append_line_bytes(chunk[position:separator])
+            byte = chunk[separator]
+            self._finish_line()
+            position = separator + 1
+            if byte == 0x0D:
+                if position < len(chunk) and chunk[position] == 0x0A:
+                    position += 1
+                elif position == len(chunk):
+                    self._pending_cr = True
+
+    def _append_line_bytes(self, data: bytes) -> None:
+        if not data:
+            return
+        self._line_had_bytes = True
+        if self._line_comment is None:
+            stripped = data.lstrip(b" \t\v\f")
+            if stripped:
+                hash_comment = self.language not in {"c", "cpp"} and not (
+                    self.language == "shell" and stripped.startswith(b"#!")
+                )
+                self._line_comment = stripped.startswith(b"//") or (
+                    hash_comment and stripped.startswith(b"#")
+                )
+        self._line_buffer.extend(data)
+        while len(self._line_buffer) >= self.window_bytes:
+            window = bytes(self._line_buffer[: self.window_bytes])
+            self._scan_window(window, accept_before=self._stride)
+            del self._line_buffer[: self._stride]
+
+    def _finish_line(self) -> None:
+        if self._line_buffer:
+            self._scan_window(bytes(self._line_buffer), accept_before=len(self._line_buffer))
+        self.total_lines += 1
+        self._line_number += 1
+        self._line_buffer.clear()
+        self._line_had_bytes = False
+        self._line_comment = None
+
+    @staticmethod
+    def _snippet(window: bytes, start: int, end: int) -> str:
+        left = max(0, start - 48)
+        right = min(len(window), max(end + 72, start + 120))
+        text = window[left:right].decode("utf-8", errors="replace").strip()
+        return text if len(text) <= 120 else text[:117] + "..."
+
+    def _retain(self, dimension: str, record: dict[str, Any] | str) -> None:
+        self.signal_counts[dimension] += 1
+        target = getattr(self, dimension)
+        if len(target) < self.signal_limit:
+            target.append(record)
+        else:
+            self._truncated.add(dimension)
+
+    def _scan_window(self, window: bytes, *, accept_before: int) -> None:
+        if self._line_comment is True:
+            return
+        for kind, pattern, vuln_classes in self._sink_patterns:
+            for match in pattern.finditer(window):
+                if match.start() >= accept_before:
+                    continue
+                self._retain(
+                    "security_sinks",
+                    {
+                        "kind": kind,
+                        "line": self._line_number,
+                        "function": "<streaming>",
+                        "snippet": self._snippet(window, match.start(), match.end()),
+                        "vuln_classes": vuln_classes,
+                        "detection": "heuristic_streaming",
+                    },
+                )
+        for kind, pattern, vuln_classes in self._source_patterns:
+            for match in pattern.finditer(window):
+                if match.start() >= accept_before:
+                    continue
+                self._retain(
+                    "security_sources",
+                    {
+                        "kind": kind,
+                        "line": self._line_number,
+                        "snippet": self._snippet(window, match.start(), match.end()),
+                        "vuln_classes": vuln_classes,
+                        "detection": "heuristic_streaming",
+                    },
+                )
+        for kind, pattern in self._entry_patterns:
+            for match in pattern.finditer(window):
+                if match.start() >= accept_before:
+                    continue
+                self._retain(
+                    "entry_points",
+                    {
+                        "name": kind,
+                        "line": self._line_number,
+                        "kind": kind,
+                        "annotation": "",
+                        "detection": "heuristic_streaming",
+                    },
+                )
+        for pattern in self._import_patterns:
+            for match in pattern.finditer(window):
+                if match.start() >= accept_before:
+                    continue
+                raw = self._snippet(window, match.start(), match.end())
+                self.signal_counts["imports"] += 1
+                if len(self.imports) < self.signal_limit:
+                    self.imports.append(raw)
+                    self.import_targets.append(
+                        {
+                            "raw": raw,
+                            "resolved": "",
+                            "line": self._line_number,
+                            "detection": "heuristic_streaming",
+                        }
+                    )
+                else:
+                    self._truncated.add("imports")
+
+    def finish(self, *, degradation_reason: str) -> dict[str, Any]:
+        if self._line_had_bytes:
+            self._finish_line()
+        truncated = sorted(self._truncated)
+        unavailable = set(STREAMING_FALLBACK_BASELINE_UNAVAILABLE)
+        for dimension, patterns in (
+            ("entry_points", self._entry_patterns),
+            ("imports", self._import_patterns),
+            ("security_sinks", self._sink_patterns),
+            ("security_sources", self._source_patterns),
+        ):
+            if not patterns:
+                unavailable.add(dimension)
+        return {
+            "file_path": self.file_path,
+            "language": self.language,
+            "structural_index_available": False,
+            "analysis_status": "degraded",
+            "analysis_mode": "streaming_security_fallback",
+            "degradation_reason": degradation_reason,
+            "source_size": self.bytes_scanned,
+            "bytes_scanned": self.bytes_scanned,
+            "unavailable_dimensions": sorted(unavailable),
+            "artifact_truncated": bool(truncated),
+            "truncated_dimensions": truncated,
+            "signal_counts": dict(self.signal_counts),
+            "signal_limit_per_dimension": self.signal_limit,
+            "scan_window_bytes": self.window_bytes,
+            "scan_overlap_bytes": self.overlap_bytes,
+            "total_functions": 0,
+            "total_exports": 0,
+            "total_lines": self.total_lines,
+            "functions": [],
+            "entry_points": self.entry_points,
+            "security_sinks": self.security_sinks,
+            "security_sources": self.security_sources,
+            "call_sites": [],
+            "imports": self.imports,
+            "import_targets": self.import_targets,
+            "exports": [],
+            "classes": [],
+        }
+
+
+def streaming_security_fallback(
+    file_path: str,
+    language: str,
+    chunks,
+    *,
+    degradation_reason: str,
+) -> dict[str, Any]:
+    scanner = StreamingSecurityScanner(file_path, language)
+    for chunk in chunks:
+        scanner.feed(chunk)
+    return scanner.finish(degradation_reason=degradation_reason)
+
+
+def _fallback_from_bytes(
+    file_path: str,
+    language: str,
+    source: bytes,
+    *,
+    degradation_reason: str,
+) -> dict[str, Any]:
+    return streaming_security_fallback(
+        file_path,
+        language,
+        (source[offset : offset + STREAMING_SCAN_WINDOW_BYTES] for offset in range(0, len(source), STREAMING_SCAN_WINDOW_BYTES)),
+        degradation_reason=degradation_reason,
+    )
+
+
+def _attach_bounded_security_sources(
+    indexed: dict[str, Any],
+    *,
+    file_path: str,
+    language: str,
+    source: bytes,
+) -> dict[str, Any]:
+    observed = _fallback_from_bytes(
+        file_path,
+        language,
+        source,
+        degradation_reason="bounded_security_source_scan",
+    )
+    if "security_sources" in observed["unavailable_dimensions"]:
+        raise RuntimeError(f"no bounded security-source detector for {language}")
+    indexed["security_sources"] = observed["security_sources"]
+    counts = dict(indexed.get("signal_counts") or {})
+    counts["security_sources"] = int(observed["signal_counts"]["security_sources"])
+    indexed["signal_counts"] = counts
+    return indexed
+
+
+def _complete_index_metadata(
+    indexed: dict[str, Any],
+    *,
+    source_size: int,
+    analysis_mode: str,
+) -> dict[str, Any]:
+    provided_counts = indexed.get("signal_counts")
+    if not isinstance(provided_counts, dict):
+        provided_counts = {}
+    retained_signal_counts = {
+        "entry_points": len(indexed.get("entry_points", [])),
+        "imports": max(
+            len(indexed.get("imports", [])), len(indexed.get("import_targets", []))
+        ),
+        "security_sinks": len(indexed.get("security_sinks", [])),
+        "security_sources": len(indexed.get("security_sources", [])),
+    }
+    signal_counts: dict[str, int] = {}
+    for dimension, retained in retained_signal_counts.items():
+        observed = provided_counts.get(dimension, retained)
+        if type(observed) is not int or observed < retained:
+            raise ValueError(f"{dimension} total undercounts retained records")
+        signal_counts[dimension] = observed
+
+    functions = indexed.setdefault("functions", [])
+    exports = indexed.setdefault("exports", [])
+    total_functions = indexed.get("total_functions", len(functions))
+    total_exports = indexed.get("total_exports", len(exports))
+    if type(total_functions) is not int or total_functions < len(functions):
+        raise ValueError("function total undercounts retained records")
+    if type(total_exports) is not int or total_exports < len(exports):
+        raise ValueError("export total undercounts retained records")
+    indexed["total_functions"] = total_functions
+    indexed["total_exports"] = total_exports
+
+    truncated: set[str] = set()
+    for dimension, retained in retained_signal_counts.items():
+        if signal_counts[dimension] > retained:
+            truncated.add(dimension)
+    if total_functions > len(functions):
+        truncated.add("functions")
+    if total_exports > len(exports):
+        truncated.add("exports")
+    for dimension in _CAPPED_INDEX_LISTS:
+        values = indexed.setdefault(dimension, [])
+        if len(values) > STRUCTURAL_SIGNAL_LIMIT:
+            indexed[dimension] = values[:STRUCTURAL_SIGNAL_LIMIT]
+            truncated.add("imports" if dimension == "import_targets" else dimension)
+    indexed.update(
+        {
+            "structural_index_available": True,
+            "analysis_status": "degraded" if truncated else "complete",
+            "analysis_mode": analysis_mode,
+            "degradation_reason": "artifact_signal_limit" if truncated else None,
+            "source_size": source_size,
+            "bytes_scanned": source_size,
+            "unavailable_dimensions": [],
+            "artifact_truncated": bool(truncated),
+            "truncated_dimensions": sorted(truncated),
+            "signal_counts": signal_counts,
+            "signal_limit_per_dimension": STRUCTURAL_SIGNAL_LIMIT,
+        }
+    )
+    return indexed
+
 def language_for_file(file_path: str) -> str | None:
     """Return the language key for a file, or None if unsupported.
 
@@ -1995,12 +2995,7 @@ def language_for_file(file_path: str) -> str | None:
     lightweight regex-based extractors. Dockerfiles are matched by basename
     (``Dockerfile`` or ``Dockerfile.<variant>``).
     """
-    name = Path(file_path).name
-    # Dockerfile / Dockerfile.* (e.g. Dockerfile.dev, Dockerfile.prod)
-    if name == "Dockerfile" or name.startswith("Dockerfile."):
-        return "dockerfile"
-    ext = Path(file_path).suffix.lower()
-    return EXTENSION_LANG_MAP.get(ext)
+    return structural_language_for_file(file_path)
 
 
 def index_file(
@@ -2008,11 +3003,7 @@ def index_file(
     language: str,
     source: bytes | None = None,
 ) -> dict[str, Any]:
-    """Parse a single file and return a structural index dict.
-
-    If tree-sitter is not available, returns a minimal stub with only line
-    counts and language metadata (no functions, sinks, etc.).
-    """
+    """Parse one bounded source value and return explicit coverage status."""
     if source is None:
         try:
             with open(file_path, "rb") as fh:
@@ -2027,14 +3018,28 @@ def index_file(
     # Lightweight regex-based extractors run regardless of tree-sitter availability
     if language in LIGHTWEIGHT_LANGUAGES:
         try:
-            return _index_lightweight(file_path, language, source_lines, total_lines)
+            return _complete_index_metadata(
+                _attach_bounded_security_sources(
+                    _index_lightweight(file_path, language, source_lines, total_lines),
+                    file_path=file_path,
+                    language=language,
+                    source=source,
+                ),
+                source_size=len(source),
+                analysis_mode="lightweight_regex",
+            )
         except Exception as exc:  # noqa: BLE001
             warnings.warn(
                 f"lightweight extractor for '{language}' on {file_path} failed: {exc}; "
-                "returning empty index.",
+                "using bounded streaming security fallback.",
                 stacklevel=2,
             )
-            return _empty_index(file_path, language, total_lines=total_lines)
+            return _fallback_from_bytes(
+                file_path,
+                language,
+                source,
+                degradation_reason="lightweight_extractor_error",
+            )
 
     if not _TS_AVAILABLE:
         warnings.warn(
@@ -2043,10 +3048,30 @@ def index_file(
             "for full indexing.",
             stacklevel=2,
         )
-        return _empty_index(file_path, language, total_lines=total_lines)
+        return _fallback_from_bytes(
+            file_path,
+            language,
+            source,
+            degradation_reason="tree_sitter_unavailable",
+        )
 
     if language not in _TS_SUPPORTED_LANGUAGES:
-        return _empty_index(file_path, language, total_lines=total_lines)
+        indexed = _empty_index(file_path, language, total_lines=total_lines)
+        indexed.update(
+            {
+                "structural_index_available": False,
+                "analysis_status": "unsupported",
+                "analysis_mode": "none",
+                "degradation_reason": "unsupported_language",
+                "source_size": len(source),
+                "bytes_scanned": len(source),
+                "unavailable_dimensions": list(_UNSUPPORTED_UNAVAILABLE_DIMENSIONS),
+                "artifact_truncated": False,
+                "truncated_dimensions": [],
+                "signal_counts": {dimension: 0 for dimension in _SIGNAL_DIMENSIONS},
+            }
+        )
+        return indexed
 
     # For .tsx files, use the tsx parser variant
     parse_lang = language
@@ -2060,57 +3085,103 @@ def index_file(
             "degraded index.",
             stacklevel=2,
         )
-        return _empty_index(file_path, language, total_lines=total_lines)
+        return _fallback_from_bytes(
+            file_path,
+            language,
+            source,
+            degradation_reason="tree_sitter_grammar_unavailable",
+        )
 
-    tree = parser.parse(source)
+    try:
+        tree = parser.parse(source)
+    except Exception as exc:  # noqa: BLE001 - retain bounded signal coverage
+        warnings.warn(
+            f"tree-sitter parse for '{language}' on {file_path} failed: {exc}; "
+            "using bounded streaming security fallback.",
+            stacklevel=2,
+        )
+        return _fallback_from_bytes(
+            file_path,
+            language,
+            source,
+            degradation_reason="tree_sitter_parse_error",
+        )
+    if tree is None:
+        return _fallback_from_bytes(
+            file_path,
+            language,
+            source,
+            degradation_reason="tree_sitter_parse_failed",
+        )
 
-    # Extract structural elements
-    functions = _extract_functions_ts(tree, parse_lang, source)
-    classes = _extract_classes_ts(tree, parse_lang, source)
-    imports = _extract_imports_ts(tree, parse_lang, source)
+    try:
+        functions = _extract_functions_ts(tree, parse_lang, source)
+        classes = _extract_classes_ts(tree, parse_lang, source)
+        imports = _extract_imports_ts(tree, parse_lang, source)
 
-    # For JS/TS, also find arrow functions assigned to variables
-    effective_lang = "typescript" if parse_lang == "tsx" else language
-    if effective_lang in ("javascript", "typescript"):
-        arrows = _detect_arrow_functions(source_lines)
-        # Merge arrows that are not already captured
-        existing_names = {(f["name"], f["line_start"]) for f in functions}
-        for arrow in arrows:
-            if (arrow["name"], arrow["line_start"]) not in existing_names:
-                functions.append(arrow)
+        effective_lang = "typescript" if parse_lang == "tsx" else language
+        if effective_lang in ("javascript", "typescript"):
+            arrows = _detect_arrow_functions(source_lines)
+            existing_names = {(f["name"], f["line_start"]) for f in functions}
+            for arrow in arrows:
+                if (arrow["name"], arrow["line_start"]) not in existing_names:
+                    functions.append(arrow)
 
-    # Enrich qualified names with class context
-    _enrich_qualified_names(functions, classes)
+        _enrich_qualified_names(functions, classes, effective_lang)
+        if effective_lang == "cpp":
+            functions = _deduplicate_cpp_functions(functions)
+        entry_points = _detect_entry_points(
+            functions, classes, effective_lang, source_lines
+        )
+        entry_points.extend(
+            _detect_top_level_entry_points(tree, effective_lang, source_lines)
+        )
+        sinks = _detect_sinks(functions, effective_lang, source_lines)
+        call_sites = _detect_call_sites(functions, source_lines)
+        exports = _detect_exports(functions, classes, effective_lang, source_lines)
+        import_targets = _resolve_import_targets(imports, effective_lang)
+        security_observations: dict[str, Any] = {}
+        _attach_bounded_security_sources(
+            security_observations,
+            file_path=file_path,
+            language=effective_lang,
+            source=source,
+        )
+        _remove_internal_structural_fields(functions, classes)
+    except Exception as exc:  # noqa: BLE001 - retain bounded signal coverage
+        warnings.warn(
+            f"tree-sitter extraction for '{language}' on {file_path} failed: {exc}; "
+            "using bounded streaming security fallback.",
+            stacklevel=2,
+        )
+        return _fallback_from_bytes(
+            file_path,
+            language,
+            source,
+            degradation_reason="tree_sitter_analysis_error",
+        )
 
-    # Detect entry points
-    entry_points = _detect_entry_points(functions, classes, effective_lang, source_lines)
-
-    # Detect security sinks
-    sinks = _detect_sinks(functions, effective_lang, source_lines)
-
-    # Detect call sites
-    call_sites = _detect_call_sites(functions, source_lines)
-
-    # Detect exports
-    exports = _detect_exports(functions, classes, effective_lang, source_lines)
-
-    # Resolve import targets
-    import_targets = _resolve_import_targets(imports, effective_lang)
-
-    return {
-        "file_path": file_path,
-        "language": language,
-        "total_functions": len(functions),
-        "total_lines": total_lines,
-        "functions": functions,
-        "entry_points": entry_points,
-        "security_sinks": sinks,
-        "call_sites": call_sites,
-        "imports": imports,
-        "import_targets": import_targets,
-        "exports": exports,
-        "classes": classes,
-    }
+    return _complete_index_metadata(
+        {
+            "file_path": file_path,
+            "language": language,
+            "total_functions": len(functions),
+            "total_exports": len(exports),
+            "total_lines": total_lines,
+            "functions": functions,
+            "entry_points": entry_points,
+            "security_sinks": sinks,
+            "security_sources": security_observations["security_sources"],
+            "call_sites": call_sites,
+            "imports": imports,
+            "import_targets": import_targets,
+            "exports": exports,
+            "classes": classes,
+            "signal_counts": security_observations["signal_counts"],
+        },
+        source_size=len(source),
+        analysis_mode="tree_sitter",
+    )
 
 
 def _empty_index(
@@ -2123,10 +3194,12 @@ def _empty_index(
         "file_path": file_path,
         "language": language,
         "total_functions": 0,
+        "total_exports": 0,
         "total_lines": total_lines,
         "functions": [],
         "entry_points": [],
         "security_sinks": [],
+        "security_sources": [],
         "call_sites": [],
         "imports": [],
         "import_targets": [],

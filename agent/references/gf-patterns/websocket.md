@@ -3,6 +3,7 @@ name: gf-patterns:websocket
 description: WebSocket and real-time transport endpoint patterns (/ws, /socket.io, /stomp, /mqtt)
 origin: local overlay (no upstream gf equivalent)
 bucket: websocket
+skill: websocket-testing
 weight: 30
 ---
 

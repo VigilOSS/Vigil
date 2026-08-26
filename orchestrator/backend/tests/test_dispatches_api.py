@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from app import db as db_module
+
 
 ENGAGEMENT_KEY = "2026-04-28-120000-dispatches"
 BASE = f"/engagements/{ENGAGEMENT_KEY}/assessment"
@@ -35,11 +37,12 @@ def _write_engagement(engagements_dir: Path, key: str = ENGAGEMENT_KEY) -> Path:
     return eng
 
 
-def _seed(client, isolate_settings) -> None:
+def _seed(client, isolate_settings) -> int:
     eng = _write_engagement(isolate_settings["engagements_dir"])
     (eng / "findings.md").write_text("# Findings\n", encoding="utf-8")
     response = client.get(f"/engagements/{ENGAGEMENT_KEY}")
     assert response.status_code == 200, response.text
+    engagement_id = int(response.json()["id"])
     for slug in ("VA-001", "VA-002"):
         finding = client.post(
             f"{BASE}/findings",
@@ -57,6 +60,20 @@ def _seed(client, isolate_settings) -> None:
             },
         )
         assert finding.status_code == 201, finding.text
+    return engagement_id
+
+
+def _application_unit(engagement_id: int) -> int:
+    with db_module.get_connection() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO assessment_application_units (
+                engagement_id, host, port_class, path_prefix
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (engagement_id, "rock.example.com", "web", "/giving"),
+        )
+        return int(cursor.lastrowid)
 
 
 def test_dispatch_post_get_list_patch(client, isolate_settings) -> None:
@@ -66,7 +83,6 @@ def test_dispatch_post_get_list_patch(client, isolate_settings) -> None:
         "agent_id": "AG-001",
         "agent_role": "vulnerability-analyst",
         "task": "Validate IDOR on /api/users/{id}",
-        "scope_host": "example.com",
         "model": "gpt-5.4",
         "reasoning": "high",
         "dispatch_mode": "item-iterating",
@@ -218,29 +234,18 @@ def test_dispatch_validation_rejects_bad_status_and_unknown_fields(client, isola
     assert bad.status_code == 422
 
 
-def test_dispatch_specialist_requires_skills(client, isolate_settings) -> None:
-    """Specialist roles must declare at least one skill so the dispatch row is auditable."""
-    _seed(client, isolate_settings)
-    bad = client.post(f"{BASE}/dispatches", json={
-        "agent_id": "NO-SKILLS",
-        "agent_role": "vulnerability-analyst",
-    })
-    assert bad.status_code == 422, bad.text
-    assert "skills is required" in bad.text
-
-
-def test_dispatch_allow_no_skills_accepts_skill_less_specialist(client, isolate_settings) -> None:
-    """L2-2 / L3-6: allow_no_skills=true lets an ad-hoc specialist dispatch
-    through instead of 422'ing on the missing skills audit."""
+def test_dispatch_without_skills_is_accepted(client, isolate_settings) -> None:
+    """A specialist dispatch may omit skills: the specialist selects them from
+    what it observes on the surface, so the honest list is only known after the
+    dispatch runs. Requiring it up front would force the operator to name a
+    vulnerability class before the hunt."""
     _seed(client, isolate_settings)
     resp = client.post(f"{BASE}/dispatches", json={
         "agent_id": "ADHOC-1",
         "agent_role": "vulnerability-analyst",
-        "allow_no_skills": True,
     })
     assert resp.status_code == 201, resp.text
     assert resp.json()["agent_id"] == "ADHOC-1"
-    assert "allow_no_skills" not in resp.json()
 
 
 def test_dispatch_unknown_dispatch_mode_stored_as_text(client, isolate_settings) -> None:
@@ -344,18 +349,14 @@ def test_dispatch_requested_actual_fields_post_get_list(client, isolate_settings
 
 
 def test_dispatch_structured_depth_metadata_round_trips(client, isolate_settings) -> None:
-    """Wave 6b — scope_path_prefix / vuln_classes / identity persist + read back.
-
-    These are the structured signals the depth ledger matches dispatches on
-    (depth-gate §5.3); they must round-trip through POST -> GET one -> list.
-    """
-    _seed(client, isolate_settings)
+    """Application-unit identity and descriptive metadata round-trip."""
+    engagement_id = _seed(client, isolate_settings)
+    unit_id = _application_unit(engagement_id)
     payload = {
         "agent_id": "AG-DEPTH-1",
         "agent_role": "vulnerability-analyst",
         "task": "Deep IDOR pass on the giving app",
-        "scope_host": "rock.example.com",
-        "scope_path_prefix": "/giving",
+        "application_unit_id": unit_id,
         "vuln_classes": "idor,bola,sqli",
         "identity": "user_a",
         "skills": "idor-testing",
@@ -363,19 +364,61 @@ def test_dispatch_structured_depth_metadata_round_trips(client, isolate_settings
     resp = client.post(f"{BASE}/dispatches", json=payload)
     assert resp.status_code == 201, resp.text
     row = resp.json()
-    assert row["scope_path_prefix"] == "/giving"
+    assert row["application_unit_id"] == unit_id
     assert row["vuln_classes"] == "idor,bola,sqli"
     assert row["identity"] == "user_a"
 
     fetched = client.get(f"{BASE}/dispatches/AG-DEPTH-1").json()
-    assert fetched["scope_path_prefix"] == "/giving"
+    assert fetched["application_unit_id"] == unit_id
     assert fetched["vuln_classes"] == "idor,bola,sqli"
     assert fetched["identity"] == "user_a"
 
     listed = client.get(f"{BASE}/dispatches").json()
-    assert listed[0]["scope_path_prefix"] == "/giving"
+    assert listed[0]["application_unit_id"] == unit_id
     assert listed[0]["vuln_classes"] == "idor,bola,sqli"
     assert listed[0]["identity"] == "user_a"
+
+
+def test_dispatch_application_unit_identity_round_trips(client, isolate_settings) -> None:
+    """Dispatch depth attribution uses a concrete engagement-owned unit id."""
+    engagement_id = _seed(client, isolate_settings)
+    unit_id = _application_unit(engagement_id)
+    payload = {
+        "agent_id": "AG-UNIT-1",
+        "agent_role": "vulnerability-analyst",
+        "task": "Deep pass over the measured application unit",
+        "application_unit_id": unit_id,
+        "identity": "user_a",
+        "skills": "idor-testing",
+    }
+    response = client.post(f"{BASE}/dispatches", json=payload)
+    assert response.status_code == 201, response.text
+    assert response.json()["application_unit_id"] == unit_id
+    assert client.get(f"{BASE}/dispatches/AG-UNIT-1").json()["application_unit_id"] == unit_id
+    assert client.get(f"{BASE}/dispatches").json()[0]["application_unit_id"] == unit_id
+
+
+def test_dispatch_rejects_application_unit_from_another_engagement(
+    client,
+    isolate_settings,
+) -> None:
+    _seed(client, isolate_settings)
+    other_key = "2026-04-28-120001-dispatches-other"
+    _write_engagement(isolate_settings["engagements_dir"], key=other_key)
+    other = client.get(f"/engagements/{other_key}")
+    assert other.status_code == 200, other.text
+    foreign_unit_id = _application_unit(int(other.json()["id"]))
+
+    response = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": "AG-FOREIGN-UNIT",
+            "agent_role": "vulnerability-analyst",
+            "application_unit_id": foreign_unit_id,
+        },
+    )
+    assert response.status_code == 400, response.text
+    assert "this engagement" in response.json()["detail"]
 
 
 def test_dispatch_structured_depth_metadata_optional(client, isolate_settings) -> None:
@@ -391,6 +434,6 @@ def test_dispatch_structured_depth_metadata_optional(client, isolate_settings) -
     )
     assert resp.status_code == 201, resp.text
     row = resp.json()
-    assert row["scope_path_prefix"] is None
+    assert row["application_unit_id"] is None
     assert row["vuln_classes"] is None
     assert row["identity"] is None

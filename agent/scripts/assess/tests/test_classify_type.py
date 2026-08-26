@@ -14,7 +14,6 @@ suite which loads it by file path).
 from __future__ import annotations
 
 import json
-import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,7 +21,8 @@ import pytest
 
 from assess.commands import ingest_endpoints
 from assess.lib.classify import classify_type
-from assess.lib.db import db_init
+
+from _fake_client import FakeAssessmentClient
 
 
 # --------------------------------------------------------------------------- #
@@ -426,17 +426,16 @@ def test_bare_url_list_path_still_works() -> None:
 
 def _run_ingest(monkeypatch, tmp_path: Path, lines: list[str]) -> dict[str, str]:
     """Run ingest-endpoints over `lines` with a fake backend; return the
-    persisted {url_path: type} map from the work_items table.
+    {url_path: type} map from the work items the backend derived.
 
-    Mirrors the FakeClient harness used by ``test_work_buffer`` so the host-side
-    ingest CLI runs without a live FastAPI backend.
+    The `work_items` table now lives in the orchestrator backend
+    (`assessment_work_items`); the stateful `FakeAssessmentClient` derives each
+    row from the request-observation's `work_item` block, so the persisted
+    {url_path: type} map is read back off `fake.rows`.
     """
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
     (engagement_dir / "scope.json").write_text("{}", encoding="utf-8")
-    db_path = engagement_dir / "cases.db"
-    db_path.touch()
-    db_init(str(db_path))
 
     monkeypatch.setattr(
         ingest_endpoints,
@@ -449,37 +448,13 @@ def _run_ingest(monkeypatch, tmp_path: Path, lines: list[str]) -> dict[str, str]
     )
     monkeypatch.setattr(ingest_endpoints, "auth_active_context", lambda _eng: "anonymous")
 
-    class FakeClient:
-        def __init__(self, *a, **k) -> None:
-            pass
-
-        def post(self, endpoint, payload):
-            if endpoint == "request-observations/bulk":
-                return {
-                    "count": len(payload.get("items", [])),
-                    "records": [
-                        {"request_variant": {"id": idx}, "service": {"id": idx}}
-                        for idx, _item in enumerate(payload.get("items", []), start=1)
-                    ],
-                }
-            return {"request_variant": {"id": 1}, "service": {"id": 1}}
-
-        def close(self) -> None:
-            return None
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-    monkeypatch.setattr(ingest_endpoints, "AssessmentClient", FakeClient)
+    fake = FakeAssessmentClient()
+    monkeypatch.setattr(ingest_endpoints, "AssessmentClient", lambda *a, **k: fake)
 
     input_file = tmp_path / "endpoints.txt"
     input_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
     ingest_endpoints.run(
         SimpleNamespace(
-            db_path=str(db_path),
             source="recon",
             input_file=str(input_file),
             engagement_dir=str(engagement_dir),
@@ -487,12 +462,7 @@ def _run_ingest(monkeypatch, tmp_path: Path, lines: list[str]) -> dict[str, str]
         )
     )
 
-    conn = sqlite3.connect(str(db_path))
-    try:
-        rows = conn.execute("SELECT url_path, type FROM work_items").fetchall()
-    finally:
-        conn.close()
-    return {url_path: case_type for url_path, case_type in rows}
+    return {row["url_path"]: row["type"] for row in fake.rows}
 
 
 def test_ingest_threads_json_content_type_into_typer(monkeypatch, tmp_path: Path) -> None:

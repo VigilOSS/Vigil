@@ -1,7 +1,6 @@
 """vigil assess check-phase-readiness — ONE phase-aware readiness command.
 
-Wave 6d (command consolidation, depth-gate §6 / master plan Wave 6) folds the
-following five standalone commands into this one phase-keyed command (no
+This command folds five former standalone commands into one phase-keyed surface (no
 aliases, no back-compat shims):
 
   * ``check-coverage``         → the surface-resolution gate, relayed every phase
@@ -23,7 +22,7 @@ Per-phase composition (depth-gate §6):
     the EXPLOIT PROJECTION (``{exploit_policy, approved_targets}``)
   * ``report``  → report-readiness blockers + intel advisory
 
-Flag semantics (master plan §6 "Consolidated-command flag semantics"):
+Flag semantics:
   * ``--depth``           — show the depth ledger detail (consume/verify).
   * ``--by-app-unit``     — render the depth ledger broken out per app unit.
   * ``--by-host``         — C40 per-host outcome table (recon/collect/consume).
@@ -56,7 +55,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
@@ -101,7 +99,13 @@ _PHASE_REQUIRE_STAGE: dict[str, str | None] = {
     "report": None,
 }
 
-_DEPTH_PHASES = frozenset({"consume", "verify"})
+# ``report`` is a depth phase for RENDERING only: it previews the depth ledger
+# and the would-block set (coverage-grain unbundle / ADR 0012) so the terminal
+# depth block is legible BEFORE `transition-phase report` runs it. The preview
+# NEVER changes this advisory command's exit code — the hard block lives on the
+# transition-phase precondition. (`complete` is not a phase of this command, so
+# it is not listed; its block is previewed under `report`.)
+_DEPTH_PHASES = frozenset({"consume", "verify", "report"})
 
 _COVERAGE_PHASES = frozenset({"recon", "collect", "consume", "verify", "exploit"})
 
@@ -161,7 +165,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help=(
             "For every scope entry that FAILS the phase stage gate, emit a "
-            "ready-to-run next-dispatch RECOMMENDATION (role + scope-host + "
+            "ready-to-run next-dispatch RECOMMENDATION (role + host context + "
             "dispatch-mode + skills). Never fires a dispatch. Only meaningful on "
             "phases with a stage gate (recon/collect/consume)."
         ),
@@ -364,6 +368,33 @@ def _run_report_phase(
         text_lines.extend(rr_blockers)
     text_lines.extend(rr_advisories)
 
+    # Depth-harness PREVIEW (coverage-grain unbundle / ADR 0012). ``report`` is a
+    # depth phase (`report in _DEPTH_PHASES`) for rendering: surface the depth
+    # ledger (incl. per-class `signal_classes_uncovered`) and the would-block set
+    # so the terminal depth block is legible here, BEFORE `transition-phase
+    # report` enforces it. This NEVER flips this command's exit code — the hard
+    # block is a transition-phase precondition, not this advisory.
+    if "report" in _DEPTH_PHASES:
+        ledger = backend.get("depth_ledger")
+        if ledger is None:
+            try:
+                ledger = client.get("application-units/depth-ledger")
+            except AssessError:
+                ledger = {"skipped": True, "units": [], "summary": {}}
+        projection["depth_ledger"] = ledger
+        text_lines.extend(
+            _render_depth_ledger(ledger, by_app_unit=getattr(args, "by_app_unit", False))
+        )
+
+        would_block = None
+        try:
+            would_block = client.get("application-units/terminal-block")
+        except AssessError:
+            would_block = None
+        if isinstance(would_block, dict):
+            projection["depth_would_block"] = would_block
+            text_lines.extend(_render_terminal_block_preview(would_block))
+
     intel = backend.get("intel")
     if intel is None:
         try:
@@ -413,13 +444,14 @@ def _run_scope_gate(
         sys.exit(1)
     decided_hosts = cc._vendor_saas_decided_hosts(client)
 
-    db_path = Path(cfg.engagement_dir) / "cases.db"
-    buffer_present = db_path.is_file()
     try:
-        work_by_host = cc._load_work_items_by_host(db_path)
-    except sqlite3.Error as exc:
+        work_by_host = cc._load_work_items_by_host(client)
+    except AssessError as exc:
         print(f"check-phase-readiness: unable to read work buffer: {exc}", file=sys.stderr)
         sys.exit(1)
+    # The backend work buffer is the single store; "buffer present" now means the
+    # buffer has any rows rather than a local cases.db existing on disk.
+    buffer_present = bool(work_by_host)
 
     report = cc.build_scope_coverage_report(
         engagement_key=cfg.engagement_key,
@@ -506,11 +538,10 @@ def _run_redispatch(
             ],
         }
     prior_dispatches, dedup_degraded = cc.fetch_prior_dispatches(client)
-    db_path = Path(cfg.engagement_dir) / "cases.db"
     skills_root = cc._agent_skills_root_for_recommendations()
     return cc.build_redispatch_block(
         entries=scope_report["entries"],
-        db_path=db_path,
+        client=client,
         skills_root=skills_root,
         prior_dispatches=prior_dispatches,
         dedup_degraded=dedup_degraded,
@@ -609,6 +640,84 @@ def _render_depth_ledger(ledger: Any, *, by_app_unit: bool) -> list[str]:
             )
         if not top:
             lines.append("  (all deep_required units depth-satisfied)")
+
+    # Per-class signal gaps (coverage-grain unbundle / ADR 0012). Always surfaced
+    # — including for units that are family-`depth_satisfied` — because a specific
+    # BLOCK_HIGH class flagged via gf coverage_items can still be uncovered while
+    # the family looks covered. For DECISIVE / high-confidence units this is a
+    # deferred-terminal obligation (it will block `transition-phase report`); for
+    # the rest it is advisory. WS3 Part D: previously --json only.
+    flagged = [u for u in units if (u.get("signal_classes_uncovered") or [])]
+    if flagged:
+        lines.append(
+            "  per-class signal gaps (BLOCK_HIGH class flagged, not class-tested):"
+        )
+        for u in flagged:
+            unit = u.get("unit") or {}
+            label = f"{unit.get('host', '?')}{unit.get('path_prefix', '/')}"
+            classes = ", ".join(str(c) for c in u["signal_classes_uncovered"])
+            decisive = (
+                bool(u.get("decisive_surface"))
+                or str(u.get("confidence") or "") == "high"
+            )
+            if decisive:
+                lines.append(
+                    f"    - {label}: {classes} — will block at report unless "
+                    "covered or deferred"
+                )
+            else:
+                lines.append(f"    - {label}: {classes} (advisory; per-class gap)")
+    return lines
+
+
+def _render_terminal_block_preview(result: Any) -> list[str]:
+    """Render the terminal depth-block WOULD-BLOCK set as a phase-`report`
+    preview (coverage-grain unbundle / ADR 0012).
+
+    This is a legibility preview only — it lists the app units that WOULD block
+    `transition-phase report`/`complete` and how to clear each. It NEVER changes
+    this advisory command's exit code (the hard block is a transition-phase
+    precondition). WEB-ONLY: a ``skipped`` result (code/blue) renders nothing.
+    """
+    lines: list[str] = []
+    if not isinstance(result, dict) or result.get("skipped"):
+        return lines
+    blocking = result.get("blocking") or []
+    deferral_count = int(result.get("deferral_count") or 0)
+    lines.append("")
+    if not blocking:
+        lines.append(
+            "depth backstop preview: no app unit would block the report/complete "
+            f"transition ({deferral_count} depth_deferral(s) recorded)."
+        )
+        return lines
+    lines.append(
+        f"depth backstop preview: {len(blocking)} app unit(s) WOULD BLOCK the "
+        "report/complete transition unless covered or deferred "
+        f"({deferral_count} depth_deferral(s) recorded):"
+    )
+    for b in blocking:
+        unit = b.get("unit") or {}
+        label = f"{unit.get('host', '?')}{unit.get('path_prefix', '/')}"
+        if b.get("block_grain") == "class":
+            classes = ", ".join(
+                str(c) for c in (b.get("uncovered_classes") or [])
+            ) or "?"
+            lines.append(
+                f"  x {label} — uncovered BLOCK_HIGH class(es): {classes}"
+            )
+        else:
+            fams = ", ".join(
+                str(f) for f in (b.get("missing_block_families") or [])
+            ) or "?"
+            lines.append(
+                f"  x {label} — untested/undeferred/untouched; missing family: {fams}"
+            )
+    lines.append(
+        "  -> cover the class/family (tested/signal probe or evidence-bearing "
+        "coverage-item), record a depth_deferral naming the class(es), or "
+        "transition with --force --reason. Preview only; this command never blocks."
+    )
     return lines
 
 

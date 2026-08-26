@@ -3,6 +3,7 @@ import { Check, Copy } from "lucide-react";
 import type { ReportAttackChain, ReportData, ReportFinding } from "../types";
 import { formatDateTime, formatLabel, SEVERITY_RANK } from "../lib/format";
 import { findingToMarkdown } from "../lib/findingMarkdown";
+import { stepsText } from "../lib/steps";
 import { Markdown } from "./Markdown";
 
 interface Props {
@@ -102,14 +103,11 @@ function FindingBlock({ finding, kind }: { finding: ReportFinding; kind: "root" 
           <Markdown text={finding.evidence_detail} />
         </div>
       )}
-      {Array.isArray(finding.steps_to_reproduce) && finding.steps_to_reproduce.length > 0 && (
+      {stepsText(finding.steps_to_reproduce) && (
         <div className="rpt-doc-block">
           <h4>Steps to reproduce</h4>
-          <ol className="rpt-steps">
-            {finding.steps_to_reproduce.map((step, i) => (
-              <li key={i}>{step}</li>
-            ))}
-          </ol>
+          {/* Verbatim — the author's numbering is what other sections cite. */}
+          <div className="rpt-steps">{stepsText(finding.steps_to_reproduce)}</div>
         </div>
       )}
       {finding.poc_code && (

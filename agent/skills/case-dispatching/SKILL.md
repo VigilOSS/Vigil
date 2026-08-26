@@ -6,7 +6,7 @@ origin: Vigil
 
 # Case Dispatching
 
-Guides consumption of the transient local work buffer in `cases.db` for batching worker tasks. The orchestrator backend remains canonical for findings, coverage, services, request variants, and chains, and the work buffer should mirror canonical backend identities rather than inventing its own request identity.
+Guides consumption of the backend work buffer (`assessment_work_items`) for batching worker tasks. The orchestrator backend is canonical for the work buffer itself — not only for findings, coverage, services, request variants, and chains: ingest verbs derive each work-item row server-side from the posted request-observation in the same transaction (ADR 0013), so there is no separate local queue to keep in sync or drift from canonical backend identities.
 
 This skill is coordination-only. Use it to inspect the work buffer, route batches, mark completion or errors, and requeue canonical work items. Do not use host-side shell commands from this skill to probe, crawl, fuzz, or exploit targets directly. All target-facing execution must happen through `vigil assess kali ...` subcommands so the audit pipeline stays truthful.
 
@@ -22,27 +22,27 @@ This skill is coordination-only. Use it to inspect the work buffer, route batche
 
 **Dispatch mode switches on work-buffer volume.** Type-based fetch orders within a type by id, which is fine for small buffers but blind to signal quality. At 2000+ pending items, switch to priority-first fetch so specialists see high-signal clusters first.
 
-Each iteration (set `DB="$DIR/cases.db"`):
+Each iteration:
 ```
-1. Reset stale: vigil assess work-buffer "$DB" reset-stale 10
-2. Check stats: vigil assess work-buffer "$DB" stats    # read total pending
+1. Reset stale: vigil assess work-buffer reset-stale 10
+2. Check stats: vigil assess work-buffer stats    # read total pending
 3a. Pending < 2000 → type-based dispatch (vulnerability-analyst and source-analyzer can run IN PARALLEL):
 
     vulnerability-analyst: api, api-spec, form, upload, graphql, websocket
     source-analyzer: page, javascript, stylesheet, data
 
-    vigil assess work-buffer "$DB" fetch <type> 10 <agent_name>
+    vigil assess work-buffer fetch <type> 10 <agent_name>
 
 3b. Pending >= 2000 → priority-first dispatch:
 
     # Classification ran inline at ingestion, so priority_score / cluster_key
-    # are already populated. Re-run classify-work only if you intentionally
-    # changed _BUCKETS in classify_buckets.py and want to re-apply the new
-    # weights to already-ingested rows.
+    # are already populated. Re-run `work-buffer reclassify` only if you
+    # intentionally changed _BUCKETS in classify_buckets.py and want to
+    # re-apply the new weights to already-ingested rows.
 
     # Review clusters and defer low-signal ones before dispatch:
-    vigil assess list-clusters "$DB"
-    vigil assess work-buffer "$DB" defer-cluster <cluster_key> --reason "..."
+    vigil assess work-buffer clusters
+    vigil assess work-buffer defer-cluster <cluster_key> --reason "..."
 
     # Fetch across types by priority. `fetch-by-priority` is route-aware: it
     # only claims rows whose type maps to a real specialist route and rejects
@@ -52,15 +52,15 @@ Each iteration (set `DB="$DIR/cases.db"`):
     #   vulnerability-analyst[-N] — claim only API/auth/workflow/debug/portal/
     #                               event rows (N is an optional instance label).
     #   source-analyzer[-N]       — claim only page/javascript/stylesheet/data rows.
-    vigil assess work-buffer "$DB" fetch-by-priority 10 auto
-    vigil assess work-buffer "$DB" fetch-by-priority 10 vulnerability-analyst
-    vigil assess work-buffer "$DB" fetch-by-priority 10 source-analyzer-2
+    vigil assess work-buffer fetch-by-priority 10 auto
+    vigil assess work-buffer fetch-by-priority 10 vulnerability-analyst
+    vigil assess work-buffer fetch-by-priority 10 source-analyzer-2
 
 4. On subagent return:
-   - Done: vigil assess work-buffer "$DB" done "id1,id2,..."
-   - New endpoints: feed them back through `vigil assess ingest-endpoints "$DB" <source>` or `vigil assess ingest-spec "$DB" <spec-file>` — those paths run inline classification so the new rows enter the priority queue with scores immediately
-   - Findings: write structured finding state with `vigil assess record-finding`
-   - Errors: vigil assess work-buffer "$DB" error "id1,id2,..."
+   - Done: vigil assess work-buffer done 101 102 103
+   - New endpoints: feed them back through `vigil assess ingest endpoints <source>` or `vigil assess ingest spec <spec-file>` — those paths run inline classification so the new rows enter the priority queue with scores immediately
+   - Findings: write structured finding state with `vigil assess finding record`
+   - Errors: vigil assess work-buffer error 101 102 103
 5. pending=0 and producers stopped → report completion
 6. Otherwise → loop back to step 1
 ```
@@ -153,11 +153,10 @@ Phases: [x] Recon (pass 1)  [x] Recon (gate ✓)  [x] Collect  [>] Consume & Tes
 [work-buffer] 120/495 done (24%) | api: 15/21 | page: 98/464 | js: 7/10 | findings: 5
 ```
 ```bash
-sqlite3 "$DB" ".timeout 5000" "
-  SELECT type, SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) as done,
-    SUM(CASE WHEN status!='skipped' THEN 1 ELSE 0 END) as total
-  FROM work_items GROUP BY type ORDER BY total DESC;"
+vigil assess work-buffer stats
 ```
+`stats` (default `--by status`) prints a `status|type|count` row per (status, type) pair —
+the per-type done/total breakdown the progress line above summarizes.
 
 ## Out-of-Scope Triage (operator-only, before the dispatching pass)
 
@@ -172,20 +171,18 @@ Examples that recur in real engagements:
 - Salesforce-managed vendor SaaS hosts when the brief covers the customer's app, not the vendor platform
 
 ```bash
-vigil assess resolve-surface <id> --status not_applicable \
+vigil assess resolve surface <id> --status not_applicable \
   --rationale "Out of scope per program brief: <quote the relevant exclusion>"
 ```
 
-Triage these BEFORE the dispatching pass, not during. A specialist that opens an out-of-scope candidate runs the full skill methodology before realising the scope error, then writes a handoff explaining why it stopped — the operator could have prevented all of that with one `resolve-surface` call.
-
-This step pairs with `agent/scripts/assess/lib/contracts.py` `validate_specialist_dispatch_contract`, which gates active-probing dispatches (vulnerability-analyst, exploit-developer) on `scope_host` membership in `scope.json` `hosts`. The validator catches mistakes at register time; this step catches them before they reach the validator.
+Triage these BEFORE the dispatching pass, not during. A specialist that opens an out-of-scope candidate runs the full skill methodology before realising the scope error, then writes a handoff explaining why it stopped — the operator could have prevented all of that with one `resolve surface` call. This is queue hygiene under `agent/shared-constraints.md` §1: remove non-admitted work before selecting a dispatch objective.
 
 ## Linking Surfaces to Work-Buffer Clusters
 
 When a recorded surface (`vigil assess record-surface`) corresponds to a cluster of work-buffer items already ingested with a durable `request_variant_id`, link them on the backend so the surface's coverage trail points at the exact requests that back it:
 
 ```bash
-vigil assess link-surface-work-items "$DB" --cluster <cluster_key> --surface-id <id> \
+vigil assess work-buffer link-surface --cluster <cluster_key> --surface-id <id> \
   --relation primary-endpoint --evidence-ref "<artifact path>"
 ```
 
@@ -193,9 +190,9 @@ Selection is by `--cluster` (the work buffer's `cluster_key`) or `--queue-key`; 
 
 ## Key Rules
 
-- Use `vigil assess work-buffer "$DB" <action>` for all work-buffer operations — reading cases.db directly bypasses the backend sync layer and can produce stale or inconsistent state
+- Use `vigil assess work-buffer <action>` for all work-buffer operations — calling the backend API directly bypasses the classification/priority logic these verbs apply and can produce stale or inconsistent state
 - Treat this skill as host-side coordination only. All real target testing stays in `vigil assess kali ...`.
-- Record findings in backend state immediately via `vigil assess record-finding`
+- Record findings in backend state immediately via `vigil assess finding record`
 - Re-ingest new endpoints through backend-first producers; let the work buffer mirror the resulting canonical ids
 - Use reset-stale at start of each iteration
 - **Loop until pending=0 for all consumable types** — stopping early leaves tested surfaces unrecorded and forces a re-dispatch to pick up the tail
@@ -207,12 +204,11 @@ Selection is by `--cluster` (the work buffer's `cluster_key`) or `--queue-key`; 
 ## Dispatcher Quick Reference
 
 ```bash
-DB="$DIR/cases.db"
-vigil assess work-buffer "$DB" stats
-vigil assess work-buffer "$DB" fetch <type> <limit> <agent_name>
-vigil assess work-buffer "$DB" done "id1,id2,id3"
-vigil assess work-buffer "$DB" error "id1,id2,id3"
-vigil assess work-buffer "$DB" reset-stale <minutes>
-echo '{"url":"...","method":"GET","type":"api","auth_context":"anonymous"}' | vigil assess work-buffer "$DB" requeue
-echo '{"url":"https://target.example/api/search","method":"GET","type":"api","auth_context":"anonymous","request_variant_id":42,"coverage_item_id":77,"queue_key":"variant:42:api"}' | vigil assess work-buffer "$DB" requeue
+vigil assess work-buffer stats
+vigil assess work-buffer fetch <type> <limit> <agent_name>
+vigil assess work-buffer done 101 102 103
+vigil assess work-buffer error 101 102 103
+vigil assess work-buffer reset-stale <minutes>
+echo '{"url":"...","method":"GET","type":"api","auth_context":"anonymous"}' | vigil assess work-buffer requeue
+echo '{"url":"https://target.example/api/search","method":"GET","type":"api","auth_context":"anonymous","request_variant_id":42,"coverage_item_id":77,"queue_key":"variant:42:api"}' | vigil assess work-buffer requeue
 ```

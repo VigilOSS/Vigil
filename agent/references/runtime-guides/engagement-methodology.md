@@ -74,6 +74,24 @@ Track and test:
 - tunnels, pivots, and post-access opportunities
 - web request variants, auth states, and payload families
 
+Some beyond-web surfaces have a dedicated skill that is not reachable through the web-track
+gf-bucket/vuln-class recommender — load it directly the moment the trigger condition below
+appears, rather than forcing the lead into the web workflow:
+
+- **Cloud IAM** — an AWS credential, session token, or role assumption surfaces during the
+  engagement (leaked in a bucket, `.env`, source repo, or an IMDS response) →
+  `agent/skills/aws-iam-privesc/SKILL.md` before testing what the credential actually grants.
+- **CI/CD pipelines** — the target or its GitHub org exposes `.github/workflows/` (public repo,
+  in-scope source repo, or a code-track classification pass surfaces workflow YAML) →
+  `agent/skills/cicd-security/SKILL.md`; this is a distinct supply-chain surface from application
+  source and warrants its own methodology, not an ad hoc read of the YAML.
+- **Mobile apps** — an APK/AAB/IPA/TestFlight build is in scope alongside or instead of web hosts
+  → `agent/skills/mobile-lab-setup/SKILL.md` first to establish the device/emulator lab, then the
+  platform skill (`agent/skills/android-app-security/SKILL.md` /
+  `agent/skills/ios-app-security/SKILL.md`). Those two name the follow-on mobile skills (SDK
+  supply chain, MASVS-privacy, on-device AI/ML, mobile fuzzing) directly in their own workflow
+  once static/dynamic triage surfaces a matching lead.
+
 ### Auth States Matter
 
 Unauthenticated and authenticated coverage are separate.

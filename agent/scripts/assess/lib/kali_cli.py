@@ -28,7 +28,7 @@ from .kali_audit import (
     _enum_reject_message,
     _resolve_agent_name,
 )
-from .kali_output import KaliResult
+from .kali_output import KaliResult, kali_exit_code
 
 
 # Maps each enum-bearing audit flag back to its allowed-value tuple so the
@@ -148,6 +148,15 @@ def add_required_kali_flags(parser) -> None:
         ),
     )
     parser.add_argument(
+        "--rate-override-reason",
+        dest="rate_override_reason",
+        default="",
+        help=(
+            "Recorded justification for exceeding scope.rate_limit_aggregate_rps. "
+            "Without it, aggregate-cap conflicts are refused before execution."
+        ),
+    )
+    parser.add_argument(
         "--agent-name",
         dest="kali_agent_name",
         default=None,
@@ -180,6 +189,29 @@ def add_required_kali_flags(parser) -> None:
             "credential injection."
         ),
     )
+    parser.add_argument(
+        "--identity-scope",
+        dest="identity_scope",
+        default="",
+        help=(
+            "Logical liveness scope used when --identity names a scoped alias. "
+            "This is never inferred from the target URL because engagement scopes "
+            "may be application- or workflow-specific."
+        ),
+    )
+    parser.add_argument(
+        "--identity-target",
+        dest="identity_target",
+        default="",
+        help=(
+            "Name the tool whose header convention this argv follows, when the "
+            "command head is one Vigil cannot classify (a wrapper binary, a "
+            "renamed HTTP client) and --identity would otherwise be refused. "
+            "Ignored for a `bash /path/script.sh` shape, where an appended flag "
+            "would become the script's $1 — inline those requests as "
+            "`bash -c '<curl …>'` instead."
+        ),
+    )
     # Resolve VIGIL_RUNTIME_CONTAINER once at parse time (not bound to a frozen
     # import-time constant) and reuse it for both the default and the help text,
     # so a single parse can never report a default that disagrees with itself.
@@ -203,7 +235,10 @@ def add_passthrough_args_flag(parser) -> None:
     parser.add_argument(
         "--extra-args",
         default="",
-        help="Raw additional CLI args appended to the underlying tool. shlex-split. Use sparingly; prefer typed flags.",
+        help=(
+            "Raw additional CLI args appended to the underlying tool. shlex-split. Use sparingly; "
+            "prefer typed flags. Example: --extra-args '-mr admin'"
+        ),
     )
 
 
@@ -248,9 +283,9 @@ def kali_args_to_kwargs(args) -> dict[str, Any]:
     Returned dict can be splatted into kali_exec(**kwargs) directly. Includes
     `engagement_dir` so a per-call `--engagement-dir <path>` (root-parser
     flag, hoisted by `assess.cli._hoist_root_flags`) reaches kali_exec.
-    Without this thread-through, --engagement-dir on a kali verb silently
-    falls back to `$ENGAGEMENT_DIR` / cwd scope.json and the operator hits
-    "Cannot resolve engagement directory" even when they passed it.
+    Without this thread-through, --engagement-dir on a kali verb is lost before
+    the shared assessment-binding resolver sees it and the operator gets a
+    misleading "Cannot resolve engagement directory" failure.
     """
     explicit_dir = getattr(args, "engagement_dir", None)
     # Resolve the audit attribution here (where --phase is in scope) so the
@@ -275,8 +310,13 @@ def kali_args_to_kwargs(args) -> dict[str, Any]:
         "force": bool(getattr(args, "force", False)),
         "container_name": getattr(args, "container_name", None),
         "identity": getattr(args, "identity", None),
+        "identity_scope": getattr(args, "identity_scope", "") or "",
+        "identity_target": getattr(args, "identity_target", "") or "",
+        "rate_override_reason": getattr(args, "rate_override_reason", "") or "",
     }
-    if explicit_dir:
+    if explicit_dir is not None:
+        if not str(explicit_dir).strip():
+            raise AssessError("--engagement-dir must not be empty")
         kwargs["engagement_dir"] = Path(explicit_dir).expanduser().resolve()
     return kwargs
 
@@ -286,6 +326,17 @@ def emit_result(result: KaliResult) -> None:
 
     Stdout is one JSON object. Stderr already carries any warnings emitted
     during the run (dedup hit, audit failure, finalize failure).
+
+    Then map the run's terminal status onto the PROCESS EXIT CODE
+    (``kali_output.KALI_EXIT_CODES``) so a caller that never parses the JSON
+    still learns that the run did not produce a usable result — before this,
+    a timed-out run with zero artifacts exited 0 exactly like a clean negative.
+    The exit happens here, not in ``cli.main``, because this is the single
+    funnel every ``kali <verb>`` run() ends on: it lands the contract for all of
+    them at once instead of half-landing on whichever verbs got edited, and it
+    keeps the mapping next to the JSON that reports the same status. A
+    ``completed`` (or ``waf_challenge``) run returns normally with exit 0, so
+    documented ``kali a && kali b`` chains keep working.
     """
     print(
         json.dumps(
@@ -309,6 +360,9 @@ def emit_result(result: KaliResult) -> None:
             ensure_ascii=False,
         )
     )
+    code = kali_exit_code(result.status)
+    if code:
+        sys.exit(code)
 
 
 # Safe-by-default crawler rate. A deep crawl (katana -d 5) must NOT ride the

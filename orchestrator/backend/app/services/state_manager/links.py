@@ -54,7 +54,9 @@ def _upsert_finding_link(
         """
         SELECT *
         FROM assessment_finding_links
-        WHERE engagement_id = ? AND finding_id = ? AND link_kind = ? AND target_kind = ? AND target_id IS ? AND target_ref = ?
+        WHERE engagement_id = ? AND finding_id = ? AND link_kind = ?
+          AND target_kind = ? AND target_id IS ? AND target_ref = ?
+          AND retired_at IS NULL
         """,
         (engagement_id, finding_id, link_kind, target_kind, target_id, target_ref),
     ).fetchone()
@@ -108,6 +110,14 @@ def create_finding_link(
             "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
             (engagement.id, finding_slug),
         ).fetchone()
+        if str(target_kind) == "finding":
+            if target_ref == finding_slug or (
+                target_id is not None and int(target_id) == int(finding["id"])
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="finding cannot link to itself",
+                )
         return _upsert_finding_link(
             connection,
             engagement.id,
@@ -166,6 +176,7 @@ def set_root_cause_link(
               AND finding_id = ?
               AND link_kind = ?
               AND target_kind = 'finding'
+              AND retired_at IS NULL
             LIMIT 1
             """,
             (engagement.id, int(root["id"]), ROOT_CAUSE_LINK_KIND),
@@ -181,6 +192,7 @@ def set_root_cause_link(
               AND link_kind = ?
               AND target_kind = 'finding'
               AND finding_id != ?
+              AND retired_at IS NULL
             LIMIT 1
             """,
             (engagement.id, finding_slug, ROOT_CAUSE_LINK_KIND, int(finding["id"])),
@@ -188,50 +200,100 @@ def set_root_cause_link(
         if finding_is_root is not None:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="nested root-cause groups are not supported")
 
+        existing_link = connection.execute(
+            """
+            SELECT *
+            FROM assessment_finding_links
+            WHERE engagement_id = ?
+              AND finding_id = ?
+              AND link_kind = ?
+              AND target_kind = 'finding'
+              AND retired_at IS NULL
+            LIMIT 1
+            """,
+            (engagement.id, int(finding["id"]), ROOT_CAUSE_LINK_KIND),
+        ).fetchone()
+
+        if (
+            sibling_order is None
+            and existing_link is not None
+            and str(existing_link["target_ref"]) == root_cause_slug
+        ):
+            existing_metadata = _json_object(existing_link["provenance_json"])
+            existing_order = existing_metadata.get("sibling_order")
+            try:
+                sibling_order = int(existing_order)
+            except (TypeError, ValueError):
+                sibling_order = None
         if sibling_order is None:
             row = connection.execute(
                 """
-                SELECT COUNT(*) AS total
+                SELECT MAX(
+                    CAST(json_extract(provenance_json, '$.sibling_order') AS INTEGER)
+                ) AS highest
                 FROM assessment_finding_links
                 WHERE engagement_id = ?
                   AND link_kind = ?
                   AND target_kind = 'finding'
                   AND target_ref = ?
                   AND finding_id != ?
+                  AND retired_at IS NULL
                 """,
                 (engagement.id, ROOT_CAUSE_LINK_KIND, root_cause_slug, int(finding["id"])),
             ).fetchone()
-            sibling_order = int(row["total"]) + 1 if row is not None else 1
+            sibling_order = int(row["highest"] or 0) + 1 if row is not None else 1
         if sibling_order < 1:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="sibling_order must be >= 1")
 
-        metadata = dict(provenance or {})
+        metadata = (
+            _json_object(existing_link["provenance_json"])
+            if existing_link is not None
+            else {}
+        )
+        metadata.update(provenance or {})
         metadata["sibling_order"] = sibling_order
         metadata["root_cause_effect"] = effect
         if source_name:
             metadata.setdefault("source_name", source_name)
 
-        connection.execute(
-            """
-            DELETE FROM assessment_finding_links
-            WHERE engagement_id = ?
-              AND finding_id = ?
-              AND link_kind = ?
-              AND target_kind = 'finding'
-            """,
-            (engagement.id, int(finding["id"]), ROOT_CAUSE_LINK_KIND),
-        )
-        link = _upsert_finding_link(
-            connection,
-            engagement.id,
-            finding_id=int(finding["id"]),
-            link_kind=ROOT_CAUSE_LINK_KIND,
-            target_kind="finding",
-            target_id=int(root["id"]),
-            target_ref=root_cause_slug,
-            notes=note,
-            provenance=metadata,
-        )
+        if existing_link is None:
+            link = _upsert_finding_link(
+                connection,
+                engagement.id,
+                finding_id=int(finding["id"]),
+                link_kind=ROOT_CAUSE_LINK_KIND,
+                target_kind="finding",
+                target_id=int(root["id"]),
+                target_ref=root_cause_slug,
+                notes=note,
+                provenance=metadata,
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE assessment_finding_links
+                SET target_id = ?,
+                    target_ref = ?,
+                    notes = ?,
+                    provenance_json = ?,
+                    retired_at = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    int(root["id"]),
+                    root_cause_slug,
+                    _common._append_notes(existing_link["notes"], note),
+                    _json_text(metadata),
+                    int(existing_link["id"]),
+                ),
+            )
+            updated_link = connection.execute(
+                "SELECT * FROM assessment_finding_links WHERE id = ?",
+                (int(existing_link["id"]),),
+            ).fetchone()
+            assert updated_link is not None
+            link = dict(updated_link)
     result = dict(link)
     result["finding_slug"] = finding_slug
     result.update(_root_cause_link_metadata(result))
@@ -248,11 +310,14 @@ def clear_root_cause_link(engagement_id: int, *, finding_slug: str) -> dict[str,
         ).fetchone()
         cursor = connection.execute(
             """
-            DELETE FROM assessment_finding_links
+            UPDATE assessment_finding_links
+            SET retired_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
             WHERE engagement_id = ?
               AND finding_id = ?
               AND link_kind = ?
               AND target_kind = 'finding'
+              AND retired_at IS NULL
             """,
             (engagement.id, int(finding["id"]), ROOT_CAUSE_LINK_KIND),
         )
@@ -272,6 +337,140 @@ def list_finding_links(engagement_id: int) -> list[dict[str, Any]]:
             (engagement.id,),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def update_finding_link(
+    engagement_id: int,
+    *,
+    finding_slug: str,
+    link_id: int,
+    target_kind: str | None,
+    target_id: int | None,
+    target_ref: str | None,
+    notes: str | None,
+    provenance: dict[str, Any] | None,
+    retired: bool | None,
+) -> dict[str, Any]:
+    """Correct or retire a generic link in place, preserving its durable id."""
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        finding_slug = _resolve_existing_finding_slug(
+            connection, engagement.id, finding_slug
+        )
+        finding = connection.execute(
+            "SELECT * FROM assessment_findings "
+            "WHERE engagement_id = ? AND slug = ?",
+            (engagement.id, finding_slug),
+        ).fetchone()
+        link = connection.execute(
+            "SELECT * FROM assessment_finding_links "
+            "WHERE engagement_id = ? AND finding_id = ? AND id = ?",
+            (engagement.id, int(finding["id"]), int(link_id)),
+        ).fetchone()
+        if link is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="finding link not found",
+            )
+        if _is_root_cause_link(link):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="use the root-cause lifecycle for root-cause links",
+            )
+        if target_kind is not None and target_id is None and target_ref is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="changing target_kind requires target_id or target_ref",
+            )
+
+        next_kind = str(target_kind) if target_kind is not None else str(link["target_kind"])
+        if target_ref is not None:
+            next_id = None
+            next_ref = str(target_ref)
+        elif target_id is not None:
+            next_id = target_id
+            next_ref = ""
+        else:
+            next_id = link["target_id"]
+            next_ref = str(link["target_ref"])
+        if next_kind == "finding":
+            if next_ref:
+                next_ref = _resolve_existing_finding_slug(
+                    connection,
+                    engagement.id,
+                    next_ref,
+                    field="target_ref",
+                )
+                target = connection.execute(
+                    "SELECT id FROM assessment_findings "
+                    "WHERE engagement_id = ? AND slug = ?",
+                    (engagement.id, next_ref),
+                ).fetchone()
+            else:
+                target = connection.execute(
+                    "SELECT id, slug FROM assessment_findings "
+                    "WHERE engagement_id = ? AND id = ?",
+                    (engagement.id, next_id),
+                ).fetchone()
+                if target is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="target_id finding not found",
+                    )
+                next_ref = str(target["slug"])
+            assert target is not None
+            next_id = int(target["id"])
+        if next_kind == "finding" and (
+            next_ref == finding_slug
+            or (next_id is not None and int(next_id) == int(finding["id"]))
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="finding cannot link to itself",
+            )
+        if next_id is None and not next_ref:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="finding link requires target_id or target_ref",
+            )
+
+        next_notes = str(link["notes"]) if notes is None else str(notes)
+        next_provenance = _merge_object_text(
+            link["provenance_json"], provenance
+        )
+        if retired is None:
+            retired_sql = "retired_at"
+        elif retired:
+            retired_sql = "CURRENT_TIMESTAMP"
+        else:
+            retired_sql = "NULL"
+        connection.execute(
+            f"""
+            UPDATE assessment_finding_links
+            SET target_kind = ?, target_id = ?, target_ref = ?,
+                notes = ?, provenance_json = ?,
+                retired_at = {retired_sql},
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                next_kind,
+                next_id,
+                next_ref,
+                next_notes,
+                next_provenance,
+                int(link_id),
+            ),
+        )
+        updated = connection.execute(
+            "SELECT * FROM assessment_finding_links WHERE id = ?",
+            (int(link_id),),
+        ).fetchone()
+    assert updated is not None
+    result = dict(updated)
+    result["finding_slug"] = finding_slug
+    return result
 
 def list_finding_groups(engagement_id: int, *, root_slug: str | None = None) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
@@ -306,6 +505,7 @@ def list_finding_groups(engagement_id: int, *, root_slug: str | None = None) -> 
             WHERE links.engagement_id = ?
               AND links.link_kind = ?
               AND links.target_kind = 'finding'
+              AND links.retired_at IS NULL
               {root_filter}
             ORDER BY links.updated_at DESC, links.id DESC
             """,

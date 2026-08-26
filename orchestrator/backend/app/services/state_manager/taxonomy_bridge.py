@@ -1,4 +1,4 @@
-"""Backend bridge to the canonical vuln-class taxonomy (Wave 1).
+"""Backend bridge to the canonical vuln-class taxonomy.
 
 The single source of truth for vuln classes + families is
 ``agent/scripts/assess/lib/vuln_taxonomy.py``. The depth ledger (§5.3) must

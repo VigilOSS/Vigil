@@ -29,7 +29,7 @@ def _render_handoff(args, extra: list[str]) -> None:
     assessment_dispatch_handoffs). The handoff payload provides
     summary / coverage gaps / next steps / runtime issues / working artifacts
     / open questions / extras; the dispatch row provides metadata (role,
-    task, scope_host, dispatched_at, status). 404 on the
+    task, application_unit_id, dispatched_at, status). 404 on the
     handoff exits 2; 404 on the dispatch row is non-fatal — the renderer
     still produces output from the handoff.
     """
@@ -71,24 +71,28 @@ def _render_handoff(args, extra: list[str]) -> None:
         if dispatch is not None:
             role = str(dispatch.get("agent_role") or handoff.get("agent_role") or "<unknown role>")
             task = str(dispatch.get("task") or "<unrecorded task>")
-            scope_host = dispatch.get("scope_host") or ""
+            application_unit_id = dispatch.get("application_unit_id")
             dispatched_at = dispatch.get("dispatched_at") or ""
             dispatch_status = dispatch.get("status") or ""
             skills = str(dispatch.get("skills") or "")
         else:
             role = str(handoff.get("agent_role") or "<unknown role>")
             task = "<unrecorded task>"
-            scope_host = ""
+            application_unit_id = None
             dispatched_at = handoff.get("created_at") or ""
             dispatch_status = "(dispatch row missing)"
             skills = ""
 
         # Handoff payload extraction. JSON columns deserialize to lists/dicts
         # in the state-manager serializer; treat anything else defensively.
-        finding_slugs = handoff.get("finding_slugs") or []
-        if not isinstance(finding_slugs, list):
-            finding_slugs = []
-        finding_slugs = [str(s).strip() for s in finding_slugs if str(s).strip()]
+        handoff_finding_slugs = _normalise_finding_slugs(handoff.get("finding_slugs"))
+        dispatch_finding_slugs = _normalise_finding_slugs(
+            dispatch.get("finding_slugs") if dispatch is not None else None
+        )
+        # The two rows are independently useful audit surfaces. Enrich their
+        # stable union so a slug recorded at dispatch closure is not silently
+        # lost merely because the handoff author omitted it (or vice versa).
+        finding_slugs = list(dict.fromkeys(dispatch_finding_slugs + handoff_finding_slugs))
 
         next_steps = handoff.get("next_steps") or []
         if not isinstance(next_steps, list):
@@ -108,6 +112,22 @@ def _render_handoff(args, extra: list[str]) -> None:
         recommended_next_agent = str(handoff.get("recommended_next_agent") or "")
         summary = str(handoff.get("summary") or "")
         confidence = str(handoff.get("confidence") or "")
+
+        # Handoff-row provenance. Every specialist's closing sequence is "write
+        # the handoff, then render it as a self-check". A REJECTED write (e.g.
+        # HTTP 422 on an over-long summary) leaves the PRIOR row intact, so the
+        # render succeeded and exited 0 against stale content — the self-check
+        # could not detect the failure it exists to detect. The renderer has no
+        # way to know what the caller tried to write, so it surfaces the row's
+        # own identity instead: handoff_version and last_checkpoint_at both move
+        # on every accepted write, so an unchanged pair after a "successful"
+        # write is the tell. `dispatched_at` is the DISPATCH timestamp and never
+        # moves on a handoff write, which is why it must not be read as one.
+        handoff_status = str(handoff.get("handoff_status") or "")
+        handoff_version = handoff.get("handoff_version")
+        handoff_written_at = str(
+            handoff.get("last_checkpoint_at") or handoff.get("created_at") or ""
+        )
 
         # Per-slug enrichment from the backend. Tolerate 404s — the operator
         # may have killed a finding between dispatch and handoff render.
@@ -134,16 +154,15 @@ def _render_handoff(args, extra: list[str]) -> None:
                 finding_rows.append({"slug": slug, "_error": "non-dict response"})
 
         credential_rows: list[dict] = []
-        if role in ("vulnerability-analyst", "exploit-developer"):
-            try:
-                creds = client.get("credentials")
-            except AssessError:
-                creds = []
-            if isinstance(creds, list):
-                credential_rows = [
-                    c for c in creds
-                    if isinstance(c, dict) and (c.get("source_name") or "") == role
-                ]
+        try:
+            # Credentials are engagement-scoped, not under /assessment. The
+            # continuity line describes the store the next worker inherits,
+            # independent of which role originally captured each identity.
+            creds = client.get_engagement("credentials")
+        except AssessError:
+            creds = []
+        if isinstance(creds, list):
+            credential_rows = [c for c in creds if isinstance(c, dict)]
 
     # Local-disk presence check for working artifacts. The new payload uses
     # objects with a 'path' key; tolerate plain strings for forward-compat.
@@ -162,12 +181,17 @@ def _render_handoff(args, extra: list[str]) -> None:
         agent_id=agent_id,
         role=role,
         task=task,
-        scope_host=scope_host,
+        application_unit_id=application_unit_id,
         dispatched_at=dispatched_at,
         status=dispatch_status,
         skills=skills,
+        handoff_status=handoff_status,
+        handoff_version=handoff_version,
+        handoff_written_at=handoff_written_at,
         summary=summary,
         confidence=confidence,
+        dispatch_finding_slugs=dispatch_finding_slugs,
+        handoff_finding_slugs=handoff_finding_slugs,
         finding_rows=finding_rows,
         coverage_gaps=coverage_gaps,
         next_steps=next_steps,
@@ -187,12 +211,17 @@ def _render_handoff_blob(
     agent_id: str,
     role: str,
     task: str,
-    scope_host: str,
+    application_unit_id: object,
     dispatched_at: str,
     status: str,
     skills: str,
+    handoff_status: str = "",
+    handoff_version: object = None,
+    handoff_written_at: str = "",
     summary: str,
     confidence: str,
+    dispatch_finding_slugs: list[str],
+    handoff_finding_slugs: list[str],
     finding_rows: list[dict],
     coverage_gaps: list[dict],
     next_steps: list[dict],
@@ -215,8 +244,9 @@ def _render_handoff_blob(
     head = [
         f"#### Handoff from {role} dispatch {agent_id}",
         f"- **Prior task:** {task}",
-        f"- **Scope host:** {scope_host or '(none recorded)'}",
+        f"- **Application unit:** {application_unit_id or '(none recorded)'}",
         f"- **Dispatched at:** {dispatched_at or '(unknown)'} (status: {status or 'unknown'})",
+        _handoff_provenance_line(handoff_status, handoff_version, handoff_written_at),
     ]
     # Skills loaded by the prior dispatch are part of the audit surface — the
     # next dispatch should know which procedure context the previous agent
@@ -229,7 +259,11 @@ def _render_handoff_blob(
         head.append("- **Skills loaded:** (not recorded)")
 
     summary_lines = _summary_section(summary, confidence)
-    finding_lines = _findings_section(finding_rows, include_evidence=include_evidence)
+    finding_lines = (
+        _findings_section(finding_rows, include_evidence=include_evidence)
+        if finding_rows
+        else ["  - (none declared in handoff or dispatch)"]
+    )
     coverage_lines = _coverage_gaps_section(coverage_gaps)
     next_steps_lines = _next_steps_section(next_steps)
     open_questions_lines = _open_questions_section(open_questions)
@@ -241,11 +275,15 @@ def _render_handoff_blob(
     def _compose(findings_kept: list[str], findings_dropped: int,
                  artifacts_kept: list[tuple[str, str]],
                  runtime_kept: list[dict], runtime_dropped: int,
-                 artifacts_dropped: int) -> list[str]:
+        artifacts_dropped: int) -> list[str]:
         out: list[str] = []
         out.extend(head)
         out.extend(summary_lines)
-        out.append("- **Findings recorded:**")
+        out.append(
+            "- **Finding declarations:** "
+            f"**Dispatch-declared findings:** {_finding_declaration_value(dispatch_finding_slugs)}; "
+            f"**Handoff-declared findings:** {_finding_declaration_value(handoff_finding_slugs)}"
+        )
         out.extend(findings_kept)
         if findings_dropped > 0:
             out.append(f"  - ... and {findings_dropped} more")
@@ -305,6 +343,48 @@ def _render_handoff_blob(
         artifacts_dropped,
     )
     return "\n".join(composed)
+
+
+def _handoff_provenance_line(
+    handoff_status: str, handoff_version: object, handoff_written_at: str
+) -> str:
+    """Render the handoff row's OWN identity: status, version, write time.
+
+    This is what makes the "write the handoff, then render it" self-check able
+    to fail. Both the version and the write timestamp advance on every accepted
+    write, so a specialist that just wrote a handoff can confirm the write
+    landed instead of reading a stale prior row as success. The wording names
+    the timestamp as the HANDOFF write time so it is never confused with the
+    ``Dispatched at`` line above, which does not move on a handoff write.
+    """
+    try:
+        version = int(handoff_version)  # type: ignore[arg-type]
+        version_text = f"v{version}"
+    except (TypeError, ValueError):
+        version_text = "v(unrecorded)"
+    return (
+        f"- **Handoff row:** {handoff_status or '(status unrecorded)'} "
+        f"{version_text}, last written {handoff_written_at or '(unknown)'} "
+        "(this is the handoff write time, NOT the dispatch time — if it did not "
+        "advance, your write did not land)"
+    )
+
+
+def _normalise_finding_slugs(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(slug).strip() for slug in value if str(slug).strip()]
+
+
+def _finding_declaration_value(slugs: list[str]) -> str:
+    """Render a bounded source summary without defeating --max-lines."""
+    if not slugs:
+        return "(none declared)"
+    preview_limit = 8
+    preview = ", ".join(f"`{slug}`" for slug in slugs[:preview_limit])
+    remaining = len(slugs) - preview_limit
+    suffix = f" … and {remaining} more" if remaining > 0 else ""
+    return f"{preview}{suffix}"
 
 
 def _summary_section(summary: str, confidence: str) -> list[str]:
@@ -494,4 +574,3 @@ def _truncate_findings(
             i += 1
         break
     return kept, truncated
-

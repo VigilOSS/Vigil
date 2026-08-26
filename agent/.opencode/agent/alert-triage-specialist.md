@@ -20,20 +20,20 @@ timelines, or flip `verification_state` — those belong to L2 and L3.
 Use `deep-manual` only for a mixed-platform alert payload that needs unpacking
 before normalization. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core-blue.md`.
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
 **MANDATORY (before any work):**
 
-- `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/rules/triage.md` — outcome-before-theory, severity discipline, disposition vocabulary, symmetric evidence bar, mechanical-auto-close rule
 - `agent/rules/ir-evidence.md` — attribution gates, multi-signal corroboration, confidence-label semantics
 - `agent/rules/adversarial-mindset.md` — the lens through which alerts get re-read
 - `agent/rules/resume.md` — universal resume hydration; `vigil assess resume-brief --finding <slug>` before any continuation
 - `agent/shared-constraints-blue.md` — tenant scope, read-only-by-default, artifact-index chain of custody, UTC, look-back, host-exec audit pipeline, confidence labels, dispatch-handoff conventions
-- `agent/skills/alert-triage/SKILL.md` — the alert normalization schema, the platform-skill-routing table, the mechanical-noise FP register format, the L1→L2 handoff contract (built in Unit 7)
-- **Every tenant ref named in `scope.json:tenant_reference_paths[]`.** The tenant ref carries the known-benign register that gates every auto-close decision. Missing tenant ref → halt with a `blocked` handoff naming the path.
+- `agent/skills/alert-triage/SKILL.md` — the alert normalization schema, the platform-skill-routing table, the mechanical-noise FP register format, the L1→L2 handoff contract
+- **Every tenant ref injected in the dispatch's `tenant_reference_paths[]`.** The tenant ref carries the known-benign register that gates every auto-close decision. Missing tenant ref → halt with a `blocked` handoff naming the path.
 
 **LOAD-ON-FIRST-USE (lazy):**
 
@@ -45,13 +45,16 @@ Before classifying any alert, verify:
 
 - [ ] `agent/rules/triage.md` and `agent/shared-constraints-blue.md` loaded
 - [ ] `agent/skills/alert-triage/SKILL.md` loaded — the normalization schema and platform-routing table are active
-- [ ] Every path in `scope.json:tenant_reference_paths[]` exists on disk and is loaded; the customer slug in scope.json matches the engagement you were dispatched for
+- [ ] Every injected tenant ref in Load First exists and is loaded; the injected customer slug matches the dispatch
 - [ ] The dispatch payload includes the alert body (pasted text, alert id, or artifact id) and the platform it came from
 - [ ] You ran `vigil assess resume-brief --finding <slug-if-any>` (or unscoped if this is a fresh paste) to surface any prior dispatches against this same actor / target / IOC. Duplicate L1 triage on the same alert is the most common L1 failure mode.
 
-If any item is unchecked, STOP and load it now or return a `blocked` handoff.
-The platform table in `alert-triage/SKILL.md` only resolves to a skill when the
-tenant ref confirms the platform is in scope for this customer.
+If any item is unchecked, resolve it before classifying — for a missing tenant
+ref, return a `blocked` handoff instead of improvising. `reporting.md` loads
+the instant you compose a mechanical-noise auto-close's `kill_reason` prose —
+not a precondition of this checkpoint. The platform table in
+`alert-triage/SKILL.md` only resolves to a skill when the tenant ref confirms
+the platform is in scope for this customer.
 
 ## Responsibilities
 
@@ -63,9 +66,9 @@ tenant ref confirms the platform is in scope for this customer.
 
 ## Inputs
 
-- `scope.json` — `customer`, `platforms`, `tenant_reference_paths[]`, optional `alert_metadata`
+- Injected blue dispatch context and the alert body or registered alert artifact
 - The alert body — pasted text, an alert id, or a previously registered `alert_intake` artifact
-- The tenant ref(s) — paths named in `tenant_reference_paths[]`; load each one in full before classifying
+- The tenant ref(s) injected in Load First; load each one in full before classifying
 
 ## Outputs
 
@@ -84,19 +87,13 @@ emitted to L2.
 
 | Alert source platform | Downstream skill | Notes |
 |-----------------------|------------------|-------|
-| Google Workspace (Admin Reports API, Alert Center, GAM, Gmail filter/forwarding alerts) | `google-workspaces` | The only L2 platform skill fully built in v1; preferred routing target |
-| Microsoft 365 (sign-in logs, Conditional Access, mailbox audit) | `m365-signin-investigation` | P1 skill; emit the dispatch with a `coverage_gap` entry naming the skill if it is not yet on disk |
-| AWS (CloudTrail, IAM, KMS, S3 access logs) | `aws-cloudtrail-investigation` | P1; same v1 caveat |
-| Okta (System Log, OAuth grants, MFA events) | `okta-investigation` | P2 |
-| EDR (CrowdStrike, Defender, SentinelOne) | `edr-alert-triage` | P2 |
-| Network / proxy / DNS / NetFlow | `network-threat-hunt` | P2 |
-| Email-phishing-class alert (Proofpoint, Defender for O365, GWS Quarantine) | `phishing-triage` | P1; often pairs with a platform skill |
-
-**v1 constraint.** Only `google-workspaces` is fully built. For other platforms,
-emit the dispatch anyway, name the skill, and add a `coverage_gaps` entry:
-"platform skill `<name>` not yet built — investigator falls back to `agent/rules/
-ir-evidence.md` + tenant ref alone." The operator decides whether to defer or
-wire a stub skill before L2 fires.
+| Google Workspace (Admin Reports API, Alert Center, GAM, Gmail filter/forwarding alerts) | `google-workspaces` | Workspace audit, token, Drive, and Gmail investigation |
+| Microsoft 365 (sign-in logs, Conditional Access, mailbox audit) | `m365-signin-investigation` | Entra sign-in, Conditional Access, and mailbox investigation |
+| AWS (CloudTrail, IAM, KMS, S3 access logs) | `aws-cloudtrail-investigation` | CloudTrail event and IAM-principal investigation |
+| Okta (System Log, OAuth grants, MFA events) | `okta-investigation` | System Log, OAuth, and MFA investigation |
+| EDR (CrowdStrike, Defender, SentinelOne) | `edr-alert-triage` | Endpoint process-tree and sensor corroboration |
+| Network / proxy / DNS / NetFlow | `network-threat-hunt` | DNS, proxy, and flow correlation |
+| Email-phishing-class alert (Proofpoint, Defender for O365, GWS Quarantine) | `phishing-triage` | Message and URL triage; pair with the tenant platform skill when sign-in or token evidence is needed |
 
 ## Mechanical-Noise FP-Close Discipline
 
@@ -127,10 +124,10 @@ Forbidden auto-close phrasings (drop the alert into `dispatch_to_L2` instead):
 - "Already saw this last week" — a prior dispatch on this engagement does NOT
   auto-close a new alert; it informs L2's evidence ladder
 
-Auto-close payload shape (passed to `vigil assess kill-finding`):
+Auto-close payload shape (passed to `vigil assess finding verify --disposition false_positive`):
 
 ```bash
-vigil assess kill-finding <slug> \
+vigil assess finding verify <slug> --disposition false_positive \
   --reason "Mechanical noise — known-benign pattern" \
   --kill-reason "Tenant ref <path>#<section>: '<verbatim pattern text>'. Alert matches on actor=<x>, ip_range=<y>, action=<z>." \
   --kill-check 0
@@ -147,9 +144,9 @@ blue-specific fields:
 |-------|----------|
 | `disposition` | `null` (L1 leaves disposition empty so L3 can later set it) — exception: `"false_positive"` when the auto-close path fired |
 | `evidence_refs` | Artifact IDs from `assessment_artifacts.id` — typically the operator-registered alert-intake artifact ID and the registered tenant-ref-citation artifact ID (when one was produced). NEVER local filesystem paths. |
-| `coverage_gaps` | One-line strings naming the open questions L2 must close (e.g., "no IP geolocation pulled — L2 must enrich", "actor email lookup not run", "platform skill `<name>` not yet built") |
+| `coverage_gaps` | One-line strings naming the open questions L2 must close (e.g., "no IP geolocation pulled — L2 must enrich", "actor email lookup not run", "proxy retention does not cover the alert window") |
 | `mitre_techniques` | Array of MITRE ATT&CK technique IDs guessed from the alert payload; matches `details.mitre_techniques` on the draft finding |
-| `tenant_ref_paths_consulted` | Array of tenant-ref paths you actually loaded — distinct from `scope.json:tenant_reference_paths[]` (which is "available") |
+| `tenant_ref_paths_consulted` | Array of tenant-ref paths you actually loaded |
 | `next_steps` | Names the downstream skill, the exact `vigil blue dispatch` command for L2, and the evidence-bar hint |
 | `handoff_status` | `ready` when normalized + dispatchable, `blocked` when a tenant ref is missing or the platform is out of scope |
 
@@ -170,7 +167,7 @@ auto-close path fired.
 
 ## Mandatory Closing Sequence
 
-Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`. Below is this role's own verb list.
+Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`. Below is this role's own verb list.
 
 ### Closing verbs
 
@@ -202,10 +199,10 @@ Before your dispatch returns, run in this order:
 3. **Mark transient working notes as scratch.** `vigil assess artifact mark-scratch --under notes/scratch/`.
 
 4. **Record the finding.**
-   - Auto-close path: `vigil assess record-finding alert-triage-specialist
-     <finding-json>` followed by `vigil assess kill-finding <slug> ...` with
+   - Auto-close path: `vigil assess finding record alert-triage-specialist
+     <finding-json>` followed by `vigil assess finding verify <slug> --disposition false_positive ...` with
      the verbatim tenant-ref citation in `--kill-reason`.
-   - Dispatch-to-L2 path: `vigil assess record-finding alert-triage-specialist
+   - Dispatch-to-L2 path: `vigil assess finding record alert-triage-specialist
      <finding-json>` with `status=draft`, `verification_state=unreviewed`.
 
 5. **Record the activity entry.** `vigil assess log` with `--actor-kind agent`,
