@@ -426,11 +426,11 @@ def main(argv: list[str] | None = None) -> None:
     start_p = engagement_sub.add_parser("start")
     start_p.add_argument("key", nargs="?")
     start_p.add_argument("--select", action="store_true")
-    start_p.add_argument("--client", choices=["codex", "claude", "opencode", "goose"], required=True)
+    start_p.add_argument("--client", choices=["codex", "claude", "opencode", "goose", "kimi"], required=True)
     start_p.add_argument("--thinking", choices=["off", "high", "max"], default=None,
                          help="DeepSeek thinking level for --client opencode: off=disabled, "
                               "high=on, max=maximum (default: client default — thinking on). "
-                              "Ignored for claude/codex.")
+                              "Ignored for claude/codex/kimi.")
     start_p.add_argument("client_args", nargs="*")
     open_p = engagement_sub.add_parser("open")
     open_p.add_argument("key", nargs="?")
