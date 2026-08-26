@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
-from pathlib import Path
+import re
 import sys
+from pathlib import Path
 
 
 def _load_schema_generator_module():
@@ -36,3 +37,120 @@ def test_schema_generator_check_mode_passes_for_committed_bundle(capsys):
 
     assert exit_code == 0
     assert "in sync" in capsys.readouterr().out.lower()
+
+
+def test_finding_record_accepts_lifecycle_analysis_detail_keys():
+    module = _load_schema_generator_module()
+
+    schema = module.build_schema_bundle()["finding-record.schema.json"]
+    properties = schema["properties"]["details"]["properties"]
+
+    for key in (
+        "precondition_analysis",
+        "severity_ceiling",
+        "root_cause_candidates",
+        "notes_provenance",
+    ):
+        assert key in properties
+
+
+def test_finding_record_schema_exposes_reserved_code_snapshot_contract():
+    module = _load_schema_generator_module()
+
+    schema = module.build_schema_bundle()["finding-record.schema.json"]
+    code_snapshot = schema["properties"]["provenance"]["properties"]["code_snapshot"]
+
+    assert code_snapshot["additionalProperties"] is False
+    assert code_snapshot["required"] == [
+        "repo_id",
+        "repo_generation",
+        "source_manifest_digest",
+    ]
+    assert code_snapshot["properties"]["repo_id"]["minimum"] == 1
+    assert code_snapshot["properties"]["repo_generation"]["minimum"] == 1
+    digest = code_snapshot["properties"]["source_manifest_digest"]
+    assert digest["minLength"] == 64
+    assert digest["maxLength"] == 64
+    assert digest["pattern"] == "^[0-9a-f]{64}$"
+
+
+def test_finding_record_schema_requires_snapshot_binding_for_file_findings():
+    module = _load_schema_generator_module()
+
+    schema = module.build_schema_bundle()["finding-record.schema.json"]
+
+    assert {
+        "if": {
+            "required": ["canonical_location"],
+            "properties": {"canonical_location": {"pattern": r"^\s*file:"}},
+        },
+        "then": {
+            "required": ["provenance"],
+            "properties": {
+                "provenance": {
+                    "required": ["code_snapshot"],
+                    "properties": {
+                        "code_snapshot": {"type": "object"},
+                    },
+                },
+            },
+        },
+    } in schema["allOf"]
+
+
+def test_finding_record_file_examples_carry_complete_snapshot_binding():
+    module = _load_schema_generator_module()
+
+    schema = module.build_schema_bundle()["finding-record.schema.json"]
+    file_examples = [
+        example
+        for example in schema["examples"]
+        if example["canonical_location"].startswith("file:")
+    ]
+
+    assert file_examples
+    for example in file_examples:
+        binding = example["provenance"]["code_snapshot"]
+        assert binding["repo_id"] >= 1
+        assert binding["repo_generation"] >= 1
+        assert re.fullmatch(r"[0-9a-f]{64}", binding["source_manifest_digest"])
+
+
+def test_fuzz_schemas_expose_canonical_lists_and_conditional_invariants():
+    module = _load_schema_generator_module()
+    bundle = module.build_schema_bundle()
+
+    decision = bundle["code-fuzz-decision.schema.json"]
+    assert decision["properties"]["target_ids"]["uniqueItems"] is True
+    assert {
+        "if": {"properties": {"decision": {"const": "required"}}},
+        "then": {"properties": {"target_ids": {"minItems": 1}}},
+    } in decision["allOf"]
+    assert {
+        "if": {"properties": {"decision": {"const": "not_required"}}},
+        "then": {"properties": {"target_ids": {"maxItems": 0}}},
+    } in decision["allOf"]
+
+    campaign = bundle["code-fuzz-campaign-receipt.schema.json"]
+    assert campaign["properties"]["covered_finding_slugs"]["uniqueItems"] is True
+    assert campaign["properties"]["sanitizers"]["uniqueItems"] is True
+    assert {
+        "if": {"properties": {"outcome": {"const": "completed_no_crash"}}},
+        "then": {
+            "properties": {
+                "crash_count": {"const": 0},
+                "executions": {"minimum": 1},
+            }
+        },
+    } in campaign["allOf"]
+    assert {
+        "if": {
+            "properties": {"outcome": {"const": "completed_crashes_triaged"}}
+        },
+        "then": {
+            "properties": {
+                "crash_count": {"minimum": 1},
+                "executions": {"minimum": 1},
+            }
+        },
+    } in campaign["allOf"]

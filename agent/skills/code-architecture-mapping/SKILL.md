@@ -6,6 +6,11 @@ origin: Vigil
 
 # Code Architecture Mapping
 
+Together with `agent/shared-constraints-code.md` §5, this skill owns the architecture portion of
+the code hunting contract: enumerate every admitted file, distinguish shipped product reachability
+from attacker control, map trust boundaries and complete entry chains, and queue rather than erase
+ambiguous coverage. The web hunting rules are neither required nor a substitute for these outputs.
+
 ## When to Activate
 
 - Phase 1 of code analysis pipeline. This is the entry point before any vulnerability analysis begins.
@@ -15,11 +20,15 @@ origin: Vigil
 ## Tools
 
 All host-side:
-- `git log` — commit history, churn analysis, CVE-fixing commit identification
-- `grep` / `rg` — pattern matching across project files
-- `find` — directory tree enumeration, file discovery
+- Backend repository envelope — ingest-time Git provenance and churn summary
+- `grep` / `rg` — pattern matching beneath the sealed `snapshot_path`
+- `find` — sealed-tree enumeration and file discovery
 - `wc -l` — line counts for size estimation
 - `file` — file type identification for ambiguous extensions
+
+Run filesystem commands with `snapshot_path` as the explicit root or change into it first. Do not
+run ambient Git against `source_origin_path`; it is a mutable provenance location, not analysis
+state.
 
 ## Methodology
 
@@ -45,6 +54,13 @@ Identify the build system and dependency graph. Read these files in full:
 
 Extract: project name, version, dependencies (especially native/unsafe ones), build targets, feature flags, compile-time options.
 
+Also check for CI/CD pipeline definitions: `.github/workflows/*.yml`, `.gitlab-ci.yml`,
+`Jenkinsfile`, `.circleci/config.yml`. These are a distinct supply-chain attack surface from
+application source (expression injection, untrusted checkout, secret exfiltration, self-hosted
+runner escalation) — flag them in the classification for a Phase 2 dispatch that loads
+`agent/skills/cicd-security/SKILL.md` instead of the standard code-vulnerability-analysis
+methodology, since the bug classes and evidence shape differ from application-source review.
+
 ### Step 3: Read Project Documentation
 
 Read in full if present:
@@ -65,22 +81,13 @@ For every source file, read the first ~50 lines to capture:
 
 Store as `header_snippet` per file for later reference.
 
-### Step 5: Git Churn Analysis
+### Step 5: Git Provenance and Churn Context
 
-If git history is available:
-
-```bash
-# Top 30 highest-churn files (most frequently modified)
-git log --format=format: --name-only --since="2 years ago" | sort | uniq -c | sort -rn | head -30
-
-# Files with CVE-fixing commits
-git log --all --oneline --grep="CVE-" --grep="security" --grep="vulnerability" --grep="overflow" --grep="injection" --grep="use-after-free" --grep="race condition" | head -30
-
-# Recent security-related commits with changed files
-git log --all --oneline --diff-filter=M --grep="CVE-" --name-only --since="3 years ago" | head -50
-```
-
-High-churn files in security-relevant directories are priority targets. Files touched by CVE-fixing commits are strong indicators of historically vulnerable code.
+Use only the ingest-time Git fields and `code_repos.git_churn_json` supplied in dispatch context.
+Do not reopen the mutable origin or infer current source identity from a commit hash: dirty and
+untracked admitted files are covered by the sealed manifest instead. High-churn files in
+security-relevant directories are priority signals, and files named by captured security-history
+metadata warrant attention, but neither is proof of a vulnerability and neither limits the queue.
 
 ### Step 6: Group Files into Logical Modules
 
@@ -96,13 +103,27 @@ is persisted in the backend, so it must be meaningful and stable (`auth-reset-pa
 
 ### Step 7: Identify Entry Points
 
-Scan for entry points where execution begins or external interaction occurs:
+First classify each module's shipped product surface from sealed evidence:
+`application/service`, `library/framework`, `CLI`, `plugin/extension`, or `mixed/unknown`. Use build
+targets, package/export manifests, installed headers, registration code, and project documentation;
+record the evidence and uncertainty. An example or test is behavioral evidence, not proof that its
+call site is the production surface.
+
+Then scan for the entry points appropriate to that surface:
 - **main functions**: `main()`, `__main__`, `if __name__`, entry points in `package.json` scripts
-- **Exported APIs**: public functions in shared libraries, HTTP route handlers, gRPC service implementations
+- **Exported APIs**: installed/public functions, classes, parsers, callbacks, or codecs in libraries
+  and frameworks; record the valid supported API sequences relevant to stateful behavior
+- **Service APIs**: HTTP route handlers, gRPC service implementations, jobs, and event consumers
 - **Protocol handlers**: packet parsers, message dispatchers, frame decoders
 - **Callback registrations**: event handlers, signal handlers, timer callbacks, hook registrations
 - **CLI parsers**: argument parsing (`argparse`, `getopt`, `clap`, `cobra`, `flag`)
-- **Plugin/extension entry points**: `init()` functions, module registration macros
+- **Plugin/extension entry points**: manifests, exported hooks, `init()` functions, module
+  registration macros, and host callbacks
+
+An exported symbol is product reachability only when packaging, visibility, documentation, or a
+registered host contract supports it. Keep product reachability distinct from attacker control:
+the former establishes that a defect is on a supported product path, while the latter determines
+who can trigger it and how the impact is scored (`agent/shared-constraints-code.md` §5).
 
 #### Web Framework Entry Points
 
@@ -131,7 +152,7 @@ Also identify middleware/interceptor registration patterns — these control aut
 
 ### Step 8: Map Trust Boundaries
 
-Identify every point where external (untrusted) data enters the system:
+Identify every point where external data or a supported product invocation enters the system:
 - **Network**: socket reads, HTTP request parsing, WebSocket frames, DNS responses, TLS handshake data
 - **CLI**: command-line arguments, stdin
 - **Files**: configuration file parsing, uploaded file handling, log file reading, certificate loading
@@ -139,14 +160,20 @@ Identify every point where external (untrusted) data enters the system:
 - **APIs**: responses from external services, database query results (if attacker-influenced), IPC messages
 - **Hardware/OS**: ioctl results, /proc or /sys reads, device driver data
 
-For each boundary, record: entry function, data format, size constraints (if any), first consumer.
+For each boundary, record: product surface kind, reachability basis, entry function, data format,
+size constraints (if any), first consumer, what the caller/attacker can control, and which consumer
+or host context remains unknown. A public library API can be product-reachable without proving that
+a remote attacker controls every argument.
 
 ### Step 9: Classify Every File
 
 Assign each file to exactly one classification tier:
 
-**Critical** — Files that sit on or immediately behind a trust boundary and define what attacker-controlled data means.
-- Decision: Does this file accept, parse, normalize, validate, deserialize, route, or semantically interpret untrusted input, or make authentication/authorization/crypto/state decisions from attacker-influenced values?
+**Critical** — Files on or immediately behind a trust/product boundary that define input meaning or
+enforce a supported security invariant.
+- Decision: Does this file accept, parse, normalize, validate, deserialize, route, or semantically
+  interpret untrusted/caller-controlled input, or make authentication, authorization, crypto, or
+  state decisions on a supported product path?
 - Examples: TLS handshake parser, HTTP header parser, authentication module, certificate validator, access control checker, protocol state machine
 
 **High** — Files that may not be the first parser but still transform, propagate, or act on attacker-influenced data in security-relevant ways.
@@ -209,31 +236,50 @@ Is this file executable source code?
 
 ## Priority Scoring
 
-Each file receives an `analysis_priority` score for analysis ordering. The code-classify
+Each file receives an `analysis_priority` score for analysis ordering. The code-record classify
 machine JSON field is named `analysis_priority`; do not emit `priority_score` or
 `classification_tier` in classification artifacts. When building the Phase 2 file-analysis
-queue, map this value to the queue item's `priority` field; the two names belong to different
-helpers and should not be swapped.
+queue, copy this value unchanged to the queue item's `priority` field: queue `priority` MUST
+exactly equal classification `analysis_priority` for the same file.
 
 ```
-priority = classification_base + git_churn_bonus + entry_point_proximity + past_cve_bonus
+raw_priority = classification_base + git_churn_bonus + entry_point_proximity + past_cve_bonus
+analysis_priority = 0                                      if classification is skip
+analysis_priority = min(raw_priority, classification_cap)  otherwise
 ```
 
-| Factor | Value |
-|--------|-------|
-| `classification_base` | critical=40, high=25, medium=10, low=0, skip=0 |
+| Classification | Base | Cap | Final `analysis_priority` |
+|----------------|------|-----|---------------------------|
+| critical | 80 | 100 | 80-100 |
+| high | 50 | 79 | 50-79 |
+| medium | 20 | 49 | 20-49 |
+| low | 5 | 19 | 5-19 |
+| skip | 0 | 0 | exactly 0 |
+
+For non-`skip` files, add one mutually exclusive value from each bonus row before applying the
+classification cap:
+
+| Bonus | Value |
+|-------|-------|
 | `git_churn_bonus` | top-10 churn=15, top-20=10, top-30=5, other=0 |
 | `entry_point_proximity` | direct entry point=15, one hop from entry=10, two hops=5, other=0 |
 | `past_cve_bonus` | touched by CVE-fixing commit=20, touched by security commit=10, other=0 |
 
-Files scoring 50+ are dispatched first. Files scoring 30-49 are second wave. Files below 30 are analyzed only if time permits.
+Do not apply bonuses to `skip`: its score remains exactly 0. The cap keeps bonuses inside the
+classification tier, so they rank files within a tier and never promote a lower-tier file above a
+higher-tier one. Sort queue work by descending `priority`; every admitted file still enters the
+queue, because the score controls order only.
 
 ### Step 11: Build Cross-Module Call Graph
 
 The call graph is the navigational backbone for the entire pipeline. Without it,
 the hunter cannot trace multi-function vulnerability chains across file boundaries.
 
-When a structural index is available (`tools/analysis-state/structural-index/`), use the pre-computed function definitions and call sites as the starting point for call graph construction. The structural index provides exact function boundaries, call site locations, and import statements — use these to resolve call graph edges more accurately than header-only grep. The architect then adds security annotations (trust boundaries, untrusted data flow, module boundary crossings) that tree-sitter cannot provide.
+Open the exact `structural_index_manifest_path` from Code Source Identity and resolve per-file
+indexes through its `path_to_index` map. Use those pre-computed function definitions and call sites
+as the starting point for call-graph construction. The index supplies exact function boundaries,
+call locations, and imports; the architect adds the trust-boundary, untrusted-flow, and
+module-crossing semantics tree-sitter cannot provide.
 
 Using ctags + grep (supplemented by structural index when available):
 
@@ -241,11 +287,17 @@ Using ctags + grep (supplemented by structural index when available):
    For each entry point function:
    a. Read the function body
    b. Identify all function calls
-   c. For each call: resolve to definition via ctags (grep '^<function>\t' tags)
-   d. Record edge: {caller: {function, file, line}, callee: {function, file, line}}
-   e. Note which arguments carry untrusted data (from slot-type annotations in Step 10)
-   f. Note if edge crosses a module boundary (from Step 6)
-   g. Recurse into callee (up to depth 3 from entry point)
+   c. For each call: resolve to definition via ctags (`grep '^<function>\t' "$ctags_path"`)
+   d. Record the edge using the flat fields the operator spec and
+      `agent/phases/code-phase-1-classify-map.md` "Cross-module call graph" expect:
+      `caller_func`, `caller_file`, `caller_line`, `callee_func`, `callee_file`, `callee_line`,
+      `crosses_trust_boundary` (bool, from Step 6's module-boundary map), `untrusted_data_label`
+      (string naming which arguments carry untrusted data, from Step 10's slot-type annotations,
+      or `null`)
+   e. Recurse into the callee, tracing as deep as the chain actually runs — to a leaf function, a
+      security-relevant decision, a state transition, or a sink, not to a fixed depth. If you stop
+      before reaching one of those (context budget, unresolvable indirection), record where and
+      why in `audit_metadata` rather than silently truncating.
 
 2. **Reverse trace from critical functions and security-relevant operations**:
    For each critical/high file's exported functions:
@@ -253,27 +305,30 @@ Using ctags + grep (supplemented by structural index when available):
    b. Record reverse edges
    c. This identifies which entry points can reach each critical function
 
-3. **Build adjacency list**:
+3. **Build adjacency list** — one edge per entry, flat fields only:
    ```json
    {
      "edges": [
        {
-         "caller": {"function": "...", "file": "...", "line": N},
-         "callee": {"function": "...", "file": "...", "line": N},
-         "untrusted_args": ["arg1", "arg3"],
-         "crosses_module": true/false,
-         "edge_type": "direct|callback|vtable"
+         "caller_func": "handle", "caller_file": "daemon.c", "caller_line": 887,
+         "callee_func": "run_service", "callee_file": "daemon.c", "callee_line": 740,
+         "crosses_trust_boundary": false,
+         "untrusted_data_label": "client_addr, req_buf",
+         "edge_type": "direct"
        }
      ],
     "entry_points": [...],
     "critical_targets": [...]
    }
    ```
+   `edge_type` (`direct` / `callback` / `vtable`) is additive to the required flat fields above —
+   keep it, it is the only signal that distinguishes a resolved direct call from an indirect one
+   worth flagging as lower-confidence.
 
 4. **Mark indirect calls**:
    Function pointer calls, vtable dispatches, and callback invocations are
-   harder to resolve. Mark these as edge_type "callback" or "vtable" and
-   list the possible targets if determinable from type analysis.
+   harder to resolve. Set `edge_type` to `"callback"` or `"vtable"` and
+   list the possible targets in `untrusted_data_label` or a sibling note if determinable from type analysis.
 
 Record every ctags/grep lookup used in audit_metadata.
 
@@ -284,7 +339,9 @@ From the call graph, extract complete chains from entry points to security-relev
 1. For each entry point: depth-first traversal following callee edges
 2. At each node: check if it reaches a critical/high function, security-relevant decision, or harm-bearing operation
 3. If yes: record the complete chain with untrusted data annotations
-4. Rank chains by: impact severity x number of trust boundary crossings
+4. Rank chains by: impact severity x target-kind entry-reachability weight x
+   `max(1, trust-boundary crossings)`. A supported public API/host entry remains rankable when the
+   implementation has no additional internal boundary crossing.
 
 Output format:
 ```json
@@ -312,15 +369,17 @@ harm-bearing operation, generate 2-3 specific
 attack hypotheses. Hypotheses attach to file-analysis-queue entries as `guidance_hypotheses`. Files without hypotheses still appear in the queue with an empty array — the hunter provides unconstrained analysis first, then checks hypotheses. This prevents hypothesis anchoring where the analysis scope gets limited to what the architect predicted.
 
 Each hypothesis specifies:
-1. **Entry point**: where untrusted data enters and what the attacker controls
+1. **Entry point**: the target-kind product entry, its reachability basis, what the caller/attacker
+   controls, and any missing consumer context
 2. **Chain**: the sequence of functions through which data flows
 3. **Target**: the specific decision point, state transition, or operation that could cause harm
 4. **CWE**: the vulnerability class that would apply
-5. **Concrete scenario**: "If the attacker sends [specific input], it reaches [function]
-   where [specific operation] occurs without [specific guard], causing [specific harm]"
+5. **Concrete scenario**: "If [attacker input or a valid supported API sequence] reaches
+   [function], [specific operation] occurs without [specific guard], causing [specific harm]"
 
 Prioritize by:
-- entry_point_reachability: unauthenticated_network(4) > authenticated(3) > local_config(2) > CLI(1)
+- entry_point_reachability: unauthenticated_network(4) > authenticated(3) >
+  supported_public_api_or_host_contract(2) > local_config(2) > CLI(1)
 - impact_severity: code_execution(4) > memory_corruption(3) > auth_bypass(3) > state_corruption(2) > info_leak(2) > DoS(1)
 - guard_absence: no_guard(4) > partial(3) > most_paths(2) > all_paths(1)
 
@@ -328,22 +387,31 @@ Score = reachability x impact_severity x guard_absence. Include hypotheses scori
 
 ## Output Format
 
-Use `vigil assess contract code-classify`, `vigil assess contract code-record-modules`,
-`vigil assess contract code-record-threat-model`, and `vigil assess contract code-dispatch`
+Use `vigil assess contract code-record classify`, `vigil assess contract code-record modules`,
+`vigil assess contract code-record threat-model`, and `vigil assess contract code-dispatch`
 as the canonical machine-artifact shape references. Cite those contract names in your handoff
 instead of duplicating payload templates, because the operator records your outputs through those
 helpers and their backend validation.
 
 Produce a structured architecture map containing:
 1. **Module Map**: module name, file list, description, primary slot types
-2. **Entry Point Catalog**: function, file, line, type (main/API/handler/callback/CLI)
+2. **Product Surface + Entry Point Catalog**: per-module surface kind and evidence, then function,
+   file, line, type (main/API/handler/callback/CLI/plugin), reachability basis, caller/attacker
+   control, and missing consumer/host context
 3. **Trust Boundary Map**: boundary name, entry function, data format, slot type
 4. **File Classification Table**: records keyed by backend `file_id` (with `file_path` as helper context when useful), plus classification tier, slot types, and `analysis_priority`. Do not emit path-only classifications.
-5. **File Analysis Queue**: flat ordered list of concrete files for Phase 2 (Hunt) dispatch, grouped by `batch_theme` for cross-file reasoning and using queue `priority` mapped from classification `analysis_priority`. Written to `tools/analysis-state/file-analysis-queue.json`. Every critical/high file appears regardless of whether a hypothesis names it. Emit one object per file with concrete `file_id` and `file_path` — no nested batch wrappers, no globs. Do not emit `context_id`; the queue is file-level and the supporting structure comes from metadata plus `tools/analysis-state/structural-index/`.
+5. **File Analysis Queue**: flat ordered list of every admitted file for Phase 2 (Hunt) dispatch, grouped by `batch_theme` for cross-file reasoning and with queue `priority` exactly equal to classification `analysis_priority` for the same file. Written to `tools/analysis-state/file-analysis-queue.json`. Classification controls order, not inclusion; even a `skip` classification appears so closeout must record an explicit reason. Emit one object per file with concrete `file_id` and `file_path` — no nested batch wrappers, no globs. Do not emit `context_id`; the queue is file-level and supporting structure resolves through the bound structural manifest.
 6. **Call Graph**: JSON adjacency list with edges, entry points, and critical targets. Written to `tools/analysis-state/call-graph.json`.
 7. **Entry-Point Chains**: ranked list of complete data flow chains from entry to target.
 8. **Attack Hypotheses**: prioritized list of specific vulnerability hypotheses. Each includes: entry point, chain, target, CWE, concrete scenario, score. Written to `tools/analysis-state/attack-hypotheses.json`.
-9. **Structural Index Integration**: when `tools/analysis-state/structural-index/` exists, the call graph and entry-point chains incorporate tree-sitter-derived function definitions, call sites, and security-relevant operations for higher accuracy.
+9. **Structural Index Integration**: the call graph and entry-point chains incorporate tree-sitter-derived function definitions, call sites, and security-relevant operations resolved through the Code Source Identity manifest.
+10. **Historical CVE Bug Shapes (optional)**: when repository history/advisories expose a concrete
+    vulnerable-to-fixed delta, write `tools/analysis-state/cve-bug-shapes.jsonl`, one compact JSON
+    object per physical line with `shape_id`, `cwe`, `affected_paths`, `vulnerable_revision`,
+    `fixed_revision`, `bug_pattern`, `guard_delta`, and `evidence_refs`. The two revision fields may
+    name commits, tags, or advisory/source snapshots, but every record must contain enough cited
+    vulnerable/fixed evidence to derive the semantic pattern. Omit the artifact rather than emit an
+    identifier-only record; Phase 2 treats absence as not applicable, not as completed discovery.
 
 ## Extended Resources
 

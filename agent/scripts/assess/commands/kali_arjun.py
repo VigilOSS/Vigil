@@ -4,7 +4,8 @@ Arjun discovers *hidden* HTTP parameters an endpoint silently accepts but never
 advertises. This verb exposes the FULL Arjun v2.2.7 CLI surface as first-class
 typed flags (no capability narrowed): single-URL (`-u`) and list (`-i`) input,
 all four methods (GET/POST/JSON/XML), the passive OSINT mode (`--passive`),
-header-based auth (`--headers`), every rate/politeness/stability knob, the
+auth-aware discovery (`--identity <name>` folds a store identity's session/bearer
+into `--headers`, or paste `--headers` manually), every rate/politeness knob, the
 casing styles, and all three output formats. A `--extra-args` passthrough is
 kept as the safety net for any future Arjun flag.
 
@@ -12,7 +13,7 @@ Output policy: JSON (`-oJ`) is ALWAYS written into the engagement scan dir
 (`scans/arjun/<target>/<hash>.json`, reachable in-container at
 `/engagements/$ENGAGEMENT_KEY/...`) so every run is captured and auditable,
 even when the operator also requests `-oT`/`-oB`. The JSON file is what
-`vigil assess ingest-arjun` consumes to enrich the work buffer.
+`vigil assess ingest arjun` consumes to enrich the work buffer.
 
 Like every other kali_* verb, Arjun runs INSIDE the isolated Kali runtime
 (it sends HTTP to the target and, in passive mode, hits external OSINT
@@ -265,6 +266,26 @@ def _host_json_path(args, json_path: str) -> str | None:
     return os.path.join(eng_dir, json_path)
 
 
+def _precreate_json_parent(args, json_path: str) -> None:
+    """Create the ``-oJ`` parent directory BEFORE the run.
+
+    Arjun writes the ``-oJ`` file during the run but does NOT create parent
+    directories itself, so a first run against a novel target (whose
+    ``scans/arjun/<token>/<digest>/`` dir does not exist yet) crashes at export
+    and loses the whole run. The engagement tree is bind-mounted into the kali
+    container, so a host-side mkdir makes the path exist in-container too.
+    Best-effort — never raises into the verb (the post-run
+    :func:`_ensure_json_artifact` still backfills a placeholder if needed).
+    """
+    host = _host_json_path(args, json_path)
+    if not host:
+        return
+    try:
+        Path(host).parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+
+
 def _ensure_json_artifact(args, json_path: str, *, incomplete: bool = False) -> None:
     """Write a placeholder at the -oJ path if arjun produced no file.
 
@@ -417,6 +438,11 @@ def run(args) -> None:
                 "raise --rate-limit/-t so the run finishes before the wall."
             ),
         )
+
+    # Pre-create the -oJ parent dir so arjun can write its output on a first run
+    # against a novel target (arjun does not create parent dirs and crashes at
+    # export otherwise). Best-effort; the post-run guard still backfills.
+    _precreate_json_parent(args, json_path)
 
     result = kali_exec(cmd, tool_name="arjun", **kali_args_to_kwargs(args))
 

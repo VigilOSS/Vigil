@@ -3,6 +3,7 @@ name: gf-patterns:devops_console
 description: Ops dashboards, metrics planes, and registry/CI APIs routinely deployed unauthenticated (Grafana, Jenkins, Jolokia, Kibana, Solr, Druid, pprof, Docker registry, GitLab API)
 origin: local overlay (no upstream gf equivalent)
 bucket: devops_console
+skill: info-disclosure-testing
 weight: 30
 ---
 
@@ -105,8 +106,7 @@ fragment with a non-zero hit count today; these scored 0 before this bucket exis
 remaining fragments (`/jenkins`, `/jolokia`, `/hystrix`, `/kibana`, `/solr/`, `/druid`,
 `/debug/pprof`, `/v2/_catalog`, `/api/v4/projects`) are **forward-looking coverage** for
 future engagements — ops/registry/CI planes recur across enterprise targets even when the
-current corpus has none. See `docs/plans/classify-context-and-surface-buckets-2026-06.md`
-Part 3 §A.7.
+current corpus has none. See ADR 0008 and `DRIFT.md` for the accepted rationale.
 
 ## Sources
 

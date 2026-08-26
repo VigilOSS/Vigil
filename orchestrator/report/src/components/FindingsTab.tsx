@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, Search } from "lucide-react";
 import type { ReportData, ReportFinding } from "../types";
 import { flattenFindings, formatLabel, SEVERITY_ORDER, SEVERITY_RANK } from "../lib/format";
+import { stepsText } from "../lib/steps";
 import { Markdown } from "./Markdown";
 
 interface Props {
@@ -36,14 +37,11 @@ function FindingDetail({ finding }: { finding: ReportFinding }) {
           <Markdown text={finding.evidence_detail} />
         </section>
       )}
-      {Array.isArray(finding.steps_to_reproduce) && finding.steps_to_reproduce.length > 0 && (
+      {stepsText(finding.steps_to_reproduce) && (
         <section>
           <h4>Steps to reproduce</h4>
-          <ol className="rpt-steps">
-            {finding.steps_to_reproduce.map((step, i) => (
-              <li key={i}>{step}</li>
-            ))}
-          </ol>
+          {/* Verbatim — the author's numbering is what other sections cite. */}
+          <div className="rpt-steps">{stepsText(finding.steps_to_reproduce)}</div>
         </section>
       )}
       {finding.poc_code && (

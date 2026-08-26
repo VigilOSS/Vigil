@@ -51,14 +51,6 @@ The instant you name the trust, you know what to test: break the assumption the 
 
 ---
 
-## 3. Developers are not your adversaries. They are your collaborators — involuntarily.
-
-> This lens (cognitive-state patterns for reading code/behavior as developer-decision evidence) now
-> lives in `agent/rules/mindsets/developer.md` — load it when the dispatch calls for generating your
-> own hypotheses about where a codebase under-guarded.
-
----
-
 ## 4. The gap between design and implementation is where you live.
 
 Security specifications, threat models, and architecture diagrams describe the system the
@@ -161,20 +153,16 @@ probe that answers the question) for the operational discipline this mindset mot
 
 ---
 
-## 10. Dispatch one lens. Cycle across batches.
-
-> This is operator-only dispatch doctrine (which lens to name, cadence rule for cycling lenses
-> across batches) — it now lives in `agent/operator-core.md`'s dispatch doctrine, not the
-> specialist-facing baseline.
-
----
-
 ## Relationship to `hunting.md`
 
 This document generates hypotheses. `hunting.md` gates them into findings.
 
 - A hypothesis from this document is not a finding. It is a candidate to test.
-- A candidate that passes the 8-question gate in `hunting.md` with proved attacker outcome is a finding.
+- A candidate becomes a finding when it clears `agent/rules/hunting.md` §2: evidence-backed, proved
+  attacker outcome, not just an existence proof. The vulnerability-analyst applies this bar through
+  the 8-Question Gate in `agent/agents/vulnerability-analyst.md` ("## The 8-Question Gate"); every
+  other hunting role — fuzzer, source-analyzer, exploit-developer, code-vuln-hunter — applies the
+  same `hunting.md` §2 bar directly, without that gate's mechanics.
 - The mindset accelerates finding generation. The discipline prevents false positives.
 
 The adversarial frame accelerates discovery — evidence requirements keep it honest. The most dangerous attacker is creative AND precise. Be both.

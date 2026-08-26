@@ -1,4 +1,4 @@
-"""Drift tests for the canonical vuln-class taxonomy (master plan §4.4 + §5.4).
+"""Drift tests for the canonical vulnerability-class taxonomy.
 
 `agent/scripts/assess/lib/vuln_taxonomy.py` is the ONE source of truth for the
 cross-track vuln vocabulary. Everything else — skill `vuln_class:` frontmatter,
@@ -32,6 +32,16 @@ KNOWN_SKILLLESS_CLASSES: frozenset[str] = frozenset(
     {
         "ldap-injection",
         "path-authz",
+        # Added (vuln-taxonomy-audit 2026-07): real, WSTG-documented classes
+        # with no reliable gf-style URL/param signal (so no bucket) and no
+        # existing skill whose scope honestly covers them yet — allowlisted
+        # rather than forcing an unbacked skill mapping, mirroring
+        # `ldap-injection`/`path-authz` above. `ssi-injection` DOES have a
+        # bucket (`ssi`, extension-based) but still has no dedicated skill.
+        "xpath-injection",
+        "ssi-injection",
+        "clickjacking",
+        "csv-injection",
     }
 )
 
@@ -205,3 +215,108 @@ def test_skilless_allowlist_has_no_stale_entries():
         elif cls in covered:
             stale.append(f"{cls} (now has a skill — drop from allowlist)")
     assert not stale, "Stale KNOWN_SKILLLESS_CLASSES entries:\n  " + "\n  ".join(stale)
+
+
+# The reverse completeness direction: skills with no `vuln_class:` at all are
+# invisible to `check-phase-readiness --auto-redispatch`'s recommender (which
+# derives from `load_skill_vuln_classes()`). Each entry here is a skill that
+# legitimately has no single canonical class — a process/orchestration/reporting
+# skill, a blue/IR investigation skill (detection process, not an offensive
+# vuln-class hunt), a broad mobile checklist (mobile isn't a FAMILIES entry), or
+# a multi-class checklist with no dominant single class. REMOVE an entry the
+# moment the skill gains an accurate `vuln_class:`.
+SKILLS_WITHOUT_VULN_CLASS: frozenset[str] = frozenset(
+    {
+        # Blue/IR investigation — detection/triage process, not an offensive hunt.
+        "alert-fp-verification",
+        "alert-triage",
+        "athena-log-investigation",
+        "aws-cloudtrail-investigation",
+        "cobalt-strike-analysis",
+        "dns-tunneling-detection",
+        "edr-alert-triage",
+        "google-workspaces",
+        "incident-containment",
+        "ioc-enrichment",
+        "m365-signin-investigation",
+        "network-threat-hunt",
+        "okta-investigation",
+        "phishing-triage",
+        # Mobile — broad MASVS-style checklists spanning many classes; "mobile"
+        # is not a FAMILIES entry in the taxonomy.
+        "android-app-security",
+        "ios-app-security",
+        "masvs-privacy-testing",
+        "mobile-fuzzing",
+        "mobile-lab-setup",
+        "sdk-supply-chain-security",
+        # Process / orchestration / reporting / tool-mechanics / recon — no
+        # single vuln class owns "how to dispatch", "how to verify", "how to
+        # crawl", etc.
+        "blind-triage",
+        "browser-automation",
+        "browser-semantic-analysis",
+        "case-dispatching",
+        "code-architecture-mapping",
+        "code-finding-verification",
+        "container-escape-detection",  # no container/kernel-escape class exists in the taxonomy
+        "directory-fuzzing",
+        "disclosure-deployment-shape-check",
+        "exploit-playbook-authoring",
+        "finding-verification",
+        "gau-triage",
+        "kali-exec",
+        "nuclei-scanning",
+        "osint-recon",
+        "parameter-fuzzing",
+        "phase-qc",
+        "port-scanning",
+        "report-generation",
+        "subdomain-enumeration",
+        "surface-collection",
+        "tls-vhost-correlation",
+        "vendor-platform-enum",
+        "web-recon",
+        "write-probe-script",
+        # Multi-class checklist, no single canonical class dominates.
+        "cicd-security",
+    }
+)
+
+
+def _all_skill_names() -> set[str]:
+    skills_dir = vuln_taxonomy._default_skills_dir()
+    return {d.name for d in skills_dir.iterdir() if (d / "SKILL.md").is_file()}
+
+
+def test_every_skill_has_vuln_class_or_is_allowlisted():
+    """Completeness (reverse direction): every skill declares ≥1 `vuln_class`
+    via its frontmatter, except skills in the documented SKILLS_WITHOUT_VULN_CLASS
+    allowlist. A new offensive/code skill that forgets `vuln_class:` (and isn't
+    allowlisted) FAILS — this is what keeps the 48-skill blind spot from
+    silently reopening."""
+    all_skills = _all_skill_names()
+    assert all_skills, "no skill directories found — path wrong?"
+    declared = set(vuln_taxonomy.load_skill_vuln_classes())
+    missing = sorted(all_skills - declared - SKILLS_WITHOUT_VULN_CLASS)
+    assert not missing, (
+        "Skills with no `vuln_class:` frontmatter and no allowlist entry (add "
+        "`vuln_class:` naming a canonical class, or add the skill to "
+        "SKILLS_WITHOUT_VULN_CLASS with a reason):\n  " + "\n  ".join(missing)
+    )
+
+
+def test_vuln_classless_allowlist_has_no_stale_entries():
+    """The allowlist must not rot: every entry must be (1) a real skill
+    directory and (2) genuinely still without a `vuln_class:`. If an allowlisted
+    skill later gains one, it must leave the allowlist so it stays an honest
+    ledger."""
+    all_skills = _all_skill_names()
+    declared = set(vuln_taxonomy.load_skill_vuln_classes())
+    stale: list[str] = []
+    for name in sorted(SKILLS_WITHOUT_VULN_CLASS):
+        if name not in all_skills:
+            stale.append(f"{name} (not a real skill directory)")
+        elif name in declared:
+            stale.append(f"{name} (now declares vuln_class — drop from allowlist)")
+    assert not stale, "Stale SKILLS_WITHOUT_VULN_CLASS entries:\n  " + "\n  ".join(stale)

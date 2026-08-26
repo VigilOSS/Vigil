@@ -42,7 +42,7 @@ vigil assess kali asnmap -org "Target Corporation" -silent \
 ## When to use vs. alternatives
 
 - **vs. whois/RDAP scraping:** asnmap aggregates BGP announcement data from multiple sources, so it catches announced-but-undocumented prefixes that whois misses.
-- **vs. manual `dig +short` chains:** asnmap is a single audited call; manual chains are not auditable through `list-command-runs`.
+- **vs. manual `dig +short` chains:** asnmap is a single audited call; manual chains are not auditable through `command-run list`.
 
 ## Cross-reference
 

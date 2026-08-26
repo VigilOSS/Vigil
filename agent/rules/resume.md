@@ -5,9 +5,9 @@ operator's durable memory for findings, intel, dispatch handoffs, null results, 
 coverage. Skipping it causes duplicate dispatches, repeated probes, lost kill rationale, and
 stale phase decisions.
 
-Apply this rule after locating the engagement directory and reading `scope.json` when any of these
-are true:
-- `scope.json` shows `status: in_progress`
+Apply this rule after locating the engagement directory when any of these are
+true:
+- The engagement is in progress
 - The current phase is past initialization
 - Findings, dispatch rows, activity entries, or command runs may already exist
 - You are unsure whether the engagement is fresh
@@ -38,15 +38,15 @@ disposition, and any notes you tagged `coverage` / `read-first`). Use the
 drill-down commands it prints for exact evidence:
 
 ```bash
-vigil assess get-command-run <id>
-vigil assess artifact search <query>
+vigil assess command-run get <id>
+vigil assess artifact search --q <query>
 vigil assess artifact get <id>
 vigil assess agent render-handoff <agent-id>
 vigil assess check-phase-readiness --phase report   # advisory (red engagements): open CVEs/leads + dangling finding links + report blockers
 ```
 
 Use command history as a coverage map, not as a reuse gate. If you cite a prior run
-instead of re-running, fetch it with `vigil assess get-command-run <id>` first because
+instead of re-running, fetch it with `vigil assess command-run get <id>` first because
 a successful return code does not prove the preview answers the current question.
 
 Treat unlinked markdown notes as scratch, not engagement memory. State that must
@@ -55,10 +55,11 @@ finding, chain, dispatch/agent, surface, request variant, or command run.
 
 ### Keep resume bounded
 
-- Drill down by id (`get-command-run`, `artifact get`, `fetch findings/<slug>`) — the brief already names the surfaces and command runs you need. The brief carries only the **aggregate** Surfaces (status×type + top uncovered) and Work Buffer (pending counts by gf-bucket) rollups; the per-item `coverage-items`, `request-variants`, and full `work-buffer` dumps stay out of the resume picture as operational detail — reach for them only after the rollup flags a bucket worth opening.
+- Drill down by id (`command-run get`, `artifact get`, `fetch findings/<slug>`) — the brief already names the surfaces and command runs you need. The brief carries only the **aggregate** Surfaces (status×type + top uncovered) and Work Buffer (pending counts by gf-bucket) rollups; the per-item `coverage-items`, `request-variants`, and full `work-buffer` dumps stay out of the resume picture as operational detail — reach for them only after the rollup flags a bucket worth opening.
 - Treat `artifact search` as the engagement memory index — `.md` files under the engagement directory that are not in the index are scratch.
 - Use `vigil assess agent render-handoff <agent-id>` for prior dispatch context — it stays bounded where raw transcripts grow linearly.
 - Read command history before re-running probes — the history is canonical, and rerunning is warranted only when the variant differs.
+- Read the brief's **Per-Input Coverage** grid before re-probing a surface — it shows which specific input was tested for which attack family as which identity, and any wall code, so a covered (host × input × identity × class) cell is not blindly re-tested.
 
 After hydration, summarize the resume state in one compact operator note:
 - confirmed, suspicious, killed, and open findings

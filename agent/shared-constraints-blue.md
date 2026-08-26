@@ -7,9 +7,9 @@ work. These rules apply to every blue specialist.
 
 ## Authorization
 
-Tenant data access is authorized per the engagement's scope
-(`scope.json:customer`, `platforms`, `tenant_reference_paths`). Read-only
-telemetry pulls are permitted within the declared tenant. WRITE-class actions
+Tenant data access is authorized by the dispatch's `customer`, `platforms`, and
+`tenant_reference_paths` context. Read-only telemetry pulls are permitted within that
+tenant. WRITE-class actions
 (containment, account state mutations, filter deletions) require an
 operator-approved `vigil blue propose-contain` record, audited operator
 execution via `vigil assess host-exec`, then operator recording with
@@ -19,10 +19,11 @@ execution via `vigil assess host-exec`, then operator recording with
 
 ## 1. Authorization scope — tenant, not host
 
-The unit of scope in blue mode is the **tenant**, not the host. `scope.json`
-carries `customer` (the customer slug), `platforms` (one or more platform tags),
-and `tenant_reference_paths[]` (the resolved paths to per-customer-per-platform
-reference markdown). Confirm before any tenant-facing command:
+The unit of scope in blue mode is the **tenant**, not the host. The operator and
+`vigil blue dispatch` inject `customer` (the customer slug), `platforms` (one or
+more platform tags), and `tenant_reference_paths[]` (resolved paths to
+per-customer-per-platform reference markdown). Confirm before any tenant-facing
+command:
 
 - The customer slug matches the engagement you were dispatched for
 - The platform you are about to query is listed in `platforms`
@@ -43,8 +44,9 @@ cross-tenant log rows into `ir/reports/` or `ir/evidence/`.
 ## 1a. CLI path convention
 
 All assessment operations use `vigil assess <subcommand>` from any directory. Blue-specific verbs
-live under `vigil blue <subcommand>`. Use `ENGAGEMENT_DIR` or `--engagement-dir` for path
-resolution — hardcoded absolute paths break across environments.
+live under `vigil blue <subcommand>`. `vigil assess` binds state using the rule printed by
+`vigil assess contract <command>`; use `ENGAGEMENT_DIR` only for engagement-local artifact paths,
+or pass `--engagement-dir` explicitly. Hardcoded absolute paths break across environments.
 
 ---
 
@@ -111,8 +113,7 @@ vigil assess artifact register <path> \
   --finding <finding-slug> \
   --agent-id <id> \
   --command-run-id <id> \
-  [--sensitive] \
-  [--scratch]
+  [--sensitive]
 ```
 
 Register each durable output explicitly — explicit registration preserves the
@@ -122,13 +123,15 @@ The backend computes SHA-256, FTS-indexes a preview, and links the artifact to
 its producer agent (`producer_agent_id`, `producer_agent_role`), the originating
 command run (`producer_command_run_id`), and the finding it substantiates
 (`related_finding_slug`). The `assessment_artifacts` table at
-`orchestrator/backend/app/db.py:1652` is the schema source of truth.
+`orchestrator/backend/app/db.py:1766` is the schema source of truth.
 
 Use `--sensitive` for PII-bearing exports (mailbox content, full sign-in
 history, IAM principal listings) so the FTS preview is suppressed but the
-hash + linkage remain auditable. Use `--scratch` (or
-`vigil assess artifact mark-scratch --under notes/scratch/` for bulk) on
-transient working notes that should not appear in resume briefs or reports.
+hash + linkage remain auditable. `register` has no inline scratch flag — mark
+transient working notes as scratch in a separate call, either
+`vigil assess artifact mark-scratch <artifact-id>` for one artifact or
+`vigil assess artifact mark-scratch --under notes/scratch/` for bulk, so they
+do not appear in resume briefs or reports.
 
 **Manual `shasum -a 256 ... > SHA256SUMS.txt` is deprecated.** The backend
 computes SHA-256 on register/refresh into `assessment_artifacts.sha256`. The
@@ -157,20 +160,11 @@ strings, and JSON payloads.
 
 ## 5. 30-day default look-back
 
-Initial-access events routinely precede user-visible symptoms by 7–30 days.
-Default audit window: **T-30d from the earliest plausible trigger**, not from
-"when the user noticed."
-
-Extend on boundary: if anomalous events cluster near 30 days, push to T-60d.
-Trigger sources in priority:
-
-1. Earliest log event the alert cites
-2. Earliest related event in the same actor's session timeline
-3. Earliest related event in the same target's session timeline
-4. User-reported observation timestamp (lower bound only — never the upper bound)
-
-Short look-back misses initial-access. Explaining a finding without its
-entry point to the client costs more than 30 days of audit pulls upfront.
+Full rule (the trigger-source priority order, the T-60d boundary extension, the
+initial-access rationale) is canonical in `agent/rules/triage.md` §6 — every blue
+specialist already loads that file as an always-active rule, so it is not restated
+here. The one number to carry into every telemetry pull: default audit window is
+**T-30d from the earliest plausible trigger**, not from "when the user noticed."
 
 ---
 
@@ -204,8 +198,8 @@ command output so the operator can preserve evidence and retry recording.
 
 Forbidden — bypasses audit pipeline: raw host Bash hitting tenant APIs,
 ad-hoc `curl` against admin REST endpoints, `gcloud` / `gam` invocations
-outside the wrapper. The host boundary is for coordination (scope.json
-reads, JSON parsing, payload construction), not tenant traffic.
+outside the wrapper. The host boundary is for coordination (local engagement
+metadata reads, JSON parsing, payload construction), not tenant traffic.
 
 `host-exec` is required for tenant-facing commands. If it is unavailable,
 return a blocked handoff with a `runtime_issues[]` entry; do not run the
@@ -230,8 +224,8 @@ No host-exec required (no tenant data): `jq` over a registered artifact,
   HEALTH, META, LOG-READ, OTHER}`.
 - **`--phase <enum>`** — one of the blue phases: `intake`, `triage`,
   `investigate`, `verify`, `respond`, `report`. Pass the phase the dispatch
-  was authorized for, NOT `scope.json.current_phase` (which is operator state
-  and may have moved on between phases).
+  was authorized for, not the mutable operator phase (which may have moved on
+  between phases).
 - **`--scope-host <slug>`** — set to the tenant / customer slug. Never an IP
   or hostname in blue mode.
 - **`--target-host <id>`** — set when the command narrows to a specific
@@ -259,8 +253,8 @@ Specifically:
 - A finding that depends on cross-tenant evidence escalates rather than
   inheriting the other tenant's artifacts directly
 
-The escalation path: open a separate engagement for the second tenant under
-its own scope.json and link via `intel-note` references on both sides.
+The escalation path: open a separate engagement for the second tenant and link
+via `intel-note` references on both sides.
 
 ---
 
@@ -348,10 +342,10 @@ Blue handoffs include the following fields beyond the cross-mode baseline:
   `details_json.mitre_techniques`; redundant on purpose so the handoff
   is self-contained.
 - **`tenant_ref_paths_consulted`** — array of tenant ref paths the dispatch
-  actually loaded. Distinct from `scope.json:tenant_reference_paths[]` (which
-  is all available refs); this field records which ones the specialist read.
+  actually loaded. Distinct from the dispatch's available `tenant_reference_paths[]`;
+  this field records which ones the specialist read.
 - **`cross_platform_correlation_notes`** — present and non-empty when
-  `scope.json:platforms` has more than one entry; one-paragraph summary of
+  the dispatch names more than one platform; one-paragraph summary of
   how identity, time window, and IOCs correlate across platforms.
 
 A handoff missing `evidence_refs` for a finding with claimed evidence is a
@@ -408,7 +402,7 @@ agents cannot query unindexed local files.
    by `register` or `sync` in the handoff's `evidence_refs`. Never put local
    paths there — the downstream consumer cannot resolve them.
 
-4. **Record the finding(s).** `vigil assess record-finding <agent-name>
+4. **Record the finding(s).** `vigil assess finding record <agent-name>
    <finding-json>` per finding. The JSON must include
    `details_json.mitre_techniques`, `details_json.confidence`, and
    `details_json.timeline` (UTC ISO-8601 entries with `source_file` citations
@@ -429,7 +423,7 @@ agents cannot query unindexed local files.
    means the `agent_id` in step 6 did not match the registered dispatch — fix
    and re-handoff before returning.
 
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 The seven steps above are the blue-specific closing verbs. Checkpoint after
 each major step (after the initial audit pull, after the correlation pass,
@@ -452,9 +446,9 @@ Use the IDs in the block (finding slugs, command-run IDs, handoff agent IDs,
 artifact IDs) for drill-down through:
 
 ```bash
-vigil assess get-command-run <id>
+vigil assess command-run get <id>
 vigil assess artifact get <id>
-vigil assess artifact search <query>
+vigil assess artifact search --q <query>
 vigil assess agent render-handoff <agent-id>
 vigil assess fetch findings/<slug>
 ```
@@ -473,10 +467,8 @@ it stays bounded where raw transcript pastes grow linearly.
 
 The Runtime Identity banner is a binding agreement on `agent_id`, `agent_role`,
 `phase`. It appears once at dispatch time — echoing it in the handoff or response
-wastes context, pollutes FTS preview, and adds no signal.
-
-This is parity with red mode (`agent/shared-constraints.md` banner-policing).
-The handoff JSON is the durable record; the response is reflection.
+wastes context, pollutes FTS preview, and adds no signal. The handoff JSON is
+the durable record; the response is reflection.
 
 Same for `--intent` on `vigil assess host-exec`: do not prefix with agent
 name or phase — those land in the audit row via `--phase` and `agent_name`.
@@ -518,8 +510,8 @@ see the response, only the handoff row.
   resume-brief` before any continuation.
 - `agent/skills/alert-fp-verification/SKILL.md` — five-check protocol and the
   Multi-Perspective Voting Protocol for `escalated` dispositions.
-- `agent/references/tenants/<customer>-<platform>.md` — the tenant ref the
-  dispatch was scoped to; resolved into `scope.json:tenant_reference_paths[]`.
+- `agent/references/tenants/<customer>-<platform>.md` — the tenant ref injected
+  for this dispatch.
 - `agent/references/runtime-guides/handoff-schema.md` — canonical handoff JSON
   schema (cross-mode).
 - `agent/references/runtime-guides/command-history-auditing.md` — the coverage-

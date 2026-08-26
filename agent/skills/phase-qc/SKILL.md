@@ -52,7 +52,7 @@ phase's full dispatch transcripts:
 2. **The lanes' handoffs:** enumerate the phase's dispatches with `vigil assess agent
    list` (filter by phase / role), then `vigil assess agent render-handoff <agent-id>`
    for each — the bounded blob (summary, coverage gaps, next steps), NOT the transcript.
-3. **The findings list:** `vigil assess list-findings` / `vigil assess fetch findings`
+3. **The findings list:** `vigil assess finding list` / `vigil assess fetch findings`
    — slug, severity, status, `canonical_location`, and the `details` story (evidence /
    impact / cvss_vector).
 
@@ -109,6 +109,11 @@ Emit it as a markdown table or as a JSON array of those objects. Keep `expected`
   surface. *Signal:* the handoff's own coverage-gaps / next-steps naming untested
   variants or surfaces; a thin probe footprint against a high `route_count`; a
   `covered` host whose lane touched far fewer routes than the ledger counts.
+  Two concrete depth misses belong here rather than becoming new taxonomy:
+  a route marked covered after probing only the wrong HTTP method (for example,
+  GET against a state-changing POST/PUT handler), and an ambient cookie/session-authenticated
+  browser action closed without testing the applicable CSRF defense (token or
+  Origin/Referer enforcement). Bearer-header APIs do not inherit this obligation.
   *Redispatch:* re-open with a real campaign — the matching vuln-class skill at
   `item-iterating` / `hypothesis-driven` depth, not another quick tick.
 - **`grading`** — *this P4 is, impact-if-true, a P2* and *account-gated but the gate
@@ -117,7 +122,7 @@ Emit it as a markdown table or as a JSON array of those objects. Keep `expected`
   (anyone can self-register → the precondition is free → effectively unauthenticated →
   higher band); an "impact-if-true" never proven up to the claimed band; an inflated
   `S:C` / `I:H` with no real object crossing the boundary. *Signal:* the finding's
-  severity vs. its proven evidence, run through the C1–C6 FP & severity gate.
+  severity vs. its proven evidence, run through the C1–C7 FP & severity gate.
   *Redispatch:* re-grade via `agent/references/finding-fp-and-severity-gate.md`, or a
   `vulnerability-analyst` review-mode pass to prove or kill the impact-if-true.
 - **`chain`** — A→B primitives left **unsynthesized** across the phase's lanes. Two
@@ -151,8 +156,6 @@ A miss that is silently dropped is the failure mode this skill exists to prevent
   the per-PHASE level. blind-triage judges one submission's bytes blind; phase-qc
   judges a whole phase's coverage / depth / grading / chains. They stack: blind-triage
   per Medium+ finding, phase-qc once at the boundary.
-- `agent/references/finding-fp-and-severity-gate.md` — the C1–C6 FP / severity-downgrade
-  catalog phase-qc applies for `grading` misses.
 - `vigil assess coverage` (operator-core "Read the coverage ledger…") — the measured
   baseline phase-qc reasons against and never recomputes.
 - operator-core "Closed-surface dead-vs-unfinished re-audit" + "Depth Doctrine" — the

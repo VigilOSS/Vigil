@@ -18,9 +18,8 @@ vuln_class: source-disclosure, secrets-exposure
 
 ## Tools
 
-- `LinkFinder` — automated endpoint extraction from JavaScript files; prefer
-  `vigil assess gau-js-endpoints` for corpus-scale extraction from saved JS bodies
-- `SecretFinder` — scan JS files for API keys, tokens, and secrets
+- `vigil assess gau js-endpoints` — supported endpoint extraction over saved JavaScript bodies
+- `vigil assess gau secrets` — supported body-fetch and secret-discovery pipeline
 - `trufflehog` — scan saved JS/source-map artifacts through `vigil assess kali exec --` (host-side installs
   aren't required; the runtime image ships trufflehog)
 - `curl`, `grep`/`sed`/`awk`, `jq` — manual extraction and verification
@@ -68,44 +67,15 @@ vigil assess kali exec --technique DISCOVERY \
 #### Automated JS Endpoint Extraction
 
 ```bash
-# LinkFinder — extract endpoints from JS when a direct runtime install exists
-vigil assess kali exec --technique DISCOVERY \
-  --intent "LinkFinder endpoint extraction from app.js" \
-  --probe-kind fingerprint --phase recon --timeout 300 -- \
-  LinkFinder -i https://TARGET/static/js/app.js -o cli
-
-# Batch all JS files discovered in step 1
-vigil assess kali exec --technique DISCOVERY \
-  --intent "LinkFinder batch endpoint extraction from all JS files" \
-  --probe-kind fingerprint --phase recon --timeout 600 -- bash -c '
-for js_url in $(cat /engagements/$ENGAGEMENT_KEY/scans/js_files.txt); do
-  LinkFinder -i "$js_url" -o cli
-done | sort -u > /engagements/$ENGAGEMENT_KEY/scans/js_endpoints.txt
-'
-
-# SecretFinder — scan for API keys, tokens, credentials in JS
-vigil assess kali exec --technique INFO-DISCLOSURE \
-  --intent "SecretFinder secret scan on app.js" \
-  --probe-kind fingerprint --phase recon --timeout 300 -- \
-  python3 SecretFinder.py -i https://TARGET/static/js/app.js -o cli
-
-# Batch scan
-vigil assess kali exec --technique INFO-DISCLOSURE \
-  --intent "SecretFinder batch secret scan across all JS files" \
-  --probe-kind fingerprint --phase recon --timeout 600 -- bash -c '
-for js_url in $(cat /engagements/$ENGAGEMENT_KEY/scans/js_files.txt); do
-  python3 SecretFinder.py -i "$js_url" -o cli
-done | sort -u > /engagements/$ENGAGEMENT_KEY/scans/js_secrets.txt
-'
+# Build/reuse the historical corpus and fetch bodies, then extract JS routes.
+vigil assess gau secrets TARGET
+vigil assess gau js-endpoints TARGET --fetch-if-missing
 ```
 
-Use LinkFinder and SecretFinder as the primary narrow extraction pass. If
-`LinkFinder` is not installed as a command, check for the older
-`python3 linkfinder.py` form in the runtime before declaring the tool missing.
-For large historical corpora, prefer `vigil assess gau-js-endpoints` because it
-pairs body capture, LinkFinder-style extraction, URL resolution, and ingestion.
-Fall back to manual grep for edge cases they miss (inline scripts, dynamically
-loaded chunks, non-standard patterns).
+Use the supported wrapper verbs as the primary extraction pass: they pair body
+capture, route extraction, URL resolution, secret scanning, and ingestion without
+depending on optional runtime scripts. Fall back to manual grep for edge cases
+they miss (inline scripts, dynamically loaded chunks, non-standard patterns).
 When scanning saved artifacts for secrets, invoke `trufflehog filesystem` via
 `vigil assess kali exec --technique INFO-DISCLOSURE --intent "secret scan on saved JS/source-map artifacts" --probe-kind fingerprint --phase recon --timeout 600 -- trufflehog filesystem ...`
 against `/engagements/$ENGAGEMENT_KEY/...` paths so the runtime-owned install is used consistently
@@ -137,9 +107,9 @@ Extract `url()` refs, `@import` paths, source map refs.
 ### 5. API Schema Discovery
 Probe: /swagger.json, /openapi.json, /api-docs, /graphql (introspection), /application.wadl
 
-If an OpenAPI / Swagger spec is accessible, ingest it into the canonical backend assessment state.
-The local queue can still be populated as a transient batching aid, but the operator contract is
-the backend ledger:
+If an OpenAPI / Swagger spec is accessible, ingest it into the canonical backend assessment state —
+the backend derives the work-buffer row from the same POST, in one transaction (ADR 0013), so
+there is no separate local queue to populate:
 
 ```bash
 vigil assess kali exec --technique DISCOVERY \
@@ -147,12 +117,12 @@ vigil assess kali exec --technique DISCOVERY \
   --probe-kind fingerprint --phase recon --timeout 60 -- \
   curl -sL "https://TARGET/openapi.json" -o /engagements/$ENGAGEMENT_KEY/scans/openapi.json
 # Host-side: ingest the downloaded spec into the backend work buffer
-vigil assess ingest-spec "$ENGAGEMENT_DIR/cases.db" "$ENGAGEMENT_DIR/scans/openapi.json"
-vigil assess work-buffer "$ENGAGEMENT_DIR/cases.db" stats
+vigil assess ingest spec "$ENGAGEMENT_DIR/scans/openapi.json"
+vigil assess work-buffer stats
 ```
 
-This creates durable request/service coverage candidates and, when the local buffer is in use,
-`api-spec` work items that should be routed to `vulnerability-analyst`.
+This creates durable request/service coverage candidates and `api-spec` work items that
+should be routed to `vulnerability-analyst`.
 
 ### 6. Source Map Analysis
 Fetch .map → extract `sources` array → reconstruct original source for analysis.
@@ -273,19 +243,19 @@ exposed.
 ## Output Contract
 
 The skill produces these structured sections in the source-analyzer's return payload.
-Backend writes (`record-finding`, `record-intel`, `record-surface`,
-`ingest-endpoints`, `vigil assess agent handoff`) are the durable record; this contract names what
+Backend writes (`finding record`, `intel record`, `record-surface`,
+`ingest endpoints`, `vigil assess agent handoff`) are the durable record; this contract names what
 each markdown section should hold so downstream specialists can parse the output
 consistently.
 
 | Section | Holds |
 |---|---|
 | `#### Summary` | One-paragraph headline: bundles analyzed, route count extracted, secret-scan hits, vendor-platform fingerprint hits, app-version pinned. |
-| `#### Findings` | Decisive findings the source pass already proved (e.g., a live API key with non-empty value, a secret string verified against a third-party endpoint). Each must also be recorded via `vigil assess record-finding`. |
-| `#### Surface Candidates` | Requestable endpoints, API bases, hidden routes, GraphQL endpoints, admin paths extracted from JS / source maps / inline config — each surfaced via `vigil assess record-surface` and ingested via `vigil assess ingest-endpoints "$DIR/cases.db" source-analysis`. |
+| `#### Findings` | Decisive findings the source pass already proved (e.g., a live API key with non-empty value, a secret string verified against a third-party endpoint). Each must also be recorded via `vigil assess finding record`. |
+| `#### Surface Candidates` | Requestable endpoints, API bases, hidden routes, GraphQL endpoints, admin paths extracted from JS / source maps / inline config — each surfaced via `vigil assess record-surface` and ingested via `vigil assess ingest endpoints source-analysis`. |
 | `#### Secrets` | Secret-scan hits (API keys, JWT samples, AWS access-key prefixes, internal hostnames, tokens) with confidence and matched pattern. Confirmed-live secrets escalate to `#### Findings`; unverified hits stay here as leads. |
 | `#### Backend Hypotheses` | Inferred backend shape from frontend evidence — auth role checks, feature flags, internal-only branches, tenant IDs, callback routes, proxy base paths, debugging toggles. Drives the next-step list for vulnerability-analyst dispatch. |
-| `#### Intelligence` | Tech components from bundle fingerprinting, vendor-product fingerprints (Salesforce / ServiceNow / Drupal / Pexip), APP_VERSION / BUILD_HASH / Sentry-release constants for osint-analyst triangulation, vendor-template CSP / CORS placeholder hits — each row landed via `vigil assess record-intel <type>`. |
+| `#### Intelligence` | Tech components from bundle fingerprinting, vendor-product fingerprints (Salesforce / ServiceNow / Drupal / Pexip), APP_VERSION / BUILD_HASH / Sentry-release constants for osint-analyst triangulation, vendor-template CSP / CORS placeholder hits — each row landed via `vigil assess intel record <type>`. |
 | `#### Coverage Gaps` | Bundles too minified to analyze, files behind auth, source-maps not present, vendor-platform deep-enum trigger fired but the matching playbook could not run. The operator reads this section to decide whether to re-dispatch. |
 
 ## Extended Resources

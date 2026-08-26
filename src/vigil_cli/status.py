@@ -12,10 +12,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import docker
-from .backup import latest_backup
+from .backup import latest_backup, live_database
+from .image_freshness import proxy_image_drift
 from .config import get_config_value
 from .engagements import list_engagements
-from .oob import DEFAULT_OOB_DOMAIN, oob_status
+from .oob import oob_options, oob_status
+from .oob_tenants import load_tenant_route
 from .orchestrator import orchestrator_status
 from .paths import default_runtime_container, engagements_root, resolve_orchestrator_base_url
 from .runtime import runtime_mounts_ok, runtime_resource_state, runtime_status
@@ -198,26 +200,30 @@ def install_staleness(
     return result
 
 
-def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_command) -> dict[str, object]:
+def collect_status(
+    install_root: Path,
+    *,
+    runner: docker.Runner = docker.run_command,
+    write_check: bool = False,
+) -> dict[str, object]:
     install_root = install_root.expanduser().resolve()
     rows = list_engagements(install_root)
     # C36: surface legacy engagement_type=both engagements that predate
     # dual-track phase tracking. They are not broken — they just have no
     # `code_phase` field, which makes `vigil assess transition-phase --track
-    # code` confusing. `vigil engagement migrate-scope` sets the default.
+    # code` confusing. Setting code_phase=ingest in scope.json clears it.
     from .engagements import _both_engagements_missing_code_phase
     legacy_both_missing_code_phase = [
         eng_dir.name for eng_dir in _both_engagements_missing_code_phase(install_root)
     ]
     runtime_state = runtime_status(runner=runner)
     mitm_running = docker.container_running("vigil-proxy", runner=runner)
+    # Drift is only meaningful for a running container; skip the two docker
+    # inspects otherwise to keep `vigil status` cheap.
+    mitm_image_drift = mitm_running and proxy_image_drift(runner=runner)
     backup = latest_backup(install_root)
     oob_token_configured = bool(os.environ.get("VIGIL_FRP_TOKEN") or get_config_value("oob.frp_token"))
-    oob_domain = (
-        os.environ.get("VIGIL_OOB_DOMAIN")
-        or get_config_value("oob.domain", DEFAULT_OOB_DOMAIN)
-        or DEFAULT_OOB_DOMAIN
-    )
+    resolved_oob = oob_options(install_root)
     return {
         "install_root": str(install_root),
         "install_exists": install_root.exists(),
@@ -236,11 +242,19 @@ def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_com
         "mitmproxy": {
             "state": "running" if mitm_running else "stopped",
             "image_exists": docker.image_exists("vigil-proxy:latest", runner=runner),
+            "image_drift": bool(mitm_image_drift),
             "ca_volume": docker.volume_exists("mitmproxy-ca", runner=runner),
         },
         # deep=False keeps `vigil status` cheap (no per-client log reads / DNS probe);
         # `vigil oob status` runs the full health check.
-        "oob": oob_status(oob_domain=oob_domain, runner=runner, deep=False) | {"frp_token_configured": oob_token_configured},
+        "oob": oob_status(
+            oob_domain=resolved_oob.oob_domain,
+            tenant_prefix=resolved_oob.tenant_prefix,
+            dns_remote_port=resolved_oob.dns_remote_port,
+            reverse_remote_port=resolved_oob.reverse_remote_port,
+            runner=runner,
+            deep=False,
+        ) | {"frp_token_configured": oob_token_configured},
         "backup": {
             "latest": str(backup.path) if backup else None,
             "modified_at": backup.modified_at if backup else None,
@@ -249,6 +263,11 @@ def collect_status(install_root: Path, *, runner: docker.Runner = docker.run_com
         # Install-staleness guard (I-5): warn when the working root has fallen
         # behind the source it was installed from. Resolution is offline/cheap.
         "install_staleness": install_staleness(install_root),
+        "database_write_check": (
+            database_write_check(install_root)
+            if write_check
+            else {"status": "not_requested", "database": None, "detail": ""}
+        ),
     }
 
 
@@ -273,6 +292,16 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
     print(
         f"orchestrator\t{orchestrator_blk['state']}\thealthy={orchestrator_blk['healthy']}{ready_bits}"  # type: ignore[index]
     )
+    if isinstance(readiness, dict):
+        backend_runtime = readiness.get("backend_runtime")
+        if isinstance(backend_runtime, dict) and backend_runtime.get("restart_required"):
+            changed = backend_runtime.get("newer_source_files")
+            preview = ", ".join(str(path) for path in changed[:3]) if isinstance(changed, list) else ""
+            suffix = f" ({preview})" if preview else ""
+            print(
+                "warn\tbackend restart required: source files changed after process start"
+                f"{suffix}; run `vigil orchestrator restart`"
+            )
     print(f"runtime\t{runtime['state']}\tmounts_ok={runtime['mounts_ok']}")  # type: ignore[index]
     resources = runtime.get("resources") if isinstance(runtime, dict) else None  # type: ignore[union-attr]
     if isinstance(resources, dict):
@@ -289,18 +318,27 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
                 f"cpu.max={live.get('cpu_max', '?')} pids.max={live.get('pids_max', '?')}"
             )
         print(f"runtime-tier\t{configured_str}{live_str}")
-    print(f"mitmproxy\t{mitmproxy['state']}\tca_volume={mitmproxy['ca_volume']}")  # type: ignore[index]
+    mitm_dict = mitmproxy if isinstance(mitmproxy, dict) else {}
+    drift_note = "\trestart-needed" if mitm_dict.get("image_drift") else ""
+    print(f"mitmproxy\t{mitm_dict.get('state', '-')}\tca_volume={mitm_dict.get('ca_volume')}{drift_note}")
     print(
         f"oob\t{oob.get('state', '-')}\tclients={len(oob.get('clients') or [])}"
+        f"\ttenant={oob.get('tenant_prefix') or '-'}\tports={oob.get('port_range') or '-'}"
         f"\tdomain={oob.get('domain') or '-'}"
     )
     print(f"backup\t{backup['latest'] or '-'}")  # type: ignore[index]
+    write_check = status.get("database_write_check")
+    if isinstance(write_check, dict) and write_check.get("status") != "not_requested":
+        detail = str(write_check.get("detail") or "")
+        suffix = f"\t{detail}" if detail else ""
+        print(f"database-write\t{write_check.get('status', 'storage_error')}{suffix}")
     legacy_keys = status.get("legacy_both_missing_code_phase") or []
     if isinstance(legacy_keys, list) and legacy_keys:
         preview = ", ".join(legacy_keys[:3]) + (" ..." if len(legacy_keys) > 3 else "")
         print(
             f"warn\t{len(legacy_keys)} legacy `engagement_type=both` engagement(s) "
-            f"missing `code_phase` ({preview}); run `vigil engagement migrate-scope`"
+            f"missing `code_phase` ({preview}); set code_phase=ingest in each "
+            "scope.json to clear this"
         )
     _print_install_staleness_warning(status.get("install_staleness"))
 
@@ -338,6 +376,28 @@ def _short_sha(value: object) -> str:
     return value[:12] if isinstance(value, str) and value else "?"
 
 
+def _install_staleness_check(install_root: Path) -> Check:
+    """Working-root-vs-source drift, as a doctor check.
+
+    ``vigil status`` already surfaced this, but doctor is where an operator looks
+    when a documented verb is missing — which is exactly the symptom a working
+    root lagging its source produces.
+    """
+    staleness = install_staleness(install_root)
+    state = str(staleness.get("state") or "unknown")
+    if state == "current":
+        return Check("install-staleness", "OK")
+    if state == "unknown":
+        return Check("install-staleness", "SKIPPED", "no source checkout to compare against")
+    installed = _short_sha(staleness.get("installed_sha"))
+    current = _short_sha(staleness.get("current_source_sha"))
+    return Check(
+        "install-staleness",
+        "STALE",
+        f"{state}: working root at {installed}, source at {current}; run `vigil install`",
+    )
+
+
 def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.run_command) -> list[Check]:
     checks: list[Check] = []
     binary_status: dict[str, str] = {}
@@ -355,6 +415,14 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
         checks.append(Check("docker-daemon", "OK" if docker.daemon_available(runner=runner) else "FAIL"))
         checks.append(Check("runtime-image", "OK" if docker.image_exists("vigil:latest", runner=runner) else "MISSING"))
         checks.append(Check("mitmproxy-image", "OK" if docker.image_exists("vigil-proxy:latest", runner=runner) else "MISSING"))
+        # Drift only exists for a running container; a stopped/absent proxy is
+        # OK because the next `vigil mitmproxy start` picks up the current image.
+        mitm_drift = docker.container_running("vigil-proxy", runner=runner) and proxy_image_drift(runner=runner)
+        checks.append(
+            Check("mitmproxy-container-drift", "STALE", "container older than image; run `vigil mitmproxy start`")
+            if mitm_drift
+            else Check("mitmproxy-container-drift", "OK")
+        )
         if runtime_status(runner=runner) == "running":
             checks.append(Check("runtime-mounts", "OK" if runtime_mounts_ok(install_root, runner=runner) else "FAIL"))
             for tool in ("dtach", "tmux", "frpc", "interactsh-server", "interactsh-client"):
@@ -378,8 +446,10 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
         checks.append(Check("orchestrator-health", "OK" if healthy else "FAIL", detail))
     backup = latest_backup(install_root)
     checks.append(Check("backup-latest", "OK" if backup else "MISSING", str(backup.path) if backup else ""))
+    checks.append(_install_staleness_check(install_root))
     checks.append(_failed_audit_marker_check(install_root))
     checks.append(_host_recon_tools_check())
+    checks.append(_oob_tenant_check(install_root))
     checks.append(Check("oob.frp_token", "OK" if os.environ.get("VIGIL_FRP_TOKEN") or get_config_value("oob.frp_token") else "MISSING"))
     return checks
 
@@ -388,6 +458,25 @@ def print_doctor(checks: list[Check]) -> None:
     for check in checks:
         suffix = f"\t{check.detail}" if check.detail else ""
         print(f"{check.status}\t{check.name}{suffix}")
+
+
+def _oob_tenant_check(install_root: Path) -> Check:
+    try:
+        route = load_tenant_route(install_root)
+    except SystemExit as exc:
+        return Check("oob.tenant-routing", "FAIL", str(exc))
+    if route is None:
+        return Check(
+            "oob.tenant-routing",
+            "WARN",
+            "legacy install has no tenant metadata; run `vigil install` to pin its current route",
+        )
+    mode = "legacy-pinned" if route.legacy else "tenant"
+    return Check(
+        "oob.tenant-routing",
+        "OK",
+        f"{mode}={route.tenant_prefix} domain={route.oob_domain} ports={route.dns_remote_port}-{route.reverse_remote_port}",
+    )
 
 
 def _host_recon_tools_check() -> Check:
@@ -431,6 +520,84 @@ def _database_check(path: Path) -> Check:
     return Check("orchestrator-db", "OK", str(path))
 
 
+def database_write_check(
+    install_root: Path,
+    *,
+    timeout_seconds: float = 0.25,
+) -> dict[str, object]:
+    """Prove the existing main SQLite database is writable, then roll back.
+
+    ``mode=rw`` prevents a typo or missing installation from creating a new,
+    empty database. The schema write is deliberately stronger than a temporary
+    table or ``SELECT`` probe: it exercises the same main database that durable
+    assessment state uses. SQLite transactional DDL lets the table and its row
+    disappear in the same rollback.
+    """
+    path = live_database(install_root).expanduser().resolve()
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(
+            f"{path.as_uri()}?mode=rw",
+            uri=True,
+            timeout=timeout_seconds,
+            isolation_level=None,
+        )
+        connection.execute("BEGIN IMMEDIATE")
+        collision = connection.execute(
+            "SELECT 1 FROM main.sqlite_master WHERE type = 'table' "
+            "AND name = '_vigil_status_write_probe'"
+        ).fetchone()
+        if collision is not None:
+            connection.rollback()
+            return {
+                "status": "storage_error",
+                "database": str(path),
+                "detail": "reserved probe table already exists",
+            }
+        connection.execute(
+            "CREATE TABLE main._vigil_status_write_probe "
+            "(marker INTEGER NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO main._vigil_status_write_probe (marker) VALUES (1)"
+        )
+        connection.rollback()
+        leftover = connection.execute(
+            "SELECT 1 FROM main.sqlite_master WHERE type = 'table' "
+            "AND name = '_vigil_status_write_probe'"
+        ).fetchone()
+        if leftover is not None:
+            return {
+                "status": "storage_error",
+                "database": str(path),
+                "detail": "probe rollback left schema residue",
+            }
+        return {"status": "ok", "database": str(path), "detail": "write rolled back"}
+    except sqlite3.Error as exc:
+        if connection is not None and connection.in_transaction:
+            connection.rollback()
+        return {
+            "status": _database_write_error_status(exc),
+            "database": str(path),
+            "detail": str(exc),
+        }
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _database_write_error_status(exc: sqlite3.Error) -> str:
+    raw_code = getattr(exc, "sqlite_errorcode", None)
+    primary_code = raw_code & 0xFF if isinstance(raw_code, int) else None
+    if primary_code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+        return "busy"
+    if primary_code == sqlite3.SQLITE_READONLY:
+        return "read_only"
+    if primary_code == sqlite3.SQLITE_CANTOPEN:
+        return "missing_or_unopenable"
+    return "storage_error"
+
+
 def _orchestrator_readyz_snapshot(install_root: Path) -> tuple[bool, dict[str, object]]:
     """Fetch ``/readyz`` and return ``(healthy, readiness)``.
 
@@ -446,6 +613,7 @@ def _orchestrator_readyz_snapshot(install_root: Path) -> tuple[bool, dict[str, o
         "database_connected": None,
         "assessment_schema_ready": None,
         "code_analysis_schema_ready": None,
+        "backend_runtime": None,
     }
     try:
         with urllib.request.urlopen(url, timeout=1) as response:
@@ -475,6 +643,7 @@ def _merge_readyz_payload(readiness: dict[str, object], raw: bytes) -> None:
         "database_connected",
         "assessment_schema_ready",
         "code_analysis_schema_ready",
+        "backend_runtime",
     ):
         if key in parsed:
             readiness[key] = parsed[key]
@@ -489,11 +658,9 @@ def list_failed_audit_markers(engagement_dir: Path) -> list[Path]:
     """Return ``<run_uuid>.failed-audit`` markers under ``scans/kali/`` for one engagement.
 
     Each marker is written by ``agent/scripts/assess/lib/kali.py`` when the
-    pre-exec audit POST to the orchestrator backend fails — the assess CLI
-    keeps running the subprocess so the operator sees results, but the audit
-    row never lands. A pile of these on a long engagement signals silent
-    coverage drift, so any surface that wants to nag the operator (doctor,
-    a future cleanup verb) can call this helper.
+    pre-exec audit POST to the orchestrator backend fails. The assess CLI
+    refuses execution; the marker retains the failed attempt and backend error
+    for diagnosis without manufacturing an unaudited target request.
 
     Returns the markers sorted newest-first by mtime so callers can show the
     most recent ones without re-sorting. Missing directories return ``[]``.
@@ -509,12 +676,10 @@ def list_failed_audit_markers(engagement_dir: Path) -> list[Path]:
 def _failed_audit_marker_check(install_root: Path) -> Check:
     """Surface orphaned ``<run_uuid>.failed-audit`` markers across engagements.
 
-    The marker is the only on-disk signal that an ``vigil assess kali`` run
-    proceeded without a backend audit row. Nothing else inspects them —
-    ``sweep-orphans`` ignores them, the runtime never re-tries the POST —
-    so they accumulate silently. Surface a WARN with per-engagement counts
-    plus the most recent marker paths (capped at 5 per engagement) so the
-    operator can decide whether to investigate or sweep.
+    The marker is the on-disk signal that an ``vigil assess kali`` run was
+    refused because its backend audit row could not be created. Surface a WARN
+    with per-engagement counts plus the most recent marker paths (capped at 5
+    per engagement) so the operator can diagnose the write path.
     """
     root = engagements_root(install_root)
     if not root.is_dir():

@@ -1,8 +1,8 @@
 """Reusable coverage / readiness checks shared by ``check-phase-readiness``.
 
-Wave 6d (command consolidation, depth-gate §6) folded three standalone CLI
-commands into the one phase-aware ``check-phase-readiness`` command. To lose
-NOTHING in that consolidation, the reusable bodies of the deleted commands live
+Command consolidation folded three standalone CLI commands into the one
+phase-aware ``check-phase-readiness`` command. To preserve their behavior, the
+reusable bodies of the deleted commands live
 here as importable helpers:
 
   * ``check-coverage``        → :func:`render_surface_coverage` (surface-
@@ -23,7 +23,6 @@ module is CLI-side glue only.
 from __future__ import annotations
 
 import ipaddress
-import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +41,7 @@ from assess.lib.scope import (
 
 
 # ===========================================================================
-# check-coverage — surface-resolution gate (old check_coverage.py body)
+# surface-coverage — surface-resolution gate (former check-coverage body)
 # ===========================================================================
 def render_surface_coverage(readiness: Any) -> tuple[bool, list[str], list[str]]:
     """Render the surface-coverage gate from a ``/coverage-readiness`` payload.
@@ -53,7 +52,7 @@ def render_surface_coverage(readiness: Any) -> tuple[bool, list[str], list[str]]
     success line. The caller decides exit code + stream.
     """
     if not isinstance(readiness, dict):
-        return False, [], ["check-coverage: unexpected response from backend"]
+        return False, [], ["surface-coverage: unexpected response from backend"]
 
     unresolved = readiness.get("unresolved_surfaces") or []
     partially_covered = readiness.get("partially_covered_surfaces") or []
@@ -193,8 +192,8 @@ def render_intel_readiness(data: Any) -> tuple[bool, list[str]]:
             lines.append(f"  - id={row.get('id')} [{row.get('lead_status')}] {row.get('title')}")
     lines.append(
         "\nDisposition by id: "
-        "`vigil assess update-intel cve <id> --inline '{\"validation_status\": \"ruled_out\"}'` "
-        "or `update-intel note <id> --inline '{\"lead_status\": \"resolved\"}'`."
+        "`vigil assess intel update cve <id> --inline '{\"validation_status\": \"ruled_out\"}'` "
+        "or `intel update note <id> --inline '{\"lead_status\": \"resolved\"}'`."
     )
     return True, lines
 
@@ -411,7 +410,7 @@ def _bucket_of_cluster_key(cluster_key: str) -> str:
 
 
 def _pending_buckets_for_host(
-    db_path: Path,
+    client: AssessmentClient,
     entry: dict[str, Any],
     deny_entries: list[dict[str, Any]] = (),
 ) -> dict[str, int]:
@@ -421,48 +420,39 @@ def _pending_buckets_for_host(
     is ``pending`` with no ``terminal_reason``, OR stuck in ``processing``, OR in
     ``error`` — in every case ``type != 'host_root'``. Reuses the stored
     ``cluster_key`` (``gf:<bucket>``) when present, re-classifying otherwise.
-    Returns ``{bucket_name: count}`` summed across matching hosts. A missing DB
-    yields ``{}``.
+    Returns ``{bucket_name: count}`` summed across matching hosts. Reads the
+    backend work buffer; an empty buffer yields ``{}``.
     """
-    if not db_path.is_file():
-        return {}
-
     tally: dict[str, int] = {}
-    conn = sqlite3.connect(str(db_path), timeout=5.0)
-    try:
-        conn.execute("PRAGMA busy_timeout=5000")
-        cursor = conn.execute(
-            """
-            SELECT url, url_path, query_params, body_params, path_params,
-                   type, cluster_key
-            FROM work_items
-            WHERE type != 'host_root'
-              AND (
-                    (status = 'pending'
-                       AND (terminal_reason IS NULL OR terminal_reason = ''))
-                 OR status = 'processing'
-                 OR status = 'error'
-              )
-            """
-        )
-        for row in cursor.fetchall():
-            url = str(row[0] or "")
-            host = _endpoint_host(url)
-            if not host or not entry_matches_host(entry, host) or host_in_scope(host, deny_entries):
-                continue
-            bucket = _bucket_of_cluster_key(str(row[6] or ""))
-            if not bucket:
-                assignment = classify_from_fields(
-                    case_type=str(row[5] or "unknown"),
-                    url_path=str(row[1] or ""),
-                    query_params=str(row[2] or "{}"),
-                    body_params=str(row[3] or "{}"),
-                    path_params=str(row[4] or "{}"),
-                )
-                bucket = _bucket_of_cluster_key(str(assignment.get("cluster_key") or ""))
-            tally[bucket] = tally.get(bucket, 0) + 1
-    finally:
-        conn.close()
+    for row in client.get_all_pages("work-items"):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("type") or "") == "host_root":
+            continue
+        status = str(row.get("status") or "")
+        terminal_reason = str(row.get("terminal_reason") or "")
+        if not (
+            (status == "pending" and terminal_reason == "")
+            or status == "processing"
+            or status == "error"
+        ):
+            continue
+        # Prefer the row's stored ``host`` column (lowercased hostname, no port)
+        # over re-parsing the URL.
+        host = str(row.get("host") or "")
+        if not host or not entry_matches_host(entry, host) or host_in_scope(host, deny_entries):
+            continue
+        bucket = _bucket_of_cluster_key(str(row.get("cluster_key") or ""))
+        if not bucket:
+            assignment = classify_from_fields(
+                case_type=str(row.get("type") or "unknown"),
+                url_path=str(row.get("url_path") or ""),
+                query_params=str(row.get("query_params") or "{}"),
+                body_params=str(row.get("body_params") or "{}"),
+                path_params=str(row.get("path_params") or "{}"),
+            )
+            bucket = _bucket_of_cluster_key(str(assignment.get("cluster_key") or ""))
+        tally[bucket] = tally.get(bucket, 0) + 1
     return tally
 
 
@@ -608,7 +598,7 @@ def _build_recommendation(
     *,
     entry: dict[str, Any],
     stage: str,
-    db_path: Path,
+    client: AssessmentClient,
     skills_root: Path | None,
     deny_entries: list[dict[str, Any]] = (),
 ) -> dict[str, Any]:
@@ -617,7 +607,7 @@ def _build_recommendation(
     dropped_skills: list[str] = []
 
     if stage == "consumption":
-        bucket_tally = _pending_buckets_for_host(db_path, entry, deny_entries)
+        bucket_tally = _pending_buckets_for_host(client, entry, deny_entries)
         selection = _consumption_skill_selection(bucket_tally)
         if selection["confidence"] == "high" and _ambiguous_dominant(bucket_tally):
             shortlist: list[str] = []
@@ -662,7 +652,7 @@ def _build_recommendation(
     mode = _ROLE_TO_MODE.get(role, "item-iterating")
     parallel_role = _STAGE_PARALLEL_ROLE.get(stage)
 
-    command = _format_start_command(role=role, scope_host=host, mode=mode, skills=skills)
+    command = _format_start_command(role=role, mode=mode, skills=skills)
     task_skeleton = _format_task_skeleton(
         host=host,
         stage=stage,
@@ -673,7 +663,7 @@ def _build_recommendation(
 
     return {
         "scope_entry": entry["scope_entry"],
-        "scope_host": host,
+        "host": host,
         "stage": stage,
         "role": role,
         "parallel_role": parallel_role,
@@ -692,14 +682,12 @@ def _build_recommendation(
 def _format_start_command(
     *,
     role: str,
-    scope_host: str,
     mode: str,
     skills: list[str],
 ) -> str:
     parts = [
         "vigil assess agent start",
         f"--role {role}",
-        f"--scope-host {scope_host}",
         f"--dispatch-mode {mode}",
     ]
     if skills:
@@ -741,7 +729,7 @@ def _format_task_skeleton(
 def build_redispatch_block(
     *,
     entries: list[dict[str, Any]],
-    db_path: Path,
+    client: AssessmentClient,
     skills_root: Path | None,
     prior_dispatches: list[dict[str, Any]] | None,
     dedup_degraded: bool,
@@ -758,19 +746,19 @@ def build_redispatch_block(
         if stage is None:
             continue
         rec = _build_recommendation(
-            entry=entry, stage=stage, db_path=db_path, skills_root=skills_root,
+            entry=entry, stage=stage, client=client, skills_root=skills_root,
             deny_entries=deny_entries,
         )
-        key = (rec["role"], rec["scope_host"])
+        key = _dispatch_dedup_key(rec["role"], rec["task_skeleton"])
         if key in prior_index:
             suppressed.append(
                 {
-                    "scope_host": rec["scope_host"],
+                    "host": rec["host"],
                     "role": rec["role"],
                     "stage": rec["stage"],
                     "reason": (
                         f"prior dispatch already exists for role={rec['role']} "
-                        f"scope_host={rec['scope_host']} "
+                        "with the same task "
                         f"(agent_id={prior_index[key]})"
                     ),
                 }
@@ -812,17 +800,24 @@ def build_redispatch_block(
     }
 
 
+def _dispatch_dedup_key(role: Any, task: Any) -> tuple[str, str]:
+    return (
+        str(role or "").strip(),
+        " ".join(str(task or "").strip().lower().split()),
+    )
+
+
 def _index_prior_dispatches(rows: list[dict[str, Any]]) -> dict[tuple[str, str], str]:
-    """Map ``(role, scope_host) -> agent_id`` for prior dispatch rows."""
+    """Map exact ``(role, normalized task)`` pairs to prior dispatch ids."""
     index: dict[tuple[str, str], str] = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
         role = str(row.get("agent_role") or row.get("role") or "").strip()
-        scope_host = host_from_token(str(row.get("scope_host") or ""))
-        if not role or not scope_host:
+        task = str(row.get("task") or "").strip()
+        if not role or not task:
             continue
-        key = (role, scope_host)
+        key = _dispatch_dedup_key(role, task)
         if key not in index:
             index[key] = str(row.get("agent_id") or row.get("id") or "")
     return index
@@ -1102,51 +1097,34 @@ def _scope_metadata_lookup_key(entry: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# cases.db work buffer
+# backend work buffer
 # ---------------------------------------------------------------------------
-def _load_work_items_by_host(db_path: Path) -> dict[str, dict[str, int]]:
-    """Return a ``{host: {status: count, ...}}`` rollup from the local DB.
+def _load_work_items_by_host(client: AssessmentClient) -> dict[str, dict[str, int]]:
+    """Return a ``{host: {status: count, ...}}`` rollup from the backend work buffer.
 
     Tracks ``pending_without_terminal_reason`` so the consumption gate can
-    distinguish "really pending" from "deferred by classify-work". ``host_root``
-    crawl seeds are excluded from that count. A missing DB yields an empty map.
+    distinguish "really pending" from "deferred by work-buffer reclassify". ``host_root``
+    crawl seeds are excluded from that count. An empty buffer yields an empty map.
     """
-    if not db_path.is_file():
-        return {}
-
-    rows: list[tuple[str, str, int]] = []
-    rows_with_reason: list[tuple[str, str, int]] = []
-    conn = sqlite3.connect(str(db_path), timeout=5.0)
-    try:
-        conn.execute("PRAGMA busy_timeout=5000")
-        cursor = conn.execute(
-            """
-            SELECT url, status, COUNT(*) AS total
-            FROM work_items
-            GROUP BY url, status
-            """
-        )
-        rows = [(str(r[0] or ""), str(r[1] or ""), int(r[2] or 0)) for r in cursor.fetchall()]
-        cursor = conn.execute(
-            """
-            SELECT url, COUNT(*) AS total
-            FROM work_items
-            WHERE status = 'pending' AND (terminal_reason IS NULL OR terminal_reason = '')
-              AND type != 'host_root'
-            GROUP BY url
-            """
-        )
-        rows_with_reason = [(str(r[0] or ""), "pending_without_terminal_reason", int(r[1] or 0)) for r in cursor.fetchall()]
-    finally:
-        conn.close()
-
     agg: dict[str, dict[str, int]] = {}
-    for url, status, count in rows + rows_with_reason:
-        host = _endpoint_host(url)
+    for row in client.get_all_pages("work-items"):
+        if not isinstance(row, dict):
+            continue
+        # Prefer the row's stored ``host`` column over re-parsing the URL.
+        host = str(row.get("host") or "")
         if not host:
             continue
+        status = str(row.get("status") or "")
         bucket = agg.setdefault(host, {})
-        bucket[status] = bucket.get(status, 0) + count
+        bucket[status] = bucket.get(status, 0) + 1
+        if (
+            status == "pending"
+            and str(row.get("terminal_reason") or "") == ""
+            and str(row.get("type") or "") != "host_root"
+        ):
+            bucket["pending_without_terminal_reason"] = (
+                bucket.get("pending_without_terminal_reason", 0) + 1
+            )
     return agg
 
 
@@ -1193,48 +1171,30 @@ def _response_is_live(response_status: Any) -> bool:
     return response_status in _LIVE_RESPONSE_EXTRA
 
 
-def load_route_stats_by_host(db_path: Path) -> dict[str, dict[str, Any]]:
+def load_route_stats_by_host(client: AssessmentClient) -> dict[str, dict[str, Any]]:
     """Return ``{host: {live_routes, total_routes, api_like, auth_like,
-    graphql_like}}`` from the local cases.db work buffer.
+    graphql_like}}`` from the backend work buffer.
 
-    Mirrors :func:`_load_work_items_by_host` (same connection discipline + the
-    shared :func:`_endpoint_host` extractor) but counts DISTINCT ``url_path`` per
-    host instead of status rows, and flags API/auth/GraphQL surfaces for the
-    ledger's real_app OR-inclusion. A missing DB yields an empty map.
+    Mirrors :func:`_load_work_items_by_host` (same stored-``host`` grouping) but
+    counts DISTINCT ``url_path`` per host instead of status rows, and flags
+    API/auth/GraphQL surfaces for the ledger's real_app OR-inclusion. An empty
+    buffer yields an empty map.
     """
-    if not db_path.is_file():
-        return {}
-
-    raw: list[tuple[str, str, str, Any, str]] = []
-    conn = sqlite3.connect(str(db_path), timeout=5.0)
-    try:
-        conn.execute("PRAGMA busy_timeout=5000")
-        cursor = conn.execute(
-            "SELECT url, url_path, type, response_status, live_status FROM work_items"
-        )
-        raw = [
-            (
-                str(r[0] or ""),
-                str(r[1] or ""),
-                str(r[2] or ""),
-                r[3],
-                str(r[4] or ""),
-            )
-            for r in cursor.fetchall()
-        ]
-    finally:
-        conn.close()
-
     acc: dict[str, dict[str, Any]] = {}
-    for url, url_path, wtype, response_status, live_status in raw:
-        if wtype.lower() == "host_root":
+    for row in client.get_all_pages("work-items"):
+        if not isinstance(row, dict):
             continue
-        path = url_path.strip()
+        if str(row.get("type") or "").lower() == "host_root":
+            continue
+        path = str(row.get("url_path") or "").strip()
         if not path:
             continue
-        host = _endpoint_host(url)
+        # Prefer the row's stored ``host`` column over re-parsing the URL.
+        host = str(row.get("host") or "")
         if not host:
             continue
+        response_status = row.get("response_status")
+        live_status = str(row.get("live_status") or "")
         bucket = acc.setdefault(
             host,
             {
@@ -1649,7 +1609,7 @@ def render_redispatch_section(block: dict[str, Any]) -> list[str]:
         return lines
     for rec in recommendations:
         lines.append(
-            f"  - {rec['scope_host']} [{rec['stage']} gap] "
+            f"  - {rec['host']} [{rec['stage']} gap] "
             f"confidence={rec['confidence']} role={rec['role']}"
         )
         lines.append(f"      {rec['command']}")
@@ -1740,13 +1700,25 @@ def compute_coverage_state(
     return COVERAGE_STATE_UNCOVERED
 
 
-def dispatched_hosts_from_rows(rows: list[dict[str, Any]]) -> dict[str, list[str]]:
-    """Map dispatch rows to ``{host: [roles]}`` (a "dedicated lane" per host)."""
+def dispatched_hosts_from_rows(
+    rows: list[dict[str, Any]],
+    application_units: list[dict[str, Any]],
+) -> dict[str, list[str]]:
+    """Map unit-attributed dispatch rows to ``{host: [roles]}`` lanes."""
+    unit_hosts = {
+        int(unit["id"]): host_from_token(str(unit.get("host") or ""))
+        for unit in application_units
+        if isinstance(unit, dict) and unit.get("id") is not None
+    }
     out: dict[str, list[str]] = {}
     for row in rows or []:
         if not isinstance(row, dict):
             continue
-        host = host_from_token(str(row.get("scope_host") or ""))
+        unit_id = row.get("application_unit_id")
+        try:
+            host = unit_hosts.get(int(unit_id)) if unit_id is not None else None
+        except (TypeError, ValueError):
+            host = None
         if not host:
             continue
         role = str(row.get("agent_role") or row.get("role") or "").strip()
@@ -1773,7 +1745,7 @@ def build_coverage_ledger(
 ) -> dict[str, Any]:
     """Assemble the per-host coverage ledger.
 
-    Joins the local route stats (cases.db) with the backend per-host C40
+    Joins the backend work-buffer route stats with the backend per-host C40
     outcomes and the finding-VERDICT projection, scoped to in-scope hosts
     (out-of-scope carve-outs win). Hosts with at least one signal (routes,
     backend outcome row, verdict, or lane) become ledger rows; in-scope scope
@@ -1977,6 +1949,192 @@ def render_coverage_ledger_text(ledger: dict[str, Any]) -> list[str]:
     return lines
 
 
+# ---------------------------------------------------------------------------
+# A1 — the by-family coverage grid (per application-unit × attack-family)
+# ---------------------------------------------------------------------------
+# The by-family grid is the finer-grained sibling of the per-host ledger: it
+# projects, per deep-required application-unit, one cell PER expected attack-
+# family — so a unit that is "covered" at the host level but has an untouched
+# SQLi class is visibly a gap. The backend owns the projection
+# (``coverage-readiness/by-family``); these renderers are CLI-side glue over the
+# pinned payload shape:
+#
+#   {"units": [{"application_unit_id", "host", "port_class", "path_prefix",
+#               "deep_required", "families": [{"family", "expected_reason",
+#               "status", "probe_count", "covering_probe_count", "has_finding",
+#               "finding_id"}]}],
+#    "totals": {"units", "cells", "covered", "missing_block", "missing_warn",
+#               "deferred", "with_finding"}}
+#
+# ``status`` ∈ covered | missing_block | missing_warn | deferred.
+
+_FAMILY_LEDGER_STATUS_LABEL: dict[str, str] = {
+    "covered": "COVERED",
+    "missing_block": "MISSING-BLOCK",
+    "missing_warn": "missing-warn",
+    "deferred": "deferred",
+}
+
+
+def _family_cell_is_gap(fam: dict[str, Any]) -> bool:
+    """A family cell is a coverage GAP when its status is a missing_* verdict, or
+    (for any unrecognized status) when no covering probe has landed on it yet
+    (``covering_probe_count == 0``). A ``covered`` cell is never a gap, and a
+    ``deferred`` cell is a deliberate decision (like a per-host deferral), so it
+    is not surfaced as an unaddressed gap either."""
+    status = str(fam.get("status") or "")
+    if status in ("covered", "deferred"):
+        return False
+    if status in ("missing_block", "missing_warn"):
+        return True
+    return int(fam.get("covering_probe_count") or 0) == 0
+
+
+def _family_finding_flag(fam: dict[str, Any]) -> str:
+    """Return a ``finding#<id>`` (or bare ``finding``) flag for a linked cell, else ``""``."""
+    if not fam.get("has_finding"):
+        return ""
+    finding_id = fam.get("finding_id")
+    return f"finding#{finding_id}" if finding_id is not None else "finding"
+
+
+def render_family_ledger_text(payload: dict[str, Any]) -> list[str]:
+    """Render the by-family coverage grid as text lines.
+
+    One block per application-unit (header carries host / port_class /
+    path_prefix / deep-required), then one line per expected family cell. A GAP
+    cell (missing_block / missing_warn, or no covering probe) is marked ``GAP``;
+    a covered cell shows its verdict plus ``covering/total covering`` probe
+    counts; a finding-linked cell is flagged ``finding#<id>`` so the three read
+    distinctly at a glance. The leading ``totals:`` line summarizes the grid.
+    """
+    if not isinstance(payload, dict):
+        return ["coverage by-family: unexpected response from backend"]
+
+    units = [u for u in (payload.get("units") or []) if isinstance(u, dict)]
+    totals = payload.get("totals") if isinstance(payload.get("totals"), dict) else {}
+
+    lines: list[str] = [
+        "coverage by-family (per application-unit × attack-family — a GAP cell "
+        "has no covering probe; a covered cell shows its verdict + probe counts):"
+    ]
+    lines.append(
+        "  totals: "
+        f"{totals.get('units', 0)} unit(s) | "
+        f"{totals.get('cells', 0)} cell(s) | "
+        f"{totals.get('covered', 0)} covered | "
+        f"{totals.get('missing_block', 0)} missing-block | "
+        f"{totals.get('missing_warn', 0)} missing-warn | "
+        f"{totals.get('deferred', 0)} deferred | "
+        f"{totals.get('with_finding', 0)} with finding"
+    )
+    if not units:
+        lines.append("  (no application-units recorded yet)")
+        return lines
+
+    for unit in units:
+        host = str(unit.get("host") or "")
+        port_class = str(unit.get("port_class") or "")
+        path_prefix = str(unit.get("path_prefix") or "")
+        deep = "deep-required" if unit.get("deep_required") else "shallow-ok"
+        unit_id = unit.get("application_unit_id")
+        header = f"  - unit#{unit_id} {host}"
+        if port_class:
+            header += f" [{port_class}]"
+        if path_prefix:
+            header += f" {path_prefix}"
+        header += f"  ({deep})"
+        lines.append(header)
+
+        families = [f for f in (unit.get("families") or []) if isinstance(f, dict)]
+        if not families:
+            lines.append("      (no expected families for this unit)")
+            continue
+        for fam in families:
+            family = str(fam.get("family") or "")
+            status = str(fam.get("status") or "")
+            label = _FAMILY_LEDGER_STATUS_LABEL.get(status, status or "?")
+            probe_count = int(fam.get("probe_count") or 0)
+            covering = int(fam.get("covering_probe_count") or 0)
+            marker = "GAP " if _family_cell_is_gap(fam) else "    "
+            reason = str(fam.get("expected_reason") or "")
+            reason_str = f" ({reason})" if reason else ""
+            finding_flag = _family_finding_flag(fam)
+            finding_str = f"  {finding_flag}" if finding_flag else ""
+            lines.append(
+                f"      {marker}{family}{reason_str}: {label} "
+                f"[{covering}/{probe_count} covering]{finding_str}"
+            )
+    return lines
+
+
+def render_dispatch_coverage_block(
+    payload: dict[str, Any],
+    *,
+    host: str,
+    path_prefix: str | None = None,
+) -> list[str]:
+    """Render a paste-ready ``COVERAGE:`` block for a specialist dispatch prompt.
+
+    Filters the by-family grid CLIENT-SIDE to ``host`` (and ``path_prefix`` when
+    given) and lists, per application-unit, which attack-families are already
+    covered and which remain OPEN gaps — so a dispatch can hand the specialist
+    the measured coverage picture plus an OPEN objective instead of a
+    prescriptive technique cage. Reuses the by-family payload; adds no backend
+    call. NOTE: ``host``/``path_prefix`` scope by application-unit here — this is
+    deliberately NOT the surface-id sense of ``--surface`` on ``coverage --attempts``.
+    """
+    host_l = (host or "").strip().lower()
+    prefix = (path_prefix or "").strip()
+    units = [
+        u
+        for u in (payload.get("units") or [])
+        if isinstance(u, dict) and str(u.get("host") or "").strip().lower() == host_l
+    ]
+    if prefix:
+        units = [u for u in units if str(u.get("path_prefix") or "") == prefix]
+
+    scope = f"{host_l}{prefix}"
+    lines: list[str] = [
+        f"COVERAGE: {scope} (coverage-driven dispatch context — hunt the OPEN "
+        "gaps below and form your own hypotheses; this is a map, not a script):"
+    ]
+    if not units:
+        lines.append(
+            f"  (no recorded coverage expectation for {scope} yet — treat the "
+            "whole surface as open and enumerate first)"
+        )
+        return lines
+
+    for unit in units:
+        pp = str(unit.get("path_prefix") or "")
+        deep = "deep-required" if unit.get("deep_required") else "shallow-ok"
+        covered_fams: list[str] = []
+        deferred_fams: list[str] = []
+        open_fams: list[str] = []
+        for fam in unit.get("families") or []:
+            if not isinstance(fam, dict):
+                continue
+            name = str(fam.get("family") or "")
+            if _family_cell_is_gap(fam):
+                open_fams.append(name)
+            elif str(fam.get("status") or "") == "deferred":
+                deferred_fams.append(name)
+            else:
+                flag = _family_finding_flag(fam)
+                covered_fams.append(f"{name}({flag})" if flag else name)
+        lines.append(f"  unit {host_l}{pp} [{deep}]")
+        lines.append(
+            f"    covered: {', '.join(covered_fams) if covered_fams else '(none)'}"
+        )
+        if deferred_fams:
+            lines.append(f"    deferred: {', '.join(deferred_fams)}")
+        lines.append(
+            f"    OPEN gaps: {', '.join(open_fams) if open_fams else '(none)'}"
+        )
+    return lines
+
+
 # Re-exports the consolidated CLI command and tests expect from this module.
 __all__ = [
     "BUCKET_SKILLS",
@@ -1999,6 +2157,8 @@ __all__ = [
     "compute_coverage_state",
     "dispatched_hosts_from_rows",
     "render_coverage_ledger_text",
+    "render_family_ledger_text",
+    "render_dispatch_coverage_block",
     "COVERAGE_STATE_COVERED",
     "COVERAGE_STATE_UNCOVERED",
     "COVERAGE_STATE_NEEDS_BROWSER_REPROBE",

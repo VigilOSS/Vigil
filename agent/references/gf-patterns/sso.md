@@ -3,6 +3,7 @@ name: gf-patterns:sso
 description: SAML/SSO routing and federation endpoint patterns (/sso/, /saml, /cas/, /adfs/)
 origin: local overlay (no upstream gf equivalent)
 bucket: sso
+skill: saml-sso-testing
 weight: 35
 ---
 
@@ -125,7 +126,7 @@ Param-key matches:
 ## Corpus grounding
 
 3 actionable `sso` templates (371 rows) in the first cms-gov deep sweep (Okta login, profile
-Okta endpoint, Okta config JavaScript). See `docs/plans/research/classify-surface-2026-06/README.md` §4b.
+Okta endpoint, Okta config JavaScript). See `docs/research/classify-surface-2026-06/README.md` §4b.
 
 ## Sources
 

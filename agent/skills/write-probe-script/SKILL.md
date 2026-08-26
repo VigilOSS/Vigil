@@ -62,7 +62,7 @@ not cosmetic, it is what keeps the blast radius honest.
 | **Passive / fingerprint** | Reads the target: GETs, header inspection, TLS introspection, response-shape differentials with no state change. | `fingerprint` / `baseline` | no |
 | **Active / payload** | Sends a crafted input testing one hypothesis (a traversal string, an injected parameter, an oversized body) and inspects the response. | `payload` | only if it writes/edits/deletes target state |
 | **Blind / callback** | Fires an input that should trigger an out-of-band hit (SSRF, blind XXE, command injection) and correlates the callback. | `payload` | usually no (the *callback* is the signal, not a target write) |
-| **Exploit / proof** | Demonstrates the attacker outcome end-to-end (extracts a record, proves the IDOR boundary, chains two primitives). | `exploit` | per the actual writes performed |
+| **Exploit / proof** | Demonstrates the attacker outcome (`agent/rules/hunting.md` §2) end-to-end (extracts a record, proves the IDOR boundary, chains two primitives). | `exploit` | per the actual writes performed |
 
 A passive probe that quietly starts POSTing is mislabelled and under-audits its
 risk. Pick the shape up front; if the probe grows a write, bump `--probe-kind` and
@@ -179,7 +179,7 @@ Convention:
 - `evidence` (object) — the load-bearing facts (status codes, response markers,
   timing deltas, callback nonce) that justify the verdict.
 
-When `finding` is `true`, that JSON is exactly what seeds a `record-finding`: the
+When `finding` is `true`, that JSON is exactly what seeds a `finding record`: the
 `summary` becomes the finding title/notes line, and the evidence file under
 `scans/` (plus the registered probe script itself) becomes the `evidence_ref`.
 Keeping the verdict structured means the run is decidable from the audit preview
@@ -222,6 +222,7 @@ def main():
     ap.add_argument("--marker", default="root:x:0:0")
     ap.add_argument("--out", default="")
     args = ap.parse_args()
+    # scoped_host(args.target)  ← keep scaffold-probe's scope guard here; elided for length.
 
     good_status, _ = fetch(f"{args.target}?{args.param}={args.good}")
     pay_status, pay_body = fetch(f"{args.target}?{args.param}={args.payload}")
@@ -280,7 +281,7 @@ vigil assess artifact register scripts/traversal_diff.py \
 ```
 
 The validated script is now an indexed artifact: discoverable via
-`vigil assess artifact search traversal`, replayable next engagement, and linked as
+`vigil assess artifact search --q traversal`, replayable next engagement, and linked as
 evidence on `LFI-001`.
 
 ## The iterate-and-validate loop
@@ -318,6 +319,25 @@ registered artifact at the end.
 - **Hard-coding the OOB callback host.** Mint a fresh nonce per payload with
   `vigil oob mint` and pass it as an argument. A baked-in host cannot be correlated
   and pollutes the next probe's results.
+- **Letting a caller-supplied host authorize itself.** Nothing below the probe
+  refuses by host — `vigil assess kali` never blocks an outbound request on scope
+  (`agent/shared-constraints.md §1`), so the script's own ALLOW list is the only
+  guard there is. A `--target` / `--tenant` / `--<vendor>-host` argument is untrusted
+  *input*, not an authorization: normalize it to a bare lowercase hostname
+  (`urlsplit` → `.hostname`, strip the trailing dot, drop the port), match it against
+  `scope.json`'s `hosts` + `discovered_hosts` — reading the file directly, stdlib-only
+  — and build the allow list from **that result**, never from argv. `vigil assess
+  scaffold-probe` emits a `scoped_host()` helper that does exactly this; keep it.
+- **Reconfiguring by union instead of by replacement.** When a probe is re-pointed at
+  a different tenant, **replace** the allow list; adding to it leaves every previous
+  tenant permanently authorized, so the script silently accumulates reach nobody
+  re-approved.
+- **Shelling out to `vigil` from inside the script.** There is no `vigil` executable
+  in the runtime container — `command -v vigil` finds nothing, so a `subprocess` call
+  to `vigil assess ...` passes when you test it on the host and dies with exit 127 on
+  the only approved target-execution route. Parse any manifest or scope file with the
+  stdlib off the `/engagements` bind mount, and make the recording calls from the host
+  after the run returns.
 - **Writing outside the engagement.** `/tmp` and `/data` inside the container are
   non-engagement paths — outputs there are invisible from the host and lost on
   restart. Always write under `/engagements/$ENGAGEMENT_KEY/scans/` (and author

@@ -1,4 +1,4 @@
-"""Shared intel type metadata for record-intel and contract helpers."""
+"""Shared intel type metadata for intel record and contract helpers."""
 from __future__ import annotations
 
 

@@ -1,4 +1,4 @@
-"""vigil assess code-record-analysis — POST per-function analysis results."""
+"""vigil assess code-record analysis — POST per-function analysis results."""
 from __future__ import annotations
 
 import json
@@ -63,7 +63,7 @@ def _validate_cross_file_triggers(item_index: int, result: dict) -> None:
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
-        "code-record-analysis",
+        "analysis",
         help="Record per-function analysis results from code-vuln-hunter",
     )
     p.add_argument(
@@ -95,7 +95,7 @@ def run(args) -> None:
         sys.exit(0)
 
     # Validate required fields
-    required = {"queue_item_id", "disposition"}
+    required = {"queue_item_id", "agent_name", "lease_token", "disposition"}
     for i, result in enumerate(results):
         if not isinstance(result, dict):
             print(f"Item {i} is not a JSON object", file=sys.stderr)

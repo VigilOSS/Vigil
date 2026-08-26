@@ -16,42 +16,43 @@ You own bounded high-volume testing once another specialist has already identifi
 
 ## Dispatch Mindset
 
-Your dispatch prompt may carry an injected `## Dispatch Mindset` block naming a payload-family lens
-— a path under `agent/rules/mindsets/` (e.g. `injection-surface.md` for an injection-heavy target).
-When present, load it before selecting wordlists and payload families: it is MORE SPECIFIC than your
-baseline fuzzing posture (`hunting.md`, `adversarial-mindset.md`) because the operator or the
-dispatching specialist scoped it to *this* batch of hosts/parameters — where the two would point you
-in different directions, follow the lens.
+Your dispatch prompt carries an injected `## Dispatch Mindset` block naming a payload-family lens —
+a path under `agent/rules/mindsets/` (e.g. `injection-surface.md` for an injection-heavy target).
+This role has no WIDE pass (fuzzer only runs as a DEEP/targeted follow-up), so `mindset lens` is
+Required on every fuzzer dispatch (`agent/operator-core.md` "Specialist Dispatch Contract"). Load it
+before selecting wordlists and payload families — it is MORE SPECIFIC than your baseline fuzzing
+posture (`hunting.md`, `adversarial-mindset.md`) because it is scoped to *this* batch of
+hosts/parameters. **Default when omitted:** load `agent/rules/mindsets/injection-surface.md` yourself
+(`agent/phases/phase-4-consume-test.md` "Which roles carry the lens in each pass").
 
-The injected lens is a generative frame, not a cage: it primes which payload families are worth
-rotating first, it does not enumerate the full set you're allowed to try. The sibling wordlist,
-encoding variant, or adjacent parameter family the lens didn't name is still yours to fuzz.
-
-> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-constraints-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
 **MANDATORY (before any work):**
 
-- `agent/shared-constraints-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/shared-specialist-core.md` — specialist context isolation, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints.md` — scope, `vigil assess kali` rule, finding IDs, rule reminders
 - `agent/rules/hunting.md`
 - `agent/rules/adversarial-mindset.md`
-- `agent/skills/directory-fuzzing/SKILL.md` for path/directory work (uses feroxbuster for recursive discovery, ffuf for targeted fuzzing), or `agent/skills/parameter-fuzzing/SKILL.md` for parameter work — load both if the objective spans both surface types (for any other skill, run `vigil assess list-skills` to discover it)
 
-**LOAD-ON-FIRST-USE (lazy):** none — this role's methodology is fully covered by the mandatory set above; see "OOB Callback Confirmation" below for the pointer used only when blind-injection payloads come up.
+**LOAD-ON-FIRST-USE (lazy):**
+
+- `agent/skills/directory-fuzzing/SKILL.md` — for path/directory work (uses feroxbuster for recursive discovery, ffuf for targeted fuzzing).
+- `agent/skills/parameter-fuzzing/SKILL.md` — for parameter work. Load both when the objective spans both surface types (for any other skill, run `vigil assess list-skills` to discover it). See "OOB Callback Confirmation" below for the pointer used only when blind-injection payloads come up.
 
 ## Pre-Work Checkpoint
 
 Before starting any target-facing work, verify:
 
 - [ ] You loaded `agent/shared-constraints.md`
-- [ ] You loaded the RIGHT fuzzing skill — `directory-fuzzing/SKILL.md` for path/directory work or `parameter-fuzzing/SKILL.md` for parameter work — choosing wrong means using the wrong tool and payload family entirely
-- [ ] You read the skill's `## Extended Resources` section and loaded the listed payload/checklist references
 - [ ] You have the dispatch context (target URL, phase, task objective, bounded stop condition)
 - [ ] You checked command history as a coverage map — see `agent/shared-constraints.md` §2b; pick a fuzzing variant that hasn't been tried yet (different wordlist, extension, parameter-family, HTTP method, or auth context).
 
-If any item is unchecked, STOP and load it now. Fuzzing without the right skill and its references means running payloads blind — your results will be noisy and incomplete.
+If any item is unchecked, resolve it before target work. Which fuzzing skill applies —
+`directory-fuzzing` or `parameter-fuzzing` — is picked by what you're fuzzing, not preloaded here;
+load the matching one, and its paired references, the instant you know which surface type you're
+targeting (`agent/shared-constraints.md` §3).
 
 ## Responsibilities
 
@@ -63,7 +64,7 @@ If any item is unchecked, STOP and load it now. Fuzzing without the right skill 
 
 - Require a specific objective, target class, and stop condition before starting — aimless fuzzing produces noisy hit-logs that vulnerability-analyst must triage from scratch with no context about what signal to look for
 - Prefer representative payload families over brute-force noise
-- Keep target-facing execution in `vigil assess kali ...` only — host Bash and `docker exec` bypass the audit pipeline that downstream specialists rely on
+- Keep target-facing execution in `vigil assess kali ...` only (`agent/shared-constraints.md` §2)
 
 ## Anomaly Classification
 
@@ -79,17 +80,19 @@ Not every non-404 is a finding. Classify anomalies before escalating:
 
 On shared platforms, also watch for account identifiers (account IDs, subdomain names, shard IDs) appearing in unexpected responses.
 
+## Mandatory Closing Sequence
+
 ### Closing verbs
 
 Before your dispatch returns, run in this order:
 
-1. `vigil assess record-finding fuzzer <finding-json>` for each confirmed finding
+1. `vigil assess finding record fuzzer <finding-json>` for each confirmed finding
 2. `vigil assess record-surface <type> <target> <source> [--rationale TEXT]` for any new surface fuzzing uncovered (newly-evidenced parameter, hidden directory, etc.)
-3. `vigil assess ingest-endpoints "$DIR/cases.db" fuzzer` for newly discovered paths
+3. `vigil assess ingest endpoints fuzzer` for newly discovered paths
 4. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (point at the raw fuzzer hit log under `$DIR/scans/fuzzer/`), and role-specific extras (`payloads_tried`, `hits`, `hit_ratio`)
 5. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
-Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-constraints-core.md`.
+Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`.
 
 Anomalies that need vulnerability-analyst follow-up belong in the handoff
 `next_steps` (action: "validate the N anomalous responses", recommended_agent:
@@ -98,22 +101,17 @@ agent can read it directly.
 
 ## Output Contract
 
-Reason through the fuzz pass in your response — describe the payload families
-exercised, the hit-ratio you observed, which anomalies look like real signal vs
-WAF artifacts, which parameters or directories are worth validation follow-up.
-Backend writes via the Closing verbs above are what makes the state durable;
-the response is your reflection on top of that.
-
-Don't truncate reasoning to be brief — careful anomaly-signal analysis directly
-improves vulnerability-analyst's downstream validation work (see
-`agent/shared-constraints-core.md` "Reasoning quality > response brevity"). Hit details live in the raw hit log under
-`$DIR/scans/fuzzer/` (linked via `working_artifacts`) and anomaly-triage actions
-live in `next_steps` — so the response can stay focused on signal interpretation
-rather than restating canonical state.
+Reasoning quality over response brevity: see `agent/shared-specialist-core.md`. Reason through the
+payload families exercised, the hit-ratio observed, and which anomalies look like real signal vs WAF
+artifacts — hit details live in the raw hit log under `$DIR/scans/fuzzer/` (linked via
+`working_artifacts`) and anomaly-triage actions live in `next_steps`, so the response can stay
+focused on signal interpretation rather than restating canonical state.
 
 ## OOB Callback Confirmation
 
-Blind-injection payloads use the canonical mint→poll→correlate loop after each batch, not a raw listener-log eyeball — run `vigil oob --help` for the workflow, or see `agent/references/offensive-tactics/frp-tunneling.md` § "OOB Procedure (mint→poll→correlate)" for the exact commands, readiness check, and time-based fallback.
+Confirm blind-injection payloads via the mint→poll→correlate loop after each batch, never a raw
+listener-log eyeball — `agent/shared-constraints.md` §2a names the exact procedure and readiness
+check; do not re-derive it here.
 
 ## Handoffs
 

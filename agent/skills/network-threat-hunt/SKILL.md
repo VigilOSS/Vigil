@@ -80,7 +80,7 @@ IOCs do not enter this engagement's evidence tree.
 
 - `vigil assess resume-brief` — hydrate engagement state first on
   continuation.
-- `vigil assess record-finding <agent-name> <finding-json>` — draft or
+- `vigil assess finding record <agent-name> <finding-json>` — draft or
   update findings.
 - `vigil assess host-exec` — wrap every host command (tshark, dig,
   whois, python entropy, RITA, Zeek).
@@ -271,7 +271,8 @@ vigil assess host-exec --tool python3 --intent "score DNS label entropy" \
 
 **MITRE.** T1568.002 (DGA), T1071.004 (DNS C2), T1048.003 (Exfil over
 Unencrypted/Obfuscated Non-C2 Protocol) when the TXT-exfil pattern
-holds.
+holds, T1572 (Protocol Tunneling) when the DNS channel is carrying a
+general-purpose tunnel rather than plain C2 beacons.
 
 **False-positive class to eliminate.**
 `dns_high_entropy_allowlist` in the tenant ref — Akamai/AWS service
@@ -312,7 +313,9 @@ matches; the original `ja3er.com` is dead.
 cells with `count > 0` are the hunting set. Save as
 `ir/evidence/network/ja3_matrix_<window>.csv`.
 
-**MITRE.** T1573, T1071.001 when JA3 ties to HTTP-layer C2.
+**MITRE.** T1573, T1071.001 when JA3 ties to HTTP-layer C2; T1572
+(Protocol Tunneling) when the TLS channel is wrapping a tunnel rather
+than a direct C2 session.
 
 **False-positive class.** `internal_jaX_baseline` — corp-managed
 clients, legacy OpenSSL, Java tooling. Match by hash AND
@@ -390,30 +393,15 @@ recently-registered domains, downloads from unusual TLDs.
 
 **MITRE.** T1071.001 (Web Protocols), T1567 (Exfil Over Web Service),
 T1567.002 (Exfil to Cloud Storage) when the destination is a
-cloud-storage SaaS the tenant does not use.
+cloud-storage SaaS the tenant does not use; T1071.002 (File Transfer
+Protocols) or T1071.003 (Mail Protocols) when the proxy content is
+FTP/SMTP-shaped rather than HTTP(S); T1090 (Proxy) when traffic routes
+through a chained or anonymizing proxy the tenant does not operate.
 
 **False-positive class to eliminate.** Legitimate SaaS onboarded
 recently — a new vendor app the procurement team approved last week
 shows up exactly like a fresh-WHOIS exfil destination. The tenant ref
 maintains a `recently_onboarded_saas` list specifically for this.
-
-## MITRE Technique Mapping
-
-Use sub-technique IDs when the parent has them.
-
-| ID | Name | Step |
-|---|---|---|
-| T1071.001 | Web Protocols | 2, 6 |
-| T1071.002 | File Transfer Protocols | 6 |
-| T1071.003 | Mail Protocols | 6 |
-| T1071.004 | DNS | 2, 3 |
-| T1568.002 | DGA | 3 |
-| T1572 | Protocol Tunneling | 3, 4 |
-| T1573 | Encrypted Channel | 2, 4 |
-| T1090 | Proxy | 6 |
-| T1021 / .001 / .002 / .006 | Remote Services (RDP, SMB, WinRM) | 5 |
-| T1567 / T1567.002 | Exfil Over Web Service / to Cloud Storage | 6 |
-| T1048.003 | Exfil Over Unencrypted/Obfuscated Non-C2 Protocol | 3 |
 
 ## Tenant-Ref Known-Benign Register Additions
 
@@ -494,7 +482,7 @@ silent gap.
   "agent_role": "network-threat-hunt-specialist",
   "phase": "investigation",
   "handoff_status": "ready",
-  "finding_slug": "<from record-finding>",
+  "finding_slug": "<from finding record>",
   "skill_completed": "network-threat-hunt",
   "platform": "network",
   "sub_platform": "siem|fw|proxy|dns|tls|mixed",
@@ -588,8 +576,8 @@ silent gap.
 ## Reference Block
 
 - `agent/skills/alert-triage/SKILL.md` — L1 dispatch producer.
-- `agent/skills/edr-alert-triage/SKILL.md` — origin-host pivot
-  (parallel build); use when Step 5 needs endpoint corroboration.
+- `agent/skills/edr-alert-triage/SKILL.md` — origin-host pivot; use when
+  Step 5 needs endpoint corroboration.
 - `agent/skills/dns-tunneling-detection/SKILL.md` — deeper DNS-tunnel
   analysis (slow-drip, short-label, charset chi-squared) for Step 3
   candidates.

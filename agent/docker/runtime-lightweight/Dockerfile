@@ -126,6 +126,32 @@ RUN arch="$(dpkg --print-architecture)" && \
       | tar -xzf - -C /usr/local/bin trufflehog && \
     chmod +x /usr/local/bin/trufflehog
 
+# Match runtime-full's pinned AWS CLI v2 surface. Kali rolling does not
+# currently publish an awscli package candidate.
+ARG AWS_CLI_VERSION=2.36.10
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) \
+        aws_arch=x86_64; \
+        aws_sha256=f6bf7f19f584a1b32b50217f357f2a5877204cf6f703fec8036cd774932383dd \
+        ;; \
+      arm64) \
+        aws_arch=aarch64; \
+        aws_sha256=8435364a5a09004a644340131c720e081823023f9c69d5fd15f9bc650fb662fc \
+        ;; \
+      *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL $CURL_RETRY_FLAGS \
+      "https://awscli.amazonaws.com/awscli-exe-linux-${aws_arch}-${AWS_CLI_VERSION}.zip" \
+      -o /tmp/awscliv2.zip; \
+    echo "${aws_sha256}  /tmp/awscliv2.zip" | sha256sum -c -; \
+    unzip -q /tmp/awscliv2.zip -d /tmp; \
+    /tmp/aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli; \
+    aws --version; \
+    rm -rf /tmp/aws /tmp/awscliv2.zip
+LABEL vigil.install-versions="${INSTALL_VERSION_STAMP}-awscli-${AWS_CLI_VERSION}"
+
 RUN ln -sf /usr/share/wordlists /wordlists && \
     ln -sf /usr/share/seclists /seclists
 

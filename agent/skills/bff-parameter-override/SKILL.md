@@ -194,7 +194,7 @@ A parameter that gets silently ignored is not a finding. Confirm the override by
 
 ## Phase 4: Escalate Impact
 
-Once override is confirmed, demonstrate the full attacker outcome:
+Once override is confirmed, demonstrate the full attacker outcome (`agent/rules/hunting.md` §2):
 
 - [ ] **Identity override**: Access victim's sensitive data (PII, financial, messages)
 - [ ] **Identity override + write**: Modify victim's account (change email, add payment method)
@@ -221,7 +221,7 @@ When you find a parameter in a response or error message that matches a session-
 - The parameter location (query, body, header, cookie) that achieved the override
 - Auth context: whose session was used, whose data was accessed
 - Proof of divergence: baseline response vs override response
-- Attacker outcome: what the attacker gains (not just "parameter is accepted")
+- Attacker outcome (`agent/rules/hunting.md` §2): what the attacker gains (not just "parameter is accepted")
 - Severity:
   - **Critical**: Identity override enabling account takeover or full impersonation
   - **High**: Tenant/org override enabling cross-tenant data access, or role elevation

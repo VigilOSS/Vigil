@@ -3,15 +3,26 @@
 These rules are always active across the engagement. They are intentionally compact, but they are
 strict: breaking them lowers finding quality.
 
-## 1. Read scope before target work
+## 1. Resolve the engagement boundary before target work
 
-Confirm the exact in-scope hosts, scope mode, exploit policy, and auth state before making target-facing decisions.
+Apply `agent/shared-constraints.md` §1; it owns the engagement boundary and the
+state that must be resolved before target-facing decisions.
 
 ## 2. No theoretical findings — prove the attacker outcome, not just the vulnerability
 
-If the answer to "can an attacker do this right now with real harm?" is no, it is not a finding yet.
+For a live/deployed attack claim, if the answer to "can an attacker do this right now with real
+harm?" is no, that claimed attacker outcome is not established yet.
 
-Proving a vulnerability exists is not enough. You must demonstrate what the attacker **gains** from it. The gap between "vulnerability confirmed" and "attacker outcome proved" is where most severity underrating happens.
+**Code-mode reachability:** apply `agent/shared-constraints-code.md` §5. A supported public
+library/framework API, shipped CLI input, or registered plugin callback can establish product
+reachability even when no embedding application is present. That proves only the applicable product
+path: retain the concrete defect, then constrain attacker claims and severity to the consumer/host
+context actually evidenced. The broken security invariant and plausible harmful outcome still need
+proof, and generic caller-selected capability alone still grants no net-new attacker power.
+
+For live/deployed claims, proving a vulnerability exists is not enough: demonstrate what the
+attacker **gains** from it. The gap between "vulnerability confirmed" and "attacker outcome
+proved" is where most severity inflation happens.
 
 **Existence proof (insufficient alone) — examples, not exhaustive:**
 - "TLS validation is disabled" — so what?
@@ -25,17 +36,79 @@ Proving a vulnerability exists is not enough. You must demonstrate what the atta
 - "SSRF to 169.254.169.254 returns IAM credentials → credentials grant s3:ListBucket on production bucket"
 - "Session token replayed from a different IP returns 200 with authenticated user data — no IP binding"
 
-The pattern applies to every vulnerability class: confirm the primitive exists, then demonstrate the attacker outcome it enables.
+For live/deployed claims, the pattern applies to every vulnerability class: confirm the primitive,
+then demonstrate the attacker outcome it enables. For code-mode supported-product defects, the §5
+rule above governs instead: prove the broken security invariant and feasible harm, while keeping an
+unevidenced consumer-specific attacker outcome out of the claim.
 
 When you capture credentials, tokens, or keys — **use them**. Extract the token, replay it, show what it unlocks. If replay fails, say why (expiry, IP binding, CSRF token required) and mark the finding CHAIN REQUIRED with the specific gap.
 
-A strong-but-unproven finding is parked, not dropped: hold it with `evidence_type=theoretical` + `chain_required=true` at `verification_disposition=pending_runtime_proof` (see `agent/operator-core.md`), and review the holding area with `vigil assess list-findings --holding`. It stays out of the report until a runtime pass proves it.
+A strong-but-unproven finding is parked, not dropped: hold it with `evidence_type=theoretical` + `chain_required=true` at `verification_disposition=pending_runtime_proof` (see `agent/operator-core.md`), and review the holding area with `vigil assess finding list --holding`. It stays out of the report until a runtime pass proves it.
+
+A deterministic code-mode proof through a supported product path is not "unproven" merely because
+an embedding consumer is unavailable. Record the bounded intrinsic defect under
+`shared-constraints-code.md` §5; park it only when the invariant failure or feasible harm is itself
+still unproved.
 
 **Recording a finding is not grading it.** A finding at `verification_state=unreviewed` is an **open question**, not a graded N/A — the lifecycle default means "not yet judged," not "judged harmless." Do not assert "no P2 here" / "this surface is clean" while any unauth or medium-plus finding is still `unreviewed`: an unreviewed finding is exactly what a clean-bill-of-health claim is supposed to have already resolved. Drive it to a verifier disposition before you grade the surface.
 
-**ROE-blocked proof is a CANDIDATE, not a severity downgrade.** This rule demands the attacker outcome — but when you cannot safely complete the final proof step because the program's rules of engagement forbid it (touching real customer data, pivoting into production, exfiltrating a record you have already shown you can reach), that is a constraint on *you*, not a weakness in the finding. Do not lower the severity to match what you were permitted to demonstrate. Grade the **candidate at impact-if-true** — the severity it carries if the blocked step succeeds, which the surrounding evidence already makes likely — and record the single unblocking test that would convert it: set `details.roe_blocked=true` and put the exact next action in `details.required_followup`. This is distinct from the theoretical/`chain_required` park above (which needs another *bug* to land): here the primitive is proved and only the demonstration is walled off by policy. An ROE wall must never masquerade as a low-severity verdict.
+### ROE-blocked: a candidate, not a severity downgrade
 
-**Blocked-for-provisioning is a THIRD category — distinct from both `roe_blocked` and theoretical/`chain_required`.** `roe_blocked` means the primitive is proved and only the final demonstration is walled off by policy; theoretical/`chain_required` means the finding needs another *bug* to complete. A third case is neither: the attempt cannot even start because a precondition is missing — no test account in the required group, no access to the physical line/device, no additional credential or access grant — and the wall may be permanent for this engagement. Record this with `details.block_reason` (why the attempt could not proceed) and `details.unblock_requirements` (`{kind: account|line|device|credential|access, description, requested_from}` — what is missing and who/what would need to provision it); roll repeated attempts up into `details.attempts_summary` instead of scattering them across free-text notes. A `blocked` finding stays OUT of the report — unlike an `roe_blocked` candidate, it is not gradeable at impact-if-true, because the primitive itself was never reached. But the unblock path is first-class, not a dead end: when a later finding or chain lands that would satisfy the block (the missing account gets provisioned, the missing device turns up, the missing credential surfaces elsewhere), link the two — `vigil assess link-finding <blocked-finding-slug> --link-kind unblocked_by --target-kind finding --target-ref <finding-that-unblocks-it>` — so the operator, and the next engagement against this target, see the connection instead of re-discovering it from scratch.
+This rule demands the attacker outcome — but when you cannot safely complete the final
+proof step because the program's rules of engagement forbid it (touching real customer
+data, pivoting into production, exfiltrating a record you have already shown you can
+reach), that is a constraint on *you*, not a weakness in the finding. Do not lower the
+severity to match what you were permitted to demonstrate. Grade the **candidate at
+impact-if-true** — the severity it carries if the blocked step succeeds, which the
+surrounding evidence already makes likely — and record the single unblocking test that
+would convert it:
+
+| Field | Value |
+|---|---|
+| `details.roe_blocked` | `true` |
+| `details.required_followup` | the exact next action that would convert the candidate |
+
+This is distinct from the theoretical/`chain_required` park above (which needs another
+*bug* to land): here the primitive is proved and only the demonstration is walled off by
+policy. An ROE wall must never masquerade as a low-severity verdict.
+
+### Blocked-for-provisioning: a third category
+
+Distinct from both `roe_blocked` and theoretical/`chain_required`: `roe_blocked` means
+the primitive is proved and only the final demonstration is walled off by policy;
+theoretical/`chain_required` means the finding needs another *bug* to complete. A third
+case is neither — the attempt cannot even start because a precondition is missing: no
+test account in the required group, no access to the physical line/device, no
+additional credential or access grant. The wall may be permanent for this engagement.
+Record it with:
+
+| Field | Purpose |
+|---|---|
+| `details.block_reason` | why the attempt could not proceed |
+| `details.unblock_requirements` | `{kind: account\|line\|device\|credential\|access, description, requested_from}` — what is missing and who/what would need to provision it |
+| `details.attempts_summary` | repeated attempts rolled up here instead of scattered across free-text notes |
+
+A `blocked` finding stays OUT of the report — unlike an `roe_blocked` candidate, it is
+not gradeable at impact-if-true, because the primitive itself was never reached. But the
+unblock path is first-class, not a dead end: when a later finding or chain lands that
+would satisfy the block (the missing account gets provisioned, the missing device turns
+up, the missing credential surfaces elsewhere), link the two — `vigil assess finding
+link <blocked-finding-slug> --link-kind unblocked_by --target-kind finding --target-ref
+<finding-that-unblocks-it>` — so the operator, and the next engagement against this
+target, see the connection instead of re-discovering it from scratch.
+
+### Re-derive a blocked record before accepting it
+
+A `blocked` record encodes a premise that was true when it was written — an identity
+that did not exist yet, a fixture nobody had built, a role that could not be granted, a
+product "not provisioned for this user." Premises expire; the record does not.
+Re-derive the premise before accepting the block, and re-read the standing block list
+(`vigil assess list-blocked-techniques`, plus `vigil assess finding list
+--verification-disposition blocked`) whenever a new identity, credential, or access
+grant lands — tie the re-check to that state change, or to phase entry, never to a
+feeling that the block is probably still good. A single stale "not provisioned for this
+user" sentence can hide an entire product's surface for the rest of the engagement once
+a second identity gains access to it.
 
 ## 3. Precondition equivalence check
 
@@ -45,6 +118,7 @@ Examples:
 - **Redundant**: "Unvalidated redirect captures auth verifier" — but triggering the redirect requires breaking the same TLS connection that already exposes the auth verifier. Incremental impact: zero.
 - **Not redundant**: "App disables TLS validation process-wide" — no precondition beyond network proximity. The app removes its own protection. Incremental impact: full credential capture from any shared network.
 - **Chain test**: If exploiting B requires condition A, ask: "What can the attacker already do with just A?" If the answer is "everything B provides," then B is defense-in-depth.
+- **Attacker controls the whole processed input**: the same test applies when the "precondition" is that the victim runs the tool on an artifact the attacker wholly controls — a repo, PR, template, project path, archive, config, or build. Run the chain test with A = "the victim processes the attacker's artifact": a build/dev tool that compiles or executes the attacker's own source *by design* already grants code execution, so a flaw that only reproduces that outcome (e.g. a crafted directory name that injects an import the attacker could have written into their own source) is defense-in-depth — zero incremental capability — **unless** it reaches a genuinely different trust context (a victim's deployment/tenant/credentials, or a control the attacker's visible source could not evade). A fully-reproduced injection can still be no-impact under this test. The verifier's FP catalog echoes this as the "Redundant with the attacker's own controlled input" trigger (`agent/references/finding-fp-and-severity-gate.md`), run by both the web and code verifiers.
 
 ## 4. Kill weak leads fast — and push harder on strong ones
 
@@ -66,9 +140,14 @@ Push-harder signals include:
 - A sibling route, method, or content-type behaves differently than the one you just tested — siblings are the fastest way to confirm or widen the finding
 - The response silently accepts an input shape the application shouldn't (alternate protocol, unexpected encoding, out-of-range value) without erroring — silent acceptance is almost never benign
 
-## 5. Exhaust the surface — rotate only when genuinely dry
+## 5. Exhaust the surface — depth over breadth, rotate only when genuinely dry
 
 Leave a surface only when it is genuinely dry: no meaningful routes, no privileged features, no object references, and no useful source intelligence after a *thorough* pass. "Slow" is not "dry" — do not rotate on a timer; rotate when you have actually exhausted the surface.
+
+One well-understood target is worth more than shallow passes over many: stay on it long enough to
+understand what the application actually values (its money-moving flow, its admin surface, its
+trust boundary) before moving to the next. A breadth-first sweep that touches everything once and
+nothing twice is exactly how the deep bug on the third surface gets missed.
 
 ## 5a. A human-reach determination is part of exhausting a surface
 
@@ -86,11 +165,18 @@ not the name — decides how you treat it.
 
 ## 6. Evidence beats volume
 
-Prefer a few decisive requests and exact proofs over broad noisy testing.
+A handful of decisive, exact requests that prove the primitive is stronger evidence than broad,
+repetitive testing across many inputs — once the first proof lands, reissuing it is noise, not
+rigor. This holds at the collection boundary too: once access to a data set is proven, one minimal
+sample is the whole of the evidence a finding needs. Pulling more records is not more proof, and
+the extra pull is itself the harm (`agent/shared-constraints.md` §4, "Proof-not-collection").
 
-## 7. Use skills before improvising
+## 7. Reach for the skill when the signal calls for it
 
-Load the most relevant skill first. Only improvise when the existing skill/reference set is genuinely insufficient.
+When a skill exists for the technique you're about to run, load it the moment the signal appears —
+it encodes harness specifics and calibration you cannot derive from general knowledge
+(`agent/shared-constraints.md` §3). This is trigger-gated, not a mandatory pre-work gate: you are
+not blocked on having pre-loaded every skill before starting.
 
 ## 8. Automation for recon, judgment for validation
 
@@ -98,7 +184,11 @@ Use automation to enumerate and classify. Use deliberate human-guided validation
 
 ## 9. The sibling rule
 
-When one route, method, or controller path is vulnerable, inspect its siblings before moving on.
+When one route, method, content-type, or controller path is vulnerable, its siblings sharing the
+same code path are the highest-probability next test — a vulnerable pattern is rarely unique to
+the one instance you happened to test first. Walk every sibling before moving to a new surface;
+this is what the Verify → Exploit variant/sibling pass (`agent/operator-core.md` Mandatory
+Phase-Exit Passes) checks for at phase exit.
 
 ## 10. Think in chains
 
@@ -106,15 +196,21 @@ Use bug A as a signal for B and C nearby; follow the cluster until it is genuine
 
 ## 11. Impact first
 
-Prioritize surfaces where broken auth, object reference drift, privileged writes, or trust-boundary confusion would matter.
+Prioritize surfaces where broken auth, object reference drift, privileged writes, or trust-boundary
+confusion would matter over surfaces where they wouldn't. This is not a style preference — these
+are the same families (`access-control`, `auth`, `injection`, `ssrf`, `file`) the depth ledger
+treats as BLOCK_HIGH (rule 25, below); weighting your own attention toward them here is the same
+judgment the terminal gate applies later, applied earlier when it's cheaper to act on.
 
-## 12. Depth over breadth
+## 13. Validate before writing — a report entry costs the same evidence bar as a finding
 
-One well-understood target or feature is worth more than shallow passes over many. Stay long enough to understand what the application actually values.
-
-## 13. Validate before writing
-
-Validate leads to reproducible, evidence-backed state before report drafting — a finding earns report space only when it is worth a human reader's time.
+Do not draft a finding, chain step, or remediation note from a lead that hasn't been pushed to a
+`tested`/`signal` probe-run verdict (§23) with recorded evidence. Writing the prose ahead of the
+evidence backfills confidence the testing never earned, and Phase 5's reviewer inherits the gap
+instead of catching it. A live/deployed lead earns report space only after it clears rule 2's
+proved-attacker-outcome bar. A code-mode finding clears the corresponding bar with a supported
+product path, concrete invariant failure, feasible harmful outcome, and bounded consumer-impact
+claim under `shared-constraints-code.md` §5.
 
 ## 14. Credentials require proof
 
@@ -128,7 +224,7 @@ Switch endpoint, method, surface, or hypothesis when a lead is genuinely exhaust
 
 Being thorough and refusing to rush is what earns high confidence that no vulnerability was left undiscovered; a pass that finishes fast but shallow has not done the job. Do not trade coverage or validation depth for speed, and do not abandon a live lead because it is taking time. This is not license to grind genuinely dead surface — rules 5 and 15 govern that: rotate only when a surface is truly exhausted, then spend the reclaimed time going deep on live surface.
 
-## 16b. Exhaust confirmed leads first; break the same-response-class loop
+## 16a. Exhaust confirmed leads first; break the same-response-class loop
 
 A *confirmed* lead — a host that answers but blocks, a gate that rejects (any
 auth/permission wall), a partial primitive that half-works — must be either
@@ -148,7 +244,7 @@ signal. This does NOT apply to a probe you are repeating on purpose to detect
 state divergence (rule 4's push-harder signals) — that is new information, not
 a stall.
 
-## 16c. Phase-exhausted means every flagged host has a recorded verdict — not a feeling of completion
+## 16b. Phase-exhausted means every flagged host has a recorded verdict — not a feeling of completion
 
 Rule 16 measures the *job* by confidence; this rule operationalizes when a
 *phase* is actually done. A phase is **exhausted** only when every real-app
@@ -169,8 +265,8 @@ the hunt is the one to distrust most.
 ledger means every *flagged* host has a verdict — it does **not** mean the
 surface is fully explored. A high-value API that sits below the route
 threshold may never have been flagged at all, so a green ledger can co-exist
-with an entire untested application (the "a URL can be a whole application"
-rule below is the companion check). Treat ledger-green as the minimum bar you
+with an entire untested application (rule 25, "A URL can be a whole application,"
+below, is the companion check). Treat ledger-green as the minimum bar you
 cleared, then keep looking for the surface the ledger could not see.
 
 **A negative verdict on one tier or lens does not cover siblings.** A
@@ -180,6 +276,15 @@ sibling tier — different auth level, different role, different trust context �
 lens on an already-worked surface is a fresh test, not a redundant one. Before recording
 a negative and closing the work item, state "proven fails-closed at [tier] / [lens] /
 [run-id]" — anything shorter than that is a disposition you cannot defend.
+
+**Bracket every negative with a live positive control.** Prove a positive on the same
+route, verb, identity, and gateway, in the same window, before you record the negative.
+Without one you cannot distinguish "denied" from "blocked," "not found," "not
+provisioned," or "not reached" — the response bytes alone don't carry that distinction.
+This generalizes a case already enforced narrowly: before a failed replay becomes a
+negative disposition, `agent/agents/vulnerability-analyst.md` requires proving the
+identity is actually live — `vigil assess auth status --probe --identity <name>
+--probe-url <known-authed-url>` — the identity-specific instance of this general rule.
 
 **Pull the next uncovered host; do not sample.** The default loop is
 structural, not intuitive: take the next `uncovered` real-app host straight off
@@ -201,31 +306,6 @@ When progress stalls, use this table to pick a concrete next action instead of g
 | The app is simple with few endpoints | Go deeper: test business logic, race conditions, multi-step workflow abuse, parameter pollution |
 | I confirmed a low-severity bug but can't chain it | Check if it enables a higher-impact primitive (open redirect -> OAuth theft, SSRF -> metadata, XSS -> admin panel) |
 | Tools are returning nothing useful | Stop automation, test manually. Read the JS source, map the API by hand, test one request at a time |
-
-## 18. Sub-Agent Dispatch Discipline
-
-> **Sub-agent dispatch discipline** (default-to-dispatch, inline only for
-> operator-scoped work, one-specialist/one-objective/one-skill-set): moved to
-> `agent/operator-core.md`'s dispatch doctrine — operator-only content, not a
-> specialist read.
-
-## 19. Developer psychology heuristics
-
-> **Developer psychology heuristics** (feature-copy, flow-complexity, API
-> version drift, naming anomaly, error-response divergence, new-feature
-> window): moved to `agent/rules/mindsets/developer.md` — load it as your
-> generative lens for hypothesis generation.
-
-## 20. Severity-CVSS alignment audit before report
-
-> **Severity-CVSS alignment audit before report:** moved to
-> `agent/operator-core.md`'s dispatch doctrine — operator-only content, not a
-> specialist read.
-
-## 21. Stale-text scrub before publishing
-
-> **Stale-text scrub before publishing:** moved to `agent/operator-core.md`'s
-> dispatch doctrine — operator-only content, not a specialist read.
 
 ## 22. Smallest probe that answers the question
 
@@ -358,13 +438,38 @@ from a malformed argv is not evidence the handler was reached.
 **Re-derive un-pushed signals from RAW evidence.** A prior agent's stopping point — a
 "tested / clean / disproven" note, a `notes/PHASE-3-REMAINING-WORK.md` line, an inherited
 disposition — is a **view to re-verify, not ground truth**. Before accepting any negative
-disposition on a protected op, re-open the raw `get-command-run` rows behind that signal
-(`vigil assess get-command-run <id>`, `vigil assess list-command-runs --tool-bin <bin> --show-matches`)
+disposition on a protected op, re-open the raw `command-run get` rows behind that signal
+(`vigil assess command-run get <id>`, `vigil assess command-run list --tool-bin <bin> --show-matches`)
 and re-derive the disposition from the actual request/response bytes. A `403` recorded by a
 prior pass may have been a downstream validation error mistaken for an auth gate (b); a "patched"
 may have been an `http=000` transport error (c); a "clean" may have been a status-only probe that
 never read the body (a); a "gated"/"not-present" may have been a WAF challenge page never
 re-rendered in a browser (d).
+
+## 23a. Aggregate-rate discipline — a shared egress IP sees the SUM of every concurrent dispatch
+
+A WAF-fronted estate rate-limits (or hard-blocks) the shared runtime egress IP, not any single
+dispatch — four agents each issuing a "safe" 5 r/s look like one client doing 20 r/s at the
+edge, and that sum, not any one agent's rate, is what trips the rule.
+
+- **Budget the AGGREGATE request rate across ALL concurrent dispatches, not per-dispatch.**
+  Before adding another concurrent agent against a WAF-fronted estate, sum the rates already
+  in flight and confirm the total still fits the tier's ceiling
+  (`agent/references/recon/rate-calibration.md`).
+- **Do not run an inherently high-volume tool** (`arjun`, `ffuf`, a large `nuclei` sweep)
+  **concurrently with multiple deep specialist agents** on the same WAF-fronted estate over the
+  shared egress IP — serialize it, or run it alone at a low rate scoped to a few endpoints.
+- **Run long or high-volume tools as an operator-owned `kali job`, not a stretched synchronous
+  `kali exec`.** `vigil assess kali job stop` cleanly SIGTERMs the in-container PID it owns. A
+  synchronous call killed by the external agent-harness ceiling (exit 144/SIGUSR1,
+  `agent/shared-constraints.md` §2) orphans the in-container process instead — an orphaned
+  scanner keeps sending traffic to the target with nobody watching it or able to stop it.
+- **A WAF/CloudFront 403 block is PENDING, never a clean negative.** A *challenge interstitial*
+  resolves via a browser re-render (rule 23(d) above); a *signature/fingerprint block*
+  (AWS-WAF/CloudFront) returns the same 403 to headless Chromium, so a re-render will not clear
+  it — it stays PENDING until routed WAF-clean. Detection signatures, the
+  per-request-vs-estate-block disambiguation, and WAF-clean routing intel:
+  `agent/references/web/waf-bypass-and-safe-testing.md`.
 
 ## 24. OOB self-resolution caveat — confirm on a public egress source
 
@@ -386,7 +491,7 @@ To avoid fabricating self-resolution hits:
   source IP falls in RFC-1918 space is self-resolution regardless of the DNS name.
 - Confirm public egress on the OOB hit before recording a SSRF finding.
 
-## A URL can be a whole application — go deep on app units
+## 25. A URL can be a whole application — go deep on app units
 
 A single host often carries several distinct applications under different
 path-prefixes — `host/giving` (a donations app), `host/admin` (tenant
@@ -397,13 +502,103 @@ that an entire application went untested — exactly the failure this harness
 exists to catch.
 
 The backend scores each app unit (structure × risk − suppressors) and marks
-the ones worth a dedicated deep campaign as `deep_required`. The score is an
-**advisory** signal, not a wall — it tells you where to dig, it does not
-block you. Inspect it with `vigil assess app-unit list`; re-run discovery
-after more collection with `vigil assess app-unit score`. When you know a
-unit deserves (or does not deserve) a deep pass regardless of the score, set
-a durable manual override with `vigil assess app-unit mark-deep <id>
---reason ...` or `vigil assess app-unit clear-deep <id> --reason ...` — a
-manual mark always wins over the scorer. Treat a `deep_required` unit as a
-whole application: a dedicated dispatch across every applicable vuln class
-and auth context, not a single surface glance.
+the ones worth a dedicated deep campaign as `deep_required`. Mid-engagement
+this scoring is **advisory and EV-ranked** — it tells you where to dig next,
+and nothing in Phases 1–6 refuses a transition or exits non-zero on it. But
+that advisory posture does not hold all the way to report: app-unit depth is
+where depth is *measured*, at two grains, and a **decisive-surface or
+high-confidence** `deep_required` unit that fails either one is a
+**deferred-terminal obligation**, not advisory:
+
+- **Family grain** (`kind=depth_unsatisfied_units`) — the unit was never
+  touched at all for a BLOCK_HIGH family (`access-control`, `auth`,
+  `injection`, `ssrf`, `file`).
+- **Class grain** (`kind=depth_uncovered_classes`) — the family LOOKS covered
+  or touched, but a specific class its gf coverage_items flagged
+  (`signal_classes_uncovered`) was never class-specifically probed — a
+  sibling class (e.g. `ssti`) can satisfy the whole `injection` family while
+  `sqli` was never demanded. This is the single-class blind spot the
+  family-only view used to miss entirely, and it fires even on a unit that
+  is otherwise family-satisfied or touched.
+
+Both block the terminal `report`/`complete` edge unless you deep-test the
+gap or clear it with a recorded `depth_deferral` decision (exact escape
+command, the touched-but-unfinished WARN downgrade, and the non-decisive/
+low-confidence exemption: `agent/phases/phase-8-report.md` Definition of Done
+and `agent/operator-core.md` Mandatory Phase-Exit Passes). This is not
+"advisory until it suddenly blocks" — the discontinuity was the bug.
+`check-phase-readiness --phase report` previews the same ledger every phase
+from Phase 4 on, so the hold is legible the whole way and never a surprise at
+report time.
+
+Inspect the ledger with `vigil assess app-unit list` and
+`check-phase-readiness --by-app-unit`; re-run discovery after more collection
+with `vigil assess app-unit score`. When you know a unit deserves (or does
+not deserve) a deep pass regardless of the score, set a durable manual
+override with `vigil assess app-unit mark-deep <id> --reason ...` or `vigil
+assess app-unit clear-deep <id> --reason ...` — a manual mark always wins
+over the scorer. Treat a `deep_required` unit as a whole application: a
+dedicated dispatch across every applicable vuln class and auth context, not
+a single surface glance. The Operator can claim its next coherent queue batch
+with `vigil assess work-buffer fetch-by-unit`; inspect `vigil assess contract
+work-buffer` for optional unit/path/class narrowing and explicit sizing before
+dispatching it.
+
+## 26. Attack headers are ordinary injected inputs, not special-cased
+
+A header the application (or a fronting proxy/CDN) trusts as authoritative is an
+injected-at-test-time input like any query param or body field — you choose which
+ones are plausible for the observed architecture, probe them, and record the
+result exactly like any other named input. The standard set worth trying wherever
+a proxy, CDN, or load balancer sits in front of the target:
+
+| Header | What it typically confuses |
+|---|---|
+| `X-Forwarded-Host` | Origin routing, password-reset/link-generation host, cache-key host |
+| `X-Original-URL` / `X-Rewrite-URL` | Reverse-proxy path rewriting — path-based auth bypass |
+| `X-Http-Method-Override` / `X-HTTP-Method` | Verb-based access control (a blocked `DELETE`/`PUT` re-sent as `GET` + override) |
+| `X-Forwarded-For` / `X-Real-IP` | IP-allowlist / rate-limit / geofence bypass, log/audit poisoning |
+
+This is a starting menu, not a checklist to exhaust mechanically — the same
+"surface what exists, LLM chooses, evidence lands in the grid" principle that
+governs every other input applies here uniformly; headers are not special. Inject
+the ones plausible for the architecture you observed (a CDN-fronted host →
+`X-Forwarded-*`; a path-rewriting reverse proxy → `X-Original-URL`/`X-Rewrite-URL`),
+then record the attempt the same way you would a query or body probe:
+`vigil assess record-probe --input-slot header:X-Forwarded-Host --result-status
+<tested|signal|attempted|blocked|no-signal|error> ...` — the verdict decides
+covering vs. touched-but-inconclusive (evidence is required only for
+`tested`/`signal`) — full template in `agent/shared-constraints.md` §10. Observed
+security-relevant routing,
+identity, and method-override names can arrive as first-class `header:<name>`
+coverage items; manual probes still land in the same per-input grid when no item
+was derived. For exploitation depth once a header vector shows signal, see
+`agent/skills/host-header-injection/SKILL.md`.
+
+---
+
+## 27. An empty result from your own tooling is not a measurement of the target
+
+Rule 23 governs what the *target* returned. This one governs what *your own tooling* returned. A
+refusal, a zero-byte result, a parse error, or an empty match set is a fact about the run, not a
+fact about the target — and it arrives looking exactly like a clean negative. Before recording any
+"nothing there," establish that the probe reached the target and did the thing you asked.
+
+The failure is expensive because it is confident and it compounds: a rate-limited API that silently
+drops your request returns zero bytes, and "nothing exposed on their GitHub" enters the record as a
+finding-grade negative that later work inherits without re-deriving.
+
+Two habits catch it:
+
+- **Ask what a false result would look like, before you run the probe.** If your grep would match a
+  string you introduced yourself, or your search pattern assumes wording the file may not use, the
+  probe cannot answer the question — and you know that in advance, not afterwards.
+- **Bracket a negative with a positive control.** Confirm the same query returns hits for something
+  known-present before believing the empty result for your target. An archive index that is empty
+  for every host is broken; one that is empty only for yours is evidence.
+
+The same rule applies to writes: **verify the effect, not the acknowledgement.** An operation can
+succeed structurally while being empty of the thing you needed — a write that returns 200 and
+changes nothing, a self-check that renders a stale row, a 200 whose body carries no data because a
+cache had not filled. Re-read the state you intended to change rather than trusting the response
+that says you changed it.

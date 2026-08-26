@@ -1,9 +1,9 @@
-"""Wave-2 harness regressions for surface-coverage readiness and the
+"""Harness regressions for surface-coverage readiness and the
 result_status / coverage-item honesty rules.
 
-These cover the master-plan Wave-2 items the coverage backend owns:
+These cover the contracts the coverage backend owns:
 
-- result_status vocabulary (foundation for Wave 5): a probe with a non-test
+- result_status vocabulary: a probe with a non-test
   outcome (``blocked``/``error``/``no-signal``/``attempted``) is recorded but is
   NOT a covering status; unknown statuses are rejected; the bare default no
   longer auto-maps to COVERED.

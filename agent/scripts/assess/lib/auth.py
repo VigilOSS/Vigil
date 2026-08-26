@@ -85,7 +85,7 @@ def auth_runtime_snapshot(engagement_dir: str) -> dict[str, Any]:
         # session (F5 APM / SiteMinder) can be dead while still "available" here.
         # The honest liveness signal is exposed as ``liveness`` below (always
         # "unknown" from this snapshot — it never probes; a live check requires
-        # ``vigil assess auth-status --probe``).
+        # ``vigil assess auth status --probe``).
         state = "available"
     else:
         state = "missing"
@@ -106,7 +106,7 @@ def auth_runtime_snapshot(engagement_dir: str) -> dict[str, Any]:
         "state": state,
         # Presence != liveness. This snapshot never sends a request, so it can only
         # honestly report liveness as "unknown"; an actual live/dead verdict comes
-        # from `vigil assess auth-status --probe`, which GETs an authed URL as the
+        # from `vigil assess auth status --probe`, which GETs an authed URL as the
         # identity. (`state="available"` above only means material is present.)
         "liveness": "unknown",
         "use_for_requests": use_for_requests,

@@ -1,6 +1,6 @@
 ---
 name: finding-verification
-description: Adversarial Phase-5 verification of runtime/web findings produced by other agents — reproduce the PoC, ground severity in the trust boundary, run the C1-C6 FP & severity gate, and author the report-ready story. Loaded by vulnerability-analyst in review mode. The web analog of code-finding-verification.
+description: Adversarial Phase-5 verification of runtime/web findings produced by other agents — reproduce the PoC, ground severity in the trust boundary, run the C1-C7 FP & severity gate, and author the report-ready story. Loaded by vulnerability-analyst in review mode. The web analog of code-finding-verification.
 origin: Vigil
 ---
 
@@ -47,7 +47,7 @@ review:
   (chainable into a higher-severity outcome, or a disposition call close enough to the
   high/medium boundary that a wrong verdict matters). Run the full Methodology below.
 - **Tier 2 — cheap spot-check.** Every ordinary MEDIUM/LOW that isn't Tier 1. Do not skip these
-  in silence. Run the severity↔CVSS band audit (`agent/rules/hunting.md` §20 — `severity` vs.
+  in silence. Run the severity↔CVSS band audit (`agent/operator-core.md` "Mandatory Phase-Exit Passes" — `severity` vs.
   `details.cvss_score` band mismatch) plus a quick evidence-presence sanity check: is there a
   captured request/response or command output backing the claim, or is `evidence_type` marked
   `theoretical` without a `chain_required` rationale? This is a few-minute audit, not a re-run of
@@ -66,11 +66,11 @@ This skill operationalizes gates that live elsewhere; read them rather than re-d
 - **8-Question Gate, Four Validation Gates, Chain-Only List, Fast Kill Signals** —
   `agent/agents/vulnerability-analyst.md`. These are your reviewer toolkit; they are part of
   your role prompt already.
-- **C1–C6 FP & severity-downgrade gate** — `agent/references/finding-fp-and-severity-gate.md`.
+- **C1–C7 FP & severity-downgrade gate** — `agent/references/finding-fp-and-severity-gate.md`.
   Run every confirmed debate-skipped runtime-proven finding through it (data-exposure, write, auth-bypass, race, business-logic): it catches the real-world-impact
   gaps a CVSS-band check misses (no-PII "reads", orphan writes, insider-only enumerability,
   inflated `S:C`/`I:H`).
-- **Severity ↔ CVSS bands** — `agent/shared-constraints-core.md` "Finding IDs and the `record-finding` Contract" (the canonical band table).
+- **Severity ↔ CVSS bands** — `agent/shared-specialist-core.md` "Finding IDs and the `finding record` Contract" (the canonical band table).
 
 ## Methodology
 
@@ -100,7 +100,7 @@ For each finding under review:
    report-readiness until an exploit-developer runtime pass completes the extraction and re-verifies
    it `confirmed`/`downgraded`. This is the disposition that keeps blind injections — the class most
    dependent on slow extraction — from being silently dropped at the gate.
-4. **Run the C1–C6 FP & severity gate** (above) on any debate-skipped runtime-proven finding.
+4. **Run the C1–C7 FP & severity gate** (above) on any debate-skipped runtime-proven finding.
 5. **Recompute the CVSS vector** from the reproduced impact; correct `cvss_vector` / `cvss_score`
    if the band drifted.
 
@@ -109,16 +109,16 @@ For each finding under review:
 Write exactly one per reviewed finding (these are the operator-facing verbs, kept in
 operator-core Phase 5 — listed here so the reviewer self-serves them):
 
-- **Confirmed** — reproduced, severity accurate → `vigil assess verify-finding <slug> --disposition confirmed --reason "..."`
-- **Upgraded** — real, severity understated → `vigil assess update-finding <slug> --severity <higher> --reason "..."` then `verify-finding ... --disposition confirmed`
-- **Downgraded** — real, severity overstated → `vigil assess verify-finding <slug> --disposition downgraded --reason "..." --new-severity <lower>`
-- **Killed** — false positive / unreproducible / stacked self-induced preconditions → `vigil assess kill-finding <slug> --reason "..." --kill-reason "..." --kill-check <1-6>`
+- **Confirmed** — reproduced, severity accurate → `vigil assess finding verify <slug> --disposition confirmed --reason "..."`
+- **Upgraded** — real, severity understated → `vigil assess finding update <slug> --severity <higher> --reason "..."` then `finding verify ... --disposition confirmed`
+- **Downgraded** — real, severity overstated → `vigil assess finding verify <slug> --disposition downgraded --reason "..." --new-severity <lower>`
+- **Killed** — false positive / unreproducible / stacked self-induced preconditions → `vigil assess finding verify <slug> --disposition false_positive --reason "..." --kill-reason "..." --kill-check <1-6>`
 
 **Dedup:** merge findings with overlapping `canonical_location` + similar `defect_family` across
-agent prefixes — `vigil assess merge-finding <source-slug> <target-slug> "<reason>"`.
+agent prefixes — `vigil assess finding merge <source-slug> <target-slug> "<reason>"`.
 
 **Chain-only primitives** stay in the normal finding table: when a finding is real only as part
-of a proved/expected escalation path, `vigil assess update-finding <slug>` to populate
+of a proved/expected escalation path, `vigil assess finding update <slug>` to populate
 `details.chain_required`, `details.chain_rationale`, `details.required_followup`. Do not invent a
 chain-specific status.
 
@@ -135,19 +135,19 @@ the corrected severity/CVSS if changed, and — for survivors — confirmation t
 was authored into `details`. End with the review-scope summary: HIGH/CRITICAL all dispositioned
 (Tier 1); which MEDIUMs were reviewed at Tier 1 and why; which ordinary MEDIUM/LOW findings
 received the Tier-2 spot-check and whether any were promoted to Tier 1 on a band mismatch or
-missing evidence; the kill rate (if >50%, flag that Phase-4 dispatch context may be producing
-speculative findings).
+missing evidence; and the disposition counts. If most kills failed on the same check, name that
+pattern — a systematic failure mode says the Phase-4 dispatch context is producing a predictable
+class of speculative finding, which the operator can fix upstream.
 
 ## Root-Cause Review Mode (Phase 5 → 6 exit)
 
 When dispatched as `mode=root_cause_review`, additionally run the operator's root-cause grouping
-intent: group intentional root/sibling relationships (`vigil assess link-finding`), picking the
+intent: group intentional root/sibling relationships (`vigil assess finding link`), picking the
 root as the broadest attacker-controllable cause. See "Root-Cause Review Mode" in
 `agent/agents/vulnerability-analyst.md`.
 
 ## Extended Resources
 
 - `agent/agents/vulnerability-analyst.md` — 8-Question Gate, Four Validation Gates, Chain-Only List
-- `agent/references/finding-fp-and-severity-gate.md` — C1–C6 FP & severity gate
 - `agent/skills/blind-triage/SKILL.md` — the zero-context pre-submission gate that re-applies the overclaim catalog on the submission bytes (this skill is the in-context Phase-5 version)
 - `agent/skills/code-finding-verification/SKILL.md` — the source-only analog (five-check protocol)

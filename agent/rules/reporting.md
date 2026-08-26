@@ -93,7 +93,10 @@ Sentence one should explain what the attacker gains, not what category label the
 
 ## 7. Keep it concise and human-readable
 
-A strong report should be fast to scan without losing exact technical proof.
+A strong report should be fast to scan without losing exact technical proof. This is the standing
+principle; Rules 11 (banned phrases), 12 (active voice), 15 (load-bearing sentences), 20 (human
+voice), and 21 (state each fact once) are its concrete mechanics — apply them together, not as
+independent checklists.
 
 ## 8. Title quality matters
 
@@ -109,11 +112,13 @@ Vague titles that fail this formula:
 
 Every claim in the report traces back to a recorded finding, backend state, or confirmed evidence reference — the report reflects proved state, not memory or inference.
 
-## 10. Section length limits
+## 10. Section length ceilings — internal `report.md` only
 
-Reports are for humans who scan fast. Enforce these ceilings per finding:
+Reports are for humans who scan fast, and these are ceilings, not targets: a Description that uses
+one sentence because one sentence carries the fact is better written than one that pads out to four.
+Hitting the ceiling on every finding is a sign of padding, not thoroughness.
 
-| Section | Maximum |
+| Section | Ceiling |
 |---------|---------|
 | Description | 2-4 sentences |
 | Steps to Reproduce | Numbered steps, one action per step, no narrative between steps. Each step that sends a request includes the request block and the relevant response excerpt (truncated to 5-15 lines) inline — proof lives inside the step that produces it. |
@@ -122,7 +127,13 @@ Reports are for humans who scan fast. Enforce these ceilings per finding:
 
 If you need more space, the finding is probably two findings. Split it.
 
-The executive summary is one page maximum. If it does not fit on one page, cut words.
+The executive summary is one page maximum. If it does not fit on one page, cut words, not font size.
+
+**External submissions have their own, separate ceiling table.** This table governs the internal
+`report.md`'s `Description`/`Steps to Reproduce`/`Impact`/`Remediation` sections only.
+`agent/references/submission-format.md` "Section budgets" is the sole owner of ceilings for a
+submission's `Summary`/`Steps to Reproduce`/`Evidence`/`Attack Scenario`/`Impact`/`Remediation` — do
+not cross-apply either table to the other artifact.
 
 ## 11. Language that signals confidence and precision
 
@@ -165,6 +176,25 @@ Preferred pattern: subject-verb-object. The endpoint does X. The attacker sends 
 |---|---|
 | `robust` · `comprehensive` · `seamless` · `crucial` · `admirably honest` · `the crux of the matter` | Name what the thing does instead of rating it |
 
+**Given-property qualifiers → cut the adjective.** An adjective earns its place only when dropping it would let the reader assume something false or materially different. If the property is already implied by the setup, or the finding does not turn on it, cut it.
+
+| Instead of | Write |
+|---|---|
+| `disposable` / `throwaway` / `burner` organization · `dummy user` | `a test organization`, or `a second organization you control` — the PoC setup already implies it is disposable; `you control` is the only load-bearing qualifier |
+| `malicious attacker` · `malicious actor` | `an attacker` |
+| `unsuspecting victim` | `the victim` |
+| `carefully crafted` / `specially crafted` payload | name the payload; the crafting is a given |
+| `vulnerable` / `affected` endpoint | name the endpoint; being vulnerable is the finding |
+
+Keep a qualifier that distinguishes the instance from a relevant alternative the reader would otherwise assume: `attacker-controlled input` (vs trusted/server input), `an organization you control` (vs the victim's), `pre-authentication` (vs after login).
+
+**Meta-commentary → state the fact.** A distinct class from the filler above: the writer narrating its own reporting decisions instead of reporting.
+
+| Instead of | Write |
+|---|---|
+| `read this as` · `that bounds` · `I would rather report` · `to be clear about what I am not claiming` | (delete — add nothing) |
+| `Earlier revisions of this report carried...` · `An earlier pass measured this on... and wrongly concluded...` | State the current, correct fact only — a report has no drafts and an investigation has no history, only a finding |
+
 **External submissions → focus on the finding, not the researcher.**
 
 Compliance is assumed. Restating it implies uncertainty:
@@ -186,17 +216,22 @@ Write in active voice. The subject acts.
 
 Passive voice is acceptable only when the actor is genuinely unknown or irrelevant.
 
-## 13. Inline evidence formatting
+## 13. Evidence formatting — proof quality and placement
 
-Evidence lives inside the Steps to Reproduce step that produces it — not in a separate section. Format proof inline with each reproduction step.
+**Proof quality applies wherever evidence lives, regardless of format:**
 
 **Request block:** Full HTTP request in a fenced code block immediately after the step instruction. Annotate injected payloads or manipulated parameters with inline comments if the critical part is not obvious.
 
-**Response block:** Immediately below the request, truncate to the 5-15 lines that prove the finding. Bold or annotate the specific data that constitutes the proof — the leaked PII field, the unauthorized record, the injected output. 10 lines that show the proof beat 200 lines that bury it.
+**Response block:** Immediately below the request (in an external submission the step's own outcome is a short `**Expect:**` line inside that step, and only proof the steps cannot show reaches Evidence — see "Placement" below), truncate to only the lines that prove the finding — Rule 10 above sets the internal `report.md` ceiling; `agent/references/submission-format.md` "Section budgets" sets the submission Evidence ceiling. Bold or annotate the specific data that constitutes the proof — the leaked PII field, the unauthorized record, the injected output. 10 lines that show the proof beat 200 lines that bury it.
 
-**Highlighting:** Use `**bold**` or `← proof` annotations to draw the eye to the critical line in response blocks. A reviewer should find the proof in under 3 seconds.
+**Highlighting:** Use `**bold**` or `← proof` / `<-- proof` annotations to draw the eye to the critical line in response blocks. A reviewer should find the proof in under 3 seconds.
 
 **Raw tool output is not evidence.** Extract the specific proof from tool output and present it as a request/response pair or a targeted excerpt — the reader needs the proof line, not the full Nmap scan, Nuclei JSON, or sqlmap log.
+
+**Placement differs by format — do not mix them:**
+
+- **Internal `report.md` (legacy):** evidence lives inside the Steps to Reproduce step that produces it — no separate Evidence section. See "Report Structure (Legacy Internal Report)" in the report-generation skill.
+- **External submissions:** evidence lives in its own `### Evidence` section, separate from Steps to Reproduce — see `agent/references/submission-format.md` "Structure" and "Steps to Reproduce vs Evidence." A step's own outcome is inline in that step's `**Expect:**` line, not here — Evidence carries only proof the steps cannot show, so nothing in it is a second copy of what a step already proved (Rule 21).
 
 ## 14. Remediation must be specific
 
@@ -216,7 +251,7 @@ When the server-side technology is unknown, state the control that failed and th
 
 ## 15. Keep every sentence load-bearing
 
-Every sentence in a finding must contribute new information. If removing a sentence does not reduce the reader's understanding, remove it.
+Every sentence in a finding must contribute new information. If removing a sentence does not reduce the reader's understanding, remove it. Rule 21 is the specific case of this where the repeated sentence re-proves a fact already established elsewhere.
 
 Common padding to avoid:
 - Background paragraphs explaining the technology stack before getting to the bug
@@ -250,6 +285,36 @@ Common patterns that require consolidation:
 - Credential exposure as a direct consequence of an auth bypass on the same system
 - Multiple unauthenticated routes on the same API when the root cause is a single missing-auth control
 
+### Cross-finding dedup pass — pick a lead, flag dup-risk siblings (operator-run, not part of a per-finding dispatch)
+
+Consolidation (above) collapses findings into one. The other axis is **which findings a program
+will treat as duplicates of each other even when you file them separately.** Blind pre-submission
+triage cannot catch this: it judges one finding's bytes in isolation and never sees the cluster.
+The vulnerability hunt is per-surface and never sees it either. So before submitting two-or-more
+findings that share a root cause, run an explicit **cross-finding pass** over the whole submittable
+set:
+
+1. **Cluster by root cause** — group findings that share the same vulnerable control, component, or
+   endpoint family (not merely the same host). A shared *selector* — e.g. every handler trusting the
+   same client-supplied `userId`/`id`/`eps_sirp_id` — is a cluster signal.
+2. **Pick the lead** — the highest-impact finding in the cluster is the canonical submission and
+   carries the cluster's severity. A cross-user *write* leads a cross-user *read*; an RCE leads the
+   info-leak that enabled it.
+3. **Decide consolidate vs separate-with-framing** using the dup-risk heuristic:
+   - **Same endpoint family + same selector/object class → high dup risk.** Consolidate into the lead
+     as "root cause + all demonstrated impacts", or — if filing separately — expect a merge and frame
+     each sibling by its *distinct primitive* (the read is the *discovery/harvest* primitive; the
+     write is the *tampering* primitive) so the incremental value is explicit.
+   - **Different endpoint + different object + different authority/impact axis → low dup risk.** File
+     separately; a one-line cross-reference to the shared root is enough.
+4. **Record the decision** so it is not re-litigated: `finding link <sibling> --root-cause <lead>`
+   for the backend cluster, and state the lead-vs-sibling framing in each submission's dedup notes.
+
+The failure mode this prevents: filing a P3 read and a P2 write on the same broken endpoint family as
+two independent tickets, then having the read dup-closed into the write — burning triage goodwill and
+a submission slot. One root cause, one lead; siblings either merge in or carry an explicit
+distinct-primitive justification.
+
 ## 19. Keep internal sections out of external reports
 
 These sections are engagement-internal — strip them from client-facing deliverables:
@@ -260,11 +325,13 @@ These sections are engagement-internal — strip them from client-facing deliver
 
 ## 20. Write like a human in external submissions
 
-External submissions (bug bounty, disclosure email) are read by humans. The patterns below signal automated authorship and undermine credibility. The full gate checklist lives in `agent/references/bugbounty-submission-format.md`.
+External submissions (bug bounty, disclosure email) are read by humans. The patterns below signal automated authorship and undermine credibility. The full gate checklist lives in `agent/references/submission-format.md`.
 
-**Report what you found, not what you ruled out.** The submission covers the vulnerability. If a negative result is genuinely material, state it in one sentence without a probe count — sections cataloguing failed attack variants ("Defender-positive", "Dead ends", "Negative findings") signal automated enumeration.
+**Report what you found, not what you ruled out.** The submission covers the vulnerability. If a negative result is genuinely material, state it in one sentence without a probe count — sections cataloguing failed attack variants ("Defender-positive", "Dead ends", "Negative findings") signal automated enumeration. A control that proves the causal claim — a safe branch escaping the same bytes, a pre-exploitation capability baseline — is corroborating proof, not a ruled-out variant; Rule 21 covers what to keep and how to place it.
 
 **Keep telemetry internal.** Request volumes, per-phase timing, percentile latencies, and per-node distribution are operational state. One UTC date range covers the time window if the reviewer needs it.
+
+**State safety framing once; keep it separate from mechanism.** Say why the PoC is safe to run (offline / localhost-only / FAKE credentials) exactly once, in the setup — never re-asserted at every step. That test-safety fact answers "why can I trust this didn't touch the real target," which is a different question from the vulnerability's mechanism ("why does the sink fire," "what triggers it," "what order things happen in"). Restating the safety framing at each step in place of explaining the mechanism is padding: it dilutes the finding's actual proof and is one of the most recognizable tells of agent-authored output. A PoC that says "offline" or "FAKE" a dozen times reads as a script defending itself, not a script proving a bug.
 
 **Deconfliction: three lines only.** Researcher ID, source IP, UTC time window (single range, not per-phase). Omit if the program does not require it.
 
@@ -278,8 +345,24 @@ External submissions (bug bounty, disclosure email) are read by humans. The patt
 
 **Remediation: ≤3 items.** Primary fix, optional defense-in-depth, optional audit step.
 
-**Header metadata lives in the header.** CWE, CVSS, and VRT declared in header fields need no in-body explanation. One field, one place.
+**Header metadata lives in the header.** CWE, CVSS, and VRT declared in header fields need no in-body explanation. One field, one place. Resolve the exact VRT leaf or CWE weakness offline via `agent/references/reporting/` (`bugcrowd-vrt.md` / `hackerone-weaknesses.md`) rather than guessing the category.
 
 **Preferred phrase:** `this finding` (not `this submission`).
 
+**Write your own actions in first person.** `I submitted the form and the request was rejected`, not `a human filed one such submission` or `it was observed that the request was rejected` — third-person or passive framing of what you personally did during testing is an agent tell.
+
+**Name what you haven't established, in your own voice — but stay accurate.** `I haven't worked out the outbound beacon on Excel-for-Mac (WEBSERVICE is unsupported there), though the local cross-row read still surfaces the neighbor's email` reads human; a matrix where every cell is solved reads generated. Don't over-concede past what you actually found: if a lesser impact still holds where the primary one doesn't, say so instead of writing off the whole environment.
+
 **If flagged as AI-generated:** the correction is shorter, rougher, and more specific — never longer and more polished. Uniform polish is itself the tell.
+
+## 21. Establish each fact once — don't re-prove it every section
+
+State and prove each load-bearing fact in exactly one place, then let the rest of the finding rely on it. Re-asserting the same claim in the Summary, again in a step's preamble, and again in the Attack Scenario — or re-pasting a step's request/response verbatim under a separate Evidence heading — is one of the most recognizable agent-authored tells: the model re-establishes a claim wherever a section could carry it, where a human states it once and trusts the reader to carry it forward. Give each fact one home — usually the step whose request/response proves it — and let everything else reference that home instead of restating it.
+
+- **Sections:** don't re-paste bytes a step already showed. A step's own outcome belongs inline in that step, not in Evidence — Evidence carries only proof the steps cannot show (see submission-format.md "Steps to Reproduce vs Evidence" for the taxonomy). If the Attack Scenario just re-narrates the Summary and Steps, cut it, reduce it to the one sentence that adds a new adversary or starting-access detail, or omit it outright when the Summary carries an Exploit flow (submission-format.md already drops Attack Scenario for this reason).
+- **Qualifiers:** state each precondition once, where it's proven — don't repeat the same adjective phrase on every actor mention. `an anonymous visitor holding no account, session, or token, in a logged-out browser, clearing only Turnstile` → `an anonymous visitor` on every mention after the first.
+- **Annotations:** gloss a response line once. `login_identifier:null` — the field name carries the rest; never repeat the same gloss in a second section.
+
+**This is not a license to cut corroborating proof.** A second environment, engine, or code path that independently confirms the same conclusion through a different mechanism — e.g., an offline replay that rules out network dependence, or a second browser engine that rules out a client-side quirk — is a new primitive, not a restatement of the same fact. Cutting it trades a rebuttal-proof anchor for concision; keep it.
+
+Test: if a sentence's fact is already stated or proven earlier by the *same* mechanism, it must add something new (a different identity, endpoint, or primitive) — or it's cut.

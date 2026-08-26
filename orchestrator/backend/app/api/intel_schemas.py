@@ -226,12 +226,27 @@ class IntelUpdateRequest(BaseModel):
 
 
 class IntelSupersedeRequest(BaseModel):
-    """Replacement payload for ``POST /intel/{type}/{id}/supersede``."""
+    """Replacement payload for ``POST /intel/{type}/{id}/supersede``.
+
+    Supply ``payload`` to upsert a replacement row (the default flow), OR
+    ``to_existing_id`` to point the stale row at an already-recorded canonical
+    row of the same type without re-upserting it. The two are mutually
+    exclusive — the service rejects a non-empty ``payload`` alongside
+    ``to_existing_id``.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     payload: dict[str, Any] = Field(default_factory=dict)
     rationale: str = Field(default="", max_length=4096)
+    to_existing_id: int | None = Field(
+        default=None,
+        description=(
+            "Point the stale row at this existing same-type canonical row id "
+            "instead of upserting a replacement. Mutually exclusive with a "
+            "non-empty payload."
+        ),
+    )
 
 
 class TechComponentRecord(_IntelResponseBase):

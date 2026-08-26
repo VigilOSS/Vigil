@@ -48,6 +48,15 @@ def _finding_summary(row: Any) -> dict[str, Any]:
         "evidence_ref": row["evidence_ref"] or "",
         "chain_required": bool(details.get("chain_required")),
         "chain_rationale": str(details.get("chain_rationale") or "")[:500],
+        # Blocked-for-provisioning marker: a disposition='blocked' finding is held
+        # OUT of the report and otherwise renders in the brief as a bare
+        # active/verified line, so surface WHY it stalled via the required
+        # block_reason. Empty for non-blocked findings; bounded so the brief stays
+        # compact. Rendered by resume_brief._finding_line via the shared
+        # finding_render.blocked_reason_summary helper. The compact projection
+        # intentionally carries only the reason; full prerequisite metadata
+        # remains available on the finding detail endpoint.
+        "block_reason": str(details.get("block_reason") or "")[:300],
         "updated_at": row["updated_at"],
     }
 
@@ -150,22 +159,86 @@ def _stale_threshold_for(role: str | None, *, override: float | None) -> float:
     return _STALE_THRESHOLD_BY_ROLE.get(str(role or ""), _DEFAULT_STALE_THRESHOLD_HOURS)
 
 
+# A dispatch that lands on any terminal status with no
+# handoff row at all is silent state-loss — there is no artifact explaining
+# why it died, and (pre-fix) it was structurally invisible to this picture
+# because the in-progress-only gate below excluded it before the handoff-gap
+# check ever ran. `_TERMINAL_NO_HANDOFF_STATUSES` is the scope for the new
+# `terminal_no_handoff` list; keep it in sync with the `agent.py`
+# `_reconcile_stale` mirror (which reports the same rows read-only, since a
+# handoff-less terminal dispatch has no ready/blocked handoff to close).
+_TERMINAL_NO_HANDOFF_STATUSES = frozenset(
+    {"completed", "blocked", "failed", "aborted"}
+)
+
+# Newest-N dispatches shown in the `recent_dispatches` display list. This window
+# drives DISPLAY ONLY — stale/gap/terminal detection is decoupled from it (I-10).
+_DISPATCH_DISPLAY_LIMIT = 25
+# Stale/gap/terminal detection scans every in-progress (and terminal) dispatch,
+# not just the display window. Matches reconcile-stale's scan depth (agent.py
+# `_reconcile_stale`) so the two commands agree on the ROW SET, not just the
+# threshold. The handoffs map is scanned as deep so a handoff for an old
+# in-progress dispatch is still resolvable (else a false handoff gap).
+_DISPATCH_SCAN_LIMIT = 1000
+_HANDOFF_SCAN_LIMIT = 1000
+# Rendered worklists are capped; the true totals ride alongside as `*_count`
+# (the "capped list + absolute count" pattern used elsewhere, e.g.
+# blocked_techniques_count) so a capped list still signals real depth.
+_DISPATCH_LIST_RENDER_CAP = 10
+
+
 def _recent_dispatch_picture(
     engagement_id: int,
     *,
     max_age_hours: float | None,
 ) -> dict[str, Any]:
-    dispatches = state_manager.list_dispatches(engagement_id, limit=25)
-    handoffs = {row.get("agent_id"): row for row in state_manager.list_handoffs(engagement_id, limit=100)}
+    # Display window: newest-N dispatches across ALL statuses. Drives the
+    # `recent_dispatches` / `latest_handoffs` display lists only — NOT the
+    # stale/gap/terminal detection below.
+    display_dispatches = state_manager.list_dispatches(engagement_id, limit=_DISPATCH_DISPLAY_LIMIT)
+    # Handoffs keyed by agent_id, scanned as deep as reconcile-stale so a handoff
+    # belonging to an OLD in-progress dispatch (one that has sunk below the
+    # display window) is still resolvable; otherwise it would be mis-reported as
+    # a handoff gap.
+    handoffs = {
+        row.get("agent_id"): row
+        for row in state_manager.list_handoffs(engagement_id, limit=_HANDOFF_SCAN_LIMIT)
+    }
+    # A decision is the durable adjudication for a worker that genuinely
+    # produced no handoff. Read every matching row directly so a long-running
+    # engagement cannot lose older reconciliations behind an API page cap.
+    with get_connection() as connection:
+        decision_rows = connection.execute(
+            """
+            SELECT payload_json
+            FROM assessment_dispatch_decisions
+            WHERE engagement_id = ? AND kind = 'dispatch_reconciliation'
+            """,
+            (engagement_id,),
+        ).fetchall()
+    reconciled_agent_ids: set[str] = set()
+    for decision_row in decision_rows:
+        payload = _json_obj(decision_row["payload_json"])
+        if payload.get("agent_id"):
+            reconciled_agent_ids.add(str(payload["agent_id"]))
     now = dt.datetime.now(dt.timezone.utc)
+
+    # Stale + handoff-gap detection scans EVERY in-progress dispatch, not just the
+    # newest-N display window. An old in-progress dispatch sorts below that window
+    # and used to vanish from the brief entirely — even though `reconcile-stale`
+    # (same thresholds, but a status-filtered scan) still flagged it. Decoupling
+    # the scan from the display list is the I-10 fix: the ROW SET, not the
+    # threshold definition, was the divergence.
+    in_progress = state_manager.list_dispatches(
+        engagement_id, status_value="in-progress", limit=_DISPATCH_SCAN_LIMIT
+    )
     stale: list[dict[str, Any]] = []
     gaps: list[dict[str, Any]] = []
-    for row in dispatches:
-        if row.get("status") != "in-progress":
-            continue
+    for row in in_progress:
         agent_id = row.get("agent_id")
         agent_role = row.get("agent_role")
         handoff = handoffs.get(agent_id)
+        # In-progress with no handoff = running but not yet checkpointed.
         if not handoff:
             gaps.append({"agent_id": agent_id, "agent_role": agent_role, "reason": "no_handoff"})
         started = _parse_iso(row.get("dispatched_at"))
@@ -181,17 +254,53 @@ def _recent_dispatch_picture(
                     "threshold_hours": threshold,
                 }
             )
+
+    # Terminal dispatches with no handoff row = silent
+    # state-loss. Scanned via the same status-filtered path (mirrors agent.py's
+    # reconcile-stale) so a terminal row below the display window is not lost.
+    # A dispatch_reconciliation decision removes an honestly-empty worker from
+    # this worklist without fabricating a handoff.
+    terminal_no_handoff: list[dict[str, Any]] = []
+    for terminal_status in sorted(_TERMINAL_NO_HANDOFF_STATUSES):
+        for row in state_manager.list_dispatches(
+            engagement_id, status_value=terminal_status, limit=_DISPATCH_SCAN_LIMIT
+        ):
+            # Defensive: don't trust every backend to have filtered server-side.
+            if str(row.get("status") or "") != terminal_status:
+                continue
+            agent_id = row.get("agent_id")
+            if handoffs.get(agent_id):
+                continue
+            if str(agent_id or "") in reconciled_agent_ids:
+                continue
+            terminal_no_handoff.append(
+                {
+                    "agent_id": agent_id,
+                    "agent_role": row.get("agent_role"),
+                    "status": terminal_status,
+                    "completed_at": row.get("completed_at"),
+                }
+            )
+
     # The reported `stale_threshold_hours` is the override if set, else the
     # default — per-role thresholds applied per dispatch are also visible on
     # each stale entry's `threshold_hours`.
     reported_threshold = (
         float(max_age_hours) if max_age_hours is not None else _DEFAULT_STALE_THRESHOLD_HOURS
     )
+    # Rendered lists stay capped; the TRUE totals ride alongside so a capped list
+    # still signals the real depth of stale/gap/terminal work. The operator is
+    # pointed at `reconcile-stale` (already wired in _recommended_actions) for the
+    # full list + action.
     return {
-        "recent_dispatches": dispatches[:10],
+        "recent_dispatches": display_dispatches[:10],
         "latest_handoffs": list(handoffs.values())[:10],
-        "stale_in_progress_dispatches": stale,
-        "handoff_gaps": gaps[:10],
+        "stale_in_progress_dispatches": stale[:_DISPATCH_LIST_RENDER_CAP],
+        "stale_in_progress_dispatches_count": len(stale),
+        "handoff_gaps": gaps[:_DISPATCH_LIST_RENDER_CAP],
+        "handoff_gaps_count": len(gaps),
+        "terminal_no_handoff": terminal_no_handoff[:_DISPATCH_LIST_RENDER_CAP],
+        "terminal_no_handoff_count": len(terminal_no_handoff),
         "stale_threshold_hours": reported_threshold,
         "stale_threshold_role_overrides": dict(_STALE_THRESHOLD_BY_ROLE) if max_age_hours is None else {},
     }
@@ -246,19 +355,30 @@ _TOP_UNCOVERED_SURFACE_LIMIT = 6
 _RESUME_NOTE_TAGS = frozenset({"coverage", "read-first"})
 _RESUME_NOTE_LIMIT = 8
 
-# "Do-today" attempt ledger surfacing (P1-C). The Attempts section pulls three
+# "Do-today" attempt ledger surfacing (P1-C). The Attempts section pulls two
 # already-persisted but previously resume-invisible signals so the operator
 # reads what has been TRIED-AND-WALLED-OFF before re-dispatching the same
-# surface: recorded blocked techniques, non-covering probe runs, and findings
-# flagged roe_blocked in details_json. Each list is bounded (pointers + counts,
-# never bodies) consistent with the other sections.
+# surface: recorded blocked techniques and findings flagged roe_blocked in
+# details_json. (Per-input probe coverage moved to its own Per-Input Coverage
+# section — see _per_input_coverage_section.) Each list is bounded (pointers +
+# counts, never bodies) consistent with the other sections.
 _ATTEMPTS_ROW_LIMIT = 8
 # The covering subset mirrors state_manager.coverage.PROBE_RESULT_STATUSES_
 # COVERING; a probe run outside it (blocked / no-signal / attempted / error) is
-# an attempt that did NOT establish coverage — exactly what "what did I already
-# try here" wants. Kept as a local literal (the brief must not depend on the
-# coverage module) but pinned to the same two values.
+# an attempt that did NOT establish coverage. Used by the Per-Input Coverage
+# grid to mark a cell covering vs non-covering. Kept as a local literal (the
+# brief must not depend on the coverage module) but pinned to the same values.
 _PROBE_COVERING_STATUSES = ("tested", "signal")
+
+# Per-Input Coverage grid (WS2). A generated per-(host × path × attack_family ×
+# input_slot × auth_context) view over assessment_probe_runs — the queryable
+# "which input was tested for which class, as which identity" surface that the
+# named `--input-slot slot:name` convention produces. _FETCH scans a recent
+# window to build cells; _ROW caps the cells returned (bounded like every other
+# worklist). The absolute distinct-cell total is reported separately so a capped
+# grid still signals true breadth.
+_PER_INPUT_FETCH_LIMIT = 400
+_PER_INPUT_ROW_LIMIT = 20
 
 
 def _surfaces_section(connection, engagement_id: int) -> dict[str, Any]:
@@ -319,26 +439,30 @@ def _surfaces_section(connection, engagement_id: int) -> dict[str, Any]:
 
 
 def _work_buffer_section(connection, engagement_id: int) -> dict[str, Any]:
-    """Pending coverage-item rollup ("work buffer") keyed by gf-bucket (gap #2).
+    """Pending work-buffer rollup keyed by gf-bucket cluster (gap #2).
 
-    The gf-bucket → coverage bridge records one ``assessment_coverage_items``
-    row per matched bucket, storing the canonical attack-class that the bucket
-    maps to (``GF_BUCKET_TO_CLASS[bucket]``) in ``attack_family`` — so grouping
-    by ``attack_family`` rolls up the pending work by bucket-derived class. A
-    coverage item is pending until it is ``covered`` / ``not_applicable``.
-    Counts are an absolute snapshot, NOT since-filtered. ``by_bucket`` is
-    ordered by descending count.
+    Reads the real dispatch queue (``assessment_work_items``) — the transient
+    triage buffer folded into the backend ledger (ADR 0013) — rather than a
+    coverage-item proxy. A row is pending work until it is claimed / done /
+    skipped / deferred; rows carrying a ``terminal_reason`` are excluded. Keyed
+    by ``cluster_key`` (the gf-bucket identity, e.g. ``gf:trust_surface``),
+    falling back to ``type:<type>`` when unclustered. Counts are an absolute
+    snapshot, NOT since-filtered. ``by_bucket`` is ordered by descending count.
     """
     rows = connection.execute(
-        "SELECT attack_family, status FROM assessment_coverage_items WHERE engagement_id = ?",
+        "SELECT cluster_key, type, status, terminal_reason "
+        "FROM assessment_work_items WHERE engagement_id = ?",
         (engagement_id,),
     ).fetchall()
     by_bucket: Counter = Counter()
     for row in rows:
         status_value = str(row["status"] or "pending").strip().lower()
-        if status_value in _RETIRED_COVERAGE_STATUSES:
+        if status_value != "pending":
             continue
-        by_bucket[str(row["attack_family"] or "unknown")] += 1
+        if row["terminal_reason"]:
+            continue
+        key = row["cluster_key"] or f"type:{row['type'] or 'unknown'}"
+        by_bucket[str(key)] += 1
     return {
         "pending_total": sum(by_bucket.values()),
         "by_bucket": dict(by_bucket.most_common()),
@@ -348,7 +472,7 @@ def _work_buffer_section(connection, engagement_id: int) -> dict[str, Any]:
 def _resume_note_pointers(engagement_id: int, *, since: str) -> list[dict[str, Any]]:
     """Intel notes tagged ``coverage`` / ``read-first`` — projected as bounded
     pointers (id + title + matching tags + lead_status), not bodies, so the
-    operator opens them via list-intel/search. Bounded list, so since-filtered
+    operator opens them via intel list/search. Bounded list, so since-filtered
     like the other intel worklists."""
     matches: list[dict[str, Any]] = []
     for row in intel.list_notes(engagement_id, include_superseded=False):
@@ -372,18 +496,20 @@ def _resume_note_pointers(engagement_id: int, *, since: str) -> list[dict[str, A
 
 
 def _attempts_section(connection, engagement_id: int, *, since: str) -> dict[str, Any]:
-    """Do-today attempt ledger (P1-C) — three already-persisted signals that the
+    """Do-today attempt ledger (P1-C) — two already-persisted signals that the
     brief never surfaced, so a re-dispatch could unknowingly retry a walled-off
     surface.
 
     - ``blocked_techniques``: recent ``assessment_blocked_techniques`` rows
       (wires the previously CLI-less table into resume).
-    - ``noncovering_probe_runs``: ``assessment_probe_runs`` whose result_status
-      is NOT in the covering subset (tested/signal) — i.e. blocked / no-signal /
-      attempted / error attempts that established no coverage.
     - ``roe_blocked_findings``: findings whose ``details_json`` has
       ``roe_blocked`` set true (value-aware json_extract, mirroring the
       chain_required predicate). Projected as finding pointers.
+
+    Per-input probe coverage (the old ``noncovering_probe_runs`` flat list) moved
+    to :func:`_per_input_coverage_section`, which groups covering AND non-covering
+    probes by (host × path × class × input × identity) — a richer view of the
+    same rows, so the brief does not render probe data twice.
 
     Each list is bounded and, where the row carries a timestamp, since-filtered.
     Counts are the pre-truncation totals so a truncated list still signals depth.
@@ -419,39 +545,6 @@ def _attempts_section(connection, engagement_id: int, *, since: str) -> dict[str
         field="updated_at",
     )[:_ATTEMPTS_ROW_LIMIT]
 
-    placeholders = ", ".join("?" for _ in _PROBE_COVERING_STATUSES)
-    probe_rows = connection.execute(
-        f"""
-        SELECT id, attack_family, result_status, tool_name, agent_name,
-               target_host, target_path, signal_type, evidence_ref, created_at
-        FROM assessment_probe_runs
-        WHERE engagement_id = ?
-          AND result_status NOT IN ({placeholders})
-        ORDER BY created_at DESC, id DESC
-        LIMIT ?
-        """,
-        (engagement_id, *_PROBE_COVERING_STATUSES, _ATTEMPTS_ROW_LIMIT * 3),
-    ).fetchall()
-    noncovering_probe_runs = _since_filter(
-        [
-            {
-                "id": row["id"],
-                "attack_family": row["attack_family"] or "",
-                "result_status": row["result_status"] or "",
-                "tool_name": row["tool_name"] or "",
-                "agent_name": row["agent_name"] or "",
-                "target_host": row["target_host"] or "",
-                "target_path": row["target_path"] or "",
-                "signal_type": row["signal_type"] or "",
-                "evidence_ref": row["evidence_ref"] or "",
-                "created_at": row["created_at"],
-            }
-            for row in probe_rows
-        ],
-        since=since,
-        field="created_at",
-    )[:_ATTEMPTS_ROW_LIMIT]
-
     roe_blocked_findings = _limited_findings(
         connection,
         engagement_id,
@@ -466,11 +559,6 @@ def _attempts_section(connection, engagement_id: int, *, since: str) -> dict[str
         "SELECT COUNT(*) FROM assessment_blocked_techniques WHERE engagement_id = ?",
         (engagement_id,),
     ).fetchone()[0]
-    noncovering_total = connection.execute(
-        f"SELECT COUNT(*) FROM assessment_probe_runs "
-        f"WHERE engagement_id = ? AND result_status NOT IN ({placeholders})",
-        (engagement_id, *_PROBE_COVERING_STATUSES),
-    ).fetchone()[0]
     roe_blocked_total = connection.execute(
         "SELECT COUNT(*) FROM assessment_findings "
         "WHERE engagement_id = ? AND json_extract(details_json,'$.roe_blocked') = 1",
@@ -480,11 +568,138 @@ def _attempts_section(connection, engagement_id: int, *, since: str) -> dict[str
     return {
         "blocked_techniques": blocked_techniques,
         "blocked_techniques_count": blocked_total,
-        "noncovering_probe_runs": noncovering_probe_runs,
-        "noncovering_probe_runs_count": noncovering_total,
         "roe_blocked_findings": roe_blocked_findings,
         "roe_blocked_findings_count": roe_blocked_total,
     }
+
+
+def _per_input_coverage_section(
+    connection, engagement_id: int, *, since: str, row_limit: int = _PER_INPUT_ROW_LIMIT
+) -> dict[str, Any]:
+    """Per-input coverage grid (WS2) — the generated, queryable answer to "which
+    input was tested for which class, as which identity, and did it hit a wall".
+
+    Groups ``assessment_probe_runs`` by
+    ``(target_host, target_path, attack_family, input_slot, auth_context)`` and
+    reports, per cell: the probe count, whether any probe was COVERING
+    (tested/signal) vs only non-covering (attempted/blocked/no-signal/error), the
+    latest ``result_status``, the latest non-null ``observed_http_status`` (the
+    403/auth-wall signal — previously an orphan column read by nothing), and the
+    latest non-empty ``lens``.
+
+    Both covering and non-covering probes are included: the grid is a true
+    coverage view (what WAS tested), not just a dead-ends ledger. It supersedes
+    the old flat ``noncovering_probe_runs`` list in :func:`_attempts_section` — the
+    same rows, grouped, so the brief never renders probe data twice.
+
+    Bounded like every other worklist: a recent window of rows is scanned to build
+    cells, the cell list is capped, and the ABSOLUTE distinct-cell total (not
+    since-filtered) is reported so a capped grid still signals true breadth. The
+    cell list itself is since-filtered — a cell only appears if it has a probe in
+    the window — so a future ``--since`` cutoff yields no cells.
+    """
+    # ``row_limit <= 0`` is the ``--all-cells`` escape valve: it must see EVERY
+    # probe run, not just the newest _PER_INPUT_FETCH_LIMIT. Capping the source
+    # query unconditionally would silently drop older cells from the grid while
+    # ``cells_count`` (uncapped, below) still reported them — sending operators
+    # back to already-covered inputs. Only bound the fetch for the sampled path.
+    fetch_sql = """
+        SELECT id, attack_family, result_status, tool_name,
+               target_host, target_path, input_slot, auth_context, lens,
+               observed_http_status, evidence_ref, created_at
+        FROM assessment_probe_runs
+        WHERE engagement_id = ?
+        ORDER BY created_at DESC, id DESC
+    """
+    if row_limit <= 0:
+        rows = connection.execute(fetch_sql, (engagement_id,)).fetchall()
+    else:
+        rows = connection.execute(
+            fetch_sql + "        LIMIT ?\n",
+            (engagement_id, _PER_INPUT_FETCH_LIMIT),
+        ).fetchall()
+    probes = _since_filter(
+        [
+            {
+                "id": row["id"],
+                "attack_family": row["attack_family"] or "",
+                "result_status": row["result_status"] or "",
+                "tool_name": row["tool_name"] or "",
+                "target_host": row["target_host"] or "",
+                "target_path": row["target_path"] or "",
+                "input_slot": row["input_slot"] or "",
+                "auth_context": row["auth_context"] or "",
+                "lens": row["lens"] or "",
+                "observed_http_status": row["observed_http_status"],
+                "evidence_ref": row["evidence_ref"] or "",
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ],
+        since=since,
+        field="created_at",
+    )
+
+    # Group into cells. Rows are DESC by created_at, so the FIRST time a cell key
+    # is seen is its most-recent probe — dict insertion order is therefore
+    # recency-of-latest-activity, and the "latest_*" fields take the first
+    # (most-recent) non-empty value encountered.
+    cells: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+    for probe in probes:
+        key = (
+            probe["target_host"],
+            probe["target_path"],
+            probe["attack_family"],
+            probe["input_slot"],
+            probe["auth_context"],
+        )
+        covering = probe["result_status"] in _PROBE_COVERING_STATUSES
+        cell = cells.get(key)
+        if cell is None:
+            cell = {
+                "target_host": probe["target_host"],
+                "target_path": probe["target_path"],
+                "attack_family": probe["attack_family"],
+                "input_slot": probe["input_slot"],
+                "auth_context": probe["auth_context"],
+                "count": 0,
+                "covering": False,
+                "latest_status": probe["result_status"],
+                "observed_http_status": None,
+                "lens": "",
+                "evidence_ref": "",
+            }
+            cells[key] = cell
+        cell["count"] += 1
+        if covering:
+            cell["covering"] = True
+        if cell["observed_http_status"] is None and probe["observed_http_status"] is not None:
+            cell["observed_http_status"] = probe["observed_http_status"]
+        if not cell["lens"] and probe["lens"]:
+            cell["lens"] = probe["lens"]
+        if not cell["evidence_ref"] and covering and probe["evidence_ref"]:
+            cell["evidence_ref"] = probe["evidence_ref"]
+
+    all_cells = list(cells.values())
+    # ``row_limit <= 0`` returns every cell (the resume-brief ``--all-cells``
+    # escape valve for the ~790-cell case); a positive limit caps the sample. The
+    # absolute total below still reports true breadth regardless of the cap.
+    cell_list = all_cells if row_limit <= 0 else all_cells[:row_limit]
+
+    # Absolute distinct-cell total (NOT since-filtered), like the other counts —
+    # so a capped/filtered grid still signals the true number of probed inputs.
+    total_cells = connection.execute(
+        """
+        SELECT COUNT(*) FROM (
+            SELECT DISTINCT target_host, target_path, attack_family, input_slot, auth_context
+            FROM assessment_probe_runs
+            WHERE engagement_id = ?
+        )
+        """,
+        (engagement_id,),
+    ).fetchone()[0]
+
+    return {"cells": cell_list, "cells_count": total_cells}
 
 
 def build_resume_brief(
@@ -495,6 +710,7 @@ def build_resume_brief(
     agent_id: str = "",
     max_age_hours: float | None = None,
     since: str = "",
+    per_input_limit: int = _PER_INPUT_ROW_LIMIT,
 ) -> dict[str, Any]:
     if since and _parse_iso(since) is None:
         # Silent fallback would hide the bug — the operator types
@@ -530,7 +746,13 @@ def build_resume_brief(
             target_finding = _finding_summary(row) if row else None
         findings = {
             "active": _limited_findings(connection, engagement_id, "status IN ('active', 'exploited', 'reported')", since=since),
-            "unreviewed": _limited_findings(connection, engagement_id, "verification_state = 'unreviewed'", since=since),
+            "unreviewed": _limited_findings(
+                connection,
+                engagement_id,
+                "verification_state = 'unreviewed' "
+                "AND status NOT IN ('merged', 'false_positive')",
+                since=since,
+            ),
             "verified": _limited_findings(connection, engagement_id, "verification_state = 'verified'", since=since),
             "killed": _limited_findings(connection, engagement_id, "status = 'false_positive'", since=since),
             "merged": _limited_findings(connection, engagement_id, "status = 'merged'", since=since),
@@ -545,6 +767,9 @@ def build_resume_brief(
         surfaces_section = _surfaces_section(connection, engagement_id)
         work_buffer_section = _work_buffer_section(connection, engagement_id)
         attempts_section = _attempts_section(connection, engagement_id, since=since)
+        per_input_coverage_section = _per_input_coverage_section(
+            connection, engagement_id, since=since, row_limit=per_input_limit
+        )
 
     command_matches_all = (
         state_manager.list_command_runs(
@@ -583,7 +808,7 @@ def build_resume_brief(
         "summary": intel.intel_summary(engagement_id),
         "open_high_cves": open_high_cves,
         # Project a pointer (title + status), not the note body — keep the brief
-        # compact; the operator opens the lead via list-intel/search.
+        # compact; the operator opens the lead via intel list/search.
         "open_leads": [
             {"id": row.get("id"), "title": row.get("title"), "lead_status": row.get("lead_status")}
             for row in open_leads
@@ -614,6 +839,7 @@ def build_resume_brief(
         "surfaces": surfaces_section,
         "work_buffer": work_buffer_section,
         "attempts": attempts_section,
+        "per_input_coverage": per_input_coverage_section,
         "target_finding": target_finding,
         "findings": findings,
         "recent_decisions": _recent_decisions(engagement_id, since=since),
@@ -662,10 +888,10 @@ def _recommended_actions(
 
     if finding:
         add("inspect finding", f"vigil assess fetch findings/{finding}", entity_kind="finding", entity_id=finding)
-        add("command coverage", f"vigil assess list-command-runs --q {finding} --show-matches", entity_kind="finding", entity_id=finding)
+        add("command coverage", f"vigil assess command-run list --q {finding} --show-matches", entity_kind="finding", entity_id=finding)
         add("artifact context", f"vigil assess artifact search --finding {finding}", entity_kind="finding", entity_id=finding)
     elif not command_matches:
-        add("recent command coverage", "vigil assess list-command-runs --limit 20")
+        add("recent command coverage", "vigil assess command-run list --limit 20")
     if agent_id:
         add("handoff continuation", f"vigil assess agent render-handoff {agent_id}", entity_kind="agent", entity_id=agent_id)
     if stale_dispatches:
@@ -684,7 +910,7 @@ def _recommended_actions(
         if run_id is not None:
             add(
                 "inspect matching command run",
-                f"vigil assess get-command-run {run_id}",
+                f"vigil assess command-run get {run_id}",
                 entity_kind="command_run",
                 entity_id=run_id,
             )

@@ -29,7 +29,7 @@ evidence set the verifier can rule on without re-pulling.
   inbound SAML chain and the Entra-side direct sign-in becomes the new
   hypothesis.
 
-This skill is for L2/L3 investigation of M365 sign-in anomalies. L1 dispatch decisions belong to alert-triage, verification belongs to alert-fp-verification, and
+This skill is for L2 investigation of M365 sign-in anomalies. L1 dispatch decisions belong to alert-triage, verification belongs to alert-fp-verification, and
 post-incident reporting (report-generation owns that).
 
 ## Operating Rules
@@ -804,9 +804,9 @@ produces audit rows that look like the IR principal is the suspect.
 
 **Cross-cloud / cross-IdP pivots:**
 
-- `agent/skills/okta-investigation/SKILL.md` (P2) — SAML from Okta as
+- `agent/skills/okta-investigation/SKILL.md` — SAML from Okta as
   the credential origin into M365.
-- `agent/skills/aws-cloudtrail-investigation/SKILL.md` (P1) — federated
+- `agent/skills/aws-cloudtrail-investigation/SKILL.md` — federated
   SAML from Entra ID into AWS STS.
 
 **Always-active rules:** `agent/rules/triage.md`,

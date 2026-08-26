@@ -3,6 +3,7 @@ name: gf-patterns:idor
 description: Object-reference parameter patterns that signal broken object-level authorization surfaces
 origin: 1ndianl33t/Gf-Patterns (+ local overlay)
 bucket: idor
+skill: idor-testing, split-brain-idor
 weight: 35
 ---
 

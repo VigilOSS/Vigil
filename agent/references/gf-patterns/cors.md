@@ -3,6 +3,7 @@ name: gf-patterns:cors
 description: CORS-control parameters (`origin`, `access_control`, `allow_origin`)
 origin: 1ndianl33t/Gf-Patterns (+ local overlay)
 bucket: cors
+skill: cors-testing
 weight: 25
 ---
 

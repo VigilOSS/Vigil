@@ -36,6 +36,13 @@ not a prototype. Every change should leave the codebase clearer than it found it
   improvement lands (e.g. curated whole-keys + a capped weak-signal tier), not *whether* it lands. A
   simpler mechanism that misroutes or misses signal is not an acceptable trade for less code.
 
+# Explaining work (breakdowns & planning)
+
+When asked for a breakdown, an explanation, or to justify a change, answer at BOTH altitudes:
+a **high-level** framing (why it matters for Vigil's mission — precision, deep coverage, trustworthy
+state over vibe) and a **low-level** view (the concrete files/mechanics), and argue each change on how
+it helps quality and depth. Do not answer at one altitude only — a single-altitude answer is incomplete.
+
 # Version control: Jujutsu (jj)
 
 This repository is managed with **[Jujutsu (`jj`)](https://github.com/jj-vcs/jj)** (v0.40+),
@@ -164,12 +171,13 @@ heading), so a skill with neither is discoverable only by directory name. Always
 
 ## Add a reference
 
-References are the payload / checklist / tooling library specialists load on dispatch. Like skills,
-discovery is a frontmatter scan, so a reference is self-registering — but ONLY if its frontmatter
-carries the keys the pipeline keys on.
+References are the payload / checklist / tooling library specialists load on
+dispatch. Like skills, discovery is a frontmatter scan. References intended for
+skill-routed discovery need a resolvable `skill:` key; general templates and
+engagement-owned references may intentionally remain unpaired.
 
-1. Create `agent/references/<area>/<name>.md` with YAML frontmatter that includes BOTH a `description`
-   and a `skill:` key:
+1. Create `agent/references/<area>/<name>.md` with YAML frontmatter that includes
+   a `description` and, when the reference belongs to a skill, a `skill:` key:
 
    ```markdown
    ---
@@ -182,11 +190,11 @@ carries the keys the pipeline keys on.
    ```
 
    `agent/scripts/assess/commands/list_references.py` globs `agent/references/**/*.md` and parses the
-   frontmatter. **A reference with no `skill:` key is orphaned** — it never appears under
-   `vigil assess list-references --skill <name>`, so a threat hunter navigating by skill never finds
-   it. The `skill:` value must resolve to a real `agent/skills/<name>/` directory (comma-separate to
-   pair with several). If no skill fits, that is a signal to author one — not to ship the reference
-   unpaired.
+   frontmatter. A reference with no `skill:` key still appears in the global
+   listing but not under `list-references --skill <name>`. The `skill:` value must
+   resolve to a real `agent/skills/<name>/` directory (comma-separate to pair with
+   several). Tool and methodology references should be paired; omit `skill:` only
+   for deliberately general templates or engagement-specific material.
 
 2. Confirm discovery and pairing — no other file needs editing:
 
@@ -280,8 +288,12 @@ quality checks — no LLM, no network, no real backend. Cases live under `tests/
    the orchestrator running. This transforms each row into a schema-valid record, validates every one
    (hard-fail on drift), and can scaffold a green-by-construction definition:
 
+   `eval-capture` is a maintainer/CI tool, intentionally off the operator
+   `vigil assess` surface — invoke the module directly (its import chain is
+   stdlib-only, so no venv is needed):
+
    ```bash
-   vigil assess eval-capture \
+   python agent/scripts/assess/commands/eval_capture.py \
      --engagement-dir <engagement-dir> \
      --out tests/eval/fixtures/golden_<name>.json \
      --definition tests/eval/definitions/<name>.yaml
@@ -295,8 +307,8 @@ quality checks — no LLM, no network, no real backend. Cases live under `tests/
    ```
 
    Commit the fixture and definition together so replay stays zero-token. Use
-   `vigil assess eval-capture ... --check` after a re-run to diff a fresh capture against the committed
-   baseline without overwriting it; it exits non-zero on a coverage regression.
+   `python agent/scripts/assess/commands/eval_capture.py ... --check` after a re-run to diff a fresh
+   capture against the committed baseline without overwriting it; it exits non-zero on a coverage regression.
 
 # Code map maintenance
 
@@ -385,8 +397,9 @@ so edits land in the right place and do not create drift.
 - Put role-specific reasoning guidance in `agent/agents/*.md`, because that is where identity,
   examples, and handoff semantics live.
 - Put payload-shape and lifecycle truth in CLI helpers when possible. Prompts should reference
-  helper commands such as `vigil assess contract`, `record-finding`, `verify-finding`, `kill-finding`,
-  `reset-finding`, and `update-finding` rather than duplicating raw schema details.
+  helper commands such as `vigil assess contract`, `finding record`, `finding verify`
+  (`--disposition false_positive` for a kill), and `finding update` (`--status draft` to reopen)
+  rather than duplicating raw schema details.
 - Treat generated artifacts as drift detectors, not authoring targets. If you edit a generated
   prompt directly, the next render will overwrite it.
 
@@ -439,7 +452,7 @@ edit through that ruleset in addition to the **Prompt edit checklist** above.
 
 # Tests & verification
 
-The verification surface is **not one command**: 4 pytest scopes + a render-check + a schema-check + lint/types + the bench rungs, each with a different venv, prereqs, and cost. CI (`.github/workflows/ci.yml`) is authoritative for the blocking gates — backend pytest, the markdown-vs-CLI sync-lint, the deterministic eval, ruff, and mypy.
+The verification surface is **not one command**: 4 pytest scopes + a render-check + a schema-check + lint/types + the bench rungs, each with a different venv, prereqs, and cost. CI (`.github/workflows/ci.yml`) is authoritative for the blocking gates — backend pytest, the markdown-vs-CLI sync-lint, the deterministic eval, the root `tests/` suite, the assess CLI suite, the frontend build, ruff, and mypy.
 
 > **Never run a bare `pytest` from the repo root, and always go through the backend venv.** Scope every run to one suite — duplicate `test_vigil_cli.py` basenames in `tests/` and `agent/scripts/assess/tests/` collide under a single collection. The backend venv (`uv run --directory orchestrator/backend --extra dev …`) is the one interpreter that can collect every suite; the root `.venv` hard-errors on `tests/eval` (unconditional `import yaml`), and `uv run` *without* `--extra dev` fails to spawn pytest in a clean env.
 
@@ -457,8 +470,8 @@ The verification surface is **not one command**: 4 pytest scopes + a render-chec
 | Bench run (live agent) | `vigil bench run --launch auto …` | **BILLED** — see Live tests |
 
 - **Integration tests are deselected by default** (`-m 'not integration'` in both pyprojects); opt in with `pytest -m integration` only after rebuilding the runtime image (`test_oob_correlate.py`, backend `test_runtime_tooling_contract.py`, `test_kali_cli.py`).
-- **Pre-push: mirror the blocking CI gates locally.** Before pushing a branch, run the gates CI blocks on — backend pytest, the sync-lint and deterministic eval (covered by the backend pytest + eval rows above), `uvx ruff check .`, and `uvx --with-editable . mypy src/vigil_cli`. CI runs on a clean checkout, so it catches drift a warm local venv hides.
-- **CI gap:** CI does not gate the root `tests/` (bench harness) or the assess CLI suite — run those two locally before handing off harness/recon changes.
+- **Pre-push: mirror the blocking CI gates locally.** Before pushing a branch, run the gates CI blocks on — all four pytest rows above (backend, root `tests/`, assess CLI, deterministic eval; the sync-lint rides inside backend pytest), `uvx ruff check .`, and `uvx --with-editable . mypy src/vigil_cli`. CI runs on a clean checkout, so it catches drift a warm local venv hides.
+- **CI covers all four pytest scopes.** Every suite in the table above is a blocking PR gate: `backend-tests`, `eval`, `root-tests` (root `tests/`, less `tests/eval`), and `assess-tests` (`agent/scripts/assess/tests`). Until 0.2.0 the last two were unguarded and had to be run by hand; four red `vigil email` tests survived an entire hardening effort in that gap, which is why they are gates now rather than a note. Each of the three path-scoped jobs passes an **absolute** path: a relative one resolves against `--directory orchestrator/backend`'s cwd, collects zero tests, and exits 0 — a green job that ran nothing. Run them locally anyway before pushing, per the pre-push bullet; CI is the backstop, not the first look.
 - **The `**/data/` ignore trap.** Shipped data a test or feature depends on — resolver lists, fixtures, golden files — often lives under a `data/` dir, which `.gitignore`'s broad `**/data/` rule silently drops: it passes locally (file on disk) but fails in CI (clean checkout never received it). When you add *required* shipped data, add a targeted `!` negation in `.gitignore` (re-include each path level down to the files, since git won't descend into an ignored dir) **and** `git add -f` it, then confirm `git ls-files <path>` tracks it. This is exactly what bit `test_shipped_resolver_lists_exist_and_are_within_cap`.
 - **`skeleton/` sidecars vs mypy.** Bench `skeleton/` `.py` files are container-runtime sidecars that import runtime-only siblings (e.g. `oracle_checkpoint`) mypy can't resolve. They are excluded from mypy via `[tool.mypy] exclude` in `pyproject.toml` (or keep sidecars as `.tmpl`, which mypy ignores). Do **not** "fix" such an `import-not-found` by adding the runtime module to the type path.
 
@@ -470,7 +483,10 @@ The verification surface is **not one command**: 4 pytest scopes + a render-chec
 
 The benchmark harness kills a stuck run at a **per-family** wall-clock budget, defined in the editable table `FAMILY_TIMEOUTS` in `src/vigil_cli/bench/models.py`. A measured family uses a budget derived from its observed runs (≈1.5–2× the observed max wall time under `~/.vigil-bench/runs/`); an unmeasured family (no table entry) falls back to the generous `GENEROUS_UNKNOWN_FAMILY_TIMEOUT` so it is never killed before its real duration is known.
 
-- [ ] **TODO — record a new family's wall time and set its timeout.** When a new benchmark family is run for the first time, record its observed wall-clock time and set/refresh its per-family timeout in the codebase (`FAMILY_TIMEOUTS` in `src/vigil_cli/bench/models.py`) if none exists yet. Until then it runs under the generous unmeasured-family fallback; do not leave a family on the fallback once you have real timing data.
+After a new benchmark family completes its first measured run, record the
+observed wall-clock time and set or refresh its entry in `FAMILY_TIMEOUTS`. Until
+that evidence exists, the generous unmeasured-family fallback is intentional;
+never invent a tighter timeout from the family level alone.
 
 # Orchestrator backend
 
@@ -511,4 +527,3 @@ Build the primary runtime image from the repo root:
 ```bash
 docker build -t vigil:latest -f agent/docker/runtime-full/Dockerfile .
 ```
-

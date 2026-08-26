@@ -1,8 +1,10 @@
 """vigil assess code-dispatch — analysis queue dispatch engine for the code analysis pipeline."""
 from __future__ import annotations
 
+import argparse
 from fnmatch import fnmatch
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -11,6 +13,8 @@ from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 
 _CODE_FILE_LOOKUP_PAGE_SIZE = 10000
+_MAX_QUEUE_IDS_FILE_BYTES = 64 * 1024
+_PROCESS_DESCRIPTOR_PATH = re.compile(r"/(?:dev|proc/self)/fd/[0-9]+")
 _DONE_DISPOSITIONS = ("clean", "finding", "suspicious", "skipped")
 # C50: when disposition=skipped the operator must supply --skip-reason so
 # code-coverage can attribute the skip. Common reasons:
@@ -22,14 +26,98 @@ _SKIP_REASONS_HINT = (
     "vendored-dependency",
 )
 
+_ACTION_HELP: dict[str, str] = {
+    "stats": (
+        "Usage: vigil assess code-dispatch stats\n\n"
+        "Print current and historical analysis-queue counts.\n"
+    ),
+    "fetch": (
+        "Usage: vigil assess code-dispatch fetch <limit> <agent-name> "
+        "[--repo-id ID] [--classification TIER] [--batch-theme THEME] "
+        "[--ids-file PATH]\n\n"
+        "Atomically claim matching current queue items for one analysis worker.\n"
+    ),
+    "heartbeat": (
+        "Usage: vigil assess code-dispatch heartbeat "
+        "<item-id> <agent-name> <lease-token>\n\n"
+        "Renew the exact active lease for one claimed queue item.\n"
+    ),
+    "done": (
+        "Usage: vigil assess code-dispatch done <item-id> <agent-name> "
+        "<lease-token> <disposition> <cwe-coverage-json-file> [notes] "
+        "[--dry-run] [--skip-reason <reason>]\n\n"
+        f"Valid dispositions: {', '.join(_DONE_DISPOSITIONS)}.\n"
+        "CWE coverage must be a JSON array such as "
+        "[{\"family\":\"ssrf\",\"effort\":80}].\n"
+        "--skip-reason is required when disposition=skipped. Suggested values: "
+        f"{', '.join(_SKIP_REASONS_HINT)}.\n"
+    ),
+    "error": (
+        "Usage: vigil assess code-dispatch error "
+        "<item-id> <agent-name> <lease-token> [notes]\n\n"
+        "Close the exact active lease as an analysis error.\n"
+    ),
+    "needs-context": (
+        "Usage: vigil assess code-dispatch needs-context "
+        "<item-id> <agent-name> <lease-token> [expansion-json-file]\n\n"
+        "Close the exact active lease while recording the missing context.\n"
+    ),
+    "reset-stale": (
+        "Usage: vigil assess code-dispatch reset-stale <minutes>\n\n"
+        "Return processing leases older than the threshold to pending.\n"
+    ),
+    "retry-error": (
+        "Usage: vigil assess code-dispatch retry-error <id1,id2,...> [reason]\n\n"
+        "Create current retry attempts for errored queue items.\n"
+    ),
+    "retry-needs-context": (
+        "Usage: vigil assess code-dispatch retry-needs-context "
+        "<id1,id2,...> <reason>\n\n"
+        "Create current retry attempts after supplying the missing context.\n"
+    ),
+    "queue": (
+        "Usage: vigil assess code-dispatch queue <queue-items-json-file>\n\n"
+        "Submit canonical initial analysis items.\n"
+    ),
+    "reanalyze": (
+        "Usage: vigil assess code-dispatch reanalyze "
+        "<queue-items-json-file> <reason>\n\n"
+        "Create new current attempts that supersede prior analysis attempts.\n"
+    ),
+    "requeue-triggers": (
+        "Usage: vigil assess code-dispatch requeue-triggers <triggers-json-file>\n\n"
+        "Turn cross-file triggers into linked current analysis attempts.\n"
+    ),
+    "list-triggers": (
+        "Usage: vigil assess code-dispatch list-triggers [status]\n\n"
+        "List cross-file triggers, defaulting to pending.\n"
+    ),
+    "resolve-triggers": (
+        "Usage: vigil assess code-dispatch resolve-triggers <triggers-json-file> "
+        "<external_context_unavailable|source_equivalent_analyzed|not_applicable> "
+        "<note>\n\n"
+        "Resolve triggers that cannot or should not produce another queue attempt.\n"
+    ),
+}
+
+
+def maybe_print_action_help(tokens: list[str]) -> None:
+    """Render action help before argparse.REMAINDER consumes help flags as data."""
+    if len(tokens) >= 2 and any(token in {"-h", "--help"} for token in tokens[1:]):
+        help_text = _ACTION_HELP.get(tokens[0])
+        if help_text:
+            print(help_text)
+            raise SystemExit(0)
+
 
 def register(subparsers) -> None:
     p = subparsers.add_parser("code-dispatch", help="Code analysis queue dispatch engine")
     p.add_argument(
         "action",
-        help="stats|fetch|done|error|needs-context|reset-stale|queue|requeue-triggers|list-triggers|resolve-triggers",
+        choices=tuple(_ACTION_HELP),
+        help="stats|fetch|heartbeat|done|error|needs-context|reset-stale|retry-error|retry-needs-context|queue|reanalyze|requeue-triggers|list-triggers|resolve-triggers",
     )
-    p.add_argument("extra", nargs="*", help="Action-specific arguments")
+    p.add_argument("extra", nargs=argparse.REMAINDER, help="Action-specific arguments")
     p.set_defaults(func=run)
 
 
@@ -37,19 +125,29 @@ def run(args) -> None:
     action = args.action
     extra = args.extra or []
 
+    if action not in _ACTION_HELP:
+        print(f"Unknown action: {action}", file=sys.stderr)
+        print(f"Actions: {', '.join(_ACTION_HELP)}", file=sys.stderr)
+        raise SystemExit(1)
+
     cfg = load_config(args.engagement_dir)
 
     if action == "stats":
         _stats(cfg)
     elif action == "fetch":
         if len(extra) < 2:
-            print("Usage: code-dispatch fetch <limit> <agent-name>", file=sys.stderr)
-            sys.exit(1)
-        _fetch(cfg, int(extra[0]), extra[1])
-    elif action == "done":
-        if len(extra) < 3:
             print(
-                "Usage: code-dispatch done <item-id> <disposition> <cwe-coverage-json-file> [notes] [--dry-run] [--skip-reason <reason>]\n"
+                "Usage: code-dispatch fetch <limit> <agent-name> "
+                "[--repo-id ID] [--classification TIER] [--batch-theme THEME] "
+                "[--ids-file PATH]",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        _fetch(cfg, int(extra[0]), extra[1], _parse_fetch_filters(extra[2:]))
+    elif action == "done":
+        if len(extra) < 5:
+            print(
+                "Usage: code-dispatch done <item-id> <agent-name> <lease-token> <disposition> <cwe-coverage-json-file> [notes] [--dry-run] [--skip-reason <reason>]\n"
                 f"Valid dispositions: {', '.join(_DONE_DISPOSITIONS)}\n"
                 "CWE coverage must be a JSON array like "
                 "[{\"family\":\"ssrf\",\"effort\":80}]\n"
@@ -60,37 +158,61 @@ def run(args) -> None:
             sys.exit(1)
         notes_parts: list[str] = []
         dry_run = False
+        dry_run_seen = False
         skip_reason = ""
-        tokens = list(extra[3:])
+        skip_reason_seen = False
+        tokens = list(extra[5:])
         idx = 0
         while idx < len(tokens):
             token = tokens[idx]
             if token == "--dry-run":
+                if dry_run_seen:
+                    print("ERROR: --dry-run was specified more than once", file=sys.stderr)
+                    sys.exit(1)
+                dry_run_seen = True
                 dry_run = True
                 idx += 1
             elif token == "--skip-reason":
-                if idx + 1 >= len(tokens):
+                if skip_reason_seen:
+                    print("ERROR: --skip-reason was specified more than once", file=sys.stderr)
+                    sys.exit(1)
+                if (
+                    idx + 1 >= len(tokens)
+                    or not tokens[idx + 1].strip()
+                    or tokens[idx + 1].startswith("-")
+                ):
                     print("ERROR: --skip-reason requires a value", file=sys.stderr)
                     sys.exit(1)
+                skip_reason_seen = True
                 skip_reason = tokens[idx + 1]
                 idx += 2
+            elif token.startswith("-"):
+                print(f"ERROR: unknown code-dispatch done option: {token}", file=sys.stderr)
+                sys.exit(1)
             else:
                 notes_parts.append(token)
                 idx += 1
         notes = " ".join(notes_parts)
-        _done(cfg, extra[0], extra[1], extra[2], notes, dry_run=dry_run, skip_reason=skip_reason)
+        _done(
+            cfg, extra[0], extra[1], extra[2], extra[3], extra[4], notes,
+            dry_run=dry_run, skip_reason=skip_reason,
+        )
+    elif action == "heartbeat":
+        if len(extra) != 3:
+            print("Usage: code-dispatch heartbeat <item-id> <agent-name> <lease-token>", file=sys.stderr)
+            sys.exit(1)
+        _heartbeat(cfg, extra[0], extra[1], extra[2])
     elif action == "error":
-        if not extra:
-            print("Usage: code-dispatch error <id1,id2,...> [notes]", file=sys.stderr)
+        if len(extra) < 3:
+            print("Usage: code-dispatch error <item-id> <agent-name> <lease-token> [notes]", file=sys.stderr)
             sys.exit(1)
-        notes = extra[1] if len(extra) > 1 else ""
-        _error(cfg, extra[0], notes)
+        _error(cfg, extra[0], extra[1], extra[2], " ".join(extra[3:]))
     elif action == "needs-context":
-        if not extra:
-            print("Usage: code-dispatch needs-context <id1,id2,...> [expansion-json-file]", file=sys.stderr)
+        if len(extra) < 3:
+            print("Usage: code-dispatch needs-context <item-id> <agent-name> <lease-token> [expansion-json-file]", file=sys.stderr)
             sys.exit(1)
-        expansion_file = extra[1] if len(extra) > 1 else None
-        _needs_context(cfg, extra[0], expansion_file)
+        expansion_file = extra[3] if len(extra) > 3 else None
+        _needs_context(cfg, extra[0], extra[1], extra[2], expansion_file)
     elif action == "reset-stale":
         if not extra:
             print("Usage: code-dispatch reset-stale <minutes>", file=sys.stderr)
@@ -100,11 +222,30 @@ def run(args) -> None:
             print("ERROR: code-dispatch reset-stale requires minutes >= 1", file=sys.stderr)
             sys.exit(1)
         _reset_stale(cfg, minutes)
-    elif action == "queue":
+    elif action == "retry-error":
         if not extra:
+            print("Usage: code-dispatch retry-error <id1,id2,...> [reason]", file=sys.stderr)
+            sys.exit(1)
+        reason = " ".join(extra[1:])
+        _retry_error(cfg, extra[0], reason)
+    elif action == "retry-needs-context":
+        if len(extra) < 2:
+            print("Usage: code-dispatch retry-needs-context <id1,id2,...> <reason>", file=sys.stderr)
+            sys.exit(1)
+        _retry_needs_context(cfg, extra[0], " ".join(extra[1:]))
+    elif action == "queue":
+        if len(extra) != 1:
             print("Usage: code-dispatch queue <queue-items-json-file>", file=sys.stderr)
             sys.exit(1)
-        _queue(cfg, extra[0])
+        _queue(cfg, extra[0], mode="initial")
+    elif action == "reanalyze":
+        if len(extra) < 2 or not " ".join(extra[1:]).strip():
+            print(
+                "Usage: code-dispatch reanalyze <queue-items-json-file> <reason>",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        _queue(cfg, extra[0], mode="reanalysis", reason=" ".join(extra[1:]))
     elif action == "requeue-triggers":
         if not extra:
             print("Usage: code-dispatch requeue-triggers <triggers-json-file>", file=sys.stderr)
@@ -122,14 +263,6 @@ def run(args) -> None:
             )
             sys.exit(1)
         _resolve_triggers(cfg, extra[0], extra[1], " ".join(extra[2:]))
-    else:
-        print(f"Unknown action: {action}", file=sys.stderr)
-        print(
-            "Actions: stats, fetch, done, error, needs-context, reset-stale, queue, "
-            "requeue-triggers, list-triggers, resolve-triggers",
-            file=sys.stderr,
-        )
-        sys.exit(1)
 
 
 def _validate_id_list(id_list: str) -> list[int]:
@@ -150,29 +283,134 @@ def _stats(cfg) -> None:
         for key in ('pending', 'processing', 'done', 'error', 'needs_context'):
             val = result.get(key, 0)
             print(f"  {key}: {val}")
-        total = sum(result.get(k, 0) for k in ('pending', 'processing', 'done', 'error', 'needs_context'))
+        total = result.get(
+            'total',
+            sum(result.get(k, 0) for k in ('pending', 'processing', 'done', 'error', 'needs_context')),
+        )
         print(f"  total: {total}")
         # Print any extra fields
         for key, val in result.items():
-            if key not in ('pending', 'processing', 'done', 'error', 'needs_context'):
+            if key not in ('pending', 'processing', 'done', 'error', 'needs_context', 'total'):
                 print(f"  {key}: {val}")
     else:
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
-def _fetch(cfg, limit: int, agent_name: str) -> None:
+def _ids_from_file(path_value: str) -> list[int]:
+    path = Path(path_value)
+    is_process_descriptor = _PROCESS_DESCRIPTOR_PATH.fullmatch(path_value) is not None
+    if not is_process_descriptor and not path.is_file():
+        print(f"Queue ids file not found: {path_value}", file=sys.stderr)
+        raise SystemExit(1)
+    try:
+        with path.open("rb") as handle:
+            payload = handle.read(_MAX_QUEUE_IDS_FILE_BYTES + 1)
+    except OSError as exc:
+        print(f"Could not read queue ids file {path_value}: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
+    if len(payload) > _MAX_QUEUE_IDS_FILE_BYTES:
+        print(
+            f"Queue ids file exceeds {_MAX_QUEUE_IDS_FILE_BYTES} bytes",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    try:
+        text = payload.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        print("Queue ids file must be valid UTF-8", file=sys.stderr)
+        raise SystemExit(1) from None
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError:
+        tokens = [token for token in text.replace(",", " ").split() if token]
+        if not tokens or any(re.fullmatch(r"[1-9][0-9]*", token) is None for token in tokens):
+            print(
+                "Queue ids file must contain a non-empty JSON array or positive id list",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        try:
+            return sorted({int(token) for token in tokens})
+        except ValueError:
+            print("Queue ids file contains an invalid id", file=sys.stderr)
+            raise SystemExit(1) from None
+    except (ValueError, RecursionError):
+        print("Queue ids file contains invalid or excessively complex JSON", file=sys.stderr)
+        raise SystemExit(1) from None
+    if isinstance(raw, dict):
+        raw = raw.get("item_ids", raw.get("ids"))
+    if not isinstance(raw, list) or not raw:
+        print("Queue ids file must contain a non-empty JSON array or id list", file=sys.stderr)
+        raise SystemExit(1)
+    if any(type(value) is not int or value <= 0 for value in raw):
+        print("Queue ids file contains a non-positive or non-integer id", file=sys.stderr)
+        raise SystemExit(1)
+    return sorted(set(raw))
+
+
+def _parse_fetch_filters(tokens: list[str]) -> dict[str, object]:
+    filters: dict[str, object] = {}
+    index = 0
+    options = {
+        "--repo-id": "repo_id",
+        "--classification": "classification",
+        "--batch-theme": "batch_theme",
+        "--ids-file": "ids_file",
+    }
+    while index < len(tokens):
+        option = tokens[index]
+        field = options.get(option)
+        if field is None or index + 1 >= len(tokens):
+            print(f"Unknown or incomplete code-dispatch fetch option: {option}", file=sys.stderr)
+            raise SystemExit(1)
+        value = tokens[index + 1]
+        if field == "repo_id":
+            try:
+                filters[field] = int(value)
+            except ValueError:
+                print("--repo-id must be an integer", file=sys.stderr)
+                raise SystemExit(1) from None
+        elif field == "ids_file":
+            filters["item_ids"] = _ids_from_file(value)
+        else:
+            filters[field] = value
+        index += 2
+    return filters
+
+
+def _fetch(cfg, limit: int, agent_name: str, filters: dict[str, object] | None = None) -> None:
+    payload: dict[str, object] = {
+        'limit': limit,
+        'agent_name': agent_name,
+        **(filters or {}),
+    }
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        result = client.post('code/analysis-queue/fetch', {
-            'limit': limit,
-            'agent_name': agent_name,
-        })
+        result = client.post('code/analysis-queue/fetch', payload)
+
+    if isinstance(result, list):
+        normalized_result: list[object] = []
+        for raw_item in result:
+            if not isinstance(raw_item, dict):
+                normalized_result.append(raw_item)
+                continue
+            item = dict(raw_item)
+            assigned_agent = item.pop("assigned_agent", None)
+            if "agent_name" not in item and assigned_agent is not None:
+                item["agent_name"] = assigned_agent
+            normalized_result.append(item)
+        result = normalized_result
 
     snapshot = write_json_snapshot(
         cfg.engagement_dir,
         category="code-queue-fetch",
         label=agent_name,
         payload=result,
-        metadata={"command": "code-dispatch fetch", "agent_name": agent_name, "limit": limit},
+        metadata={
+            "command": "code-dispatch fetch",
+            "agent_name": agent_name,
+            "limit": limit,
+            "filters": filters or {},
+        },
     )
     print(f"Saved audit snapshot: {snapshot.name}", file=sys.stderr)
     print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -181,6 +419,8 @@ def _fetch(cfg, limit: int, agent_name: str) -> None:
 def _done(
     cfg,
     id_list: str,
+    agent_name: str,
+    lease_token: str,
     disposition: str,
     cwe_file: str,
     notes: str = "",
@@ -235,7 +475,12 @@ def _done(
             print(f"CWE coverage entry {idx} has a non-numeric effort", file=sys.stderr)
             sys.exit(1)
 
-    payload: dict = {'item_ids': ids, 'disposition': normalized_disposition}
+    payload: dict = {
+        'item_ids': ids,
+        'agent_name': agent_name,
+        'lease_token': lease_token,
+        'disposition': normalized_disposition,
+    }
     if notes:
         payload['notes'] = notes
     payload['cwe_coverage'] = cwe_data
@@ -262,9 +507,24 @@ def _done(
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
-def _error(cfg, id_list: str, notes: str = "") -> None:
+def _heartbeat(cfg, item_id: str, agent_name: str, lease_token: str) -> None:
+    ids = _validate_id_list(item_id)
+    if len(ids) != 1:
+        print("ERROR: code-dispatch heartbeat accepts exactly one queue item id", file=sys.stderr)
+        sys.exit(1)
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        result = client.post('code/analysis-queue/heartbeat', {
+            'item_id': ids[0], 'agent_name': agent_name, 'lease_token': lease_token,
+        })
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def _error(cfg, id_list: str, agent_name: str, lease_token: str, notes: str = "") -> None:
     ids = _validate_id_list(id_list)
-    payload: dict = {'item_ids': ids}
+    if len(ids) != 1:
+        print("ERROR: code-dispatch error accepts exactly one queue item id", file=sys.stderr)
+        sys.exit(1)
+    payload: dict = {'item_ids': ids, 'agent_name': agent_name, 'lease_token': lease_token}
     if notes:
         payload['notes'] = notes
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
@@ -284,10 +544,15 @@ def _error(cfg, id_list: str, notes: str = "") -> None:
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
-def _needs_context(cfg, id_list: str, expansion_file: str | None) -> None:
+def _needs_context(
+    cfg, id_list: str, agent_name: str, lease_token: str, expansion_file: str | None
+) -> None:
     ids = _validate_id_list(id_list)
+    if len(ids) != 1:
+        print("ERROR: code-dispatch needs-context accepts exactly one queue item id", file=sys.stderr)
+        sys.exit(1)
 
-    payload: dict = {'item_ids': ids}
+    payload: dict = {'item_ids': ids, 'agent_name': agent_name, 'lease_token': lease_token}
     if expansion_file:
         ep = Path(expansion_file)
         if not ep.is_file():
@@ -329,6 +594,45 @@ def _reset_stale(cfg, minutes: int) -> None:
     print(f"Saved audit snapshot: {snapshot.name}")
     if isinstance(result, dict) and result:
         print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def _retry_error(cfg, id_list: str, reason: str = "") -> None:
+    """C5.1: recover status='error' queue items back to 'pending' by id.
+
+    Unlike `reset-stale` (time-windowed, 'processing' only), this is
+    id-scoped and requires every id to currently be 'error' — the backend
+    409s if any id has already moved (e.g. re-fetched, completed) since the
+    operator listed it.
+    """
+    ids = _validate_id_list(id_list)
+    payload: dict = {'item_ids': ids}
+    if reason:
+        payload['reason'] = reason
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        result = client.post('code/analysis-queue/retry-error', payload)
+
+    snapshot = write_json_snapshot(
+        cfg.engagement_dir,
+        category="code-queue-retry-error",
+        label="items",
+        payload=result,
+        metadata={"command": "code-dispatch retry-error", "item_ids": ids, "reason": reason},
+    )
+    retried = result.get('retried', 0) if isinstance(result, dict) else 0
+    print(f"Retried (error -> pending): {retried} item(s)")
+    print(f"Saved audit snapshot: {snapshot.name}")
+    if isinstance(result, dict) and result:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def _retry_needs_context(cfg, id_list: str, reason: str) -> None:
+    ids = _validate_id_list(id_list)
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        result = client.post('code/analysis-queue/retry-needs-context', {
+            'item_ids': ids, 'reason': reason,
+        })
+    print(f"Retried (needs_context -> pending): {result.get('retried', 0)} item(s)")
+    print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 def _fetch_code_files(cfg) -> list[dict]:
@@ -436,11 +740,10 @@ def _flatten_queue_specs(item, inherited: dict | None = None) -> list[dict]:
 def _resolve_queue_file_ids(item: dict, code_files: list[dict]) -> list[int]:
     file_id = item.get('file_id')
     if file_id not in (None, ""):
-        try:
-            return [int(file_id)]
-        except (TypeError, ValueError):
+        if type(file_id) is not int or file_id <= 0:
             print(f"Invalid queue file_id: {file_id!r}", file=sys.stderr)
             sys.exit(1)
+        return [file_id]
 
     file_path = str(item.get('file_path', '')).strip()
     if not file_path:
@@ -449,9 +752,7 @@ def _resolve_queue_file_ids(item: dict, code_files: list[dict]) -> list[int]:
 
     repo_id = item.get('repo_id')
     if repo_id not in (None, ""):
-        try:
-            repo_id = int(repo_id)
-        except (TypeError, ValueError):
+        if type(repo_id) is not int or repo_id <= 0:
             print(f"Invalid queue repo_id: {repo_id!r}", file=sys.stderr)
             sys.exit(1)
     else:
@@ -505,10 +806,20 @@ def _normalize_queue_items(cfg, raw_items: list[dict]) -> list[dict]:
             sys.exit(1)
 
         file_ids = _resolve_queue_file_ids(entry, code_files)
+        if entry.get('priority') in (None, ""):
+            print("Queue item requires explicit priority", file=sys.stderr)
+            sys.exit(1)
+        priority = entry['priority']
+        if type(priority) is not int:
+            print("Queue priority must be an integer", file=sys.stderr)
+            sys.exit(1)
+        if not 0 <= priority <= 100:
+            print("Queue priority must be between 0 and 100", file=sys.stderr)
+            sys.exit(1)
         for file_id in file_ids:
             normalized_item: dict = {
                 'file_id': file_id,
-                'priority': max(0, min(100, int(entry.get('priority', 50)))),
+                'priority': priority,
                 'batch_theme': str(entry.get('batch_theme', '')),
                 'slot_types': _normalize_string_list(entry.get('slot_types')),
                 'guidance_hypotheses': _normalize_string_list(entry.get('guidance_hypotheses')),
@@ -523,11 +834,17 @@ def _normalize_queue_items(cfg, raw_items: list[dict]) -> list[dict]:
     return normalized
 
 
-def _queue(cfg, queue_items_file: str) -> None:
+def _queue(
+    cfg,
+    queue_items_file: str,
+    *,
+    mode: str = "initial",
+    reason: str = "",
+) -> None:
     """Queue analysis items. Items can include batch_theme, slot_types, and
     guidance_hypotheses fields alongside the existing format — those are
-    normalized (priority clamped, string lists flattened) before being posted
-    to the backend."""
+    normalized (explicit priority validated, string lists flattened) before
+    being posted to the backend."""
     fp = Path(queue_items_file)
     if not fp.is_file():
         print(f"Queue items JSON file not found: {queue_items_file}", file=sys.stderr)
@@ -543,16 +860,46 @@ def _queue(cfg, queue_items_file: str) -> None:
 
     normalized_items = _normalize_queue_items(cfg, items)
 
+    normalized_mode = str(mode).strip().lower()
+    normalized_reason = str(reason).strip()
+    if normalized_mode not in {"initial", "reanalysis"}:
+        print("Queue mode must be initial or reanalysis", file=sys.stderr)
+        sys.exit(1)
+    if normalized_mode == "reanalysis" and not normalized_reason:
+        print("Reanalysis reason is required", file=sys.stderr)
+        sys.exit(1)
+
+    request_payload: dict[str, object] = {
+        "mode": normalized_mode,
+        "items": normalized_items,
+    }
+    if normalized_mode == "reanalysis":
+        request_payload["reason"] = normalized_reason
+    command_name = (
+        "code-dispatch reanalyze"
+        if normalized_mode == "reanalysis"
+        else "code-dispatch queue"
+    )
+
     submit_snapshot = write_json_snapshot(
         cfg.engagement_dir,
         category="code-queue-submit",
         label=fp.stem,
-        payload={"input": items, "normalized": normalized_items},
+        payload={
+            "input": items,
+            "normalized": normalized_items,
+            "mode": normalized_mode,
+            "reason": normalized_reason,
+        },
         source_path=str(fp),
-        metadata={"command": "code-dispatch queue", "count": len(normalized_items)},
+        metadata={
+            "command": command_name,
+            "mode": normalized_mode,
+            "count": len(normalized_items),
+        },
     )
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        result = client.post('code/analysis-queue', {'items': normalized_items})
+        result = client.post('code/analysis-queue', request_payload)
 
     response_snapshot = write_json_snapshot(
         cfg.engagement_dir,
@@ -560,13 +907,33 @@ def _queue(cfg, queue_items_file: str) -> None:
         label=fp.stem,
         payload=result,
         source_path=str(submit_snapshot),
-        metadata={"command": "code-dispatch queue", "count": len(normalized_items)},
+        metadata={
+            "command": command_name,
+            "mode": normalized_mode,
+            "count": len(normalized_items),
+        },
     )
-    inserted_count = result.get('inserted', len(normalized_items)) if isinstance(result, dict) else len(normalized_items)
-    print(f"Queued {inserted_count} analysis item(s)")
+    response = result if isinstance(result, dict) else {}
+    inserted_count = int(response.get("inserted", len(normalized_items)))
+    updated_count = int(response.get("updated", 0))
+    already_active_count = int(response.get("already_active", 0))
+    conflict_count = int(response.get("conflicts", 0))
+    reanalysis_count = int(response.get("reanalysis", 0))
+    print(
+        "Queue outcomes: "
+        f"inserted={inserted_count}, updated={updated_count}, "
+        f"already-active={already_active_count}, conflicts={conflict_count}, "
+        f"reanalysis={reanalysis_count}"
+    )
     print(f"Audit snapshots: {submit_snapshot.name}, {response_snapshot.name}")
     if isinstance(result, dict) and result:
         print(json.dumps(result, indent=2, ensure_ascii=False))
+    if conflict_count:
+        print(
+            f"Queue submission reported {conflict_count} conflict(s)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def _requeue_triggers(cfg, triggers_file: str) -> None:

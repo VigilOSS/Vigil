@@ -1,17 +1,20 @@
-"""vigil assess merge-finding — POST merge + emit event."""
+"""vigil assess finding merge — POST merge + emit event."""
 from __future__ import annotations
 
 import os
+import sys
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
 
 
 def register(subparsers) -> None:
-    p = subparsers.add_parser("merge-finding", help="Merge one finding into another")
+    p = subparsers.add_parser("merge", help="Merge one finding into another")
     p.add_argument("source_slug", help="Source finding slug (will be merged away)")
     p.add_argument("target_slug", help="Target finding slug (will absorb source)")
     p.add_argument("reason", help="Reason for the merge")
+    p.add_argument("--expected-source-row-version", type=int)
+    p.add_argument("--expected-target-row-version", type=int)
     p.set_defaults(func=run)
 
 
@@ -22,10 +25,13 @@ def run(args) -> None:
         "target_slug": args.target_slug,
         "reason": args.reason,
         "source_name": "operator",
+        "expected_source_row_version": getattr(args, "expected_source_row_version", None),
+        "expected_target_row_version": getattr(args, "expected_target_row_version", None),
     }
+    payload = {key: value for key, value in payload.items() if value is not None}
 
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        client.post("findings/merge", payload)
+        result = client.post("findings/merge", payload)
 
     # Emit event
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
@@ -36,5 +42,13 @@ def run(args) -> None:
             "agent_name": "operator",
             "summary": f"Merged {args.source_slug} into {args.target_slug}: {args.reason}",
         })
+
+    # A merge that inherited a contradictory CVSS pair still completes (refusing
+    # would strand two duplicates the agent correctly identified), so the backend
+    # reports the defect instead. Relay it: the API and websocket consumers see
+    # `warnings`, and a CLI agent would otherwise only learn about it much later,
+    # from a blocked report-readiness check.
+    for warning in (result or {}).get("warnings") or []:
+        print(f"finding merge: {warning}", file=sys.stderr)
 
     print(f"Merged {args.source_slug} into {args.target_slug}")

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import sys
-from pathlib import Path
 from typing import Any
 
 from assess.lib.client import AssessmentClient, AssessError
@@ -27,11 +26,9 @@ from assess.commands.dispatch._shared import (
 )
 
 
-# Actions that don't need a cases.db (work-buffer SQLite). When the first
-# positional arg matches one of these names, we treat it as the action and
-# leave db_path empty rather than forcing the operator to pass a useless path.
-# These hit the orchestrator backend (not the work buffer). The operator-facing
-# CLI maps them to ``vigil assess agent start|done|list|get|handoff|decision|...``.
+# Backend dispatch actions. The operator-facing CLI maps these to
+# ``vigil assess agent start|done|list|get|handoff|decision|...``; no local
+# database path is part of that public contract.
 _DBLESS_ACTIONS = (
     "render-handoff",
     "register",
@@ -43,50 +40,28 @@ _DBLESS_ACTIONS = (
     "record-handoff",
 )
 
+_HANDOFF_PATCHABLE_FIELDS = frozenset(
+    {
+        "summary",
+        "phase",
+        "confidence",
+        "finding_slugs",
+        "coverage_gaps",
+        "next_steps",
+        "runtime_issues",
+        "working_artifacts",
+        "open_questions",
+        "recommended_next_agent",
+        "handoff_status",
+        "closed_dispatch_status",
+        "extras",
+    }
+)
+
 
 def _client_for(args) -> tuple[AssessmentClient, Any]:
     cfg = load_config(getattr(args, "engagement_dir", None))
     return AssessmentClient(cfg.base_url, cfg.engagement_key), cfg
-
-
-def _emit_scope_rejection_telemetry(args, payload: dict, scope_errors: list[str]) -> None:
-    """Item 11: record a kind='scope_rejection' decision row when the
-    validator rejects a dispatch for scope_host reasons. Audited per
-    engagement so the C7 gate's false-positive rate is queryable via
-    the existing dispatch-decisions list endpoint.
-
-    Best-effort: the caller wraps this in try/except so a failed telemetry
-    write does not block the original rejection error. No network failure
-    path here raises through to the caller.
-    """
-    client, _cfg = _client_for(args)
-    try:
-        scope_entries_summary: list[str] = []
-        scope_path = Path(_cfg.engagement_dir) / "scope.json"
-        if scope_path.is_file():
-            try:
-                scope = json.loads(scope_path.read_text(encoding="utf-8"))
-                raw_hosts = scope.get("hosts") or []
-                if isinstance(raw_hosts, list):
-                    scope_entries_summary = [
-                        str(entry) for entry in raw_hosts if isinstance(entry, (str, int))
-                    ]
-            except (OSError, ValueError):
-                scope_entries_summary = []
-        body = {
-            "kind": "scope_rejection",
-            "payload": {
-                "host": payload.get("scope_host"),
-                "role": payload.get("agent_role") or payload.get("role"),
-                "scope_entries": scope_entries_summary,
-                "reason": scope_errors[0] if scope_errors else "scope_host not in scope.json",
-                "rejected_at": _utcnow_iso(),
-            },
-            "surfaced_to_user": True,
-        }
-        client.record_decision(body)
-    finally:
-        client.close()
 
 
 def _build_register_payload(args) -> dict:
@@ -102,13 +77,12 @@ def _build_register_payload(args) -> dict:
         "agent_id": getattr(args, "agent_id", None),
         "agent_role": getattr(args, "agent_role", None),
         "task": getattr(args, "task", None),
-        "scope_host": getattr(args, "scope_host", None),
+        "application_unit_id": getattr(args, "application_unit_id", None),
         "requested_model": getattr(args, "dispatch_model", None),
         "requested_reasoning": getattr(args, "reasoning", None),
         "dispatch_mode": getattr(args, "dispatch_mode_arg", None),
         "skills": getattr(args, "skills", None),
         "tier": getattr(args, "tier", None),
-        "scope_path_prefix": getattr(args, "scope_path_prefix", None),
         "vuln_classes": getattr(args, "vuln_classes", None),
         "identity": getattr(args, "dispatch_identity", None),
     }
@@ -137,43 +111,10 @@ def _build_register_payload(args) -> dict:
             "Pass --dispatch-mode explicitly to override.",
             file=sys.stderr,
         )
-    allow_no_skills = bool(getattr(args, "allow_no_skills", False))
-    if allow_no_skills:
-        payload["allow_no_skills"] = True
-    # Engagement dir lets the validator check scope_host against scope.json
-    try:
-        _cfg_for_validation = load_config(getattr(args, "engagement_dir", None))
-        _eng_dir_for_validation = _cfg_for_validation.engagement_dir
-    except Exception as exc:  # noqa: BLE001
-        _eng_dir_for_validation = None
-        print(
-            "WARN agent start: could not load engagement config; the scope-host gate "
-            f"is NOT enforced for this dispatch ({type(exc).__name__}: {exc}). "
-            "Verify scope.json manually before active probing.",
-            file=sys.stderr,
-        )
-    errors, warnings = validate_specialist_dispatch_contract(
-        payload,
-        engagement_dir=_eng_dir_for_validation,
-        allow_no_skills=allow_no_skills,
-    )
+    errors, warnings = validate_specialist_dispatch_contract(payload)
     for warning in warnings:
         print(f"WARN agent start: {warning}", file=sys.stderr)
     if errors:
-        # Item 11: when the scope_host gate is the cause of rejection, record
-        # a dispatch decision row (kind='scope_rejection') so the C7 gate's
-        # false-positive rate is auditable across engagements. Best-effort —
-        # failures here do NOT block the original rejection error.
-        scope_errors = [e for e in errors if "not in scope.json" in e]
-        if scope_errors and _eng_dir_for_validation:
-            try:
-                _emit_scope_rejection_telemetry(args, payload, scope_errors)
-            except Exception as telemetry_exc:  # noqa: BLE001
-                print(
-                    f"WARN agent start: scope-rejection telemetry write failed: "
-                    f"{telemetry_exc}",
-                    file=sys.stderr,
-                )
         for error in errors:
             print(f"agent start: {error}", file=sys.stderr)
         sys.exit(1)
@@ -192,8 +133,12 @@ def _register_dispatch(args) -> None:
         row = client.record_dispatch(payload)
     finally:
         client.close()
+    # `dispatch_id`, not a bare `id`: this row lives in assessment_dispatches while
+    # `agent handoff` returns an assessment_dispatch_handoffs row. Two unrelated
+    # sequences printed under the same key sent a verifier at the wrong lifecycle
+    # record. `agent_id` remains the addressable key for every other verb.
     print(json.dumps({
-        "id": row.get("id"),
+        "dispatch_id": row.get("id"),
         "agent_id": row.get("agent_id"),
         "status": row.get("status"),
     }, ensure_ascii=False))
@@ -267,10 +212,22 @@ def _string_set(value: Any) -> set[str]:
     return {str(item).strip() for item in items if str(item).strip()}
 
 
+def _dispatch_ids(args, extra: list[str]) -> list[str]:
+    """Collect one-or-more agent ids from the variadic ``extra`` positional,
+    falling back to ``--agent-id`` when no positional id was given. Batch:
+    every id in ``extra`` is processed with the same shared flags."""
+    ids = [str(x).strip() for x in (extra or []) if str(x).strip()]
+    if not ids:
+        fallback = (getattr(args, "agent_id", "") or "").strip()
+        if fallback:
+            ids = [fallback]
+    return ids
+
+
 def _update_dispatch_status(args, extra: list[str]) -> None:
-    agent_id = (extra[0].strip() if extra else (getattr(args, "agent_id", "") or ""))
-    if not agent_id:
-        print("Usage: vigil assess agent done <agent-id> --status ...", file=sys.stderr)
+    ids = _dispatch_ids(args, extra)
+    if not ids:
+        print("Usage: vigil assess agent done <agent-id> [<agent-id> ...] --status ...", file=sys.stderr)
         sys.exit(1)
     patch: dict[str, Any] = {}
     if getattr(args, "dispatch_status", None):
@@ -289,11 +246,25 @@ def _update_dispatch_status(args, extra: list[str]) -> None:
         )
         sys.exit(1)
     client, _ = _client_for(args)
+    rows: list[dict[str, Any]] = []
+    failed = 0
     try:
-        row = client.update_dispatch(agent_id, patch)
+        for agent_id in ids:
+            try:
+                rows.append(client.update_dispatch(agent_id, patch))
+            except Exception as exc:  # noqa: BLE001 - one bad id must not drop the rest
+                failed += 1
+                print(f"agent done: {agent_id} failed: {exc}", file=sys.stderr)
     finally:
         client.close()
-    print(json.dumps(row, ensure_ascii=False))
+    if len(ids) == 1 and rows:
+        print(json.dumps(rows[0], ensure_ascii=False))
+    else:
+        for row in rows:
+            print(json.dumps(row, ensure_ascii=False))
+        print(f"[agent done] updated {len(rows)} dispatch(es); {failed} failed.", file=sys.stderr)
+    if failed:
+        sys.exit(1)
 
 
 def _abort_duplicate_dispatch(args, extra: list[str]) -> None:
@@ -369,19 +340,24 @@ def _list_dispatches(args) -> None:
 
 
 def _get_dispatch(args, extra: list[str]) -> None:
-    agent_id = (extra[0].strip() if extra else (getattr(args, "agent_id", "") or ""))
-    if not agent_id:
-        print("Usage: vigil assess agent get <agent-id>", file=sys.stderr)
+    ids = _dispatch_ids(args, extra)
+    if not ids:
+        print("Usage: vigil assess agent get <agent-id> [<agent-id> ...]", file=sys.stderr)
         sys.exit(1)
     client, _ = _client_for(args)
+    missing = 0
     try:
-        row = client.get_dispatch(agent_id)
+        for agent_id in ids:
+            row = client.get_dispatch(agent_id)
+            if row is None:
+                missing += 1
+                print(f"agent get: agent_id '{agent_id}' not found", file=sys.stderr)
+                continue
+            print(json.dumps(row, ensure_ascii=False))
     finally:
         client.close()
-    if row is None:
-        print(f"agent get: agent_id '{agent_id}' not found", file=sys.stderr)
+    if missing:
         sys.exit(2)
-    print(json.dumps(row, ensure_ascii=False))
 
 
 def _record_decision(args) -> None:
@@ -471,16 +447,18 @@ def _build_handoff_payload(args) -> dict:
     agent_id = getattr(args, "agent_id", None)
     agent_role = getattr(args, "agent_role", None)
     summary = getattr(args, "hf_summary", None)
-    if not agent_id or not agent_role or not summary:
+    if not agent_id:
         print(
-            "agent handoff: --agent-id, --agent-role, and --summary are required "
-            "(or pass --from-json with a payload that supplies them)",
+            "agent handoff: --agent-id is required "
+            "(or pass --from-json with an agent_id)",
             file=sys.stderr,
         )
         sys.exit(1)
     payload["agent_id"] = agent_id
-    payload["agent_role"] = agent_role
-    payload["summary"] = summary
+    if agent_role:
+        payload["agent_role"] = agent_role
+    if summary:
+        payload["summary"] = summary
     if getattr(args, "hf_confidence", None):
         payload["confidence"] = args.hf_confidence
     finding_slugs = _split_csv(getattr(args, "finding_slugs", None))
@@ -558,14 +536,40 @@ def _record_handoff(args) -> None:
     payload = _build_handoff_payload(args)
     client, _ = _client_for(args)
     try:
-        # Idempotent by design: agents call record-handoff after every major
-        # step in their methodology, so the same (engagement, agent_id) tuple
-        # collides on each subsequent call. The client retries the POST as a
-        # PATCH on 409 transparently.
-        row = client.record_handoff(payload, upsert=True)
+        agent_id = str(payload.get("agent_id") or "")
+        if payload.get("agent_role") and payload.get("summary"):
+            # Full checkpoints are idempotent: POST on the first write and
+            # transparently PATCH on a duplicate agent_id.
+            row = client.record_handoff(payload, upsert=True)
+        else:
+            # Lifecycle promotion is a true partial update. Requiring the
+            # caller to re-send the summary risks replacing the specialist's
+            # authored record just to change handoff_status.
+            existing = client.get_handoff(agent_id)
+            if existing is None:
+                print(
+                    "agent handoff: --agent-role and --summary are required when "
+                    f"creating new handoff {agent_id!r}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            patch = {
+                key: value
+                for key, value in payload.items()
+                if key in _HANDOFF_PATCHABLE_FIELDS
+            }
+            if not patch:
+                print(
+                    "agent handoff: supply at least one handoff field to update",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            row = client.update_handoff(agent_id, patch)
     finally:
         client.close()
+    # `handoff_id` names the namespace (assessment_dispatch_handoffs) so it cannot
+    # be confused with the `dispatch_id` that `agent start` prints — see the note there.
     print(json.dumps({
-        "id": row.get("id"),
+        "handoff_id": row.get("id"),
         "agent_id": row.get("agent_id"),
     }, ensure_ascii=False))

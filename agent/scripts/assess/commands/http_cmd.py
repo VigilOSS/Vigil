@@ -128,21 +128,24 @@ def register(subparsers) -> None:
         dest="enabled",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Master switch for raw-body capture (--enabled / --no-enabled). Default OFF.",
+        help=(
+            "Enable/disable full-flow metadata recording. Body sidecars remain controlled "
+            "independently by --capture-request-bodies/--capture-response-bodies. Default OFF."
+        ),
     )
     sp_policy_set.add_argument(
         "--capture-request-bodies",
         dest="capture_request_bodies",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Persist raw request bodies as engagement-local sidecars.",
+        help="When full-flow recording is enabled, persist request bodies as engagement-local sidecars.",
     )
     sp_policy_set.add_argument(
         "--capture-response-bodies",
         dest="capture_response_bodies",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Persist raw response bodies as engagement-local sidecars.",
+        help="When full-flow recording is enabled, persist response bodies as engagement-local sidecars.",
     )
     sp_policy_set.add_argument(
         "--max-body-bytes",

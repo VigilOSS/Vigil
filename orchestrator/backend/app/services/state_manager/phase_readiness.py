@@ -1,4 +1,4 @@
-"""Wave 6d — phase-keyed readiness assembly (command consolidation).
+"""Phase-keyed readiness assembly for the consolidated command.
 
 This module is the backend half of the consolidated ``check-phase-readiness``
 CLI command. It exposes ONE entry point — :func:`phase_readiness` — that the API
@@ -20,7 +20,7 @@ routes that serve them are STABLE — the phase-transition gate, ``report_export
 and the frontend bind to them. This module is purely ADDITIVE: it calls them
 behind a new front door.
 
-Phase composition (depth-gate §6 / master plan Wave 6):
+Phase composition:
 
   * ``recon``   → coverage gate + per-host outcomes + intel advisory
   * ``collect`` → coverage gate + per-host outcomes

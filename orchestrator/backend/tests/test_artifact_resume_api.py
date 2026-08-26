@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import json
 import sqlite3
 from pathlib import Path
@@ -353,9 +354,9 @@ def test_resume_brief_returns_bounded_operating_picture(client, isolate_settings
     assert body["target_finding"]["slug"] == "VA-047"
     assert body["command_runs"][0]["stdout_preview"] == ""
     assert any(row["relative_path"] == "notes/VA-047-note.md" for row in body["artifacts"])
-    assert any("list-command-runs" in row["command"] for row in body["recommended_next_actions"])
+    assert any("command-run list" in row["command"] for row in body["recommended_next_actions"])
     assert any(
-        row["entity_kind"] == "command_run" and row["command"] == f"vigil assess get-command-run {command.json()['id']}"
+        row["entity_kind"] == "command_run" and row["command"] == f"vigil assess command-run get {command.json()['id']}"
         for row in body["recommended_next_actions"]
     )
     artifact_id = next(row["id"] for row in body["artifacts"] if row["relative_path"] == "notes/VA-047-note.md")
@@ -414,28 +415,35 @@ def test_resume_brief_surfaces_section_rolls_up_by_status_and_type(client, isola
 
 
 def test_resume_brief_work_buffer_counts_pending_by_gf_bucket(client, isolate_settings) -> None:
-    """build_resume_brief.work_buffer counts pending assessment_coverage_items by
-    attack_family (the gf-bucket key) and excludes retired (covered) items
-    (gap #2 root fix)."""
+    """build_resume_brief.work_buffer counts pending assessment_work_items keyed
+    by cluster_key (the gf-bucket identity) and excludes non-pending / terminal
+    rows. Reads the real dispatch queue folded into the backend ledger (ADR 0013),
+    not a coverage-item proxy."""
     _write_engagement(isolate_settings["engagements_dir"])
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
 
-    items = [
-        {"attack_family": "idor", "input_slot": "endpoint"},
-        {"attack_family": "idor", "input_slot": "query"},
-        {"attack_family": "ssrf", "input_slot": "endpoint"},
-        {"attack_family": "sqli", "input_slot": "endpoint", "status_value": "covered", "notes": "tested, no injection"},
-    ]
-    for payload in items:
-        resp = client.post(f"{BASE}/coverage-items", json=payload)
+    def _observe(url, cluster, *, status="pending", terminal_reason=""):
+        wi = {"case_type": "api", "cluster_key": cluster, "status": status}
+        if terminal_reason:
+            wi["terminal_reason"] = terminal_reason
+        resp = client.post(
+            f"{BASE}/request-observations",
+            json={"url": url, "method": "GET", "work_item": wi},
+        )
         assert resp.status_code == 201, resp.text
 
+    _observe("https://example.com/api/a", "gf:idor")
+    _observe("https://example.com/api/b", "gf:idor")
+    _observe("https://example.com/api/c", "gf:ssrf")
+    # A deferred/terminal row is excluded from the pending work buffer.
+    _observe("https://example.com/api/d", "gf:sqli", status="skipped", terminal_reason="low-signal")
+
     work_buffer = client.get(f"{BASE}/resume-brief").json()["work_buffer"]
-    assert work_buffer["pending_total"] == 3  # the covered sqli item is excluded
-    assert work_buffer["by_bucket"] == {"idor": 2, "ssrf": 1}
+    assert work_buffer["pending_total"] == 3  # the skipped sqli row is excluded
+    assert work_buffer["by_bucket"] == {"gf:idor": 2, "gf:ssrf": 1}
     # most_common ordering: the heaviest bucket comes first
-    assert list(work_buffer["by_bucket"].keys())[0] == "idor"
-    assert "sqli" not in work_buffer["by_bucket"]
+    assert list(work_buffer["by_bucket"].keys())[0] == "gf:idor"
+    assert "gf:sqli" not in work_buffer["by_bucket"]
 
 
 def test_resume_brief_lists_coverage_and_read_first_intel_notes(client, isolate_settings) -> None:
@@ -712,6 +720,85 @@ def test_report_readiness_unlinked_markdown_notes_are_advisory(client, isolate_s
     assert body["ready"] is True, body
 
 
+def test_report_readiness_checks_unlinked_root_markdown_documents(client, isolate_settings) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _seed_finding(client, eng)
+    (eng / "RESUME.md").write_text("Durable engagement state", encoding="utf-8")
+    registered = client.post(
+        f"{BASE}/artifacts",
+        json={"path": "RESUME.md", "kind": "note"},
+    )
+    assert registered.status_code == 201, registered.text
+
+    readiness = client.get(f"{BASE}/report-readiness")
+    assert readiness.status_code == 200, readiness.text
+    advisory = next(
+        row
+        for row in readiness.json()["advisories"]
+        if row["kind"] == "unlinked_markdown_note" and row["path"] == "RESUME.md"
+    )
+    assert "artifact register RESUME.md --finding" in advisory["detail"]
+
+
+def test_report_readiness_flags_missing_markdown_paths_cited_by_durable_notes(
+    client,
+    isolate_settings,
+) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _seed_finding(client, eng)
+    (eng / "RESUME.md").write_text(
+        "Deferred work is tracked in `OOB-CALLBACKS.md`.",
+        encoding="utf-8",
+    )
+    registered = client.post(
+        f"{BASE}/artifacts",
+        json={"path": "RESUME.md", "kind": "note", "producer_agent_id": "operator"},
+    )
+    assert registered.status_code == 201, registered.text
+
+    readiness = client.get(f"{BASE}/report-readiness")
+    assert readiness.status_code == 200, readiness.text
+    advisory = next(
+        row
+        for row in readiness.json()["advisories"]
+        if row["kind"] == "missing_cited_markdown_artifact"
+    )
+    assert advisory["path"] == "OOB-CALLBACKS.md"
+    assert advisory["cited_by"] == ["RESUME.md"]
+
+
+def test_report_readiness_does_not_follow_markdown_citations_outside_engagement(
+    client,
+    isolate_settings,
+) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _seed_finding(client, eng)
+    outside = eng.parent / "outside.md"
+    outside.write_text("not engagement evidence", encoding="utf-8")
+    (eng / "RESUME.md").write_text(
+        "Deferred work is tracked in `../outside.md`.",
+        encoding="utf-8",
+    )
+    registered = client.post(
+        f"{BASE}/artifacts",
+        json={"path": "RESUME.md", "kind": "note", "producer_agent_id": "operator"},
+    )
+    assert registered.status_code == 201, registered.text
+
+    readiness = client.get(f"{BASE}/report-readiness")
+
+    assert readiness.status_code == 200, readiness.text
+    advisory = next(
+        row
+        for row in readiness.json()["advisories"]
+        if row["kind"] == "missing_cited_markdown_artifact"
+    )
+    assert advisory["path"] == "../outside.md"
+
+
 def test_report_readiness_normalizes_absolute_evidence_ref(client, isolate_settings) -> None:
     eng = _write_engagement(isolate_settings["engagements_dir"])
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
@@ -777,7 +864,7 @@ def test_report_readiness_validates_evidence_ref_when_artifact_id_is_present(cli
         for blocker in blockers
         if blocker["kind"] == "finding_evidence_artifact_mismatch" and blocker["slug"] == "VA-047"
     )
-    assert "vigil assess update-finding VA-047 --evidence-ref notes/replacement-evidence.md" in mismatch["detail"]
+    assert "vigil assess finding update VA-047 --evidence-ref notes/replacement-evidence.md" in mismatch["detail"]
 
 
 def test_mark_scratch_clears_unlinked_markdown_advisory(client, isolate_settings) -> None:
@@ -948,6 +1035,150 @@ def test_resume_brief_stale_threshold_per_role(client, isolate_settings) -> None
     assert "exp-old" in stale_ids
 
 
+def test_resume_brief_surfaces_terminal_handoff_less_dispatch(client, isolate_settings) -> None:
+    """C4c: a dispatch that reads terminal (failed/aborted) with no handoff row
+    is silent state-loss — pre-fix, `_recent_dispatch_picture` excluded any
+    non-in-progress row before the handoff-gap check ever ran, so this case
+    was structurally invisible to resume-brief. It must now appear in the new
+    `terminal_no_handoff` list, while staying OUT of both `handoff_gaps` (which
+    is in-progress-only, so a terminal row isn't double-reported) and
+    `stale_in_progress_dispatches`."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    dispatch = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": "recon-died-1",
+            "agent_role": "recon-specialist",
+            "task": "enumerate subdomains",
+            "skills": "recon-methodology",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
+    closed = client.patch(
+        f"{BASE}/dispatches/recon-died-1",
+        json={"status": "failed", "completed_at": "2026-07-08T12:00:00Z"},
+    )
+    assert closed.status_code == 200, closed.text
+
+    brief = client.get(f"{BASE}/resume-brief")
+    assert brief.status_code == 200, brief.text
+    dispatches = brief.json()["dispatches"]
+
+    terminal_ids = [row["agent_id"] for row in dispatches.get("terminal_no_handoff") or []]
+    assert "recon-died-1" in terminal_ids
+    terminal_row = next(row for row in dispatches["terminal_no_handoff"] if row["agent_id"] == "recon-died-1")
+    assert terminal_row["status"] == "failed"
+    assert terminal_row["agent_role"] == "recon-specialist"
+
+    # A terminal handoff-less dispatch is surfaced ONLY by terminal_no_handoff,
+    # not double-reported in the in-progress-only handoff_gaps list.
+    gap_ids = [row["agent_id"] for row in dispatches.get("handoff_gaps") or []]
+    assert "recon-died-1" not in gap_ids
+
+    stale_ids = [row["agent_id"] for row in dispatches.get("stale_in_progress_dispatches") or []]
+    assert "recon-died-1" not in stale_ids
+
+
+def test_resume_brief_surfaces_completed_handoff_gap_until_decision_reconciles_it(
+    client, isolate_settings
+) -> None:
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    created = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": "recon-completed-no-handoff",
+            "agent_role": "recon-specialist",
+            "task": "enumerate",
+            "skills": "recon-methodology",
+        },
+    )
+    assert created.status_code == 201, created.text
+    closed = client.patch(
+        f"{BASE}/dispatches/recon-completed-no-handoff",
+        json={"status": "completed", "completed_at": "2026-07-08T12:00:00Z"},
+    )
+    assert closed.status_code == 200, closed.text
+
+    before = client.get(f"{BASE}/resume-brief").json()["dispatches"]
+    assert "recon-completed-no-handoff" in {
+        row["agent_id"] for row in before["terminal_no_handoff"]
+    }
+
+    decision = client.post(
+        f"{BASE}/dispatch-decisions",
+        json={
+            "kind": "dispatch_reconciliation",
+            "payload": {
+                "agent_id": "recon-completed-no-handoff",
+                "reason": "confirmed completed with no durable specialist output",
+            },
+            "surfaced_to_user": True,
+        },
+    )
+    assert decision.status_code == 201, decision.text
+
+    after = client.get(f"{BASE}/resume-brief").json()["dispatches"]
+    assert "recon-completed-no-handoff" not in {
+        row["agent_id"] for row in after["terminal_no_handoff"]
+    }
+
+
+def test_resume_brief_stale_in_progress_below_display_window_is_reported(client, isolate_settings) -> None:
+    """I-10: an OLD in-progress dispatch that sorts BELOW the newest-25 display
+    window must still be reported as stale (and counted). Pre-fix, stale/gap
+    detection scanned only that newest-25 window, so a stale row beneath it
+    silently vanished from resume-brief — even though `reconcile-stale` (which
+    scans in-progress with the SAME thresholds) still flagged it. The divergence
+    was the ROW SET, not the threshold."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+
+    # Dispatched "now" → age ~0h, well under the 24h default → NOT stale. 30 of
+    # them push any older dispatch out of the newest-25 display window.
+    recent_iso = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for index in range(30):
+        resp = client.post(
+            f"{BASE}/dispatches",
+            json={
+                "agent_id": f"recent-{index:02d}",
+                "agent_role": "vulnerability-analyst",
+                "task": "probe",
+                "skills": "web-methodology",
+                "dispatched_at": recent_iso,
+            },
+        )
+        assert resp.status_code == 201, resp.text
+
+    # One OLD in-progress dispatch: far past the 24h threshold and, having the
+    # oldest dispatched_at, sorted at the very bottom (below the newest-25).
+    old = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": "stale-old",
+            "agent_role": "vulnerability-analyst",
+            "task": "deep enumeration",
+            "skills": "web-methodology",
+            "dispatched_at": "2026-01-01T00:00:00Z",
+        },
+    )
+    assert old.status_code == 201, old.text
+
+    brief = client.get(f"{BASE}/resume-brief")
+    assert brief.status_code == 200, brief.text
+    dispatches = brief.json()["dispatches"]
+
+    # The old dispatch is NOT in the newest-window display list …
+    recent_ids = [row["agent_id"] for row in dispatches.get("recent_dispatches") or []]
+    assert "stale-old" not in recent_ids
+    # … yet it IS flagged stale by the decoupled full in-progress scan, and it is
+    # the only stale one (the 30 recent dispatches are not stale).
+    stale_ids = [row["agent_id"] for row in dispatches.get("stale_in_progress_dispatches") or []]
+    assert "stale-old" in stale_ids
+    assert dispatches["stale_in_progress_dispatches_count"] == 1
+
+
 def test_recommended_actions_keep_lifecycle_items_before_inspect_cap() -> None:
     actions = _recommended_actions(
         finding="VA-047",
@@ -961,3 +1192,195 @@ def test_recommended_actions_keep_lifecycle_items_before_inspect_cap() -> None:
     assert len(actions) == 8
     assert "vigil assess agent render-handoff va-memory" in commands
     assert "vigil assess agent reconcile-stale --dry-run" in commands
+
+
+# ---------------------------------------------------------------------------
+# Directory evidence_refs are present, not "missing on disk"
+# ---------------------------------------------------------------------------
+
+def test_registered_directory_is_indexed_as_present(client, isolate_settings) -> None:
+    """`artifact register <dir>` already accepts a directory at write time.
+
+    The indexer's existence predicate was `is_file()`, so every registered
+    directory came back `present=False` and report-readiness reported "the file
+    is missing on disk" against directories holding the whole capture set.
+    """
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    evidence_dir = eng / "scans" / "idor-capture"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    (evidence_dir / "request-01.txt").write_text("GET /account/2", encoding="utf-8")
+
+    registered = _register_note(client, "scans/idor-capture", kind="scan-report")
+    assert registered["present"] is True
+
+    refreshed = client.post(f"{BASE}/artifacts/refresh")
+    assert refreshed.status_code in (200, 201), refreshed.text
+    assert refreshed.json()["missing"] == 0
+
+    detail = client.get(f"{BASE}/artifacts/{registered['id']}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["present"] is True
+
+
+def test_finding_with_directory_evidence_ref_is_not_reported_missing(
+    client, isolate_settings
+) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    evidence_dir = eng / "scans" / "va-049-evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    (evidence_dir / "response-01.txt").write_text("HTTP/1.1 200 OK", encoding="utf-8")
+
+    created = client.post(
+        f"{BASE}/findings",
+        json={
+            "slug": "VA-049",
+            "title": "Directory evidence set",
+            "severity": "high",
+            "workflow_status": "active",
+            "verification_state": "verified",
+            "verification_disposition": "confirmed",
+            "canonical_location": "https://example.com/account",
+            "summary": "The proof is a directory of captured request/response pairs.",
+            "evidence_ref": "scans/va-049-evidence",
+            "source_name": "vulnerability-analyst",
+            "details": {
+                "cvss_score": 7.7,
+                "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N",
+                "steps_to_reproduce": ["capture pair", "replay as second identity"],
+                "remediation": "Enforce object-level authorization",
+                "impact": "Cross-account read",
+                "evidence": "Captured pairs in the linked directory",
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    readiness = client.get(f"{BASE}/report-readiness")
+    assert readiness.status_code == 200, readiness.text
+    blockers = readiness.json()["blockers"]
+    assert not any(
+        blocker["slug"] == "VA-049"
+        and blocker["kind"]
+        in {"finding_evidence_missing_artifact", "finding_evidence_unindexed"}
+        for blocker in blockers
+    )
+
+
+def test_mark_scratch_accepts_an_unindexed_directory(client, isolate_settings) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    scratch_dir = eng / "notes" / "scratch-set"
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    (scratch_dir / "a.md").write_text("scratch", encoding="utf-8")
+
+    response = client.post(
+        f"{BASE}/artifacts/scratch-by-path",
+        json={"path": "notes/scratch-set", "scratch": True},
+    )
+    assert response.status_code in (200, 201), response.text
+    assert response.json()["scratch"] is True
+
+
+def test_missing_evidence_blocker_never_tells_the_operator_to_restore_the_file(
+    client, isolate_settings
+) -> None:
+    """The remediation text lands on real evidence directories — it must not
+    read as an instruction to recreate or overwrite what is there."""
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _seed_finding(client, eng)
+    (eng / "notes" / "VA-047-note.md").unlink()
+    assert client.post(f"{BASE}/artifacts/refresh").status_code in (200, 201)
+
+    readiness = client.get(f"{BASE}/report-readiness")
+    assert readiness.status_code == 200, readiness.text
+    blocker = next(
+        b
+        for b in readiness.json()["blockers"]
+        if b["kind"] == "finding_evidence_missing_artifact" and b["slug"] == "VA-047"
+    )
+    detail = blocker["detail"]
+    assert "Restore the file" not in detail
+    assert "VERIFY the path first" in detail
+    assert "do NOT recreate or overwrite" in detail
+
+    # Same wording rule on the sibling branch, reached when the finding carries
+    # no evidence_artifact_id and the path is resolved through the index.
+    with sqlite3.connect(str(db_module.database_path())) as connection:
+        connection.execute(
+            "UPDATE assessment_findings SET evidence_artifact_id = NULL WHERE slug = ?",
+            ("VA-047",),
+        )
+        connection.commit()
+    readiness = client.get(f"{BASE}/report-readiness")
+    assert readiness.status_code == 200, readiness.text
+    unlinked = next(
+        b
+        for b in readiness.json()["blockers"]
+        if b["kind"] == "finding_evidence_missing_artifact" and b["slug"] == "VA-047"
+    )
+    assert "Restore the file" not in unlinked["detail"]
+    assert "VERIFY the path first" in unlinked["detail"]
+    assert "do NOT recreate or overwrite" in unlinked["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Composite / prose evidence_refs must not mint a ghost artifact row
+# ---------------------------------------------------------------------------
+
+def test_composite_evidence_ref_records_the_finding_but_mints_no_artifact_row(
+    client, isolate_settings
+) -> None:
+    """Warn-don't-block is correct and preserved; the ghost row is the bug.
+
+    A semicolon-joined or prose-prefixed ref can never resolve to a path, so
+    minting a permanent artifact row for it and linking it as
+    evidence_artifact_id fabricates evidence provenance that does not exist.
+    """
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+
+    for slug, ref in (
+        ("VA-051", "scans/a.out; scans/b.out"),
+        ("VA-052", "command-runs 56052/56054/56061"),
+    ):
+        created = client.post(
+            f"{BASE}/findings",
+            json={
+                "slug": slug,
+                "title": f"Composite evidence ref {slug}",
+                "severity": "medium",
+                "workflow_status": "active",
+                "verification_state": "unreviewed",
+                "verification_disposition": "none",
+                "canonical_location": f"https://example.com/{slug}",
+                "summary": "Recording must still succeed with a composite ref.",
+                "evidence_ref": ref,
+                "source_name": "vulnerability-analyst",
+                "details": {"evidence": "prose", "impact": "n/a"},
+            },
+        )
+        # The finding still records — blocking a finding mid-hunt risks losing it.
+        assert created.status_code == 201, created.text
+        assert created.json()["finding"]["evidence_artifact_id"] in (None, 0, "")
+
+    rows = client.get(f"{BASE}/artifacts/search", params={"q": "scans"}).json()
+    assert not any(
+        row["relative_path"].startswith("scans/a.out;")
+        or "command-runs 56052" in row["relative_path"]
+        for row in rows
+    )
+
+
+def test_single_path_evidence_ref_still_mints_its_artifact_row(
+    client, isolate_settings
+) -> None:
+    """The tightened shape check must not stop a genuine single path."""
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _seed_finding(client, eng)
+
+    rows = client.get(f"{BASE}/artifacts/search", params={"q": "VA047"}).json()
+    assert any(row["relative_path"] == "notes/VA-047-note.md" for row in rows)

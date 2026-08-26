@@ -22,6 +22,10 @@ Supported assertion kinds:
   attacker_outcome_present — every finding's details.impact must be a non-empty
                              string (enforces the project's attacker-outcome
                              discipline)
+  white_box_finding_contract — require an exact set of code-finding identities,
+                               canonical file locations, named proof fields,
+                               an allowed evidence type, and one exact sealed
+                               source identity
 
 Definition format: YAML (PyYAML 6.x is present in the backend venv).
 Fixture format: JSON array of finding payloads.
@@ -135,6 +139,100 @@ def _score_assertion(
                 failures.append(
                     f"attacker_outcome_present: finding '{title}' has an empty "
                     "or missing details.impact"
+                )
+
+    elif kind == "white_box_finding_contract":
+        contract = value if isinstance(value, dict) else {}
+        expected_rows = contract.get("expected_findings", [])
+        expected_code_snapshot = contract.get("expected_code_snapshot")
+        expected_snapshot_valid = (
+            isinstance(expected_code_snapshot, dict)
+            and type(expected_code_snapshot.get("repo_id")) is int
+            and expected_code_snapshot["repo_id"] >= 1
+            and type(expected_code_snapshot.get("repo_generation")) is int
+            and expected_code_snapshot["repo_generation"] >= 1
+            and isinstance(expected_code_snapshot.get("source_manifest_digest"), str)
+            and len(expected_code_snapshot["source_manifest_digest"]) == 64
+            and all(
+                character in "0123456789abcdef"
+                for character in expected_code_snapshot["source_manifest_digest"]
+            )
+        )
+        if not expected_snapshot_valid:
+            failures.append(
+                "white_box_finding_contract: value must declare expected_code_snapshot "
+                "with positive repo_id/repo_generation and a lowercase SHA-256 digest"
+            )
+        required_proof_fields = contract.get("required_proof_fields", [])
+        allowed_evidence_types = set(contract.get("allowed_evidence_types", []))
+
+        def identity(finding: dict[str, Any]) -> tuple[str, str, str]:
+            details = finding.get("details")
+            return (
+                str(finding.get("defect_family", "")),
+                str(finding.get("canonical_location", "")),
+                str(details.get("cwe_id", "")) if isinstance(details, dict) else "",
+            )
+
+        expected_identities = sorted(
+            (
+                str(row.get("defect_family", "")),
+                str(row.get("canonical_location", "")),
+                str(row.get("cwe_id", "")),
+            )
+            for row in expected_rows
+            if isinstance(row, dict)
+        )
+        actual_identities = sorted(identity(finding) for finding in findings)
+        if actual_identities != expected_identities:
+            failures.append(
+                "white_box_finding_contract: exact finding identity mismatch; "
+                f"expected {sorted(expected_identities)}, got {sorted(actual_identities)}"
+            )
+
+        for idx, finding in enumerate(findings):
+            title = str(finding.get("title") or f"finding[{idx}]")
+            location = finding.get("canonical_location")
+            if not (
+                isinstance(location, str)
+                and location.startswith("file:")
+                and location.rsplit(":", 1)[-1].isdigit()
+                and bool(location.removeprefix("file:").rsplit(":", 1)[0])
+            ):
+                failures.append(
+                    "white_box_finding_contract: finding "
+                    f"'{title}' lacks a canonical file location in file:path:line form"
+                )
+
+            details = finding.get("details")
+            details = details if isinstance(details, dict) else {}
+            for field in required_proof_fields:
+                proof = details.get(field)
+                if not (isinstance(proof, str) and proof.strip()):
+                    failures.append(
+                        "white_box_finding_contract: finding "
+                        f"'{title}' has empty or missing details.{field}"
+                    )
+
+            evidence_type = finding.get("evidence_type")
+            if evidence_type not in allowed_evidence_types:
+                failures.append(
+                    "white_box_finding_contract: finding "
+                    f"'{title}' evidence_type {evidence_type!r} is not one of "
+                    f"{sorted(allowed_evidence_types)}"
+                )
+
+            provenance = finding.get("provenance")
+            actual_code_snapshot = (
+                provenance.get("code_snapshot")
+                if isinstance(provenance, dict)
+                else None
+            )
+            if expected_snapshot_valid and actual_code_snapshot != expected_code_snapshot:
+                failures.append(
+                    "white_box_finding_contract: finding "
+                    f"'{title}' code snapshot mismatch; expected "
+                    f"{expected_code_snapshot!r}, got {actual_code_snapshot!r}"
                 )
 
     else:
@@ -261,6 +359,115 @@ def test_scorer_severity_distribution_fails_when_count_below_min():
     assert any("critical" in f for f in failures), (
         f"Expected critical severity_distribution failure, got: {failures}"
     )
+
+
+def _white_box_contract() -> dict[str, Any]:
+    return {
+        "kind": "white_box_finding_contract",
+        "value": {
+            "expected_findings": [
+                {
+                    "defect_family": "buffer-overflow",
+                    "canonical_location": "file:src/parser.c:41",
+                    "cwe_id": "CWE-122",
+                }
+            ],
+            "expected_code_snapshot": {
+                "repo_id": 1,
+                "repo_generation": 7,
+                "source_manifest_digest": "a" * 64,
+            },
+            "required_proof_fields": [
+                "entry_point",
+                "sink",
+                "taint_path",
+                "guards_evaluated",
+                "remediation",
+            ],
+            "allowed_evidence_types": ["code-inferred", "network-confirmed"],
+        },
+        "mode": "strict",
+    }
+
+
+def _white_box_finding() -> dict[str, Any]:
+    return {
+        "title": "Parser overflow",
+        "defect_family": "buffer-overflow",
+        "canonical_location": "file:src/parser.c:41",
+        "evidence_type": "code-inferred",
+        "provenance": {
+            "code_snapshot": {
+                "repo_id": 1,
+                "repo_generation": 7,
+                "source_manifest_digest": "a" * 64,
+            }
+        },
+        "details": {
+            "cwe_id": "CWE-122",
+            "entry_point": "parse_packet",
+            "sink": "memcpy",
+            "taint_path": "packet -> length -> memcpy",
+            "guards_evaluated": "No length guard",
+            "remediation": "Reject oversized lengths",
+        },
+    }
+
+
+def test_scorer_white_box_contract_accepts_exact_identity_and_complete_proof():
+    failures = _score_assertion(_white_box_contract(), [_white_box_finding()])
+    assert failures == [], f"Unexpected failures: {failures}"
+
+
+def test_scorer_white_box_contract_rejects_identity_drift():
+    finding = _white_box_finding()
+    finding["details"]["cwe_id"] = "CWE-190"
+    failures = _score_assertion(_white_box_contract(), [finding])
+    assert any("exact finding identity" in failure for failure in failures), failures
+
+
+def test_scorer_white_box_contract_rejects_noncanonical_file_location():
+    finding = _white_box_finding()
+    finding["canonical_location"] = "src/parser.c"
+    failures = _score_assertion(_white_box_contract(), [finding])
+    assert any("canonical file location" in failure for failure in failures), failures
+
+
+def test_scorer_white_box_contract_rejects_missing_proof_field():
+    finding = _white_box_finding()
+    finding["details"]["taint_path"] = ""
+    failures = _score_assertion(_white_box_contract(), [finding])
+    assert any("details.taint_path" in failure for failure in failures), failures
+
+
+def test_scorer_white_box_contract_rejects_untyped_evidence():
+    finding = _white_box_finding()
+    finding["evidence_type"] = None
+    failures = _score_assertion(_white_box_contract(), [finding])
+    assert any("evidence_type" in failure for failure in failures), failures
+
+
+def test_scorer_white_box_contract_rejects_missing_snapshot_binding():
+    finding = _white_box_finding()
+    finding["provenance"] = {}
+    failures = _score_assertion(_white_box_contract(), [finding])
+    assert any("code snapshot mismatch" in failure for failure in failures), failures
+
+
+def test_scorer_white_box_contract_rejects_snapshot_identity_drift():
+    finding = _white_box_finding()
+    finding["provenance"]["code_snapshot"]["repo_generation"] = 8
+    failures = _score_assertion(_white_box_contract(), [finding])
+    assert any("code snapshot mismatch" in failure for failure in failures), failures
+
+
+def test_scorer_white_box_contract_requires_expected_snapshot_identity():
+    contract = _white_box_contract()
+    del contract["value"]["expected_code_snapshot"]
+
+    failures = _score_assertion(contract, [_white_box_finding()])
+
+    assert any("must declare expected_code_snapshot" in failure for failure in failures), failures
 
 
 # ---------------------------------------------------------------------------

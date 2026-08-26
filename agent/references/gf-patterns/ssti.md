@@ -3,6 +3,7 @@ name: gf-patterns:ssti
 description: Template-rendering parameter patterns that signal server-side template injection surfaces
 origin: 1ndianl33t/Gf-Patterns (+ local overlay)
 bucket: ssti
+skill: ssti-testing
 weight: 25
 ---
 

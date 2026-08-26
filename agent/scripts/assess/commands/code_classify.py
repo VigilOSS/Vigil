@@ -1,4 +1,4 @@
-"""vigil assess code-classify — bulk-classify code files by tier and role."""
+"""vigil assess code-record classify — bulk-classify code files by tier and role."""
 from __future__ import annotations
 
 from fnmatch import fnmatch
@@ -30,10 +30,16 @@ _VALID_CLASSIFICATIONS = frozenset(
 _VALID_SLOT_TYPES = frozenset(
     _CLASSIFICATION_SCHEMA["properties"]["slot_types"]["items"]["enum"]
 )
+_CLASSIFICATION_PRIORITY_BANDS = {
+    tier: (int(bounds[0]), int(bounds[1]))
+    for tier, bounds in _CLASSIFICATION_SCHEMA[
+        "x-classification-priority-bands"
+    ].items()
+}
 
 
 def register(subparsers) -> None:
-    p = subparsers.add_parser("code-classify", help="Bulk-classify code files for analysis prioritization")
+    p = subparsers.add_parser("classify", help="Bulk-classify code files for analysis prioritization")
     p.add_argument("classifications_json", help="Path to JSON file with array of classification objects")
     p.set_defaults(func=run)
 
@@ -61,11 +67,10 @@ def _fetch_code_files(cfg) -> list[dict]:
 def _resolve_matching_file_ids(item: dict, code_files: list[dict]) -> list[int]:
     file_id = item.get('file_id')
     if file_id not in (None, ""):
-        try:
-            return [int(file_id)]
-        except (TypeError, ValueError):
+        if type(file_id) is not int or file_id <= 0:
             print(f"Invalid file_id in classification item: {file_id!r}", file=sys.stderr)
             sys.exit(1)
+        return [file_id]
 
     file_path = str(item.get('file_path', '')).strip()
     if not file_path:
@@ -74,9 +79,7 @@ def _resolve_matching_file_ids(item: dict, code_files: list[dict]) -> list[int]:
 
     repo_id = item.get('repo_id')
     if repo_id not in (None, ""):
-        try:
-            repo_id = int(repo_id)
-        except (TypeError, ValueError):
+        if type(repo_id) is not int or repo_id <= 0:
             print(f"Invalid repo_id in classification item: {repo_id!r}", file=sys.stderr)
             sys.exit(1)
     else:
@@ -183,6 +186,20 @@ def _validate_classification_payload(payload: list[dict]) -> list[str]:
 
         if classification in {"critical", "high"} and not slot_types:
             errors.append(f"Item {i} slot_types is required for {classification} classifications")
+
+        if "analysis_priority" not in item:
+            errors.append(f"Item {i} missing required field 'analysis_priority'")
+            continue
+        priority = item["analysis_priority"]
+        if type(priority) is not int:
+            errors.append(f"Item {i} analysis_priority must be an integer")
+            continue
+        minimum, maximum = _CLASSIFICATION_PRIORITY_BANDS[classification]
+        if not minimum <= priority <= maximum:
+            expected = str(minimum) if minimum == maximum else f"between {minimum} and {maximum}"
+            errors.append(
+                f"Item {i} analysis_priority must be {expected} for {classification} classification"
+            )
 
     return errors
 

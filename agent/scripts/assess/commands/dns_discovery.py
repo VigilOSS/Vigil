@@ -31,19 +31,32 @@ resolution-FAILURE signal (I-6 / I-006: could-not-resolve read as nothing).
 """
 from __future__ import annotations
 
+import fcntl
+import json
 import os
 import random
+import re
 import shlex
+import shutil
 import string
 import subprocess
 import sys
 import threading
 import time
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
 from assess.commands import host_exec
-from assess.commands.kali_dnsx import DNSX_PROFILES, RESOLVER_PROFILES, resolution_failures
+from assess.commands.kali_dnsx import (
+    DNSX_PROFILES,
+    RESOLVER_PROFILES,
+    resolution_failures,
+)
+from assess.lib import runtime_route
+from assess.lib import scope as scope_lib
+from assess.lib.client import AssessError
 from assess.lib.config import load_config
 from assess.lib.discovery import (
     cluster_productive_parents,
@@ -54,7 +67,6 @@ from assess.lib.discovery import (
 from assess.lib.kali import kali_exec
 from assess.lib.kali_output import _apply_required_headers, _required_headers
 from assess.lib.locking import network_heavy_lock
-from assess.lib import runtime_route
 
 _DEFAULT_WORDLIST = "/usr/share/wordlists/SecLists/Discovery/DNS/subdomains-top1million-110000.txt"
 
@@ -176,9 +188,138 @@ def register(subparsers) -> None:
 
 
 def _paths(cfg, name: str) -> tuple[Path, str]:
-    host = Path(cfg.engagement_dir) / "scans" / "dns-discovery" / name
-    container = f"/engagements/{cfg.engagement_key}/scans/dns-discovery/{name}"
+    run_uuid = getattr(cfg, "dns_run_uuid", "")
+    relative = Path("scans") / "dns-discovery"
+    container_root = f"/engagements/{cfg.engagement_key}/scans/dns-discovery"
+    if run_uuid:
+        relative = relative / "runs" / run_uuid
+        container_root += f"/runs/{run_uuid}"
+    host = Path(cfg.engagement_dir) / relative / name
+    container = f"{container_root}/{name}"
     return host, container
+
+
+def _canonical_path(cfg, name: str) -> Path:
+    return Path(cfg.engagement_dir) / "scans" / "dns-discovery" / name
+
+
+_PROMOTION_THREAD_LOCK = threading.Lock()
+
+
+@contextmanager
+def _promotion_lock(canonical_dir: Path):
+    """Serialize canonical publication across threads and host processes."""
+    lock_path = canonical_dir / ".promotion.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with _PROMOTION_THREAD_LOCK, lock_path.open("a+b") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _promote_generation(
+    cfg,
+    *,
+    state: str,
+    resolved_count: int,
+    failure_count: int,
+) -> None:
+    """Publish one complete DNS generation, with the manifest committed last.
+
+    Tool stages never write canonical files. Promotion first prepares every
+    replacement beside its canonical destination, then replaces the complete
+    artifact set and commits ``generation.json`` last. Readers that need a
+    coherent multi-file snapshot can key it to that accepted-generation marker;
+    an interrupted or failed run leaves the last accepted generation intact.
+    """
+    run_uuid = cfg.dns_run_uuid
+    run_dir = _canonical_path(cfg, "runs") / run_uuid
+    canonical_dir = _canonical_path(cfg, "")
+    canonical_dir.mkdir(parents=True, exist_ok=True)
+
+    with _promotion_lock(canonical_dir):
+        current = {path.name: path for path in run_dir.iterdir() if path.is_file()}
+        prior = {
+            path.name
+            for path in canonical_dir.iterdir()
+            if path.is_file()
+            and not path.name.startswith(".")
+            and path.name != "generation.json"
+        }
+        artifact_names = sorted(prior | set(current))
+        staged: list[tuple[Path, Path]] = []
+        backup_dir = canonical_dir / f".promotion-backup-{run_uuid}"
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir)
+        backup_dir.mkdir()
+        manifest_path = canonical_dir / "generation.json"
+        manifest_backup = backup_dir / "generation.json"
+        manifest_existed = manifest_path.is_file()
+        if manifest_existed:
+            shutil.copyfile(manifest_path, manifest_backup)
+        existed: dict[str, bool] = {}
+        publishing: list[str] = []
+        temporary_manifest = canonical_dir / f".generation.json.promote-{run_uuid}"
+        try:
+            for name in artifact_names:
+                destination = canonical_dir / name
+                temporary = canonical_dir / f".{name}.promote-{run_uuid}"
+                source = current.get(name)
+                if source is None:
+                    temporary.write_bytes(b"")
+                else:
+                    shutil.copyfile(source, temporary)
+                staged.append((temporary, destination))
+                existed[name] = destination.is_file()
+                if existed[name]:
+                    shutil.copyfile(destination, backup_dir / name)
+
+            manifest = {
+                "run_uuid": run_uuid,
+                "state": state,
+                "artifacts": artifact_names,
+                "resolved_count": resolved_count,
+                "failure_count": failure_count,
+            }
+            temporary_manifest.write_text(
+                json.dumps(manifest, sort_keys=True, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            for temporary, destination in staged:
+                publishing.append(destination.name)
+                temporary.replace(destination)
+            temporary_manifest.replace(manifest_path)
+        except BaseException:
+            rollback_errors: list[OSError] = []
+            for name in publishing:
+                destination = canonical_dir / name
+                try:
+                    if existed.get(name):
+                        os.replace(backup_dir / name, destination)
+                    else:
+                        destination.unlink(missing_ok=True)
+                except OSError as rollback_error:
+                    rollback_errors.append(rollback_error)
+            try:
+                if manifest_existed:
+                    os.replace(manifest_backup, manifest_path)
+                else:
+                    manifest_path.unlink(missing_ok=True)
+            except OSError as rollback_error:
+                rollback_errors.append(rollback_error)
+            if rollback_errors:
+                raise RuntimeError(
+                    "DNS canonical promotion failed and rollback was incomplete: "
+                    + "; ".join(str(error) for error in rollback_errors)
+                )
+            raise
+        finally:
+            for temporary, _ in staged:
+                temporary.unlink(missing_ok=True)
+            temporary_manifest.unlink(missing_ok=True)
+            shutil.rmtree(backup_dir, ignore_errors=True)
 
 
 def _warn(message: str) -> None:
@@ -527,6 +668,11 @@ def _wordlist_for_route(cfg, original: str, route: str) -> str:
     untouched. Falls back to the original with a WARN if staging is not possible.
     """
     if route == "host":
+        if not Path(original).is_file():
+            raise AssessError(
+                f"host wordlist does not exist: {original}. Pass a host-visible "
+                "wordlist or use --runtime container."
+            )
         return original
     src = Path(original)
     eng_dir = Path(cfg.engagement_dir)
@@ -851,7 +997,8 @@ def _discover_once(args, cfg, apexes: list[str], seed_hosts: set[str],
         if not args.no_ct:
             ct_host, ct_container = _paths(cfg, "subs_ct.txt")
             _exec(args, ["sh", "-c", _crt_sh_script(apexes, ct_container)],
-                  "dns-discovery: certificate-transparency harvest (crt.sh)", "crt.sh", route="container")
+                  "dns-discovery: certificate-transparency harvest (crt.sh)", "crt.sh",
+                  route="container")
             produced.append(ct_host)
 
         # OPT-IN axes (CR-6) — only when explicitly enabled; never default-on.
@@ -1028,6 +1175,7 @@ _ARG_DEFAULTS = {
     "parent_min_children": 5, "no_wildcard_strip": False, "quiet_brute": False,
     "js_host_mining": False, "bbot": False,
     "query_budget": _DEFAULT_QUERY_BUDGET, "per_resolver_qps": _DEFAULT_PER_RESOLVER_QPS,
+    "run_uuid": None,
 }
 
 
@@ -1040,12 +1188,28 @@ def _apply_arg_defaults(args) -> None:
 def run(args) -> None:
     _apply_arg_defaults(args)
     cfg = load_config(args.engagement_dir)
+    # ``args.engagement_dir`` is the raw CLI flag and is ``None`` on the common
+    # active-pointer path (no explicit ``--engagement-dir``). Downstream readers
+    # -- ``_host_dispatch`` required-header injection and the ``_puredns_brute``
+    # ``network_heavy_lock`` -- consume it directly and crash / silently skip on
+    # ``None``. Canonicalize it to the resolved path so every stage, including
+    # ``--brute``, sees a real directory.
+    args.engagement_dir = cfg.engagement_dir
+    run_uuid = args.run_uuid or uuid.uuid4().hex
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", run_uuid):
+        raise AssessError("dns-discovery run UUID contains unsafe path characters")
+    cfg.dns_run_uuid = run_uuid
     out_dir = Path(cfg.engagement_dir) / "scans" / "dns-discovery"
     out_dir.mkdir(parents=True, exist_ok=True)
+    (_canonical_path(cfg, "runs") / run_uuid).mkdir(parents=True, exist_ok=False)
     apexes = [a.strip() for a in args.apexes if a.strip()]
     if not apexes:
         print("dns-discovery: no apexes given.", file=sys.stderr)
         sys.exit(2)
+    try:
+        scope_doc = scope_lib.load_scope(cfg.engagement_dir)
+    except SystemExit:
+        scope_doc = {}
 
     resolved_all: set[str] = set()
     bruted_apexes: set[str] = set()
@@ -1059,7 +1223,13 @@ def run(args) -> None:
         if pass_no == 1:
             targets = apexes
         else:
-            targets = _select_parent_targets(args, resolved_all, bruted_apexes)
+            targets = _select_parent_targets(
+                args,
+                resolved_all,
+                bruted_apexes,
+                allowed_apexes=apexes,
+                scope_doc=scope_doc,
+            )
             print(f"dns-discovery: productive-parent recursion: re-bruting "
                   f"{len(targets)} parent(s) with >= {args.parent_min_children} children (CR-20)",
                   file=sys.stderr)
@@ -1089,7 +1259,13 @@ def run(args) -> None:
         # productive-parent recursion (CR-20) requires --brute + recursion enabled
         # and at least one fresh productive parent. Otherwise pass 1's passive/CT/
         # axes already captured everything and re-resolving is a no-op — stop.
-        if not _select_parent_targets(args, resolved_all, bruted_apexes):
+        if not _select_parent_targets(
+            args,
+            resolved_all,
+            bruted_apexes,
+            allowed_apexes=apexes,
+            scope_doc=scope_doc,
+        ):
             break
 
     # I-6: persist the per-host resolution-FAILURE signal — in-scope hosts that
@@ -1125,16 +1301,48 @@ def run(args) -> None:
     resolved_host, _ = _paths(cfg, "resolved_hosts.txt")
     if resolved_all:
         resolved_host.write_text("\n".join(sorted(resolved_all)) + "\n", encoding="utf-8")
+        _record_discovered_hosts(cfg.engagement_dir, sorted(resolved_all))
     else:
         resolved_host.write_text("", encoding="utf-8")
+        _promote_generation(
+            cfg,
+            state="accepted-empty",
+            resolved_count=0,
+            failure_count=len(failures_all),
+        )
         print("dns-discovery: no hosts resolved.", file=sys.stderr)
         sys.exit(0)
 
-    print(f"dns-discovery: done. {len(resolved_all)} resolved hosts -> {resolved_host}\n"
-          f"  Next: vigil assess web-discovery {resolved_host}", file=sys.stderr)
+    _promote_generation(
+        cfg,
+        state="accepted",
+        resolved_count=len(resolved_all),
+        failure_count=len(failures_all),
+    )
+    canonical_resolved = _canonical_path(cfg, "resolved_hosts.txt")
+    print(f"dns-discovery: done. {len(resolved_all)} resolved hosts -> {canonical_resolved}\n"
+          f"  Next: vigil assess web-discovery {canonical_resolved}", file=sys.stderr)
 
 
-def _select_parent_targets(args, resolved_all: set[str], bruted_apexes: set[str]) -> list[str]:
+def _record_discovered_hosts(engagement_dir: str, candidates: list[str]) -> None:
+    """Best-effort derived inventory; bookkeeping never aborts discovery."""
+    try:
+        scope_lib.record_discovered_hosts(engagement_dir, candidates)
+    except (OSError, ValueError, SystemExit) as exc:
+        print(
+            f"WARN: could not update scope.json discovered_hosts inventory: {exc}",
+            file=sys.stderr,
+        )
+
+
+def _select_parent_targets(
+    args,
+    resolved_all: set[str],
+    bruted_apexes: set[str],
+    *,
+    allowed_apexes: list[str] | None = None,
+    scope_doc: dict | None = None,
+) -> list[str]:
     """CR-20: productive parents to re-brute next pass (>= --parent-min-children),
     excluding parents already bruted. Empty when parent recursion is disabled or
     no brute axis is active (re-bruting needs --brute). Pure — no I/O — so it can
@@ -1146,4 +1354,18 @@ def _select_parent_targets(args, resolved_all: set[str], bruted_apexes: set[str]
         min_children=int(args.parent_min_children),
         bruted_apexes=sorted(bruted_apexes),
     )
-    return [p for p in parents if p not in bruted_apexes]
+    candidates = [p for p in parents if p not in bruted_apexes]
+    bypass = bool(scope_doc) and scope_lib.scope_enforcement(scope_doc or {}) == "bypass"
+    if not bypass and allowed_apexes:
+        normalized_apexes = [a.strip().lower().rstrip(".") for a in allowed_apexes]
+        candidates = [
+            parent
+            for parent in candidates
+            if any(
+                parent == apex or parent.endswith("." + apex)
+                for apex in normalized_apexes
+            )
+        ]
+    if not bypass and scope_doc:
+        candidates, _ = scope_lib.filter_recon_targets(scope_doc, candidates)
+    return candidates

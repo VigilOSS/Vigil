@@ -17,10 +17,6 @@ makes the intent clear and diff noise low.
 """
 from __future__ import annotations
 
-import json
-import tempfile
-from pathlib import Path
-
 import pytest
 
 from assess.lib.contracts import (
@@ -37,26 +33,6 @@ from assess.lib.contracts import (
 def _dispatch(payload: dict) -> tuple[list[str], list[str]]:
     """Convenience wrapper — returns (errors, warnings)."""
     return validate_specialist_dispatch_contract(payload)
-
-
-def _dispatch_with_engagement(payload: dict, scope_hosts: list[str]) -> tuple[list[str], list[str]]:
-    """Run the validator with a synthetic engagement dir + scope.json.
-
-    Creates a temp directory with a minimal scope.json so the scope-gate
-    logic fires. Cleaned up automatically after the call.
-
-    Note: scope_entries() in scope.py only processes string items from the
-    ``hosts`` list (dicts are silently skipped), so hosts must be plain strings.
-    """
-    scope_json = {
-        "name": "eval-test-scope",
-        "description": "Eval harness synthetic scope",
-        "hosts": scope_hosts,
-    }
-    with tempfile.TemporaryDirectory() as tmpdir:
-        scope_path = Path(tmpdir) / "scope.json"
-        scope_path.write_text(json.dumps(scope_json), encoding="utf-8")
-        return validate_specialist_dispatch_contract(payload, engagement_dir=tmpdir)
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +61,6 @@ def test_valid_vuln_analyst_dispatch_no_errors():
         "role": "vulnerability-analyst",
         "dispatch_mode": "item-iterating",
         "skills": ["sqli-testing", "xss-testing"],
-        "scope_host": "target.example",
     }
     errors, warnings = _dispatch(payload)
     assert errors == [], f"Unexpected errors: {errors}"
@@ -102,7 +77,6 @@ def test_valid_exploit_developer_dispatch_no_errors():
         "role": "exploit-developer",
         "dispatch_mode": "deep-manual",
         "skills": ["exploit-playbook-authoring"],
-        "scope_host": "target.example",
         "requested_model": "claude-opus-4-5",
     }
     errors, warnings = _dispatch(payload)
@@ -209,15 +183,23 @@ def test_invalid_dispatch_mode_value_warns_not_rejected():
 # ---------------------------------------------------------------------------
 
 
-def test_specialist_role_without_skills_is_rejected():
-    """A non-operator specialist role with no skills must surface a skills error."""
+def test_specialist_role_without_skills_warns_but_is_not_rejected():
+    """Missing skills WARNs and proceeds; it never blocks a dispatch.
+
+    A specialist picks its skills from what it observes on the surface, so the
+    honest list is only known once the dispatch has run — requiring it up front
+    forced the operator to guess a vulnerability class before the hunt.
+    """
     payload = {
         "role": "vulnerability-analyst",
         "dispatch_mode": "hypothesis-driven",
     }
     errors, warnings = _dispatch(payload)
-    assert any("skills" in e and "required" in e.lower() for e in errors), (
-        f"Expected a skills-required error, got: {errors}"
+    assert not any("skills" in e.lower() for e in errors), (
+        f"Missing skills must not error, got: {errors}"
+    )
+    assert any("skills" in w.lower() for w in warnings), (
+        f"Expected a skills warning, got: {warnings}"
     )
 
 
@@ -241,45 +223,60 @@ def test_role_and_agent_role_mismatch_is_rejected():
 
 
 # ---------------------------------------------------------------------------
-# Invalid: scope-gated role (vulnerability-analyst) with out-of-scope host
+# Valid: application-unit attribution is optional dispatch metadata
 # ---------------------------------------------------------------------------
 
 
-def test_scope_gated_role_out_of_scope_host_is_rejected():
-    """vulnerability-analyst dispatched against a host not in scope.json must fail.
-
-    This is the key regression guard: the scope-gate must catch active-probing
-    dispatches targeting hosts that were found during recon but are not in scope.
-    """
+def test_application_unit_identity_is_valid_dispatch_metadata():
+    """Concrete unit attribution is metadata, never dispatch authorization."""
     payload = {
         "role": "vulnerability-analyst",
         "dispatch_mode": "item-iterating",
         "skills": ["sqli-testing"],
-        "scope_host": "adjacent-domain-not-in-scope.example",
+        "application_unit_id": 17,
     }
-    in_scope_hosts = ["target.example", "api.target.example"]
-    errors, warnings = _dispatch_with_engagement(payload, in_scope_hosts)
-    assert any("not in scope" in e or "scope_host" in e for e in errors), (
-        f"Expected a scope_host error, got errors={errors}, warnings={warnings}"
-    )
+    errors, warnings = _dispatch(payload)
+    assert errors == []
+    assert not any("scope" in warning.lower() for warning in warnings)
 
 
-# ---------------------------------------------------------------------------
-# Valid: scope-gated role with in-scope host passes
-# ---------------------------------------------------------------------------
-
-
-def test_scope_gated_role_in_scope_host_passes():
-    """vulnerability-analyst dispatched against a host in scope.json must pass."""
+def test_dispatch_contract_does_not_require_target_scope():
+    """Dispatch admission is about the agent contract, not target authorization."""
     payload = {
         "role": "vulnerability-analyst",
         "dispatch_mode": "item-iterating",
         "skills": ["sqli-testing"],
-        "scope_host": "target.example",
     }
-    in_scope_hosts = ["target.example", "api.target.example"]
-    errors, warnings = _dispatch_with_engagement(payload, in_scope_hosts)
-    assert errors == [], f"Unexpected errors for in-scope host: {errors}"
+    errors, warnings = _dispatch(payload)
+    assert errors == []
+    assert not any("scope" in warning.lower() for warning in warnings)
+
+
+# ---------------------------------------------------------------------------
+# Valid: active specialist roles need no scope field
+# ---------------------------------------------------------------------------
+
+
+def test_vulnerability_analyst_dispatch_needs_no_scope_field():
+    """A specialist dispatch carries an objective, not a scope declaration."""
+    payload = {
+        "role": "vulnerability-analyst",
+        "dispatch_mode": "item-iterating",
+        "skills": ["sqli-testing"],
+    }
+    errors, warnings = _dispatch(payload)
+    assert errors == [], f"Unexpected errors: {errors}"
+
+
+def test_exploit_developer_dispatch_needs_no_scope_field():
+    """Exploit dispatch validation is independent of scope-shaping settings."""
+    payload = {
+        "role": "exploit-developer",
+        "dispatch_mode": "deep-manual",
+        "skills": ["sqli-testing"],
+    }
+    errors, _warnings = _dispatch(payload)
+    assert errors == []
 
 
 # ---------------------------------------------------------------------------

@@ -27,6 +27,8 @@ submission in place:
 
 - format and structure,
 - AI-tells (Rule 20 human-voice check),
+- PoC script hygiene (`submission-format.md` § "PoC Script Authoring" — minimal,
+  de-harnessed, no decorative banners or agent-env handling),
 - CVSS stated exactly once and consistent with the claimed severity,
 - repro-step correctness,
 - overclaim language ("I" vs "H" — impact-claimed vs impact-proven).
@@ -36,7 +38,7 @@ whether **impact was actually demonstrated** — that is what Pass 2 exists for.
 Pass 1 produces the clean submission bytes that Pass 2 then judges blind.
 
 (Pass 1 is the existing `agent/skills/report-generation/SKILL.md` "Review-and-Fix
-QA Mode" / the `agent/references/bugbounty-submission-format.md` pre-submission
+QA Mode" / the `agent/references/submission-format.md` pre-submission
 checklist — frame that pass as Pass 1 of this gate; it returns QA PASS / QA
 BLOCKED. Do not re-implement it here.)
 
@@ -56,7 +58,7 @@ engagement. It is the decisive gate.
   (b) the submission `.md` itself. Nothing else.
 - **Hard isolation.** The reviewer reads **ONLY the submission `.md`**. It must
   **NOT** read any repo file, run any `vigil` / CLI / `curl` command, query
-  `cases.db`, or pull in any other engagement artifact. If a claim is not proven
+  the work buffer, or pull in any other engagement artifact. If a claim is not proven
   *inside the submission bytes*, it is unproven for triage purposes — that is the
   reviewer judging exactly what an external triager can see.
 
@@ -130,16 +132,21 @@ on any of them should **not** get an `Accept`:
 7. **By-design behavior called a vuln** — anonymous/public-by-design flows (public
    intake, self-registration, password-reset *request*, public search) where the anonymity
    is the intended UX, not a bug.
+8. **Documented capability with no proven boundary break** — the vendor's own docs
+   describe the exact behavior demonstrated, and the submission does not show a
+   boundary the docs mark as protected actually being crossed (C7). "The docs say
+   this is possible, and it sounds dangerous" is not the same as "the docs say
+   this must not happen, and it happened."
 
 ## Cross-references
 
-- `agent/references/finding-fp-and-severity-gate.md` — the in-context C1–C6
+- `agent/references/finding-fp-and-severity-gate.md` — the in-context C1–C7
   FP/severity-downgrade gate the vulnerability-analyst runs at Phase-4
   verification (the same overclaim catalog, applied earlier in the lifecycle and
   *with* context). This blind gate is the late, zero-context safety net before
   submission.
 - `agent/skills/report-generation/SKILL.md` "Review-and-Fix QA Mode" — Pass 1 of
   this gate.
-- `agent/references/bugbounty-submission-format.md` — the in-context
+- `agent/references/submission-format.md` — the in-context
   pre-submission checklist (Rule 20 AI-tell + "I is not H" overclaim check) that
   Pass 1 applies.

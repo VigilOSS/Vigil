@@ -1,4 +1,4 @@
-"""vigil assess list-command-runs — search the backend command-run audit log.
+"""vigil assess command-run list — search the backend command-run audit log.
 
 Use before re-running a `vigil assess kali` command to check whether an
 equivalent command already ran in the current engagement. Filter by agent,
@@ -17,7 +17,7 @@ from assess.lib.config import load_config
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
-        "list-command-runs",
+        "list",
         help="List `vigil assess kali` command-run audit records for this engagement",
     )
     p.add_argument("--q", default="", help="Fuzzy keyword search over command, tool, previews, metadata, and finding aliases")
@@ -83,7 +83,10 @@ def register(subparsers) -> None:
         dest="probe_kind",
         default="",
         help=(
-            "Filter by probe kind (exact match). Known values: "
+            "Filter by tool-EXECUTION kind (fingerprint/baseline/payload/…), NOT "
+            "the vuln family — so `--probe-kind sqli` correctly returns [] (sqli is "
+            "an attack_family, not an execution kind). For vuln-family coverage use "
+            "`fetch probe-runs?attack_family=…`. Exact match. Known values: "
             + ", ".join(PROBE_KIND_ENUM)
         ),
     )
@@ -110,9 +113,29 @@ def register(subparsers) -> None:
         help="Only runs explicitly declared non-destructive (read-only probes)",
     )
     p.add_argument("--timed-out", dest="timed_out", action="store_true", help="Only runs that hit the tool timeout")
+    p.add_argument(
+        "--output-attention",
+        dest="output_attention",
+        action="store_true",
+        help=(
+            "Only runs whose retained output is pending, deferred, untrusted, "
+            "or failed integrity verification"
+        ),
+    )
     p.add_argument("--limit", type=int, default=50)
     p.add_argument("--offset", type=int, default=0)
-    p.add_argument("--include-output", dest="include_output", action="store_true", help="Include stdout/stderr previews in default rendering")
+    p.add_argument(
+        "--include-output",
+        dest="include_output",
+        action="store_true",
+        help=(
+            "Ask the backend for the full stdout/stderr preview TEXT on every row. "
+            "Only --json renders it — the table never has a preview column, it "
+            "shows the out/err character counts instead. Listings are lightweight "
+            "by default on purpose: 50 rows x 64 KiB of preview is a context bomb. "
+            "For one run's output prefer `command-run get <id>`."
+        ),
+    )
     p.add_argument("--json", dest="as_json", action="store_true", help="Emit raw JSON instead of a table")
     p.set_defaults(func=run)
 
@@ -161,11 +184,26 @@ def _build_query(args) -> str:
         params.append(("destructive", "false"))
     if args.timed_out:
         params.append(("timed_out", "true"))
+    if getattr(args, "output_attention", False):
+        params.append(("output_attention", "true"))
     if args.include_output:
         params.append(("include_output", "true"))
     params.append(("limit", str(args.limit)))
     params.append(("offset", str(args.offset)))
     return "command-runs?" + urlencode(params, quote_via=quote)
+
+
+def _preview_chars(row: dict, stream: str) -> int:
+    """Characters of retained preview for ``stream`` on one listing row.
+
+    A lightweight row carries the count in ``<stream>_preview_chars`` and an
+    empty preview; a row fetched with --include-output carries the text and no
+    count. Read whichever the backend sent so the column is right either way.
+    """
+    count = row.get(f"{stream}_preview_chars")
+    if isinstance(count, int):
+        return count
+    return len(row.get(f"{stream}_preview") or "")
 
 
 def _render_table(rows: list[dict]) -> str:
@@ -183,6 +221,12 @@ def _render_table(rows: list[dict]) -> str:
         "dest",
         "rc",
         "timed_out",
+        # The affordance the lightweight-listing bandwidth control was designed
+        # around: the preview TEXT is withheld, but its size is not, so a caller
+        # can see a run DID produce output and decide whether `command-run get`
+        # is worth the round-trip — instead of reading an empty preview as "no
+        # output" and re-running the command.
+        "out/err",
         "intent",
         "command",
     ]
@@ -228,6 +272,7 @@ def _render_table(rows: list[dict]) -> str:
             dest_str,
             rc_str,
             "yes" if row.get("timed_out") else "no",
+            f"{_preview_chars(row, 'stdout')}/{_preview_chars(row, 'stderr')}",
             intent or "-",
             command,
         ]

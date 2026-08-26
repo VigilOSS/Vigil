@@ -13,6 +13,9 @@ captured host_cookies that this run is not using.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
+import pytest
 from assess.lib import auth, identity, kali
 
 
@@ -127,7 +130,7 @@ def test_pairs_without_host_cookies_unchanged() -> None:
 def test_apply_injects_portal_session_for_portal_target() -> None:
     cmd = ["curl", "-s", "https://portal.example.com/my.policy"]
     applied = kali._apply_identity_material(cmd, "curl", _material())
-    assert applied is True
+    assert applied == "injected"
     joined = " ".join(cmd)
     assert "Cookie: " in joined
     assert "JSESSIONID=PORTAL" in joined
@@ -137,12 +140,12 @@ def test_apply_warns_when_host_cookies_unused_for_request_host(capsys) -> None:
     # The identity has buckets for portal/api.example.com but the run targets a
     # host with NO matching bucket. Its only material is those per-host cookies, so
     # nothing rides this request (the cross-host flat union is correctly omitted)
-    # and _apply_identity_material returns False — but the session-stale WARN must
+    # and _apply_identity_material reports "unavailable" — but the session-stale WARN must
     # STILL fire so the operator knows the session did not ride, and no unrelated
     # host's cookie leaks onto the target.
     cmd = ["curl", "-s", "https://nomatch.test/x"]
     applied = kali._apply_identity_material(cmd, "curl", _material())
-    assert applied is False
+    assert applied == "unavailable"
     # No cross-host cookie leaked into the argv.
     assert "Cookie:" not in " ".join(cmd)
     err = capsys.readouterr().err
@@ -156,10 +159,12 @@ def test_apply_no_warn_when_bucket_matches(capsys) -> None:
     assert "carries captured host_cookies" not in capsys.readouterr().err
 
 
-def test_apply_non_injectable_tool_returns_false() -> None:
+def test_apply_non_injectable_tool_reports_no_head() -> None:
     # nmap takes no -H; identity must not be stamped (matches existing contract).
+    # The reason is the ARGV SHAPE, not the credential — the refusal message
+    # branches on that distinction.
     cmd = ["nmap", "-sV", "portal.example.com"]
-    assert kali._apply_identity_material(cmd, "nmap", _material()) is False
+    assert kali._apply_identity_material(cmd, "nmap", _material()) == "no_head"
 
 
 # --------------------------------------------------------------------------- #
@@ -277,7 +282,7 @@ def test_csrf_pre_existing_header_not_overwritten() -> None:
 
 def test_apply_injects_csrf_on_post() -> None:
     cmd = ["curl", "-X", "POST", "-d", "x=1", "https://portal.example.com/api/write"]
-    assert kali._apply_identity_material(cmd, "curl", _csrf_material()) is True
+    assert kali._apply_identity_material(cmd, "curl", _csrf_material()) == "injected"
     assert "PORTAL-X-CSRF-TOKEN: tok123" in " ".join(cmd)
 
 
@@ -311,16 +316,83 @@ def test_classify_liveness_unknown_on_transport_error() -> None:
     assert auth_status._classify_liveness(None, None, {"authed_marker": "Sign out"})[0] == "unknown"
 
 
-def test_classify_liveness_dead_cases() -> None:
+def test_classify_liveness_dead_only_on_positive_evidence_of_death() -> None:
     from assess.commands import auth_status
 
     cl = auth_status._classify_liveness
-    # dead_marker present in haystack.
+    # dead_marker present in haystack — the operator's own death signal.
     assert cl(200, "Please sign in", {"dead_marker": "sign in"})[0] == "dead"
-    # authed_marker absent from haystack.
-    assert cl(200, "anonymous page", {"authed_marker": "Sign out"})[0] == "dead"
-    # expect_status mismatch (marker present, status wrong).
-    assert cl(302, "Sign out", {"authed_marker": "Sign out", "expect_status": 200})[0] == "dead"
+    # The response IS an authentication challenge.
+    assert cl(401, "nope", {"authed_marker": "Sign out"})[0] == "dead"
+    assert cl(407, "nope", {"authed_marker": "Sign out"})[0] == "dead"
+    # A redirect to a login surface is the classic session-expiry bounce.
+    verdict, reason = cl(
+        302,
+        "HTTP 302 Found\nLocation: /my.policy",
+        {"authed_marker": "Sign out", "expect_status": 200},
+    )
+    assert verdict == "dead"
+    assert "login location" in reason
+    # ...but an ordinary redirect is not, and neither is a path that merely
+    # CONTAINS "auth" (``/authors`` must never read as an auth challenge).
+    assert cl(
+        302,
+        "HTTP 302 Found\nLocation: /authors/17",
+        {"authed_marker": "Sign out", "expect_status": 200},
+    )[0] == "unknown"
+
+
+def test_classify_liveness_absent_marker_is_unknown_not_dead() -> None:
+    """A probe that cannot reach a valid authed URL must never say ``dead``.
+
+    ``dead`` hides the identity from the default listing and refuses replay, so
+    a false one costs a credential re-import. When the ONLY evidence is "the
+    configured authed_marker was not found", the far likelier cause is that the
+    probe URL is not an authed page for this identity's signature.
+    """
+    from assess.commands import auth_status
+
+    cl = auth_status._classify_liveness
+    verdict, reason = cl(200, "anonymous page", {"authed_marker": "Sign out"})
+    assert verdict == "unknown"
+    assert "may not be an authed page" in reason
+    # An unexplained status mismatch is not an auth signal either.
+    verdict, reason = cl(500, "Sign out", {"authed_marker": "Sign out", "expect_status": 200})
+    assert verdict == "unknown"
+    assert "not an authentication challenge" in reason
+    # 403 is an AUTHORIZATION verdict — the normal IDOR/BOLA signal, and it must
+    # never kill the identity doing the testing.
+    assert cl(403, "forbidden", {"authed_marker": "Sign out", "expect_status": 200})[0] == "unknown"
+
+
+def test_classify_liveness_signature_is_one_flat_origin_agnostic_rule() -> None:
+    """``material.liveness`` is ONE flat signature; per-host lives elsewhere.
+
+    Per-host modelling already has two owners — ``probe_scope_key`` scopes the
+    recorded observation, and an identity that genuinely differs per host is a
+    separate identity selected by ``--identity-scope``. A third, signature-level
+    per-origin shape would be a second way to say the same thing AND a way for
+    the two CLI surfaces to disagree, since only one of them could pass the
+    scope through. Any shape that is not the flat signature therefore carries
+    none of the three keys and reads as "no signature configured" — ``unknown``
+    with the shape to set, never a verdict borrowed from another host's rule.
+    """
+    from assess.commands import auth_status
+
+    cl = auth_status._classify_liveness
+    # One rule, applied wherever the identity is probed.
+    assert cl(200, "Sign out", {"authed_marker": "Sign out"})[0] == "live"
+    # An origin-keyed shape is not a signature; it never yields a verdict.
+    verdict, reason = cl(
+        200,
+        "Sign out",
+        {
+            "https://app.example.test": {"authed_marker": "Sign out"},
+            "https://admin.example.test": {"authed_marker": "Admin console"},
+        },
+    )
+    assert verdict == "unknown"
+    assert "material.liveness" in reason
 
 
 def test_classify_liveness_live_when_all_checks_pass() -> None:
@@ -337,8 +409,11 @@ def test_classify_liveness_live_when_all_checks_pass() -> None:
 def test_classify_liveness_markers_case_sensitive() -> None:
     from assess.commands import auth_status
 
-    # Case-sensitive substring: "sign out" != "Sign out".
-    assert auth_status._classify_liveness(200, "sign out", {"authed_marker": "Sign out"})[0] == "dead"
+    # Case-sensitive substring: "sign out" != "Sign out", so the marker does not
+    # confirm the session (and, absent death evidence, that is `unknown`).
+    assert auth_status._classify_liveness(200, "sign out", {"authed_marker": "Sign out"})[0] == "unknown"
+    # The dead_marker is matched with the same case sensitivity.
+    assert auth_status._classify_liveness(200, "Sign In", {"dead_marker": "sign in"})[0] != "dead"
 
 
 def test_classify_liveness_mirror_parity_with_cli() -> None:
@@ -354,6 +429,7 @@ def test_classify_liveness_mirror_parity_with_cli() -> None:
         sys.path.insert(0, str(repo_src))
 
     from assess.commands import auth_status
+
     from vigil_cli import auth as cli_auth
 
     cases = [
@@ -364,6 +440,7 @@ def test_classify_liveness_mirror_parity_with_cli() -> None:
         (200, "body", {}),
         (None, None, {"authed_marker": "x"}),
         (500, "Sign out", {"authed_marker": "Sign out", "expect_status": 200}),
+        (401, "denied", {"authed_marker": "Sign out"}),
         (200, "Sign out", {"authed_marker": "Sign out"}),
         (200, "anon", {"authed_marker": "Sign out"}),
         (200, "sign out", {"authed_marker": "Sign out"}),  # case-sensitivity
@@ -372,3 +449,425 @@ def test_classify_liveness_mirror_parity_with_cli() -> None:
     for status, hay, cfg in cases:
         assert cli_auth._classify_liveness(status, hay, cfg) == \
             auth_status._classify_liveness(status, hay, cfg), (status, hay, cfg)
+
+
+def test_prepare_browser_identity_material_only_stamps_when_materialized(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        kali,
+        "resolve_identity",
+        lambda _eng, requested: (
+            requested,
+            {"headers": {"X-App": "yes"}, "cookies": {"sid": "abc"}},
+        ),
+    )
+    auth_context, prepared = kali.prepare_browser_identity_material(
+        tmp_path, "member", "https://app.example.com/account"
+    )
+    assert auth_context == "member"
+    assert prepared["headers"] == {"X-App": "yes"}
+    assert prepared["cookies"] == [
+        {"name": "sid", "value": "abc", "domain": "app.example.com", "path": "/"}
+    ]
+
+    monkeypatch.setattr(kali, "resolve_identity", lambda *_args: ("empty", {}))
+    context, prepared = kali.prepare_browser_identity_material(
+        tmp_path, "empty", "https://app.example.com"
+    )
+    assert context == "anonymous"
+    assert prepared["headers"] == {}
+    assert prepared["cookies"] == []
+    assert prepared["storage_state"] is None
+    # The refusal must carry a reason the operator can act on.
+    assert "vigil assess auth list" in str(prepared["refusal_detail"])
+
+
+def test_prepare_browser_identity_preserves_parent_domain_cookie_scope(
+    monkeypatch, tmp_path
+) -> None:
+    material = {
+        "host_cookies": [
+            {"host": "example.com", "cookies": {"parent_session": "abc"}},
+        ],
+    }
+    monkeypatch.setattr(
+        kali,
+        "resolve_identity",
+        lambda _eng, requested: (requested, material),
+    )
+
+    auth_context, prepared = kali.prepare_browser_identity_material(
+        tmp_path, "member", "https://app.example.com/account"
+    )
+
+    assert auth_context == "member"
+    assert prepared["cookies"] == [
+        {
+            "name": "parent_session",
+            "value": "abc",
+            "domain": ".example.com",
+            "path": "/",
+        }
+    ]
+
+
+def test_prepare_browser_identity_exact_cookie_overlays_parent_collision(
+    monkeypatch, tmp_path
+) -> None:
+    material = {
+        "host_cookies": [
+            {
+                "host": "example.com",
+                "cookies": {"session": "parent", "parent_only": "p"},
+            },
+            {
+                "host": "app.example.com",
+                "cookies": {"session": "exact", "exact_only": "e"},
+            },
+        ],
+    }
+    monkeypatch.setattr(
+        kali,
+        "resolve_identity",
+        lambda _eng, requested: (requested, material),
+    )
+
+    _auth_context, prepared = kali.prepare_browser_identity_material(
+        tmp_path, "member", "https://app.example.com/account"
+    )
+
+    cookies = {cookie["name"]: cookie for cookie in prepared["cookies"]}
+    assert cookies == {
+        "session": {
+            "name": "session",
+            "value": "exact",
+            "domain": "app.example.com",
+            "path": "/",
+        },
+        "parent_only": {
+            "name": "parent_only",
+            "value": "p",
+            "domain": ".example.com",
+            "path": "/",
+        },
+        "exact_only": {
+            "name": "exact_only",
+            "value": "e",
+            "domain": "app.example.com",
+            "path": "/",
+        },
+    }
+
+
+def test_prepare_execution_command_refuses_missing_requested_identity(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(
+        kali,
+        "resolve_identity",
+        lambda _eng, requested: (requested, {}),
+    )
+
+    with pytest.raises(
+        kali.scope_lib.ScopePolicyError,
+        match="requested identity 'ghost'.*refusing to run anonymously",
+    ):
+        kali.prepare_execution_command(
+            ["curl", "https://app.example.com/account"],
+            tool_name="curl",
+            engagement_dir=tmp_path,
+            identity="ghost",
+        )
+
+
+def test_prepare_browser_identity_stamps_replayable_external_storage_state(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(
+        kali,
+        "resolve_identity",
+        lambda _eng, requested: (
+            requested,
+            {"state": "available", "use_for_requests": True},
+        ),
+    )
+
+    auth_context, prepared = kali.prepare_browser_identity_material(
+        tmp_path,
+        "member",
+        "https://app.example.com",
+        external_state_applied=True,
+    )
+
+    assert auth_context == "member"
+    assert prepared == {"headers": {}, "cookies": [], "storage_state": None}
+
+
+@pytest.mark.parametrize(
+    "disabled",
+    [
+        {"use_for_requests": False},
+        {"state": "dead"},
+        # An operator-set marker is a deliberate signal: only the age-advisory
+        # `stale` state widened, not every non-`available` state.
+        {"state": "revoked"},
+    ],
+)
+def test_disabled_identity_material_is_never_injected_or_audit_stamped(
+    monkeypatch, tmp_path, disabled
+) -> None:
+    material = {
+        "headers": {"Authorization": "Bearer secret"},
+        "cookies": {"sid": "abc"},
+        **disabled,
+    }
+    monkeypatch.setattr(
+        kali,
+        "resolve_identity",
+        lambda _eng, requested: (requested, material),
+    )
+    cmd = ["curl", "https://app.example.com/account"]
+    with pytest.raises(
+        kali.scope_lib.ScopePolicyError,
+        match="requested identity 'member'.*refusing to run anonymously",
+    ):
+        kali.prepare_execution_command(
+            cmd,
+            tool_name="curl",
+            engagement_dir=tmp_path,
+            identity="member",
+        )
+    assert cmd == ["curl", "https://app.example.com/account"]
+    context, prepared = kali.prepare_browser_identity_material(
+        tmp_path, "member", "https://app.example.com/account"
+    )
+    assert context == "anonymous"
+    assert prepared["headers"] == {}
+    assert prepared["cookies"] == []
+    assert prepared["storage_state"] is None
+    assert str(prepared["refusal_detail"]).strip()
+
+
+def test_scoped_alias_is_propagated_to_command_and_browser_resolution(
+    monkeypatch, tmp_path
+) -> None:
+    calls = []
+
+    def resolve(_engagement, requested, *, scope_key=""):
+        calls.append((requested, scope_key))
+        return requested, {
+            "state": "available",
+            "headers": {"Authorization": "Bearer scoped"},
+        }
+
+    monkeypatch.setattr(kali, "resolve_identity", resolve)
+    cmd = ["curl", "https://app.example.com/account"]
+    auth_context = kali.prepare_execution_command(
+        cmd,
+        tool_name="curl",
+        engagement_dir=tmp_path,
+        identity="member",
+        identity_scope="billing",
+    )
+    assert auth_context == "member"
+    browser_context, _prepared = kali.prepare_browser_identity_material(
+        tmp_path,
+        "member",
+        "https://app.example.com/account",
+        scope_key="billing",
+    )
+    assert browser_context == "member"
+    assert calls == [("member", "billing"), ("member", "billing")]
+
+
+# --------------------------------------------------------------------------- #
+# Identity staleness is ADVISORY, and a refusal must say why
+# --------------------------------------------------------------------------- #
+
+def _aged_material(**over):
+    material = {
+        "identity_name": "member",
+        "headers": {"Authorization": "Bearer secret"},
+        "last_seen_at": (
+            datetime.now(timezone.utc) - timedelta(hours=9)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    material.update(over)
+    return material
+
+
+def test_stale_identity_is_replayed_with_a_warning_not_refused(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """`stale` is an age flag, not a verdict — replay it and warn.
+
+    Refusing it deadlocked the store: the flag is set purely by age, and the
+    documented recovery (`auth status --probe`) runs through this same
+    injector, so the flag blocked the probe that would clear it.
+    """
+    material = _aged_material(state="stale")
+    monkeypatch.setattr(
+        kali, "resolve_identity", lambda _eng, requested: (requested, material)
+    )
+
+    cmd = ["curl", "https://app.example.com/account"]
+    auth_context = kali.prepare_execution_command(
+        cmd, tool_name="curl", engagement_dir=tmp_path, identity="member"
+    )
+
+    assert auth_context == "member"
+    assert "Authorization: Bearer secret" in cmd
+    err = capsys.readouterr().err
+    assert "state 'stale'" in err
+    assert "auth status --probe --identity member" in err
+
+
+def test_stale_identity_is_replayed_by_the_browser_path_too(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    material = _aged_material(state="stale")
+    monkeypatch.setattr(
+        kali, "resolve_identity", lambda _eng, requested: (requested, material)
+    )
+
+    context, prepared = kali.prepare_browser_identity_material(
+        tmp_path, "member", "https://app.example.com/account"
+    )
+
+    assert context == "member"
+    assert prepared["headers"] == {"Authorization": "Bearer secret"}
+    assert "state 'stale'" in capsys.readouterr().err
+
+
+def test_liveness_probe_may_replay_a_probe_dead_identity(
+    monkeypatch, tmp_path
+) -> None:
+    """The probe is the recovery mechanism, so it must run on the dead state.
+
+    `db.set_liveness` documents that a `live` verdict "revives a session probed
+    with --include-dead"; that is unreachable if the probe itself is refused.
+    Only this one caller passes `identity_probe`.
+    """
+    material = _aged_material(state="dead")
+    monkeypatch.setattr(
+        kali, "resolve_identity", lambda _eng, requested: (requested, material)
+    )
+
+    cmd = ["curl", "https://app.example.com/account"]
+    auth_context = kali.prepare_execution_command(
+        cmd,
+        tool_name="curl",
+        engagement_dir=tmp_path,
+        identity="member",
+        identity_probe=True,
+    )
+
+    assert auth_context == "member"
+    assert "Authorization: Bearer secret" in cmd
+
+
+def test_identity_refusal_names_state_age_and_the_recovery_command(
+    monkeypatch, tmp_path
+) -> None:
+    material = _aged_material(state="dead")
+    monkeypatch.setattr(
+        kali, "resolve_identity", lambda _eng, requested: (requested, material)
+    )
+
+    with pytest.raises(kali.scope_lib.ScopePolicyError) as excinfo:
+        kali.prepare_execution_command(
+            ["curl", "https://app.example.com/account"],
+            tool_name="curl",
+            engagement_dir=tmp_path,
+            identity="member",
+        )
+
+    message = str(excinfo.value)
+    assert "'dead'" in message                       # the state
+    assert "ago)" in message                         # the age
+    assert (                                         # the exact recovery command
+        "vigil assess auth status --probe --identity member --probe-url"
+        in message
+    )
+
+
+def test_quarantined_identity_refusal_explains_the_quarantine(
+    monkeypatch, tmp_path
+) -> None:
+    material = _aged_material(state="available", use_for_requests=False)
+    monkeypatch.setattr(
+        kali, "resolve_identity", lambda _eng, requested: (requested, material)
+    )
+
+    with pytest.raises(kali.scope_lib.ScopePolicyError) as excinfo:
+        kali.prepare_execution_command(
+            ["curl", "https://app.example.com/account"],
+            tool_name="curl",
+            engagement_dir=tmp_path,
+            identity="member",
+        )
+
+    message = str(excinfo.value)
+    assert "quarantined" in message
+    assert "vigil assess auth list" in message
+
+
+def test_missing_identity_refusal_points_at_the_listing_command(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(
+        kali, "resolve_identity", lambda _eng, requested: (requested, {})
+    )
+
+    with pytest.raises(kali.scope_lib.ScopePolicyError) as excinfo:
+        kali.prepare_execution_command(
+            ["curl", "https://app.example.com/account"],
+            tool_name="curl",
+            engagement_dir=tmp_path,
+            identity="ghost",
+        )
+
+    message = str(excinfo.value)
+    assert "was not found in the credential store" in message
+    assert "vigil assess auth list" in message
+
+
+def test_operator_flagged_state_refusal_names_the_state_and_the_probe(
+    monkeypatch, tmp_path
+) -> None:
+    material = _aged_material(state="revoked")
+    monkeypatch.setattr(
+        kali, "resolve_identity", lambda _eng, requested: (requested, material)
+    )
+
+    with pytest.raises(kali.scope_lib.ScopePolicyError) as excinfo:
+        kali.prepare_execution_command(
+            ["curl", "https://app.example.com/account"],
+            tool_name="curl",
+            engagement_dir=tmp_path,
+            identity="member",
+        )
+
+    message = str(excinfo.value)
+    assert "state 'revoked'" in message
+    assert "only the age-advisory 'stale' state is replayed" in message
+    assert "auth status --probe --identity member" in message
+
+
+def test_liveness_probe_may_re_test_any_flagged_state(monkeypatch, tmp_path) -> None:
+    """The recovery mechanism must run against whatever state it recovers from."""
+    material = _aged_material(state="revoked")
+    monkeypatch.setattr(
+        kali, "resolve_identity", lambda _eng, requested: (requested, material)
+    )
+
+    cmd = ["curl", "https://app.example.com/account"]
+    auth_context = kali.prepare_execution_command(
+        cmd,
+        tool_name="curl",
+        engagement_dir=tmp_path,
+        identity="member",
+        identity_probe=True,
+    )
+
+    assert auth_context == "member"
+    assert "Authorization: Bearer secret" in cmd

@@ -28,16 +28,16 @@ type CommandsTabProps = {
 const INITIAL_FETCH_LIMIT = 1000;
 
 // Status color map — drives the row-left bar, status pill, filter chips,
-// and sparkline bars. Five buckets: success (green), failed (red),
-// timed_out (amber), suppressed (muted), artifact (teal).
+// and sparkline bars. Trust failures stay distinct from ordinary tool failure.
 export const STATUS_COLORS: Record<string, string> = {
   success: "var(--chip-green)",
   failed: "var(--chip-red)",
   timed_out: "var(--chip-orange)",
   suppressed: "var(--chip-muted)",
   artifact: "var(--chip-teal)",
+  untrusted: "var(--chip-red)",
 };
-const STATUS_ORDER = ["success", "failed", "timed_out", "suppressed", "artifact"] as const;
+const STATUS_ORDER = ["success", "failed", "timed_out", "suppressed", "artifact", "untrusted"] as const;
 type StatusBucket = (typeof STATUS_ORDER)[number];
 
 // Tool color map. Keep the bin name keyed so it also works for short-tail
@@ -240,13 +240,15 @@ function midTruncate(text: string, max: number): string {
 }
 
 // ── Status bucket ─────────────────────────────────────────────────────
-// One bucket per row: suppressed/artifact when the retention status says
-// so, otherwise success/failed/timed_out. Used for sparkline, color bar,
-// chip coloring. Matches the spec's rollup rule.
+// One bucket per row. Pending/deferred suppression remains visibly suppressed;
+// evidence-integrity failures never inherit a success-looking process status.
 function statusBucket(row: AssessmentCommandRun): StatusBucket {
   const retention = (row.output_retention_status || "").toLowerCase();
-  if (retention === "suppressed") return "suppressed";
+  const integrity = (row.output_integrity_status || "").toLowerCase();
+  if (integrity === "pending" || integrity === "warning") return "untrusted";
+  if (retention === "suppressed" || retention.startsWith("suppression_")) return "suppressed";
   if (retention === "artifact") return "artifact";
+  if (retention === "untrusted" || retention === "integrity_failure") return "untrusted";
   if (row.timed_out) return "timed_out";
   if (row.success) return "success";
   return "failed";
@@ -692,6 +694,7 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
       timed_out: 0,
       suppressed: 0,
       artifact: 0,
+      untrusted: 0,
     };
     for (const d of derivedList) c[d.bucket] += 1;
     return c;
@@ -1684,6 +1687,7 @@ function OverviewPane({ d }: { d: Derived }) {
         <div className="kv-grid">
           <KV k="Started" v={row.started_at} mono />
           <KV k="Completed" v={row.completed_at} mono />
+          <KV k="Output recovery baseline" v={row.output_recovery_observed_at || "—"} mono />
           <KV k="Duration" v={fmtDuration(row.duration_ms)} />
           <KV k="Return code" v={row.return_code == null ? "—" : String(row.return_code)} />
           <KV k="Timed out" v={row.timed_out ? "yes" : "no"} />
@@ -1740,6 +1744,7 @@ function StreamPane({
 }) {
   const row = d.row;
   const retention = (row.output_retention_status || "").toLowerCase();
+  const integrity = (row.output_integrity_status || "").toLowerCase();
   const preview = detail
     ? kind === "stdout"
       ? detail.stdout_preview
@@ -1754,16 +1759,50 @@ function StreamPane({
   const previewChars =
     (kind === "stdout" ? row.stdout_preview_chars : row.stderr_preview_chars) ?? 0;
 
-  if (retention === "suppressed") {
+  if (integrity === "pending" || integrity === "warning") {
+    return (
+      <div className="section">
+        <div className="callout" style={{ borderLeft: "4px solid var(--chip-red)" }}>
+          <p className="section-title">Output integrity is {integrity}</p>
+          <p>{row.output_integrity_warning || "Vigil has not proved that this artifact stayed stable; do not use it as evidence."}</p>
+        </div>
+        <div className="kv-grid">
+          <KV k="Retention" v={retention || "unknown"} />
+          <KV k="Integrity" v={integrity} />
+        </div>
+      </div>
+    );
+  }
+
+  if (retention === "suppressed" || retention.startsWith("suppression_")) {
+    const spillMayRemain = retention !== "suppressed";
     return (
       <div className="section">
         <div className="callout" style={{ borderLeft: "4px solid var(--pending)" }}>
-          <p className="section-title">Suppressed</p>
+          <p className="section-title">{spillMayRemain ? "Suppression incomplete" : "Suppressed"}</p>
           <p>{suppressionReason || "Output was suppressed by the capture layer."}</p>
+          {spillMayRemain && (
+            <p>{row.output_cleanup_warning || "Raw spill bytes may remain in the private host-exec directory and are blocked from artifact indexing."}</p>
+          )}
         </div>
         <div className="kv-grid">
           <KV k="Bytes captured" v={bytes} />
           <KV k="SHA-256" v={sha} mono onCopy={() => copyToClipboard(sha)} />
+        </div>
+      </div>
+    );
+  }
+
+  if (retention === "untrusted" || retention === "integrity_failure") {
+    return (
+      <div className="section">
+        <div className="callout" style={{ borderLeft: "4px solid var(--chip-red)" }}>
+          <p className="section-title">Output is not trustworthy</p>
+          <p>{row.output_integrity_warning || "Vigil could not prove that this output stayed stable."}</p>
+        </div>
+        <div className="kv-grid">
+          <KV k="Retention" v={retention} />
+          <KV k="Integrity" v={row.output_integrity_status || "warning"} />
         </div>
       </div>
     );

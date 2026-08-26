@@ -1,10 +1,16 @@
 # ADR 0001 — Coverage and depth as a harness, not a gate
 
-- **Status:** Accepted (planning) — implementation pending, tracked by `docs/plans/harness-master-plan.md`.
+- **Status:** Accepted — implemented.
+  **Superseded-in-part by [ADR 0012](0012-coverage-grain-selective-load-bearing-depth.md):** the coarse,
+  family-level scope of the terminal block (decision 2, and the "strict per-item gate" rejection under
+  Alternatives considered) is narrowed to a decisive-unit, class-level exception; decision 3 (never gate
+  on self-attested/free-text signal) and everything else here stand unchanged.
 - **Date:** 2026-06-08
 - **Deciders:** Engagement operator (project owner) + Claude (planning).
-- **Supersedes / relates to:** establishes `docs/adr/`. Implemented by `docs/plans/harness-master-plan.md`
-  (entry point) and `docs/plans/coverage-depth-gate.md` (detailed design).
+- **Supersedes / relates to:** establishes `docs/adr/`; narrowed in part by ADR 0012.
+  Current ownership is `orchestrator/backend/app/services/state_manager/app_units.py`,
+  `depth_ledger.py`, the coverage/readiness services, and the `vigil assess coverage`
+  and phase-readiness contracts.
 
 ---
 
@@ -46,7 +52,7 @@ The existing coverage gates measure **breadth** and **resolution**, never **dept
   — which `classify-work` can set by *deferring*, not testing.
 - `per_host_coverage` (the one depth-ish projection) is recon-flavored (did fingerprinting happen) and WARN-only.
 
-There are **four disjoint vuln taxonomies** (gf-buckets in cases.db only; a hardcoded `BUCKET_SKILLS` mapping
+There are **four disjoint vuln taxonomies** (gf-buckets, at the time only in the local per-engagement `cases.db` — since folded into the backend `assessment_work_items` ledger, see `docs/adr/0013-work-buffer-folded-into-backend-ledger.md`; a hardcoded `BUCKET_SKILLS` mapping
 11/15 buckets; 8 `surface_type`s; free-text `attack_family`), and **24 of 35 offensive testing skills have no
 gf-bucket at all** — so a gate keyed on gf-buckets is blind to ~68% of capability, including the access-control,
 auth, and business-logic classes where the highest bounties live. The richer primitives that *could* measure
@@ -152,7 +158,8 @@ it." And several existing hard gates were already actively fighting the LLM rath
 ---
 
 ## References
-- `docs/plans/harness-master-plan.md` — the waved implementation plan (entry point) + the full choke register.
-- `docs/plans/coverage-depth-gate.md` — detailed scorer rubric, applicability predicates, storage, anti-staleness.
+
+- `docs/data-flow.md` — current assessment-state flow and ownership boundaries.
+- `CODE-MAP.md` — stable subsystem and contract ownership.
 - `docs/engagement-prompt-playbook.md` — the human-side steering library this complements.
-- Verified code anchors are cited inline in both plans (confirm against live code before editing).
+- ADR 0012 — the selective load-bearing depth refinement.

@@ -280,3 +280,25 @@ def test_best_effort_survives_httpx_failure(monkeypatch, tmp_path):
     summary = json.loads(out.getvalue())
     assert summary["verb"] == "js-mining"
     assert summary["bodies_scanned"] == 0
+
+
+def test_malformed_url_is_quarantined_not_fatal(monkeypatch, tmp_path):
+    # jsluice/regex output is untrusted parser input: a malformed URL literal (an
+    # unbracketed IPv6-like authority makes urlparse raise "Invalid IPv6 URL")
+    # must NOT abort the run and lose every mined endpoint. The bad literal is
+    # quarantined to a sidecar; good endpoints still land.
+    _scope(tmp_path)
+    src = _katana_source(tmp_path)
+    _, _, summary = _run(
+        monkeypatch, tmp_path,
+        _args(tmp_path, urls_file=str(src), db_path="", target="example.com"),
+        body_text="HTTP/1.1 200 OK\r\n\r\n",
+        jsluice_lines=['{"url":"http://[not-ipv6-thing/path"}',
+                       '{"url":"https://example.com/keep"}'],
+        th_lines=[],
+    )
+    mine = tmp_path / "scans" / "web-discovery" / "js-mining"
+    endpoints = (mine / "js_endpoints.txt").read_text(encoding="utf-8")
+    assert "example.com/keep" in endpoints            # good endpoint survived the bad one
+    malformed = (mine / "js_endpoints_malformed.txt").read_text(encoding="utf-8")
+    assert "not-ipv6-thing" in malformed              # bad literal quarantined, not fatal

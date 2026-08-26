@@ -3,6 +3,7 @@ name: gf-patterns:privileged_action
 description: State-change verb routes and dangerous-action params that signal function-level-authz (BFLA) / business-logic surfaces
 origin: local overlay (classify-context-and-surface 2026-06; no upstream gf equivalent)
 bucket: privileged_action
+skill: auth-bypass
 weight: 30
 ---
 
@@ -131,7 +132,7 @@ bucket (unlike `dotnet_handler` ≈835, `servicenow` 877 + 2,826 `.do`, `wordpre
 attributed to the `servicenow` bucket plus the compound-key fix. `privileged_action` is a
 generic, recurrence-driven BFLA surface (the roster's "write/grant/sendotp" note), not a
 corpus-volume play — it exists to catch function-level-authz routes wherever they appear in
-future engagements. See `docs/plans/classify-context-and-surface-buckets-2026-06.md` §A.9.
+future engagements. See ADR 0008 and `DRIFT.md` for the accepted rationale.
 
 ## Sources
 

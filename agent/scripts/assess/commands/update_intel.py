@@ -1,6 +1,6 @@
-"""vigil assess update-intel — patch an intel row by id.
+"""vigil assess intel update — patch an intel row by id.
 
-Mirrors ``update-finding`` for intel rows. Use this when an existing intel
+Mirrors ``finding update`` for intel rows. Use this when an existing intel
 row needs an in-place metadata update (severity refinement, new
 ``evidence_ref`` after re-investigation, etc.) — the backend keeps a
 single canonical row and refreshes the FTS shadow so search reflects the
@@ -11,8 +11,8 @@ audit and insert a wholly new row that replaces it.
 
 Usage::
 
-    vigil assess update-intel <type> <id> <patch-json-file>
-    vigil assess update-intel <type> <id> --inline '{"...": "..."}'
+    vigil assess intel update <type> <id> <patch-json-file>
+    vigil assess intel update <type> <id> --inline '{"...": "..."}'
 """
 from __future__ import annotations
 
@@ -30,13 +30,13 @@ from assess.lib.schema_validation import collect_patch_validation_errors, load_s
 def register(subparsers) -> None:
     types_list = ", ".join(sorted(INTEL_TYPES.keys()))
     p = subparsers.add_parser(
-        "update-intel",
+        "update",
         help="PATCH an intel row by id (in-place update)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  vigil assess update-intel tech-component 42 patch.json\n"
-            "  vigil assess update-intel cve 17 --inline '{\"validation_status\": \"exploited\"}'\n"
+            "  vigil assess intel update tech-component 42 patch.json\n"
+            "  vigil assess intel update cve 17 --inline '{\"validation_status\": \"exploited\"}'\n"
             f"\nValid types: {types_list}"
         ),
     )
@@ -124,7 +124,7 @@ def _maybe_explain_409(exc: AssessError) -> None:
         return
     print(
         "update-intel: backend rejected with HTTP 409 (natural-key collision).\n"
-        "  Hint: use `vigil assess supersede-intel <type> <id> ...` when the new "
+        "  Hint: use `vigil assess intel supersede <type> <id> ...` when the new "
         "payload would change the natural key and you want the prior row retained for audit.",
         file=sys.stderr,
     )

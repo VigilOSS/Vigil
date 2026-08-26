@@ -3,6 +3,7 @@ name: gf-patterns:webhook
 description: Inbound/outbound webhook registration and delivery endpoint patterns
 origin: local overlay (no upstream gf equivalent)
 bucket: webhook
+skill: ssrf-testing
 weight: 30
 ---
 
@@ -86,7 +87,7 @@ Param-key matches (co-fire with path):
 
 1 actionable `webhook` template (6 rows) in the first cms-gov deep sweep and 1 template (6 rows)
 in the third targeted sweep. Low volume confirmed the P3 classification in the implementation
-roadmap. See `docs/plans/research/classify-surface-2026-06/README.md` §4b.
+roadmap. See `docs/research/classify-surface-2026-06/README.md` §4b.
 
 ## Sources
 

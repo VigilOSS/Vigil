@@ -27,13 +27,16 @@ authorized_phase: <phase, e.g. 4>
 
 ## Dispatch Mindset
 hunt_scope: <wide | deep>
-mindset lens: <agent/rules/mindsets/<name>.md> — <one line: why this lens fits the observed signal>
+mindset lens: <agent/rules/mindsets/<name>.md> [(<finer-grained lens name>)] — <one line: why this lens fits the observed signal>
+  # the finer-grained name (Caching, Race conditions, ...) is an optional parenthetical qualifier
+  # on a real backing path — never a bare value; see phase-4-consume-test.md "Lens Vocabulary"
 
 <if resumed/continuation: paste `vigil assess resume-brief` output here>
 <if a prior dispatch touched this surface/finding: paste `vigil assess agent render-handoff <prior-agent-id>` output here>
 
 ## Dispatch Context
 target: <URL, or repo/artifact path for code/android>
+application_unit_id: <optional positive id when this is a dedicated app-unit lane>
 outcome objective: <the surface to hunt + the result wanted — NOT a pre-named vuln/payload>
 skills:
   - <skill-name> — full path: agent/skills/<skill-name>/SKILL.md
@@ -55,8 +58,8 @@ Register the contract alongside the prompt (`operator-core.md` § Specialist Dis
 
 ```bash
 vigil assess agent start \
-    --agent-id <agent_id> --agent-role <role> \
-    --task "<one-paragraph outcome objective>" --scope-host <host> \
+    --agent-id <agent_id> --role <role> \
+    --task "<one-paragraph outcome objective>" \
     --model <name> --reasoning <level> --dispatch-mode <mode> \
     --skills "<skill-name>[,<skill-name>...]"
 ```
@@ -73,16 +76,17 @@ vigil assess agent done <agent_id> --status completed --finding-slugs <slugs>
 |---|---|---|
 | `agent_id` / `agent_role` / `authorized_phase` | Required | § Runtime Identity Block — `authorized_phase` is also the "Current phase" field cited by § Dispatch Context Template; there is no separate `phase` field in Dispatch Context, it is not restated below |
 | `hunt_scope` | Required (VA); default `deep` for EX | `agent/phases/phase-4-consume-test.md` "Phased mindset flow" (Pass-1 WIDE / Pass-2 DEEP / Pass-3 EXPLOIT) — WIDE = open objective, baseline + `developer.md` only; DEEP = one family mindset + matching skill per signal/high-yield cell |
-| `mindset lens` | Required | Role file's own `## Dispatch Mindset` slot (VA/EX) — the injected packet is MORE SPECIFIC than the role's baseline mindset and governs where the two compete |
+| `mindset lens` | Pass-scoped, not role-scoped — Required on DEEP/VARIANT/SYNTHESIS-pass dispatches, OMITTED on WIDE/SURVEY-pass dispatches | `agent/operator-core.md` § Specialist Dispatch Contract `mindset lens` row (canonical statement of which passes require it) and the role file's own `## Dispatch Mindset` slot — the injected packet is MORE SPECIFIC than the role's baseline mindset and governs where the two compete |
 | resume-brief / render-handoff paste | Required when continuation or prior dispatch exists | § Runtime Identity Block ("If this is a continuation…") + § Dispatch Context Template "Cross-agent prior work" |
 | `target` | Required | § Dispatch Context Template "Agent identity and target URL" |
+| `application_unit_id` | Optional; use for a dispatch dedicated to one concrete app unit | § Specialist Dispatch Contract `application_unit_id` row; pass as `--application-unit-id <id>` so the depth ledger can attribute the lane without inferring from a host/path string |
 | `outcome objective` | Required | § Dispatch Context Template "specific outcome objective" |
 | `skills` | Required | § Dispatch Context Template "Which skill(s) to load" + Pre-Dispatch Checklist — the named skills are illustrative, not the boundary of what may be loaded; the specialist self-discovers others via `vigil assess list-skills` |
 | `depth expectation` | Required | § Dispatch Context Template "Depth expectation" |
 | `rate-limit budget` | Required when target-facing | § Dispatch Context Template "Rate-limit budget" |
 | `oob` | Required when the dispatch may need a callback | § Dispatch Context Template "OOB / listener availability" |
 | `auth_context` / `credential_id` | Required | § Dispatch Context Template "Auth context" |
-| `coverage` | Required | § Dispatch Context Template "Coverage statement" — source it from `vigil assess resume-brief` (its Surfaces / Work Buffer / Attempts sections) or `vigil assess list-command-runs --q <surface> --show-matches` |
+| `coverage` | Required | § Dispatch Context Template "Coverage statement" — source it from `vigil assess resume-brief` (its Surfaces / Work Buffer / Attempts sections) or `vigil assess command-run list --q <surface> --show-matches` |
 | `cleanup` | Required when server-side state may be left | § Dispatch Context Template "Cleanup constraints" |
 | `human_reach_decision` | Required when an open gate exists on the target surface | § Dispatch Context Template "Human-reach gate state" |
 | role-specific additions | Required per role | § Dispatch Context Template "Role-specific additions" |
@@ -114,7 +118,7 @@ mindset lens: agent/rules/mindsets/idor-bac.md — Pass-1 wide sweep flagged num
 
 #### Handoff from vulnerability-analyst dispatch va-wide-9f1a (Pass-1, rendered)
 - Prior task: Pass-1 wide sweep, orders/billing surface group
-- Scope host: saas.acme.example
+- Application unit: (none recorded)
 - **Dispatched at:** 2026-06-30T08:02:14Z (status: completed)
 - Summary: baseline pass across /api/v1/orders*, /api/v1/invoices*, /api/v1/billing*; numeric
   IDs on orders/invoices, UUIDs on billing (lower BAC signal); no auth-boundary probing done yet
@@ -123,6 +127,7 @@ mindset lens: agent/rules/mindsets/idor-bac.md — Pass-1 wide sweep flagged num
 
 ## Dispatch Context
 target: https://saas.acme.example/api/v1/orders/{id} and /api/v1/invoices/{id}
+application_unit_id: 42
 outcome objective: hunt the orders/invoices surface for access-control and object-reference
   weaknesses across the two named identities; prove any attacker outcome you find (read, write,
   or enumerate another tenant's order/invoice data) — do not stop at "IDOR exists," replay the
@@ -152,7 +157,7 @@ human_reach_decision: none open on this surface
 
 Candidate surface: /api/v1/orders/{id}, /api/v1/invoices/{id} — REST JSON API behind session-cookie
 auth. Recon observed sequential integer IDs on both. Prior probe-run ids for this surface:
-`vigil assess list-command-runs --q orders --show-matches`. Let the analyst choose which
+`vigil assess command-run list --q orders --show-matches`. Let the analyst choose which
 access-control variants to pursue beyond the base IDOR replay (BFLA on state-transition
 endpoints, mass-assignment on the update verb, etc.) — the objective above is the surface and
 result wanted, not the boundary of the hunt.
@@ -160,9 +165,9 @@ result wanted, not the boundary of the hunt.
 
 ```bash
 vigil assess agent start \
-    --agent-id va-idor-b7c2 --agent-role vulnerability-analyst \
+    --agent-id va-idor-b7c2 --role vulnerability-analyst \
     --task "Deep IDOR/BAC pass on orders+invoices, cross-identity replay user_a/user_b" \
-    --scope-host saas.acme.example \
+    --application-unit-id 42 \
     --model claude-opus-4-8 --reasoning high --dispatch-mode item-iterating \
     --skills "idor-testing,split-brain-idor"
 ```
@@ -190,7 +195,7 @@ mindset lens: agent/rules/mindsets/chain-impact.md — two confirmed findings on
 
 #### Handoff from vulnerability-analyst dispatch va-idor-b7c2 (rendered)
 - Prior task: Deep IDOR/BAC pass on orders+invoices, cross-identity replay user_a/user_b
-- Scope host: saas.acme.example
+- Application unit: 42
 - **Dispatched at:** 2026-06-30T15:41:02Z (status: completed)
 - Summary: confirmed cross-tenant IDOR on /api/v1/orders/{id} — user_b's session reads
   user_a's order detail including shipping PII by incrementing the numeric id
@@ -234,9 +239,8 @@ are `exploit-developer.md`'s own doctrine — this template does not restate the
 
 ```bash
 vigil assess agent start \
-    --agent-id ex-chain-d4e1 --agent-role exploit-developer \
+    --agent-id ex-chain-d4e1 --role exploit-developer \
     --task "Chain-construction pass: admin SSO auth-bypass -> orders IDOR, full endpoint map self-served" \
-    --scope-host saas.acme.example \
     --model claude-opus-4-8 --reasoning high --dispatch-mode deep-manual \
     --skills "exploit-playbook-authoring"
 ```

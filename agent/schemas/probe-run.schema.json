@@ -34,7 +34,7 @@
     },
     "input_slot": {
       "default": "unknown",
-      "maxLength": 64,
+      "maxLength": 128,
       "minLength": 1,
       "title": "Input Slot",
       "type": "string",
@@ -102,6 +102,12 @@
       "type": "string",
       "description": "What anomaly was detected when result_status is 'signal' (e.g. 'time-delay', 'error-disclosure', 'different-response-length')."
     },
+    "outcome_assertion": {
+      "default": "",
+      "maxLength": 1024,
+      "title": "Outcome Assertion",
+      "type": "string"
+    },
     "evidence_ref": {
       "default": "",
       "maxLength": 1024,
@@ -152,6 +158,28 @@
       ],
       "default": null,
       "title": "Finding Id"
+    },
+    "work_item_ids": {
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "title": "Work Item Ids",
+      "type": "array",
+      "description": "OVERRIDE the default work-buffer drain. A covering probe carrying coverage_item_id drains its FK-linked work-items by default; pass explicit ids to narrow the drain to exactly these (marked 'done' atomically with the probe). Unknown ids are skipped, not an error."
+    },
+    "resolve_surface_id": {
+      "type": "integer",
+      "default": null,
+      "title": "Resolve Surface Id",
+      "minimum": 1,
+      "description": "OVERRIDE the default surface advance. A covering probe carrying request_variant_id advances its FK-linked discovered surface(s) to 'partially-covered' by default; pass a surface id to advance exactly that one instead."
+    },
+    "no_drain": {
+      "default": false,
+      "title": "No Drain",
+      "type": "boolean",
+      "description": "SUPPRESS the default FK-derived cascade (both the work-item drain and the surface advance). The probe is still recorded; the buffer and surfaces are left untouched."
     }
   },
   "required": [

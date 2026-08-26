@@ -81,7 +81,7 @@ L2 is `vigil assess host-exec` territory for Okta API pulls plus
 | Active sessions | `curl ".../api/v1/users/{id}/sessions"` | Where supported; some tenants restrict this endpoint by feature flag |
 | Hybrid AD pivot | PowerShell `Get-ADUser`, `Get-ADGroupMember` | AD-side state for hybrid drift in step 6; runs from a domain-joined admin workstation |
 | Filter / project JSON | `jq` | Read-only, fast, no tenant calls |
-| AiTM correlation | `vigil assess artifact search "device_fingerprint"` | Sibling-skill artifacts (M365, AWS) often already carry the device fingerprint Okta needs to dedupe |
+| AiTM correlation | `vigil assess artifact search --q "device_fingerprint"` | Sibling-skill artifacts (M365, AWS) often already carry the device fingerprint Okta needs to dedupe |
 
 ### Token + scope requirement
 
@@ -108,8 +108,6 @@ while [[ -n "$URL" ]]; do
   printf '%s\n' "$body" >> "$ENGAGEMENT_DIR/ir/reports/okta_systemlog_${USER_ID}.json"
   URL=$(printf '%s' "$resp" | awk -F'[<>]' 'tolower($0) ~ /rel="next"/ {print $2; exit}')
 done
-shasum -a 256 "$ENGAGEMENT_DIR/ir/reports/okta_systemlog_${USER_ID}.json" \
-  >> "$ENGAGEMENT_DIR/ir/reports/SHA256SUMS.txt"
 ```
 
 ## Methodology

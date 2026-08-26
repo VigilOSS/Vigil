@@ -183,7 +183,7 @@ curl -s -X POST "http://target/api/payment" \
 
 - **Workflow step** that was bypassed or abused
 - **Expected behavior** vs **actual behavior**
-- **Financial impact** if applicable — confirming the API accepted a negative quantity or zero price is not enough; you must show the **attacker outcome** (e.g., submitting `quantity: -5` resulted in a credit of $50 applied to the account balance, confirmed by the subsequent balance API call; the coupon was applied twice in the same order reducing the total from $100 to $0; the payment step was skipped and the order was fulfilled with no payment record in the transaction log)
+- **Financial impact** if applicable — prove the attacker outcome (`agent/rules/hunting.md` §2), e.g., submitting `quantity: -5` resulted in a credit of $50 applied to the account balance, confirmed by the subsequent balance API call; the coupon was applied twice in the same order reducing the total from $100 to $0; the payment step was skipped and the order was fulfilled with no payment record in the transaction log
 - **Exact request/response** proving the logic flaw
 - **Reproducibility** — can it be repeated?
 - **Severity** — based on business impact, not just technical impact:

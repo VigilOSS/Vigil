@@ -3,6 +3,7 @@ name: gf-patterns:auth
 description: Authentication-entry path and credential-key patterns (login, MFA, SAML assertion endpoints)
 origin: local overlay (gf upstream only had interestingparams at weight 15)
 bucket: auth
+skill: auth-bypass
 weight: 40
 ---
 
@@ -93,7 +94,7 @@ Param-key matches:
 Long-tail cms-gov sweeps found 46 actionable `auth` templates (4,201 underlying rows) in
 the first deep sweep and 19 more (38 rows) in the second, concentrated in `/efi/*` account
 lifecycle, Spring Security login, PIV login, and portal session routes. Third targeted sweep:
-173 actionable `auth_entry` templates. See `docs/plans/research/classify-surface-2026-06/README.md` §4b.
+173 actionable `auth_entry` templates. See `docs/research/classify-surface-2026-06/README.md` §4b.
 
 ## Sources
 

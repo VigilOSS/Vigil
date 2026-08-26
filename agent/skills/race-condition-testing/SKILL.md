@@ -125,7 +125,7 @@ session override behavior.
 
 - Endpoint and action with race condition
 - Number of parallel requests sent
-- Number of successful duplicate executions — confirming two requests both returned 200 is not enough; you must show the **attacker outcome** (e.g., the coupon was redeemed 18 times in a single burst, the discount was applied 18 times reducing the total from $500 to $0, confirmed by checking the order total in the response; the gift card balance of $50 was withdrawn 12 times totaling $600 withdrawn from a $50 balance; the vote count increased by 8 from a single user confirming no server-side uniqueness enforcement)
+- Number of successful duplicate executions — prove the attacker outcome (`agent/rules/hunting.md` §2), e.g., the coupon was redeemed 18 times in a single burst, the discount was applied 18 times reducing the total from $500 to $0, confirmed by checking the order total in the response; the gift card balance of $50 was withdrawn 12 times totaling $600 withdrawn from a $50 balance; the vote count increased by 8 from a single user confirming no server-side uniqueness enforcement
 - Technique used (single-packet, Turbo Intruder, curl --parallel)
 - Business impact (financial loss, integrity violation, privilege escalation)
 - Timing window observed

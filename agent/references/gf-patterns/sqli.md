@@ -3,6 +3,7 @@ name: gf-patterns:sqli
 description: Query-identifier and search parameter patterns that signal SQL injection surfaces
 origin: 1ndianl33t/Gf-Patterns (+ local overlay)
 bucket: sqli
+skill: sqli-testing
 weight: 40
 ---
 
@@ -36,6 +37,16 @@ FP guard: `where` and `select` also overlap the `nosqli` bucket (Mongo/ES `$`-op
 via compound-key expansion), so both buckets firing on the same row is expected and fine — the
 reason chain is multi-bucket, and bucket weight only orders triage rather than gating inclusion,
 so the overlap never suppresses a row. No path fragments were added.
+
+### ORM sort/group compound family (deepened, vuln-taxonomy-audit 2026-07)
+
+"SQLi via sort/orderBy parameter" — an ORM building `ORDER BY <param>` or `GROUP BY <param>`
+directly from a request value (column names generally cannot be parameterized/bound the way
+literal values can) — is a recurring bug-bounty pattern and a direct extension of the same
+rationale as the upstream additions above. `order`/`sort` bare keys already existed; the
+compound `_by` forms and `having` did not:
+
+`order_by, orderby, sort_by, sortby, group_by, groupby, having`
 
 ## Path patterns that match
 

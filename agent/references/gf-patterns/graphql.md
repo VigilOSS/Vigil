@@ -3,6 +3,7 @@ name: gf-patterns:graphql
 description: GraphQL endpoint and request-key patterns that signal introspection, query-injection, and BOLA surfaces
 origin: local overlay (no upstream gf equivalent)
 bucket: graphql
+skill: graphql-testing
 weight: 45
 ---
 
@@ -80,7 +81,7 @@ Param-key matches:
 (proposed priority 75, present in both, falling to `path:/` at priority 0 before 2026-06).
 Zendesk (modern SaaS, third validation corpus): 392 of 1,540 proxy-captured rows are
 `graphql`-typed, confirming graphql is a dominant surface shape in production SaaS, not a
-niche class. See `docs/plans/research/classify-surface-2026-06/README.md` §4b.
+niche class. See `docs/research/classify-surface-2026-06/README.md` §4b.
 
 ## Sources
 

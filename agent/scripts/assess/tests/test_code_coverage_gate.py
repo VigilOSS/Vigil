@@ -78,7 +78,39 @@ def _coverage(
     }
 
 
-def _setup_env(monkeypatch, module, tmp_path, *, scope, coverage, findings=None):
+def _readiness(*, blockers=None, warnings=None):
+    blockers = list(blockers or [])
+    return {
+        "target_phase": "verify-variant",
+        "transition_ready": not blockers,
+        "blockers": blockers,
+        "quality_gate": {
+            "passed": not warnings,
+            "warnings": list(warnings or []),
+        },
+    }
+
+
+def _blocker(code: str, message: str, *, overrideable: bool = True):
+    return {
+        "code": code,
+        "message": message,
+        "overrideable": overrideable,
+    }
+
+
+def _setup_env(
+    monkeypatch,
+    module,
+    tmp_path,
+    *,
+    scope,
+    coverage,
+    findings=None,
+    decisions=None,
+    readiness=None,
+    readiness_error=None,
+):
     engagement = tmp_path / "agent" / "engagements" / "eng-code"
     engagement.mkdir(parents=True, exist_ok=True)
     (engagement / "scope.json").write_text(json.dumps(scope), encoding="utf-8")
@@ -89,10 +121,18 @@ def _setup_env(monkeypatch, module, tmp_path, *, scope, coverage, findings=None)
             pass
 
         def get(self, path: str):
+            if path.startswith("code/readiness?target_phase="):
+                if readiness_error is not None:
+                    raise readiness_error
+                payload = dict(readiness or _readiness())
+                payload["target_phase"] = path.rsplit("=", 1)[-1]
+                return payload
             if path == "findings":
                 return findings if findings is not None else [_ACTIVE_CODE_FINDING]
             if path == "code/coverage":
                 return coverage
+            if path.startswith("dispatch-decisions"):
+                return list(decisions or [])
             return []
 
         def record_decision(self, payload):
@@ -138,6 +178,34 @@ def _args(engagement, target_phase, **overrides):
 _UNCOVERED = [{"file_id": 7, "file_path": "src/parser.py", "classification": "critical", "total_functions": 5}]
 
 
+def test_backward_transition_to_ingest_does_not_call_unsupported_readiness(
+    monkeypatch, tmp_path
+):
+    module = _load_transition_module("tp_backward_ingest")
+    eng, recorded = _setup_env(
+        monkeypatch,
+        module,
+        tmp_path,
+        scope={"engagement_type": "code", "current_phase": "hunt"},
+        coverage=_coverage(),
+        readiness_error=RuntimeError("ingest readiness is unsupported"),
+    )
+
+    module.run(
+        _args(
+            eng,
+            "ingest",
+            reason="Source changed; restart from the sealed-snapshot boundary.",
+        )
+    )
+
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "ingest"
+    regressions = [
+        decision for decision in recorded if decision["kind"] == "phase_regression"
+    ]
+    assert len(regressions) == 1
+
+
 # ---------------------------------------------------------------------------
 # (c) uncovered_high_risk_file blocks hunt -> verify-variant
 # ---------------------------------------------------------------------------
@@ -148,7 +216,10 @@ def test_hunt_to_verify_blocks_on_uncovered_high_risk_file(monkeypatch, tmp_path
     eng, _ = _setup_env(
         monkeypatch, module, tmp_path,
         scope={"engagement_type": "code", "current_phase": "hunt"},
-        coverage=_coverage(uncovered=_UNCOVERED),
+        coverage=_coverage(uncovered=[]),
+        readiness=_readiness(blockers=[
+            _blocker("uncovered_high_risk_file", "src/parser.py has no function proof"),
+        ]),
     )
     with pytest.raises(SystemExit):
         module.run(_args(eng, "verify-variant"))
@@ -164,6 +235,7 @@ def test_uncovered_cleared_allows_transition(monkeypatch, tmp_path, capsys):
         monkeypatch, module, tmp_path,
         scope={"engagement_type": "code", "current_phase": "hunt"},
         coverage=_coverage(uncovered=[]),
+        readiness=_readiness(),
     )
     module.run(_args(eng, "verify-variant"))
     assert "uncovered_high_risk_file" not in capsys.readouterr().err
@@ -180,7 +252,10 @@ def test_hunt_to_verify_blocks_on_incomplete_high_coverage(monkeypatch, tmp_path
     eng, _ = _setup_env(
         monkeypatch, module, tmp_path,
         scope={"engagement_type": "code", "current_phase": "hunt"},
-        coverage=_coverage(critical=(2, 2), high=(3, 1)),
+        coverage=_coverage(critical=(0, 0), high=(0, 0)),
+        readiness=_readiness(blockers=[
+            _blocker("code_coverage_incomplete", "High files not fully analyzed: 1/3"),
+        ]),
     )
     with pytest.raises(SystemExit):
         module.run(_args(eng, "verify-variant"))
@@ -199,7 +274,10 @@ def test_hunt_to_verify_blocks_on_pending_triggers(monkeypatch, tmp_path, capsys
     eng, _ = _setup_env(
         monkeypatch, module, tmp_path,
         scope={"engagement_type": "code", "current_phase": "hunt"},
-        coverage=_coverage(pending=2),
+        coverage=_coverage(pending=0),
+        readiness=_readiness(blockers=[
+            _blocker("pending_cross_file_triggers", "2 cross-file triggers remain"),
+        ]),
     )
     with pytest.raises(SystemExit):
         module.run(_args(eng, "verify-variant"))
@@ -223,6 +301,9 @@ def test_low_effort_warning_does_not_block(monkeypatch, tmp_path, capsys):
             uncovered=[],
             effort_warnings=["Critical file src/parser.py: family 'ssrf' effort 40 < 70"],
         ),
+        readiness=_readiness(
+            warnings=["Critical file src/parser.py: family 'ssrf' effort 40 < 70"],
+        ),
     )
     module.run(_args(eng, "verify-variant"))
     err = capsys.readouterr().err
@@ -241,7 +322,10 @@ def test_force_overrides_uncovered_and_records_decision(monkeypatch, tmp_path):
     eng, recorded = _setup_env(
         monkeypatch, module, tmp_path,
         scope={"engagement_type": "code", "current_phase": "hunt"},
-        coverage=_coverage(uncovered=_UNCOVERED),
+        coverage=_coverage(uncovered=[]),
+        readiness=_readiness(blockers=[
+            _blocker("uncovered_high_risk_file", "src/parser.py has no function proof"),
+        ]),
     )
     module.run(_args(eng, "verify-variant", force=True, reason="accepted residual risk"))
     assert json.loads((eng / "scope.json").read_text())["current_phase"] == "verify-variant"
@@ -263,10 +347,100 @@ def test_complete_blocks_on_uncovered_high_risk_file(monkeypatch, tmp_path, caps
     eng, _ = _setup_env(
         monkeypatch, module, tmp_path,
         scope={"engagement_type": "code", "current_phase": "fuzz"},
-        coverage=_coverage(uncovered=_UNCOVERED),
+        coverage=_coverage(uncovered=[]),
         findings=[],
+        readiness=_readiness(blockers=[
+            _blocker("uncovered_high_risk_file", "src/parser.py has no function proof"),
+        ]),
     )
     with pytest.raises(SystemExit):
         module.run(_args(eng, "complete"))
     assert "uncovered_high_risk_file" in capsys.readouterr().err
     assert json.loads((eng / "scope.json").read_text())["current_phase"] == "fuzz"
+
+
+# ---------------------------------------------------------------------------
+# A-R2: the track-agnostic blind-triage gate also guards the CODE complete edge
+# (code-phase-4-fuzz.md makes the blind Pass-2 mandatory for every Medium+
+# finding). Mirrors the web report/complete blind-triage precondition.
+# ---------------------------------------------------------------------------
+
+
+_MEDIUM_CODE_FINDING = {
+    "slug": "code-med-1",
+    "severity": "medium",
+    "verification_state": "verified",
+    "workflow_status": "active",
+    "canonical_location": "file:src/handler.py:42",
+}
+
+# Clean coverage so ONLY the blind-triage gate can block: no crit/high files to
+# analyze, no pending triggers, no uncovered high-risk files.
+_CLEAN_COVERAGE = _coverage(critical=(0, 0), high=(0, 0), uncovered=[])
+
+
+def test_code_complete_blocks_without_blind_triage_verdict(monkeypatch, tmp_path, capsys):
+    module = _load_transition_module("tp_blind_triage_code_block")
+    eng, _ = _setup_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "code", "current_phase": "fuzz"},
+        coverage=_CLEAN_COVERAGE,
+        findings=[_MEDIUM_CODE_FINDING],
+        decisions=[],
+        readiness=_readiness(blockers=[
+            _blocker("missing_blind_triage", "code-med-1 lacks blind triage"),
+        ]),
+    )
+    with pytest.raises(SystemExit):
+        module.run(_args(eng, "complete", track="code"))
+    err = capsys.readouterr().err
+    assert "missing_blind_triage" in err
+    assert "code-med-1" in err
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "fuzz"
+
+
+def test_code_complete_allowed_with_blind_triage_accept(monkeypatch, tmp_path, capsys):
+    module = _load_transition_module("tp_blind_triage_code_allow")
+    eng, _ = _setup_env(
+        monkeypatch, module, tmp_path,
+        scope={"engagement_type": "code", "current_phase": "fuzz"},
+        coverage=_CLEAN_COVERAGE,
+        findings=[_MEDIUM_CODE_FINDING],
+        decisions=[
+            {
+                "kind": "blind_triage_verdict",
+                "payload": {"finding_slug": "code-med-1", "verdict": "Accept@P3"},
+            }
+        ],
+        readiness=_readiness(),
+    )
+    module.run(_args(eng, "complete", track="code"))
+    assert "missing_blind_triage" not in capsys.readouterr().err
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "complete"
+
+
+def test_source_identity_blocker_cannot_be_forced(monkeypatch, tmp_path, capsys):
+    module = _load_transition_module("tp_source_identity_nonoverrideable")
+    eng, recorded = _setup_env(
+        monkeypatch,
+        module,
+        tmp_path,
+        scope={"engagement_type": "code", "current_phase": "ingest"},
+        coverage=_coverage(),
+        readiness=_readiness(blockers=[
+            _blocker(
+                "source_snapshot_unverified",
+                "Repository 7 must be reingested into a verified sealed snapshot",
+                overrideable=False,
+            ),
+        ]),
+    )
+
+    with pytest.raises(SystemExit):
+        module.run(_args(eng, "classify-map", force=True, reason="accept risk"))
+
+    err = capsys.readouterr().err
+    assert "source_snapshot_unverified" in err
+    assert "cannot be overridden" in err
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "ingest"
+    assert not [d for d in recorded if d["kind"] == "forced_transition_override"]

@@ -89,6 +89,16 @@ so the TLS/JA3 fingerprint survives Akamai Bot Manager.
 
 ## B. Liveness-gate-first rule (don't record verdicts against a dead session)
 
+**When the session came from the credential store, gate with the built-in probe first** —
+`vigil assess auth status --probe --identity <name> --probe-url <authed-url>` — rather than
+hand-rolling this check. It's the same own-object-read idea below, generalized: it never follows
+redirects, persists the verdict against that named identity (`live`/`dead`/`unknown`, never a false
+positive on a transport error), and clears a `stale` mark on `live`. The self-minted-token pattern
+in this section applies when the identity was never captured into the store at all (a freshly
+self-minted access_token from live SPA cookies, §A above) or when no `material.liveness` signature
+has been declared yet for that identity — declare one (`vigil auth import`/`edit`) so future probes
+go through the CLI instead of a one-off script.
+
 Before trusting **any** authenticated result — and *especially* before recording an "unreachable" /
 "not-exposed" verdict — **prove the session is live** with an own-object read that you know returns
 `200`:

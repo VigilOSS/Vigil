@@ -31,7 +31,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 import uuid
+from collections import Counter
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -42,7 +45,12 @@ from assess.lib.kali import (
     kali_exec,
 )
 from assess.lib import reachability
-from assess.lib.kali_output import KaliResult, detect_transport_error
+from assess.lib.kali_output import (
+    KALI_EXIT_CODES,
+    KaliResult,
+    detect_transport_error,
+    kali_exit_code,
+)
 
 
 _DEFAULT_PLACEHOLDER = "{}"
@@ -371,9 +379,15 @@ def cluster_results(results: list[tuple[str, KaliResult]]) -> list[dict[str, Any
 # --------------------------------------------------------------------------- #
 
 
-def _render_table(batch_id: str, total: int, clusters: list[dict[str, Any]]) -> str:
+def _render_table(
+    batch_id: str, total: int, clusters: list[dict[str, Any]], failed: int = 0
+) -> str:
+    header = f"# sweep {batch_id[:8]} — {total} value(s), {len(clusters)} cluster(s)"
+    if failed:
+        # A dead arm still clusters, so the table alone would read as coverage.
+        header += f", {failed} with NO usable output"
     lines = [
-        f"# sweep {batch_id[:8]} — {total} value(s), {len(clusters)} cluster(s)",
+        header,
         "",
         f"{'CLASS':<18} {'STATUS':<8} {'N':<4} {'EXAMPLE-VALUES':<22} MARKER",
     ]
@@ -388,22 +402,89 @@ def _render_table(batch_id: str, total: int, clusters: list[dict[str, Any]]) -> 
     return "\n".join(lines)
 
 
+def aggregate_exit_code(statuses: Iterable[str]) -> int:
+    """Process exit code for a fan-out, derived from ``KALI_EXIT_CODES``.
+
+    WORST-ARM-WHEN-ALL-FAILED. A fan-out exits non-zero only when EVERY arm
+    produced an unusable result, because one dead arm out of fifty is a normal
+    and useful sweep — failing the command there would train callers to ignore
+    ``$?`` on the verb most likely to be run unattended. When every arm shares
+    one terminal status the aggregate carries that status's own code (an
+    all-timed-out sweep exits 4, an all-transport-error sweep exits 6, so the
+    diagnosis survives the aggregation); a mixed all-failed set exits ``failed``
+    and the per-arm statuses in the JSON say which was which.
+
+    Sourced from the same table ``emit_result`` uses, so the per-run and
+    aggregate halves of the contract cannot drift apart.
+    """
+    codes = {kali_exit_code(status) for status in statuses}
+    if not codes or 0 in codes:
+        # Nothing ran, or at least one arm came back with a usable result.
+        return 0
+    return codes.pop() if len(codes) == 1 else KALI_EXIT_CODES["failed"]
+
+
+def _failure_tally(results: list[tuple[str, KaliResult]]) -> dict[str, int]:
+    """Count the arms whose terminal status means no usable output, by status."""
+    return dict(
+        Counter(
+            str(getattr(result, "status", "") or "")
+            for _value, result in results
+            if kali_exit_code(getattr(result, "status", ""))
+        )
+    )
+
+
 def emit_sweep_result(
     batch_id: str,
     results: list[tuple[str, KaliResult]],
     *,
     as_json: bool = False,
 ) -> None:
+    """Print the clustered summary, then land the aggregate exit-code contract.
+
+    The terminal statement of every sweep, the way ``emit_result`` is for a
+    single ``kali <verb>`` run. A dead arm is invisible in the cluster table on
+    its own — a transport failure clusters like any other signature — so the
+    failure tally is stated separately in the JSON, on stderr, and (when total)
+    in ``$?``.
+    """
     clusters = cluster_results(results)
     total = len(results)
+    failures = _failure_tally(results)
+    failed = sum(failures.values())
     if as_json:
         print(json.dumps({
             "batch_id": batch_id,
             "total": total,
+            "failed": failed,
+            "failed_by_status": failures,
             "clusters": clusters,
         }, ensure_ascii=False))
     else:
-        print(_render_table(batch_id, total, clusters))
+        print(_render_table(batch_id, total, clusters, failed))
+
+    code = aggregate_exit_code(
+        getattr(result, "status", "") for _value, result in results
+    )
+    if failed:
+        breakdown = ", ".join(f"{status}={n}" for status, n in sorted(failures.items()))
+        if code:
+            print(
+                f"sweep {batch_id[:8]}: ALL {failed} arm(s) produced no usable output "
+                f"({breakdown}); this sweep proves NOTHING about the target. Exiting {code}.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"sweep {batch_id[:8]}: WARN {failed}/{total} arm(s) produced no usable "
+                f"output ({breakdown}) — those values are NOT negatives; re-run them before "
+                f"reading their absence as a result. The other {total - failed} arm(s) "
+                "answered, so the exit code stays 0.",
+                file=sys.stderr,
+            )
+    if code:
+        sys.exit(code)
 
 
 # --------------------------------------------------------------------------- #
@@ -443,7 +524,7 @@ def run(args) -> None:
         cmd_i = _substitute(template, placeholder, value)
         tool_name = cmd_i[0] if cmd_i else "command"
         # The batch id + value rides in the per-row intent so a later
-        # `vigil assess list-command-runs --intent-q "sweep <id>"` recovers the
+        # `vigil assess command-run list --intent-q "sweep <id>"` recovers the
         # whole fan-out, and each row links back to ITS value.
         per_intent = f"{base_intent} [sweep {batch_id[:8]} value={value}]"
         result = kali_exec(cmd_i, tool_name=tool_name, intent=per_intent, **kwargs)

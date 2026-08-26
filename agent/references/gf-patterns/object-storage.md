@@ -3,6 +3,7 @@ name: gf-patterns:object-storage
 description: Cloud and Domino object-storage path patterns (S3, GCS, blob, Lotus .nsf file objects)
 origin: local overlay (no upstream gf equivalent)
 bucket: object-storage
+skill: info-disclosure-testing
 weight: 25
 ---
 
@@ -127,7 +128,7 @@ Domino/Lotus Notes:
 in the third targeted sweep, dominated by Domino/Lotus `.nsf`, `$FILE`, `docscat`, and
 document-library paths. The Domino-specific discriminators (`$file`, `.nsf`, `files.nsf`,
 `docscat`, `didc`) were added specifically to capture this corpus signal.
-See `docs/plans/research/classify-surface-2026-06/README.md` §4b (object-storage long-tail validation).
+See `docs/research/classify-surface-2026-06/README.md` §4b (object-storage long-tail validation).
 
 ## Sources
 
