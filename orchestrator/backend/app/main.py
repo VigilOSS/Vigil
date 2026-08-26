@@ -1,9 +1,13 @@
 import logging
 import os
+import sqlite3
+import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
 
 from anyio import to_thread
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 
 from .api.activity import router as activity_router
@@ -25,6 +29,9 @@ from .ws import broadcaster
 
 logger = logging.getLogger(__name__)
 
+_BACKEND_PROCESS_STARTED_AT = time.time()
+_BACKEND_SOURCE_ROOT = Path(__file__).resolve().parent
+
 
 _FRONTEND_MISSING_HELP = (
     "Frontend build not found at "
@@ -33,6 +40,33 @@ _FRONTEND_MISSING_HELP = (
     "`vigil up` or `vigil orchestrator start`). Run `vigil orchestrator build` "
     "to build the install-side frontend in place, then refresh."
 )
+
+
+def _backend_runtime_snapshot() -> dict[str, object]:
+    newer_files: list[str] = []
+    newest_mtime = 0.0
+    for path in _BACKEND_SOURCE_ROOT.rglob("*.py"):
+        try:
+            modified_at = path.stat().st_mtime
+        except OSError:
+            continue
+        newest_mtime = max(newest_mtime, modified_at)
+        if modified_at > _BACKEND_PROCESS_STARTED_AT:
+            newer_files.append(path.relative_to(_BACKEND_SOURCE_ROOT).as_posix())
+    return {
+        "source_root": str(_BACKEND_SOURCE_ROOT),
+        "process_started_at": datetime.fromtimestamp(
+            _BACKEND_PROCESS_STARTED_AT,
+            tz=timezone.utc,
+        ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "newest_source_mtime": (
+            datetime.fromtimestamp(newest_mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if newest_mtime
+            else None
+        ),
+        "restart_required": bool(newer_files),
+        "newer_source_files": sorted(newer_files)[:20],
+    }
 
 
 @asynccontextmanager
@@ -58,6 +92,27 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+
+
+@app.exception_handler(sqlite3.OperationalError)
+async def sqlite_operational_error(
+    _request: Request, exc: sqlite3.OperationalError
+) -> JSONResponse:
+    """Expose contention as retryable service pressure, not a blank 500."""
+    if "locked" in str(exc).lower():
+        logger.warning("SQLite contention exhausted busy timeout: %s", exc)
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "database write contention; retry shortly"},
+            headers={"Retry-After": "1"},
+        )
+    logger.exception("SQLite operational failure", exc_info=exc)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "database operation failed"},
+    )
+
+
 app.include_router(admin_router)
 app.include_router(dashboard_router)
 app.include_router(engagements_router)
@@ -85,6 +140,7 @@ def readyz() -> JSONResponse | dict[str, object]:
         "status": "ready",
         "app": settings.app_name,
         "database_connected": True,
+        "backend_runtime": _backend_runtime_snapshot(),
     }
     payload.update(schema_flags)
     if not all(schema_flags.values()):

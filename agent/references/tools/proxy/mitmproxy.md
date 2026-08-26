@@ -4,7 +4,7 @@ description: "Mitmproxy session capture: setup, CA cert install, FoxyProxy confi
 
 # Mitmproxy Session Capture
 
-Intercept browser traffic to capture authenticated sessions (cookies, tokens, headers) into the engagement's backend credential store for use by engagement agents.
+Intercept browser traffic to capture authenticated sessions (cookies, tokens, headers) into the engagement's backend credential store for use by engagement agents. Capture is append-only and multi-identity — each distinct login becomes its own identity row rather than overwriting whatever was captured before.
 
 ## Quick Start
 
@@ -14,8 +14,10 @@ vigil mitmproxy start
 
 `vigil mitmproxy start` takes **no engagement key**. One shared proxy serves
 every active engagement at once and routes each captured flow to the matching
-engagement by hostname (see "How It Works"). Capture is a per-engagement policy,
-not a launch-time selector.
+engagement by hostname (see "How It Works"). An otherwise-unclaimed host falls
+back to the `vigil use` / launcher-selected engagement only when its
+`scope.json` declares `scope_enforcement: bypass`. Capture is a per-engagement
+policy, not a launch-time selector.
 
 ## Browser Proxy Setup (FoxyProxy)
 
@@ -66,16 +68,68 @@ vigil mitmproxy start
 
 ## Login Capture Workflow
 
-1. Start the shared proxy (no engagement key): `vigil mitmproxy start` — it routes captures to whichever active engagement owns the hostname
+1. Start the shared proxy (no engagement key): `vigil mitmproxy start` — it routes captures to whichever active engagement owns the hostname; for a global-bypass engagement, select it first with `vigil use <key>` so otherwise-unclaimed hosts have an explicit owner
 2. Configure browser proxy (see above)
 3. Navigate to the target login page and authenticate
 4. Browse a few authenticated pages (admin, settings, API endpoints)
-5. The proxy addon auto-detects login flows and POSTs the captured cookies/tokens to the engagement's backend credential store (the `default` identity)
+5. The proxy addon auto-detects login flows and POSTs the captured cookies/tokens to the engagement's backend credential store, which derives an identity name from the session-anchor material and appends or refreshes accordingly (see "Multi-Identity Capture" below)
 6. Disable the proxy in FoxyProxy when done
 
 If auto-capture misses the session (addon error, non-standard login flow):
 - Check proxy logs: `vigil logs mitmproxy --lines 30`
 - Fall back to manual cookie extraction from browser DevTools
+
+To capture a second account for cross-account testing, repeat steps 2-5 logged
+in as the other user through the same proxy — the addon detects the different
+session-anchor material and appends a new identity instead of overwriting the
+first.
+
+## Multi-Identity Capture (append-only)
+
+Each captured login becomes its own identity in the credential store. The
+backend derives an opaque identity name server-side from the capture's
+session-anchor cookies (`sid`, `sessionid`, `jsessionid`, `connect.sid`,
+`laravel_session`, ... case-insensitive) or a JWT `sub`/`uid`/`user_id`/`email`
+claim — never from raw high-entropy cookies in general, since a shared
+per-CDN/load-balancer cookie (`AWSALB`) would otherwise merge two accounts and a
+rotating anti-CSRF cookie would otherwise churn a fresh identity on every
+reload. Reloading an already-captured login refreshes that one identity in
+place; logging in as a different account appends a new identity — the property
+cross-account IDOR/BOLA testing depends on. Anonymous/pre-login traffic (a
+consent-banner cookie, no session material yet) carries no anchor and is never
+captured.
+
+List what's stored for a host, and which identity is active:
+
+```bash
+vigil assess auth list --host <host> [--include-dead] [--json]
+```
+
+Each row shows the identity name, `auth_context`, `state`, liveness verdict,
+age, and cookie *names* only — never raw values; the active identity is marked
+`*`. A session with no fresh capture for 8h is flagged `stale` (advisory — not
+dead); one with no fresh capture for 5 days is purged. Age alone never marks an
+identity `dead` — only a proven-dead liveness probe does (next section).
+
+## Per-Identity Liveness
+
+Keepalives (below) defeat the *idle* clock; they don't tell you whether a
+session has already died (logout, absolute-lifetime expiry, server-side
+revocation). Prove liveness explicitly before trusting a captured identity and
+before recording a "dead"/"unreachable" verdict against it:
+
+```bash
+vigil assess auth status --probe --identity <name> --probe-url <authed-url>
+```
+
+The probe never follows redirects and returns a real verdict only once that
+identity has a declared `material.liveness = {expect_status, authed_marker,
+dead_marker}` oracle (set via `vigil auth import`/`edit`) — a transport error
+or a missing signature returns `unknown`, never a false verdict. `live` clears
+a `stale` mark; `dead` is written only by this probe, never by hand and never
+by age alone. Liveness is per-identity and LLM/operator-owned: whoever takes an
+identity for a task probes it before trusting it, and re-probes on a
+401/403/redirect-to-login shape.
 
 ## Keeping a Captured Session Alive (Keepalives)
 
@@ -182,31 +236,52 @@ The proxy runs `mitmdump` with `proxy_addon.py`, which:
   `vigil mitmproxy start` takes no engagement key. The addon keeps a registry of
   all in-progress engagements (synced from the orchestrator, with a filesystem
   `scope.json` scan as fallback) and routes each captured flow to the
-  best-matching engagement **by hostname** — literal scope hosts beat wildcards,
-  narrower wildcards beat broader ones, and an `out_of_scope` carve-out (host,
-  URL, or CIDR) always drops the flow. A host no engagement claims is not
-  captured. This is why capture is a per-engagement **policy**, not a launch-time
-  selector.
+  best-matching engagement **by hostname** — literal scope hosts beat wildcards
+  and narrower wildcards beat broader ones. Under normal capture routing, an
+  `out_of_scope` carve-out (host, URL, or CIDR) leaves the flow unowned for
+  engagement capture. When no hostname pattern claims a host, the addon consults
+  `<engagements_root>/.active` and binds the flow only if that selected
+  engagement declares `scope_enforcement: bypass`; the bypass admits both allow-
+  and deny-misses for capture. A normal hostname owner always wins over this
+  fallback, so a selected bypass engagement cannot steal another engagement's
+  traffic. This ownership decision never blocks the proxied request or replaces
+  its upstream response.
+- **Injects program-mandated attribution headers on outbound in-scope
+  requests.** For an engagement whose `scope.json` declares `required_headers`
+  (e.g. a BugCrowd program that mandates `X-Bug-Bounty: <handle>`), the addon
+  adds those headers to each in-scope request it forwards — the same
+  `required_headers` the tool-exec path injects (ADR 0010), now applied to
+  browser/proxied traffic too. This makes **manual browsing and login capture
+  through FoxyProxy ROE-compliant** without you setting the header per request.
+  It is gated by the same engagement binding as capture, including the selected
+  global-bypass fallback, and is non-destructive — a header the client already
+  set is never overwritten. Scope/path metadata never synthesizes a proxy
+  response or blocks the upstream request. Engagements without
+  `required_headers` are unaffected. Run `vigil mitmproxy routes` to see which
+  headers each engagement will inject.
 - Filters noise (analytics, CDNs, tracking pixels)
 - Classifies requests by type (API, form, page, JS, GraphQL, WebSocket, etc.)
-- Detects login flows and POSTs captured session material to the backend credential store
-- Records intercepted traffic to `cases.db` for work-buffer ingestion
-- Posts request observations to the orchestrator backend (when available)
-- When an engagement's capture policy is enabled, additionally persists the
-  **full request/response flow** — body sidecars + a JSONL flow index under the
-  engagement root — and posts a compact flow record to the backend (see below)
+- Detects login flows and POSTs captured session material to the backend credential store, which derives the identity name from the capture's session-anchor material so distinct logins append rather than overwrite (see "Multi-Identity Capture" above)
+- Posts request observations to the orchestrator backend (when available), which derives the
+  work-buffer row (`assessment_work_items`) server-side in the same transaction — no local
+  database write (ADR 0013)
+- When an engagement's capture policy is enabled, additionally persists a
+  **full-flow metadata record** in the JSONL index and backend; request and
+  response body sidecars are stored only when their individual flags are enabled
 
 ## Full-Flow Capture Policy
 
-Beyond the compact request-observation + `cases.db` snippet the addon always
-records, each engagement has an opt-in **full-flow capture policy**. When
-enabled, the addon writes the raw request/response bodies as engagement-local
-sidecars and a JSONL flow index, and posts a compact per-flow record (sha256s,
-byte counts, truncation flags, timing, auth context, and host-mismatch
-telemetry) to the backend `POST .../assessment/http-flows` ingest route.
+Beyond the compact request-observation + derived work-item the addon always
+records, each engagement has an opt-in **full-flow capture policy** with three
+states:
 
-**Raw-body capture is OFF by default.** Restarting the shared proxy never
-silently changes capture behavior; you must turn it on per engagement.
+1. `--no-enabled`: compact observation only; no full-flow index/backend row and no body sidecars.
+2. `--enabled` with both body flags false: full-flow metadata in the JSONL index and backend, with no bodies stored.
+3. `--enabled` plus `--capture-request-bodies` and/or `--capture-response-bodies`: the same metadata plus only the selected body sidecars (subject to size/content-type policy).
+
+**Full-flow recording and raw-body storage are OFF by default.** Restarting the
+shared proxy never silently changes capture behavior; opt in per engagement and
+select body sides explicitly when their contents are needed.
 
 For the full `vigil assess http policy` command reference (inspecting,
 enabling/scoping, and disabling raw-body capture), run `vigil assess contract
@@ -216,7 +291,7 @@ The policy is authoritative in the backend and mirrored to
 `capture-policy.json` next to `scope.json` in the engagement root, so the shared
 proxy honors it even when the orchestrator registry fetch is unavailable.
 
-On-disk layout (engagement-root-relative), written only while capture is enabled:
+On-disk layout (engagement-root-relative), written only while full-flow recording is enabled:
 
 ```
 traffic/mitmproxy/bodies/<sha256>.bin   # one file per distinct stored body

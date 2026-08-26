@@ -1,22 +1,34 @@
-"""Tests for the work-buffer priority/cluster pipeline.
+"""Tests for the CLIENT-SIDE work-buffer classification pipeline.
 
-Covers the schema migration that adds `priority_score`, `priority_reason`,
-`cluster_key`, and `terminal_reason`, plus the `classify-work`, `list-clusters`,
-and the `dispatch fetch-by-priority` / `dispatch defer-cluster` CLI
-subcommands. We import each command module directly through a helper (mirroring
-the pattern used by `test_agent_script_regressions.py`) so the tests exercise
-the real argparse-driven `run` entry point without paying the subprocess cost.
+ADR 0013 folded the per-engagement local ``cases.db`` ``work_items`` queue into
+the backend ledger (``assessment_work_items``), served over HTTP. The
+server-side derivation / atomic-claim / dispatch-verb mechanics (the former
+``dispatch fetch-by-priority`` / ``defer-cluster`` / ``stats`` / ``list-clusters``
+/ ``peek``, plus the ``work_items_per_host`` view, ``db_init`` migrations, and
+the proxy ``_insert_case`` write) now live in
+``tests/test_work_buffer_backend.py`` and are NOT duplicated here.
+
+What remains here is the still-CLIENT-SIDE intent:
+
+  * pure classification-bucket behaviour, exercised directly against
+    ``assess.lib.classify_buckets.classify_from_fields`` / ``classify_type`` /
+    the reason-tag + INERT_TYPES helpers (model: sibling ``test_classify_*.py``);
+  * the ``classify-work`` command loop (default / ``--reclassify-stale`` /
+    ``--reclassify-all`` / ``--reclaim-skipped`` predicates and the
+    ``classifier_version`` stamp), driven through the real
+    ``assess.commands.classify_work.run`` against a fake ``AssessmentClient``;
+  * the ``ingest-endpoints`` gf-bucket → coverage-candidate bridge and its
+    IP/localhost/IPv6 admission, driven the same way;
+  * ``coverage_checks._load_work_items_by_host`` / ``_consumption_satisfied``
+    over a client-backed work buffer.
 """
 from __future__ import annotations
 
 import importlib.util
 import json
-import sqlite3
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-
-import pytest
 
 
 def _scripts_root() -> Path:
@@ -36,32 +48,20 @@ def _load_script_module(name: str, relative_path: str):
     return module
 
 
-def _load_db_module():
-    return _load_script_module(
-        "test_work_buffer_db_module",
-        "agent/scripts/assess/lib/db.py",
-    )
-
-
 def _load_classify_module():
-    return _load_script_module(
-        "test_classify_work_module",
-        "agent/scripts/assess/commands/classify_work.py",
-    )
+    """Return the folded-in reclassify implementation.
 
+    ``classify-work`` was merged into ``work-buffer reclassify``; the pass logic
+    lives in ``assess.commands.dispatch.work_items`` (``_reclassify`` /
+    ``_reclassify_retype``). It is a package submodule (relative imports), so it
+    is imported normally rather than loaded as a standalone file.
+    """
+    scripts_root = _scripts_root()
+    if str(scripts_root) not in sys.path:
+        sys.path.insert(0, str(scripts_root))
+    from assess.commands.dispatch import work_items
 
-def _load_list_clusters_module():
-    return _load_script_module(
-        "test_list_clusters_module",
-        "agent/scripts/assess/commands/list_clusters.py",
-    )
-
-
-def _load_dispatch_module():
-    return _load_script_module(
-        "test_dispatch_module",
-        "agent/scripts/assess/commands/dispatch/__init__.py",
-    )
+    return work_items
 
 
 def _load_proxy_addon_module():
@@ -85,656 +85,324 @@ def _load_proxy_addon_module():
     )
 
 
-def _make_collector_with_engagement(module, root: Path, *, key: str = "eng-1"):
-    """Helper for tests that need a CaseCollector preloaded with a single
-    engagement entry pointing at ``root/<key>``. Returns ``(collector, entry)``.
+# ---------------------------------------------------------------------------
+# classify-work driver. The per-engagement local cases.db is gone (ADR 0013);
+# classify-work now reads/writes the backend work buffer over HTTP. We drive the
+# real `classify_work.run` against a fake AssessmentClient that serves seeded row
+# dicts and captures the `work-items/update` payloads (applying them back onto
+# its in-memory rows so re-runs observe the mutation, exactly like the backend).
+# The server-side derivation/claim/verb mechanics live in
+# tests/test_work_buffer_backend.py.
+# ---------------------------------------------------------------------------
+class _FakeClassifyClient:
+    """Fake AssessmentClient for classify_work.run.
+
+    Serves seeded work-item rows via ``get_all_pages`` and captures the
+    ``work-items/update`` payloads, applying each update back onto the in-memory
+    row (keyed by ``id``) so a subsequent ``get_all_pages`` reflects the write —
+    the same force-write-by-id contract the backend implements (see
+    tests/test_work_buffer_backend.py::test_apply_updates_force_writes_status_and_type).
     """
-    engagement_dir = root / key
-    engagement_dir.mkdir(parents=True, exist_ok=True)
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    entry = module.EngagementEntry(
-        key=key,
-        root=engagement_dir,
-        scope_patterns=[],
-        scope_priority=0,
-        updated_at="",
-    )
-    collector.registry = {key: entry}
-    return collector, entry
+
+    def __init__(self, rows: list[dict]):
+        self._rows: dict = {row["id"]: dict(row) for row in rows}
+        self.updates: list[dict] = []        # cumulative across runs
+        self.last_updates: list[dict] = []    # only the most recent run
+
+    # Used as the monkeypatched ``AssessmentClient(base_url, key)`` constructor.
+    def __call__(self, *_args, **_kwargs):
+        return self
+
+    def get_all_pages(self, endpoint: str) -> list[dict]:
+        assert endpoint == "work-items"
+        return [dict(row) for row in self._rows.values()]
+
+    def post(self, endpoint: str, payload: dict) -> dict:
+        assert endpoint == "work-items/update"
+        ups = list(payload["updates"])
+        self.last_updates = ups
+        self.updates.extend(ups)
+        for up in ups:
+            row = self._rows.get(up["id"])
+            if row is None:
+                continue
+            for key, value in up.items():
+                if key == "id":
+                    continue
+                row[key] = value
+        return {"affected": len(ups)}
+
+    def row(self, row_id):
+        return self._rows[row_id]
+
+    def close(self) -> None:
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self.close()
+        return False
 
 
-def _make_fresh_db(tmp_path: Path, name: str = "cases.db") -> Path:
-    db_path = tmp_path / name
-    db_path.touch()
-    db_module = _load_db_module()
-    db_module.db_init(str(db_path))
-    return db_path
-
-
-def _insert_work_item(
-    db_path: Path,
+def _wi(
+    row_id,
     *,
-    queue_key: str,
     url_path: str,
-    url: str | None = None,
-    method: str = "GET",
-    # Floor-less, non-inert default so rows that match no bucket fall through to
-    # the path:* fallback (these tests isolate bucket matching). The producer's
-    # real `api` type DOES carry a gf:api/20 floor (see classify_buckets
-    # `_TYPE_FLOOR`); tests that specifically need that floor pass case_type
-    # explicitly. The floor itself is covered by test_classify_type_floor.py.
     case_type: str = "unknown",
     status: str = "pending",
     query_params: dict | None = None,
     body_params: dict | None = None,
-    source: str = "test",
+    path_params: dict | None = None,
     priority_score: int = 0,
+    priority_reason: str | None = None,
     cluster_key: str | None = None,
     terminal_reason: str | None = None,
     classifier_version: str | None = None,
-) -> int:
-    conn = sqlite3.connect(str(db_path))
-    try:
-        cursor = conn.execute(
-            """INSERT INTO work_items
-            (queue_key, method, url, url_path, query_params, body_params,
-             type, source, status, priority_score, cluster_key, terminal_reason,
-             classifier_version)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                queue_key,
-                method,
-                url or f"https://target.example{url_path}",
-                url_path,
-                json.dumps(query_params or {}),
-                json.dumps(body_params or {}),
-                case_type,
-                source,
-                status,
-                priority_score,
-                cluster_key,
-                terminal_reason,
-                classifier_version,
-            ),
-        )
-        conn.commit()
-        return cursor.lastrowid
-    finally:
-        conn.close()
+    url: str | None = None,
+    source: str = "test",
+    live_status: str | None = None,
+) -> dict:
+    """Build a backend work-item row dict carrying every field classify_work reads.
+
+    Param columns are JSON text (the backend's storage shape) so
+    `classify_row`'s `collect_keys` decodes them exactly as it does for a real row.
+    """
+    return {
+        "id": row_id,
+        "type": case_type,
+        "url_path": url_path,
+        "query_params": json.dumps(query_params or {}),
+        "body_params": json.dumps(body_params or {}),
+        "path_params": json.dumps(path_params or {}),
+        "status": status,
+        "priority_score": priority_score,
+        "priority_reason": priority_reason,
+        "cluster_key": cluster_key,
+        "terminal_reason": terminal_reason,
+        "classifier_version": classifier_version,
+        "url": url or f"https://target.example{url_path}",
+        "source": source,
+        "live_status": live_status,
+    }
 
 
-def _run_classify(db_path: Path, batch: int = 500, extra_args: list[str] | None = None):
+def _classify_env(rows: list[dict]):
+    """Return ``(module, fake)`` wired so the reclassify pass runs against a fake
+    backend seeded with ``rows``. The ``work-buffer`` wrapper builds the client
+    and hands it to the pass, so the fake is passed to ``_reclassify`` directly."""
+    fake = _FakeClassifyClient(rows)
     module = _load_classify_module()
-    extras = extra_args or []
-    reclassify_all = "--reclassify-all" in extras
-    reclassify_stale = "--reclassify-stale" in extras
-    reclaim_skipped = "--reclaim-skipped" in extras
-    only_unscored = "--only-unscored" in extras  # deprecated alias, kept for back-compat
-    module.run(
+    return module, fake
+
+
+def _run_classify(module, fake, capsys, *extra_args):
+    """Invoke the real `work-buffer reclassify` pass once; return
+    ``(updates, summary)`` — ``updates`` = the update dicts POSTed this run,
+    ``summary`` = the printed JSON summary."""
+    extras = list(extra_args)
+    fake.last_updates = []
+    module._reclassify(
+        fake,
         SimpleNamespace(
-            db_path=str(db_path),
-            batch=batch,
-            reclassify_all=reclassify_all,
-            reclassify_stale=reclassify_stale,
-            reclaim_skipped=reclaim_skipped,
-            only_unscored=only_unscored,
-        )
+            engagement_dir="/eng",
+            batch=500,
+            reclassify_all="--reclassify-all" in extras,
+            reclassify_stale="--reclassify-stale" in extras,
+            reclaim_skipped="--reclaim-skipped" in extras,
+            retype=False,
+            retype_all=False,
+        ),
     )
+    return fake.last_updates, json.loads(capsys.readouterr().out)
 
 
-def _run_list_clusters(
-    db_path: Path,
-    status: str = "pending",
-    limit: int = 100,
-    host: str = "",
-):
-    module = _load_list_clusters_module()
-    module.run(
-        SimpleNamespace(
-            db_path=str(db_path),
-            status=status,
-            limit=limit,
-            host=host,
-        )
-    )
+# Removed: local cases.db mechanics — db_init/ALTER schema migration,
+# db_exec_returning, and db_connect. The work buffer is now the backend
+# assessment_work_items ledger; see tests/test_work_buffer_backend.py.
 
 
-def _run_dispatch(
-    db_path: Path,
-    action: str,
-    extra: list[str] | None = None,
-    reason: str = "",
-    by: str = "status",
-    reason_tag: str = "",
-):
-    module = _load_dispatch_module()
-    module.run(
-        SimpleNamespace(
-            db_path=str(db_path),
-            action=action,
-            extra=extra or [],
-            reason=reason,
-            by=by,
-            reason_tag=reason_tag,
-        )
-    )
-
-
-def test_schema_migration_adds_priority_columns(tmp_path: Path) -> None:
-    db_path = tmp_path / "old.db"
-    db_path.touch()
-    conn = sqlite3.connect(str(db_path))
-    try:
-        # Build a work_items table that mirrors the schema before the
-        # signal-first dispatch columns shipped. The migration should add the
-        # four columns without touching existing rows.
-        conn.execute(
-            """CREATE TABLE work_items (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                queue_key TEXT NOT NULL,
-                request_variant_id INTEGER,
-                service_id INTEGER,
-                coverage_item_id INTEGER,
-                auth_context TEXT NOT NULL DEFAULT 'anonymous',
-                method TEXT NOT NULL,
-                url TEXT NOT NULL,
-                url_path TEXT NOT NULL,
-                query_params TEXT,
-                body_params TEXT,
-                path_params TEXT,
-                cookie_params TEXT,
-                headers TEXT,
-                body TEXT,
-                content_type TEXT,
-                content_length INTEGER,
-                response_status INTEGER,
-                response_headers TEXT,
-                response_size INTEGER,
-                response_snippet TEXT,
-                type TEXT NOT NULL DEFAULT 'unknown',
-                source TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending',
-                assigned_agent TEXT,
-                retry_count INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT DEFAULT (datetime('now')),
-                consumed_at TEXT,
-                params_key_sig TEXT,
-                UNIQUE(queue_key)
-            )"""
-        )
-        conn.execute(
-            "INSERT INTO work_items (queue_key, method, url, url_path, source, type) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            ("legacy:1", "GET", "https://target.example/", "/", "legacy", "api"),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-    db_module = _load_db_module()
-    db_module.db_init(str(db_path))
-
-    conn = sqlite3.connect(str(db_path))
-    try:
-        columns = {row[1]: row for row in conn.execute("PRAGMA table_info(work_items)").fetchall()}
-        for name in (
-            "priority_score",
-            "priority_reason",
-            "cluster_key",
-            "terminal_reason",
-            "signals",
-            "selected_by",
-            "triage_rationale",
-            "live_status",
-            "request_body_truncated",
-            "response_truncated",
-        ):
-            assert name in columns, f"missing migrated column {name}"
-
-        # priority_score has NOT NULL DEFAULT 0; existing rows should reflect that
-        # and the nullable columns should come back as NULL rather than empty strings.
-        row = conn.execute(
-            "SELECT priority_score, priority_reason, cluster_key, terminal_reason, "
-            "signals, selected_by, triage_rationale, live_status "
-            "FROM work_items WHERE queue_key = ?",
-            ("legacy:1",),
-        ).fetchone()
-        assert row == (0, None, None, None, None, None, None, None)
-
-        # The priority index is created as part of schema.sql for fresh DBs; the
-        # migration path must also leave it present so fetch-by-priority can rely
-        # on the ordering.
-        indexes = {row[0] for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='work_items'"
-        ).fetchall()}
-        assert "idx_work_items_priority" in indexes
-    finally:
-        conn.close()
-
-
-def test_db_exec_returning_commits_and_returns_dict_rows(tmp_path: Path) -> None:
-    """db_exec_returning runs an UPDATE ... RETURNING, commits, and returns the
-    mutated rows as dicts (the contract _fetch relies on)."""
-    db_module = _load_db_module()
-    db_path = tmp_path / "ret.db"
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, status TEXT, note TEXT)")
-        conn.execute("INSERT INTO t (id, status, note) VALUES (1, 'pending', 'a')")
-        conn.execute("INSERT INTO t (id, status, note) VALUES (2, 'pending', 'b')")
-        conn.commit()
-    finally:
-        conn.close()
-
-    rows = db_module.db_exec_returning(
-        str(db_path),
-        "UPDATE t SET status = 'done' WHERE status = 'pending' RETURNING *",
-    )
-    assert isinstance(rows, list)
-    assert all(isinstance(r, dict) for r in rows)
-    assert sorted(r["id"] for r in rows) == [1, 2]
-    assert {r["status"] for r in rows} == {"done"}
-
-    # The mutation must be durably committed: a fresh connection sees 'done'.
-    conn = sqlite3.connect(str(db_path))
-    try:
-        persisted = {r[0]: r[1] for r in conn.execute("SELECT id, status FROM t").fetchall()}
-    finally:
-        conn.close()
-    assert persisted == {1: "done", 2: "done"}
-
-
-def test_db_exec_returning_empty_match_returns_empty_list(tmp_path: Path) -> None:
-    """A RETURNING statement that matches no rows returns []."""
-    db_module = _load_db_module()
-    db_path = tmp_path / "ret_empty.db"
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, status TEXT)")
-        conn.commit()
-    finally:
-        conn.close()
-
-    rows = db_module.db_exec_returning(
-        str(db_path),
-        "UPDATE t SET status = 'done' WHERE status = 'pending' RETURNING *",
-    )
-    assert rows == []
-
-
-def test_db_connect_yields_row_factory_and_supports_explicit_txn(tmp_path: Path) -> None:
-    """db_connect yields a Row-factory connection the caller can drive a
-    BEGIN IMMEDIATE transaction on, and closes it on exit."""
-    db_module = _load_db_module()
-    db_path = tmp_path / "conn.db"
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, status TEXT)")
-        conn.execute("INSERT INTO t (id, status) VALUES (1, 'pending')")
-        conn.commit()
-    finally:
-        conn.close()
-
-    captured = {}
-    with db_module.db_connect(str(db_path)) as c:
-        c.execute("BEGIN IMMEDIATE")
-        row = c.execute("SELECT * FROM t WHERE id = 1").fetchone()
-        # Row factory => mapping access by column name works.
-        assert row["status"] == "pending"
-        c.execute("UPDATE t SET status = 'processing' WHERE id = 1")
-        c.commit()
-        captured["conn"] = c
-
-    # Connection is closed after the context manager exits.
-    import pytest as _pytest
-
-    with _pytest.raises(sqlite3.ProgrammingError):
-        captured["conn"].execute("SELECT 1")
-
-    # The committed change is visible to a fresh connection.
-    conn = sqlite3.connect(str(db_path))
-    try:
-        assert conn.execute("SELECT status FROM t WHERE id = 1").fetchone()[0] == "processing"
-    finally:
-        conn.close()
-
-
-def test_db_connect_closes_connection_on_exception(tmp_path: Path) -> None:
-    """An exception inside the with-block still closes the connection."""
-    db_module = _load_db_module()
-    db_path = tmp_path / "conn_exc.db"
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
-        conn.commit()
-    finally:
-        conn.close()
-
-    leaked = {}
-    with __import__("pytest").raises(RuntimeError):
-        with db_module.db_connect(str(db_path)) as c:
-            leaked["conn"] = c
-            raise RuntimeError("boom")
-
-    with __import__("pytest").raises(sqlite3.ProgrammingError):
-        leaked["conn"].execute("SELECT 1")
-
-
-def test_classify_work_assigns_ssrf_bucket(tmp_path: Path, capsys) -> None:
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(
-        db_path,
-        queue_key="v:1",
+def test_classify_work_assigns_ssrf_bucket() -> None:
+    """An ssrf-shaped param (url=) buckets to gf:ssrf. Re-expressed against the
+    client-side classifier `classify_from_fields` (classify-work applies exactly
+    this per-row assignment; the update/summary mechanics are covered server-side
+    in tests/test_work_buffer_backend.py)."""
+    cb = _classify_buckets()
+    a = cb.classify_from_fields(
+        case_type="unknown",
         url_path="/api",
-        url="https://target.example/api?url=http://evil.example",
-        query_params={"url": "http://evil.example"},
+        query_params=json.dumps({"url": "http://evil.example"}),
     )
-
-    _run_classify(db_path)
-
-    conn = sqlite3.connect(str(db_path))
-    try:
-        row = conn.execute(
-            "SELECT cluster_key, priority_score, priority_reason, terminal_reason "
-            "FROM work_items WHERE queue_key = ?",
-            ("v:1",),
-        ).fetchone()
-    finally:
-        conn.close()
-
-    assert row[0] == "gf:ssrf"
-    assert row[1] >= 40
-    assert row[2] is not None and "gf:ssrf" in row[2]
-    assert row[3] is None
-
-    summary = json.loads(capsys.readouterr().out)
-    assert summary["classified"] == 1
-    assert summary["updated"] == 1
-    assert summary["by_cluster"].get("gf:ssrf") == 1
+    assert a["cluster_key"] == "gf:ssrf"
+    assert a["priority_score"] >= 40
+    assert a["priority_reason"] is not None and "gf:ssrf" in a["priority_reason"]
+    assert a["terminal_reason"] is None
 
 
-def test_upload_rows_prefer_upload_fields_over_generic_lfi(tmp_path: Path) -> None:
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(
-        db_path,
-        queue_key="upload:1",
-        url_path="/api/users/avatar",
-        method="POST",
+def test_upload_rows_prefer_upload_fields_over_generic_lfi() -> None:
+    cb = _classify_buckets()
+    a = cb.classify_from_fields(
         case_type="upload",
-        body_params={"file": "avatar.png"},
+        url_path="/api/users/avatar",
+        body_params=json.dumps({"file": "avatar.png"}),
     )
-
-    _run_classify(db_path)
-
-    conn = sqlite3.connect(str(db_path))
-    try:
-        row = conn.execute(
-            "SELECT cluster_key, priority_score, priority_reason "
-            "FROM work_items WHERE queue_key = ?",
-            ("upload:1",),
-        ).fetchone()
-    finally:
-        conn.close()
-
-    assert row[0] == "gf:upload_fields"
-    assert row[1] == 40
-    assert row[2] == "gf:lfi+gf:upload_fields"
+    assert a["cluster_key"] == "gf:upload_fields"
+    assert a["priority_score"] == 40
+    assert a["priority_reason"] == "gf:lfi+gf:upload_fields"
 
 
-def _classify_one(db_path: Path, queue_key: str):
-    conn = sqlite3.connect(str(db_path))
-    try:
-        return conn.execute(
-            "SELECT cluster_key, priority_score, priority_reason, terminal_reason "
-            "FROM work_items WHERE queue_key = ?",
-            (queue_key,),
-        ).fetchone()
-    finally:
-        conn.close()
-
-
-def test_classify_idor_path_embedded_numeric_id(tmp_path: Path) -> None:
+def test_classify_idor_path_embedded_numeric_id() -> None:
     """A numeric object id in the URL path (no query/body param) buckets as idor."""
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(
-        db_path,
-        queue_key="idor:path-num",
-        url_path="/api/users/1024/profile",
-    )
-    _run_classify(db_path)
-    row = _classify_one(db_path, "idor:path-num")
-    assert row[0] == "gf:idor"
-    assert row[1] == 35
-    assert row[2] is not None and "gf:idor" in row[2]
-    assert row[3] is None
+    cb = _classify_buckets()
+    a = cb.classify_from_fields(case_type="unknown", url_path="/api/users/1024/profile")
+    assert a["cluster_key"] == "gf:idor"
+    assert a["priority_score"] == 35
+    assert a["priority_reason"] is not None and "gf:idor" in a["priority_reason"]
+    assert a["terminal_reason"] is None
 
 
-def test_classify_idor_path_embedded_uuid(tmp_path: Path) -> None:
+def test_classify_idor_path_embedded_uuid() -> None:
     """A UUID object id in the URL path buckets as idor."""
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(
-        db_path,
-        queue_key="idor:path-uuid",
+    cb = _classify_buckets()
+    a = cb.classify_from_fields(
+        case_type="unknown",
         url_path="/files/550e8400-e29b-41d4-a716-446655440000",
     )
-    _run_classify(db_path)
-    row = _classify_one(db_path, "idor:path-uuid")
-    assert row[0] == "gf:idor"
-    assert row[1] == 35
+    assert a["cluster_key"] == "gf:idor"
+    assert a["priority_score"] == 35
 
 
-def test_classify_idor_expanded_param_key_workspace(tmp_path: Path) -> None:
+def test_classify_idor_expanded_param_key_workspace() -> None:
     """A tenant/workspace scoping key (cross-tenant BOLA) buckets as idor."""
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(
-        db_path,
-        queue_key="idor:workspace",
+    cb = _classify_buckets()
+    a = cb.classify_from_fields(
+        case_type="unknown",
         url_path="/api/list",
-        query_params={"workspace_id": "acme"},
+        query_params=json.dumps({"workspace_id": "acme"}),
     )
-    _run_classify(db_path)
-    row = _classify_one(db_path, "idor:workspace")
-    assert row[0] == "gf:idor"
-    assert row[1] == 35
-    assert row[2] is not None and "gf:idor" in row[2]
+    assert a["cluster_key"] == "gf:idor"
+    assert a["priority_score"] == 35
+    assert a["priority_reason"] is not None and "gf:idor" in a["priority_reason"]
 
 
-def test_classify_non_object_path_is_not_idor(tmp_path: Path) -> None:
+def test_classify_non_object_path_is_not_idor() -> None:
     """A static, id-free path stays in the path: fallback — no spurious idor."""
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(
-        db_path,
-        queue_key="static:about",
-        url_path="/about/company/history",
-    )
-    _run_classify(db_path)
-    row = _classify_one(db_path, "static:about")
-    assert row[0] == "path:/about/company"
-    assert row[1] == 0
-    assert row[2] is None
+    cb = _classify_buckets()
+    a = cb.classify_from_fields(case_type="unknown", url_path="/about/company/history")
+    assert a["cluster_key"] == "path:/about/company"
+    assert a["priority_score"] == 0
+    assert a["priority_reason"] is None
 
 
-def test_classify_work_deterministic(tmp_path: Path, capsys) -> None:
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(
-        db_path,
-        queue_key="v:1",
-        url_path="/account/profile",
-        query_params={"id": "42", "url": "http://x"},
-    )
-    _insert_work_item(
-        db_path,
-        queue_key="v:2",
-        url_path="/admin/debug",
-        query_params={"cmd": "id"},
-    )
+def test_classify_work_deterministic(capsys) -> None:
+    module, fake = _classify_env([
+        _wi("v:1", url_path="/account/profile", query_params={"id": "42", "url": "http://x"}),
+        _wi("v:2", url_path="/admin/debug", query_params={"cmd": "id"}),
+    ])
 
-    _run_classify(db_path)
-    first = capsys.readouterr().out
+    _, first = _run_classify(module, fake, capsys)
+    after_first = {rid: dict(fake.row(rid)) for rid in ("v:1", "v:2")}
 
-    conn = sqlite3.connect(str(db_path))
-    try:
-        first_rows = conn.execute(
-            "SELECT queue_key, cluster_key, priority_score, priority_reason, terminal_reason "
-            "FROM work_items ORDER BY queue_key"
-        ).fetchall()
-    finally:
-        conn.close()
+    # Re-running with the safe default predicate must NOT touch already-scored
+    # rows — otherwise an operator running it as a routine "refresh" would
+    # silently overwrite manual triage.
+    _, second = _run_classify(module, fake, capsys)
+    after_second = {rid: dict(fake.row(rid)) for rid in ("v:1", "v:2")}
 
-    # Re-running classify-work with the safe default predicate must not
-    # touch already-scored rows — otherwise an operator running it as a
-    # routine "refresh" would silently overwrite manual triage. Re-running
-    # with --reclassify-all is the explicit opt-in that re-applies the
-    # current bucket table to every pending row.
-    _run_classify(db_path)
-    second = capsys.readouterr().out
-
-    conn = sqlite3.connect(str(db_path))
-    try:
-        second_rows = conn.execute(
-            "SELECT queue_key, cluster_key, priority_score, priority_reason, terminal_reason "
-            "FROM work_items ORDER BY queue_key"
-        ).fetchall()
-    finally:
-        conn.close()
-
-    assert first_rows == second_rows
-    first_summary = json.loads(first)
-    second_summary = json.loads(second)
-    assert first_summary["classified"] == 2
+    assert after_first == after_second
+    assert first["classified"] == 2
     # Default predicate is narrow: scored rows are skipped on re-run.
-    assert second_summary["classified"] == 0
-    assert second_summary["updated"] == 0
+    assert second["classified"] == 0
+    assert second["updated"] == 0
 
-    # --reclassify-all re-applies the bucket table to every pending row
-    # (the deliberate path for picking up _BUCKETS edits without resetting).
-    _run_classify(db_path, extra_args=["--reclassify-all"])
-    third = capsys.readouterr().out
-    third_summary = json.loads(third)
-    assert third_summary["classified"] == 2
-    assert third_summary["updated"] == 2
+    # --reclassify-all re-applies the bucket table to every pending row (the
+    # deliberate path for picking up _BUCKETS edits without resetting) and is
+    # deterministic — it reproduces byte-identical assignments.
+    _, third = _run_classify(module, fake, capsys, "--reclassify-all")
+    after_third = {rid: dict(fake.row(rid)) for rid in ("v:1", "v:2")}
+    assert third["classified"] == 2
+    assert third["updated"] == 2
+    assert after_third == after_first
 
-    # Deprecated --only-unscored alias still works as a no-op when every row
-    # is already scored, so older runbooks/CI do not break mid-cutover.
-    _run_classify(db_path, extra_args=["--only-unscored"])
-    fourth = capsys.readouterr().out
-    fourth_summary = json.loads(fourth)
-    assert fourth_summary["classified"] == 0
-    assert fourth_summary["updated"] == 0
+    # Deprecated --only-unscored alias still behaves as a no-op when every row is
+    # already scored (it now lives purely at the argparse layer — run() ignores
+    # it — so a bare default pass is the faithful behavior).
+    _, fourth = _run_classify(module, fake, capsys, "--only-unscored")
+    assert fourth["classified"] == 0
+    assert fourth["updated"] == 0
 
 
-def test_classify_work_ignores_non_pending_consumable_rows(tmp_path: Path, capsys) -> None:
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(
-        db_path,
-        queue_key="done:rce",
-        url_path="/api/run",
-        status="done",
-        query_params={"cmd": "id"},
-    )
-    _insert_work_item(
-        db_path,
-        queue_key="pending:rce",
-        url_path="/api/run",
-        query_params={"cmd": "id"},
-    )
+def test_classify_work_ignores_non_pending_consumable_rows(capsys) -> None:
+    module, fake = _classify_env([
+        _wi("done:rce", url_path="/api/run", status="done", query_params={"cmd": "id"}),
+        _wi("pending:rce", url_path="/api/run", status="pending", query_params={"cmd": "id"}),
+    ])
 
-    _run_classify(db_path)
+    _, summary = _run_classify(module, fake, capsys)
 
-    conn = sqlite3.connect(str(db_path))
-    try:
-        rows = {
-            row[0]: row[1:]
-            for row in conn.execute(
-                "SELECT queue_key, status, cluster_key, priority_score, priority_reason "
-                "FROM work_items ORDER BY queue_key"
-            ).fetchall()
-        }
-    finally:
-        conn.close()
-
-    assert rows["done:rce"] == ("done", None, 0, None)
-    assert rows["pending:rce"] == ("pending", "gf:rce", 50, "gf:rce")
-    summary = json.loads(capsys.readouterr().out)
+    done = fake.row("done:rce")
+    pending = fake.row("pending:rce")
+    assert (
+        done["status"], done["cluster_key"], done["priority_score"], done["priority_reason"]
+    ) == ("done", None, 0, None)
+    assert (
+        pending["status"], pending["cluster_key"], pending["priority_score"], pending["priority_reason"]
+    ) == ("pending", "gf:rce", 50, "gf:rce")
     assert summary["classified"] == 1
 
 
-def test_classify_work_inert_type_terminates(tmp_path: Path, capsys) -> None:
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(
-        db_path,
-        queue_key="img:1",
-        url_path="/static/logo.png",
-        case_type="image",
-        status="skipped",
-    )
+def test_classify_work_inert_type_terminates(capsys) -> None:
+    cb = _classify_buckets()
+    # The client-side classifier terminates inert types: cluster type:<type>,
+    # zero priority, terminal_reason 'inert_type'.
+    a = cb.classify_from_fields(case_type="image", url_path="/static/logo.png")
+    assert a["cluster_key"] == "type:image"
+    assert a["priority_score"] == 0
+    assert a["terminal_reason"] == "inert_type"
+    assert "image" in cb.INERT_TYPES
 
-    _run_classify(db_path)
+    # classify-work's DEFAULT pass (no flags) turns that terminal_reason into a
+    # status='skipped' write — a CLIENT-SIDE decision in classify_work.run
+    # (terminal_reason non-None on a scored row → flip to skipped). Drive the
+    # real run over a pending, never-scored inert row and assert the emitted
+    # update carries the terminal fields + the skipped-status flip.
+    module, fake = _classify_env([
+        _wi("img:1", url_path="/static/logo.png", case_type="image", status="pending"),
+    ])
+    updates, _summary = _run_classify(module, fake, capsys)
+    assert len(updates) == 1
+    up = updates[0]
+    assert up["id"] == "img:1"
+    assert up["cluster_key"] == "type:image"
+    assert up["priority_score"] == 0
+    assert up["terminal_reason"] == "inert_type"
+    assert up["status"] == "skipped"
+    # And the row reflects the write.
+    row = fake.row("img:1")
+    assert row["status"] == "skipped"
+    assert row["terminal_reason"] == "inert_type"
+    assert row["cluster_key"] == "type:image"
+    assert row["priority_score"] == 0
 
-    conn = sqlite3.connect(str(db_path))
-    try:
-        row = conn.execute(
-            "SELECT status, terminal_reason, cluster_key, priority_score "
-            "FROM work_items WHERE queue_key = ?",
-            ("img:1",),
-        ).fetchone()
-    finally:
-        conn.close()
 
-    assert row[0] == "skipped"
-    assert row[1] == "inert_type"
-    assert row[2] == "type:image"
-    assert row[3] == 0
+def test_classify_work_reclaim_skipped_unstrands_now_non_inert_rows(capsys) -> None:
+    module, fake = _classify_env([
+        _wi("map:1", url_path="/static/app.js.map", case_type="sourcemap",
+            status="skipped", terminal_reason="inert_type", cluster_key="type:sourcemap"),
+        _wi("img:1", url_path="/static/logo.png", case_type="image",
+            status="skipped", terminal_reason="inert_type"),
+    ])
 
+    # Default predicate must NOT touch the stranded (now non-inert) sourcemap row.
+    _run_classify(module, fake, capsys)
+    assert fake.row("map:1")["status"] == "skipped", "default predicate must not touch the stranded row"
 
-def test_classify_work_reclaim_skipped_unstrands_now_non_inert_rows(tmp_path: Path, capsys) -> None:
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(
-        db_path,
-        queue_key="map:1",
-        url_path="/static/app.js.map",
-        case_type="sourcemap",
-        status="skipped",
-        terminal_reason="inert_type",
-        cluster_key="type:sourcemap",
-    )
-    _insert_work_item(
-        db_path,
-        queue_key="img:1",
-        url_path="/static/logo.png",
-        case_type="image",
-        status="skipped",
-        terminal_reason="inert_type",
-    )
-
-    _run_classify(db_path)
-    capsys.readouterr()
-    conn = sqlite3.connect(str(db_path))
-    try:
-        before = conn.execute(
-            "SELECT status FROM work_items WHERE queue_key = ?", ("map:1",)
-        ).fetchone()[0]
-    finally:
-        conn.close()
-    assert before == "skipped", "default predicate must not touch the stranded row"
-
-    _run_classify(db_path, extra_args=["--reclaim-skipped"])
-    summary = json.loads(capsys.readouterr().out)
-    conn = sqlite3.connect(str(db_path))
-    try:
-        rows = {
-            r[0]: r[1:]
-            for r in conn.execute(
-                "SELECT queue_key, status, terminal_reason FROM work_items"
-            ).fetchall()
-        }
-    finally:
-        conn.close()
-    assert rows["map:1"][0] == "pending"
-    assert rows["map:1"][1] is None
-    assert rows["img:1"][0] == "skipped"
-    assert rows["img:1"][1] == "inert_type"
+    _, summary = _run_classify(module, fake, capsys, "--reclaim-skipped")
+    assert fake.row("map:1")["status"] == "pending"
+    assert fake.row("map:1")["terminal_reason"] is None
+    assert fake.row("img:1")["status"] == "skipped"
+    assert fake.row("img:1")["terminal_reason"] == "inert_type"
     assert summary["reclaimed_to_pending"] == 1
 
 
@@ -772,245 +440,42 @@ def test_classify_type_bare_host_root() -> None:
     assert module.classify_type("GET", "/api/users", "", "") == "api"
 
 
-def test_classify_work_host_root_is_seed_not_skipped(tmp_path: Path) -> None:
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(
-        db_path,
-        queue_key="v:hr",
-        url_path="/",
-        case_type="host_root",
-        query_params={},
+def test_classify_work_host_root_is_seed_not_skipped() -> None:
+    cb = _classify_buckets()
+    a = cb.classify_from_fields(case_type="host_root", url_path="/", query_params="{}")
+    # Stable, greppable cluster; zero priority; NOT terminal (a Phase-2 crawl seed
+    # must stay pending to be crawled — not silently dropped). host_root is not
+    # inert, so classify-work keeps it pending.
+    assert a["cluster_key"] == "type:host_root"
+    assert a["priority_score"] == 0
+    assert a["terminal_reason"] is None
+    assert "host_root" not in cb.INERT_TYPES
+
+
+def test_classify_work_path_fallback() -> None:
+    cb = _classify_buckets()
+    a = cb.classify_from_fields(
+        case_type="unknown", url_path="/about/company/history", query_params="{}"
     )
-
-    _run_classify(db_path)
-
-    conn = sqlite3.connect(str(db_path))
-    try:
-        row = conn.execute(
-            "SELECT cluster_key, priority_score, terminal_reason, status "
-            "FROM work_items WHERE queue_key = ?",
-            ("v:hr",),
-        ).fetchone()
-    finally:
-        conn.close()
-
-    # Stable, greppable cluster; zero priority; NOT terminal/skipped (it is a
-    # Phase-2 crawl seed, must stay pending to be crawled — not silently dropped).
-    assert row[0] == "type:host_root"
-    assert row[1] == 0
-    assert row[2] is None
-    assert row[3] == "pending"
+    assert a["cluster_key"] == "path:/about/company"
+    assert a["priority_score"] == 0
+    assert a["priority_reason"] is None
 
 
-def test_classify_work_path_fallback(tmp_path: Path) -> None:
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(
-        db_path,
-        queue_key="v:1",
-        url_path="/about/company/history",
-        query_params={},
-    )
-
-    _run_classify(db_path)
-
-    conn = sqlite3.connect(str(db_path))
-    try:
-        row = conn.execute(
-            "SELECT cluster_key, priority_score, priority_reason FROM work_items WHERE queue_key = ?",
-            ("v:1",),
-        ).fetchone()
-    finally:
-        conn.close()
-
-    assert row[0] == "path:/about/company"
-    assert row[1] == 0
-    assert row[2] is None
+# Removed: dispatch `fetch-by-priority` auto/agent routing (server-side now —
+# tests/test_work_buffer_backend.py::test_fetch_by_priority_claims_top_k_and_routes),
+# and the `db_insert_work_item` inline-classification insert (the backend derives
+# the work item from a request-observation; see
+# tests/test_work_buffer_backend.py::test_observation_derives_one_work_item). The
+# unknown→gf:trust_surface bucketing is covered by test_classify_*.py.
 
 
-def test_fetch_by_priority_auto_routes_by_type(tmp_path: Path, capsys) -> None:
-    db_path = _make_fresh_db(tmp_path)
-    seeds = [
-        ("api-rce", "api", 50, "gf:rce"),
-        ("js-ssrf", "javascript", 45, "gf:ssrf"),
-        ("unknown-trust", "unknown", 35, "gf:trust_surface"),
-        ("unknown-high", "unknown", 99, "path:/unknown"),
-        ("page-low", "page", 5, "path:/page"),
-    ]
-    for key, case_type, score, cluster in seeds:
-        _insert_work_item(
-            db_path,
-            queue_key=key,
-            url_path=f"/{key}",
-            case_type=case_type,
-            priority_score=score,
-            cluster_key=cluster,
-        )
-
-    _run_dispatch(db_path, "fetch-by-priority", ["10", "auto"])
-
-    output = capsys.readouterr().out
-    payload = json.loads(output)
-    assert [row["queue_key"] for row in payload] == [
-        "api-rce",
-        "js-ssrf",
-        "unknown-trust",
-        "page-low",
-    ]
-    assert [row["assigned_agent"] for row in payload] == [
-        "vulnerability-analyst",
-        "source-analyzer",
-        "vulnerability-analyst",
-        "source-analyzer",
-    ]
-
-
-def test_db_insert_inline_classifies_unknown_trust_surface(tmp_path: Path) -> None:
-    db_path = _make_fresh_db(tmp_path)
-    db_module = _load_db_module()
-
-    db_module.db_insert_work_item(
-        str(db_path),
-        queue_key="unknown:trust",
-        method="GET",
-        url="https://target.example/oauth/callback",
-        url_path="/oauth/callback",
-        query_params="{}",
-        body_params="{}",
-        path_params="{}",
-        case_type="unknown",
-        source="test",
-        params_key_sig="",
-    )
-
-    conn = sqlite3.connect(str(db_path))
-    try:
-        row = conn.execute(
-            "SELECT type, status, priority_score, cluster_key, priority_reason "
-            "FROM work_items WHERE queue_key = ?",
-            ("unknown:trust",),
-        ).fetchone()
-    finally:
-        conn.close()
-
-    assert row == ("unknown", "pending", 35, "gf:trust_surface", "gf:trust_surface")
-
-
-def test_proxy_insert_uses_shared_inline_classification(tmp_path: Path) -> None:
-    module = _load_proxy_addon_module()
-    engagements_root = tmp_path / "engagements"
-    engagements_root.mkdir()
-    collector, entry = _make_collector_with_engagement(module, engagements_root)
-
-    case_type = collector._classify_type("GET", "/oauth/callback", "", {})
-    # Updated 2026-06 (typer lexical app-route rescue): `/oauth/callback` now
-    # types `auth_entry` via the segment-anchored `oauth` auth route, where it
-    # previously fell through to `unknown`. This is the intended recall
-    # improvement (an OAuth callback is a real auth surface), not a regression.
-    # The test's purpose — that the proxy's `_classify_type` + `_insert_case`
-    # use the SHARED inline classification pipeline — is unchanged and is still
-    # proven by the inserted row landing on the `gf:trust_surface` cluster below.
-    assert case_type == "auth_entry"
-    collector._insert_case(
-        entry,
-        queue_key="variant:1:unknown",
-        request_variant_id=1,
-        service_id=None,
-        auth_context="anonymous",
-        method="GET",
-        url="https://target.example/oauth/callback",
-        url_path="/oauth/callback",
-        params={
-            "query_params": "{}",
-            "body_params": "{}",
-            "path_params": "{}",
-            "cookie_params": "{}",
-        },
-        headers="{}",
-        body=None,
-        content_type="",
-        content_length=0,
-        request_body_truncated=False,
-        response_status=200,
-        response_headers="{}",
-        response_size=0,
-        response_snippet=None,
-        response_truncated=False,
-        case_type=case_type,
-        params_key_sig="",
-    )
-
-    conn = sqlite3.connect(str(entry.root / "cases.db"))
-    try:
-        row = conn.execute(
-            "SELECT type, status, priority_score, cluster_key, priority_reason "
-            "FROM work_items WHERE queue_key = ?",
-            ("variant:1:unknown",),
-        ).fetchone()
-    finally:
-        conn.close()
-
-    # `/oauth/callback` matches the `trust_surface` bucket (weight 35) via its
-    # `/oauth`+`/callback` path fragments, so the cluster/reason stay
-    # `gf:trust_surface`. The new `auth_entry` producer type carries a
-    # `_TYPE_FLOOR` of (auth, 40), which raises the score via max(35, 40)=40
-    # without changing the routing. (Was: type `unknown`, score 35.)
-    assert row == ("auth_entry", "pending", 40, "gf:trust_surface", "gf:trust_surface")
-
-
-def test_proxy_insert_reuses_open_db_connection(tmp_path: Path, monkeypatch) -> None:
-    module = _load_proxy_addon_module()
-    engagements_root = tmp_path / "engagements"
-    engagements_root.mkdir()
-    collector, entry = _make_collector_with_engagement(module, engagements_root)
-    # Open a real cached connection on the entry. A healthy insert must REUSE it
-    # (entry.db identity unchanged — not reopened per call) and the row must
-    # actually persist, so the fresh-connection verify probe passes and the
-    # stale-connection reconnect path is NOT triggered.
-    cached_connection = collector._open_db_for(entry)
-    assert cached_connection is not None
-    assert entry.db is cached_connection
-
-    collector._insert_case(
-        entry,
-        queue_key="variant:1:unknown",
-        request_variant_id=1,
-        service_id=None,
-        auth_context="anonymous",
-        method="GET",
-        url="https://target.example/oauth/callback",
-        url_path="/oauth/callback",
-        params={
-            "query_params": "{}",
-            "body_params": "{}",
-            "path_params": "{}",
-            "cookie_params": "{}",
-        },
-        headers="{}",
-        body=None,
-        content_type="",
-        content_length=0,
-        request_body_truncated=False,
-        response_status=200,
-        response_headers="{}",
-        response_size=0,
-        response_snippet=None,
-        response_truncated=False,
-        case_type="unknown",
-        params_key_sig="",
-    )
-
-    # Cached connection reused (same object, not dropped/reopened).
-    assert entry.db is cached_connection
-    # Row persisted where independent readers see it (verify probe passed).
-    rows = (
-        sqlite3.connect(str(entry.root / "cases.db"))
-        .execute(
-            "SELECT queue_key FROM work_items WHERE queue_key = ?",
-            ("variant:1:unknown",),
-        )
-        .fetchall()
-    )
-    assert rows == [("variant:1:unknown",)]
+# Removed: proxy `_insert_case` → cases.db inserts (shared-inline-classification
+# and cached-connection reuse). The proxy no longer writes a local cases.db row;
+# it POSTs a request-observation and the backend derives the work item (ADR
+# 0013). See tests/test_work_buffer_backend.py::test_observation_derives_one_work_item.
+# The proxy's request/response body-truncation policy is still covered directly
+# by test_apply_body_policy_flags_truncation below.
 
 
 def test_apply_body_policy_flags_truncation() -> None:
@@ -1041,222 +506,13 @@ def test_apply_body_policy_flags_truncation() -> None:
     assert (body, truncated) == (None, False)
 
 
-def test_proxy_insert_persists_truncation_flags(tmp_path: Path) -> None:
-    """End-to-end through `_insert_case` → `db_insert_work_item` →
-    `work_items`. Catches a regression where the flags are accepted as
-    kwargs but never written to the row.
-    """
-    module = _load_proxy_addon_module()
-    engagements_root = tmp_path / "engagements"
-    engagements_root.mkdir()
-    collector, entry = _make_collector_with_engagement(module, engagements_root)
-
-    collector._insert_case(
-        entry,
-        queue_key="variant:1:unknown",
-        request_variant_id=1,
-        service_id=None,
-        auth_context="anonymous",
-        method="POST",
-        url="https://target.example/api/large",
-        url_path="/api/large",
-        params={
-            "query_params": "{}",
-            "body_params": "{}",
-            "path_params": "{}",
-            "cookie_params": "{}",
-        },
-        headers="{}",
-        body="x" * module.BODY_TRUNCATE,
-        content_type="application/json",
-        content_length=module.BODY_TRUNCATE + 5000,
-        request_body_truncated=True,
-        response_status=200,
-        response_headers="{}",
-        response_size=module.RESPONSE_SNIPPET_BYTES * 4,
-        response_snippet="y" * module.RESPONSE_SNIPPET_BYTES,
-        response_truncated=True,
-        case_type="unknown",
-        params_key_sig="",
-    )
-
-    import sqlite3 as _sqlite
-    conn = _sqlite.connect(str(entry.root / "cases.db"))
-    try:
-        row = conn.execute(
-            "SELECT request_body_truncated, response_truncated, "
-            "content_length, response_size "
-            "FROM work_items WHERE queue_key = ?",
-            ("variant:1:unknown",),
-        ).fetchone()
-    finally:
-        conn.close()
-
-    assert row == (1, 1, module.BODY_TRUNCATE + 5000, module.RESPONSE_SNIPPET_BYTES * 4)
-
-
-def test_fetch_by_priority_vuln_agent_routes_scored_unknown_only(
-    tmp_path: Path, capsys
-) -> None:
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(
-        db_path,
-        queue_key="unknown-trust",
-        url_path="/oauth/callback",
-        case_type="unknown",
-        priority_score=35,
-        cluster_key="gf:trust_surface",
-    )
-    _insert_work_item(
-        db_path,
-        queue_key="unknown-path",
-        url_path="/misc/path",
-        case_type="unknown",
-        priority_score=99,
-        cluster_key="path:/misc/path",
-    )
-
-    _run_dispatch(db_path, "fetch-by-priority", ["10", "vulnerability-analyst-1"])
-
-    payload = json.loads(capsys.readouterr().out)
-    assert [row["queue_key"] for row in payload] == ["unknown-trust"]
-    assert payload[0]["assigned_agent"] == "vulnerability-analyst-1"
-
-
-def test_fetch_by_priority_known_agent_filters_to_routed_types(tmp_path: Path, capsys) -> None:
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(
-        db_path,
-        queue_key="api-low",
-        url_path="/api/low",
-        case_type="api",
-        priority_score=10,
-        cluster_key="path:/api",
-    )
-    _insert_work_item(
-        db_path,
-        queue_key="js-high",
-        url_path="/static/app.js",
-        case_type="javascript",
-        priority_score=50,
-        cluster_key="path:/static/app.js",
-    )
-
-    _run_dispatch(db_path, "fetch-by-priority", ["10", "vulnerability-analyst-1"])
-
-    payload = json.loads(capsys.readouterr().out)
-    assert [row["queue_key"] for row in payload] == ["api-low"]
-    assert payload[0]["assigned_agent"] == "vulnerability-analyst-1"
-
-
-def test_fetch_by_priority_rejects_unroutable_agent_name(tmp_path: Path, capsys) -> None:
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(
-        db_path,
-        queue_key="api",
-        url_path="/api",
-        case_type="api",
-        priority_score=10,
-        cluster_key="path:/api",
-    )
-
-    with pytest.raises(SystemExit) as excinfo:
-        _run_dispatch(db_path, "fetch-by-priority", ["10", "priority-agent"])
-
-    assert excinfo.value.code == 1
-    assert "not a routed agent" in capsys.readouterr().err
-
-
-def test_fetch_by_priority_skips_terminal(tmp_path: Path, capsys) -> None:
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(
-        db_path,
-        queue_key="keep",
-        url_path="/keep",
-        priority_score=30,
-        cluster_key="gf:idor",
-    )
-    _insert_work_item(
-        db_path,
-        queue_key="drop",
-        url_path="/drop",
-        priority_score=99,
-        cluster_key="gf:xss",
-        terminal_reason="low-signal",
-    )
-
-    _run_dispatch(db_path, "fetch-by-priority", ["10", "auto"])
-
-    payload = json.loads(capsys.readouterr().out)
-    assert [row["queue_key"] for row in payload] == ["keep"]
-
-
-def test_defer_cluster_flips_status(tmp_path: Path, capsys) -> None:
-    db_path = _make_fresh_db(tmp_path)
-    for idx in range(3):
-        _insert_work_item(
-            db_path,
-            queue_key=f"xss:{idx}",
-            url_path=f"/search{idx}",
-            priority_score=20,
-            cluster_key="gf:xss",
-        )
-    _insert_work_item(
-        db_path,
-        queue_key="other",
-        url_path="/else",
-        priority_score=35,
-        cluster_key="gf:idor",
-    )
-
-    _run_dispatch(db_path, "defer-cluster", ["gf:xss"], reason="low-signal")
-    output = capsys.readouterr().out
-    assert "Deferred 3 pending item(s)" in output
-    assert "gf:xss" in output
-
-    conn = sqlite3.connect(str(db_path))
-    try:
-        xss_rows = conn.execute(
-            "SELECT status, terminal_reason FROM work_items WHERE cluster_key = ?",
-            ("gf:xss",),
-        ).fetchall()
-        other = conn.execute(
-            "SELECT status, terminal_reason FROM work_items WHERE cluster_key = ?",
-            ("gf:idor",),
-        ).fetchone()
-    finally:
-        conn.close()
-
-    assert xss_rows == [("skipped", "low-signal")] * 3
-    assert other == ("pending", None)
-
-
-def test_defer_cluster_rejects_empty_reason(tmp_path: Path, capsys) -> None:
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(
-        db_path,
-        queue_key="xss:1",
-        url_path="/search",
-        priority_score=20,
-        cluster_key="gf:xss",
-    )
-
-    with pytest.raises(SystemExit) as excinfo:
-        _run_dispatch(db_path, "defer-cluster", ["gf:xss"], reason="")
-
-    assert excinfo.value.code == 1
-    stderr = capsys.readouterr().err
-    assert "--reason is required" in stderr
-
-    conn = sqlite3.connect(str(db_path))
-    try:
-        row = conn.execute(
-            "SELECT status, terminal_reason FROM work_items WHERE cluster_key = ?",
-            ("gf:xss",),
-        ).fetchone()
-    finally:
-        conn.close()
-    assert row == ("pending", None)
+# Removed: proxy `_insert_case` truncation-flag persistence into cases.db (the
+# proxy no longer writes a local row — ADR 0013), and the dispatch
+# `fetch-by-priority` (vuln-agent / known-agent routing, unroutable-agent
+# rejection, skip-terminal) + `defer-cluster` (flip / reject-empty-reason) CLI
+# verbs, all of which moved server-side. See
+# tests/test_work_buffer_backend.py::{test_fetch_by_priority_claims_top_k_and_routes,
+# test_defer_cluster_and_reset_stale_and_retry}.
 
 
 def _classify_buckets():
@@ -1310,17 +566,22 @@ def _import_vuln_taxonomy():
 
 def _run_ingest_bridge(monkeypatch, tmp_path, lines, *, variant_id=501):
     """Run ingest-endpoints over `lines` with a fake backend, capturing the
-    class-typed coverage-items the 2b bridge POSTs."""
+    class-typed gf coverage candidates the 2b bridge attaches to each
+    request-observation.
+
+    ADR 0013: coverage candidates now ride ON the observation
+    (``coverage_candidates``) so the backend links each to the request-variant it
+    derives in the same transaction — there is no longer a separate coverage-items
+    POST (nor a client-side request_variant_id stamp)."""
     module = _load_script_module(
         "test_ingest_endpoints_bridge",
         "agent/scripts/assess/commands/ingest_endpoints.py",
     )
-    db_path = _make_fresh_db(tmp_path)
 
     monkeypatch.setattr(
         module,
         "load_config",
-        lambda flag: SimpleNamespace(
+        lambda flag=None: SimpleNamespace(
             base_url="http://example.test",
             engagement_key="eng",
             engagement_dir=str(tmp_path),
@@ -1336,21 +597,14 @@ def _run_ingest_bridge(monkeypatch, tmp_path, lines, *, variant_id=501):
 
         def post(self, endpoint, payload):
             if endpoint == "request-observations/bulk":
-                return {
-                    "count": len(payload.get("items", [])),
-                    "records": [
-                        {"request_variant": {"id": variant_id}, "service": {"id": 9}}
-                        for _item in payload.get("items", [])
-                    ],
-                }
-            if endpoint == "coverage-items/bulk":
-                coverage_posts.extend(payload.get("items", []))
-                return {"count": len(payload.get("items", [])), "records": payload.get("items", [])}
+                records = []
+                for item in payload.get("items", []):
+                    coverage_posts.extend(item.get("coverage_candidates", []))
+                    records.append({"request_variant": {"id": variant_id}, "service": {"id": 9}})
+                return {"count": len(records), "records": records}
             if endpoint == "request-observations":
+                coverage_posts.extend(payload.get("coverage_candidates", []))
                 return {"request_variant": {"id": variant_id}, "service": {"id": 9}}
-            if endpoint == "coverage-items":
-                coverage_posts.append(payload)
-                return {"id": len(coverage_posts), **payload}
             return {}
 
         def close(self):
@@ -1361,7 +615,6 @@ def _run_ingest_bridge(monkeypatch, tmp_path, lines, *, variant_id=501):
     endpoints_file = tmp_path / "endpoints.txt"
     endpoints_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
     module.run(SimpleNamespace(
-        db_path=str(db_path),
         source="recon",
         input_file=str(endpoints_file),
         engagement_dir=str(tmp_path),
@@ -1371,8 +624,11 @@ def _run_ingest_bridge(monkeypatch, tmp_path, lines, *, variant_id=501):
 
 
 def test_ingest_bridges_single_gf_bucket_to_coverage_item(monkeypatch, tmp_path):
-    """2b: an endpoint classifying to the idor bucket POSTs a class-typed
-    coverage_item with attack_family='idor' (additive to the generic baseline)."""
+    """2b: an endpoint classifying to the idor bucket emits a class-typed
+    coverage candidate with attack_family='idor' (additive to the generic
+    baseline). The variant linkage is now server-side (the candidate rides on the
+    observation, ADR 0013), so we assert on the emitted attack_family/shape rather
+    than a client-side request_variant_id."""
     posts = _run_ingest_bridge(
         monkeypatch,
         tmp_path,
@@ -1381,12 +637,13 @@ def test_ingest_bridges_single_gf_bucket_to_coverage_item(monkeypatch, tmp_path)
     families = {p["attack_family"] for p in posts}
     assert "idor" in families
     idor_post = next(p for p in posts if p["attack_family"] == "idor")
-    assert idor_post["request_variant_id"] == 501
+    assert idor_post["input_slot"] == "endpoint"
+    assert idor_post["status"] == "pending"
 
 
 def test_ingest_bridges_two_buckets_to_two_coverage_items(monkeypatch, tmp_path):
     """2b/S14: a URL matching TWO gf buckets (idor + ssrf) yields TWO class-typed
-    coverage_items — not just the cluster winner."""
+    coverage candidates — not just the cluster winner."""
     posts = _run_ingest_bridge(
         monkeypatch,
         tmp_path,
@@ -1400,6 +657,7 @@ def test_ingest_bridges_two_buckets_to_two_coverage_items(monkeypatch, tmp_path)
 
 def test_reason_tag_helpers_round_trip():
     cb = _classify_buckets()
+    assert "already-covered" in cb.SKIP_REASON_TAGS
     assert cb.tagged_terminal_reason("blackholed", "akamai 403") == "skipped:blackholed | akamai 403"
     assert cb.tagged_terminal_reason("duplicate", "") == "skipped:duplicate"
     assert cb.tagged_terminal_reason("", "plain text") == "plain text"
@@ -1409,246 +667,14 @@ def test_reason_tag_helpers_round_trip():
     assert cb.reason_tag_of("egress-blocked: some prose") == "untagged"  # legacy free-text
 
 
-def test_defer_cluster_reason_tag_stamps_structured_reason(tmp_path: Path) -> None:
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(db_path, queue_key="x:1", url_path="/s", cluster_key="gf:sqli")
-
-    _run_dispatch(db_path, "defer-cluster", ["gf:sqli"], reason="akamai 403 wall",
-                  reason_tag="blackholed")
-
-    conn = sqlite3.connect(str(db_path))
-    try:
-        row = conn.execute(
-            "SELECT status, terminal_reason FROM work_items WHERE cluster_key = ?",
-            ("gf:sqli",),
-        ).fetchone()
-    finally:
-        conn.close()
-    assert row == ("skipped", "skipped:blackholed | akamai 403 wall")
-
-
-def test_dispatch_stats_by_reason_surfaces_untagged(tmp_path: Path, capsys) -> None:
-    db_path = _make_fresh_db(tmp_path)
-    # A tagged defer and an untagged (legacy free-text) defer.
-    _insert_work_item(db_path, queue_key="a", url_path="/a", cluster_key="gf:sqli")
-    _insert_work_item(db_path, queue_key="b", url_path="/b", cluster_key="gf:lfi")
-    _run_dispatch(db_path, "defer-cluster", ["gf:sqli"], reason="wall", reason_tag="blackholed")
-    _run_dispatch(db_path, "defer-cluster", ["gf:lfi"], reason="just dropped it")
-
-    _run_dispatch(db_path, "stats", by="reason")
-    out = capsys.readouterr().out
-    assert "blackholed|1" in out
-    assert "untagged|1" in out   # the un-reasoned drop is now visible
-
-
-def test_list_clusters_orders_by_max_priority(tmp_path: Path, capsys) -> None:
-    db_path = _make_fresh_db(tmp_path)
-    # gf:rce — single high-priority row
-    _insert_work_item(
-        db_path,
-        queue_key="rce:1",
-        url_path="/exec/run",
-        priority_score=50,
-        cluster_key="gf:rce",
-    )
-    # gf:ssrf — two rows at weight 45
-    for idx in range(2):
-        _insert_work_item(
-            db_path,
-            queue_key=f"ssrf:{idx}",
-            url_path=f"/proxy/{idx}",
-            priority_score=45,
-            cluster_key="gf:ssrf",
-        )
-    # path fallback — zero priority
-    _insert_work_item(
-        db_path,
-        queue_key="about:1",
-        url_path="/about",
-        priority_score=0,
-        cluster_key="path:/about",
-    )
-
-    _run_list_clusters(db_path)
-    payload = json.loads(capsys.readouterr().out)
-
-    assert payload["status"] == "pending"
-    assert payload["cluster_count"] == 3
-    keys = [entry["cluster_key"] for entry in payload["clusters"]]
-    assert keys == ["gf:rce", "gf:ssrf", "path:/about"]
-
-    ssrf_entry = payload["clusters"][1]
-    assert ssrf_entry["count"] == 2
-    assert ssrf_entry["max_priority_score"] == 45
-    assert ssrf_entry["avg_priority_score"] == 45.0
-    assert len(ssrf_entry["sample_urls"]) == 2
-
-
-def test_dispatch_peek_returns_pending_rows_without_claiming(
-    tmp_path: Path, capsys
-) -> None:
-    db_path = _make_fresh_db(tmp_path)
-    for idx in range(3):
-        _insert_work_item(
-            db_path,
-            queue_key=f"api:{idx}",
-            url_path=f"/api/users/{idx}",
-            case_type="api",
-            priority_score=50 - idx,
-        )
-    # Adjacent type that should not appear in peek output for `api`.
-    _insert_work_item(
-        db_path,
-        queue_key="form:1",
-        url_path="/login",
-        case_type="form",
-        priority_score=99,
-    )
-
-    _run_dispatch(db_path, "peek", ["api", "5"])
-    rows = json.loads(capsys.readouterr().out)
-    assert len(rows) == 3
-    assert all(row["type"] == "api" for row in rows)
-    # Peek must not flip status.
-    conn = sqlite3.connect(str(db_path))
-    try:
-        statuses = {
-            row[0]
-            for row in conn.execute(
-                "SELECT status FROM work_items WHERE type = 'api'"
-            ).fetchall()
-        }
-    finally:
-        conn.close()
-    assert statuses == {"pending"}
-
-
-def test_dispatch_defer_items_flips_specific_ids(tmp_path: Path, capsys) -> None:
-    db_path = _make_fresh_db(tmp_path)
-    ids: list[int] = []
-    for idx in range(4):
-        ids.append(
-            _insert_work_item(
-                db_path,
-                queue_key=f"api:{idx}",
-                url_path=f"/api/users/{idx}",
-                case_type="api",
-                priority_score=10,
-            )
-        )
-
-    targets = f"{ids[0]},{ids[2]}"
-    _run_dispatch(db_path, "defer-items", [targets], reason="manual triage")
-
-    conn = sqlite3.connect(str(db_path))
-    try:
-        rows = {
-            row[0]: (row[1], row[2])
-            for row in conn.execute(
-                "SELECT id, status, terminal_reason FROM work_items"
-            ).fetchall()
-        }
-    finally:
-        conn.close()
-
-    assert rows[ids[0]] == ("skipped", "manual triage")
-    assert rows[ids[2]] == ("skipped", "manual triage")
-    assert rows[ids[1]] == ("pending", None)
-    assert rows[ids[3]] == ("pending", None)
-
-
-def test_dispatch_defer_items_rejects_empty_reason(tmp_path: Path, capsys) -> None:
-    db_path = _make_fresh_db(tmp_path)
-    item_id = _insert_work_item(
-        db_path,
-        queue_key="api:1",
-        url_path="/api/users/1",
-        case_type="api",
-    )
-    with pytest.raises(SystemExit):
-        _run_dispatch(db_path, "defer-items", [str(item_id)], reason="")
-    stderr = capsys.readouterr().err
-    assert "--reason is required" in stderr
-
-
-def test_dispatch_stats_by_host_groups_by_url_host(tmp_path: Path, capsys) -> None:
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(
-        db_path,
-        queue_key="a:1",
-        url_path="/a",
-        url="https://example.test/a",
-        case_type="api",
-    )
-    _insert_work_item(
-        db_path,
-        queue_key="a:2",
-        url_path="/b",
-        url="https://example.test/b",
-        case_type="api",
-    )
-    _insert_work_item(
-        db_path,
-        queue_key="b:1",
-        url_path="/x",
-        url="https://other.example/x",
-        case_type="api",
-    )
-
-    _run_dispatch(db_path, "stats", by="host")
-    out = capsys.readouterr().out
-    assert "example.test|pending|2" in out
-    assert "other.example|pending|1" in out
-
-
-def test_dispatch_stats_by_cluster_includes_max_priority(
-    tmp_path: Path, capsys
-) -> None:
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(
-        db_path,
-        queue_key="x:1",
-        url_path="/x",
-        cluster_key="gf:rce",
-        priority_score=50,
-    )
-    _insert_work_item(
-        db_path,
-        queue_key="x:2",
-        url_path="/y",
-        cluster_key="gf:rce",
-        priority_score=20,
-    )
-
-    _run_dispatch(db_path, "stats", by="cluster")
-    out = capsys.readouterr().out
-    assert "gf:rce|pending|2|max_priority=50" in out
-
-
-def test_list_clusters_filters_by_host(tmp_path: Path, capsys) -> None:
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(
-        db_path,
-        queue_key="a:1",
-        url_path="/a",
-        url="https://example.test/a",
-        cluster_key="gf:rce",
-        priority_score=50,
-    )
-    _insert_work_item(
-        db_path,
-        queue_key="b:1",
-        url_path="/x",
-        url="https://other.example/x",
-        cluster_key="gf:xss",
-        priority_score=30,
-    )
-
-    _run_list_clusters(db_path, host="example.test")
-    payload = json.loads(capsys.readouterr().out)
-    keys = [entry["cluster_key"] for entry in payload["clusters"]]
-    assert keys == ["gf:rce"]
-    assert payload["host_filter"] == "example.test"
+# Removed: dispatch/list-clusters CLI verbs that operated on the local cases.db
+# and have MOVED server-side — defer-cluster reason-tag stamping, stats
+# by=reason/host/cluster, list-clusters order/host-filter, peek, and defer-items
+# (flip / reject-empty-reason). Covered by
+# tests/test_work_buffer_backend.py::{test_defer_cluster_and_reset_stale_and_retry,
+# test_fetch_by_type_and_done}. The reason-tag helper round-trip
+# (tagged_terminal_reason / reason_tag_of) is still covered directly above by
+# test_reason_tag_helpers_round_trip.
 
 
 # ---------------------------------------------------------------------------
@@ -1670,180 +696,12 @@ def _load_ingest_module():
     )
 
 
-def _bulk_insert_for_host(
-    db_path: Path,
-    *,
-    host: str,
-    n_pending: int,
-    n_deferred: int = 0,
-    case_type: str = "page",
-    queue_prefix: str = "host",
-) -> None:
-    """Seed the work_items table with rows split between pending and deferred.
-
-    Mirrors the pattern the ingestion path produces — pending rows look like
-    a normal admit, while deferred rows carry the budget-exceeded cluster_key
-    and terminal_reason. Used to drive the budget-decision tests below
-    without paying the cost of stubbing the full ingestion HTTP roundtrip.
-    """
-    conn = sqlite3.connect(str(db_path))
-    try:
-        for idx in range(n_pending):
-            conn.execute(
-                """INSERT INTO work_items
-                (queue_key, method, url, url_path, type, source, status, priority_score)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    f"{queue_prefix}-pending:{idx}",
-                    "GET",
-                    f"https://{host}/p{idx}",
-                    f"/p{idx}",
-                    case_type,
-                    "test",
-                    "pending",
-                    0,
-                ),
-            )
-        for idx in range(n_deferred):
-            conn.execute(
-                """INSERT INTO work_items
-                (queue_key, method, url, url_path, type, source, status,
-                 cluster_key, terminal_reason)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    f"{queue_prefix}-defer:{idx}",
-                    "GET",
-                    f"https://{host}/d{idx}",
-                    f"/d{idx}",
-                    case_type,
-                    "test",
-                    "deferred",
-                    "deferred:per-host-budget-exceeded",
-                    "per-host-budget-exceeded",
-                ),
-            )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-# The per-host budget tests (caps_content_rich_at_1000,
-# api_tier_at_1000, sitemap_at_2000, override_via_dispatch_context) and the
-# classify-work per_host_budget signal test were removed when the budget gate
-# was deleted in the mid-engagement refactor — the silent 4,300-URL deferral
-# bug they protected against no longer exists because all URLs now ingest
-# (low-signal types stamp `status='skipped'`). The view tests below still
-# exercise `work_items_per_host` directly so the view's port-stripping and
-# IPv6 handling remain regression-protected.
-
-
-def test_work_items_per_host_view_aggregates_across_statuses(tmp_path: Path) -> None:
-    """The work_items_per_host view sums active/pending/done/deferred counts
-    by host so the classify-work output and ingest budget gate share the same
-    source of truth."""
-    db_path = _make_fresh_db(tmp_path)
-    _bulk_insert_for_host(
-        db_path,
-        host="alpha.example.test",
-        n_pending=3,
-        n_deferred=2,
-        queue_prefix="alpha",
-    )
-    _bulk_insert_for_host(
-        db_path,
-        host="beta.example.test",
-        n_pending=1,
-        queue_prefix="beta",
-    )
-
-    conn = sqlite3.connect(str(db_path))
-    try:
-        rows = {
-            row[0]: {
-                "active": row[1],
-                "pending": row[2],
-                "done": row[3],
-                "deferred": row[4],
-            }
-            for row in conn.execute(
-                "SELECT host, active_count, pending_count, done_count, deferred_count "
-                "FROM work_items_per_host ORDER BY host"
-            ).fetchall()
-        }
-    finally:
-        conn.close()
-
-    assert rows["alpha.example.test"]["active"] == 3
-    assert rows["alpha.example.test"]["pending"] == 3
-    assert rows["alpha.example.test"]["deferred"] == 2
-    assert rows["beta.example.test"]["active"] == 1
-    assert rows["beta.example.test"]["pending"] == 1
-
-
-def test_work_items_per_host_view_strips_explicit_port(tmp_path: Path) -> None:
-    """B6 regression: URLs with an explicit port collapse onto the same host
-    row as their portless siblings.
-
-    The view used to extract host as ``example.com:8443`` while host
-    aggregation lookups looked up the host via ``urlparse(url).hostname``
-    (which never carries a port), silently disabling per-host counting for
-    explicit-port URLs. The fix strips the port in the view's host
-    expression so both forms aggregate on ``example.com``.
-    """
-    db_path = _make_fresh_db(tmp_path)
-
-    conn = sqlite3.connect(str(db_path))
-    try:
-        # Same host with and without explicit port; uppercase variants too,
-        # to confirm the lower() keeps working.
-        conn.executemany(
-            "INSERT INTO work_items (queue_key, method, url, url_path, type, source, status, priority_score) "
-            "VALUES (?, 'GET', ?, '/x', 'page', 'test', 'pending', 0)",
-            [
-                ("p:1", "https://example.com:8443/api"),
-                ("p:2", "https://example.com/other"),
-                ("p:3", "https://EXAMPLE.com:9000/x"),
-                ("p:4", "https://other.example/path"),
-            ],
-        )
-        conn.commit()
-        rows = list(
-            conn.execute(
-                "SELECT host, active_count FROM work_items_per_host ORDER BY host"
-            )
-        )
-    finally:
-        conn.close()
-
-    rollup = dict(rows)
-    assert rollup == {"example.com": 3, "other.example": 1}, rollup
-
-
-def test_work_items_per_host_view_preserves_ipv6_literal(tmp_path: Path) -> None:
-    db_path = _make_fresh_db(tmp_path)
-
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.executemany(
-            "INSERT INTO work_items (queue_key, method, url, url_path, type, source, status, priority_score) "
-            "VALUES (?, 'GET', ?, '/x', 'page', 'test', 'pending', 0)",
-            [
-                ("ipv6:1", "https://[2001:db8::1]:8443/api"),
-                ("ipv6:2", "https://[2001:db8::1]/other"),
-                ("ipv6:3", "https://[2001:db8::2]/x"),
-            ],
-        )
-        conn.commit()
-        rows = list(
-            conn.execute(
-                "SELECT host, active_count FROM work_items_per_host ORDER BY host"
-            )
-        )
-    finally:
-        conn.close()
-
-    rollup = dict(rows)
-    assert rollup == {"2001:db8::1": 2, "2001:db8::2": 1}, rollup
+# Removed: the `_bulk_insert_for_host` seeder and the `work_items_per_host` VIEW
+# tests (aggregate-across-statuses, explicit-port stripping, IPv6-literal). The
+# view lived in the deleted per-engagement cases.db schema; per-host rollups are
+# now computed by the backend and by `coverage_checks._load_work_items_by_host`
+# over the backend ledger (see test_host_root_seed_does_not_block_consumption_gate
+# and tests/test_work_buffer_backend.py).
 
 
 def test_egress_script_logic_handles_dead_hosts_and_empty_input() -> None:
@@ -1915,135 +773,34 @@ echo "egress_block_pct=$pct (blocked=$blocked alive=$total)"
     assert "egress check skipped" in out
 
 
-def test_stamp_liveness_marks_claimed_rows(monkeypatch, tmp_path):
-    """_stamp_liveness stamps live_status (verdict@age) from the ledger onto
-    claimed rows, persists to cases.db, and is silent when there's no data."""
-    import sqlite3 as _sql
-    from types import SimpleNamespace
-    module = _load_dispatch_module()
-
-    conn = _sql.connect(":memory:")
-    conn.row_factory = _sql.Row
-    conn.execute("CREATE TABLE work_items (id INTEGER PRIMARY KEY, url TEXT, live_status TEXT)")
-    conn.execute("INSERT INTO work_items (id, url, live_status) VALUES (1, 'https://a.example.com/x', NULL)")
-    conn.execute("INSERT INTO work_items (id, url, live_status) VALUES (2, 'https://b.example.com/y', NULL)")
-    conn.commit()
-    result = [{"id": 1, "url": "https://a.example.com/x"}, {"id": 2, "url": "https://b.example.com/y"}]
-
-    class _FakeClient:
-        def __init__(self, *a, **k): pass
-        def get(self, endpoint):
-            assert endpoint.startswith("host-liveness?host=")
-            return [{"host": "a.example.com", "reachability_class": "live", "age_seconds": 540}]
-        def close(self): pass
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
-    monkeypatch.setattr(module.work_items, "AssessmentClient", _FakeClient)
-    module._stamp_liveness(conn, result, SimpleNamespace(base_url="http://x", engagement_key="eng"))
-
-    # a got stamped (540s -> 9m); b had no ledger row -> untouched.
-    assert result[0]["live_status"] == "live@9m"
-    assert "live_status" not in result[1]
-    db_a = conn.execute("SELECT live_status FROM work_items WHERE id = 1").fetchone()[0]
-    db_b = conn.execute("SELECT live_status FROM work_items WHERE id = 2").fetchone()[0]
-    assert db_a == "live@9m" and db_b is None
+# Removed: the client-side `dispatch._stamp_liveness` (stamped live_status onto
+# claimed rows in the local cases.db — marks-claimed, best-effort-skip,
+# negative-age clamp) and the `vigil assess work-buffer <cases.db> ...` CLI
+# drivers (defer-cluster/stats reason-tag wiring, action-specific --help,
+# defer-items reason-tag). Both operated on the deleted local cases.db; the verbs
+# and liveness stamping now live server-side. See tests/test_work_buffer_backend.py.
 
 
-def test_stamp_liveness_best_effort_skips(monkeypatch, tmp_path):
-    """No cfg, or a backend error, must not raise (the fetch still succeeds)."""
-    import sqlite3 as _sql
-    from types import SimpleNamespace
-    module = _load_dispatch_module()
-    conn = _sql.connect(":memory:")
-    conn.execute("CREATE TABLE work_items (id INTEGER PRIMARY KEY, url TEXT, live_status TEXT)")
-    result = [{"id": 1, "url": "https://a.example.com/x"}]
+def test_host_root_seed_does_not_block_consumption_gate():
+    module = _load_script_module(
+        "test_scope_cov_module", "agent/scripts/assess/lib/coverage_checks.py"
+    )
+    # `_load_work_items_by_host` now reads the backend work buffer over a client
+    # (was: a local cases.db Path). Serve two rows — a host_root crawl seed and a
+    # real api row — each carrying the stored `host` column the rollup groups on.
+    rows = [
+        {"host": "seed.example.com", "url_path": "/", "type": "host_root",
+         "status": "pending", "terminal_reason": None, "cluster_key": "type:host_root"},
+        {"host": "real.example.com", "url_path": "/api/x", "type": "api",
+         "status": "pending", "terminal_reason": None, "cluster_key": "gf:api"},
+    ]
 
-    module._stamp_liveness(conn, result, None)            # no cfg → no-op
-    assert "live_status" not in result[0]
+    class _Client:
+        def get_all_pages(self, endpoint):
+            assert endpoint == "work-items"
+            return rows
 
-    class _Boom:
-        def __init__(self, *a, **k): raise RuntimeError("backend down")
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-    monkeypatch.setattr(module.work_items, "AssessmentClient", _Boom)
-    module._stamp_liveness(conn, result, SimpleNamespace(base_url="http://x", engagement_key="eng"))
-    assert "live_status" not in result[0]   # swallowed, no raise
-
-
-def test_work_buffer_cli_wires_reason_tag_and_by_reason(tmp_path, capsys):
-    """Drive the REAL `vigil assess work-buffer` argparse (not a hand-built
-    namespace) — proves --reason-tag and --by reason are wired into the
-    operator-facing verb, not just the legacy dispatch register."""
-    root = str(_scripts_root())
-    if root not in sys.path:
-        sys.path.insert(0, root)
-    import assess.cli as cli
-
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(db_path, queue_key="x", url_path="/s", cluster_key="gf:sqli")
-
-    cli.main(["work-buffer", str(db_path), "defer-cluster", "gf:sqli",
-              "--reason", "akamai 403", "--reason-tag", "blackholed"])
-    conn = sqlite3.connect(str(db_path))
-    try:
-        tr = conn.execute(
-            "SELECT terminal_reason FROM work_items WHERE cluster_key='gf:sqli'"
-        ).fetchone()[0]
-    finally:
-        conn.close()
-    assert tr == "skipped:blackholed | akamai 403"
-
-    cli.main(["work-buffer", str(db_path), "stats", "--by", "reason"])
-    assert "blackholed|1" in capsys.readouterr().out
-
-
-def test_work_buffer_action_help_is_action_specific(tmp_path, capsys):
-    root = str(_scripts_root())
-    if root not in sys.path:
-        sys.path.insert(0, root)
-    import assess.cli as cli
-
-    db_path = _make_fresh_db(tmp_path)
-
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["work-buffer", str(db_path), "peek", "url", "--help"])
-
-    assert exc.value.code == 0
-    captured = capsys.readouterr()
-    assert "Usage: vigil assess work-buffer <cases.db> peek <type> [limit]" in captured.out
-    assert "defer-cluster" not in captured.out
-
-
-def test_work_buffer_cli_defer_items_reason_tag(tmp_path):
-    root = str(_scripts_root())
-    if root not in sys.path:
-        sys.path.insert(0, root)
-    import assess.cli as cli
-    db_path = _make_fresh_db(tmp_path)
-    iid = _insert_work_item(db_path, queue_key="y", url_path="/y", cluster_key="gf:lfi")
-    cli.main(["work-buffer", str(db_path), "defer-items", str(iid),
-              "--reason", "dup", "--reason-tag", "duplicate"])
-    conn = sqlite3.connect(str(db_path))
-    try:
-        tr = conn.execute("SELECT terminal_reason FROM work_items WHERE id=?", (iid,)).fetchone()[0]
-    finally:
-        conn.close()
-    assert tr == "skipped:duplicate | dup"
-
-
-def test_host_root_seed_does_not_block_consumption_gate(tmp_path):
-    module = _load_script_module("test_scope_cov_module", "agent/scripts/assess/lib/coverage_checks.py")
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(db_path, queue_key="hr", url_path="/", url="https://seed.example.com/", case_type="host_root")
-    _insert_work_item(db_path, queue_key="api", url_path="/api/x", url="https://real.example.com/api/x", case_type="api")
-    by_host = module._load_work_items_by_host(Path(db_path))
+    by_host = module._load_work_items_by_host(_Client())
     seed = by_host.get("seed.example.com", {})
     real = by_host.get("real.example.com", {})
     assert seed.get("pending", 0) == 1
@@ -2051,31 +808,6 @@ def test_host_root_seed_does_not_block_consumption_gate(tmp_path):
     assert real.get("pending_without_terminal_reason", 0) == 1
     assert module._consumption_satisfied(seed, "active") is True     # gate passes for seed-only host
     assert module._consumption_satisfied(real, "active") is False    # still fails for real uncovered work
-
-
-def test_stamp_liveness_clamps_negative_age(monkeypatch):
-    import sqlite3 as _sql
-    from types import SimpleNamespace
-    module = _load_dispatch_module()
-    conn = _sql.connect(":memory:")
-    conn.execute("CREATE TABLE work_items (id INTEGER PRIMARY KEY, url TEXT, live_status TEXT)")
-    result = [{"id": 1, "url": "https://a.example.com/x"}]
-
-    class _C:
-        def __init__(self, *a, **k): pass
-        def get(self, e): return [{"host": "a.example.com", "reachability_class": "live", "age_seconds": -999.0}]
-        def close(self): pass
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
-    monkeypatch.setattr(module.work_items, "AssessmentClient", _C)
-    module._stamp_liveness(conn, result, SimpleNamespace(base_url="x", engagement_key="e"))
-    assert result[0]["live_status"] == "live"   # negative age → no nonsense @-NNNm suffix
-
-
 
 
 def test_s13_nested_versioned_api_doc_paths_classify_as_api_spec() -> None:
@@ -2099,38 +831,24 @@ def test_s13_nested_versioned_api_doc_paths_classify_as_api_spec() -> None:
 
 
 def test_s15_sourcemap_not_in_inert_set() -> None:
-    """S15: sourcemap is no longer terminally inert."""
+    """S15: sourcemap is no longer terminally inert. (The former db._SKIP_TYPES
+    mirror check is gone with agent/scripts/assess/lib/db.py — INERT_TYPES is the
+    single source of truth now.)"""
     cb = _classify_buckets()
     assert "sourcemap" not in cb.INERT_TYPES
-    db = _load_db_module()
-    assert "sourcemap" not in db._SKIP_TYPES
 
 
-def test_s15_sourcemap_classifies_to_secret_surface_not_inert(tmp_path: Path) -> None:
+def test_s15_sourcemap_classifies_to_secret_surface_not_inert() -> None:
     """S15: a sourcemap row classifies to a real, non-inert secret/JS surface
     that downstream analysis can act on (kept pending, no inert terminal_reason)."""
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(
-        db_path,
-        queue_key="sm:1",
-        url_path="/static/app.js.map",
-        case_type="sourcemap",
-    )
-    _run_classify(db_path)
-    row = _classify_one(db_path, "sm:1")
-    assert row[0] == "gf:interestingext"
-    assert row[1] > 0
-    assert row[2] == "gf:interestingext"
-    assert row[3] is None
-
-    conn = sqlite3.connect(str(db_path))
-    try:
-        status = conn.execute(
-            "SELECT status FROM work_items WHERE queue_key = ?", ("sm:1",)
-        ).fetchone()[0]
-    finally:
-        conn.close()
-    assert status == "pending"
+    cb = _classify_buckets()
+    a = cb.classify_from_fields(case_type="sourcemap", url_path="/static/app.js.map")
+    assert a["cluster_key"] == "gf:interestingext"
+    assert a["priority_score"] > 0
+    assert a["priority_reason"] == "gf:interestingext"
+    assert a["terminal_reason"] is None
+    # No inert terminal_reason + not in INERT_TYPES → classify-work keeps it pending.
+    assert "sourcemap" not in cb.INERT_TYPES
 
 
 def test_s20_admin_fragment_is_segment_anchored_not_substring() -> None:
@@ -2148,25 +866,16 @@ def test_s20_admin_fragment_is_segment_anchored_not_substring() -> None:
     assert cb.fragment_in_path("/proxy/", "/proxyfoo") is False
 
 
-def test_s20_administration_guide_does_not_bucket_as_debug_logic(tmp_path: Path) -> None:
+def test_s20_administration_guide_does_not_bucket_as_debug_logic() -> None:
     """End-to-end S20: a `/administration-guide` doc page no longer falls into
     the `/admin` (debug_logic) bucket — it lands in the path fallback."""
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(
-        db_path,
-        queue_key="adminguide",
-        url_path="/administration-guide/getting-started",
+    cb = _classify_buckets()
+    guide = cb.classify_from_fields(
+        case_type="unknown", url_path="/administration-guide/getting-started"
     )
-    _insert_work_item(
-        db_path,
-        queue_key="realadmin",
-        url_path="/admin/users",
-    )
-    _run_classify(db_path)
-    guide = _classify_one(db_path, "adminguide")
-    real = _classify_one(db_path, "realadmin")
-    assert not str(guide[0]).startswith("gf:")
-    assert real[0] == "gf:debug_logic"
+    real = cb.classify_from_fields(case_type="unknown", url_path="/admin/users")
+    assert not str(guide["cluster_key"]).startswith("gf:")
+    assert real["cluster_key"] == "gf:debug_logic"
 
 
 def test_s12_ingest_endpoints_admits_ip_localhost_ipv6_and_skips_malformed(
@@ -2180,9 +889,6 @@ def test_s12_ingest_endpoints_admits_ip_localhost_ipv6_and_skips_malformed(
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
     (engagement_dir / "scope.json").write_text("{}", encoding="utf-8")
-    db_path = engagement_dir / "cases.db"
-    db_path.touch()
-    _load_db_module().db_init(str(db_path))
 
     input_file = tmp_path / "endpoints.txt"
     input_file.write_text(
@@ -2242,7 +948,6 @@ def test_s12_ingest_endpoints_admits_ip_localhost_ipv6_and_skips_malformed(
 
     module.run(
         SimpleNamespace(
-            db_path=str(db_path),
             source="recon",
             input_file=str(input_file),
             engagement_dir=str(engagement_dir),
@@ -2257,12 +962,10 @@ def test_s12_ingest_endpoints_admits_ip_localhost_ipv6_and_skips_malformed(
     assert "::1" in posted_hosts
     assert "app.example.com" in posted_hosts
 
-    conn = sqlite3.connect(str(db_path))
-    try:
-        ingested = conn.execute("SELECT COUNT(*) FROM work_items").fetchone()[0]
-    finally:
-        conn.close()
-    assert ingested == 5
+    # Was: SELECT COUNT(*) FROM work_items == 5. The backend now derives the work
+    # item from each observation (ADR 0013 — no local cases.db), so assert on the
+    # number of observations the ingest POSTed. See tests/test_work_buffer_backend.py.
+    assert len(posted_hosts) == 5
 
     assert "malformed endpoint line" in captured.err
     assert "template/fuzz-marker" in captured.err
@@ -2349,8 +1052,6 @@ def test_classifier_version_inputs_cover_every_classification_constant() -> None
     assert inputs["nonprod_host_label_re"] == cb._NONPROD_HOST_LABEL_RE.pattern
     assert inputs["nondefault_ports"] is cb._NONDEFAULT_PORTS
     assert inputs["live_status_tokens"] is cb._LIVE_STATUS_TOKENS
-    assert inputs["gau_archive_source"] == cb._GAU_ARCHIVE_SOURCE
-    assert inputs["dead_live_status_tokens"] is cb._DEAD_LIVE_STATUS_TOKENS
     assert inputs["logic_revision"] == cb._CLASSIFIER_LOGIC_REVISION
 
 
@@ -2358,8 +1059,8 @@ def test_classifier_version_tracks_logic_revision_and_tables() -> None:
     """A bump to `_CLASSIFIER_LOGIC_REVISION` (the escape hatch for pure-logic
     edits) OR to any digested taxonomy table must change CLASSIFIER_VERSION. We
     recompute the digest over a mutated copy of the inputs and assert it moves,
-    proving both the logic-revision hatch and a representative context/demotion
-    table actually feed the stamp."""
+    proving both the logic-revision hatch and a representative context table
+    actually feed the stamp."""
     import hashlib
     import json
 
@@ -2383,128 +1084,65 @@ def test_classifier_version_tracks_logic_revision_and_tables() -> None:
     assert _digest(changed_ports) != cb.CLASSIFIER_VERSION
 
 
-def test_classifier_version_stamped_on_inline_insert(tmp_path: Path) -> None:
-    """db_insert_work_item stamps the current CLASSIFIER_VERSION at ingest, so a
-    freshly-ingested row is never treated as stale by --reclassify-stale."""
-    cb = _classify_buckets()
-    db_path = _make_fresh_db(tmp_path)
-    db_module = _load_db_module()
-
-    db_module.db_insert_work_item(
-        str(db_path),
-        queue_key="fresh:1",
-        method="GET",
-        url="https://target.example/exec/run?cmd=id",
-        url_path="/exec/run",
-        query_params=json.dumps({"cmd": "id"}),
-        body_params="{}",
-        path_params="{}",
-        case_type="unknown",
-        source="test",
-        params_key_sig="",
-    )
-
-    conn = sqlite3.connect(str(db_path))
-    try:
-        row = conn.execute(
-            "SELECT cluster_key, classifier_version FROM work_items WHERE queue_key = ?",
-            ("fresh:1",),
-        ).fetchone()
-    finally:
-        conn.close()
-    assert row[0] == "gf:rce"
-    assert row[1] == cb.CLASSIFIER_VERSION
+# Removed: test_classifier_version_stamped_on_inline_insert — the
+# db_insert_work_item inline stamp is gone (the backend stamps
+# classifier_version when it derives the work item from an observation, ADR
+# 0013). See tests/test_work_buffer_backend.py. The deterministic-digest
+# contract for CLASSIFIER_VERSION is still covered above by the three
+# test_classifier_version_* tests.
 
 
-def test_classify_work_default_stamps_classifier_version(tmp_path: Path, capsys) -> None:
+def test_classify_work_default_stamps_classifier_version(capsys) -> None:
     """The default classify-work pass stamps CLASSIFIER_VERSION on never-scored
     rows (and surfaces it + a from_version histogram in the JSON summary)."""
     cb = _classify_buckets()
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(
-        db_path,
-        queue_key="v:1",
-        url_path="/exec/run",
-        query_params={"cmd": "id"},
-    )
-
-    _run_classify(db_path)
-    summary = json.loads(capsys.readouterr().out)
+    module, fake = _classify_env([
+        _wi("v:1", url_path="/exec/run", query_params={"cmd": "id"}),
+    ])
+    _, summary = _run_classify(module, fake, capsys)
     assert summary["classifier_version"] == cb.CLASSIFIER_VERSION
     # The one never-scored row came from an unstamped (NULL) state.
     assert summary["from_version"] == {"none": 1}
-
-    conn = sqlite3.connect(str(db_path))
-    try:
-        row = conn.execute(
-            "SELECT classifier_version FROM work_items WHERE queue_key = ?",
-            ("v:1",),
-        ).fetchone()
-    finally:
-        conn.close()
-    assert row[0] == cb.CLASSIFIER_VERSION
+    assert fake.row("v:1")["classifier_version"] == cb.CLASSIFIER_VERSION
 
 
-def test_reclassify_stale_restamps_only_stale_rows(tmp_path: Path, capsys) -> None:
+def test_reclassify_stale_restamps_only_stale_rows(capsys) -> None:
     """--reclassify-stale restamps NULL + old-version rows (re-scoring them from
     the current bucket table) while leaving current-version and 'manual' rows
     untouched. --reclassify-all then proves it DOES touch the 'manual' row."""
     cb = _classify_buckets()
     current = cb.CLASSIFIER_VERSION
     manual = cb.MANUAL_CLASSIFIER_VERSION
-    db_path = _make_fresh_db(tmp_path)
+    module, fake = _classify_env([
+        # A: legacy NULL version, scored under an "old" bucket table.
+        _wi("A:null", url_path="/exec/run", query_params={"cmd": "id"},
+            priority_score=11, cluster_key="gf:oldbucket", classifier_version=None),
+        # B: an explicit old (non-current) version.
+        _wi("B:old", url_path="/exec/run", query_params={"cmd": "id"},
+            priority_score=11, cluster_key="gf:oldbucket", classifier_version="oldversion01"),
+        # C: already at the current version — must be left alone.
+        _wi("C:current", url_path="/exec/run", query_params={"cmd": "id"},
+            priority_score=50, cluster_key="gf:rce", classifier_version=current),
+        # D: hand-tuned 'manual' row — protected from --reclassify-stale.
+        _wi("D:manual", url_path="/exec/run", query_params={"cmd": "id"},
+            priority_score=77, cluster_key="gf:custom-manual", classifier_version=manual),
+    ])
 
-    # A: legacy NULL version, scored under an "old" bucket table.
-    _insert_work_item(
-        db_path, queue_key="A:null", url_path="/exec/run",
-        query_params={"cmd": "id"}, priority_score=11, cluster_key="gf:oldbucket",
-        classifier_version=None,
-    )
-    # B: an explicit old (non-current) version.
-    _insert_work_item(
-        db_path, queue_key="B:old", url_path="/exec/run",
-        query_params={"cmd": "id"}, priority_score=11, cluster_key="gf:oldbucket",
-        classifier_version="oldversion01",
-    )
-    # C: already at the current version — must be left alone.
-    _insert_work_item(
-        db_path, queue_key="C:current", url_path="/exec/run",
-        query_params={"cmd": "id"}, priority_score=50, cluster_key="gf:rce",
-        classifier_version=current,
-    )
-    # D: hand-tuned 'manual' row — protected from --reclassify-stale.
-    _insert_work_item(
-        db_path, queue_key="D:manual", url_path="/exec/run",
-        query_params={"cmd": "id"}, priority_score=77, cluster_key="gf:custom-manual",
-        classifier_version=manual,
-    )
+    def _snap(rid):
+        r = fake.row(rid)
+        return (r["cluster_key"], r["priority_score"], r["classifier_version"])
 
-    def _snapshot():
-        conn = sqlite3.connect(str(db_path))
-        try:
-            return {
-                r[0]: (r[1], r[2], r[3])
-                for r in conn.execute(
-                    "SELECT queue_key, cluster_key, priority_score, classifier_version "
-                    "FROM work_items"
-                ).fetchall()
-            }
-        finally:
-            conn.close()
+    before = {rid: _snap(rid) for rid in ("A:null", "B:old", "C:current", "D:manual")}
 
-    before = _snapshot()
-
-    _run_classify(db_path, extra_args=["--reclassify-stale"])
-    summary = json.loads(capsys.readouterr().out)
-    after = _snapshot()
+    _, summary = _run_classify(module, fake, capsys, "--reclassify-stale")
 
     # A + B were stale → re-scored to the current bucket (gf:rce/50) and stamped.
-    assert after["A:null"] == ("gf:rce", 50, current)
-    assert after["B:old"] == ("gf:rce", 50, current)
+    assert _snap("A:null") == ("gf:rce", 50, current)
+    assert _snap("B:old") == ("gf:rce", 50, current)
     # C (current) and D (manual) are byte-identical to before.
-    assert after["C:current"] == before["C:current"]
-    assert after["D:manual"] == before["D:manual"]
-    assert after["D:manual"][2] == manual
+    assert _snap("C:current") == before["C:current"]
+    assert _snap("D:manual") == before["D:manual"]
+    assert _snap("D:manual")[2] == manual
 
     # Only the two stale rows were touched.
     assert summary["updated"] == 2
@@ -2512,141 +1150,52 @@ def test_reclassify_stale_restamps_only_stale_rows(tmp_path: Path, capsys) -> No
     assert summary["from_version"] == {"none": 1, "oldversion01": 1}
 
     # --reclassify-all IS the nuclear option: it re-scores the 'manual' row too.
-    _run_classify(db_path, extra_args=["--reclassify-all"])
-    capsys.readouterr()
-    nuked = _snapshot()
-    assert nuked["D:manual"] == ("gf:rce", 50, current)
+    _run_classify(module, fake, capsys, "--reclassify-all")
+    assert _snap("D:manual") == ("gf:rce", 50, current)
 
 
-def test_reclassify_stale_is_idempotent(tmp_path: Path, capsys) -> None:
+def test_reclassify_stale_is_idempotent(capsys) -> None:
     """A second --reclassify-stale run reports 0 updates: after the first pass
     every touched row carries the current version, so nothing is stale."""
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(
-        db_path, queue_key="A:null", url_path="/exec/run",
-        query_params={"cmd": "id"}, classifier_version=None,
-    )
-    _insert_work_item(
-        db_path, queue_key="B:old", url_path="/proxy/x",
-        query_params={"url": "http://evil"}, classifier_version="oldversion01",
-    )
+    module, fake = _classify_env([
+        _wi("A:null", url_path="/exec/run", query_params={"cmd": "id"}, classifier_version=None),
+        _wi("B:old", url_path="/proxy/x", query_params={"url": "http://evil"}, classifier_version="oldversion01"),
+    ])
 
-    _run_classify(db_path, extra_args=["--reclassify-stale"])
-    first = json.loads(capsys.readouterr().out)
+    _, first = _run_classify(module, fake, capsys, "--reclassify-stale")
     assert first["updated"] == 2
 
-    _run_classify(db_path, extra_args=["--reclassify-stale"])
-    second = json.loads(capsys.readouterr().out)
+    _, second = _run_classify(module, fake, capsys, "--reclassify-stale")
     assert second["classified"] == 0
     assert second["updated"] == 0
     assert second["from_version"] == {}
 
 
-def test_classifier_version_migration_adds_column_without_data_loss(tmp_path: Path) -> None:
-    """A legacy work_items table (no classifier_version column) picks the column
-    up via db_init's ALTER migration, and existing rows are preserved with a
-    NULL stamp (so --reclassify-stale treats them as stale on first run)."""
-    db_path = tmp_path / "legacy.db"
-    db_path.touch()
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.execute(
-            """CREATE TABLE work_items (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                queue_key TEXT NOT NULL,
-                auth_context TEXT NOT NULL DEFAULT 'anonymous',
-                method TEXT NOT NULL,
-                url TEXT NOT NULL,
-                url_path TEXT NOT NULL,
-                type TEXT NOT NULL DEFAULT 'unknown',
-                source TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending',
-                priority_score INTEGER NOT NULL DEFAULT 0,
-                cluster_key TEXT,
-                created_at TEXT DEFAULT (datetime('now')),
-                UNIQUE(queue_key)
-            )"""
-        )
-        conn.execute(
-            "INSERT INTO work_items (queue_key, method, url, url_path, source, type, "
-            "priority_score, cluster_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            ("legacy:1", "GET", "https://t.example/exec/run", "/exec/run",
-             "legacy", "unknown", 42, "gf:oldbucket"),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-    db_module = _load_db_module()
-    db_module.db_init(str(db_path))
-
-    conn = sqlite3.connect(str(db_path))
-    try:
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(work_items)").fetchall()}
-        assert "classifier_version" in columns
-        row = conn.execute(
-            "SELECT priority_score, cluster_key, classifier_version "
-            "FROM work_items WHERE queue_key = ?",
-            ("legacy:1",),
-        ).fetchone()
-    finally:
-        conn.close()
-    # Existing data preserved; new column defaults NULL.
-    assert row == (42, "gf:oldbucket", None)
+# Removed: test_classifier_version_migration_adds_column_without_data_loss
+# (db_init ALTER migration on the deleted local cases.db) and
+# test_stats_by_classifier_version (`work-buffer stats --by classifier_version`
+# CLI-over-cases.db — moved server-side). See tests/test_work_buffer_backend.py.
 
 
-def test_stats_by_classifier_version(tmp_path: Path, capsys) -> None:
-    """`work-buffer stats --by classifier_version` groups rows by their version
-    stamp so an operator can size taxonomy drift before a reclassify."""
+def test_mark_manual_protects_row_from_reclassify_stale(capsys) -> None:
+    """A row stamped classifier_version='manual' (what `work-buffer mark-manual`
+    writes, now a backend verb) survives a --reclassify-stale run untouched. We
+    re-express the PROTECTION intent: the client-side reclassify predicate must
+    skip a 'manual' row. (The mark-manual write itself is covered server-side —
+    tests/test_work_buffer_backend.py::test_manual_rows_protected_on_reingest.)"""
     cb = _classify_buckets()
-    db_path = _make_fresh_db(tmp_path)
-    _insert_work_item(db_path, queue_key="a", url_path="/a", classifier_version=cb.CLASSIFIER_VERSION)
-    _insert_work_item(db_path, queue_key="b", url_path="/b", classifier_version=cb.CLASSIFIER_VERSION)
-    _insert_work_item(db_path, queue_key="c", url_path="/c", classifier_version="oldversion01")
-    _insert_work_item(db_path, queue_key="d", url_path="/d", classifier_version=None)
-    _insert_work_item(db_path, queue_key="e", url_path="/e", classifier_version=cb.MANUAL_CLASSIFIER_VERSION)
+    module, fake = _classify_env([
+        _wi("hand:1", url_path="/exec/run", query_params={"cmd": "id"},
+            priority_score=90, cluster_key="gf:hand-tuned",
+            classifier_version=cb.MANUAL_CLASSIFIER_VERSION),
+    ])
 
-    _run_dispatch(db_path, "stats", by="classifier_version")
-    out = capsys.readouterr().out
-    assert f"{cb.CLASSIFIER_VERSION}|pending|2" in out
-    assert "oldversion01|pending|1" in out
-    assert "(none)|pending|1" in out
-    assert "manual|pending|1" in out
+    updates, summary = _run_classify(module, fake, capsys, "--reclassify-stale")
 
-
-def test_mark_manual_protects_row_from_reclassify_stale(tmp_path: Path, capsys) -> None:
-    """work-buffer mark-manual stamps classifier_version='manual', which then
-    survives a --reclassify-stale run untouched."""
-    cb = _classify_buckets()
-    db_path = _make_fresh_db(tmp_path)
-    row_id = _insert_work_item(
-        db_path, queue_key="hand:1", url_path="/exec/run",
-        query_params={"cmd": "id"}, priority_score=90, cluster_key="gf:hand-tuned",
-        classifier_version=None,
+    # The hand-tuned 'manual' row is neither re-scored nor re-stamped.
+    assert updates == []
+    assert summary["classified"] == 0
+    row = fake.row("hand:1")
+    assert (row["priority_score"], row["cluster_key"], row["classifier_version"]) == (
+        90, "gf:hand-tuned", cb.MANUAL_CLASSIFIER_VERSION,
     )
-
-    _run_dispatch(db_path, "mark-manual", [str(row_id)])
-    assert "manual" in capsys.readouterr().out
-
-    conn = sqlite3.connect(str(db_path))
-    try:
-        stamped = conn.execute(
-            "SELECT classifier_version FROM work_items WHERE id = ?", (row_id,)
-        ).fetchone()[0]
-    finally:
-        conn.close()
-    assert stamped == cb.MANUAL_CLASSIFIER_VERSION
-
-    # A --reclassify-stale run must not touch the hand-tuned row.
-    _run_classify(db_path, extra_args=["--reclassify-stale"])
-    capsys.readouterr()
-    conn = sqlite3.connect(str(db_path))
-    try:
-        row = conn.execute(
-            "SELECT priority_score, cluster_key, classifier_version "
-            "FROM work_items WHERE id = ?",
-            (row_id,),
-        ).fetchone()
-    finally:
-        conn.close()
-    assert row == (90, "gf:hand-tuned", cb.MANUAL_CLASSIFIER_VERSION)

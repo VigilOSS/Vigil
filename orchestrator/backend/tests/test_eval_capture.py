@@ -1,4 +1,4 @@
-"""Contract tests for ``vigil assess eval-capture`` (blueprint §7).
+"""Contract tests for the ``eval_capture.py`` maintainer tool (blueprint §7).
 
 Deterministic, NO live LLM. Seeds an engagement + findings via the TestClient
 (mirroring test_dispatch_handoffs_api.py:17-58), fetches the RAW serialized rows
@@ -22,6 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from app import db as db_module
 
 # Put agent/scripts on sys.path so assess.* imports resolve (mirrors
 # tests/eval/conftest.py and test_aith_cli.py).
@@ -31,7 +32,10 @@ if str(_SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_ROOT))
 
 from assess.commands import eval_capture  # noqa: E402
-from assess.lib.schema_validation import collect_validation_errors, load_schema  # noqa: E402
+from assess.lib.schema_validation import (  # noqa: E402
+    collect_validation_errors,
+    load_schema,
+)
 
 ENGAGEMENT_KEY = "2026-05-01-090000-evalcap"
 BASE = f"/engagements/{ENGAGEMENT_KEY}/assessment"
@@ -91,7 +95,34 @@ def _schema_example_bodies() -> list[dict]:
 def _seed(client) -> list[dict]:
     response = client.get(f"/engagements/{ENGAGEMENT_KEY}")
     assert response.status_code == 200, response.text
+    source_manifest_digest = "4a" * 32
+    with db_module.get_connection() as connection:
+        engagement_id = int(
+            connection.execute(
+                "SELECT id FROM engagements WHERE key = ?", (ENGAGEMENT_KEY,)
+            ).fetchone()["id"]
+        )
+        cursor = connection.execute(
+            """
+            INSERT INTO code_repos (
+                engagement_id, repo_key, name, repo_path, active_generation,
+                source_manifest_digest, source_snapshot_quality
+            ) VALUES (?, 'eval-capture-repo', 'Eval capture repo',
+                      '/tmp/eval-capture-repo', 1, ?, 'verified')
+            """,
+            (engagement_id, source_manifest_digest),
+        )
+    code_snapshot = {
+        "repo_id": int(cursor.lastrowid),
+        "repo_generation": 1,
+        "source_manifest_digest": source_manifest_digest,
+    }
     for body in _schema_example_bodies():
+        if str(body.get("canonical_location", "")).startswith("file:"):
+            body["provenance"] = {
+                **(body.get("provenance") or {}),
+                "code_snapshot": code_snapshot,
+            }
         created = client.post(f"{BASE}/findings", json=body)
         assert created.status_code == 201, created.text
     rows = client.get(f"{BASE}/findings")
@@ -188,6 +219,13 @@ def test_pending_runtime_proof_disposition_captures_and_validates(
     _write_engagement(isolate_settings["engagements_dir"])
     rows = _seed(client)
     slug = rows[0]["slug"]
+    code_snapshot = next(
+        snapshot
+        for row in rows
+        if (
+            snapshot := json.loads(row["provenance_json"]).get("code_snapshot")
+        )
+    )
 
     verified = client.post(
         f"{BASE}/findings/{slug}/verify",
@@ -195,6 +233,7 @@ def test_pending_runtime_proof_disposition_captures_and_validates(
             "disposition": "pending_runtime_proof",
             "reason_text": "Static taint path confirmed; runtime proof outstanding.",
             "source_name": "verifier",
+            "provenance": {"code_snapshot": code_snapshot},
         },
     )
     assert verified.status_code == 200, verified.text

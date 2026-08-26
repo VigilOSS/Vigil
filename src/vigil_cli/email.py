@@ -9,22 +9,38 @@ owns the account auth.
 
 The primary use is retrieving short-lived email-verification codes (6-8 digit
 OTPs or verification links) sent to a test mailbox: ``vigil email`` filters by
-recipient mailbox, sender, and recency, optionally extracts the matching token,
-and can emit JSON so an automation can parse the code directly.
+recipient mailbox, sender or subject, and recency; can poll for delayed mail;
+can decode links hidden in raw MIME; and emits JSON for automation.
 """
 from __future__ import annotations
 
 import json
 import re
 import subprocess
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from email import policy
+from email.parser import Parser
 from email.utils import parseaddr
+from html import unescape
+from html.parser import HTMLParser
 
 
 class EmailReadError(RuntimeError):
-    """Raised when Mail.app automation fails or returns an unexpected payload."""
+    """Raised when Mail.app automation fails or returns an unexpected payload.
+
+    ``coverage`` is populated when the failure IS a coverage verdict (an empty
+    scan that cannot be called authoritative), so a caller can report the same
+    folder-by-folder proof it would have reported on success instead of
+    degrading to a bare message.
+    """
+
+    def __init__(
+        self, *args: object, coverage: EmailScanCoverage | None = None
+    ) -> None:
+        super().__init__(*args)
+        self.coverage = coverage
 
 
 # Default extraction pattern: a 6-8 digit verification / OTP code. Used when
@@ -32,16 +48,32 @@ class EmailReadError(RuntimeError):
 # automation always wants a candidate code field).
 DEFAULT_CODE_PATTERN = r"\b(\d{6,8})\b"
 
-# Reads recent messages across the Inbox and every account's inbox-like
-# mailboxes, filtered server-... no — filtered host-side after collection by
-# received time and recipient address. Mirrors email-utility's
-# _SCAN_REPLIES_JXA, extended to also surface the message's `to` recipients so
-# we can scope to a specific test mailbox address.
+# Mail.app does not offer a portable server-side recipient/sender/subject
+# query across providers.  ``--limit`` is therefore the *matching result*
+# limit, while collection walks this explicit, bounded candidate window before
+# Python applies those filters.  The window is intentionally large enough to
+# cover more than one ordinary Mail.app page without turning a verification
+# lookup into an unbounded mailbox crawl.
+MAILBOX_PAGE_SIZE = 200
+MIN_CANDIDATE_WINDOW = 2_000
+MAX_CANDIDATE_WINDOW = 10_000
+
+# Reads recent messages across each account's Inbox plus provider archive,
+# Important, and Spam/Junk folders, filtered host-side after collection.  The
+# synthetic
+# cross-account ``Mail.inbox`` is used only as a fallback because including it
+# alongside account folders creates duplicate views and can consume the scan
+# window before an archive-only OTP is reached.
 _READ_MESSAGES_JXA = r"""
 function run(argv) {
   const cfg = JSON.parse(argv[0] || "{}");
   const since = cfg.since ? new Date(String(cfg.since)) : new Date(0);
-  const limit = Math.max(1, Number(cfg.limit || 200));
+  const resultLimit = Math.max(1, Number(cfg.result_limit || cfg.limit || 200));
+  const candidateLimit = Math.max(resultLimit, Number(cfg.candidate_limit || 2000));
+  const pageSize = Math.max(1, Number(cfg.page_size || 200));
+  const maxDiscoveryDepth = 4;
+  const maxRelevantMailboxes = 64;
+  const includeSource = Boolean(cfg.include_source);
 
   function safe(fn, fallbackValue) {
     try {
@@ -82,115 +114,342 @@ function run(argv) {
     return out;
   }
 
-  function collectMessages(messages, accountName, mailboxName, payload, opts) {
+  function normalizedMailboxName(value) {
+    return String(value || "")
+      .toLowerCase()
+      .replace(/[\[\]_/.-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  // Folders a verification mail can legitimately land in.  Spam/Junk and
+  // Archive are load-bearing, not optional: providers routinely file an OTP as
+  // spam, and Gmail's All Mail excludes Spam and Trash by design — so without
+  // them a filtered OTP is invisible to every other folder and the scan reports
+  // an authoritative `complete: true` zero that is simply wrong.
+  const relevantMailboxNames = [
+    "inbox",
+    "all mail",
+    "important",
+    "spam",
+    "junk",
+    "junk mail",
+    "junk email",
+    "archive",
+  ];
+
+  function isRelevantMailbox(name) {
+    const normalized = normalizedMailboxName(name);
+    return relevantMailboxNames.some(function (candidate) {
+      return normalized === candidate || normalized.endsWith(" " + candidate);
+    });
+  }
+
+  function sourceFor(messages, accountName, mailboxName, forceUnknownOrder) {
     if (!Array.isArray(messages)) {
-      return;
+      return null;
     }
     const total = messages.length;
-    if (total === 0) {
-      return;
-    }
-    const options = opts || {};
 
     function dateAt(idx) {
       const value = safe(() => messages[idx].dateReceived(), null);
       return value ? new Date(value) : null;
     }
 
-    function pushMessage(idx) {
-      const message = messages[idx];
-      const received = safe(() => message.dateReceived(), null);
-      payload.messages.push({
-        account: String(accountName || ""),
-        mailbox: String(mailboxName || ""),
-        sender: String(safe(() => message.sender(), "") || ""),
-        recipients: recipientAddresses(message),
-        subject: String(safe(() => message.subject(), "") || ""),
-        body: String(safe(() => message.content(), "") || ""),
-        received_at: isoDate(received),
-      });
-    }
-
-    // Bound how many messages we are willing to inspect per mailbox so a
-    // large mailbox (or an order we can't trust) can't blow the automation
-    // timeout; `scanned` is independent of `limit`, which only caps
-    // *matched* messages.
-    const scanCap = Math.max(limit * 5, 500);
-
-    // Mail.app message-array order is NOT reliably "oldest-first,
-    // newest-last" across account/mailbox types -- IMAP/Gmail-backed
-    // mailboxes are frequently newest-first (index 0 is the newest message),
-    // the opposite of what a fixed "break once we cross the cutoff" scan
-    // assumes. Trusting a hardcoded direction can silently skip the very
-    // messages we care about (e.g. a short-lived OTP that just arrived), so
-    // detect the direction empirically per mailbox from its two end
-    // messages, and never trust it for the synthetic cross-account
-    // `Mail.inbox` aggregate (its ordering isn't guaranteed monotonic at
-    // all, since it interleaves multiple accounts).
     let newestFirst = null;
-    if (!options.forceFullScan) {
+    if (!forceUnknownOrder && total > 1) {
       const firstDate = dateAt(0);
       const lastDate = dateAt(total - 1);
       if (firstDate && lastDate && firstDate.getTime() !== lastDate.getTime()) {
         newestFirst = firstDate.getTime() > lastDate.getTime();
       }
     }
+    return {
+      messages: messages,
+      accountName: String(accountName || ""),
+      mailboxName: String(mailboxName || ""),
+      total: total,
+      newestFirst: newestFirst,
+      low: 0,
+      high: total - 1,
+      takeLow: true,
+      examined: 0,
+      pagesScanned: 0,
+      done: total === 0,
+      complete: total === 0,
+    };
+  }
 
-    if (newestFirst === true) {
-      for (let i = 0, scanned = 0; i < total && payload.messages.length < limit && scanned < scanCap; i += 1, scanned += 1) {
-        const receivedDate = dateAt(i);
-        if (receivedDate && receivedDate < since) {
-          break; // strictly newest-first: everything after this is older still.
-        }
-        pushMessage(i);
-      }
-      return;
+  function nextIndex(source) {
+    if (source.low > source.high) {
+      return null;
     }
-
-    if (newestFirst === false) {
-      for (let i = total - 1, scanned = 0; i >= 0 && payload.messages.length < limit && scanned < scanCap; i -= 1, scanned += 1) {
-        const receivedDate = dateAt(i);
-        if (receivedDate && receivedDate < since) {
-          break; // strictly oldest-first: everything before this is older still.
-        }
-        pushMessage(i);
-      }
-      return;
+    if (source.newestFirst === true) {
+      const index = source.low;
+      source.low += 1;
+      return index;
     }
+    if (source.newestFirst === false) {
+      const index = source.high;
+      source.high -= 1;
+      return index;
+    }
+    // Unknown ordering: alternate the two ends page-by-page rather than
+    // betting that either index zero or the final index is newest.
+    let index;
+    if (source.takeLow) {
+      index = source.low;
+      source.low += 1;
+    } else {
+      index = source.high;
+      source.high -= 1;
+    }
+    source.takeLow = !source.takeLow;
+    return index;
+  }
 
-    // Direction unknown/untrusted (ties, a single message, or the synthetic
-    // aggregate mailbox): scan without an early-exit break so we never
-    // silently drop a recent message, bounded by scanCap instead.
-    for (let i = total - 1, scanned = 0; i >= 0 && payload.messages.length < limit && scanned < scanCap; i -= 1, scanned += 1) {
-      const receivedDate = dateAt(i);
-      if (receivedDate && receivedDate >= since) {
-        pushMessage(i);
+  function stableMessageKey(message, received, recipients, sender, subject, body) {
+    const messageId = String(safe(() => message.messageId(), "") || "").trim();
+    if (messageId) {
+      return { key: "id:" + messageId.toLowerCase(), messageId: messageId };
+    }
+    return {
+      key: "fallback:" + [sender, recipients.slice().sort().join(","), subject, body, isoDate(received)].join("\u001f"),
+      messageId: "",
+    };
+  }
+
+  function scanPage(source, payload, seen) {
+    let pageExamined = 0;
+    while (!source.done && pageExamined < pageSize && payload.coverage.candidates_examined < candidateLimit) {
+      const index = nextIndex(source);
+      if (index === null) {
+        source.done = true;
+        source.complete = true;
+        break;
       }
+      const message = source.messages[index];
+      const received = safe(() => message.dateReceived(), null);
+      const receivedDate = received ? new Date(received) : null;
+      source.examined += 1;
+      pageExamined += 1;
+      payload.coverage.candidates_examined += 1;
+
+      if (receivedDate && receivedDate < since) {
+        // Endpoint dates choose the likely newest edge, but they do not prove
+        // the whole provider array is monotonic.  Keep walking the bounded
+        // window; only exhausting the folder makes a no-match authoritative.
+        continue;
+      }
+
+      const sender = String(safe(() => message.sender(), "") || "");
+      const recipients = recipientAddresses(message);
+      const subject = String(safe(() => message.subject(), "") || "");
+      const body = String(safe(() => message.content(), "") || "");
+      const stable = stableMessageKey(message, received, recipients, sender, subject, body);
+      if (seen.has(stable.key)) {
+        continue;
+      }
+      seen.add(stable.key);
+      payload.messages.push({
+        account: source.accountName,
+        mailbox: source.mailboxName,
+        message_id: stable.messageId,
+        sender: sender,
+        recipients: recipients,
+        subject: subject,
+        body: body,
+        source: includeSource ? String(safe(() => message.source(), "") || "") : "",
+        received_at: isoDate(received),
+      });
+      payload.coverage.candidates_collected += 1;
+    }
+    if (pageExamined > 0) {
+      source.pagesScanned += 1;
+    }
+    if (source.low > source.high) {
+      source.done = true;
+      source.complete = true;
     }
   }
 
   const Mail = Application("Mail");
-  const payload = { messages: [], scan_errors: [] };
+  const payload = {
+    messages: [],
+    scan_errors: [],
+    coverage: {
+      complete: true,
+      result_limit: resultLimit,
+      candidate_limit: candidateLimit,
+      page_size: pageSize,
+      candidates_examined: 0,
+      candidates_collected: 0,
+      mailboxes: [],
+      truncated_mailboxes: [],
+      used_aggregate_inbox: false,
+      discovery_complete: true,
+      discovery_truncated: false,
+    },
+  };
+  const sources = [];
+  const sourceNames = new Set();
 
-  collectMessages(safe(() => Mail.inbox.messages(), []), "", "Inbox", payload, { forceFullScan: true });
-
-  const accounts = safe(() => Mail.accounts(), []);
-  for (const account of accounts) {
-    if (payload.messages.length >= limit) {
-      break;
+  function recordScanError(message, discoveryTruncated) {
+    payload.coverage.complete = false;
+    if (discoveryTruncated) {
+      payload.coverage.discovery_complete = false;
+      payload.coverage.discovery_truncated = true;
     }
-    const accountName = safe(() => account.name(), "");
-    const mailboxes = safe(() => account.mailboxes(), []);
+    if (!payload.scan_errors.includes(message)) {
+      payload.scan_errors.push(message);
+    }
+  }
+
+  function readMailboxMessages(mailbox, label) {
+    try {
+      const messages = mailbox.messages();
+      if (!Array.isArray(messages)) {
+        throw new Error("messages were not enumerable");
+      }
+      return messages;
+    } catch (err) {
+      recordScanError(label + " message access failed: " + String(err), false);
+      return null;
+    }
+  }
+
+  function readChildMailboxes(owner, label) {
+    try {
+      const mailboxes = owner.mailboxes();
+      if (!Array.isArray(mailboxes)) {
+        throw new Error("mailboxes were not enumerable");
+      }
+      return mailboxes;
+    } catch (err) {
+      recordScanError(label + " mailbox discovery failed: " + String(err), true);
+      return [];
+    }
+  }
+
+  function discoverMailboxes(account, accountName, mailboxes, parentName, depth) {
+    if (!Array.isArray(mailboxes)) {
+      recordScanError("mailbox discovery returned a non-enumerable collection", true);
+      return;
+    }
+    if (mailboxes.length === 0) {
+      return;
+    }
+    if (depth > maxDiscoveryDepth) {
+      recordScanError(
+        "discovery depth limit reached at " + (parentName || String(accountName || "account")),
+        true
+      );
+      return;
+    }
+    if (sources.length >= maxRelevantMailboxes) {
+      recordScanError("relevant mailbox source limit reached", true);
+      return;
+    }
     for (const mailbox of mailboxes) {
-      if (payload.messages.length >= limit) {
+      if (sources.length >= maxRelevantMailboxes) {
+        recordScanError("relevant mailbox source limit reached", true);
         break;
       }
-      const mailboxName = String(safe(() => mailbox.name(), "") || "");
-      if (!mailboxName || !mailboxName.toLowerCase().includes("inbox")) {
+      const ownName = String(safe(() => mailbox.name(), "") || "");
+      if (!ownName) {
         continue;
       }
-      collectMessages(safe(() => mailbox.messages(), []), accountName, mailboxName, payload);
+      const pathName = parentName ? parentName + "/" + ownName : ownName;
+      const sourceName = String(accountName || "") + "/" + pathName;
+      if (isRelevantMailbox(pathName) && !sourceNames.has(sourceName.toLowerCase())) {
+        const messages = readMailboxMessages(mailbox, sourceName);
+        const source = messages === null ? null : sourceFor(messages, accountName, pathName, false);
+        if (source !== null) {
+          sourceNames.add(sourceName.toLowerCase());
+          sources.push(source);
+        }
+      }
+      discoverMailboxes(
+        account,
+        accountName,
+        readChildMailboxes(mailbox, sourceName),
+        pathName,
+        depth + 1
+      );
     }
+  }
+
+  let accounts = [];
+  try {
+    accounts = Mail.accounts();
+  } catch (err) {
+    payload.coverage.complete = false;
+    payload.scan_errors.push("Mail.app account enumeration failed: " + String(err));
+  }
+  if (!Array.isArray(accounts)) {
+    accounts = [];
+    payload.coverage.complete = false;
+    payload.scan_errors.push("Mail.app returned no enumerable account list");
+  }
+  for (const account of accounts) {
+    const accountName = safe(() => account.name(), "");
+    discoverMailboxes(
+      account,
+      accountName,
+      readChildMailboxes(account, String(accountName || "account")),
+      "",
+      0
+    );
+  }
+
+  // Some Mail.app providers expose only the synthetic Inbox through JXA.  It
+  // remains a useful fallback, but an empty result cannot be called
+  // authoritative because archive/Important coverage was unavailable.
+  if (sources.length === 0) {
+    payload.coverage.complete = false;
+    payload.coverage.used_aggregate_inbox = true;
+    payload.scan_errors.push("provider Inbox/All Mail/Important/Spam/Archive folders were not enumerable; used aggregate Inbox fallback");
+    const aggregateMessages = readMailboxMessages(Mail.inbox, "aggregate Inbox");
+    const aggregate = aggregateMessages === null ? null : sourceFor(aggregateMessages, "", "Inbox", true);
+    if (aggregate !== null) {
+      sources.push(aggregate);
+    }
+  }
+
+  // Round-robin one page per relevant folder.  A large Inbox therefore cannot
+  // consume the global candidate budget before All Mail or Important gets a
+  // first and subsequent page.
+  const seen = new Set();
+  let madeProgress = true;
+  while (payload.coverage.candidates_examined < candidateLimit && madeProgress) {
+    madeProgress = false;
+    for (const source of sources) {
+      if (source.done || payload.coverage.candidates_examined >= candidateLimit) {
+        continue;
+      }
+      const before = source.examined;
+      scanPage(source, payload, seen);
+      if (source.examined > before) {
+        madeProgress = true;
+      }
+    }
+  }
+
+  for (const source of sources) {
+    if (!source.done) {
+      source.complete = false;
+      payload.coverage.complete = false;
+      const label = (source.accountName ? source.accountName + "/" : "") + source.mailboxName;
+      payload.coverage.truncated_mailboxes.push(label);
+      payload.scan_errors.push(label + " reached candidate window before scan completion");
+    }
+    payload.coverage.mailboxes.push({
+      account: source.accountName,
+      mailbox: source.mailboxName,
+      examined: source.examined,
+      pages_scanned: source.pagesScanned,
+      complete: source.complete,
+    });
   }
 
   return JSON.stringify(payload);
@@ -207,6 +466,75 @@ class EmailMessage:
     received_at: datetime
     account: str = ""
     mailbox: str = ""
+    raw_source: str = ""
+    message_id: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class MailboxScanCoverage:
+    """Bounded scan progress for one Mail.app folder."""
+
+    account: str
+    mailbox: str
+    examined: int
+    pages_scanned: int
+    complete: bool
+
+
+@dataclass(frozen=True, slots=True)
+class EmailScanCoverage:
+    """Coverage proof used to distinguish a real no-match from a partial scan."""
+
+    complete: bool
+    candidate_limit: int
+    page_size: int
+    candidates_examined: int
+    candidates_collected: int
+    mailboxes: tuple[MailboxScanCoverage, ...]
+    truncated_mailboxes: tuple[str, ...] = ()
+    scan_errors: tuple[str, ...] = ()
+    used_aggregate_inbox: bool = False
+    discovery_complete: bool = True
+    discovery_truncated: bool = False
+
+    def incomplete_summary(self) -> str:
+        details = list(self.scan_errors)
+        if not details and self.truncated_mailboxes:
+            details.append(
+                "candidate window reached in " + ", ".join(self.truncated_mailboxes)
+            )
+        if not details:
+            details.append("Mail.app did not report complete folder coverage")
+        if self.truncated_mailboxes:
+            # Naming the lever matters more now that Spam/Junk/Archive share the
+            # same global candidate window: without it the caller learns only that
+            # the answer is untrustworthy, not how to get a trustworthy one.
+            details.append(
+                f"raise --limit to widen the {self.candidate_limit}-candidate window"
+            )
+        return "; ".join(details)
+
+
+class EmailScan(list[EmailMessage]):
+    """List-compatible message result with backward-compatible scan metadata."""
+
+    def __init__(
+        self,
+        values: Sequence[EmailMessage] = (),
+        *,
+        result_limit: int | None = None,
+        coverage: EmailScanCoverage | None = None,
+    ) -> None:
+        super().__init__(values)
+        self.result_limit = result_limit
+        self.coverage = coverage or EmailScanCoverage(
+            complete=True,
+            candidate_limit=0,
+            page_size=0,
+            candidates_examined=len(values),
+            candidates_collected=len(values),
+            mailboxes=(),
+        )
 
 
 def normalize_email(value: str) -> str:
@@ -216,14 +544,102 @@ def normalize_email(value: str) -> str:
     return address.strip().lower()
 
 
+def _coverage_int(value: object, fallback: int = 0) -> int:
+    if not isinstance(value, (int, float, str)):
+        return fallback
+    try:
+        return max(0, int(value))
+    except (ValueError, OverflowError):
+        return fallback
+
+
+def _parse_scan_coverage(
+    value: object,
+    *,
+    scan_errors: object,
+    fallback_candidate_limit: int,
+    fallback_page_size: int,
+    message_count: int,
+) -> EmailScanCoverage:
+    raw = value if isinstance(value, Mapping) else {}
+    errors = tuple(
+        str(item)
+        for item in (scan_errors if isinstance(scan_errors, list) else [])
+        if item
+    )
+    mailboxes: list[MailboxScanCoverage] = []
+    mailboxes_raw = raw.get("mailboxes", [])
+    if isinstance(mailboxes_raw, list):
+        for item in mailboxes_raw:
+            if not isinstance(item, Mapping):
+                continue
+            mailboxes.append(
+                MailboxScanCoverage(
+                    account=str(item.get("account", "") or ""),
+                    mailbox=str(item.get("mailbox", "") or ""),
+                    examined=_coverage_int(item.get("examined")),
+                    pages_scanned=_coverage_int(item.get("pages_scanned")),
+                    complete=bool(item.get("complete", False)),
+                )
+            )
+    truncated_raw = raw.get("truncated_mailboxes", [])
+    truncated = tuple(
+        str(item)
+        for item in (truncated_raw if isinstance(truncated_raw, list) else [])
+        if item
+    )
+    # A legacy/faked payload without the additive coverage object stays
+    # compatible and is treated as complete unless it explicitly reported a
+    # scan error.  The bundled JXA always supplies the richer coverage proof.
+    reported_complete = bool(raw.get("complete", not errors))
+    discovery_complete = bool(raw.get("discovery_complete", reported_complete))
+    discovery_truncated = bool(raw.get("discovery_truncated", False))
+    complete = reported_complete and discovery_complete and not discovery_truncated
+    return EmailScanCoverage(
+        complete=complete,
+        candidate_limit=_coverage_int(
+            raw.get("candidate_limit"), fallback_candidate_limit
+        ),
+        page_size=_coverage_int(raw.get("page_size"), fallback_page_size),
+        candidates_examined=_coverage_int(
+            raw.get("candidates_examined"), message_count
+        ),
+        candidates_collected=_coverage_int(
+            raw.get("candidates_collected"), message_count
+        ),
+        mailboxes=tuple(mailboxes),
+        truncated_mailboxes=truncated,
+        scan_errors=errors,
+        used_aggregate_inbox=bool(raw.get("used_aggregate_inbox", False)),
+        discovery_complete=discovery_complete,
+        discovery_truncated=discovery_truncated,
+    )
+
+
 def read_messages(
     *,
     since: datetime,
     limit: int = 200,
     timeout_seconds: float = 30.0,
-) -> list[EmailMessage]:
-    """Scan Mail.app inbox messages received at/after ``since``."""
-    payload = {"since": since.isoformat(), "limit": limit}
+    include_source: bool = False,
+) -> EmailScan:
+    """Scan relevant Mail.app folders and return list-compatible messages.
+
+    ``limit`` is applied to the final filtered results by :func:`filter_messages`,
+    not to the raw candidates.  Coverage metadata remains available on the
+    returned list as ``.coverage``.
+    """
+    candidate_limit = max(
+        limit,
+        min(max(limit * 10, MIN_CANDIDATE_WINDOW), MAX_CANDIDATE_WINDOW),
+    )
+    payload = {
+        "since": since.isoformat(),
+        "result_limit": limit,
+        "candidate_limit": candidate_limit,
+        "page_size": MAILBOX_PAGE_SIZE,
+        "include_source": include_source,
+    }
     raw = _run_jxa_json(_READ_MESSAGES_JXA, [json.dumps(payload)], timeout_seconds=timeout_seconds)
     if not isinstance(raw, dict):
         raise EmailReadError(f"unexpected Mail.app read response: {raw!r}")
@@ -232,11 +648,16 @@ def read_messages(
         raise EmailReadError("unexpected Mail.app read message format")
 
     messages: list[EmailMessage] = []
+    parse_errors: list[str] = []
     for item in messages_raw:
         if not isinstance(item, dict):
             continue
         received_at = _parse_datetime(item.get("received_at"))
         if received_at is None:
+            account = str(item.get("account", "") or "")
+            mailbox = str(item.get("mailbox", "") or "")
+            location = "/".join(part for part in (account, mailbox) if part) or "mailbox"
+            parse_errors.append(f"{location} returned unreadable received_at")
             continue
         recipients_raw = item.get("recipients", [])
         recipients = tuple(
@@ -251,9 +672,24 @@ def read_messages(
                 received_at=received_at,
                 account=str(item.get("account", "") or ""),
                 mailbox=str(item.get("mailbox", "") or ""),
+                raw_source=str(item.get("source", "") or ""),
+                message_id=str(item.get("message_id", "") or ""),
             )
         )
-    return messages
+    coverage = _parse_scan_coverage(
+        raw.get("coverage"),
+        scan_errors=raw.get("scan_errors"),
+        fallback_candidate_limit=candidate_limit,
+        fallback_page_size=MAILBOX_PAGE_SIZE,
+        message_count=len(messages),
+    )
+    if parse_errors:
+        coverage = replace(
+            coverage,
+            complete=False,
+            scan_errors=coverage.scan_errors + tuple(dict.fromkeys(parse_errors)),
+        )
+    return EmailScan(messages, result_limit=limit, coverage=coverage)
 
 
 def filter_messages(
@@ -261,8 +697,9 @@ def filter_messages(
     *,
     mailbox_address: str,
     from_filter: str | None = None,
+    subject_filter: str | None = None,
     since: datetime | None = None,
-) -> list[EmailMessage]:
+) -> EmailScan:
     """Keep messages addressed to ``mailbox_address`` and matching the filters.
 
     ``mailbox_address`` and ``from_filter`` accept either a full address
@@ -271,8 +708,10 @@ def filter_messages(
     """
     mailbox_norm = normalize_email(mailbox_address)
     from_norm = _normalize_filter(from_filter) if from_filter else None
+    subject_norm = str(subject_filter or "").strip().casefold()
 
     kept: list[EmailMessage] = []
+    seen: set[tuple[object, ...]] = set()
     for message in messages:
         if since is not None and message.received_at < since:
             continue
@@ -280,10 +719,43 @@ def filter_messages(
             continue
         if from_norm and not _address_matches(from_norm, [message.sender]):
             continue
+        if subject_norm and subject_norm not in message.subject.casefold():
+            continue
+        # Mail.app exposes the same message through both its synthetic
+        # cross-account Inbox and the backing account's INBOX. Treat those as
+        # one message while retaining the first view's account/mailbox fields.
+        if message.message_id:
+            duplicate_key: tuple[object, ...] = (
+                "message_id",
+                message.message_id.strip().casefold(),
+            )
+        else:
+            duplicate_key = (
+                "content",
+                normalize_email(message.sender),
+                tuple(sorted(normalize_email(value) for value in message.recipients)),
+                message.subject,
+                message.body,
+                message.received_at,
+            )
+        if duplicate_key in seen:
+            continue
+        seen.add(duplicate_key)
         kept.append(message)
 
     kept.sort(key=lambda m: m.received_at, reverse=True)
-    return kept
+    result_limit = getattr(messages, "result_limit", None)
+    if isinstance(result_limit, int) and result_limit > 0:
+        kept = kept[:result_limit]
+    coverage = getattr(messages, "coverage", None)
+    result = EmailScan(kept, result_limit=result_limit, coverage=coverage)
+    if not result and not result.coverage.complete:
+        raise EmailReadError(
+            "incomplete Mail.app scan; no authoritative match: "
+            + result.coverage.incomplete_summary(),
+            coverage=result.coverage,
+        )
+    return result
 
 
 def extract_token(body: str, *, pattern: str = DEFAULT_CODE_PATTERN) -> str | None:
@@ -305,8 +777,67 @@ def extract_token(body: str, *, pattern: str = DEFAULT_CODE_PATTERN) -> str | No
     return match.group(0)
 
 
-def message_to_dict(message: EmailMessage, *, extracted: str | None = None) -> dict[str, object]:
-    return {
+class _LinkCollector(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.links: list[str] = []
+
+    def handle_starttag(self, _tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        for key, value in attrs:
+            if key.lower() == "href" and value:
+                self.links.append(value)
+
+
+def extract_links(message: EmailMessage) -> list[str]:
+    """Return unique HTTP(S) links from visible content and decoded MIME source.
+
+    Mail.app's ``content`` property keeps link labels but commonly strips their
+    href targets. When ``raw_source`` is available, parse and decode its MIME
+    parts so quoted-printable HTML download and verification links are exposed.
+    """
+    texts = [message.body]
+    if message.raw_source:
+        try:
+            parsed = Parser(policy=policy.default).parsestr(message.raw_source)
+            for part in parsed.walk():
+                if part.get_content_maintype() != "text":
+                    continue
+                try:
+                    content = part.get_content()
+                except (LookupError, UnicodeError):
+                    content = part.get_payload(decode=False)
+                if isinstance(content, str):
+                    texts.append(content)
+        except (TypeError, ValueError):
+            texts.append(message.raw_source)
+
+    found: list[str] = []
+    seen: set[str] = set()
+    url_pattern = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+    for text in texts:
+        decoded = unescape(text or "")
+        collector = _LinkCollector()
+        try:
+            collector.feed(decoded)
+        except (TypeError, ValueError):
+            pass
+        candidates = collector.links + url_pattern.findall(decoded)
+        for candidate in candidates:
+            link = unescape(candidate).strip().rstrip(".,;]")
+            if not link.lower().startswith(("http://", "https://")) or link in seen:
+                continue
+            seen.add(link)
+            found.append(link)
+    return found
+
+
+def message_to_dict(
+    message: EmailMessage,
+    *,
+    extracted: str | None = None,
+    links: Sequence[str] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
         "received_at": message.received_at.isoformat(),
         "from": message.sender,
         "to": list(message.recipients),
@@ -316,6 +847,9 @@ def message_to_dict(message: EmailMessage, *, extracted: str | None = None) -> d
         "extracted": extracted,
         "body": message.body,
     }
+    if links is not None:
+        payload["links"] = list(links)
+    return payload
 
 
 def _normalize_filter(value: str) -> str:

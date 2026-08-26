@@ -304,6 +304,7 @@ approval IDs.
 | Command-run ID | `<command-run-id>` |
 
 #### Exact command
+
 ```text
 <COPY VERBATIM from `assessment_command_runs.command`. Examples:
   Revoke-AzureADUserAllRefreshToken -ObjectId <user-objectid>
@@ -447,14 +448,14 @@ ONE-SCREEN SELF-CHECK — run before delivering
 BACKEND QUERIES (run from the engagement directory)
 ================================================================================
 
-Findings (§5 + §6):   vigil assess list-report-findings --mode final --json
+Findings (§5 + §6):   vigil assess finding report --mode final --json
                       vigil assess fetch findings/<finding-slug>
 Timeline (§4):        vigil assess fetch 'activity-entries?limit=1000'
                         # filter by metadata.kind / check_number post-pull
 Artifacts (App. A):   vigil assess artifact search --finding <finding-slug>
                       vigil assess artifact get <artifact-id>
-Containment (§7):     vigil assess list-command-runs --phase respond
-                      vigil assess get-command-run <command-run-id>
+Containment (§7):     vigil assess command-run list --phase respond
+                      vigil assess command-run get <command-run-id>
 Verification (§5):    vigil assess agent list
                       vigil assess agent render-handoff <agent-id>
 Readiness gate:       operator ran `vigil assess transition-phase report`

@@ -157,6 +157,10 @@ def test_recon_stage_failure_stops_pipeline(monkeypatch, tmp_path):
     status = json.loads(recon.status_path(_cfg(tmp_path)).read_text(encoding="utf-8"))
     assert status["overall_state"] == "failed"
     assert status["stages"][0]["state"] == "failed"
+    assert status["stages"][0]["counts"] == {}
+    assert status["run_uuid"]
+    meta = json.loads((tmp_path / "scans" / "recon" / "dns.meta.json").read_text())
+    assert meta["run_uuid"] == status["run_uuid"]
     assert [s["state"] for s in status["stages"][1:]] == ["pending", "pending"]
 
 
@@ -346,6 +350,14 @@ def test_recon_background_records_job_and_spawns_detached(monkeypatch, tmp_path)
         return SimpleNamespace(pid=4321)
 
     monkeypatch.setattr(recon.subprocess, "Popen", fake_popen)
+    registered: list[tuple[str, str, int]] = []
+    monkeypatch.setattr(
+        recon.host_processes,
+        "register_process",
+        lambda engagement_dir, *, run_uuid, pid: registered.append(
+            (str(engagement_dir), run_uuid, pid)
+        ),
+    )
 
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
@@ -363,9 +375,78 @@ def test_recon_background_records_job_and_spawns_detached(monkeypatch, tmp_path)
     assert "--brute" in argv
     assert "--no-js-mining" in argv  # base _args opts out; the flag must propagate
     assert captured["kwargs"].get("start_new_session") is True
+    assert registered == [(str(tmp_path), "recon-job-9", 4321)]
     # Caller gets the job id immediately (non-blocking).
     payload = json.loads(out.getvalue())
     assert payload["job_id"] == 9
+    assert payload["log"].endswith("recon-job-9.log")
+    path_patch = next(payload for _, payload in fake.patches if "stdout_path" in payload)
+    assert path_patch["stdout_path"].endswith("recon-job-9.log")
+    assert path_patch["stderr_path"].endswith("recon-job-9.log")
+
+
+def test_recon_background_generations_have_distinct_logs_and_exit_markers(tmp_path):
+    cfg = _cfg(tmp_path)
+
+    first = recon._job_log_path(cfg, 9)
+    second = recon._job_log_path(cfg, 10)
+
+    assert first != second
+    assert first.name == "recon-job-9.log"
+    assert second.name == "recon-job-10.log"
+    assert first.with_suffix(".exit") != second.with_suffix(".exit")
+
+
+def test_recon_background_finalize_unregisters_owned_process(monkeypatch, tmp_path):
+    monkeypatch.setattr(recon, "AssessmentClient", lambda *a, **k: _BgClient())
+    unregistered: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        recon.host_processes,
+        "unregister_process",
+        lambda engagement_dir, *, run_uuid: unregistered.append(
+            (str(engagement_dir), run_uuid)
+        ),
+    )
+
+    recon._finalize_job(_cfg(tmp_path), 9, 0, tmp_path / "recon-job.log")
+
+    assert unregistered == [(str(tmp_path), "recon-job-9")]
+
+
+def test_recon_background_registry_failure_terminates_child_group(monkeypatch, tmp_path):
+    monkeypatch.setattr(recon, "load_config", lambda d: _cfg(tmp_path))
+    monkeypatch.setattr(recon, "_enforce_host_routing", lambda *a, **k: None)
+    fake_entry = tmp_path / "assess.py"
+    fake_entry.write_text("# stub", encoding="utf-8")
+    monkeypatch.setattr(recon, "_assess_entrypoint", lambda: fake_entry)
+    fake = _BgClient()
+    monkeypatch.setattr(recon, "AssessmentClient", lambda *a, **k: fake)
+
+    class _Proc:
+        pid = 4321
+
+        def wait(self, timeout):
+            return 0
+
+    monkeypatch.setattr(recon.subprocess, "Popen", lambda *a, **k: _Proc())
+    monkeypatch.setattr(
+        recon.host_processes,
+        "register_process",
+        lambda *a, **k: (_ for _ in ()).throw(AssessError("registry failed")),
+    )
+    terminated: list[int] = []
+    monkeypatch.setattr(
+        recon,
+        "_terminate_background_process",
+        lambda process: terminated.append(process.pid),
+        raising=False,
+    )
+
+    with pytest.raises(AssessError, match="register child ownership"):
+        recon.run(_args(tmp_path, background=True))
+
+    assert terminated == [4321]
+    assert any(payload.get("status") == "failed" for _, payload in fake.patches)
 
 
 # --------------------------------------------------------------------------- #
@@ -442,6 +523,46 @@ def test_scope_filter_drops_out_of_scope_hosts_between_stages(tmp_path):
     assert kept == ["good.example.com"]
 
 
+def test_scope_filter_records_only_confirmed_wildcard_children_as_inventory(tmp_path):
+    _write_scope(
+        tmp_path,
+        ["*.example.com", "literal.test"],
+        out_of_scope=["blocked.example.com"],
+    )
+    scope_path = tmp_path / "scope.json"
+    scope_doc = json.loads(scope_path.read_text(encoding="utf-8"))
+    scope_doc["discovered_hosts"] = ["z.example.com", "API.EXAMPLE.COM."]
+    scope_path.write_text(json.dumps(scope_doc), encoding="utf-8")
+
+    dns = tmp_path / "scans" / "dns-discovery"
+    dns.mkdir(parents=True, exist_ok=True)
+    resolved = dns / "resolved_hosts.txt"
+    resolved.write_text(
+        "\n".join(
+            (
+                "api.example.com",
+                "new.example.com",
+                "example.com",
+                "blocked.example.com",
+                "literal.test",
+                "unrelated.test",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    recon._apply_scope_filter(_cfg(tmp_path), resolved)
+
+    updated = json.loads(scope_path.read_text(encoding="utf-8"))
+    assert updated["hosts"] == ["*.example.com", "literal.test"]
+    assert updated["discovered_hosts"] == [
+        "api.example.com",
+        "new.example.com",
+        "z.example.com",
+    ]
+
+
 def test_scope_filter_passes_through_when_all_in_scope(tmp_path):
     _write_scope(tmp_path, ["*.example.com"])
     dns = tmp_path / "scans" / "dns-discovery"
@@ -451,6 +572,57 @@ def test_scope_filter_passes_through_when_all_in_scope(tmp_path):
 
     out = recon._apply_scope_filter(_cfg(tmp_path), resolved)
     assert out == resolved  # nothing dropped → original path returned
+    updated = json.loads((tmp_path / "scope.json").read_text(encoding="utf-8"))
+    assert updated["discovered_hosts"] == ["a.example.com", "b.example.com"]
+
+
+def test_scope_filter_inventory_failure_warns_without_dropping_coverage(
+    monkeypatch, tmp_path, capsys
+):
+    _write_scope(tmp_path, ["*.example.com"])
+    dns = tmp_path / "scans" / "dns-discovery"
+    dns.mkdir(parents=True, exist_ok=True)
+    resolved = dns / "resolved_hosts.txt"
+    resolved.write_text("a.example.com\n", encoding="utf-8")
+
+    def fail_inventory(*_args, **_kwargs):
+        raise OSError("scope.json is temporarily unavailable")
+
+    monkeypatch.setattr(recon.scope, "record_discovered_hosts", fail_inventory)
+
+    out = recon._apply_scope_filter(_cfg(tmp_path), resolved)
+
+    assert out == resolved
+    stderr = capsys.readouterr().err
+    assert "WARN" in stderr
+    assert "discovered_hosts" in stderr
+
+
+def test_scope_filter_global_bypass_keeps_all_hosts_and_stamps_metadata(tmp_path):
+    _write_scope(tmp_path, ["example.com"])
+    scope_doc = json.loads((tmp_path / "scope.json").read_text(encoding="utf-8"))
+    scope_doc["scope_enforcement"] = "bypass"
+    (tmp_path / "scope.json").write_text(json.dumps(scope_doc), encoding="utf-8")
+    dns = tmp_path / "scans" / "dns-discovery"
+    dns.mkdir(parents=True, exist_ok=True)
+    resolved = dns / "resolved_hosts.txt"
+    resolved.write_text("example.com\nevil.test\n", encoding="utf-8")
+
+    out = recon._apply_scope_filter(_cfg(tmp_path), resolved)
+
+    assert out == resolved
+    metadata = json.loads(
+        (tmp_path / "scans" / "recon" / "scope-filter.meta.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert metadata == {
+        "scope_enforcement": "bypass",
+        "scope_bypassed": True,
+        "input_count": 2,
+        "kept_count": 2,
+        "dropped_count": 0,
+    }
 
 
 def test_scope_filter_degrades_on_missing_scope(tmp_path):

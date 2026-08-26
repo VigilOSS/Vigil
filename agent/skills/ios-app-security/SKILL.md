@@ -54,6 +54,23 @@ Use four app-level attackers: network observer with proxy control on shared Wi-F
 
 Map each result to OWASP MASVS, affected version, device/iOS version, distribution path, entitlement context, account role, reproducible steps, and server-side impact. A client-side observation becomes a finding when it enables account compromise, unauthorized data access, unintended state change, sensitive-data exposure, privacy violation, or native/WebView boundary crossing.
 
+## Adjacent Mobile Skills
+
+Static/dynamic triage above routinely surfaces leads outside this skill's own scope — dispatch
+the matching skill directly instead of forcing the lead into this workflow:
+
+- **Third-party SDK surface** — Step 3's binary/symbol inspection inventories ad, analytics,
+  crash, or attribution SDKs → `agent/skills/sdk-supply-chain-security/SKILL.md` for SDK BOM, CVE
+  checking, malicious-SDK detection, and over-collection auditing.
+- **On-device AI/ML** — the app bundles Core ML models or integrates Apple Intelligence / an
+  on-device LLM → `agent/skills/ai-ml-on-device-security/SKILL.md` for model extraction,
+  inference-leakage, and prompt-injection testing.
+- **Privacy/tracking compliance** — the app collects device identifiers, implements App Tracking
+  Transparency, or its App Store Privacy Label needs verification against observed behavior →
+  `agent/skills/masvs-privacy-testing/SKILL.md`.
+- **Coverage-guided fuzzing** — a native-code or parser target from Step 5 warrants a campaign
+  rather than manual review → `agent/skills/mobile-fuzzing/SKILL.md`.
+
 ## A→B Chain Table
 
 When an iOS vulnerability is confirmed, check B candidates before closing the finding — chaining raises a Medium to Critical.

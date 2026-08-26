@@ -617,7 +617,6 @@ def _run_with_stdout(monkeypatch, kali, body: str, *, cmd, tool_name, eng_dir):
         phase="recon",
         timeout=30,
         engagement_dir=eng_dir,
-        engagement_key=eng_dir.name,
         tool_name=tool_name,
     )
 

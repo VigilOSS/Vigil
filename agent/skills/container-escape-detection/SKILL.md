@@ -111,7 +111,7 @@ Falco rule example:
 - Seccomp/AppArmor profile status (enforcing, complaining, unconfined)
 - Mounted volumes and sensitive paths exposed
 - Docker socket presence and permissions
-- Escape vector used and host-level access achieved — confirming a dangerous capability or socket is present is not enough; you must show the **attacker outcome** (e.g., the `CAP_SYS_ADMIN` capability enabled cgroup release_agent escape and `cat /host/etc/shadow` read the host's credential file, the Docker socket created a privileged container with `/:/host` bind mount and `chroot /host` granted full host root filesystem access, the Kubernetes service account token listed all secrets in the cluster including database passwords and TLS private keys)
+- Escape vector used and host-level access achieved — prove the attacker outcome (`agent/rules/hunting.md` §2), e.g., the `CAP_SYS_ADMIN` capability enabled cgroup release_agent escape and `cat /host/etc/shadow` read the host's credential file, the Docker socket created a privileged container with `/:/host` bind mount and `chroot /host` granted full host root filesystem access, the Kubernetes service account token listed all secrets in the cluster including database passwords and TLS private keys
 - Falco/runtime detection coverage gaps
 - Kubernetes RBAC permissions for the service account
 

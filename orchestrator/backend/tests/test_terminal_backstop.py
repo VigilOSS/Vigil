@@ -1,5 +1,4 @@
-"""Wave 7 — THE single terminal backstop (S17 resolution; master plan §1A,
-depth-gate §5.3).
+"""Tests for the single terminal depth backstop.
 
 This is the ONE hard block in the whole system. ``terminal_depth_block`` returns
 the units that BLOCK the terminal ``report``/``complete`` edge on the WEB track:
@@ -78,9 +77,29 @@ def _probe(eng_id, *, attack_family, result_status="tested", variant_id=None,
     )
 
 
+def _coverage_item(eng_id, *, attack_family, variant_id, status_value="pending",
+                   notes="gf bucket matched at ingest", auth="anonymous"):
+    """Record a gf-style coverage_item flagging a specific vuln CLASS. A
+    ``pending`` item marks the class an EXPECTED per-class signal without
+    covering it; ``covered`` + notes marks it covered."""
+    state_manager.record_coverage_item(
+        eng_id, request_variant_id=variant_id, service_id=None,
+        auth_context=auth, input_slot="endpoint", attack_family=attack_family,
+        status_value=status_value, notes=notes,
+    )
+
+
 def _block(eng_id):
     state_manager.score_application_units(eng_id)
     return state_manager.terminal_depth_block(eng_id)
+
+
+def _unit_id_for(engagement_id: int, host: str, prefix: str) -> int:
+    state_manager.score_application_units(engagement_id)
+    for unit in state_manager.list_application_units(engagement_id):
+        if unit["host"] == host and unit["path_prefix"] == prefix:
+            return int(unit["id"])
+    raise AssertionError(f"no application unit for {host}{prefix}")
 
 
 def _labels(units):
@@ -261,17 +280,176 @@ def test_surface_only_decisive_host_materializes_and_blocks(client, isolate_sett
     assert "access-control" in entry["missing_block_families"]
 
 
+# ---------------------------------------------------------------------------
+# Coverage-grain unbundle (ADR 0012): the CLASS-LEVEL block for decisive /
+# high-confidence units. `signal_classes_uncovered` — a specific BLOCK_HIGH
+# CLASS flagged (via gf coverage_items) but never class-specifically covered —
+# is promoted to a hard block for decisive units, EVEN when a sibling class
+# covered the family (the single-class blind spot the family gate misses) and
+# even when the unit is otherwise touched. Non-decisive units keep family-level
+# behaviour. The escape valves (covering probe, depth_deferral, --force) stay.
+# ---------------------------------------------------------------------------
+
+
+def test_decisive_unit_uncovered_block_high_class_blocks_at_report(client, isolate_settings):
+    """A DECISIVE unit with a `sqli` (injection/BLOCK_HIGH) class flagged but only
+    a sibling-class (`ssti`) probe — which covers the injection FAMILY and marks
+    the unit touched — now HARD-BLOCKS on the class. Under the old family gate
+    this touched unit only WARNed; the class grain is the whole point."""
+    key = "2026-07-05-220000-classblock"
+    eng_id = _seed_decisive_small_unit(client, isolate_settings, key)
+    vid = _variant_id_for(eng_id, "/login")
+    _coverage_item(eng_id, attack_family="sqli", variant_id=vid)
+    _probe(eng_id, attack_family="ssti", result_status="tested",
+           target_host="auth.example.com", target_path="/login",
+           tool_name="tplmap", payload_value="ssti")
+
+    result = _block(eng_id)
+    label = ("auth.example.com", "/login")
+    assert label in _labels(result["blocking"]), result
+    assert label not in _labels(result["warned_under_observed"]), result
+    entry = next(b for b in result["blocking"] if b["unit"]["path_prefix"] == "/login")
+    assert entry["block_grain"] == "class"
+    assert "sqli" in entry["uncovered_classes"]
+    # sanity: the injection FAMILY is NOT what blocks — a sibling probe covered it.
+    assert "injection" not in entry.get("missing_block_families", [])
+
+
+def test_non_decisive_unit_same_class_gap_does_not_block(client, isolate_settings):
+    """REGRESSION GUARD for 'decisive only': a NON-decisive, low-confidence unit
+    with the SAME uncovered BLOCK_HIGH class gap is WARNed, never blocked. If this
+    ever flips to blocking, the decisive-only invariant is broken."""
+    key = "2026-07-05-220001-nondecisive"
+    eng_id = _seed(client, isolate_settings, key)
+    _variant(eng_id, url="https://blog.example.com/about", ctf="html")
+    state_manager.score_application_units(eng_id)
+    unit = next(u for u in state_manager.list_application_units(eng_id)
+                if u["host"] == "blog.example.com")
+    state_manager.set_app_unit_override(
+        eng_id, unit["id"], override="mark-deep", reason="operator hunch")
+    vid = _variant_id_for(eng_id, "/about")
+    _coverage_item(eng_id, attack_family="sqli", variant_id=vid)
+
+    result = state_manager.terminal_depth_block(eng_id)
+    label = ("blog.example.com", "/about")
+    assert label not in _labels(result["blocking"]), result
+    assert label in _labels(result["warned_under_observed"]), result
+    warn = next(w for w in result["warned_under_observed"]
+                if w["unit"]["path_prefix"] == "/about")
+    # the class gap is still surfaced (advisory) on the warned entry, not blocked.
+    assert "sqli" in (warn.get("signal_classes_uncovered") or [])
+
+
+def test_depth_deferral_clears_class_block(client, isolate_settings):
+    """A `depth_deferral` naming the class removes it from
+    `signal_classes_uncovered`, clearing the class block (same valve as family)."""
+    key = "2026-07-05-220002-classdefer"
+    eng_id = _seed_decisive_small_unit(client, isolate_settings, key)
+    vid = _variant_id_for(eng_id, "/login")
+    _coverage_item(eng_id, attack_family="sqli", variant_id=vid)
+    _probe(eng_id, attack_family="ssti", result_status="tested",
+           target_host="auth.example.com", target_path="/login",
+           tool_name="tplmap", payload_value="ssti")
+    assert ("auth.example.com", "/login") in _labels(_block(eng_id)["blocking"])
+
+    resp = client.post(
+        f"/engagements/{key}/assessment/dispatch-decisions",
+        json={
+            "kind": "depth_deferral",
+            "payload": {
+                "host": "auth.example.com", "path_prefix": "/login",
+                "vuln_classes": ["sqli"],
+                "reason": "injection formally deferred on login; risk accepted",
+                "approved_by": "operator",
+            },
+            "surfaced_to_user": True,
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    result = _block(eng_id)
+    assert ("auth.example.com", "/login") not in _labels(result["blocking"]), result
+    assert result["deferral_count"] >= 1
+
+
+def test_block_warn_class_never_class_blocks(client, isolate_settings):
+    """A BLOCK_WARN-family class (`info-disclosure` → disclosure) flagged as a
+    per-class signal must NEVER enter the hard set — even for a decisive unit.
+    `signal_classes_uncovered` is restricted to BLOCK_HIGH classes, so the unit
+    never produces a `block_grain='class'` entry from the warn class."""
+    key = "2026-07-05-220003-warnclass"
+    eng_id = _seed_decisive_small_unit(client, isolate_settings, key)
+    vid = _variant_id_for(eng_id, "/login")
+    _coverage_item(eng_id, attack_family="info-disclosure", variant_id=vid)
+    _probe(eng_id, attack_family="ssti", result_status="tested",
+           target_host="auth.example.com", target_path="/login",
+           tool_name="tplmap", payload_value="ssti")
+
+    state_manager.score_application_units(eng_id)
+    ledger = state_manager.depth_ledger(eng_id)
+    unit = next(u for u in ledger["units"] if u["unit"]["path_prefix"] == "/login")
+    assert "info-disclosure" not in (unit.get("signal_classes_uncovered") or [])
+
+    result = state_manager.terminal_depth_block(eng_id)
+    class_blocks = [b for b in result["blocking"] if b.get("block_grain") == "class"]
+    assert not any(b["unit"]["path_prefix"] == "/login" for b in class_blocks), result
+
+
+def test_self_attested_class_signal_never_covers_class(client, isolate_settings):
+    """ANTI-SELF-ATTESTATION: neither an evidence-FREE `covered` coverage_item nor
+    a non-covering (`attempted`) probe clears the class — only a whitelisted
+    covering `result_status` (`tested`/`signal`) or an evidence-BEARING
+    coverage_item counts. `status='covered'`/`completed` claims alone never count,
+    so the unit still class-blocks on `sqli`."""
+    key = "2026-07-05-220004-selfattested"
+    eng_id = _seed_decisive_small_unit(client, isolate_settings, key)
+    vid = _variant_id_for(eng_id, "/login")
+    # `covered` but with NO evidence/notes — a self-attested claim that must not
+    # count (also makes `sqli` an EXPECTED per-class signal).
+    _coverage_item(eng_id, attack_family="sqli", variant_id=vid,
+                   status_value="covered", notes="")
+    # a probe that merely `attempted` (not `tested`/`signal`) — must not cover.
+    _probe(eng_id, attack_family="sqli", result_status="attempted",
+           target_host="auth.example.com", target_path="/login",
+           tool_name="sqlmap", payload_value="inj")
+
+    result = _block(eng_id)
+    entry = next((b for b in result["blocking"]
+                  if b["unit"]["path_prefix"] == "/login"), None)
+    assert entry is not None, result
+    assert entry["block_grain"] == "class"
+    assert "sqli" in entry["uncovered_classes"]
+
+
+def test_class_specific_covering_probe_clears_class_block(client, isolate_settings):
+    """POSITIVE path: a class-specific `sqli` probe with a covering status
+    (`tested`) drains the class, so the unit no longer class-blocks."""
+    key = "2026-07-05-220005-classcover"
+    eng_id = _seed_decisive_small_unit(client, isolate_settings, key)
+    vid = _variant_id_for(eng_id, "/login")
+    _coverage_item(eng_id, attack_family="sqli", variant_id=vid)
+    _probe(eng_id, attack_family="sqli", result_status="tested",
+           target_host="auth.example.com", target_path="/login",
+           tool_name="sqlmap", payload_value="inj")
+
+    result = _block(eng_id)
+    class_blocks = [b for b in result["blocking"]
+                    if b.get("block_grain") == "class"
+                    and b["unit"]["path_prefix"] == "/login"]
+    assert not class_blocks, result
+
+
 def test_self_attested_handoff_does_not_downgrade_block(client, isolate_settings):
     """A completed dispatch covering the unit plus ONLY a bare handoff summary
     (no covering probe, no finding) must NOT mark the unit 'touched' — the
-    decisive unit stays in `blocking`. A self-attested handoff with a broad
-    scope_path_prefix must not be able to defeat the one hard block (S7)."""
+    decisive unit stays in `blocking`. A self-attested handoff cannot defeat
+    the one hard block (S7)."""
     key = "2026-06-09-210011-handoff"
     eng_id = _seed_decisive_small_unit(client, isolate_settings, key)
+    unit_id = _unit_id_for(eng_id, "auth.example.com", "/login")
     state_manager.record_dispatch(
         eng_id, agent_id="va-x", agent_role="vulnerability-analyst",
-        task="review the login area", scope_host="auth.example.com",
-        scope_path_prefix="/", vuln_classes="idor", status_value="completed",
+        task="review the login area", application_unit_id=unit_id,
+        vuln_classes="idor", status_value="completed",
     )
     state_manager.update_dispatch(eng_id, agent_id="va-x", status_value="completed",
                                   completed_at="2026-06-09T12:00:00Z")
@@ -282,3 +460,79 @@ def test_self_attested_handoff_does_not_downgrade_block(client, isolate_settings
     result = _block(eng_id)
     assert ("auth.example.com", "/login") in _labels(result["blocking"]), result
     assert ("auth.example.com", "/login") not in _labels(result["warned_under_observed"])
+
+
+def _probe_as(eng_id, *, attack_family, auth_context, target_path="/login"):
+    state_manager.record_probe_run(
+        eng_id, request_variant_id=None, service_id=None, coverage_item_id=None,
+        auth_context=auth_context, input_slot="query", attack_family=attack_family,
+        payload_family="", payload_value="p", tool_name="curl",
+        agent_name="vulnerability-analyst", result_status="tested",
+        observed_http_status=None, signal_type="", evidence_ref="ev.txt", notes="",
+        target_host="auth.example.com", target_path=target_path, target_port=None,
+    )
+
+
+def _cover_all_block_families(eng_id):
+    """Cover every BLOCK_HIGH family the decisive /login unit expects, using
+    recorded probe evidence only. access-control needs two distinct identities."""
+    _probe_as(eng_id, attack_family="sqli", auth_context="anonymous")
+    _probe_as(eng_id, attack_family="auth-bypass", auth_context="anonymous")
+    _probe_as(eng_id, attack_family="idor", auth_context="user_a")
+    _probe_as(eng_id, attack_family="idor", auth_context="user_b")
+
+
+def test_undeclared_vuln_classes_clear_the_dedicated_dispatch_obligation(
+    client, isolate_settings
+):
+    """A dispatch that declares NO `vuln_classes` but whose probes covered every
+    block-level family satisfies the dedicated-dispatch obligation.
+
+    Coverage is read from recorded probe `attack_family`, never from what a
+    dispatch declared about itself, so an open-objective dispatch that never
+    named a vulnerability class up front is neither blocked nor flagged as an
+    unmet obligation.
+    """
+    key = "2026-07-27-000001-undeclared"
+    eng_id = _seed_decisive_small_unit(client, isolate_settings, key)
+    unit_id = _unit_id_for(eng_id, "auth.example.com", "/login")
+    state_manager.record_dispatch(
+        eng_id, agent_id="va-undeclared", agent_role="vulnerability-analyst",
+        task="hunt the login surface; prove any attacker outcome you find",
+        application_unit_id=unit_id,
+        status_value="completed",
+    )
+    state_manager.update_dispatch(eng_id, agent_id="va-undeclared",
+                                  status_value="completed",
+                                  completed_at="2026-07-27T12:00:00Z")
+    _cover_all_block_families(eng_id)
+
+    result = _block(eng_id)
+    label = ("auth.example.com", "/login")
+    assert label not in _labels(result["blocking"]), result
+    unmet = [w for w in result["warned_under_observed"]
+             if "dedicated-dispatch obligation" in (w.get("reason") or "")]
+    assert label not in _labels(unmet), result
+
+
+def test_dedicated_dispatch_obligation_still_needs_work_evidence(
+    client, isolate_settings
+):
+    """A completed dispatch with declared classes but NO probe and NO finding
+    does not satisfy the obligation — declaring classes is self-attestation, and
+    the unit still owes durable evidence that the work happened (S7)."""
+    key = "2026-07-27-000002-noevidence"
+    eng_id = _seed_decisive_small_unit(client, isolate_settings, key)
+    unit_id = _unit_id_for(eng_id, "auth.example.com", "/login")
+    state_manager.record_dispatch(
+        eng_id, agent_id="va-talker", agent_role="vulnerability-analyst",
+        task="cover the login surface", application_unit_id=unit_id,
+        vuln_classes="sqli,idor,auth-bypass",
+        status_value="completed",
+    )
+    state_manager.update_dispatch(eng_id, agent_id="va-talker",
+                                  status_value="completed",
+                                  completed_at="2026-07-27T12:00:00Z")
+
+    result = _block(eng_id)
+    assert ("auth.example.com", "/login") in _labels(result["blocking"]), result

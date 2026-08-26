@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://vigil.local/schemas/intel-breach-record.schema.json",
   "$comment": "Mirrors app.api.intel_schemas.BreachRecordRequest.",
-  "title": "Intel Breach Record — credential/PII exposure from a named leak or dump (not a vuln finding; use record-finding for confirmed exploitability).",
+  "title": "Intel Breach Record — credential/PII exposure from a named leak or dump (not a vuln finding; use finding record for confirmed exploitability).",
   "type": "object",
   "additionalProperties": false,
   "required": [

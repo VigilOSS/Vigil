@@ -11,6 +11,17 @@ name: ci
 #                     `--directory orchestrator/backend` resolves against the
 #                     backend cwd, collects zero tests, and pytest exits 0 —
 #                     a false green. The absolute path is load-bearing.
+#   - root-tests    : the root `tests/` suite (CLI + bench harness), minus
+#                     tests/eval which has its own job. ABSOLUTE path, same
+#                     false-green trap as `eval`.
+#   - assess-tests  : the whole `agent/scripts/assess/tests` suite. ABSOLUTE
+#                     path, same trap. Supersedes the two-file `code-readiness`
+#                     job's coverage but does not replace it: that job is kept
+#                     so a readiness-contract break names itself instead of
+#                     hiding in a 1400-test run.
+#   - code-readiness: target-specific assess transition/readiness contract tests.
+#   - frontend-build: installs the locked frontend dependencies and compiles the
+#                     code-analysis readiness consumer.
 #   - ruff / mypy   : lint (`uvx ruff check .`) and types
 #                     (`uvx --with-editable . mypy src/vigil_cli`). The tree is
 #                     now lint- and type-clean, so these are blocking gates:
@@ -72,6 +83,71 @@ jobs:
       # when a relative path is resolved against --directory's cwd.
       - name: Run deterministic eval harness
         run: uv run --directory orchestrator/backend --extra dev pytest "${GITHUB_WORKSPACE}/tests/eval" -q
+
+  root-tests:
+    name: root tests — CLI + bench harness (blocking)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      # ABSOLUTE path on purpose — see the header note about the false-green
+      # trap when a relative path is resolved against --directory's cwd.
+      # `tests/eval` is ignored here because the `eval` job owns it; running it
+      # twice buys nothing and doubles the time to a red signal.
+      # Never run a bare `pytest` from the repo root: duplicate
+      # `test_vigil_cli.py` basenames in `tests/` and
+      # `agent/scripts/assess/tests/` collide under one collection, which is why
+      # these two suites are separate jobs rather than one invocation.
+      - name: Run root test suite
+        run: >-
+          uv run --directory orchestrator/backend --extra dev pytest
+          "${GITHUB_WORKSPACE}/tests" -q
+          --ignore="${GITHUB_WORKSPACE}/tests/eval"
+
+  assess-tests:
+    name: assess CLI pytest (blocking)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      # ABSOLUTE path on purpose — same false-green trap as above.
+      - name: Run assess CLI test suite
+        run: >-
+          uv run --directory orchestrator/backend --extra dev pytest
+          "${GITHUB_WORKSPACE}/agent/scripts/assess/tests" -q
+
+  code-readiness:
+    name: code readiness CLI (blocking)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Run code transition/readiness contract tests
+        run: >-
+          uv run --directory orchestrator/backend --extra dev pytest
+          "${GITHUB_WORKSPACE}/agent/scripts/assess/tests/test_code_coverage_gate.py"
+          "${GITHUB_WORKSPACE}/agent/scripts/assess/tests/test_code_readiness_cli.py" -q
+
+  frontend-build:
+    name: frontend build (blocking)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: orchestrator/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: orchestrator/frontend/package-lock.json
+      - name: Install locked frontend dependencies
+        run: npm ci
+      - name: Build frontend
+        run: npm run build
 
   ruff:
     name: ruff (blocking)

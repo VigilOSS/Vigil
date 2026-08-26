@@ -1,4 +1,4 @@
-"""vigil assess ingest-httpx — ingest httpx -json output into the backend host-liveness ledger.
+"""vigil assess ingest httpx — ingest httpx -json output into the backend host-liveness ledger.
 
 httpx writes liveness verdicts to scattered ``.jsonl`` files that nothing
 reconciles back into the backend without this verb. This verb parses an httpx ``-json`` file,
@@ -27,7 +27,7 @@ _STORED_CLASSES = {"live", "dead", "blackholed", "unknown"}
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
-        "ingest-httpx",
+        "httpx",
         help="Parse an httpx -json results file and upsert the host-liveness ledger.",
     )
     p.add_argument("results_file", help="Path to the httpx -json (.jsonl) output file")

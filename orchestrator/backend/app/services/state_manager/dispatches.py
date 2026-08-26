@@ -13,6 +13,12 @@ from ._common import (
     _require_canonical_finding_slugs,
 )
 from .findings import _ensure_finding_slugs_exist
+from ..variant_scopes import (
+    MAX_VARIANT_PARENT_FINDINGS,
+    VARIANT_DISPATCH_ROLE,
+    canonical_variant_parent_slugs,
+    variant_parent_finding_set_digest,
+)
 
 
 
@@ -30,6 +36,10 @@ def _require_terminal_dispatch_status(value: str | None) -> str | None:
 
 def _serialize_dispatch(row) -> dict[str, Any]:
     data = dict(row)
+    # Old engagement databases may retain these retired columns. They are not
+    # part of the dispatch contract and must not leak back into current rows.
+    data.pop("scope_host", None)
+    data.pop("scope_path_prefix", None)
     for col in ("finding_slugs_json",):
         raw = data.pop(col, None) or ""
         key = col[: -len("_json")]
@@ -48,7 +58,7 @@ def record_dispatch(
     agent_id: str,
     agent_role: str,
     task: str | None = None,
-    scope_host: str | None = None,
+    application_unit_id: int | None = None,
     dispatched_at: str | None = None,
     status_value: str = DispatchStatus.IN_PROGRESS,
     model: str | None = None,
@@ -61,7 +71,6 @@ def record_dispatch(
     finding_slugs: list[str] | None = None,
     skills: str | None = None,
     tier: str | None = None,
-    scope_path_prefix: str | None = None,
     vuln_classes: str | None = None,
     identity: str | None = None,
 ) -> dict[str, Any]:
@@ -70,16 +79,68 @@ def record_dispatch(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="agent_id is required")
     dispatched_value = dispatched_at or _common._utcnow_iso_dispatch()
     finding_slugs = _require_canonical_finding_slugs(finding_slugs)
+    variant_parent_slugs: list[str] | None = None
+    if agent_role == VARIANT_DISPATCH_ROLE:
+        if finding_slugs is not None and not finding_slugs:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "code-variant-hunter requires a non-empty immutable "
+                    "finding_slugs parent scope"
+                ),
+            )
+        if len(finding_slugs or []) > MAX_VARIANT_PARENT_FINDINGS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "code-variant-hunter finding_slugs exceeds the immutable scope cap "
+                    f"of {MAX_VARIANT_PARENT_FINDINGS}"
+                ),
+            )
+        if finding_slugs is not None:
+            variant_parent_slugs = canonical_variant_parent_slugs(finding_slugs)
+            if finding_slugs != variant_parent_slugs:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "code-variant-hunter finding_slugs must be sorted and unique "
+                        "because they define an immutable dispatch scope"
+                    ),
+                )
     findings_json = json.dumps(list(finding_slugs)) if finding_slugs is not None else None
     skills_value = (skills or "").strip() or None
     tier_value = (tier or "").strip() or None
-    scope_path_prefix_value = (scope_path_prefix or "").strip() or None
     vuln_classes_value = (vuln_classes or "").strip() or None
     identity_value = (identity or "").strip() or None
     requested_model_value = requested_model if requested_model is not None else model
     requested_reasoning_value = requested_reasoning if requested_reasoning is not None else reasoning
     with _common.get_connection() as connection:
         _ensure_finding_slugs_exist(connection, engagement.id, finding_slugs)
+        if variant_parent_slugs is not None:
+            # Import lazily because code_analysis imports the finding lifecycle
+            # helpers from this package. Receipt-bearing authority is the only
+            # dispatch path that needs the code-specific snapshot selector.
+            from .. import code_analysis
+
+            code_analysis.validate_variant_dispatch_parent_scope(
+                connection,
+                engagement.id,
+                variant_parent_slugs,
+            )
+        if application_unit_id is not None:
+            unit = connection.execute(
+                "SELECT id FROM assessment_application_units "
+                "WHERE id = ? AND engagement_id = ?",
+                (application_unit_id, engagement.id),
+            ).fetchone()
+            if unit is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"application_unit_id={application_unit_id} does not identify "
+                        "an application unit in this engagement"
+                    ),
+                )
         existing = connection.execute(
             "SELECT id FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
             (engagement.id, agent_id),
@@ -92,19 +153,19 @@ def record_dispatch(
         cursor = connection.execute(
             """
             INSERT INTO assessment_dispatches (
-                engagement_id, agent_id, agent_role, task, scope_host,
+                engagement_id, agent_id, agent_role, task, application_unit_id,
                 dispatched_at, status, model, reasoning,
                 requested_model, actual_model, requested_reasoning, actual_reasoning,
                 dispatch_mode, finding_slugs_json, skills, tier,
-                scope_path_prefix, vuln_classes, identity
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                vuln_classes, identity
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 engagement.id,
                 agent_id,
                 agent_role,
                 task,
-                scope_host,
+                application_unit_id,
                 dispatched_value,
                 status_value,
                 requested_model_value,
@@ -117,11 +178,25 @@ def record_dispatch(
                 findings_json,
                 skills_value,
                 tier_value,
-                scope_path_prefix_value,
                 vuln_classes_value,
                 identity_value,
             ),
         )
+        if variant_parent_slugs is not None:
+            connection.execute(
+                """
+                INSERT INTO code_variant_dispatch_scopes (
+                    dispatch_id, engagement_id, parent_finding_slugs_json,
+                    parent_finding_set_digest
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    int(cursor.lastrowid),
+                    engagement.id,
+                    json.dumps(variant_parent_slugs, separators=(",", ":")),
+                    variant_parent_finding_set_digest(variant_parent_slugs),
+                ),
+            )
         row = connection.execute(
             "SELECT * FROM assessment_dispatches WHERE id = ?",
             (cursor.lastrowid,),
@@ -147,6 +222,14 @@ def update_dispatch(
         ).fetchone()
         if existing is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="dispatch not found")
+        if finding_slugs is not None and str(existing["agent_role"]) == VARIANT_DISPATCH_ROLE:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "code-variant-hunter finding_slugs define the immutable parent-finding "
+                    "scope and cannot be updated; record produced findings on the handoff"
+                ),
+            )
         sets: list[str] = []
         values: list[Any] = []
         if status_value is not None:

@@ -723,6 +723,17 @@ _INTEL_TABLE_BY_TYPE: dict[str, str] = {
 }
 
 
+# The free-text column a supersede ``--rationale`` is appended to differs by
+# table: ``intel_notes`` stores prose in ``body_markdown``; every other intel
+# table has a dedicated ``notes`` column. Keyed by intel_type so the append in
+# ``supersede_intel`` targets the column that actually exists on each table
+# (targeting ``notes`` on ``intel_notes`` raises "no such column: notes" -> 500).
+_INTEL_RATIONALE_COLUMN: dict[str, str] = {
+    intel_type: ("body_markdown" if intel_type == "note" else "notes")
+    for intel_type in _INTEL_TABLE_BY_TYPE
+}
+
+
 _INTEL_UPDATABLE_FIELDS: dict[str, set[str]] = {
     "tech-component": {
         "component", "version", "source_name", "confidence", "evidence_ref",
@@ -1142,6 +1153,121 @@ def update_intel(
     return out
 
 
+def _supersede_to_existing(
+    engagement,
+    intel_type: str,
+    table: str,
+    intel_id: int,
+    target_id: int,
+    *,
+    new_payload: dict[str, Any],
+    rationale: str,
+) -> dict[str, Any]:
+    """Point a stale intel row at an EXISTING same-type canonical row.
+
+    Unlike the payload path this never calls a ``record_*`` helper: the target
+    row already exists, so re-upserting it on its natural key would destructively
+    overwrite the canonical's own fields. Here we only set ``superseded_by_id``
+    on the stale row, leaving the canonical untouched. Used when an operator has
+    two rows for the same entity and wants the stale one to defer to the
+    surviving canonical (e.g. a re-fingerprint that landed under a slightly
+    different natural key).
+
+    Guards mirror the payload path: existence of both rows, self-collision, and
+    the shared transitive cycle walk (``_supersede_chain_reaches``).
+    """
+    # ``--to-existing`` repoints an existing row; it does not create one, so a
+    # replacement payload is mutually exclusive with it.
+    if isinstance(new_payload, dict) and new_payload:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="supersede --to-existing takes no replacement payload",
+        )
+    if target_id == intel_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="cannot supersede an intel row onto itself",
+        )
+
+    with get_connection() as connection:
+        existing = _fetch_intel_row(connection, table, engagement.id, intel_id)
+        if existing is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"intel/{intel_type} id={intel_id} not found",
+            )
+        # Same table + engagement scope enforces same-type/same-engagement.
+        target = _fetch_intel_row(connection, table, engagement.id, target_id)
+        if target is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"supersede target intel/{intel_type} id={target_id} not found",
+            )
+
+        # Cycle guard: if the target already transitively supersedes back to the
+        # stale row, pointing stale -> target closes a loop. Reuse the same walk
+        # the payload path uses.
+        if _supersede_chain_reaches(connection, table, engagement.id, target_id, intel_id):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"supersede would create a cycle: id={target_id} already "
+                    f"transitively supersedes id={intel_id}"
+                ),
+            )
+
+        if rationale:
+            rationale_column = _INTEL_RATIONALE_COLUMN[intel_type]
+            old_notes = str(existing.get(rationale_column, "") or "")
+            tag = f"[superseded-by id={target_id}] {rationale}".strip()
+            new_notes = (old_notes + ("\n" if old_notes else "") + tag) if tag else old_notes
+            connection.execute(
+                f"UPDATE {table} SET {rationale_column} = ?, superseded_by_id = ?, "
+                f"superseded_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP "
+                f"WHERE engagement_id = ? AND id = ?",
+                (new_notes, target_id, engagement.id, intel_id),
+            )
+        else:
+            connection.execute(
+                f"UPDATE {table} SET superseded_by_id = ?, "
+                f"superseded_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP "
+                f"WHERE engagement_id = ? AND id = ?",
+                (target_id, engagement.id, intel_id),
+            )
+
+        updated_old = _fetch_intel_row(connection, table, engagement.id, intel_id)
+        assert updated_old is not None
+
+        # Refresh the stale row's FTS shadow so an appended rationale becomes
+        # searchable (mirrors the payload path).
+        normalized_old = _post_process_intel_row(intel_type, updated_old)
+        old_key, old_body = _intel_search_body(intel_type, normalized_old)
+        _upsert_search_index(
+            connection,
+            engagement_id=engagement.id,
+            entity_type=_INTEL_FTS_ENTITY_TYPE[intel_type],
+            source_id=intel_id,
+            key=old_key,
+            body=old_body,
+            source_name=str(updated_old.get("source_name", "")),
+        )
+
+        canonical_id = _resolve_canonical_id(connection, table, engagement.id, intel_id)
+        # Re-read the target purely to return its current (unchanged) state.
+        target_after = _fetch_intel_row(connection, table, engagement.id, target_id)
+        assert target_after is not None
+        target_canonical = _resolve_canonical_id(connection, table, engagement.id, target_id)
+
+    superseded_view = _post_process_intel_row(intel_type, updated_old)
+    superseded_view["canonical_id"] = canonical_id
+    current_view = _post_process_intel_row(intel_type, target_after)
+    current_view["canonical_id"] = target_canonical
+    return {
+        "superseded": superseded_view,
+        "current": current_view,
+    }
+
+
 def supersede_intel(
     engagement_id: int,
     intel_type: str,
@@ -1149,6 +1275,7 @@ def supersede_intel(
     new_payload: dict[str, Any],
     *,
     rationale: str = "",
+    to_existing_id: int | None = None,
 ) -> dict[str, Any]:
     """Insert a replacement intel row and mark the old row as superseded.
 
@@ -1158,9 +1285,28 @@ def supersede_intel(
     so a mid-flight failure rolls the whole supersede back together — a
     half-applied state where the new row exists but the old row never gets
     flagged is possible only if the connection itself dies.
+
+    When ``to_existing_id`` is supplied the row is instead pointed at an
+    already-recorded canonical row of the same type (``--to-existing``); no
+    replacement is upserted and ``new_payload`` must be empty. See
+    ``_supersede_to_existing``.
     """
     engagement = _engagement_or_404(engagement_id)
     table = _resolve_intel_table(intel_type)
+
+    # ``--to-existing`` targets an already-recorded canonical row: skip the
+    # replacement upsert entirely and only set the FK on the stale row.
+    if to_existing_id is not None:
+        return _supersede_to_existing(
+            engagement,
+            intel_type,
+            table,
+            intel_id,
+            int(to_existing_id),
+            new_payload=new_payload,
+            rationale=rationale,
+        )
+
     if not isinstance(new_payload, dict) or not new_payload:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1228,12 +1374,12 @@ def supersede_intel(
         if new_id == intel_id:
             # The natural key matched the existing row; this is an in-place
             # upsert, not a supersede. Surface it as 409 so the operator can
-            # call update-intel instead.
+            # call intel update instead.
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
                     f"supersede target (id={intel_id}) collided with the new payload's "
-                    "natural key — use update-intel for in-place edits"
+                    "natural key — use intel update for in-place edits"
                 ),
             )
 
@@ -1253,11 +1399,12 @@ def supersede_intel(
         # Capture rationale on the old row's notes when supplied so the audit
         # trail includes why supersede was issued without changing the schema.
         if rationale:
-            old_notes = str(existing.get("notes", "") or "")
+            rationale_column = _INTEL_RATIONALE_COLUMN[intel_type]
+            old_notes = str(existing.get(rationale_column, "") or "")
             tag = f"[superseded-by id={new_id}] {rationale}".strip()
             new_notes = (old_notes + ("\n" if old_notes else "") + tag) if tag else old_notes
             connection.execute(
-                f"UPDATE {table} SET notes = ?, superseded_by_id = ?, "
+                f"UPDATE {table} SET {rationale_column} = ?, superseded_by_id = ?, "
                 f"superseded_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP "
                 f"WHERE engagement_id = ? AND id = ?",
                 (new_notes, new_id, engagement.id, intel_id),
@@ -1362,7 +1509,7 @@ def list_open_high_cves(engagement_id: int) -> list[dict[str, Any]]:
         open_high.append(
             {
                 # Backend id so the operator can act on the exact row
-                # (`vigil assess update-intel cve <id>` takes the numeric id).
+                # (`vigil assess intel update cve <id>` takes the numeric id).
                 "id": row.get("id"),
                 "cve_id": row.get("cve_id"),
                 "cvss_score": score,
@@ -1478,7 +1625,7 @@ def intel_readiness(engagement_id: int) -> dict[str, Any]:
                 )
 
     # id included so the operator can disposition the exact lead row
-    # (`vigil assess update-intel note <id>`).
+    # (`vigil assess intel update note <id>`).
     open_leads = [
         {"id": row.get("id"), "title": row.get("title"), "lead_status": row.get("lead_status")}
         for row in list_leads(engagement_id, open_only=True)

@@ -242,7 +242,7 @@ If user input reaches aggregation queries:
 - Search endpoint and parameter where injection was confirmed
 - Query type in use (`query_string`, `simple_query_string`, direct API)
 - Fields discovered that are not exposed through the normal UI
-- Data extracted (redact actual sensitive values, show the pattern worked)
+- Data extracted (show the pattern worked)
 - Cross-index access proof (if applicable)
 - Attacker outcome: what sensitive data is accessible, what access controls are bypassed
 - Severity:

@@ -1,11 +1,111 @@
 """vigil assess resume-brief — compact backend operating picture."""
 from __future__ import annotations
 
+import io
 import json
+import sys
+from contextlib import redirect_stdout
+from types import SimpleNamespace
 from urllib.parse import quote, urlencode
 
-from assess.lib.client import AssessmentClient
+from assess.commands import kali_sweep_orphans
+from assess.lib.client import AssessError, AssessmentClient, default_runtime_container
 from assess.lib.config import load_config
+from assess.lib.finding_render import blocked_reason_summary
+
+_COVERING_STATUSES = {"tested", "signal"}
+_DEGRADED_OUTPUT_RETENTION = {
+    "integrity_failure",
+    "suppression_deferred",
+    "untrusted",
+}
+
+
+def _orphan_attention(output: str) -> str:
+    payload = None
+    for line in reversed(output.splitlines()):
+        try:
+            candidate = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict):
+            payload = candidate
+            break
+    if payload is None:
+        return ""
+    # Each section names ONLY its genuinely-actionable fields, so the WARN fires
+    # for stuck work — not for benign bookkeeping. For command_runs/jobs the
+    # sweep's ``skipped`` counter is a benign-vs-genuine union (the backend
+    # ignores ?status=running, so it pages ALL historical rows and "skips" every
+    # already-terminal one — a benign count that can reach the thousands). Key on
+    # ``skipped_unverifiable`` (liveness/pid/PATCH/pending-recovery failures),
+    # NOT the conflated ``skipped``, mirroring how host_processes already keys
+    # on its bad states (unverifiable/failed) rather than a catch-all (I-05).
+    sections = (
+        (
+            "command_runs",
+            payload.get("summary"),
+            (
+                "still_running",
+                "skipped_unverifiable",
+                "pending_recovery_failed",
+                "recovered_degraded",
+            ),
+        ),
+        ("jobs", payload.get("jobs_summary"), ("still_running", "skipped_unverifiable")),
+        (
+            "host_processes",
+            payload.get("host_processes_summary"),
+            ("unverifiable", "failed"),
+        ),
+    )
+    rendered: list[str] = []
+    for name, summary, fields in sections:
+        if not isinstance(summary, dict):
+            continue
+        counts = [
+            f"{field}={int(summary.get(field) or 0)}"
+            for field in fields
+            if int(summary.get(field) or 0) > 0
+        ]
+        if counts:
+            attention = f"{name}:{','.join(counts)}"
+            if name == "command_runs":
+                degraded_ids = [
+                    str(row_id)
+                    for row_id in (summary.get("recovered_degraded_ids") or [])
+                    if type(row_id) is int
+                ][: kali_sweep_orphans._ATTENTION_ID_LIMIT]
+                if degraded_ids:
+                    attention += f" ids={','.join(degraded_ids)}"
+                degraded_omitted = int(
+                    summary.get("recovered_degraded_ids_omitted") or 0
+                )
+                if degraded_omitted > 0:
+                    attention += f" ids_omitted={degraded_omitted}"
+                failed_ids = [
+                    str(row_id)
+                    for row_id in (
+                        summary.get("pending_recovery_failed_ids") or []
+                    )
+                    if type(row_id) is int
+                ][: kali_sweep_orphans._ATTENTION_ID_LIMIT]
+                if failed_ids:
+                    attention += f" failed_ids={','.join(failed_ids)}"
+                failed_omitted = int(
+                    summary.get("pending_recovery_failed_ids_omitted") or 0
+                )
+                if failed_omitted > 0:
+                    attention += f" failed_ids_omitted={failed_omitted}"
+                if (
+                    summary.get("output_attention_action")
+                    == kali_sweep_orphans._OUTPUT_ATTENTION_ACTION
+                ):
+                    attention += (
+                        f" action=`{kali_sweep_orphans._OUTPUT_ATTENTION_ACTION}`"
+                    )
+            rendered.append(attention)
+    return "; ".join(rendered)
 
 
 def register(subparsers) -> None:
@@ -36,12 +136,57 @@ def register(subparsers) -> None:
             "72h for code-fuzz-engineer."
         ),
     )
+    p.add_argument(
+        "--per-input-limit",
+        dest="per_input_limit",
+        type=int,
+        default=None,
+        help=(
+            "Cap on Per-Input Coverage cells returned (default 20). The grid also "
+            "reports the true total (cells_count), so a capped sample still signals "
+            "breadth. Use a larger N, or --all-cells, when you need every cell."
+        ),
+    )
+    p.add_argument(
+        "--all-cells",
+        dest="all_cells",
+        action="store_true",
+        help="Return every Per-Input Coverage cell (no cap). Equivalent to --per-input-limit 0.",
+    )
     p.add_argument("--json", dest="as_json", action="store_true")
     p.set_defaults(func=run)
 
 
 def run(args) -> None:
     cfg = load_config(args.engagement_dir)
+    # Resume hydration is a state-truth boundary: reconcile abandoned command
+    # runs, jobs, and precisely-owned host children before projecting the
+    # operating picture. The one-hour cutoff keeps this bounded and avoids
+    # touching legitimate recent work; sweep output is internal plumbing, not
+    # part of the resume-brief response contract.
+    try:
+        sweep_output = io.StringIO()
+        with redirect_stdout(sweep_output):
+            kali_sweep_orphans.run(
+                SimpleNamespace(
+                    engagement_dir=getattr(cfg, "engagement_dir", args.engagement_dir),
+                    scope="all",
+                    max_age_seconds=3600,
+                    container_name=default_runtime_container(),
+                    dry_run=False,
+                )
+            )
+        attention = _orphan_attention(sweep_output.getvalue())
+        if attention:
+            print(
+                f"WARN: resume-brief orphan reconciliation needs attention: {attention}",
+                file=sys.stderr,
+            )
+    except (AssessError, OSError, SystemExit) as exc:
+        print(
+            f"WARN: resume-brief orphan reconciliation failed: {exc}",
+            file=sys.stderr,
+        )
     params = []
     if args.q:
         params.append(("q", args.q))
@@ -55,6 +200,10 @@ def run(args) -> None:
     since = getattr(args, "since", "")
     if since:
         params.append(("since", since))
+    if getattr(args, "all_cells", False):
+        params.append(("per_input_limit", "0"))
+    elif getattr(args, "per_input_limit", None) is not None:
+        params.append(("per_input_limit", str(int(args.per_input_limit))))
     endpoint = "resume-brief"
     if params:
         endpoint += "?" + urlencode(params, quote_via=quote)
@@ -116,14 +265,33 @@ def _render_markdown(brief: dict) -> str:
     _render_surfaces(lines, brief.get("surfaces") or {})
     _render_work_buffer(lines, brief.get("work_buffer") or {})
     _render_attempts(lines, brief.get("attempts") or {})
+    _render_per_input_coverage(lines, brief.get("per_input_coverage") or {})
     lines.extend(["", "## Dispatches"])
     dispatches = brief.get("dispatches") or {}
-    for row in dispatches.get("stale_in_progress_dispatches") or []:
+    # The lists are capped by the backend; the *_count fields carry the TRUE
+    # totals so a stale row that sorts below the display window is still counted
+    # (I-10). Surface a "showing N of M" hint whenever the list was truncated.
+    stale_rows = dispatches.get("stale_in_progress_dispatches") or []
+    for row in stale_rows:
         lines.append(f"- stale: {row.get('agent_id')} role={row.get('agent_role')} age_h={row.get('age_hours')} handoff={row.get('handoff_status')}")
-    for row in dispatches.get("handoff_gaps") or []:
+    _render_dispatch_more(lines, len(stale_rows), dispatches.get("stale_in_progress_dispatches_count"), "stale in-progress dispatches")
+    gap_rows = dispatches.get("handoff_gaps") or []
+    for row in gap_rows:
         lines.append(f"- gap: {row.get('agent_id')} role={row.get('agent_role')} reason={row.get('reason')}")
-    if not (dispatches.get("stale_in_progress_dispatches") or dispatches.get("handoff_gaps")):
-        lines.append("- no stale in-progress dispatches or handoff gaps in the brief window")
+    _render_dispatch_more(lines, len(gap_rows), dispatches.get("handoff_gaps_count"), "handoff gaps")
+    terminal_rows = dispatches.get("terminal_no_handoff") or []
+    for row in terminal_rows:
+        lines.append(
+            f"- terminal-no-handoff: {row.get('agent_id')} role={row.get('agent_role')} "
+            f"status={row.get('status')} completed_at={row.get('completed_at')} "
+            "(silent state-loss — no handoff was ever written)"
+        )
+    _render_dispatch_more(lines, len(terminal_rows), dispatches.get("terminal_no_handoff_count"), "terminal handoff-less dispatches")
+    if not (stale_rows or gap_rows or terminal_rows):
+        lines.append(
+            "- no stale in-progress dispatches, handoff gaps, or terminal "
+            "handoff-less dispatches across the engagement"
+        )
     selected = dispatches.get("selected_dispatch")
     if selected:
         lines.extend(["", "## Selected Dispatch"])
@@ -156,7 +324,13 @@ def _render_markdown(brief: dict) -> str:
                 )
     lines.extend(["", "## Command Runs"])
     for row in brief.get("command_runs") or []:
-        lines.append(f"- #{row.get('id')} {row.get('created_at')} {row.get('tool_bin') or row.get('tool_name')} {row.get('agent_name')} :: {_trim(row.get('intent') or row.get('command') or '', 120)}")
+        output_truth = _command_output_truth(row)
+        lines.append(
+            f"- #{row.get('id')} {row.get('created_at')} "
+            f"{row.get('tool_bin') or row.get('tool_name')} {row.get('agent_name')} "
+            f":: {_trim(row.get('intent') or row.get('command') or '', 120)}"
+            f"{output_truth}"
+        )
     if not brief.get("command_runs"):
         lines.append("- none")
     lines.extend(["", "## Artifacts"])
@@ -203,6 +377,40 @@ def _render_markdown(brief: dict) -> str:
             entity = f" [{row.get('entity_kind')} {row.get('entity_id')}]"
         lines.append(f"- {row.get('reason')}{entity}: `{row.get('command')}`")
     return "\n".join(lines)
+
+
+def _command_output_truth(row: dict) -> str:
+    retention = str(row.get("output_retention_status") or "").strip().lower()
+    cleanup = str(row.get("output_cleanup_status") or "").strip().lower()
+    integrity = str(row.get("output_integrity_status") or "").strip().lower()
+    if not (
+        retention in _DEGRADED_OUTPUT_RETENTION
+        or cleanup in {"deferred", "pending", "warning"}
+        or integrity in {"pending", "warning"}
+    ):
+        return ""
+    recovery_observed_at = str(
+        row.get("output_recovery_observed_at") or ""
+    ).strip()
+    observed = (
+        f" output_recovery_observed_at={recovery_observed_at}"
+        if recovery_observed_at
+        else ""
+    )
+    return (
+        f" [output={retention or 'unknown'} cleanup={cleanup or 'unknown'} "
+        f"integrity={integrity or 'unknown'}{observed}]"
+    )
+
+
+def _render_dispatch_more(lines: list, shown: int, total, label: str) -> None:
+    """Emit a '… showing N of M' hint when the backend capped a dispatch worklist
+    (stale / gaps / terminal) but reported a larger true total via its ``*_count``
+    field (I-10). A ``None`` total (older backend) or an un-truncated list emits
+    nothing. The reconcile-stale action for the full set is already surfaced under
+    ## Next Actions, so this only signals depth."""
+    if isinstance(total, int) and total > shown:
+        lines.append(f"  - … showing {shown} of {total} {label}")
 
 
 _SURFACE_ROLLUP_LIMIT = 12
@@ -261,18 +469,18 @@ _ATTEMPTS_RENDER_LIMIT = 8
 
 def _render_attempts(lines: list, attempts: dict) -> None:
     """Render the ## Attempts do-today ledger (P1-C). No-op when the brief
-    carries no attempts block (older backend) or all three sources are empty —
-    a fresh engagement should not accrue a noise section.
+    carries no attempts block (older backend) or both sources are empty — a
+    fresh engagement should not accrue a noise section.
 
-    Surfaces three previously resume-invisible signals so a re-dispatch reads
-    what was already tried-and-walled-off on a surface: recorded blocked
-    techniques, non-covering probe runs, and roe_blocked findings."""
+    Surfaces two previously resume-invisible signals so a re-dispatch reads what
+    was already tried-and-walled-off on a surface: recorded blocked techniques
+    and roe_blocked findings. Per-input probe coverage moved to its own
+    ## Per-Input Coverage section (see _render_per_input_coverage)."""
     if not attempts:
         return
     blocked = attempts.get("blocked_techniques") or []
-    probes = attempts.get("noncovering_probe_runs") or []
     roe = attempts.get("roe_blocked_findings") or []
-    if not (blocked or probes or roe):
+    if not (blocked or roe):
         return
     lines.extend(["", "## Attempts"])
 
@@ -294,20 +502,6 @@ def _render_attempts(lines: list, attempts: dict) -> None:
         lines.append(line)
     _render_attempts_more(lines, len(shown_blocked), blocked_count)
 
-    probes_count = attempts.get("noncovering_probe_runs_count", len(probes))
-    lines.append(f"- non-covering probe runs ({probes_count}):")
-    if not probes:
-        lines.append("  - none")
-    shown_probes = probes[:_ATTEMPTS_RENDER_LIMIT]
-    for row in shown_probes:
-        host_path = f"{row.get('target_host') or '-'}{row.get('target_path') or ''}"
-        lines.append(
-            f"  - #{row.get('id')} {row.get('attack_family') or '-'} "
-            f"[{row.get('result_status') or '-'}] {row.get('tool_name') or '-'} "
-            f"{_trim(host_path, 80)}"
-        )
-    _render_attempts_more(lines, len(shown_probes), probes_count)
-
     roe_count = attempts.get("roe_blocked_findings_count", len(roe))
     lines.append(f"- roe-blocked findings ({roe_count}):")
     if not roe:
@@ -325,6 +519,57 @@ def _render_attempts_more(lines: list, shown: int, total: int) -> None:
     the hint keeps the reconciliation unambiguous, mirroring the Findings section."""
     if shown < total:
         lines.append(f"  - … showing {shown} of {total}")
+
+
+_PER_INPUT_RENDER_LIMIT = 20
+
+
+def _render_per_input_coverage(lines: list, per_input: dict) -> None:
+    """Render the ## Per-Input Coverage grid (WS2). No-op when the brief carries
+    no grid (older backend) or no cells — a fresh engagement gets no section.
+
+    Each cell is one (host × path × attack_family × input_slot × auth_context)
+    tuple; cells are grouped under their host+path so the operator reads, per
+    surface, which input was tested for which class as which identity, the latest
+    verdict, and the wall code (e.g. a 403). Both covering (tested/signal) and
+    non-covering probes appear — the verdict word distinguishes them — so this is
+    a coverage view, not just a dead-ends ledger. It supersedes the old flat
+    non-covering probe list that used to live under ## Attempts."""
+    if not per_input:
+        return
+    cells = per_input.get("cells") or []
+    if not cells:
+        return
+    total = per_input.get("cells_count", len(cells))
+    lines.extend(["", "## Per-Input Coverage"])
+
+    shown = cells[:_PER_INPUT_RENDER_LIMIT]
+    # Group by host+path, preserving the backend's recency order.
+    groups: dict[str, list] = {}
+    for cell in shown:
+        host_path = f"{cell.get('target_host') or '-'}{cell.get('target_path') or ''}"
+        groups.setdefault(_trim(host_path, 80), []).append(cell)
+
+    for host_path, group in groups.items():
+        lines.append(f"- {host_path}:")
+        for cell in group:
+            family = cell.get("attack_family") or "-"
+            slot = _trim(cell.get("input_slot") or "-", 48)
+            auth = cell.get("auth_context") or "-"
+            status = cell.get("latest_status") or "-"
+            wall = cell.get("observed_http_status")
+            verdict = f"{status}({wall})" if wall is not None else status
+            if cell.get("covering") and status not in _COVERING_STATUSES:
+                verdict = f"covered; latest={verdict}"
+            count = cell.get("count") or 1
+            line = f"  - {family} {slot} [{auth}] {verdict} x{count}"
+            lens = _trim(cell.get("lens") or "", 40)
+            if lens:
+                line += f" — {lens}"
+            lines.append(line)
+
+    if len(shown) < total:
+        lines.append(f"- … showing {len(shown)} of {total} input-cells")
 
 
 _SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
@@ -351,11 +596,19 @@ def _select_findings(rows: list) -> list:
 
 
 def _finding_line(row: dict) -> str:
-    return (
+    line = (
         f"{row.get('slug')} {row.get('severity')} "
         f"{row.get('workflow_status')}/{row.get('verification_state')} "
         f"{_trim(row.get('title') or '', 100)}"
     )
+    # A blocked-for-provisioning finding (verification_disposition='blocked')
+    # shows only workflow_status/verification_state above — usually active/verified
+    # — so nothing here says it is blocked or why. Append the reason so a resume
+    # reads it without opening the finding. No-op for non-blocked findings.
+    blocked = blocked_reason_summary(row)
+    if blocked:
+        line += f" — {_trim(blocked, 160)}"
+    return line
 
 
 def _trim(value: str, limit: int) -> str:

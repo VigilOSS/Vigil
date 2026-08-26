@@ -14,6 +14,17 @@ category: Engagement Setup
 > capability-neutral judgment (why these constraints exist and how to reason about edge
 > cases) lives in `agent/shared-constraints.md` and `agent/rules/hunting.md`; this file
 > carries only the per-program values.
+>
+> **Applicability:** every ROE constraint below (scope headers, rate caps, no-fire
+> endpoints, deconfliction markers, exfiltration limits) governs LIVE target-facing
+> testing — the web/network operator (`agent/operator-core.md`) and any Kali-runtime
+> probing. The static CODE operator (`agent/operator-core-code.md`), doing pure
+> whitebox source review with no traffic to the target, is NOT bound by the header/
+> rate/no-fire/deconfliction/exfil rules below while reading source. BUT every one of
+> them RE-APPLIES the instant the code track runs any live probe — a Phase-4 fuzz
+> campaign (`agent/phases/code-phase-4-fuzz.md`) against a running target, or web
+> testing running alongside the code review (`operator-core-code.md` "Integration
+> with Web Engagement").
 
 ---
 
@@ -24,7 +35,7 @@ category: Engagement Setup
 ```
 # List every in-scope apex domain, wildcard, IP range, or asset class.
 # Mirror what is registered in scope.json — this section is human-readable context;
-# scope.json is the machine-enforced gate.
+# scope.json is the canonical declaration of what this engagement is authorized to touch.
 
 *.example.com
 api.example.com
@@ -41,7 +52,11 @@ Scope notes (cloud regions, mobile apps, API versions, etc.):
 ```
 # List every explicit OOS carve-out. These are registered with:
 #   vigil engagement add-oos <key> <host-or-path>
-# and enforced automatically by filter-scope, dispatch scope_host gate, and proxy.
+# HOST carve-outs shape the surfaces that read scope.json: the recon/ingest host
+# filters, work-buffer admission, and proxy capture ownership. PATH carve-outs
+# belong in the human-readable Off-Limits Paths section below. Neither host nor
+# path metadata is a network-request or specialist-dispatch admission control;
+# the canonical engagement-boundary rule is agent/shared-constraints.md §1.
 
 appointments.example.com       # third-party scheduling SaaS
 *.cdn-vendor.net               # CDN infrastructure — not in scope
@@ -123,6 +138,12 @@ the program may revoke scope on violation.
 [FILL: additional no-fire paths]
 ```
 
+If the engagement schema mirrors this list into `scope.json.off_limits_paths`
+(a JSON array of `/path`, globbed `/path/*`, or absolute URL patterns), treat
+that field as descriptive ROE metadata. Kali execution, browser navigation,
+Katana defaults, and the shared proxy do not translate it into outbound-request
+refusal.
+
 If a test path you want to probe is adjacent to one of the above (e.g., testing
 `/api/send-notification` vs. `/api/send-email`), raise a `scope_decision` before proceeding
 so the operator can confirm the boundary.
@@ -203,13 +224,13 @@ Known non-submittable classes for this program:
 
 Finding lifecycle for parked findings (there is no `parked` status — use the real
 holding-area mechanism):
-1. Record normally via `vigil assess record-finding`. For informational / not-applicable-by-policy
+1. Record normally via `vigil assess finding record`. For informational / not-applicable-by-policy
    classes, set `evidence_type=informational`; for a strong-but-unproven finding or chain primitive,
    set `evidence_type=theoretical` and `details.chain_required=true` (with `details.chain_rationale`).
 2. Move it into the holding area so it stays OUT of the report until proven, rather than leaving it
-   report-ready: `vigil assess verify-finding <slug> --disposition pending_runtime_proof --reason "parked: <why not yet submittable>"`.
+   report-ready: `vigil assess finding verify <slug> --disposition pending_runtime_proof --reason "parked: <why not yet submittable>"`.
    The park reason lives in that verification reason / `details.chain_rationale`, not a non-existent `parked_reason`.
-3. Review the holding area with `vigil assess list-findings --holding` and re-evaluate after each
+3. Review the holding area with `vigil assess finding list --holding` and re-evaluate after each
    engagement phase — a chain may promote it to submittable.
 
 ---
@@ -220,7 +241,6 @@ holding-area mechanism):
 
 - **Do not bypass the rate cap** (§3 above). The program monitors request volume by IP and
   researcher handle.
-- **Do not probe OOS hosts** even if they share infrastructure with in-scope hosts.
 - **Do not use destructive operations** (`DELETE`, `PATCH` on production data) without
   explicit written approval from the program.
 - **Deconfliction header is mandatory** on all in-scope HTTP traffic (§2 above). Missing

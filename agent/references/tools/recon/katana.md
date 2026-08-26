@@ -1,5 +1,5 @@
 ---
-description: Katana live crawling doctrine: audited wrapper flags, JS-aware defaults, bounded headless escalation, scope/rate controls, and ingestion handoff
+description: Katana live crawling doctrine: audited wrapper flags, JS-aware defaults, bounded headless escalation, traversal/rate controls, and ingestion handoff
 skill: surface-collection
 ---
 
@@ -22,12 +22,12 @@ The typed wrapper currently exposes:
 | `-u <url>` | crawl one URL |
 | `-list <file>` | crawl newline-separated seed URLs |
 | `-d <n>` | maximum crawl depth — **default 5** (deep by default) |
-| `-fs <scope>` | field-scope — **default `fqdn`** (crawl only the exact seeded hosts); pass `rdn` only for wildcard-scoped roots |
+| `-fs <scope>` | optional Katana field-scope (`fqdn`, `rdn`, or another installed-version value); omitted unless the operator supplies it |
 | `-rl <n>` | request rate (req/s) — **default 10, hard-capped at 20** unless `--allow-fast-crawl`; clamped DOWN to the program ceiling |
 | `--allow-fast-crawl` | permit `-rl` above the 20 req/s safety cap |
 | `-c <n>` | concurrency (default 5) |
 | `-kf <set>` | known-files expansion (e.g. `all` for robots/sitemap/well-known) |
-| `-cos <regex>` | crawl-out-of-scope path carve-out (scope.json cannot express path-level OOS) |
+| `-cos <regex>` | explicit crawl-exclusion regex supplied for this run |
 | `-H <header>` | extra request header (repeatable); attribution headers auto-inject on top |
 | `--keep-bodies` | keep body+raw in `-jsonl` (default omits them via `-or -ob` to bound disk) |
 | `--include-static` | crawl static/binary assets too (default excludes them via `-ef`) |
@@ -38,9 +38,10 @@ The typed wrapper currently exposes:
 | `--extra-args "<flags>"` | append version-specific Katana flags after typed flags |
 
 **The doctrine is now the DEFAULT.** A bare `vigil assess kali katana -u <host>` already enables
-JavaScript endpoint crawling and jsluice extraction, then applies `-d 5`, `-fs fqdn`, `-or -ob`,
-`-ef <static set>`, `-rl 10`, and `-c 5`. Override any of these with the typed flag above — you no
-longer hand-assemble them in `--extra-args`. The result's `resolved_argv` shows the exact command
+JavaScript endpoint crawling and jsluice extraction, then applies `-d 5`, `-or -ob`, `-ef <static
+set>`, `-rl 10`, and `-c 5`. The wrapper leaves field-scope and crawl exclusions unset unless the
+operator passes `-fs` or `-cos`; override the remaining defaults with the typed flags above rather
+than hand-assembling them in `--extra-args`. The result's `resolved_argv` shows the exact command
 that ran after attribution-header / IP-pin injection.
 
 Check the live runtime before using long-tail flags:
@@ -110,35 +111,28 @@ Keep crawls scoped and bounded:
   expansion) — no `--extra-args` needed. `vigil assess kali tool-help katana`
   confirms the installed version's `-kf` values.
 
-### Field-scope: `-fs fqdn` is the scope-safe default for mixed-scope seed lists
+### Choose field-scope explicitly for multi-host traversal
 
 Katana is an **active** crawler — every link it follows is a live request to the
-target. Its default field-scope is `-fs rdn` (root-domain): from a seed of
-`blis.com` it will follow links to **any** `*.blis.com` subdomain it discovers.
-That is exactly wrong when the program grants only *specific* subdomains of a
-root (the common Bugcrowd/H1 shape: `media.acme.example` and
-`media.acme.example` are in scope, but `*.media.acme.example` is not). With the
-default `rdn`, Katana will actively probe out-of-scope sibling subdomains it
-finds in links — a scope violation, not just noise.
+target. When a run needs exact-host traversal, pass `-fs fqdn`; when a wildcard
+root intentionally needs root-domain traversal, pass `-fs rdn`. The wrapper
+does not infer either value from `scope.json`, because an argv seed list and an
+engagement inventory answer different questions.
 
-Rule for a multi-host seed list that mixes wildcard-scoped roots and
-specific-host entries: pass **`-fs fqdn`** so Katana only crawls the exact hosts
-you seeded. Wildcard-subdomain breadth (`*.acme.example`) is then recovered
-separately via a scoped subdomain-enum pass and passive `gau --subs` collection —
-**not** by letting an active crawler wander the root domain. Use `-fs rdn` only
-when every seed root is itself a wildcard-scoped in-scope entry.
+For a multi-host seed list that mixes wildcard roots and specific-host entries,
+`-fs fqdn` is normally the precise choice: wildcard-subdomain breadth is
+recovered separately through the recon job and passive `gau --subs` collection.
+Use `-fs rdn` when the run deliberately calls for following sibling subdomains.
 
-`-fs` and `-cos` are now **typed flags** — `-fs` defaults to `fqdn` (the scope-safe
-choice), and `-cos <regex>` is passed directly (e.g. `-cos self-service-`). No
+`-fs` and `-cos` are typed flags passed directly to Katana. No
 `--extra-args` assembly is needed for either.
 
-### Exclude out-of-scope path patterns with `-cos`
+### Explicit crawl exclusions with `-cos`
 
-When the program carves out specific path patterns (e.g. "any endpoint ending in
-`/self-service-*` is out of scope"), exclude them at the crawler with
-`-cos <regex>` (`-crawl-out-scope`) so Katana never issues the request — e.g.
-`-cos self-service-`. scope.json matches at host granularity and cannot express a
-path carve-out, so `-cos` is the enforcement point for path-level OOS rules.
+Use `-cos <regex>` (`-crawl-out-scope`) only when the operator deliberately wants
+to prune a crawl branch for that run, for example `-cos self-service-`. The
+wrapper passes this explicit value through; it does not derive exclusions from
+`scope.json`, `out_of_scope`, or `off_limits_paths`.
 
 ### Mandatory program-attribution headers (Bugcrowd `X-Bug-Bounty`, etc.)
 
@@ -236,32 +230,31 @@ Do not apologize for an incomplete crawl. Make a deterministic decision:
   out-of-scope navigation, or headless runner missing.
 
 When escalating, name the next action: deeper Katana, headless Katana,
-browser-semantic analysis, source-analysis/LinkFinder, or a targeted fuzzer pass.
+browser-semantic analysis, the supported JS-source extraction pipeline, or a targeted fuzzer pass.
 
 ## Ingestion
 
-Plain Katana output feeds `ingest-endpoints`:
+Plain Katana output feeds `ingest endpoints`:
 
 ```bash
 cat /engagements/$ENGAGEMENT_KEY/scans/katana_target.txt |
-  vigil assess ingest-endpoints "$ENGAGEMENT_DIR/cases.db" katana
+  vigil assess ingest endpoints katana
 ```
 
 If the crawl produced JSONL with richer metadata and a triage step promoted
-records into candidate JSONL, use `ingest-candidates` so priority and rationale
+records into candidate JSONL, use `ingest candidates` so priority and rationale
 survive:
 
 ```bash
-vigil assess ingest-candidates "$ENGAGEMENT_DIR/cases.db" \
+vigil assess ingest candidates \
   surface-collector-curated \
   /engagements/$ENGAGEMENT_KEY/scans/surface-collector/candidate_records.jsonl
 ```
 
 ## Adjacent Tools
 
-- `LinkFinder` complements Katana by extracting routes from saved JavaScript
-  bundles. Prefer `vigil assess gau-js-endpoints` for corpus-scale JS body
-  extraction; use direct LinkFinder only for a narrow source-analysis dispatch.
+- `vigil assess gau js-endpoints` complements Katana by extracting routes from
+  saved JavaScript bundles with the supported corpus-scale pipeline.
 - `curl_chrome116`, when present, is a browser-like HTTP baseline for edge/TLS/UA
   ambiguity. It does not execute JavaScript or prove browser-enforced behavior.
 - `aem-hacker` is conditional AEM tooling. Use it only after fingerprints point

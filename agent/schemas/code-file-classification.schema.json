@@ -5,6 +5,7 @@
   "additionalProperties": false,
   "properties": {
     "file_id": {
+      "exclusiveMinimum": 0,
       "title": "File Id",
       "type": "integer",
       "description": "Backend ID of the code_files record to classify."
@@ -40,13 +41,14 @@
           "ENV-VARIABLE",
           "CALLBACK-DATA",
           "PROTOCOL-FIELD",
-          "SERIALIZED-DATA"
+          "SERIALIZED-DATA",
+          "EXEC-POLICY"
         ],
         "type": "string"
       },
       "title": "Slot Types",
       "type": "array",
-      "description": "Untrusted data types that flow into this file. Set at least one for critical/high files — omitting it on those tiers degrades taint-path scheduling. The 8 values above are the only accepted slot types; auth/crypto/error families are derived from role+language by the backend.",
+      "description": "Untrusted data types or execution-policy decisions that flow into this file. Set at least one for critical/high files — omitting it on those tiers degrades taint-path scheduling. The enum values above are the only accepted slot types; auth/crypto/error families are derived from role+language by the backend.",
       "default": []
     },
     "language": {
@@ -57,7 +59,6 @@
       "description": "Optional language correction when ingestion guessed wrong. Omit when the stored language is already correct."
     },
     "analysis_priority": {
-      "default": 50,
       "maximum": 100,
       "minimum": 0,
       "title": "Analysis Priority",
@@ -67,11 +68,136 @@
   },
   "required": [
     "file_id",
-    "classification"
+    "classification",
+    "analysis_priority"
   ],
   "title": "Code File Classification",
   "type": "object",
   "description": "Classification payload for bulk-classifying source code files by security relevance.",
+  "x-classification-priority-bands": {
+    "critical": [
+      80,
+      100
+    ],
+    "high": [
+      50,
+      79
+    ],
+    "medium": [
+      20,
+      49
+    ],
+    "low": [
+      5,
+      19
+    ],
+    "skip": [
+      0,
+      0
+    ]
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "classification": {
+            "const": "critical"
+          }
+        },
+        "required": [
+          "classification"
+        ]
+      },
+      "then": {
+        "properties": {
+          "analysis_priority": {
+            "minimum": 80,
+            "maximum": 100
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "classification": {
+            "const": "high"
+          }
+        },
+        "required": [
+          "classification"
+        ]
+      },
+      "then": {
+        "properties": {
+          "analysis_priority": {
+            "minimum": 50,
+            "maximum": 79
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "classification": {
+            "const": "medium"
+          }
+        },
+        "required": [
+          "classification"
+        ]
+      },
+      "then": {
+        "properties": {
+          "analysis_priority": {
+            "minimum": 20,
+            "maximum": 49
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "classification": {
+            "const": "low"
+          }
+        },
+        "required": [
+          "classification"
+        ]
+      },
+      "then": {
+        "properties": {
+          "analysis_priority": {
+            "minimum": 5,
+            "maximum": 19
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "classification": {
+            "const": "skip"
+          }
+        },
+        "required": [
+          "classification"
+        ]
+      },
+      "then": {
+        "properties": {
+          "analysis_priority": {
+            "minimum": 0,
+            "maximum": 0
+          }
+        }
+      }
+    }
+  ],
   "examples": [
     {
       "file_id": 42,

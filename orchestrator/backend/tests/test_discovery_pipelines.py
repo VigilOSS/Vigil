@@ -174,6 +174,8 @@ def test_dns_discovery_pipeline_real_dnsx_flags(monkeypatch, tmp_path):
 
     tools = [c["tool"] for c in calls]
     assert "subfinder" in tools and "crt.sh" in tools and "dnsx" in tools
+    ct_call = next(c for c in calls if c["tool"] == "crt.sh")
+    assert "destinations" not in ct_call["kwargs"]
     assert not any(t == "puredns" for t in calls if isinstance(t, str))  # brute off
 
     # Merge+de-noise dropped the _dmarc noise.

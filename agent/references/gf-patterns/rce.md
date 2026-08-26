@@ -3,6 +3,7 @@ name: gf-patterns:rce
 description: Command-execution parameter patterns that signal remote code execution surfaces
 origin: 1ndianl33t/Gf-Patterns (+ local overlay)
 bucket: rce
+skill: command-injection
 weight: 50
 ---
 

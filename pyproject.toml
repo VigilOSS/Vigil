@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vigil"
-version = "0.1.0"
+version = "0.2.0"
 description = "Universal CLI for Vigil installs, engagements, runtime, and orchestrator operations"
 requires-python = ">=3.11"
 dependencies = []
@@ -26,6 +26,12 @@ where = ["src"]
 # walk, which is how CI invokes it: `mypy src/vigil_cli`.)
 exclude = "src/vigil_cli/bench/factory/families/.*/skeleton/"
 
+[tool.ruff.lint]
+# Keep the blocking lint gate stable across unpinned Ruff releases. These are
+# Ruff's historical default correctness rules; broader style policy is not an
+# implicit dependency upgrade.
+select = ["E4", "E7", "E9", "F"]
+
 [tool.pytest.ini_options]
 # Mirrors orchestrator/backend/pyproject.toml: integration tests need a live
 # runtime container (operator-controlled frp + interactsh) and are deselected
@@ -34,4 +40,3 @@ markers = [
     "integration: end-to-end tests that require a live runtime container; deselected by default and run via `pytest -m integration` after image rebuild.",
 ]
 addopts = "-m 'not integration'"
-

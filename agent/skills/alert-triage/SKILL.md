@@ -51,10 +51,10 @@ are off-limits — those are L2 verbs.
   classification. Always run this first on continuation; on a fresh
   engagement it returns an empty brief but still records the dispatch
   intent.
-- `vigil assess record-finding <agent-name> <finding-json>` — draft the
+- `vigil assess finding record <agent-name> <finding-json>` — draft the
   finding skeleton with severity, MITRE techniques, actor, target, time
   window, platform.
-- `vigil assess kill-finding <slug>` — only on a mechanical-FP match against
+- `vigil assess finding verify <slug> --disposition false_positive` — only on a mechanical-FP match against
   the tenant ref's known-benign register; never on operator hunch.
 - `vigil assess artifact search --kind alert_intake` — confirm the operator
   registered the raw alert intake artifact so the chain of custody survives audit.
@@ -129,38 +129,19 @@ The dispatch decision in Step 6 reads this tag. If the platform is `other`,
 the dispatch handoff is `blocked` with `next_steps` naming the platform the
 operator needs to add.
 
-**Severity classification** — recomputed from MITRE impact, NOT from the
-SIEM's authored `severity_hint`. The mapping is `triage.md` rule 2:
-
-| Severity | Required impact evidence |
-|----------|--------------------------|
-| `critical` | Confirmed credential theft + active session use, confirmed exfiltration, ransomware encryption in progress, production data store write, golden-ticket / forged SAML in use |
-| `high` | Confirmed account takeover, persistence established (mailbox rule, forwarding, OAuth grant, scheduled task), confirmed lateral movement, reconnaissance from inside the tenant |
-| `medium` | Suspicious auth anomaly with corroboration but no confirmed action; MFA bypass attempt that did not succeed; scoped-down credential misuse |
-| `low` | Single-signal anomaly that passes one IR-evidence gate but not two |
-| `info` | Tenant-ref-documented benign pattern; no adversarial signal |
-
-L1 rarely has reproduction evidence yet, so the recomputed severity is the
-**ceiling** the L2 investigator will refine. Record it with a rationale
-sentence in `details_json.severity_rationale`.
+**Severity classification** — recomputed from MITRE impact per
+`agent/rules/triage.md` rule 2's severity table, NOT from the SIEM's
+authored `severity_hint`. L1 rarely has reproduction evidence yet, so the
+recomputed severity is the **ceiling** the L2 investigator will refine.
+Record it with a rationale sentence in `details_json.severity_rationale`.
 
 **MITRE techniques** — best-effort list of MITRE ATT&CK technique IDs the
-alert pattern suggests. Use sub-technique IDs (`T1078.004` "Cloud
-Accounts") when the parent technique has them. The verifier confirms the
-list during the five-check; L1's job is to seed it well.
-
-Common starter mappings (not exhaustive — load the relevant tenant ref for
-platform-specific defaults):
-
-| Alert pattern | Likely techniques |
-|---------------|-------------------|
-| Anomalous sign-in from unfamiliar IP | `T1078.004` (Cloud Accounts), possibly `T1110.001` (Password Guessing) |
-| New OAuth grant on user account | `T1098.001` (Additional Cloud Credentials), `T1078.004` |
-| New mailbox forwarding rule | `T1114.003` (Email Forwarding Rule), `T1098.001` |
-| Suspicious AWS IAM access-key creation | `T1098.001`, `T1078.004` |
-| EDR detected suspicious PowerShell parent chain | `T1059.001` (PowerShell), `T1086` (deprecated, use sub-ID) |
-| Impossible travel | `T1078.004` |
-| DLP exfiltration alert (file shared externally) | `T1567.002` (Exfiltration to Cloud Storage) |
+alert pattern suggests, preferring the sub-technique over the parent when
+one exists (e.g. `T1078.004` "Cloud Accounts" for a cloud sign-in anomaly,
+`T1114.003` "Email Forwarding Rule" for a mailbox-rule alert). Load the
+tenant ref for platform-specific mapping conventions where documented. The
+verifier confirms the list during the five-check; L1's job is to seed it
+well.
 
 `triage.md` rule 11 forbids leaving `details_json.mitre_techniques` empty;
 "unclassified" is `T1078` (Valid Accounts) as a fallback, never the empty
@@ -200,10 +181,11 @@ register entry already carries the rigor of a previous five-check pass.
 If all five hold, auto-close as `false_positive`:
 
 ```bash
-vigil assess kill-finding <draft-slug> \
+vigil assess finding verify <draft-slug> --disposition false_positive \
   --kill-reason "Mechanical FP — matches tenant-ref pattern <pattern-id>" \
   --kill-check 0 \
-  --inline '{"evidence_refs": [<alert-intake-artifact-id>], "tenant_ref_path": "<path>", "tenant_ref_section": "Known benign patterns / <pattern-id>", "matched_fields": {"actor": "...", "action_verb": "...", "time_pattern": "...", "source_signal": "..."}}'
+  --reason "All five mechanical-FP checks matched the tenant reference" \
+  --details-inline '{"evidence_refs": [<alert-intake-artifact-id>], "tenant_ref_path": "<path>", "tenant_ref_section": "Known benign patterns / <pattern-id>", "matched_fields": {"actor": "...", "action_verb": "...", "time_pattern": "...", "source_signal": "..."}}'
 ```
 
 `kill_check=0` is reserved for L1 mechanical FPs (five-check uses 1-5).
@@ -218,7 +200,7 @@ register after the verifier confirms it.
 ### Step 5 — Draft the finding skeleton
 
 ```bash
-vigil assess record-finding alert-triage-specialist /tmp/finding.json
+vigil assess finding record alert-triage-specialist /tmp/finding.json
 ```
 
 With `/tmp/finding.json` shaped:
@@ -311,11 +293,12 @@ Run all four in order:
      "Triaged alert <alert_external_id> as <platform>/<severity>" \
      "Read alert body; normalized fields; classified platform=<x> severity=<y> mitre=<list>; mechanical-FP screen: <hit|miss>" \
      "Dispatched to <downstream-skill>" \
-     --actor-kind agent
+     --actor-kind agent \
+     --metadata-file /tmp/alert-triage-metadata.json
    ```
 
-   `metadata_json` on the activity row (set via the backend client wrapper
-   or the next iteration of `log`) carries:
+   The JSON object passed through `--metadata-file` and stored in
+   `metadata_json` carries:
 
    - `tier: L1`
    - `alert_external_id: <id>`
@@ -335,23 +318,11 @@ Run all four in order:
 4. **One-screen TSV summary** to stdout for the operator (see Output
    Format below).
 
-## Mechanical-FP Bar (decision card)
+## Mechanical-FP Bar — citation requirements
 
-The screen is intentionally narrow because false auto-close is how a real
-incident gets swept under "vendor sync ran again." All five conditions
-must hold:
-
-- [ ] Register entry tagged `mechanical: true`
-- [ ] Actor in alert matches explicit identity in register (NOT wildcard)
-- [ ] Action verb matches register's `action_verb` exactly
-- [ ] Time pattern matches documented schedule (NOT "approximately
-      business hours")
-- [ ] Alert severity hint has not escalated since register entry's
-      `last_updated_utc`
-
-Any unchecked box → escalate to L2 with the alert intake artifact registered and the
-finding draft recorded `unreviewed`. The operator can promote the alert to
-the register later, after the verifier confirms the benign pattern.
+The five-condition mechanical-FP screen is Step 4 above; this section adds
+the citation discipline the `kill_reason` field must carry once all five
+conditions hold.
 
 The register entry citation in the kill_reason field must include:
 
@@ -491,7 +462,7 @@ already at the top of the dispatch prompt; re-emitting it wastes context.
   expects to see in the L2 handoff that the L1 handoff hands forward.
 - `agent/skills/case-dispatching/SKILL.md` — coordination patterns this
   skill mirrors (signal → skill trigger, batch routing, completion).
-- `agent/skills/google-workspaces/SKILL.md` — the P0 downstream skill in
-  v1; the L2 specialist's playbook for `platform=gws` dispatches.
+- `agent/skills/google-workspaces/SKILL.md` — the L2 specialist's playbook
+  for `platform=gws` dispatches.
 - `agent/references/tenants/<customer>-<platform>.md` — the tenant ref
   whose "Known benign patterns" register the mechanical-FP screen reads.

@@ -16,6 +16,7 @@ from pathlib import Path
 # "resolve from the VIGIL_ORCHESTRATOR_WORKERS env" so callers that don't pass an
 # explicit value still pick up the knob.
 WORKERS_ENV = "VIGIL_ORCHESTRATOR_WORKERS"
+ORCHESTRATOR_START_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,8 +154,9 @@ def _warn_multiworker_caveats(workers: int) -> None:
       * The 15-minute backup scheduler (app/services/backup.py) arms a per-process
         timer in each worker's lifespan, so N workers run N concurrent backups
         unless VIGIL_BACKUP_DISABLED is set on all but one.
-    Cross-process WS fan-out + a single-leader backup are the integrator follow-up
-    that makes workers>1 fully safe (see E1).
+    Workers greater than one therefore remain an explicitly caveated opt-in
+    until cross-process WebSocket fan-out and single-leader backup scheduling
+    are implemented.
     """
     print(
         f"orchestrator\twarn\tworkers={workers}: live-UI WebSocket broadcast is per-worker "
@@ -480,16 +482,26 @@ def _check_port_available(host: str, port: int) -> None:
 
 def _wait_for_health(host: str, port: int, *, process: subprocess.Popen[bytes] | None = None) -> bool:
     url = f"http://{host}:{port}/healthz"
-    return _wait_for_http_200(url, process=process)
+    return _wait_for_http_200(
+        url, process=process, timeout=ORCHESTRATOR_START_TIMEOUT_SECONDS
+    )
 
 
 def _wait_for_readiness(host: str, port: int, *, process: subprocess.Popen[bytes] | None = None) -> bool:
     url = f"http://{host}:{port}/readyz"
-    return _wait_for_http_200(url, process=process)
+    return _wait_for_http_200(
+        url, process=process, timeout=ORCHESTRATOR_START_TIMEOUT_SECONDS
+    )
 
 
-def _wait_for_http_200(url: str, *, process: subprocess.Popen[bytes] | None = None) -> bool:
-    for _ in range(30):
+def _wait_for_http_200(
+    url: str,
+    *,
+    process: subprocess.Popen[bytes] | None = None,
+    timeout: float,
+) -> bool:
+    deadline = time.monotonic() + timeout
+    while True:
         if process is not None and process.poll() is not None:
             return False
         try:
@@ -497,5 +509,8 @@ def _wait_for_http_200(url: str, *, process: subprocess.Popen[bytes] | None = No
                 if response.status == 200:
                     return True
         except OSError:
-            time.sleep(0.2)
-    return False
+            pass
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.2, remaining))

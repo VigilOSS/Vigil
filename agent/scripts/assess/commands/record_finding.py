@@ -1,4 +1,4 @@
-"""vigil assess record-finding — most complex command.
+"""vigil assess finding record — most complex command.
 
 Slug allocate → normalize defaults → schema validate → POST → emit event.
 """
@@ -15,13 +15,14 @@ from assess.lib.contracts import common_mistake_hints, render_contract
 from assess.lib.findings import finding_lock_path, next_finding_id
 from assess.lib.locking import file_lock
 from assess.lib.schema_validation import collect_validation_errors, load_schema
+from assess.lib.evidence_ref import evidence_ref_exists, is_single_path_shaped
 
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
-        "record-finding",
+        "record",
         help="Record a structured finding",
-        epilog="See `vigil assess contract record-finding` for the canonical payload shape and examples.",
+        epilog="See `vigil assess contract finding record` for the canonical payload shape and examples.",
     )
     p.add_argument("agent_name", help="Agent name (e.g. vulnerability-analyst)")
     p.add_argument("json_file", help="Path to finding JSON file")
@@ -44,7 +45,19 @@ def register(subparsers) -> None:
              "auth_context + canonical_location) collides with a reported/active finding under a "
              "different slug is otherwise REFUSED, to avoid silently overwriting it. Pass --update "
              "<slug> only when you mean to change that exact finding; for a distinct sibling on the "
-             "same root cause, give it a distinct root_cause_key/defect_family and use link-finding.",
+             "same root cause, give it a distinct root_cause_key/defect_family and use finding link.",
+    )
+    p.add_argument(
+        "--allow-remint",
+        "--force",
+        dest="allow_remint",
+        action="store_true",
+        help="D4 override: mint this finding even though it shares an endpoint + technique with a "
+             "finding previously KILLED as false_positive. Without this flag such a re-mint is "
+             "REFUSED so a disproven finding cannot silently resurrect at a different "
+             "canonical_location. Use only for a genuinely NEW finding that merely coincides on "
+             "endpoint + technique; if the prior kill was wrong, run "
+             "`finding update <slug> --status draft --reason \"...\"` instead.",
     )
     p.set_defaults(func=run)
 
@@ -84,31 +97,30 @@ def _normalize_payload(payload: dict, *, agent_name: str, candidate_slug: str) -
     return normalized
 
 
-def _evidence_file_exists(ref: str, eng_dir: str, engagement_key: str) -> bool:
-    """True when evidence_ref resolves to a real file (so the backend will
-    auto-register it). Checks the ref as-is, relative to the engagement dir, and
-    the container-path form ``/engagements/<key>/...`` mapped back to the host."""
-    candidates = [Path(ref)]
-    if not Path(ref).is_absolute():
-        candidates.append(Path(eng_dir) / ref)
-    prefix = f"/engagements/{engagement_key}/"
-    if ref.startswith(prefix):
-        candidates.append(Path(eng_dir) / ref[len(prefix):])
-    return any(c.is_file() for c in candidates)
+# Evidence-ref shape and existence rules live in ``assess.lib.evidence_ref`` so this
+# command, ``finding update`` and ``record-probe`` cannot drift apart on what counts
+# as one engagement-local path. That module mirrors the backend indexer
+# (``artifact_index._path_ref``), which is the rule that actually decides whether an
+# artifact row gets minted.
+_evidence_file_exists = evidence_ref_exists
+_is_single_path_shaped = is_single_path_shaped
 
 
 def _normalize_evidence_ref(payload: dict, *, eng_dir: str, engagement_key: str, allow_unindexed: bool) -> None:
     """Normalize evidence_ref at record time WITHOUT blocking the record.
 
-    Doctrine (master plan §0 / L4-2): recording a real finding mid-hunt must
+    Recording a real finding mid-hunt must
     always work, even before proof is a registered artifact — check-report-
     readiness is the terminal backstop for missing evidence, not record time.
     So this warns and, for URLs, reroutes — it never exits.
 
-    - existing on-disk file -> accepted as-is (the backend auto-registers it).
+    - existing on-disk file OR directory -> accepted as-is (the backend
+      auto-registers it).
     - URL -> rerouted into ``details.references`` and evidence_ref cleared
       (a URL is never an auto-registerable artifact path).
-    - prose / non-existent path -> warned; the record still proceeds.
+    - composite ("scans/a.out; scans/b.out") / prose ("command-runs 1/2/3") ->
+      warned, and the backend mints NO artifact row for it; the record proceeds.
+    - path-shaped but non-existent -> warned; the record still proceeds.
     - empty -> warned; evidence may be attached on a later update.
 
     ``allow_unindexed`` silences the warnings for intentionally-unindexed
@@ -128,7 +140,7 @@ def _normalize_evidence_ref(payload: dict, *, eng_dir: str, engagement_key: str,
         payload["evidence_ref"] = ""
         if not allow_unindexed:
             print(
-                f"record-finding: evidence_ref '{ref}' is a URL, not a registered artifact path "
+                f"finding record: evidence_ref '{ref}' is a URL, not a registered artifact path "
                 "— rerouted into details.references and cleared evidence_ref. Attach a captured "
                 "artifact later so report-readiness can index replayable proof.",
                 file=sys.stderr,
@@ -140,7 +152,7 @@ def _normalize_evidence_ref(payload: dict, *, eng_dir: str, engagement_key: str,
 
     if not ref:
         print(
-            "record-finding: warning — no evidence_ref set; check-phase-readiness --phase report will flag "
+            "finding record: warning — no evidence_ref set; check-phase-readiness --phase report will flag "
             "this finding as missing evidence. Set evidence_ref to a captured artifact path or "
             "pass --allow-unindexed-evidence to silence.",
             file=sys.stderr,
@@ -150,19 +162,20 @@ def _normalize_evidence_ref(payload: dict, *, eng_dir: str, engagement_key: str,
     if _evidence_file_exists(ref, eng_dir, engagement_key):
         return  # existing artifact — the backend registers + links it on record.
 
-    looks_like_path = ("/" in ref or "." in ref) and "  " not in ref
-    if looks_like_path:
+    if _is_single_path_shaped(ref):
         print(
-            f"record-finding: warning — evidence_ref '{ref}' looks like a path but no file exists "
+            f"finding record: warning — evidence_ref '{ref}' looks like a path but nothing exists "
             "there; recording anyway. check-phase-readiness --phase report will flag it until a real artifact is "
             "attached. Pass --allow-unindexed-evidence to silence.",
             file=sys.stderr,
         )
     else:
         print(
-            f"record-finding: warning — evidence_ref '{ref}' is free-text prose, not an artifact "
-            "path or URL; recording anyway. Put external links in details.references and attach a "
-            "captured artifact for report-readiness. Pass --allow-unindexed-evidence to silence.",
+            f"finding record: warning — evidence_ref '{ref}' is not a single engagement-local path "
+            "(it reads as prose or joins several references), so NO artifact row is created for it; "
+            "recording anyway. Point evidence_ref at ONE captured path — a directory of captured "
+            "evidence is fine — put external links in details.references, and use `vigil assess "
+            "finding link` / details.evidence for the rest. Pass --allow-unindexed-evidence to silence.",
             file=sys.stderr,
         )
 
@@ -178,10 +191,12 @@ def _normalize_evidence_ref(payload: dict, *, eng_dir: str, engagement_key: str,
 # stay semantically sticky — both are outside the guard set, matching the backend.
 _CLOBBER_GUARDED_STATUSES = frozenset({"active", "reported"})
 
-# Marker phrase the backend embeds in its clobber-refusal 409 detail. Used to
-# translate a backstop refusal (e.g. a title-tier match the CLI tuple-check does
-# not model, or a race) into a clean operator message instead of a raw HTTP dump.
+# Marker phrases the backend embeds in its refusal 409 details. Used to translate
+# a backstop refusal (e.g. a title-tier clobber match the CLI tuple-check does not
+# model, a race, or the D4 killed-finding re-mint guard which has no CLI mirror)
+# into a clean operator message instead of a raw HTTP dump.
 _BACKEND_CLOBBER_MARKER = "Refusing to clobber"
+_BACKEND_REMINT_MARKER = "Refusing to re-mint"
 
 
 def _find_clobbered_finding(
@@ -223,13 +238,13 @@ def _refuse_clobber(existing: dict) -> None:
     existing_slug = str(existing.get("slug", ""))
     existing_status = str(existing.get("workflow_status", ""))
     print(
-        f"record-finding: REFUSED — this finding's dedup tuple (defect_family + root_cause_key "
+        f"finding record: REFUSED — this finding's dedup tuple (defect_family + root_cause_key "
         f"+ auth_context + canonical_location) collides with existing finding {existing_slug} "
         f"(workflow_status={existing_status}); recording it would silently overwrite that "
         f"{existing_status} finding.\n"
         f"  - Distinct sibling on the same root cause? Give it a DISTINCT root_cause_key/"
         f"defect_family, then attach it after recording with "
-        f"`vigil assess link-finding <this-slug> --root-cause {existing_slug}`.\n"
+        f"`vigil assess finding link <this-slug> --root-cause {existing_slug}`.\n"
         f"  - Intend to MODIFY {existing_slug}? Re-run with `--update {existing_slug}`.",
         file=sys.stderr,
     )
@@ -246,7 +261,7 @@ def _resolve_update_target(update_slug: str, json_slug: str, *, base_url: str, e
     """
     if json_slug and json_slug != update_slug:
         print(
-            f"record-finding: --update {update_slug} conflicts with slug '{json_slug}' in the "
+            f"finding record: --update {update_slug} conflicts with slug '{json_slug}' in the "
             f"JSON payload. Drop the JSON slug or set it to {update_slug}.",
             file=sys.stderr,
         )
@@ -261,7 +276,7 @@ def _resolve_update_target(update_slug: str, json_slug: str, *, base_url: str, e
                 raise
     if not isinstance(existing, dict) or not existing.get("slug"):
         print(
-            f"record-finding: --update {update_slug} names a finding that does not exist. Record "
+            f"finding record: --update {update_slug} names a finding that does not exist. Record "
             f"it without --update to create a new finding, or pass the correct existing slug.",
             file=sys.stderr,
         )
@@ -290,11 +305,13 @@ def _guard_finding_clobber(payload: dict, *, candidate_slug: str, base_url: str,
 
 
 def _print_backend_clobber_refusal(exc: AssessError) -> bool:
-    """If ``exc`` is the backend clobber-guard 409, print its actionable detail
-    and return True (caller should exit 1). Otherwise return False so the caller
-    re-raises and other errors keep their existing handling."""
+    """If ``exc`` is a backend clobber-guard or D4 re-mint-guard 409, print its
+    actionable detail and return True (caller should exit 1). Otherwise return
+    False so the caller re-raises and other errors keep their existing handling."""
     message = str(exc)
-    if "HTTP 409" not in message or _BACKEND_CLOBBER_MARKER not in message:
+    if "HTTP 409" not in message or (
+        _BACKEND_CLOBBER_MARKER not in message and _BACKEND_REMINT_MARKER not in message
+    ):
         return False
     _, _, body = message.partition("\n")
     detail = body
@@ -304,7 +321,7 @@ def _print_backend_clobber_refusal(exc: AssessError) -> bool:
         parsed = None
     if isinstance(parsed, dict) and isinstance(parsed.get("detail"), str):
         detail = parsed["detail"]
-    print(f"record-finding: REFUSED — {detail}", file=sys.stderr)
+    print(f"finding record: REFUSED — {detail}", file=sys.stderr)
     return True
 
 
@@ -313,16 +330,16 @@ def _report_validation_errors(payload: dict, errors: list[str]) -> None:
     for error in errors:
         print(f"  - {error}", file=sys.stderr)
 
-    hints = common_mistake_hints("record-finding", payload)
+    hints = common_mistake_hints("finding record", payload)
     if hints:
         print("Common legacy-field fixes:", file=sys.stderr)
         for hint in hints:
             print(f"  - {hint}", file=sys.stderr)
 
     print("", file=sys.stderr)
-    print("Run `vigil assess contract record-finding` for the canonical helper contract.", file=sys.stderr)
+    print("Run `vigil assess contract finding record` for the canonical helper contract.", file=sys.stderr)
     print("", file=sys.stderr)
-    print(render_contract("record-finding"), file=sys.stderr)
+    print(render_contract("finding record"), file=sys.stderr)
     sys.exit(1)
 
 
@@ -379,6 +396,12 @@ def run(args) -> None:
                 engagement_key=cfg.engagement_key,
             )
 
+        # D4 override: injected AFTER schema validation (it is a control flag, not a
+        # finding-record.schema.json field) so the backend's killed-remint guard is
+        # skipped for an intentional distinct re-mint.
+        if getattr(args, "allow_remint", False):
+            payload["allow_remint"] = True
+
         with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
             try:
                 response = client.post("findings", payload)
@@ -391,7 +414,7 @@ def run(args) -> None:
 
         finding = response.get("finding", {})
         if not finding.get("slug") or not finding.get("title"):
-            print("record-finding: orchestrator backend did not return a canonical finding record", file=sys.stderr)
+            print("finding record: orchestrator backend did not return a canonical finding record", file=sys.stderr)
             sys.exit(1)
 
         finding_slug = finding["slug"]

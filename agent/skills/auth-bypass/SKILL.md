@@ -295,7 +295,7 @@ curl https://target/api/logs?q=fail-open-test-marker-xyz \
 
 - Auth endpoint, parameter, and bypass technique
 - Before/after state showing unauthorized access (control request, bypassed request, and proof of privileged access)
-- Tokens or credentials captured — confirming a bypass route exists is not enough; you must show the **attacker outcome** (e.g., the `alg:none` JWT was accepted and the forged token accessed the admin user list at `/api/admin/users` returning 1,200 accounts, the account lockout bypass allowed successful credential stuffing of 3 accounts from the breach list, the IDOR allowed reading another user's full profile including SSN and billing address, the forced-browse to `/admin/dashboard` loaded the authenticated admin panel with user management controls)
+- Tokens or credentials captured — prove the attacker outcome (`agent/rules/hunting.md` §2), e.g., the `alg:none` JWT was accepted and the forged token accessed the admin user list at `/api/admin/users` returning 1,200 accounts, the account lockout bypass allowed successful credential stuffing of 3 accounts from the breach list, the IDOR allowed reading another user's full profile including SSN and billing address, the forced-browse to `/admin/dashboard` loaded the authenticated admin panel with user management controls
 - Severity: Critical (account takeover, admin access) to High (privilege escalation, sensitive data) to Medium (enumeration-only)
 
 ## Extended Resources

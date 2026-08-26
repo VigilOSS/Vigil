@@ -4,11 +4,10 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-import sys
 from typing import Any
-
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -20,7 +19,7 @@ for path in (BACKEND_ROOT, AGENT_SCRIPTS_DIR):
     if path_str not in sys.path:
         sys.path.insert(0, path_str)
 
-from app.api.assessment import (  # noqa: E402
+from app.api.assessment import (  # noqa: E402 - import path is bootstrapped above
     AccessRecordRequest,
     AttackChainRecordRequest,
     CredentialRecordRequest,
@@ -28,10 +27,18 @@ from app.api.assessment import (  # noqa: E402
     JobRecord,
     ProbeRunRecordRequest,
 )
-from app.api.code_analysis import AnalysisResultRecord, CodeFileClassification  # noqa: E402
-from app.services.state_manager._common import SubmissionStatus, VerificationDisposition  # noqa: E402
-from assess.lib.contracts import get_contract  # noqa: E402
-
+from app.api.code_analysis import (  # noqa: E402 - import path is bootstrapped above
+    AnalysisResultRecord,
+    CodeFileClassification,
+    FuzzCampaignReceiptRequest,
+    FuzzDecisionRequest,
+)
+from app.services.state_manager._common import (  # noqa: E402 - import path is bootstrapped above
+    SubmissionStatus,
+    VerificationDisposition,
+)
+from app.services.code_analysis import CLASSIFICATION_PRIORITY_BANDS  # noqa: E402
+from assess.lib.contracts import get_contract  # noqa: E402 - import path is bootstrapped above
 
 # Sourced from the canonical backend StrEnum so the agent-side overlay can never
 # drift from the values the backend actually persists + serializes on GET
@@ -52,9 +59,9 @@ class SchemaSpec:
 
 
 def _finding_record_examples() -> list[dict[str, Any]]:
-    contract = get_contract("record-finding")
+    contract = get_contract("finding record")
     if contract is None:
-        raise RuntimeError("record-finding contract is required to generate finding examples")
+        raise RuntimeError("finding record contract is required to generate finding examples")
 
     examples: list[dict[str, Any]] = []
     for example in contract.examples:
@@ -82,6 +89,19 @@ def _finding_record_examples() -> list[dict[str, Any]]:
                 "agent_name": "vulnerability-analyst",
             },
         )
+        provenance = normalized["provenance"]
+        if not isinstance(provenance, dict):
+            provenance = {"agent_name": "vulnerability-analyst"}
+            normalized["provenance"] = provenance
+        if str(normalized.get("canonical_location", "")).startswith("file:"):
+            provenance.setdefault(
+                "code_snapshot",
+                {
+                    "repo_id": 1,
+                    "repo_generation": 1,
+                    "source_manifest_digest": "0" * 64,
+                },
+            )
         normalized.setdefault("links", [])
         examples.append(normalized)
     return examples
@@ -155,18 +175,37 @@ _FINDING_DETAIL_PROPERTIES = {
     },
     "cvss_score": {
         "type": "number",
-        "exclusiveMinimum": 0,
+        # 0.0 is a real, reachable score: an all-N vector computes to it, and it
+        # is the ONLY score the `info` severity band (< 0.1) can hold. Excluding
+        # it made an informational finding unrepresentable and pushed authors to
+        # a 0.1 fudge that trips both the severity<->CVSS and vector<->score
+        # readiness blockers at once.
+        "minimum": 0,
         "maximum": 10,
-        "description": "CVSS 3.1 base score (0.1-10.0). Must match cvss_vector.",
+        "description": "CVSS 3.1 base score (0.0-10.0). Must match cvss_vector.",
     },
     "remediation": {
         "type": "string",
         "description": "Specific fix or missing control (e.g. 'Use parameterized queries', 'Add bounds check on schemelen before memcpy').",
     },
     "steps_to_reproduce": {
-        "type": "array",
+        "type": ["string", "array"],
         "items": {"type": "string"},
-        "description": "Ordered reproduction steps, one action per string. Start from initial access state; end at impact observation.",
+        "description": "Ordered reproduction steps, starting from initial access state and ending at impact observation. Write them FROM WHAT YOU ACTUALLY RAN, with concrete values (the real session cookie, the real object id, the real payload) — an unbound placeholder is a step nobody can follow, and reusing one placeholder across different objects corrupts the sequence. Redaction is the report-writer's job at submission time. Preferred form is ONE string holding the whole block with your own numbering — renderers emit it verbatim, and prose elsewhere in the submission that cites a step number only resolves against numbers you wrote. A list of strings is also accepted, one action per string.",
+    },
+    # The anti-inference device for ``steps_to_reproduce``: the audit rows that
+    # actually produced the reproduction. Without it, "write accurate steps" is an
+    # instruction with no verification — a reviewer cannot diff a claimed step
+    # against what was executed, and a plausible narrative is indistinguishable
+    # from a transcript.
+    "repro_runs": {
+        "type": "array",
+        "items": {"type": ["string", "integer"]},
+        "description": "Command-run ids (from `vigil assess command-run list`) that actually produced this reproduction, in step order. A step with no run id behind it was imagined, not executed. `export submission` fetches each row and renders its real argv under OPERATOR DETAILS, so the reproduction is transcribed rather than paraphrased. An id that does not resolve is reported as an advisory, never a refusal — an unreachable run row and an invented one look identical from there.",
+    },
+    "attack_scenario": {
+        "type": "string",
+        "description": "Realistic adversary, starting access, and action, ending at first compromise. Renders as the submission's Attack Scenario section; omit when the reproduction already carries the narrative.",
     },
     "poc_code": {
         "type": "string",
@@ -209,9 +248,130 @@ _FINDING_DETAIL_PROPERTIES = {
         "items": {"type": "string"},
         "description": "Concrete next steps needed to validate or complete the chain (e.g. 'Confirm reachable network caller for the URL parser').",
     },
+    "precondition_analysis": {
+        "type": ["string", "object", "array"],
+        "description": "Conditions required for exploitation and evidence establishing whether each condition is attacker-reachable.",
+    },
+    "severity_ceiling": {
+        "type": ["string", "object"],
+        "description": "Program- or precondition-derived upper bound on severity, including the reason for the cap when structured.",
+    },
+    "root_cause_candidates": {
+        "type": ["array", "object"],
+        "description": "Candidate shared causes considered during deduplication or grouping.",
+    },
+    "notes_provenance": {
+        "type": ["string", "array", "object"],
+        "description": "Attribution for lifecycle-repair or analysis notes without changing the finding's discovery source.",
+    },
     "roe_blocked": {
         "type": "boolean",
         "description": "Set true when the primitive is proved but the program's rules of engagement forbid the final proof step; grade at impact-if-true. Distinct from a provisioning/access wall (see block_reason) and from chain_required (which needs another bug).",
+    },
+    # Platform taxonomy for an external submission. `export submission` reads
+    # these (falling back to `cwe_id` for weakness) and its final gate REQUIRES
+    # the platform's own field — VRT for Bugcrowd, weakness for HackerOne — so
+    # `details` must accept them or a submission cannot be recorded complete.
+    "vrt_category": {
+        "type": "string",
+        "description": "Bugcrowd VRT category for this finding (e.g. 'broken_access_control.idor'). Overridden by the --vrt-category flag on export.",
+    },
+    "weakness": {
+        "type": "string",
+        "description": "HackerOne weakness for this finding (e.g. 'CWE-639 Authorization Bypass Through User-Controlled Key'). Overridden by the --weakness flag on export; falls back to cwe_id.",
+    },
+    # Code/fuzzing detail keys, recorded by code-fuzz-engineer on a crash finding
+    # so the verifier and report-writer can judge reachability without re-running
+    # the campaign.
+    "crash_input": {
+        "type": "string",
+        "description": "Path to the minimized crash input that reproduces the fault.",
+    },
+    "asan_report": {
+        "type": "string",
+        "description": "ASAN/UBSAN summary line identifying the fault class and location.",
+    },
+    "attacker_trace": {
+        "type": "string",
+        "description": "Full byte-to-crash trace: how attacker-controlled input reaches the faulting operation.",
+    },
+    "caller_feasibility": {
+        "type": "string",
+        "description": "Which real entry points reach this code path, and under what conditions.",
+    },
+    "fp_gates": {
+        "type": ["object", "array", "string"],
+        "description": "Results of every false-positive gate applied to this crash, so a reviewer sees which gates passed rather than a bare verdict.",
+    },
+    "campaign_id": {
+        "type": ["string", "integer"],
+        "description": "Identifier of the fuzzing campaign that produced this crash.",
+    },
+    "fuzzer_confirmation": {
+        "type": "boolean",
+        "description": "True when a fuzzer reproduced this finding, distinguishing it from a static-only inference.",
+    },
+    # Reachability of disclosed material in a code engagement: severity follows the
+    # access path, so both keys are populated together.
+    "attacker_access_path": {
+        "type": "string",
+        "enum": [
+            "public_web_exposure",
+            "runtime_file_read_lfi",
+            "exposed_build_artifact",
+            "repository_or_backup_disclosure",
+            "privileged_insider",
+            "unknown",
+        ],
+        "description": "How a real attacker obtains the disclosed bytes. Severity must follow this access path.",
+    },
+    "exposure_prerequisite": {
+        "type": "string",
+        "description": "The concrete condition that gives a real attacker the bytes (e.g. 'file is served from a public S3 path', 'confirmed LFI reads this path').",
+    },
+    "bounded_or_systemic": {
+        "type": "string",
+        "description": "Whether the observed impact is bounded to one object/tenant or systemic across them. Record the verdict when it is established — it cannot be reconstructed later.",
+    },
+    "credential_id": {
+        "type": ["string", "integer"],
+        "description": "Identifier of the captured credential row this finding's PoC depends on, so a chain prerequisite stays traceable.",
+    },
+    "related_intel_ids": {
+        "type": "array",
+        "description": "Identifiers of intel rows enriched from this finding's indicators.",
+    },
+    "disposition": {
+        "type": "string",
+        "description": "Incident-response disposition in the blue vocabulary, carried for the report-writer.",
+    },
+    # Incident-response detail keys. Blue role prompts (investigator,
+    # alert-triage-specialist) instruct these on every finding they record, and
+    # report readiness REQUIRES a non-empty ``mitre_techniques`` for a blue
+    # engagement — so ``details`` must accept them or `finding record` rejects the
+    # documented blue finding shape outright. Shapes stay permissive because the
+    # role prompts define the contents, not this schema.
+    "mitre_techniques": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "MITRE ATT&CK technique IDs (e.g. 'T1078') this finding maps to. Required on a blue-engagement finding before report readiness passes.",
+    },
+    "timeline": {
+        "type": "array",
+        "description": "Ordered incident timeline entries, each a UTC ISO-8601 event citing its `source_file` and `command_run_id` per agent/rules/ir-evidence.md. Appended across investigation rungs, never replaced.",
+    },
+    "iocs": {
+        "type": "array",
+        "description": "Indicators of compromise observed for this finding (IP, domain, email, file hash, OAuth client_id, URL). Each one gets an `intel_*` row via `vigil assess intel record`.",
+    },
+    "confidence": {
+        "type": "string",
+        "enum": ["low", "medium", "high"],
+        "description": "Stated confidence in the finding's disposition, paired with severity_rationale. Single-signal triage is `low` by definition.",
+    },
+    "severity_rationale": {
+        "type": "string",
+        "description": "One-line justification for the assigned severity, per the impact-based severity model in agent/rules/triage.md.",
     },
     "block_reason": {
         "type": "string",
@@ -219,7 +379,7 @@ _FINDING_DETAIL_PROPERTIES = {
     },
     "unblock_requirements": {
         "type": "object",
-        "description": "What must be provisioned to lift the block so the finding can be driven to proof. When the unblocker is another finding or chain, link it with `vigil assess link-finding <slug> --link-kind unblocked_by ...`.",
+        "description": "What must be provisioned to lift the block so the finding can be driven to proof. When the unblocker is another finding or chain, link it with `vigil assess finding link <slug> --link-kind unblocked_by ...`.",
         "properties": {
             "kind": {
                 "type": "string",
@@ -246,6 +406,71 @@ _FINDING_DETAIL_PROPERTIES = {
     "original_pattern": {
         "type": "string",
         "description": "Abstract pattern signature copied verbatim from the root finding during variant analysis.",
+    },
+    "run": {
+        "type": "string",
+        "description": "One-line reproduction command for the operational overlay (e.g. 'bash scans/va-003-poc.sh'). Surfaced by export submission as the **Run:** header line so a re-render/--overwrite rebuilds it from the finding instead of wiping the operator's hand-applied overlay.",
+    },
+    "pass_if": {
+        "type": "string",
+        "description": "Success criterion for the operational overlay (e.g. 'HTTP 200 returns another member's order record'). Surfaced by export submission as the **Pass if:** header line.",
+    },
+    "replies": {
+        "type": "array",
+        "description": "Append-only thread of OUTGOING replies to the program on this submitted finding (Bugcrowd comment / HackerOne activity reply / direct follow-up). Written by `vigil assess record-reply` via read-modify-write and re-rendered by `export reply`; never hand-edited (a shallow details merge would clobber the array).",
+        "items": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "seq": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "1-based, monotonic reply index. export reply/record-reply pick max(seq)+1 for a new reply.",
+                },
+                "platform": {
+                    "type": "string",
+                    "enum": ["bugcrowd", "hackerone", "direct"],
+                    "description": "Reply channel: bugcrowd (comment), hackerone (activity reply), or direct (reply email).",
+                },
+                "in_response_to": {
+                    "type": "string",
+                    "description": "Verbatim triager ask this reply answers.",
+                },
+                "reply_to_seq": {
+                    "type": ["integer", "null"],
+                    "description": "Optional threading pointer to a prior reply seq (default: the last reply).",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Authored reply prose — exactly what is sent. The ONLY pasteable block in the rendered reply.",
+                },
+                "new_evidence": {
+                    "type": "string",
+                    "description": "Optional NEW proof authored for THIS reply. Third-party PII partial-masked; self-owned/synthetic shown in full (submission-format.md PII rules).",
+                },
+                "new_evidence_ref": {
+                    "type": "string",
+                    "description": "Optional pointer to raw new-evidence (e.g. 'scans/<file>').",
+                },
+                "sent_status": {
+                    "type": "string",
+                    "enum": ["draft", "sent"],
+                    "description": "Operator-marked send state. 'sent' is set only via `record-reply --sent`, never inferred.",
+                },
+                "created_at": {
+                    "type": "string",
+                    "description": "ISO-8601 timestamp stamped when record-reply first created the entry.",
+                },
+                "sent_at": {
+                    "type": ["string", "null"],
+                    "description": "ISO-8601 timestamp stamped when `--sent` marked the reply sent; null while a draft.",
+                },
+                "author": {
+                    "type": "string",
+                    "description": "Agent/operator that authored the reply (e.g. 'report-writer').",
+                },
+            },
+        },
     },
 }
 
@@ -458,6 +683,20 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                     "target_port": {
                         "description": "TCP port probed. Omit when port is implied by the scheme (80/443).",
                     },
+                    "work_item_ids": {
+                        "type": "array",
+                        "items": {"type": "integer", "minimum": 1},
+                        "description": "OVERRIDE the default work-buffer drain. A covering probe carrying coverage_item_id drains its FK-linked work-items by default; pass explicit ids to narrow the drain to exactly these (marked 'done' atomically with the probe). Unknown ids are skipped, not an error.",
+                    },
+                    "resolve_surface_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "OVERRIDE the default surface advance. A covering probe carrying request_variant_id advances its FK-linked discovered surface(s) to 'partially-covered' by default; pass a surface id to advance exactly that one instead.",
+                    },
+                    "no_drain": {
+                        "type": "boolean",
+                        "description": "SUPPRESS the default FK-derived cascade (both the work-item drain and the surface advance). The probe is still recorded; the buffer and surfaces are left untouched.",
+                    },
                 }
             },
         ),
@@ -517,6 +756,27 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
             model=FindingRecordRequest,
             title="Assessment Finding Record",
             overlay={
+                "allOf": [
+                    {
+                        "if": {
+                            "required": ["canonical_location"],
+                            "properties": {
+                                "canonical_location": {"pattern": r"^\s*file:"},
+                            },
+                        },
+                        "then": {
+                            "required": ["provenance"],
+                            "properties": {
+                                "provenance": {
+                                    "required": ["code_snapshot"],
+                                    "properties": {
+                                        "code_snapshot": {"type": "object"},
+                                    },
+                                },
+                            },
+                        },
+                    },
+                ],
                 "required": [
                     "title",
                     "severity",
@@ -548,7 +808,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "enum": ["info", "low", "medium", "high", "critical"],
                     },
                     "workflow_status": {
-                        "description": "Lifecycle state settable at record time. New findings: 'active'. Post-exploitation confirmed: 'exploited'. WAF/control stopped testing: 'blocked'. Duplicate absorbed into another record: 'merged'. Delivered to client: 'reported'. NOTE: the blue-team/IR states (contained, eradicated, recovered) are intentionally NOT recordable here — they are applied only via `vigil assess update-finding`, so this record-finding enum is deliberately narrower than the full WorkflowStatus vocabulary.",
+                        "description": "Lifecycle state settable at record time. New findings: 'active'. Post-exploitation confirmed: 'exploited'. WAF/control stopped testing: 'blocked'. Duplicate absorbed into another record: 'merged'. Delivered to client: 'reported'. NOTE: the blue-team/IR states (contained, eradicated, recovered) are intentionally NOT recordable here — they are applied only via `vigil assess finding update`, so this finding record enum is deliberately narrower than the full WorkflowStatus vocabulary.",
                         "enum": ["draft", "active", "exploited", "blocked", "false_positive", "merged", "reported"],
                     },
                     "verification_state": {
@@ -556,7 +816,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "enum": ["unreviewed", "verified", "disputed"],
                     },
                     "verification_disposition": {
-                        "description": "Verifier outcome (stored field). 'none': not yet checked. 'pending_runtime_proof': needs live PoC. 'blocked': the attempt could not even start (missing provisioning); requires details.block_reason and is held OUT of the report. 'confirmed': exploitability proven. 'downgraded': real but severity reduced. 'false_positive': not exploitable. NOTE: `vigil assess verify-finding --disposition` additionally accepts 'disputed', which is a verify ACTION that sets verification_state='disputed' and leaves this field at 'none' — 'disputed' is never persisted as a disposition, so it is intentionally absent from this stored enum.",
+                        "description": "Verifier outcome (stored field). 'none': not yet checked. 'pending_runtime_proof': needs live PoC. 'blocked': the attempt could not even start (missing provisioning); requires details.block_reason and is held OUT of the report. 'confirmed': exploitability proven. 'downgraded': real but severity reduced. 'false_positive': not exploitable. NOTE: `vigil assess finding verify --disposition` additionally accepts 'disputed', which is a verify ACTION that sets verification_state='disputed' and leaves this field at 'none' — 'disputed' is never persisted as a disposition, so it is intentionally absent from this stored enum.",
                         "enum": list(_VERIFICATION_DISPOSITION_VALUES),
                     },
                     "defect_family": {
@@ -572,7 +832,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "description": "Authentication state when the finding was triggered. Use 'anonymous', a role name (e.g. 'user', 'admin'), or credential slug.",
                     },
                     "canonical_location": {
-                        "maxLength": 1024,
+                        "maxLength": 4096,
                         "description": "Primary affected location. URL for network findings (e.g. 'https://target.example/search?q'); 'file:path:line' for code findings.",
                     },
                     "summary": {
@@ -684,6 +944,27 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
             title="Code File Classification",
             description="Classification payload for bulk-classifying source code files by security relevance.",
             overlay={
+                "x-classification-priority-bands": {
+                    tier: [minimum, maximum]
+                    for tier, (minimum, maximum) in CLASSIFICATION_PRIORITY_BANDS.items()
+                },
+                "allOf": [
+                    {
+                        "if": {
+                            "properties": {"classification": {"const": tier}},
+                            "required": ["classification"],
+                        },
+                        "then": {
+                            "properties": {
+                                "analysis_priority": {
+                                    "minimum": minimum,
+                                    "maximum": maximum,
+                                }
+                            }
+                        },
+                    }
+                    for tier, (minimum, maximum) in CLASSIFICATION_PRIORITY_BANDS.items()
+                ],
                 "examples": [
                     {
                         "file_id": 42,
@@ -710,13 +991,120 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "description": "Optional language correction when ingestion guessed wrong. Omit when the stored language is already correct.",
                     },
                     "slot_types": {
-                        "description": "Untrusted data types that flow into this file. Set at least one for critical/high files — omitting it on those tiers degrades taint-path scheduling. The 8 values above are the only accepted slot types; auth/crypto/error families are derived from role+language by the backend.",
+                        "description": "Untrusted data types or execution-policy decisions that flow into this file. Set at least one for critical/high files — omitting it on those tiers degrades taint-path scheduling. The enum values above are the only accepted slot types; auth/crypto/error families are derived from role+language by the backend.",
                         "default": [],
                     },
                     "analysis_priority": {
                         "description": "Priority score combining classification tier, git churn, entry-point proximity, and past CVE history. critical: 80-100, high: 50-79, medium: 20-49, low: 5-19, skip: 0.",
                     },
                 },
+            },
+        ),
+        SchemaSpec(
+            filename="code-fuzz-decision.schema.json",
+            model=FuzzDecisionRequest,
+            title="Code Fuzz Applicability Decision",
+            description=(
+                "Agent-attested, evidence-hashed generation-bound decision to run or "
+                "skip Phase 4 fuzzing. The backend rejects not_required while a "
+                "current non-killed/non-merged native memory-safety finding exists. "
+                "This acute gate is not an independent broker execution attestation."
+            ),
+            overlay={
+                "additionalProperties": False,
+                "required": [
+                    "repo_id",
+                    "repo_generation",
+                    "source_manifest_digest",
+                    "decision",
+                    "target_ids",
+                    "evidence_ref",
+                    "rationale",
+                ],
+                "properties": {
+                    "target_ids": {"uniqueItems": True},
+                },
+                "allOf": [
+                    {
+                        "if": {
+                            "properties": {"decision": {"const": "required"}}
+                        },
+                        "then": {"properties": {"target_ids": {"minItems": 1}}},
+                    },
+                    {
+                        "if": {
+                            "properties": {
+                                "decision": {"const": "not_required"}
+                            }
+                        },
+                        "then": {"properties": {"target_ids": {"maxItems": 0}}},
+                    },
+                ],
+            },
+        ),
+        SchemaSpec(
+            filename="code-fuzz-campaign-receipt.schema.json",
+            model=FuzzCampaignReceiptRequest,
+            title="Code Fuzz Campaign Receipt",
+            description=(
+                "Agent-attested bounded generation- and dispatch-bound sanitizer "
+                "campaign outcome. Failure outcomes remain durable but do not close "
+                "required obligations. Independent run ownership, build/harness/seed "
+                "attestation, and per-crash lifecycle remain Wave 2D work."
+            ),
+            overlay={
+                "additionalProperties": False,
+                "required": [
+                    "dispatch_id",
+                    "repo_id",
+                    "repo_generation",
+                    "source_manifest_digest",
+                    "target_id",
+                    "covered_finding_slugs",
+                    "engine",
+                    "sanitizers",
+                    "run_budget_seconds",
+                    "executions",
+                    "outcome",
+                    "crash_count",
+                    "triage_summary",
+                    "evidence_ref",
+                    "rationale",
+                ],
+                "properties": {
+                    "covered_finding_slugs": {"uniqueItems": True},
+                    "sanitizers": {"uniqueItems": True},
+                },
+                "allOf": [
+                    {
+                        "if": {
+                            "properties": {
+                                "outcome": {"const": "completed_no_crash"}
+                            }
+                        },
+                        "then": {
+                            "properties": {
+                                "crash_count": {"const": 0},
+                                "executions": {"minimum": 1},
+                            }
+                        },
+                    },
+                    {
+                        "if": {
+                            "properties": {
+                                "outcome": {
+                                    "const": "completed_crashes_triaged"
+                                }
+                            }
+                        },
+                        "then": {
+                            "properties": {
+                                "crash_count": {"minimum": 1},
+                                "executions": {"minimum": 1},
+                            }
+                        },
+                    },
+                ],
             },
         ),
         SchemaSpec(
@@ -730,9 +1118,11 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                     {
                         "queue_item_id": 42,
                         "agent_name": "code-vuln-hunter",
+                        "lease_token": "lease-7f6c0d12",
                         "function_name": "parseurl",
                         "hypothesis": "Attacker-controlled URL scheme length passed to memcpy without bounds check",
                         "evidence": "In parseurl() at line 342, schemelen is derived from user-supplied URL without validation. memcpy(buf, scheme, schemelen) copies attacker-controlled bytes into fixed-size heap buffer.",
+                        "evidence_ref": "tools/analysis-state/code-evidence/parseurl-taint.txt",
                         "disposition": "finding",
                         "confidence": "high",
                         "finding_slug": "CH-001",
@@ -784,6 +1174,9 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                     },
                     "evidence": {
                         "description": "Evidence supporting the disposition. For findings: code snippet + taint path + guard failure. For clean: brief reasoning why no vulnerability exists.",
+                    },
+                    "evidence_ref": {
+                        "description": "Optional engagement-owned artifact path supporting the disposition. A finding or suspicious closeout requires non-empty inline evidence or this artifact reference on a current result for the active lease.",
                     },
                     "disposition": {
                         "enum": ["finding", "suspicious", "clean", "needs_context"],

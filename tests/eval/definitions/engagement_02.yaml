@@ -39,3 +39,29 @@ assertions:
   # Attacker-outcome discipline (strict)
   - kind: attacker_outcome_present
     mode: strict
+
+  # Deterministic contract for the hand-authored white-box golden. This pins
+  # record identity and evidence shape; it does not assert discovery recall.
+  - kind: white_box_finding_contract
+    value:
+      expected_findings:
+        - defect_family: buffer-overflow
+          canonical_location: file:lib/urlapi.c:342
+          cwe_id: CWE-122
+        - defect_family: integer-overflow
+          canonical_location: file:lib/net/packet.c:88
+          cwe_id: CWE-190
+      expected_code_snapshot:
+        repo_id: 1
+        repo_generation: 1
+        source_manifest_digest: 31870221d79b5e3695caac77e804c44dd08439f609b02d14111d31ebf0a10f29
+      required_proof_fields:
+        - entry_point
+        - sink
+        - taint_path
+        - guards_evaluated
+        - remediation
+      allowed_evidence_types:
+        - code-inferred
+        - network-confirmed
+    mode: strict

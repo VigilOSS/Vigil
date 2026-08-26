@@ -3,6 +3,7 @@ name: gf-patterns:servicenow
 description: ServiceNow guest Service Portal, GlideRecord, and Struts-style `.do` action path/param patterns (sysparm_* family)
 origin: local overlay (no upstream gf equivalent)
 bucket: servicenow
+skill: idor-testing, split-brain-idor
 weight: 30
 ---
 
@@ -107,8 +108,8 @@ zero-priority (the `sysparm_url` compound key never decomposed), and **2,826 of 
 action rows scored 0 because no bucket fired on the ServiceNow surface (plan Issue B / Issue 4).
 This bucket, together with the compound-key fix, recovers the ServiceNow subset of that tail.
 The forward-looking fragments (`/api/now`, `/sys_`, `/x_`, `/sp?`, `/$`) provide coverage for
-future engagements where ServiceNow is deployed even when current hit counts are low. See
-`docs/plans/classify-context-and-surface-buckets-2026-06.md` Part 3 §A.4.
+future engagements where ServiceNow is deployed even when current hit counts are
+low. See ADR 0008 and `DRIFT.md` for the accepted rationale.
 
 ## Sources
 

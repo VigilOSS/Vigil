@@ -72,13 +72,13 @@ def _val_after(cmd: list[str], flag: str) -> str:
 
 # ── katana defaults ────────────────────────────────────────────────────────
 
-def test_katana_bakes_in_deep_safe_defaults(monkeypatch):
+def test_katana_bakes_in_deep_rate_and_disk_defaults_without_scope_filter(monkeypatch):
     captured = _capture_kali_exec(monkeypatch, "assess.commands.kali_katana")
     cli = _import("assess.cli")
     cli.main(["kali", "katana", "-u", "https://x.example", *_AUDIT])
     cmd = captured["cmd"]
     assert _val_after(cmd, "-d") == "5"          # deep by default
-    assert _val_after(cmd, "-fs") == "fqdn"      # scope-safe by default
+    assert "-fs" not in cmd                      # never scope-filter outbound crawl
     assert _val_after(cmd, "-rl") == "10"        # politely rated by default
     assert _val_after(cmd, "-c") == "5"
     assert "-or" in cmd and "-ob" in cmd         # disk-bounded by default
@@ -254,24 +254,43 @@ def test_tool_help_rejects_unsafe_tool_name(monkeypatch):
 
 # ── arjun-sweep composition ────────────────────────────────────────────────
 
-def test_arjun_sweep_scans_each_method_and_ingests(monkeypatch, tmp_path):
-    db = tmp_path / "cases.db"
-    db.write_text("")  # just needs to exist for the is_file() gate
 
+def _patch_work_items_client(monkeypatch, sweep, rows):
+    """Patch arjun-sweep's ``AssessmentClient`` so ``run()`` reads the work buffer
+    from the backend (``client.get_all_pages("work-items")``) instead of a local
+    cases.db. ``select_targets`` is monkeypatched per-test, so ``rows`` is only
+    consumed by ``run()``'s empty-target-set messaging."""
+
+    class _FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def get_all_pages(self, endpoint):
+            assert endpoint == "work-items"
+            return rows
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(sweep, "AssessmentClient", _FakeClient)
+
+
+def test_arjun_sweep_scans_each_method_and_ingests(monkeypatch, tmp_path):
     sweep = _import("assess.commands.arjun_sweep")
     kali = _import("assess.lib.kali")
 
-    monkeypatch.setattr(sweep, "anchor_engagement_relative", lambda p, d: str(db))
     monkeypatch.setattr(
         sweep, "load_config",
-        lambda d: SimpleNamespace(engagement_dir=str(tmp_path), engagement_key="eng"),
+        lambda d: SimpleNamespace(
+            engagement_dir=str(tmp_path), engagement_key="eng", base_url="http://x"
+        ),
     )
     monkeypatch.setattr(
         sweep.arjun_select, "select_targets",
         lambda rows, **kw: [("GET", "https://x/a"), ("POST", "https://x/b")],
     )
-    # db_query is imported inside run(); patch at the source module.
-    monkeypatch.setattr(_import("assess.lib.db"), "db_query", lambda *a, **k: [])
+    # The work buffer now comes from the backend, not a local cases.db.
+    _patch_work_items_client(monkeypatch, sweep, [])
 
     exec_cmds: list[list[str]] = []
 
@@ -287,7 +306,7 @@ def test_arjun_sweep_scans_each_method_and_ingests(monkeypatch, tmp_path):
     monkeypatch.setattr(sweep, "kali_exec", fake_exec)
     monkeypatch.setattr(sweep.ingest_arjun, "run", lambda ns: ingested.append(ns.default_method))
 
-    _import("assess.cli").main(["arjun-sweep", str(db), *_AUDIT])
+    _import("assess.cli").main(["arjun-sweep", *_AUDIT])
 
     # one arjun call per method, each under its OWN -m, and an ingest per method.
     methods = {c[c.index("-m") + 1] for c in exec_cmds if "-m" in c}
@@ -300,20 +319,19 @@ def test_arjun_sweep_scans_each_method_and_ingests(monkeypatch, tmp_path):
 
 
 def test_arjun_sweep_caps_max_targets_and_flags_incomplete(monkeypatch, tmp_path, capsys):
-    db = tmp_path / "cases.db"
-    db.write_text("")
     sweep = _import("assess.commands.arjun_sweep")
-    monkeypatch.setattr(sweep, "anchor_engagement_relative", lambda p, d: str(db))
     monkeypatch.setattr(
         sweep, "load_config",
-        lambda d: SimpleNamespace(engagement_dir=str(tmp_path), engagement_key="eng"),
+        lambda d: SimpleNamespace(
+            engagement_dir=str(tmp_path), engagement_key="eng", base_url="http://x"
+        ),
     )
     # 5 GET targets; cap to 2 -> 3 deferred.
     monkeypatch.setattr(
         sweep.arjun_select, "select_targets",
         lambda rows, **kw: [("GET", f"https://x/{i}") for i in range(5)],
     )
-    monkeypatch.setattr(_import("assess.lib.db"), "db_query", lambda *a, **k: [])
+    _patch_work_items_client(monkeypatch, sweep, [])
 
     cmds: list[list[str]] = []
 
@@ -324,7 +342,12 @@ def test_arjun_sweep_caps_max_targets_and_flags_incomplete(monkeypatch, tmp_path
     monkeypatch.setattr(sweep, "kali_exec", lambda cmd, **k: (cmds.append(list(cmd)), _Timed())[1])
     monkeypatch.setattr(sweep.ingest_arjun, "run", lambda ns: None)
 
-    _import("assess.cli").main(["arjun-sweep", str(db), "--max-targets", "2", *_AUDIT])
+    # The single GET arm timed out, so EVERY arm of this fan-out produced no
+    # usable output and the aggregate exit-code contract fires with the arm's
+    # own status code. The full summary is still printed before the exit.
+    with pytest.raises(SystemExit) as excinfo:
+        _import("assess.cli").main(["arjun-sweep", "--max-targets", "2", *_AUDIT])
+    assert excinfo.value.code == 4  # KALI_EXIT_CODES["timed_out"]
     out = capsys.readouterr()
     # the cap deferred 3 of 5, and the timed-out run was flagged INCOMPLETE.
     assert "deferring 3" in out.err
@@ -335,34 +358,34 @@ def test_arjun_sweep_caps_max_targets_and_flags_incomplete(monkeypatch, tmp_path
 
 
 def test_arjun_sweep_zero_targets_does_not_scan(monkeypatch, tmp_path, capsys):
-    db = tmp_path / "cases.db"
-    db.write_text("")
     sweep = _import("assess.commands.arjun_sweep")
-    monkeypatch.setattr(sweep, "anchor_engagement_relative", lambda p, d: str(db))
     monkeypatch.setattr(
         sweep, "load_config",
-        lambda d: SimpleNamespace(engagement_dir=str(tmp_path), engagement_key="eng"),
+        lambda d: SimpleNamespace(
+            engagement_dir=str(tmp_path), engagement_key="eng", base_url="http://x"
+        ),
     )
     monkeypatch.setattr(sweep.arjun_select, "select_targets", lambda rows, **kw: [])
-    monkeypatch.setattr(_import("assess.lib.db"), "db_query", lambda *a, **k: [{"url": "x"}])
+    # A non-empty work buffer that yields 0 selected targets still triggers the
+    # "no live_status?" hint, but must NOT scan or ingest.
+    _patch_work_items_client(monkeypatch, sweep, [{"url": "x"}])
     called: list[int] = []
     monkeypatch.setattr(sweep, "kali_exec", lambda *a, **k: called.append(1))
     monkeypatch.setattr(sweep.ingest_arjun, "run", lambda ns: called.append(1))
-    _import("assess.cli").main(["arjun-sweep", str(db), *_AUDIT])
+    _import("assess.cli").main(["arjun-sweep", *_AUDIT])
     out = capsys.readouterr().out
     assert not called  # no scan, no ingest on an empty target set
     assert '"selected": 0' in out
 
 
 def test_arjun_sweep_maps_body_verbs_to_post(monkeypatch, tmp_path):
-    db = tmp_path / "cases.db"
-    db.write_text("")
     sweep = _import("assess.commands.arjun_sweep")
     kali = _import("assess.lib.kali")
-    monkeypatch.setattr(sweep, "anchor_engagement_relative", lambda p, d: str(db))
     monkeypatch.setattr(
         sweep, "load_config",
-        lambda d: SimpleNamespace(engagement_dir=str(tmp_path), engagement_key="eng"),
+        lambda d: SimpleNamespace(
+            engagement_dir=str(tmp_path), engagement_key="eng", base_url="http://x"
+        ),
     )
     # arjun only accepts GET/POST/XML/JSON: PUT/PATCH/DELETE -> POST, HEAD -> GET.
     monkeypatch.setattr(
@@ -372,7 +395,7 @@ def test_arjun_sweep_maps_body_verbs_to_post(monkeypatch, tmp_path):
             ("DELETE", "https://x/c"), ("HEAD", "https://x/d"),
         ],
     )
-    monkeypatch.setattr(_import("assess.lib.db"), "db_query", lambda *a, **k: [])
+    _patch_work_items_client(monkeypatch, sweep, [])
     cmds: list[list[str]] = []
 
     def fake_exec(cmd, **k):
@@ -385,7 +408,7 @@ def test_arjun_sweep_maps_body_verbs_to_post(monkeypatch, tmp_path):
 
     monkeypatch.setattr(sweep, "kali_exec", fake_exec)
     monkeypatch.setattr(sweep.ingest_arjun, "run", lambda ns: None)
-    _import("assess.cli").main(["arjun-sweep", str(db), *_AUDIT])
+    _import("assess.cli").main(["arjun-sweep", *_AUDIT])
     modes = {c[c.index("-m") + 1] for c in cmds if "-m" in c}
     assert modes == {"POST", "GET"}  # no raw PUT/PATCH/DELETE reaches arjun
 

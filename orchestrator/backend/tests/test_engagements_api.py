@@ -78,6 +78,35 @@ def test_list_engagements_discovers_filesystem_engagements(client, isolate_setti
     assert payload[0]["session_count"] == 1
 
 
+def test_both_engagement_exposes_independent_code_phase(client, isolate_settings):
+    engagement_dir = write_engagement(
+        isolate_settings["engagements_dir"],
+        key="2026-08-04-120000-both",
+    )
+    scope_path = engagement_dir / "scope.json"
+    scope = json.loads(scope_path.read_text(encoding="utf-8"))
+    scope.update(
+        {
+            "engagement_type": "both",
+            "current_phase": "hunt",
+            "code_phase": "verify-variant",
+        }
+    )
+    scope_path.write_text(json.dumps(scope), encoding="utf-8")
+
+    listed = client.get("/engagements")
+    fetched = client.get("/engagements/2026-08-04-120000-both")
+
+    assert listed.status_code == 200
+    assert fetched.status_code == 200
+    list_row = next(
+        row for row in listed.json() if row["key"] == "2026-08-04-120000-both"
+    )
+    assert list_row["current_phase"] == "hunt"
+    assert list_row["code_phase"] == "verify-variant"
+    assert fetched.json()["code_phase"] == "verify-variant"
+
+
 def test_list_engagements_surfaces_scope_hosts_for_proxy_router(client, isolate_settings):
     """The multi-engagement mitmproxy router fetches the active engagement set
     from this endpoint; scope_hosts must be present so the addon can route
@@ -1058,7 +1087,7 @@ def test_assessment_summary_singleflights_concurrent_cache_miss(client, isolate_
 
 
 def test_probe_run_endpoint_records_target_anchor(client, isolate_settings):
-    """Wave 5 / S6: probe-runs accept and persist target_host/path/port, and two
+    """Probe runs accept and persist target_host/path/port, and two
     probes against DISTINCT hosts no longer collide on probe_key."""
     write_engagement(isolate_settings["engagements_dir"])
     base = "/engagements/2026-03-30-120000-example/assessment"
@@ -2150,7 +2179,7 @@ def test_findings_patch_can_revive_false_positive_and_lower_severity(client, iso
             "defect_family": "integer-overflow",
             "root_cause_key": "parser-length-overflow",
             "auth_context": "anonymous",
-            "canonical_location": "file:src/parser.c:91",
+            "canonical_location": "https://example.com/src/parser.c?line=91",
             "summary": "Suppressed after verifier review.",
             "evidence_ref": "tools/analysis-state/verifier.json",
             "notes": "Killed during verification.",
@@ -2303,9 +2332,10 @@ def test_findings_patch_rejects_records_merged_after_validation(client, isolate_
             connection.execute(
                 """
                 UPDATE assessment_findings
-                SET status = 'merged',
-                    merged_into_finding_id = id,
-                    updated_at = '2099-01-01 00:00:00'
+                    SET status = 'merged',
+                        merged_into_finding_id = id,
+                        row_version = row_version + 1,
+                        updated_at = '2099-01-01 00:00:00'
                 WHERE slug = 'CH-012'
                 """
             )
@@ -2338,7 +2368,7 @@ def test_false_positive_findings_are_suppressed_but_semantically_sticky(client, 
             "defect_family": "integer-overflow",
             "root_cause_key": "header-length-overflow",
             "auth_context": "anonymous",
-            "canonical_location": "file:src/parser.c:128",
+            "canonical_location": "https://example.com/src/parser.c?line=128",
             "summary": "Header length appears to overflow before allocation.",
             "evidence_ref": "tools/analysis-state/findings.json",
             "notes": "Initial hunter report.",
@@ -2404,7 +2434,7 @@ def test_false_positive_findings_are_suppressed_but_semantically_sticky(client, 
             "defect_family": "integer-overflow",
             "root_cause_key": "header-length-overflow",
             "auth_context": "anonymous",
-            "canonical_location": "file:src/parser.c:128",
+            "canonical_location": "https://example.com/src/parser.c?line=128",
             "summary": "Rediscovery attempt from later analysis pass.",
             "evidence_ref": "tools/analysis-state/rediscovery.json",
             "notes": "Re-raised by later LLM pass.",
@@ -2446,7 +2476,7 @@ def test_false_positive_title_fallback_does_not_suppress_distinct_finding(client
             "defect_family": "integer-overflow",
             "root_cause_key": "overflow-a",
             "auth_context": "anonymous",
-            "canonical_location": "file:src/parser.c:128",
+            "canonical_location": "https://example.com/src/parser.c?line=128",
             "summary": "Suppressed integer overflow hypothesis.",
             "evidence_ref": "tools/analysis-state/a.json",
             "notes": "Verifier killed the original hypothesis.",
@@ -2474,7 +2504,7 @@ def test_false_positive_title_fallback_does_not_suppress_distinct_finding(client
             "defect_family": "buffer-overflow",
             "root_cause_key": "overflow-b",
             "auth_context": "anonymous",
-            "canonical_location": "file:src/parser.c:128",
+            "canonical_location": "https://example.com/src/parser.c?line=128",
             "summary": "Different defect family at the same location.",
             "evidence_ref": "tools/analysis-state/b.json",
             "notes": "Newly verified buffer overwrite path.",
@@ -2514,7 +2544,7 @@ def test_root_cause_free_false_positive_findings_stay_semantically_sticky(client
             "defect_family": "integer-overflow",
             "root_cause_key": "",
             "auth_context": "anonymous",
-            "canonical_location": "file:src/parser.c:150",
+            "canonical_location": "https://example.com/src/parser.c?line=150",
             "summary": "Suppressed parser hypothesis without a root cause key.",
             "evidence_ref": "tools/analysis-state/original.json",
             "notes": "Verifier killed the original hypothesis.",
@@ -2541,7 +2571,7 @@ def test_root_cause_free_false_positive_findings_stay_semantically_sticky(client
             "defect_family": "integer-overflow",
             "root_cause_key": "",
             "auth_context": "anonymous",
-            "canonical_location": "file:src/parser.c:150",
+            "canonical_location": "https://example.com/src/parser.c?line=150",
             "summary": "Rediscovered without a root cause key.",
             "evidence_ref": "tools/analysis-state/rediscovered.json",
             "notes": "Later analysis pass re-raised the same parser concern.",
@@ -2614,7 +2644,7 @@ def test_merge_into_false_positive_target_is_rejected(client, isolate_settings):
             "defect_family": "buffer-overflow",
             "root_cause_key": "live-parser-issue",
             "auth_context": "anonymous",
-            "canonical_location": "file:src/parser.c:211",
+            "canonical_location": "https://example.com/src/parser.c?line=211",
             "summary": "Live finding.",
             "evidence_ref": "tools/analysis-state/live.json",
             "notes": "Confirmed by hunter.",
@@ -2638,7 +2668,7 @@ def test_merge_into_false_positive_target_is_rejected(client, isolate_settings):
             "defect_family": "integer-overflow",
             "root_cause_key": "suppressed-parser-issue",
             "auth_context": "anonymous",
-            "canonical_location": "file:src/parser.c:333",
+            "canonical_location": "https://example.com/src/parser.c?line=333",
             "summary": "Suppressed by verifier.",
             "evidence_ref": "tools/analysis-state/suppressed.json",
             "notes": "Killed during verification.",
@@ -2683,7 +2713,7 @@ def test_merge_false_positive_source_preserves_live_target(client, isolate_setti
             "defect_family": "integer-overflow",
             "root_cause_key": "suppressed-parser-duplicate",
             "auth_context": "anonymous",
-            "canonical_location": "file:src/parser.c:211",
+            "canonical_location": "https://example.com/src/parser.c?line=211",
             "summary": "Duplicate was previously suppressed by verifier.",
             "evidence_ref": "tools/analysis-state/suppressed-duplicate.json",
             "notes": "Killed during verification.",
@@ -2712,7 +2742,7 @@ def test_merge_false_positive_source_preserves_live_target(client, isolate_setti
             "defect_family": "buffer-overflow",
             "root_cause_key": "live-parser-target",
             "auth_context": "anonymous",
-            "canonical_location": "file:src/parser.c:211",
+            "canonical_location": "https://example.com/src/parser.c?line=211",
             "summary": "Target finding is still live.",
             "evidence_ref": "tools/analysis-state/live-target.json",
             "notes": "Confirmed by hunter.",
@@ -2739,8 +2769,8 @@ def test_merge_false_positive_source_preserves_live_target(client, isolate_setti
     assert merge_payload["target"]["verification_state"] == "verified"
     assert merge_payload["target"]["verification_disposition"] == "confirmed"
     assert merge_payload["source"]["workflow_status"] == "merged"
-    assert merge_payload["source"]["verification_state"] == "unreviewed"
-    assert merge_payload["source"]["verification_disposition"] == "none"
+    assert merge_payload["source"]["verification_state"] == "verified"
+    assert merge_payload["source"]["verification_disposition"] == "false_positive"
 
     findings = client.get("/engagements/2026-03-30-120000-example/assessment/findings")
     assert findings.status_code == 200
@@ -2749,8 +2779,8 @@ def test_merge_false_positive_source_preserves_live_target(client, isolate_setti
     assert by_slug["CH-033"]["verification_state"] == "verified"
     assert by_slug["CH-033"]["verification_disposition"] == "confirmed"
     assert by_slug["CH-032"]["workflow_status"] == "merged"
-    assert by_slug["CH-032"]["verification_state"] == "unreviewed"
-    assert by_slug["CH-032"]["verification_disposition"] == "none"
+    assert by_slug["CH-032"]["verification_state"] == "verified"
+    assert by_slug["CH-032"]["verification_disposition"] == "false_positive"
 
 
 def test_findings_verify_downgrade_records_previous_severity_transition(client, isolate_settings):
@@ -2819,6 +2849,124 @@ def test_findings_verify_downgrade_records_previous_severity_transition(client, 
     assert json.loads(latest["metadata_json"])["previous_severity"] == "critical"
 
 
+def test_verify_downgrade_can_audit_an_already_lowered_severity(
+    client, isolate_settings
+):
+    write_engagement(isolate_settings["engagements_dir"])
+    base = "/engagements/2026-03-30-120000-example/assessment/findings"
+    created = client.post(
+        base,
+        json={
+            "slug": "CH-140",
+            "title": "Pre-lowered finding",
+            "severity": "critical",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "defect_family": "access-control",
+            "auth_context": "user",
+            "canonical_location": "https://example.com/api/prelowered",
+            "summary": "Needs a recorded downgrade verdict.",
+            "source_name": "vulnerability-analyst",
+        },
+    )
+    assert created.status_code == 201, created.text
+    lowered = client.patch(
+        f"{base}/CH-140",
+        json={"severity": "high", "reason_text": "Pre-lowered by analyst."},
+    )
+    assert lowered.status_code == 200, lowered.text
+
+    verified = client.post(
+        f"{base}/CH-140/verify",
+        json={
+            "disposition": "downgraded",
+            "new_severity": "high",
+            "reason_text": "Record the already-applied downgrade.",
+            "source_name": "code-vuln-verifier",
+        },
+    )
+
+    assert verified.status_code == 200, verified.text
+    payload = verified.json()
+    assert payload["finding"]["verification_disposition"] == "downgraded"
+    assert payload["finding"]["severity"] == "high"
+    assert json.loads(payload["transition"]["metadata_json"])["prelowered"] is True
+
+
+def test_verify_downgrade_rejects_equal_severity_without_prior_lowering(
+    client, isolate_settings
+):
+    write_engagement(isolate_settings["engagements_dir"])
+    base = "/engagements/2026-03-30-120000-example/assessment/findings"
+    created = client.post(
+        base,
+        json={
+            "slug": "CH-142",
+            "title": "Never lowered",
+            "severity": "high",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "defect_family": "access-control",
+            "auth_context": "user",
+            "canonical_location": "https://example.com/api/not-lowered",
+            "summary": "An equal severity is not a downgrade.",
+            "source_name": "vulnerability-analyst",
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    verified = client.post(
+        f"{base}/CH-142/verify",
+        json={
+            "disposition": "downgraded",
+            "new_severity": "high",
+            "reason_text": "This must not manufacture a downgrade.",
+            "source_name": "code-vuln-verifier",
+        },
+    )
+
+    assert verified.status_code == 400
+    assert "prior severity-lowering transition" in verified.json()["detail"]
+
+
+def test_finding_update_source_name_is_actor_not_discovery_attribution(
+    client, isolate_settings
+):
+    write_engagement(isolate_settings["engagements_dir"])
+    base = "/engagements/2026-03-30-120000-example/assessment/findings"
+    created = client.post(
+        base,
+        json={
+            "slug": "CH-141",
+            "title": "Attribution stays stable",
+            "severity": "low",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "defect_family": "metadata",
+            "auth_context": "anonymous",
+            "canonical_location": "https://example.com/source",
+            "summary": "Discovery attribution is immutable on patch.",
+            "source_name": "vulnerability-analyst",
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    updated = client.patch(
+        f"{base}/CH-141",
+        json={
+            "summary": "Repaired by a later operator.",
+            "source_name": "lifecycle-repair-agent",
+            "reason_text": "Repair narrative only.",
+        },
+    )
+
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["finding"]["source_name"] == "vulnerability-analyst"
+
+
 def test_findings_verify_disputed_keeps_finding_live(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
@@ -2834,7 +2982,7 @@ def test_findings_verify_disputed_keeps_finding_live(client, isolate_settings):
             "defect_family": "state-confusion",
             "root_cause_key": "parser-state-confusion",
             "auth_context": "anonymous",
-            "canonical_location": "file:src/parser.c:411",
+            "canonical_location": "https://example.com/src/parser.c?line=411",
             "summary": "Verifier could not conclusively settle exploitability.",
             "evidence_ref": "tools/analysis-state/parser-state.json",
             "notes": "Needs further operator review.",
@@ -2914,9 +3062,10 @@ def test_findings_verify_rejects_records_merged_after_validation(client, isolate
             connection.execute(
                 """
                 UPDATE assessment_findings
-                SET status = 'merged',
-                    merged_into_finding_id = id,
-                    updated_at = '2099-01-01 00:00:00'
+                    SET status = 'merged',
+                        merged_into_finding_id = id,
+                        row_version = row_version + 1,
+                        updated_at = '2099-01-01 00:00:00'
                 WHERE slug = 'CH-042'
                 """
             )
@@ -3005,6 +3154,8 @@ def test_findings_verify_rejects_merged_records(client, isolate_settings):
             "target_slug": "CH-051",
             "reason": "Merged duplicate.",
             "source_name": "operator",
+            "expected_source_row_version": source.json()["finding"]["row_version"],
+            "expected_target_row_version": target.json()["finding"]["row_version"],
         },
     )
     assert merge.status_code == 200
@@ -3087,8 +3238,9 @@ def test_merge_findings_rejects_target_changed_after_snapshot(client, isolate_se
                 connection.execute(
                     """
                     UPDATE assessment_findings
-                    SET notes = notes || '\nConcurrent merge writer',
-                        updated_at = '2099-01-01 00:00:00'
+                        SET notes = notes || '\nConcurrent merge writer',
+                            row_version = row_version + 1,
+                            updated_at = '2099-01-01 00:00:00'
                     WHERE slug = 'CH-053'
                     """
                 )
@@ -3492,7 +3644,11 @@ def test_patch_finding_details_replace_overwrites_stale_keys(client, isolate_set
     # never delete it).
     replaced = client.patch(
         f"/engagements/2026-03-30-120000-example/assessment/findings/{slug}",
-        json={"details": {"clean": "rewritten"}, "details_mode": "replace"},
+        json={
+            "details": {"clean": "rewritten"},
+            "details_mode": "replace",
+            "expected_row_version": 2,
+        },
     )
     assert replaced.status_code == 200, replaced.text
 
@@ -3599,3 +3755,44 @@ def test_reset_finding_clears_disputed_to_unreviewed(client, isolate_settings):
     assert transitions.status_code == 200
     actions = [item["action"] for item in transitions.json()]
     assert "verification_recleared" in actions, actions
+def test_finding_row_version_increments_on_each_same_second_patch(client, isolate_settings):
+    engagement_key = "2026-07-14-finding-row-version"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    response = client.post(
+        f"/engagements/{engagement_key}/assessment/findings",
+        json={
+            "slug": "VA-910",
+            "title": "Versioned finding",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_state": "unreviewed",
+            "verification_disposition": "none",
+            "canonical_location": "https://example.com/versioned",
+            "summary": "initial",
+            "evidence_ref": "findings.md",
+            "source_name": "vulnerability-analyst",
+        },
+    )
+    assert response.status_code == 201, response.text
+    created = response.json()["finding"]
+    assert created["row_version"] == 1
+
+    first = client.patch(
+        f"/engagements/{engagement_key}/assessment/findings/VA-910",
+        json={"summary": "first mutation"},
+    )
+    second = client.patch(
+        f"/engagements/{engagement_key}/assessment/findings/VA-910",
+        json={"summary": "second mutation"},
+    )
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert first.json()["finding"]["row_version"] == 2
+    assert second.json()["finding"]["row_version"] == 3
+
+    stale = client.patch(
+        f"/engagements/{engagement_key}/assessment/findings/VA-910",
+        json={"summary": "stale mutation", "expected_row_version": 1},
+    )
+    assert stale.status_code == 409
+    assert "changed since it was loaded" in stale.json()["detail"]

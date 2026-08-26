@@ -277,7 +277,7 @@ aws iam list-access-keys --user-name <u> --profile <ir-profile>
 aws iam get-access-key-last-used --access-key-id <AKIAxxxxxxxxxxxxxxxx> --profile <ir-profile>
 
 # GuardDuty findings (delegated admin account)
-aws guardduty list-findings \
+aws guardduty finding list \
   --profile <audit-profile> --region <region> \
   --detector-id <detector-id> \
   --finding-criteria '{"Criterion":{"severity":{"Gte":4}}}'

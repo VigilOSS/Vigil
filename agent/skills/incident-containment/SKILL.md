@@ -55,7 +55,7 @@ proposal record is the audit gate, not a comment field.
 | `vigil assess log` | Record the containment decision (proposed, approved, executed, rolled-back) with structured `metadata_json` |
 | `vigil assess artifact register` | Register containment-proof artifacts (`kind=containment_proof`) — screenshots, command output, ticket links |
 | `vigil assess host-exec` | Out-of-band evidence pulls during eradication / recovery (e.g., post-containment verification that the session is actually revoked) |
-| `vigil assess update-finding` | Move finding to `workflow_status=contained | eradicated | recovered` after each phase lands |
+| `vigil assess finding update` | Move finding to `workflow_status=contained | eradicated | recovered` after each phase lands |
 | `vigil assess agent handoff --from-json <path>` | Close the L4 dispatch with a handoff naming all executed proposals and any remaining gaps |
 
 Forbidden from L4 without an approved proposal: direct platform CLI
@@ -323,14 +323,12 @@ dispatch (if a follow-on finding lands).
 3. **Update the finding workflow status:**
 
    ```bash
-   vigil assess update-finding <finding-slug> \
-     --inline '{
-       "workflow_status": "contained",
-       "details": {
-         "containment_actions": [
-           {"proposal_id": <id>, "action": "revoke_session", "target": "...", "executed_utc": "...", "proof_artifact_id": <id>}
-         ]
-       }
+   vigil assess finding update <finding-slug> \
+     --workflow-status contained \
+     --details-inline '{
+       "containment_actions": [
+         {"proposal_id": <id>, "action": "revoke_session", "target": "...", "executed_utc": "...", "proof_artifact_id": <id>}
+       ]
      }'
    ```
 

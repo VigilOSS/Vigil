@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 import anyio
 from fastapi import APIRouter, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..models.engagement import Engagement
 from ..services import activity as activity_service
@@ -25,7 +25,14 @@ from ..services.state_manager.coverage import (
     MAX_ASSESSMENT_LIST_LIMIT,
     MAX_PROBE_RUN_LIST_LIMIT,
     MAX_REQUEST_LIST_LIMIT,
+    SurfaceStatus,
+    list_attempts,
 )
+# by_family_coverage lives in the depth_ledger submodule (it reuses the ledger's
+# per-unit scope/expected/covered helpers); the package re-exports the
+# ``depth_ledger`` FUNCTION under that name, shadowing the submodule attribute, so
+# it is imported directly from the submodule rather than via ``state_manager``.
+from ..services.state_manager.depth_ledger import by_family_coverage
 from ..services.state_manager.http_flows import (
     DEFAULT_HTTP_FLOW_LIMIT,
     MAX_HTTP_FLOW_LIST_LIMIT,
@@ -60,6 +67,50 @@ _ALLOWED_PHASES: frozenset[str] = frozenset(
 )
 
 
+class WorkItemInput(BaseModel):
+    """Optional per-observation work-buffer derivation block. Permissive (every
+    field defaulted, extra keys ignored) so a well-formed observation can NEVER
+    422 — the same silent-loss-avoidance invariant as HttpFlowIngestRequest.
+    When present, the backend derives one ``assessment_work_items`` row in the
+    same transaction as the observation/variant/coverage-item; when absent
+    (``None``), no buffered row is created. Classification fields
+    (type/priority/cluster/…) are producer-computed facts — the backend stores
+    them, it never re-runs the classifier."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    case_type: str = Field(default="unknown", max_length=64)
+    queue_key: str = Field(default="", max_length=512)
+    source: str = Field(default="", max_length=128)
+    status: str = Field(default="pending", max_length=32)
+    url: str = ""
+    url_path: str = ""
+    query_params: Any = ""
+    body_params: Any = ""
+    path_params: Any = ""
+    cookie_params: Any = ""
+    headers: Any = ""
+    body: str | None = None
+    content_type: str = Field(default="", max_length=256)
+    content_length: int = 0
+    request_body_truncated: bool = False
+    response_status: int = 0
+    response_headers: Any = ""
+    response_size: int = 0
+    response_snippet: str | None = None
+    response_truncated: bool = False
+    params_key_sig: str = Field(default="", max_length=256)
+    priority_score: int = 0
+    priority_reason: str = ""
+    cluster_key: str = ""
+    terminal_reason: str = ""
+    classifier_version: str = ""
+    signals: str = ""
+    selected_by: str = ""
+    triage_rationale: str = ""
+    live_status: str = ""
+
+
 class RequestObservationIngestRequest(BaseModel):
     url: str = Field(min_length=1, max_length=4096)
     method: str = Field(default="GET", min_length=1, max_length=16)
@@ -84,6 +135,9 @@ class RequestObservationIngestRequest(BaseModel):
     banner: str = Field(default="", max_length=4096)
     coverage_candidates: list[dict[str, Any]] = Field(default_factory=list)
     auto_generate_coverage: bool = True
+    # Optional producer-supplied work-buffer derivation block. When present the
+    # backend derives one work item in the same ingest transaction (ADR 0013).
+    work_item: WorkItemInput | None = None
 
 
 class RequestObservationBulkIngestRequest(BaseModel):
@@ -91,6 +145,124 @@ class RequestObservationBulkIngestRequest(BaseModel):
         min_length=1,
         max_length=MAX_BULK_ASSESSMENT_WRITE_ITEMS,
     )
+
+
+class WorkItemBulkInput(BaseModel):
+    """Direct work-buffer write for rows with no request-variant (out-of-scope /
+    egress skips, arjun/dns/gau-only producers, ``requeue``, the cases.db
+    migration tool). Permissive/defaulted so a well-formed producer never 422s.
+    ``queue_key`` + ``url`` are the minimum for a row to be stored."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    queue_key: str = Field(default="", max_length=512)
+    request_variant_id: int | None = None
+    service_id: int | None = None
+    coverage_item_id: int | None = None
+    auth_context: str = Field(default="anonymous", max_length=128)
+    method: str = Field(default="GET", max_length=16)
+    url: str = ""
+    url_path: str = ""
+    host: str = Field(default="", max_length=512)
+    query_params: Any = "{}"
+    body_params: Any = "{}"
+    path_params: Any = "{}"
+    cookie_params: Any = "{}"
+    headers: Any = ""
+    body: str | None = None
+    content_type: str = Field(default="", max_length=256)
+    content_length: int = 0
+    request_body_truncated: bool = False
+    response_status: int = 0
+    response_headers: Any = ""
+    response_size: int = 0
+    response_snippet: str | None = None
+    response_truncated: bool = False
+    type: str = Field(default="unknown", max_length=64)
+    source: str = Field(default="", max_length=128)
+    status: str = Field(default="pending", max_length=32)
+    params_key_sig: str = Field(default="", max_length=256)
+    priority_score: int = 0
+    priority_reason: str | None = None
+    cluster_key: str | None = None
+    terminal_reason: str | None = None
+    classifier_version: str | None = None
+    signals: str | None = None
+    selected_by: str | None = None
+    triage_rationale: str | None = None
+    live_status: str | None = None
+
+
+class WorkItemBulkIngestRequest(BaseModel):
+    items: list[WorkItemBulkInput] = Field(
+        min_length=1,
+        max_length=MAX_BULK_ASSESSMENT_WRITE_ITEMS,
+    )
+
+
+class WorkItemFetchRequest(BaseModel):
+    type: str = Field(default="", max_length=64)
+    limit: int = Field(default=1, ge=1, le=1000)
+    agent: str = Field(default="", max_length=128)
+
+
+class WorkItemPriorityFetchRequest(BaseModel):
+    limit: int = Field(default=1, ge=1, le=1000)
+    agent: str = Field(default="auto", max_length=128)
+
+
+class WorkItemUnitFetchRequest(BaseModel):
+    unit_id: int | None = Field(default=None, ge=1)
+    path: str = Field(default="", max_length=1024)
+    work_class: str = Field(default="", max_length=64)
+    limit: int | None = Field(default=None, ge=1, le=1000)
+    agent: str = Field(default="auto", max_length=128)
+
+
+class WorkItemIdsRequest(BaseModel):
+    ids: list[int] = Field(default_factory=list)
+
+
+class WorkItemDeferItemsRequest(BaseModel):
+    ids: list[int] = Field(default_factory=list)
+    reason: str = Field(default="", max_length=1024)
+    dry_run: bool = False
+
+
+class WorkItemDeferClusterRequest(BaseModel):
+    cluster_key: str = Field(default="", max_length=512)
+    reason: str = Field(default="", max_length=1024)
+    dry_run: bool = False
+
+
+class WorkItemUpdate(BaseModel):
+    """One by-id field update for the classify-work maintenance path. Only the
+    fields present are written (extra keys ignored); ``id`` is required."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+    type: str | None = None
+    status: str | None = None
+    queue_key: str | None = None
+    priority_score: int | None = None
+    priority_reason: str | None = None
+    cluster_key: str | None = None
+    terminal_reason: str | None = None
+    classifier_version: str | None = None
+    triage_rationale: str | None = Field(default=None, max_length=4096)
+
+
+class WorkItemUpdateRequest(BaseModel):
+    updates: list[WorkItemUpdate] = Field(min_length=1, max_length=MAX_BULK_ASSESSMENT_WRITE_ITEMS)
+
+
+class WorkItemResetStaleRequest(BaseModel):
+    minutes: int = Field(default=30, ge=0, le=100000)
+
+
+class WorkItemRetryErrorsRequest(BaseModel):
+    max_retries: int = Field(default=3, ge=0, le=1000)
 
 
 class HttpFlowIngestRequest(BaseModel):
@@ -162,7 +334,10 @@ class ProbeRunRecordRequest(BaseModel):
     service_id: int | None = None
     coverage_item_id: int | None = None
     auth_context: str = Field(default="anonymous", min_length=1, max_length=128)
-    input_slot: str = Field(default="unknown", min_length=1, max_length=64)
+    # 128 (not 64) so the `slot:name` probe convention survives intact — a
+    # prefixed input name like `header:X-Forwarded-Host` or a nested
+    # `body:data.attributes.owner.id` would truncate at 64.
+    input_slot: str = Field(default="unknown", min_length=1, max_length=128)
     attack_family: str = Field(min_length=1, max_length=64)
     payload_family: str = Field(default="", max_length=128)
     payload_value: str = Field(default="", max_length=16384)
@@ -173,6 +348,10 @@ class ProbeRunRecordRequest(BaseModel):
     ] = "tested"
     observed_http_status: int | None = None
     signal_type: str = Field(default="", max_length=128)
+    # A signal must name the application-level observation that distinguishes a
+    # true positive from a status/size lookalike. The service demotes a signal
+    # with no assertion to an inconclusive attempt, including for direct callers.
+    outcome_assertion: str = Field(default="", max_length=1024)
     evidence_ref: str = Field(default="", max_length=1024)
     notes: str = Field(default="", max_length=4096)
     target_host: str = Field(default="", max_length=256)
@@ -185,10 +364,27 @@ class ProbeRunRecordRequest(BaseModel):
     # Optional attempt→finding linkage. Validated to belong to the engagement
     # (404 otherwise) and COALESCE-backfilled on a re-run of the same probe.
     finding_id: int | None = None
+    # 1b — work-buffer drain OVERRIDE. A covering probe carrying a
+    # ``coverage_item_id`` drains its FK-linked work-items BY DEFAULT; passing an
+    # explicit id list narrows the drain to exactly these ids instead (and fires
+    # regardless of the covering gate). Marked ``done`` in the SAME transaction as
+    # the probe insert so "remaining work" bucket counts and recorded probes can
+    # never disagree. Unknown ids are silently skipped (mirrors POST
+    # /work-items/done); an empty list keeps the default derivation.
+    work_item_ids: list[int] = Field(default_factory=list)
+    # 1b — surface advance OVERRIDE. A covering probe carrying a
+    # ``request_variant_id`` advances its FK-linked (discovered) surface(s) to
+    # ``partially-covered`` BY DEFAULT; passing an explicit surface id advances
+    # exactly that surface instead (and fires regardless of the covering gate).
+    resolve_surface_id: int | None = None
+    # 1b — suppress the whole default FK-derived cascade (both the work-item drain
+    # and the surface advance). Recording still writes the probe row; it just
+    # leaves the buffer and surfaces untouched.
+    no_drain: bool = False
 
 
 class CoverageItemRecordRequest(BaseModel):
-    """Create/upsert a class-typed coverage item (Wave 5 / 2b).
+    """Create or update a class-typed coverage item.
 
     Wires the previously-dead ``record_coverage_item``. The gf-bucket bridge
     (``ingest_endpoints``) POSTs one of these per matched gf bucket with the
@@ -199,7 +395,10 @@ class CoverageItemRecordRequest(BaseModel):
     request_variant_id: int | None = None
     service_id: int | None = None
     auth_context: str = Field(default="anonymous", min_length=1, max_length=128)
-    input_slot: str = Field(default="endpoint", min_length=1, max_length=64)
+    # Coarse in practice (endpoint|query|body|path|cookie|header|service), but
+    # kept aligned with ProbeRunRecordRequest.input_slot at 128 so the two fields
+    # for the same concept cannot drift apart.
+    input_slot: str = Field(default="endpoint", min_length=1, max_length=128)
     attack_family: str = Field(min_length=1, max_length=64)
     status_value: str = Field(default="pending", min_length=1, max_length=64)
     notes: str = Field(default="", max_length=4096)
@@ -218,7 +417,7 @@ class CommandRunRecordRequest(BaseModel):
     tool_name: str = Field(min_length=1, max_length=128)
     route: str = Field(default="", max_length=256)
     agent_name: str = Field(min_length=1, max_length=128)
-    # phase is required-from-input. Wave-1 cutover removes the env-var
+    # phase is required from input; the command-run contract has no env-var
     # fallback that the patched MCP server used; the dispatching agent must
     # pass --phase explicitly because scope.json.current_phase is operator
     # state that does not reflect what the dispatch was authorized for.
@@ -254,7 +453,7 @@ class CommandRunRecordRequest(BaseModel):
     intent: str | None = Field(default=None, max_length=4096)
     probe_kind: str | None = Field(default=None, max_length=64)
     destructive: bool | None = None
-    # Wave-1 cutover fields. New CLI pre-exec writes pass status=running
+    # Command-run lifecycle fields. CLI pre-exec writes pass status=running
     # explicitly. Legacy one-shot posts may omit status while carrying terminal
     # fields; the service layer infers the terminal status in that case.
     status: Literal["queued", "running", "completed", "failed", "timed_out", "killed", "lost"] | None = None
@@ -301,6 +500,8 @@ class CommandRunFinalize(BaseModel):
     duplicate terminal PATCHes can be detected and rejected with 409 instead
     of silently overwriting the first finalize."""
 
+    model_config = ConfigDict(extra="forbid")
+
     status: Literal[
         "running",
         "completed",
@@ -309,16 +510,29 @@ class CommandRunFinalize(BaseModel):
         "killed",
         "lost",
     ]
-    return_code: int | None = None
+    return_code: int | None = Field(default=None, ge=-(2**31), le=2**31 - 1)
     ended_at: datetime
-    duration_ms: int | None = Field(default=None, ge=0)
+    duration_ms: int | None = Field(default=None, ge=0, le=2**63 - 1)
     stdout_preview: str | None = Field(default=None, max_length=COMMAND_FINALIZE_PREVIEW_MAX_CHARS)
     stderr_preview: str | None = Field(default=None, max_length=COMMAND_FINALIZE_PREVIEW_MAX_CHARS)
+    # Byte truth measured by the wrapper from the output file it owns. The
+    # previews above are truncated, so they cannot supply it, and only the
+    # ``host_exec`` lane spills through the backend's own retention machinery —
+    # for every other route these are the sole source of a real byte count.
+    stdout_bytes: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    stderr_bytes: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    stdout_sha256: str | None = Field(default=None, max_length=64)
+    stderr_sha256: str | None = Field(default=None, max_length=64)
     timed_out: bool = False
     partial_results: bool = False
-    peak_rss_bytes: int | None = Field(default=None, ge=0)
-    cpu_user_seconds: float | None = Field(default=None, ge=0)
-    cpu_system_seconds: float | None = Field(default=None, ge=0)
+    peak_rss_bytes: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    cpu_user_seconds: float | None = Field(
+        default=None, ge=0, le=10**12, allow_inf_nan=False
+    )
+    cpu_system_seconds: float | None = Field(
+        default=None, ge=0, le=10**12, allow_inf_nan=False
+    )
+    output_quiesced: bool = True
 
 
 class ArtifactRegisterRequest(BaseModel):
@@ -340,7 +554,7 @@ class ArtifactRegisterRequest(BaseModel):
 class JobCreate(BaseModel):
     """Request body for POST /jobs — opens an assessment_jobs row.
 
-    parent_command_run_id links the synchronous audit row that initiated the
+    parent_command_run_id links the pre-exec command audit owned by the async
     dtach worker. status defaults to queued; the CLI bumps it to running
     immediately after dtach attaches.
     """
@@ -388,6 +602,29 @@ class JobRecord(BaseModel):
     updated_at: datetime
 
 
+class RateLeaseCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    owner: str = Field(min_length=1, max_length=256)
+    effective_rate_rps: float = Field(gt=0)
+    ttl_seconds: int = Field(default=300, ge=1, le=86_400)
+    override_reason: str = Field(default="", max_length=2048)
+    command_run_id: int | None = Field(default=None, ge=1)
+
+
+class RateLeaseUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ttl_seconds: int | None = Field(default=None, ge=1, le=86_400)
+    release: bool = False
+
+    @model_validator(mode="after")
+    def _one_action(self) -> "RateLeaseUpdate":
+        if self.release == (self.ttl_seconds is not None):
+            raise ValueError("provide exactly one of release=true or ttl_seconds")
+        return self
+
+
 class SurfaceRecordRequest(BaseModel):
     surface_type: Literal[
         "account_recovery",
@@ -421,7 +658,10 @@ class SurfaceUpdateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    status: Literal["covered", "deferred", "discovered", "not_applicable", "partially-covered"] | None = None
+    # ``SurfaceStatus`` is the canonical backend vocabulary (state_manager.coverage).
+    # The create model (SurfaceRecordRequest) keeps a narrower Literal that omits
+    # ``partially-covered`` deliberately — that status is only reachable via update.
+    status: SurfaceStatus | None = None
     rationale: str | None = Field(default=None, max_length=4096)
     source_name: str | None = Field(default=None, min_length=1, max_length=128)
     evidence_ref: str | None = Field(default=None, min_length=1, max_length=1024)
@@ -455,6 +695,8 @@ class OobProbeRecordRequest(BaseModel):
     probe_kind: str = Field(default="", max_length=64)
     request_hash: str = Field(default="", max_length=128)
     oob_domain: str = Field(default="", max_length=256)
+    client_name: str = Field(min_length=1, max_length=128, pattern=r".*\S.*")
+    client_payload_host: str = Field(min_length=1, max_length=256, pattern=r".*\S.*")
     notes: str = Field(default="", max_length=4096)
     status: Literal["pending", "fired", "confirmed", "expired", "ignored"] = "pending"
 
@@ -475,6 +717,8 @@ class OobInteractionRecordRequest(BaseModel):
     query_type: str = Field(default="", max_length=32)
     raw_request: str = Field(default="", max_length=20000)
     observed_at: str = Field(default="", max_length=64)
+    client_name: str = Field(min_length=1, max_length=128, pattern=r".*\S.*")
+    client_payload_host: str = Field(min_length=1, max_length=256, pattern=r".*\S.*")
 
 
 class AttackChainLinkRequest(BaseModel):
@@ -501,7 +745,7 @@ class CredentialRecordRequest(BaseModel):
     credential_key: str = Field(min_length=1, max_length=256)
     kind: str = Field(min_length=1, max_length=64)
     principal: str = Field(min_length=1, max_length=256)
-    secret: str = Field(default="", max_length=1024, description="Literal secret value (password, token, key material). Redact if policy prohibits storage; record 'REDACTED' and describe in notes.")
+    secret: str = Field(default="", max_length=8192, description="Literal secret value (password, token, key material). Redact if policy prohibits storage; record 'REDACTED' and describe in notes.")
     source_name: str = Field(default="", max_length=128)
     status: str = Field(default="discovered", min_length=1, max_length=64)
     notes: str = Field(default="", max_length=4096)
@@ -574,6 +818,38 @@ class FindingLinkRequest(BaseModel):
     notes: str = Field(default="", max_length=4096)
     provenance: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def require_one_target_selector(self) -> FindingLinkRequest:
+        has_id = self.target_id is not None
+        has_ref = bool(self.target_ref.strip())
+        if has_id == has_ref:
+            raise ValueError("provide exactly one of target_id or target_ref")
+        return self
+
+
+class FindingLinkPatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_kind: str | None = Field(default=None, min_length=1, max_length=64)
+    target_id: int | None = None
+    target_ref: str | None = Field(default=None, max_length=1024)
+    notes: str | None = Field(default=None, max_length=4096)
+    provenance: dict[str, Any] | None = None
+    retired: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_patch(self) -> FindingLinkPatchRequest:
+        provided = self.model_fields_set
+        if not provided:
+            raise ValueError("finding link patch requires at least one field")
+        if {"target_id", "target_ref"} <= provided:
+            raise ValueError("provide only one of target_id or target_ref")
+        if "target_kind" in provided and not (
+            {"target_id", "target_ref"} & provided
+        ):
+            raise ValueError("changing target_kind requires a target selector")
+        return self
+
 
 class RootCauseLinkRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -591,6 +867,8 @@ class MergeFindingsRequest(BaseModel):
     target_slug: str = Field(min_length=1, max_length=256)
     reason: str = Field(min_length=1, max_length=4096)
     source_name: str = Field(default="operator", min_length=1, max_length=128)
+    expected_source_row_version: int | None = Field(default=None, ge=1)
+    expected_target_row_version: int | None = Field(default=None, ge=1)
 
 
 def _reject_invalid_submission_status(value: str | None) -> None:
@@ -606,12 +884,41 @@ def _reject_invalid_submission_status(value: str | None) -> None:
         raise ValueError(f"submission_status must be one of: {allowed}")
 
 
+class CodeSnapshotProvenance(BaseModel):
+    """Immutable identity of the verified source snapshot behind a code finding."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    repo_id: int = Field(
+        ge=1,
+        description="code_repos.id for the source snapshot reviewed for this finding.",
+    )
+    repo_generation: int = Field(
+        ge=1,
+        description="The repository active_generation reviewed for this finding.",
+    )
+    source_manifest_digest: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+        description="The repository source_manifest_digest reviewed for this finding.",
+    )
+
+
+class FindingProvenance(BaseModel):
+    """Typed reserved provenance with forward-compatible producer metadata."""
+
+    model_config = ConfigDict(extra="allow")
+
+    code_snapshot: CodeSnapshotProvenance | None = None
+
+
 class FindingRecordRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     slug: str | None = Field(default=None, max_length=256)
     title: str = Field(min_length=1, max_length=512)
-    # Default aligned to the CLI + record-finding contract (both `medium`): a
+    # Default aligned to the CLI + finding-record contract (both `medium`): a
     # not-yet-triaged finding is presumed real, not informational. `info` was the
     # lone outlier here and produced a schema default that contradicted the CLI;
     # since severity feeds report-inclusion, defaulting low risked silently
@@ -624,13 +931,13 @@ class FindingRecordRequest(BaseModel):
     defect_family: str = Field(default="", max_length=128)
     root_cause_key: str = Field(default="", max_length=256)
     auth_context: str = Field(default="anonymous", min_length=1, max_length=128)
-    canonical_location: str = Field(default="", max_length=1024)
+    canonical_location: str = Field(default="", max_length=4096)
     summary: str = Field(default="", max_length=4096)
     evidence_ref: str = Field(default="", max_length=1024)
     notes: str = Field(default="", max_length=20000)
     source_name: str = Field(default="", max_length=128)
     details: dict[str, Any] = Field(default_factory=dict)
-    provenance: dict[str, Any] = Field(default_factory=dict)
+    provenance: FindingProvenance = Field(default_factory=FindingProvenance)
     # C44: evidence_type categorizes confirmation mode so report-writer can
     # sort/downrate without re-parsing details. Nullable; agents that don't
     # set it leave NULL (legacy behavior preserved).
@@ -647,16 +954,34 @@ class FindingRecordRequest(BaseModel):
     service_id: int | None = None
     surface_id: int | None = None
     links: list[FindingLinkRequest] = Field(default_factory=list)
+    # D4 (kill re-mint override): control flag, NOT a stored column. When true it
+    # skips the killed-finding re-mint guard so an intentional distinct re-mint of
+    # a finding that only coincidentally shares an endpoint + technique with a prior
+    # false_positive still lands. Plumbed from `finding record --allow-remint/--force`.
+    allow_remint: bool = Field(default=False)
+
+    @field_validator("canonical_location")
+    @classmethod
+    def _normalize_canonical_location(cls, value: str) -> str:
+        return value.strip()
 
     @model_validator(mode="after")
     def _root_cause_links_use_helper(self) -> "FindingRecordRequest":
         if any(link.link_kind == state_manager.ROOT_CAUSE_LINK_KIND for link in self.links):
-            raise ValueError("root_cause links must be created with link-finding / PUT /findings/{slug}/root-cause")
+            raise ValueError("root_cause links must be created with `finding link` / PUT /findings/{slug}/root-cause")
         return self
 
     @model_validator(mode="after")
     def _validate_submission_status(self) -> "FindingRecordRequest":
         _reject_invalid_submission_status(self.submission_status)
+        return self
+
+    @model_validator(mode="after")
+    def _require_code_snapshot_for_file_finding(self) -> FindingRecordRequest:
+        if self.canonical_location.startswith("file:") and self.provenance.code_snapshot is None:
+            raise ValueError(
+                "file findings require provenance.code_snapshot bound to the current verified repository snapshot"
+            )
         return self
 
 
@@ -669,7 +994,7 @@ class FindingPatchRequest(BaseModel):
     defect_family: str | None = Field(default=None, max_length=128)
     root_cause_key: str | None = Field(default=None, max_length=256)
     auth_context: str | None = Field(default=None, min_length=1, max_length=128)
-    canonical_location: str | None = Field(default=None, max_length=1024)
+    canonical_location: str | None = Field(default=None, max_length=4096)
     summary: str | None = Field(default=None, max_length=4096)
     evidence_ref: str | None = Field(default=None, max_length=1024)
     notes: str | None = Field(default=None, max_length=20000)
@@ -683,7 +1008,7 @@ class FindingPatchRequest(BaseModel):
     # fully removed (merge cannot delete keys). Requires details to be present.
     details_mode: Literal["merge", "replace"] = "merge"
     provenance: dict[str, Any] | None = None
-    # C44: allow retroactive labeling via vigil assess update-finding.
+    # Allow retroactive labeling via vigil assess finding update.
     evidence_type: Literal[
         "network-confirmed", "code-inferred", "theoretical", "informational"
     ] | None = None
@@ -694,6 +1019,12 @@ class FindingPatchRequest(BaseModel):
     reason_code: str = Field(default="", max_length=128)
     reason_text: str = Field(default="", max_length=4096)
     artifact_ref: str = Field(default="", max_length=1024)
+    expected_row_version: int | None = Field(default=None, ge=1)
+
+    @field_validator("canonical_location")
+    @classmethod
+    def _normalize_canonical_location(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None
 
     @model_validator(mode="after")
     def _validate_submission_status(self) -> "FindingPatchRequest":
@@ -714,6 +1045,63 @@ class FindingPatchRequest(BaseModel):
             raise ValueError("details_mode='replace' requires details")
         return self
 
+    @model_validator(mode="after")
+    def _require_cas_when_replacing(self) -> "FindingPatchRequest":
+        if (
+            self.notes_mode == "replace" or self.details_mode == "replace"
+        ) and self.expected_row_version is None:
+            raise ValueError(
+                "replacement modes require expected_row_version"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_mutation(self) -> "FindingPatchRequest":
+        scalar_values = (
+            self.title,
+            self.severity,
+            self.workflow_status,
+            self.defect_family,
+            self.root_cause_key,
+            self.auth_context,
+            self.canonical_location,
+            self.summary,
+            self.evidence_ref,
+            self.source_name,
+            self.evidence_type,
+            self.submission_status,
+        )
+        has_scalar_mutation = any(value not in (None, "") for value in scalar_values)
+        has_notes_mutation = self.notes is not None and (
+            self.notes != "" or self.notes_mode == "replace"
+        )
+        has_details_mutation = self.details is not None and (
+            self.details != {} or self.details_mode == "replace"
+        )
+        has_provenance_mutation = self.provenance not in (None, {})
+        if not any(
+            (
+                has_scalar_mutation,
+                has_notes_mutation,
+                has_details_mutation,
+                has_provenance_mutation,
+            )
+        ):
+            raise ValueError(
+                "finding patch requires at least one field that updates the finding; "
+                "concurrency, mode, and transition-metadata controls do not update a "
+                "finding by themselves, and empty merge values are no-ops"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _protect_code_snapshot_binding(self) -> FindingPatchRequest:
+        if self.provenance is not None and "code_snapshot" in self.provenance:
+            raise ValueError(
+                "provenance.code_snapshot is reserved and cannot be changed by a generic finding patch"
+            )
+        return self
+
 
 class FindingVerifyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -727,7 +1115,7 @@ class FindingVerifyRequest(BaseModel):
     notes: str = Field(default="", max_length=20000)
     source_name: str = Field(default="", max_length=128)
     details: dict[str, Any] = Field(default_factory=dict)
-    provenance: dict[str, Any] = Field(default_factory=dict)
+    provenance: FindingProvenance = Field(default_factory=FindingProvenance)
 
 
 _SUMMARY_AFFECTING_RECORD_TYPES = frozenset(
@@ -864,6 +1252,22 @@ def get_per_host_coverage(engagement_key: str) -> dict[str, Any]:
     return payload
 
 
+@router.get("/coverage-readiness/by-family")
+def get_by_family_coverage(engagement_key: str) -> dict[str, Any]:
+    """A1 — engagement-wide (application-unit × vuln-family) coverage grid.
+
+    Complements ``/coverage-readiness/by-host`` (per-host recon outcomes) with a
+    per-unit, per-family view: every application unit (INCLUDING non-deep_required
+    ones) and, for each, one cell per vuln family in ``union(expected, probed)``
+    tagged covered / missing_block / missing_warn / deferred with its probe and
+    finding-linkage stats. Read-only/advisory — operators use it to SEE
+    never-probed gaps vs probed-and-walled vs finding-linked before a phase exit.
+    """
+    engagement = get_engagement_or_404(engagement_key)
+    with state_manager.get_connection() as connection:
+        return by_family_coverage(connection, engagement.id)
+
+
 @router.get("/report-readiness")
 def get_report_readiness(engagement_key: str) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
@@ -890,7 +1294,7 @@ def get_report_readiness(engagement_key: str) -> dict[str, Any]:
 
 @router.get("/phase-readiness")
 def get_phase_readiness(engagement_key: str, phase: str) -> dict[str, Any]:
-    """Wave 6d — consolidated phase-keyed readiness (depth-gate §6).
+    """Consolidated phase-keyed readiness.
 
     The backend half of ``vigil assess check-phase-readiness --phase <phase>``.
     ASSEMBLES the per-phase result by CALLING the existing, unchanged gates
@@ -1006,11 +1410,60 @@ def get_coverage_items(
 @router.get("/probe-runs")
 def get_probe_runs(
     engagement_key: str,
+    attack_family: str = "",
+    target_host: str = "",
+    target_path: str = "",
+    auth_context: str = "",
+    result_status: str = "",
     limit: int = Query(default=DEFAULT_PROBE_RUN_LIMIT, ge=1, le=MAX_PROBE_RUN_LIST_LIMIT),
     offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.list_probe_runs(engagement.id, limit=limit, offset=offset)
+    return state_manager.list_probe_runs(
+        engagement.id,
+        attack_family=attack_family,
+        target_host=target_host,
+        target_path=target_path,
+        auth_context=auth_context,
+        result_status=result_status,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/attempts")
+def get_attempts(
+    engagement_key: str,
+    finding: str = "",
+    surface_id: int | None = None,
+    target_host: str = "",
+    attack_family: str = "",
+    result_status: str = "",
+    lens: str = "",
+    limit: int = Query(default=DEFAULT_PROBE_RUN_LIMIT, ge=1, le=MAX_PROBE_RUN_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """A4a — finding-joined, surface-aware read of recorded probe attempts.
+
+    A "what has actually been tried against this finding/surface/host, and did it
+    land" view so a specialist does not re-run an already-walled probe. Additive to
+    ``GET /probe-runs`` (unchanged): each attempt carries the linked finding's
+    slug/title/severity (null when unlinked). ``finding`` is a finding SLUG
+    (resolved server-side); ``surface_id`` matches BOTH FK-linked probes and probes
+    whose target host/path is contained by the surface descriptor.
+    """
+    engagement = get_engagement_or_404(engagement_key)
+    return list_attempts(
+        engagement.id,
+        finding=finding,
+        surface_id=surface_id,
+        target_host=target_host,
+        attack_family=attack_family,
+        result_status=result_status,
+        lens=lens,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/command-runs")
@@ -1026,6 +1479,7 @@ def get_command_runs(
     route: str = "",
     success: bool | None = Query(default=None),
     timed_out: bool | None = Query(default=None),
+    output_attention: bool = False,
     # Command-metadata filter axes. Technique + probe_kind are plain str
     # (matching the audit_source precedent) so new enum values don't force
     # a backend redeploy. intent_q runs a FTS5 scoped match against the
@@ -1060,6 +1514,7 @@ def get_command_runs(
         route=route,
         success=success,
         timed_out=timed_out,
+        output_attention=output_attention,
         technique=technique or "",
         probe_kind=probe_kind or "",
         destructive=destructive,
@@ -1082,6 +1537,9 @@ def get_resume_brief(
     agent_id: str = "",
     max_age_hours: float | None = Query(default=None, gt=0, le=24 * 30),
     since: str = "",
+    per_input_limit: int = Query(
+        default=assessment_memory._PER_INPUT_ROW_LIMIT, ge=0, le=100000
+    ),
 ) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
     return assessment_memory.build_resume_brief(
@@ -1091,6 +1549,7 @@ def get_resume_brief(
         agent_id=agent_id,
         max_age_hours=max_age_hours,
         since=since,
+        per_input_limit=per_input_limit,
     )
 
 
@@ -1484,6 +1943,175 @@ async def create_request_observations_bulk(
     return result
 
 
+# ---------------------------------------------------------------------------
+# Work buffer (assessment_work_items) — the transient triage/dispatch queue.
+# Folds the former per-engagement cases.db work_items into the backend ledger
+# (ADR 0013). Reads are plain GET; the mutation/claim verbs are POST and offload
+# the sync SQLite work to the threadpool like the other write handlers.
+# ---------------------------------------------------------------------------
+@router.get("/work-items")
+def get_work_items(
+    engagement_key: str,
+    type: str = "",
+    status: str = "",
+    limit: int = Query(default=5000, ge=1, le=10000),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    if type:
+        return state_manager.peek_work_items(engagement.id, type_val=type, limit=limit)
+    return state_manager.list_work_items(engagement.id, status=(status or None), limit=limit, offset=offset)
+
+
+@router.get("/work-items/stats")
+def get_work_item_stats(
+    engagement_key: str, by: str = "status", status: str = ""
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.work_buffer_stats(
+        engagement.id, by=by, status_value=status
+    )
+
+
+@router.post("/work-items/bulk", status_code=status.HTTP_201_CREATED)
+async def create_work_items_bulk(engagement_key: str, request: WorkItemBulkIngestRequest) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.record_work_items_bulk,
+            engagement.id,
+            [item.model_dump() for item in request.items],
+        )
+    )
+
+
+@router.post("/work-items/fetch")
+async def fetch_work_items_endpoint(engagement_key: str, request: WorkItemFetchRequest) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.fetch_work_items,
+            engagement.id,
+            type_val=request.type,
+            limit=request.limit,
+            agent=request.agent,
+        )
+    )
+
+
+@router.post("/work-items/fetch-by-priority")
+async def fetch_work_items_by_priority_endpoint(
+    engagement_key: str, request: WorkItemPriorityFetchRequest
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.fetch_work_items_by_priority,
+            engagement.id,
+            limit=request.limit,
+            agent=request.agent,
+        )
+    )
+
+
+@router.post("/work-items/fetch-by-unit")
+async def fetch_work_items_by_unit_endpoint(
+    engagement_key: str, request: WorkItemUnitFetchRequest
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.fetch_work_items_by_unit,
+            engagement.id,
+            unit_id=request.unit_id,
+            path=request.path,
+            work_class=request.work_class,
+            limit=request.limit,
+            agent=request.agent,
+        )
+    )
+
+
+@router.post("/work-items/done")
+async def work_items_done(engagement_key: str, request: WorkItemIdsRequest) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    return await anyio.to_thread.run_sync(
+        functools.partial(state_manager.mark_work_items_done, engagement.id, request.ids)
+    )
+
+
+@router.post("/work-items/error")
+async def work_items_error(engagement_key: str, request: WorkItemIdsRequest) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    return await anyio.to_thread.run_sync(
+        functools.partial(state_manager.mark_work_items_error, engagement.id, request.ids)
+    )
+
+
+@router.post("/work-items/defer")
+async def work_items_defer(engagement_key: str, request: WorkItemDeferItemsRequest) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.defer_work_items,
+            engagement.id,
+            ids=request.ids,
+            reason=request.reason,
+            dry_run=request.dry_run,
+        )
+    )
+
+
+@router.post("/work-items/defer-cluster")
+async def work_items_defer_cluster(engagement_key: str, request: WorkItemDeferClusterRequest) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.defer_work_item_cluster,
+            engagement.id,
+            cluster_key=request.cluster_key,
+            reason=request.reason,
+            dry_run=request.dry_run,
+        )
+    )
+
+
+@router.post("/work-items/mark-manual")
+async def work_items_mark_manual(engagement_key: str, request: WorkItemIdsRequest) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    return await anyio.to_thread.run_sync(
+        functools.partial(state_manager.mark_work_items_manual, engagement.id, request.ids)
+    )
+
+
+@router.post("/work-items/update")
+async def work_items_update(engagement_key: str, request: WorkItemUpdateRequest) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.apply_work_item_updates,
+            engagement.id,
+            [u.model_dump(exclude_unset=True) for u in request.updates],
+        )
+    )
+
+
+@router.post("/work-items/reset-stale")
+async def work_items_reset_stale(engagement_key: str, request: WorkItemResetStaleRequest) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    return await anyio.to_thread.run_sync(
+        functools.partial(state_manager.reset_stale_work_items, engagement.id, minutes=request.minutes)
+    )
+
+
+@router.post("/work-items/retry-errors")
+async def work_items_retry_errors(engagement_key: str, request: WorkItemRetryErrorsRequest) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    return await anyio.to_thread.run_sync(
+        functools.partial(state_manager.retry_error_work_items, engagement.id, max_retries=request.max_retries)
+    )
+
+
 def _register_http_flow_artifacts(engagement_id: int, request: HttpFlowIngestRequest) -> None:
     """Register the addon-reported body/index sidecars in assessment_artifacts.
 
@@ -1692,6 +2320,14 @@ async def create_command_run(
     engagement_key: str,
     request: CommandRunRecordRequest,
 ) -> dict[str, Any]:
+    if request.route == "host_exec":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "route='host_exec' is reserved for the bounded "
+                "/command-runs/host-exec contract"
+            ),
+        )
     engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
     payload = request.model_dump()
     if not payload.get("command_hash"):
@@ -1706,15 +2342,91 @@ async def create_command_run(
 
 
 class HostExecRecord(CommandRunRecordRequest):
-    """Audit payload for ``vigil assess host-exec``.
+    """Bounded ingress for host pre-exec rows and policy refusals.
 
-    Reuses ``CommandRunRecordRequest`` for full field parity with the kali
-    route — the host-exec wrapper is just a different execution surface, not
-    a different audit shape. The dedicated route exists so the server can
-    force ``route='host_exec'`` regardless of client input, giving downstream
-    queries a single discriminator between kali-container rows and
-    host-machine rows.
+    Full host output belongs in descriptor-backed spill files, never this POST.
+    The ordinary command-run endpoint intentionally keeps its one-shot inline
+    contract for Kali and legacy tool writers.
     """
+
+    model_config = ConfigDict(extra="forbid")
+
+    host_record_kind: Literal["pre_exec", "policy_refusal"] = "pre_exec"
+    argv: list[str] = Field(min_length=1, max_length=256)
+    stdout: str = Field(default="", max_length=65_536)
+    stderr: str = Field(default="", max_length=65_536)
+    stdout_spill_device: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    stdout_spill_inode: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    stderr_spill_device: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    stderr_spill_inode: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    timeout_seconds_requested: int | None = Field(
+        default=None, ge=0, le=2**63 - 1
+    )
+    finding_id: int | None = Field(default=None, ge=1, le=2**63 - 1)
+
+    @model_validator(mode="after")
+    def _validate_host_record_shape(self) -> "HostExecRecord":
+        if any(len(arg.encode("utf-8", errors="replace")) > 4096 for arg in self.argv):
+            raise ValueError("host-exec argv entries must be at most 4096 bytes")
+        canonical_command = " ".join(self.argv)
+        if len(canonical_command.encode("utf-8", errors="replace")) > 65_536:
+            raise ValueError("host-exec argv must be at most 65536 bytes in total")
+        if self.command != canonical_command:
+            raise ValueError("host-exec command must exactly match argv joined by spaces")
+        if self.timed_out or self.duration_ms != 0:
+            raise ValueError("host-exec ingress timing fields must be empty")
+        if any(
+            value is not None
+            for value in (
+                self.peak_rss_bytes,
+                self.cpu_user_seconds,
+                self.cpu_system_seconds,
+            )
+        ):
+            raise ValueError("host-exec ingress resource fields must be empty")
+        if self.command_hash or self.stdout_sha256 or self.stderr_sha256:
+            raise ValueError("host-exec ingress hash fields are server-owned")
+        if self.engagement_artifact_dir is not None or self.force:
+            raise ValueError("host-exec ingress storage and dedup fields are server-owned")
+        if self.host_record_kind == "pre_exec":
+            if self.status != "running":
+                raise ValueError("host-exec pre_exec records must use status='running'")
+            if self.return_code is not None or self.success is not None or self.completed_at:
+                raise ValueError("host-exec pre_exec records cannot contain terminal fields")
+            if self.stdout or self.stderr:
+                raise ValueError("host-exec pre_exec output must be written to spill files")
+            if not self.stdout_path or not self.stderr_path:
+                raise ValueError("host-exec pre_exec records require stdout_path and stderr_path")
+            if any(
+                value is None
+                for value in (
+                    self.stdout_spill_device,
+                    self.stdout_spill_inode,
+                    self.stderr_spill_device,
+                    self.stderr_spill_inode,
+                )
+            ):
+                raise ValueError("host-exec pre_exec records require spill identity claims")
+        else:
+            if (
+                self.status != "failed"
+                or self.success is not False
+                or self.return_code is not None
+            ):
+                raise ValueError("host-exec policy_refusal records must be failed")
+            if self.stdout or self.stdout_path or self.stderr_path:
+                raise ValueError("host-exec policy_refusal records cannot claim output spills")
+            if any(
+                value is not None
+                for value in (
+                    self.stdout_spill_device,
+                    self.stdout_spill_inode,
+                    self.stderr_spill_device,
+                    self.stderr_spill_inode,
+                )
+            ):
+                raise ValueError("host-exec policy_refusal records cannot claim spill identity")
+        return self
 
 
 @router.post("/command-runs/host-exec", status_code=status.HTTP_201_CREATED)
@@ -1731,13 +2443,19 @@ async def record_host_exec(
     """
     engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
     payload = request.model_dump()
+    payload.pop("host_record_kind")
     payload["route"] = "host_exec"  # canonical marker, never trust client input
     if not payload.get("command_hash"):
         payload["command_hash"] = hashlib.sha256(
             payload["command"].encode("utf-8", errors="replace")
         ).hexdigest()
     record = await anyio.to_thread.run_sync(
-        functools.partial(state_manager.record_command_run, engagement.id, **payload)
+        functools.partial(
+            state_manager.record_command_run,
+            engagement.id,
+            _host_exec_contract=True,
+            **payload,
+        )
     )
     await _broadcast(engagement.key, "command_run", record)
     return record
@@ -1762,7 +2480,12 @@ async def patch_command_run(
             duration_ms=request.duration_ms,
             stdout_preview=request.stdout_preview,
             stderr_preview=request.stderr_preview,
+            stdout_bytes=request.stdout_bytes,
+            stderr_bytes=request.stderr_bytes,
+            stdout_sha256=request.stdout_sha256,
+            stderr_sha256=request.stderr_sha256,
             timed_out=request.timed_out,
+            output_quiesced=request.output_quiesced,
             partial_results=request.partial_results,
             peak_rss_bytes=request.peak_rss_bytes,
             cpu_user_seconds=request.cpu_user_seconds,
@@ -1849,6 +2572,46 @@ async def patch_job(
     return record
 
 
+@router.post("/rate-leases", status_code=status.HTTP_201_CREATED)
+def create_rate_lease(
+    engagement_key: str,
+    request: RateLeaseCreate,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.acquire_rate_lease(
+        engagement.id,
+        owner=request.owner,
+        effective_rate_rps=request.effective_rate_rps,
+        ttl_seconds=request.ttl_seconds,
+        override_reason=request.override_reason,
+        command_run_id=request.command_run_id,
+    )
+
+
+@router.get("/rate-leases")
+def get_rate_leases(
+    engagement_key: str,
+    active_only: bool = Query(default=False),
+) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_rate_leases(engagement.id, active_only=active_only)
+
+
+@router.patch("/rate-leases/{lease_token}")
+def patch_rate_lease(
+    engagement_key: str,
+    lease_token: str,
+    request: RateLeaseUpdate,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.update_rate_lease(
+        engagement.id,
+        lease_token=lease_token,
+        ttl_seconds=request.ttl_seconds,
+        release=request.release,
+    )
+
+
 @router.post("/oob-probes", status_code=status.HTTP_201_CREATED)
 async def create_oob_probe(engagement_key: str, request: OobProbeRecordRequest) -> dict[str, Any]:
     """Record an OAST probe (called by ``vigil oob mint``).
@@ -1868,6 +2631,8 @@ async def create_oob_probe(engagement_key: str, request: OobProbeRecordRequest) 
             probe_kind=request.probe_kind,
             request_hash=request.request_hash,
             oob_domain=request.oob_domain,
+            client_name=request.client_name,
+            client_payload_host=request.client_payload_host,
             notes=request.notes,
             status_value=request.status,
         )
@@ -1895,6 +2660,8 @@ async def record_oob_interaction(engagement_key: str, request: OobInteractionRec
             query_type=request.query_type,
             raw_request=request.raw_request,
             observed_at=request.observed_at,
+            client_name=request.client_name,
+            client_payload_host=request.client_payload_host,
         )
     )
     if result.get("matched") and result.get("probe") and not result.get("duplicate"):
@@ -2013,7 +2780,7 @@ def get_application_units(engagement_key: str) -> list[dict[str, Any]]:
 
 @router.get("/application-units/depth-ledger")
 def get_depth_ledger(engagement_key: str) -> dict[str, Any]:
-    """Read-only, ADVISORY depth ledger (depth-gate §5.3, Wave 6c).
+    """Read-only, advisory depth ledger.
 
     Per ``deep_required`` app unit: Expected vuln classes (each gated by an
     executable §5.3 predicate), Covered, missing block/warn classes, active
@@ -2021,8 +2788,8 @@ def get_depth_ledger(engagement_key: str) -> dict[str, Any]:
     ``depth_satisfied`` verdict, and an EV rank. EV-ranked, highest first.
 
     Mid-engagement this is ADVISORY ONLY — it never blocks a transition and the
-    endpoint never returns non-2xx for missing depth (the terminal block is a
-    later wave). WEB-ONLY: code/blue engagements get a skipped result.
+    endpoint never returns non-2xx for missing depth. The terminal backstop is a
+    separate projection. WEB-ONLY: code/blue engagements get a skipped result.
     """
     engagement = get_engagement_or_404(engagement_key)
     return state_manager.depth_ledger(engagement.id)
@@ -2030,7 +2797,7 @@ def get_depth_ledger(engagement_key: str) -> dict[str, Any]:
 
 @router.get("/application-units/terminal-block")
 def get_terminal_depth_block(engagement_key: str) -> dict[str, Any]:
-    """The ONE hard block (Wave 7, S17 resolution; master plan §1A).
+    """The one terminal depth blocker.
 
     Read-only. Returns the units that BLOCK the terminal ``report``/``complete``
     edge on the WEB track: the union of high-confidence ``deep_required`` units
@@ -2100,6 +2867,8 @@ async def merge_findings_endpoint(engagement_key: str, request: MergeFindingsReq
             target_slug=request.target_slug,
             reason=request.reason,
             source_name=request.source_name,
+            expected_source_row_version=request.expected_source_row_version,
+            expected_target_row_version=request.expected_target_row_version,
         )
     )
     await anyio.to_thread.run_sync(
@@ -2139,20 +2908,21 @@ async def create_finding(engagement_key: str, request: FindingRecordRequest) -> 
             notes=request.notes,
             source_name=request.source_name,
             details=request.details,
-            provenance=request.provenance,
+            provenance=request.provenance.model_dump(exclude_none=True),
             evidence_type=request.evidence_type,
             submission_status=request.submission_status,
             request_variant_id=request.request_variant_id,
             service_id=request.service_id,
             surface_id=request.surface_id,
             links=[item.model_dump() for item in request.links],
+            allow_remint=request.allow_remint,
         )
     )
     await anyio.to_thread.run_sync(
         functools.partial(
             _audit_assessment_mutation,
             engagement.id,
-            title="record-finding",
+            title="finding-record",
             action=f"finding={record.get('slug', request.slug)} severity={record.get('severity', request.severity)}",
             actor_name=request.source_name,
             result=record.get("workflow_status", request.workflow_status) or "",
@@ -2195,13 +2965,14 @@ async def patch_finding(
             transition_reason_code=request.reason_code,
             transition_reason_text=request.reason_text,
             transition_artifact_ref=request.artifact_ref,
+            expected_row_version=request.expected_row_version,
         )
     )
     await anyio.to_thread.run_sync(
         functools.partial(
             _audit_assessment_mutation,
             engagement.id,
-            title="update-finding",
+            title="finding-update",
             action=f"finding={finding_slug}",
             actor_name=request.source_name,
             result=request.reason_code or request.reason_text or "",
@@ -2236,7 +3007,7 @@ async def set_finding_root_cause(
         functools.partial(
             _audit_assessment_mutation,
             engagement.id,
-            title="link-finding",
+            title="finding-link",
             action=f"finding={finding_slug} root_cause={request.root_cause_slug}",
             actor_name=request.source_name,
             result=request.root_cause_effect,
@@ -2308,6 +3079,40 @@ async def create_finding_link(
     return record
 
 
+@router.patch("/findings/{finding_slug}/links/{link_id}")
+async def update_finding_link(
+    engagement_key: str,
+    finding_slug: str,
+    link_id: int,
+    request: FindingLinkPatchRequest,
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(
+        lambda: get_engagement_or_404(engagement_key)
+    )
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.update_finding_link,
+            engagement.id,
+            finding_slug=finding_slug,
+            link_id=link_id,
+            **request.model_dump(),
+        )
+    )
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_assessment_mutation,
+            engagement.id,
+            title="finding-link-update",
+            action=f"finding={finding_slug} link_id={link_id}",
+            actor_name="operator",
+            result="retired" if request.retired else "updated",
+            metadata={"finding_slug": finding_slug, "link_id": link_id},
+        )
+    )
+    await _broadcast(engagement.key, "finding_link", record)
+    return record
+
+
 @router.post("/findings/{finding_slug}/verify")
 async def verify_finding(
     engagement_key: str,
@@ -2327,7 +3132,7 @@ async def verify_finding(
             evidence_ref=request.evidence_ref,
             notes=request.notes,
             details=request.details,
-            provenance=request.provenance,
+            provenance=request.provenance.model_dump(exclude_none=True),
             artifact_ref=request.artifact_ref,
             new_severity=request.new_severity,
         )
@@ -2336,7 +3141,7 @@ async def verify_finding(
         functools.partial(
             _audit_assessment_mutation,
             engagement.id,
-            title="verify-finding",
+            title="finding-verify",
             action=f"finding={finding_slug} disposition={request.disposition}",
             actor_name=request.source_name,
             result=request.reason_code or request.reason_text or request.disposition,
@@ -2503,7 +3308,7 @@ class DispatchCreate(BaseModel):
     agent_id: str = Field(min_length=1, max_length=256)
     agent_role: str = Field(min_length=1, max_length=128)
     task: str | None = Field(default=None, max_length=4096)
-    scope_host: str | None = Field(default=None, max_length=512)
+    application_unit_id: int | None = Field(default=None, gt=0)
     dispatched_at: str | None = Field(default=None, max_length=64)
     status: _DISPATCH_STATUS = "in-progress"
     model: str | None = Field(default=None, max_length=128)
@@ -2523,37 +3328,8 @@ class DispatchCreate(BaseModel):
     finding_slugs: list[str] | None = None
     skills: str | None = Field(default=None, max_length=4096)
     tier: Literal["L1", "L2", "L3", "L4"] | None = None
-    scope_path_prefix: str | None = Field(default=None, max_length=512)
     vuln_classes: str | None = Field(default=None, max_length=2048)
     identity: str | None = Field(default=None, max_length=128)
-    allow_no_skills: bool = False
-
-    @model_validator(mode="after")
-    def _enforce_skills_for_specialists(self) -> "DispatchCreate":
-        """Specialist dispatches must declare which skills the agent loaded.
-
-        The dispatch row is the audit surface for "what context did this
-        specialist actually carry"; without a skill list it loses the
-        provenance report-writer relies on. Operators are exempt because
-        they coordinate phases rather than executing a single skill. L2-2 /
-        L3-6: `allow_no_skills=true` provides an explicit escape for ad-hoc
-        roles so the recording path is not hard-blocked on a self-attested
-        signal — per the harness-not-gate doctrine, prefer a loud WARN +
-        proceed over a 422.
-        """
-        role = (self.agent_role or "").strip()
-        if role.lower() in _DISPATCH_ROLES_WITHOUT_SKILLS:
-            return self
-        if self.allow_no_skills:
-            return self
-        skills = (self.skills or "").strip()
-        if not skills:
-            raise ValueError(
-                f"skills is required for role '{role}'; "
-                "list at least one skill name from `vigil assess list-skills` "
-                "(or set allow_no_skills=true for an ad-hoc role)"
-            )
-        return self
 
 
 class DispatchUpdate(BaseModel):
@@ -2850,7 +3626,7 @@ async def create_dispatch(engagement_key: str, request: DispatchCreate) -> dict[
             agent_id=request.agent_id,
             agent_role=request.agent_role,
             task=request.task,
-            scope_host=request.scope_host,
+            application_unit_id=request.application_unit_id,
             dispatched_at=request.dispatched_at,
             status_value=request.status,
             model=request.model,
@@ -2863,7 +3639,6 @@ async def create_dispatch(engagement_key: str, request: DispatchCreate) -> dict[
             finding_slugs=request.finding_slugs,
             skills=request.skills,
             tier=request.tier,
-            scope_path_prefix=request.scope_path_prefix,
             vuln_classes=request.vuln_classes,
             identity=request.identity,
         )

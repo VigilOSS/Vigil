@@ -1,5 +1,5 @@
 """mitmproxy addon — intercepts HTTP traffic and routes each flow to the
-matching engagement's scope, credential store, cases.db, and orchestrator backend.
+matching engagement's scope, credential store, and orchestrator backend.
 
 Managed launch:
     vigil mitmproxy start
@@ -18,19 +18,24 @@ import ipaddress
 import json
 import os
 import re
-import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-from mitmproxy import http, ctx
-
 from assess.lib.classify import classify_type
-from assess.lib.db import db_init, db_insert_work_item
+from assess.lib.classify_buckets import (
+    CLASSIFIER_VERSION,
+    INERT_TYPES,
+    classify_from_fields,
+)
+from assess.lib.params import header_schema_from_headers
+from assess.lib.scope import required_headers as _scope_required_headers
+from assess.lib.scope import scope_enforcement as _scope_enforcement
+from mitmproxy import ctx, http
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -57,8 +62,8 @@ NOISE_PATH_RE = re.compile(r"(\.gif\?|pixel|beacon)", re.IGNORECASE)
 BODY_TRUNCATE = 100 * 1024  # 100 KB — request body cap
 RESPONSE_SNIPPET_BYTES = 16 * 1024  # 16 KB — response preview cap. Matches
 # `INDEXED_TEXT_BYTES` for assessment_artifacts so an engagement can grep
-# both data sources at the same depth. The cap exists so cases.db rows stay
-# small; truncation is surfaced explicitly via `response_truncated`.
+# both data sources at the same depth. The cap exists so the work-item snapshot
+# stays small; truncation is surfaced explicitly via `response_truncated`.
 
 BINARY_PREFIXES = ("image/", "video/", "audio/", "font/")
 
@@ -174,20 +179,25 @@ def _is_deletion_set_cookie(sc: str) -> bool:
 class EngagementEntry:
     """Per-engagement state the addon needs to route a single flow.
 
-    The addon keeps one ``EngagementEntry`` per active engagement and looks one
-    up by hostname on every captured response. ``db`` is lazily populated by
-    ``CaseCollector`` rather than at registry-load time so we never open a
-    SQLite handle for an engagement that never sees traffic.
+    The addon keeps one ``EngagementEntry`` per active engagement and normally
+    looks one up by hostname on every captured response. An otherwise-unclaimed
+    host may bind to the active global-bypass engagement. The captured work item rides
+    in the request-observation POST (the backend derives the
+    ``assessment_work_items`` row server-side), so the entry holds no local
+    SQLite handle.
     """
 
     key: str
     root: Path
     scope_patterns: list[str]
     out_of_scope_patterns: list[str] = field(default_factory=list)
+    scope_enforcement: str = "enforce"
     scope_priority: int = 0
     updated_at: str = ""
     capture_policy: dict = field(default_factory=dict)
-    db: sqlite3.Connection | None = None
+    # Program-mandated attribution headers (e.g. BugCrowd ``X-Bug-Bounty``) the
+    # ``request`` hook injects onto this engagement's outbound in-scope requests.
+    required_headers: dict = field(default_factory=dict)
 
 
 def _normalize_scope_entry(raw: str) -> str:
@@ -266,12 +276,16 @@ def _coerce_ip(value):
 
 
 def _out_of_scope_covers(
-    patterns: list[str], hostname: str, resolved_ip: str | None = None
+    patterns: list[str],
+    hostname: str,
+    resolved_ip: str | None = None,
+    *,
+    defer_unresolved_cidr: bool = False,
 ) -> bool:
     """Return True when ANY out_of_scope entry could plausibly cover ``hostname``.
 
-    The out-of-scope denylist ALWAYS wins (operator priority #1: never
-    capture/route/persist an out-of-scope host). Beyond literal and ``*.``
+    The caller uses this as the fail-closed deny primitive under normal scope
+    enforcement; the explicit engagement-wide global bypass skips it. Beyond literal and ``*.``
     wildcard host patterns, this understands:
 
     * URL-form entries (``https://host/path``) — reduced to their bare host and
@@ -310,8 +324,15 @@ def _out_of_scope_covers(
             if network is not None:
                 # CIDR carve-out — match against the flow's resolved server IP.
                 if host_ip is None:
-                    # CIDR present but no IP to test THIS flow — uncertain, so
-                    # fail closed on this one flow (per-flow, not engagement-wide).
+                    # CIDR present but no IP to test THIS flow. At request time the
+                    # upstream is usually not connected yet, so failing closed here
+                    # would drop in-scope traffic (and suppress required-header
+                    # injection). ``defer_unresolved_cidr`` skips this one CIDR
+                    # entry so host/URL carve-outs still apply now and the CIDR
+                    # gate is re-evaluated on the response path where the resolved
+                    # IP is available. Otherwise fail closed (per-flow).
+                    if defer_unresolved_cidr:
+                        continue
                     return True
                 if host_ip in network:
                     return True
@@ -335,8 +356,8 @@ def _out_of_scope_covers(
 def _normalize_capture_policy(raw) -> dict:
     """Coerce a registry/​filesystem capture-policy blob into the addon's shape.
 
-    Matches the backend ``DEFAULT_CAPTURE_POLICY`` contract: raw-body capture is
-    OFF unless ``enabled`` is explicitly true.
+    Matches the backend ``DEFAULT_CAPTURE_POLICY`` contract: full-flow metadata
+    recording is OFF unless ``enabled`` is true; each body side remains opt-in.
     """
     data = raw if isinstance(raw, dict) else {}
 
@@ -464,14 +485,6 @@ class CaseCollector:
         self._reload_stop.set()
         if self._reload_thread is not None:
             self._reload_thread.join(timeout=2)
-        with self._registry_lock:
-            for entry in self.registry.values():
-                if entry.db is not None:
-                    try:
-                        entry.db.close()
-                    except Exception:
-                        pass
-                    entry.db = None
 
     # -- registry loading ---------------------------------------------------
 
@@ -525,33 +538,22 @@ class CaseCollector:
         new_registry: dict[str, EngagementEntry] = {}
         with self._registry_lock:
             for entry in entries:
-                # Reuse the existing entry (and its open DB handle + auth lock)
-                # so a registry reload does not flap connections for engagements
-                # that are still active.
+                # Reuse the existing entry object so a registry reload does not
+                # churn per-engagement state for engagements that are still
+                # active.
                 existing = self.registry.get(entry.key)
                 if existing is not None:
                     existing.root = entry.root
                     existing.scope_patterns = entry.scope_patterns
                     existing.out_of_scope_patterns = entry.out_of_scope_patterns
+                    existing.scope_enforcement = entry.scope_enforcement
                     existing.scope_priority = entry.scope_priority
                     existing.updated_at = entry.updated_at
                     existing.capture_policy = entry.capture_policy
+                    existing.required_headers = entry.required_headers
                     new_registry[entry.key] = existing
                 else:
                     new_registry[entry.key] = entry
-            removed = set(self.registry) - set(new_registry)
-            for key in removed:
-                old = self.registry[key]
-                if old.db is not None:
-                    try:
-                        old.db.close()
-                    except Exception:
-                        pass
-                    # Clear the cached connection so a flow still holding a
-                    # reference to the dropped entry re-opens (or no-ops via
-                    # ``_open_db_for``) instead of writing through a closed
-                    # handle.
-                    old.db = None
             self.registry = new_registry
             self._last_reload_at = time.monotonic()
             self._write_routes_cache()
@@ -596,9 +598,9 @@ class CaseCollector:
             if not root.is_dir():
                 # Stale backend row pointing at a directory that doesn't
                 # exist (install-root mismatch, deleted-but-not-tombstoned
-                # engagement, etc.). Skipping here keeps `_open_db_for` from
-                # attempting `db_path.touch()` against a missing parent and
-                # crashing the flow hook.
+                # engagement, etc.). Skipping here keeps routing from binding a
+                # phantom engagement whose root the full-flow sidecar writes
+                # cannot reach.
                 ctx.log.warn(
                     f"proxy_addon: backend lists engagement {key!r} but {root} is not a directory; skipping"
                 )
@@ -628,15 +630,26 @@ class CaseCollector:
                 scope_priority = 0
             updated_at = str(row.get("updated_at") or "")
             capture_policy = _normalize_capture_policy(row.get("capture_policy"))
+            # The backend ``/engagements`` payload does not carry
+            # ``required_headers``, so read them from the engagement's on-disk
+            # scope.json (authoritative). The addon always knows the root even on
+            # the backend path, so injection works whether or not the backend is
+            # up — without this the marker would silently never inject in the
+            # common case where the backend registry fetch succeeds.
+            required_headers, scope_enforcement = (
+                self._scope_request_policy_from_root(root)
+            )
             entries.append(
                 EngagementEntry(
                     key=key,
                     root=root,
                     scope_patterns=scope_patterns,
                     out_of_scope_patterns=out_of_scope_patterns,
+                    scope_enforcement=scope_enforcement,
                     scope_priority=scope_priority,
                     updated_at=updated_at,
                     capture_policy=capture_policy,
+                    required_headers=required_headers,
                 )
             )
         return entries
@@ -672,6 +685,7 @@ class CaseCollector:
                 continue
             scope_patterns = self._scope_patterns_from_dict(scope_data)
             out_of_scope_patterns = self._out_of_scope_patterns_from_dict(scope_data)
+            scope_enforcement = _scope_enforcement(scope_data)
             scope_priority_raw = scope_data.get("scope_priority", 0)
             try:
                 scope_priority = int(scope_priority_raw) if scope_priority_raw is not None else 0
@@ -685,15 +699,20 @@ class CaseCollector:
             except OSError:
                 updated_at = ""
             capture_policy = self._capture_policy_from_root(engagement_dir)
+            # scope_data is already parsed here; reuse it rather than re-reading
+            # scope.json from disk like the backend path must.
+            required_headers = _scope_required_headers(scope_data)
             entries.append(
                 EngagementEntry(
                     key=engagement_dir.name,
                     root=engagement_dir,
                     scope_patterns=scope_patterns,
                     out_of_scope_patterns=out_of_scope_patterns,
+                    scope_enforcement=scope_enforcement,
                     scope_priority=scope_priority,
                     updated_at=updated_at,
                     capture_policy=capture_policy,
+                    required_headers=required_headers,
                 )
             )
         return entries
@@ -710,6 +729,21 @@ class CaseCollector:
         except (OSError, json.JSONDecodeError):
             return _normalize_capture_policy({})
         return _normalize_capture_policy(raw)
+
+    @staticmethod
+    def _scope_request_policy_from_root(
+        engagement_dir: Path,
+    ) -> tuple[dict, str]:
+        """Load attribution and routing policy the backend registry omits."""
+        scope_path = engagement_dir / "scope.json"
+        try:
+            with scope_path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            return {}, "enforce"
+        if not isinstance(data, dict):
+            return {}, "enforce"
+        return _scope_required_headers(data), _scope_enforcement(data)
 
     @staticmethod
     def _scope_patterns_from_dict(scope_data: dict) -> list[str]:
@@ -760,8 +794,10 @@ class CaseCollector:
                     "key": entry.key,
                     "scope_patterns": list(entry.scope_patterns),
                     "out_of_scope": list(entry.out_of_scope_patterns),
+                    "scope_enforcement": entry.scope_enforcement,
                     "scope_priority": entry.scope_priority,
                     "updated_at": entry.updated_at,
+                    "required_headers": dict(entry.required_headers),
                 }
                 for entry in self.registry.values()
             ),
@@ -781,7 +817,11 @@ class CaseCollector:
     # -- matching -----------------------------------------------------------
 
     def _match_engagement(
-        self, hostname: str, resolved_ip: str | None = None
+        self,
+        hostname: str,
+        resolved_ip: str | None = None,
+        *,
+        defer_unresolved_cidr: bool = False,
     ) -> EngagementEntry | None:
         if not hostname:
             return None
@@ -808,17 +848,29 @@ class CaseCollector:
                 else:
                     runners_up.append(entry)
         if best is None:
-            return None
-        chosen = best[3]
+            chosen = self._active_global_bypass_entry()
+            if chosen is None:
+                return None
+        else:
+            chosen = best[3]
         # Out-of-scope carve-out: a host admitted by an in-scope wildcard but
         # covered by ANY of the engagement's out_of_scope entries must not be
-        # captured or routed. The denylist ALWAYS wins — drop the flow entirely.
+        # captured or routed under normal enforcement. The explicit global
+        # bypass overrides target allow/deny admission.
         # ``_out_of_scope_covers`` understands literal/``*.`` host patterns,
         # URL-form entries (reduced to their host) and CIDR entries (matched
         # against ``resolved_ip`` when the flow carries the server IP), and
         # FAILS CLOSED on any entry it cannot evaluate with certainty so an
         # unparseable carve-out never silently admits an out-of-scope host.
-        if _out_of_scope_covers(chosen.out_of_scope_patterns, hostname, resolved_ip):
+        if (
+            chosen.scope_enforcement != "bypass"
+            and _out_of_scope_covers(
+                chosen.out_of_scope_patterns,
+                hostname,
+                resolved_ip,
+                defer_unresolved_cidr=defer_unresolved_cidr,
+            )
+        ):
             suppress_key = (hostname, chosen.key)
             if suppress_key not in self._routed_log_seen:
                 self._routed_log_seen.add(suppress_key)
@@ -841,6 +893,28 @@ class CaseCollector:
                     f"(score={best[0]}, priority={best[1]})"
                 )
         return chosen
+
+    def _active_global_bypass_entry(self) -> EngagementEntry | None:
+        """Bind an otherwise-unclaimed proxy flow to the selected bypass engagement.
+
+        Normal hostname ownership always wins. The active pointer is consulted
+        only when no engagement scope pattern claims the host, which gives a
+        global-bypass engagement an unambiguous capture/attribution owner without
+        letting it steal traffic from another active engagement.
+        """
+        if self.engagements_root is None:
+            return None
+        try:
+            key = (self.engagements_root / ".active").read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        if not key:
+            return None
+        with self._registry_lock:
+            entry = self.registry.get(key)
+            if entry is None or entry.scope_enforcement != "bypass":
+                return None
+            return entry
 
     # -- noise --------------------------------------------------------------
 
@@ -938,7 +1012,7 @@ class CaseCollector:
     def _apply_body_policy(self, body: bytes | None, content_type: str) -> tuple[str | None, bool]:
         """Return (saved_text, truncated). The flag is True only when the
         body was saveable AND larger than BODY_TRUNCATE — so callers can
-        flag the cases.db row, never silently dropping bytes.
+        flag the work-item snapshot, never silently dropping bytes.
         """
         if not body:
             return None, False
@@ -983,6 +1057,24 @@ class CaseCollector:
         response_status: int,
         evidence_ref: str,
         observation_payload: dict,
+        request_headers: dict | None = None,
+        # Flow-derived work-item snapshot. These ride in the observation's
+        # ``work_item`` block; the backend derives the ``assessment_work_items``
+        # row from it in the SAME transaction as the request-variant/coverage
+        # item (ADR 0013 — no dual write). The proxy no longer holds a local
+        # cases.db handle.
+        case_type: str = "unknown",
+        url_path: str = "",
+        request_content_type: str = "",
+        headers: str = "",
+        body: str | None = None,
+        content_length: int = 0,
+        request_body_truncated: bool = False,
+        response_headers: str = "",
+        response_size: int = 0,
+        response_snippet: str | None = None,
+        response_truncated: bool = False,
+        params_key_sig: str = "",
     ) -> dict | None:
         if not self._backend_configured():
             self._warn_backend_unavailable()
@@ -995,11 +1087,36 @@ class CaseCollector:
         # a top-level JSON ARRAY or SCALAR body decodes to a list/str/number
         # here; sending that would 422 the observation and drop the WHOLE
         # capture (silent data loss). Only forward a parsed body when it is a
-        # dict; otherwise send {} — the raw body is still preserved in
-        # ``body_params`` (cases.db) and the full-flow sidecar.
+        # dict; otherwise send {} — the raw body is still preserved in the
+        # ``work_item`` block's ``body_params`` and the full-flow sidecar.
         body_schema = json.loads(params.get("body_params") or "{}")
         if not isinstance(body_schema, dict):
             body_schema = {}
+
+        # Classify the captured flow client-side (the classifier globs the agent
+        # skills tree, so it must stay off the backend). Mirrors the inline
+        # classification ``db_insert_work_item`` used to run at insert time.
+        # Guarded so a classification failure never aborts a capture.
+        try:
+            assignment = classify_from_fields(
+                case_type=case_type,
+                url_path=url_path,
+                query_params=params.get("query_params") or "{}",
+                body_params=params.get("body_params") or "{}",
+                path_params=params.get("path_params") or "{}",
+                url=url,
+                source="proxy",
+            )
+        except Exception as exc:  # noqa: BLE001 — classification must never drop a capture
+            ctx.log.warn(
+                f"proxy_addon: work-item classification failed for {url} — {exc}"
+            )
+            assignment = {
+                "priority_score": 0,
+                "priority_reason": None,
+                "cluster_key": None,
+                "terminal_reason": None,
+            }
 
         payload = {
             "url": url,
@@ -1010,7 +1127,12 @@ class CaseCollector:
             "body_schema": body_schema,
             "path_schema": json.loads(params.get("path_params") or "{}"),
             "cookie_schema": json.loads(params.get("cookie_params") or "{}"),
-            "header_schema": {},
+            # Capture the request header NAMES (values discarded; hop-by-hop /
+            # browser noise filtered — see header_schema_from_headers) so the
+            # depth ledger's CORS/proxy presence triggers fire on live-proxy
+            # traffic, not only the spec/candidate slice. The full headers are
+            # still preserved verbatim in observation_payload.request_headers.
+            "header_schema": header_schema_from_headers(request_headers),
             "path_template": parsed.path or "",
             "discovery_source": "proxy",
             "notes": "",
@@ -1025,6 +1147,39 @@ class CaseCollector:
             "banner": "",
             "coverage_candidates": [],
             "auto_generate_coverage": True,
+            # Work-buffer derivation block — the backend derives the
+            # assessment_work_items row from this in the same transaction as the
+            # request-variant/coverage item. All fields are optional/defaulted
+            # and extra keys are ignored, so this can never 422 an otherwise
+            # well-formed observation. The backend computes ``queue_key`` itself
+            # (``variant:<id>:<case_type>``); ``request_variant_id`` /
+            # ``service_id`` / ``auth_context`` are derived from the observation.
+            "work_item": {
+                "case_type": case_type,
+                "source": "proxy",
+                "status": "skipped" if case_type in INERT_TYPES else "pending",
+                "url_path": url_path,
+                "query_params": params.get("query_params") or "{}",
+                "body_params": params.get("body_params") or "{}",
+                "path_params": params.get("path_params") or "{}",
+                "cookie_params": params.get("cookie_params") or "{}",
+                "headers": headers or "",
+                "body": body or "",
+                "content_type": request_content_type,
+                "content_length": content_length,
+                "request_body_truncated": request_body_truncated,
+                "response_status": response_status,
+                "response_headers": response_headers or "",
+                "response_size": response_size,
+                "response_snippet": response_snippet or "",
+                "response_truncated": response_truncated,
+                "params_key_sig": params_key_sig,
+                "priority_score": assignment.get("priority_score", 0),
+                "priority_reason": assignment.get("priority_reason") or "",
+                "cluster_key": assignment.get("cluster_key") or "",
+                "terminal_reason": assignment.get("terminal_reason") or "",
+                "classifier_version": CLASSIFIER_VERSION,
+            },
         }
         request = Request(
             f"{self.orchestrator_base_url}/engagements/{entry.key}/assessment/request-observations",
@@ -1088,15 +1243,18 @@ class CaseCollector:
         headers: dict,
         tokens: dict,
     ) -> None:
-        """POST a captured credential delta to the backend, which merges it into
-        the engagement's ``default`` identity (host-cookie buckets, flat cookie
-        recompute, header/token merge). Mirrors ``_post_request_observation``.
+        """POST a captured credential delta to the backend, which DERIVES the
+        session identity server-side from the delta's session-anchor material
+        (session-hint cookies + JWT/bearer sub) and merges into that identity —
+        appending a new row for a distinct login, refreshing the row for the same
+        login (host-cookie buckets, flat cookie recompute, header/token merge).
+        The addon stays a thin client and posts no identity_name. Mirrors
+        ``_post_request_observation``.
         """
         if not self._backend_configured():
             self._warn_backend_unavailable()
             return
         payload = {
-            "identity_name": "default",
             "host": host,
             "scope_host": scope_host,
             "cookies": cookies,
@@ -1208,10 +1366,14 @@ class CaseCollector:
         if not hostname:
             return
 
-        # Defense in depth: NEVER harvest credentials for a host any out_of_scope
-        # entry could plausibly cover, even if a routing change ever let this run
-        # for such a host. Out-of-scope always wins (operator priority #1).
-        if _out_of_scope_covers(entry.out_of_scope_patterns, hostname, resolved_ip):
+        # Defense in depth: under normal enforcement, never harvest credentials
+        # for a host an out_of_scope entry could plausibly cover, even if a
+        # routing change ever let this run. The explicit global bypass overrides
+        # target allow/deny admission.
+        if (
+            entry.scope_enforcement != "bypass"
+            and _out_of_scope_covers(entry.out_of_scope_patterns, hostname, resolved_ip)
+        ):
             return
 
         # -- 1. Request cookies (mitmproxy parses them correctly) ------------
@@ -1288,190 +1450,60 @@ class CaseCollector:
             tokens=tokens,
         )
 
-    # -- DB insert ----------------------------------------------------------
-
-    def _open_db_for(self, entry: EngagementEntry) -> sqlite3.Connection | None:
-        with self._registry_lock:
-            if entry.db is not None:
-                return entry.db
-            db_path = entry.root / "cases.db"
-            try:
-                if not entry.root.is_dir():
-                    # Root vanished between registry load and the next flow
-                    # (deleted engagement, unmounted volume). Returning None
-                    # cleanly lets the flow hook continue without writing
-                    # rather than raising up through mitmproxy.
-                    ctx.log.warn(
-                        f"proxy_addon: engagement root {entry.root} is missing — skipping DB open for {entry.key}"
-                    )
-                    return None
-                if not db_path.exists():
-                    db_path.touch()
-                db_init(str(db_path))
-                connection = sqlite3.connect(str(db_path), check_same_thread=False)
-                connection.execute("PRAGMA journal_mode=WAL")
-                connection.execute("PRAGMA busy_timeout=5000")
-                entry.db = connection
-                ctx.log.info(f"proxy_addon: opened {db_path} for engagement {entry.key}")
-                return connection
-            except (sqlite3.OperationalError, OSError) as exc:
-                # OSError covers FileNotFoundError (root deleted between
-                # registry load and open), PermissionError (read-only mount),
-                # and bind-mount surprises. Log and degrade — losing one
-                # capture is better than aborting the whole flow hook.
-                ctx.log.error(
-                    f"proxy_addon: cannot open DB for engagement {entry.key} — {exc.__class__.__name__}: {exc}"
-                )
-                return None
-
-    def _drop_db_for(self, entry: EngagementEntry) -> None:
-        """Close and forget the cached connection so the next _open_db_for
-        re-opens a fresh one.
-
-        A long-lived SQLite connection can stop persisting writes after the
-        underlying cases.db file is checkpointed, VACUUMed, or replaced (new
-        inode) out from under it — e.g. an external ``.recover`` rebuild or a
-        WAL truncate from another process. The connection keeps accepting
-        execute()/commit() without raising, but the rows land in a detached/old
-        file image that other readers never see. This was observed in
-        production: the proxy held a connection for ~2h while work_items in the
-        engagement DB silently stopped growing even though flows were arriving
-        and the backend POSTs succeeded. Dropping the connection here lets the
-        verify-and-retry path in _insert_case recover without a manual restart.
-        """
-        with self._registry_lock:
-            if entry.db is not None:
-                try:
-                    entry.db.close()
-                except sqlite3.Error:
-                    pass
-                entry.db = None
-
-    @staticmethod
-    def _row_persisted(db_path: str, queue_key: str) -> bool:
-        """Confirm a just-written row is visible to an INDEPENDENT reader.
-
-        Staleness is defined relative to what *other* processes see: the
-        backend and CLI read cases.db through fresh short-lived connections, so
-        the only probe that reliably detects a wedged writer is one that also
-        reads through a fresh connection. A read-back on the *writing*
-        connection would still see its own (un-persisted) write when the file
-        was replaced underneath it — masking exactly the failure we are trying
-        to catch. In WAL mode a fresh reader sees any committed write on the
-        current file, and sees nothing when the writer is stranded on a stale
-        inode, which is precisely the discrimination we need. The cost is one
-        file open plus one indexed lookup per capture, negligible on this path.
-        """
-        try:
-            probe = sqlite3.connect(db_path, timeout=5.0)
-        except sqlite3.Error:
-            return False
-        try:
-            row = probe.execute(
-                "SELECT 1 FROM work_items WHERE queue_key = ? LIMIT 1",
-                (queue_key,),
-            ).fetchone()
-            return row is not None
-        except sqlite3.Error:
-            return False
-        finally:
-            probe.close()
-
-    def _insert_case(
-        self,
-        entry: EngagementEntry,
-        *,
-        queue_key: str,
-        request_variant_id: int | None,
-        service_id: int | None,
-        auth_context: str,
-        method: str,
-        url: str,
-        url_path: str,
-        params: dict,
-        headers: str,
-        body: str | None,
-        content_type: str,
-        content_length: int,
-        request_body_truncated: bool,
-        response_status: int,
-        response_headers: str,
-        response_size: int,
-        response_snippet: str | None,
-        response_truncated: bool,
-        case_type: str,
-        params_key_sig: str,
-    ):
-        db_path = str(entry.root / "cases.db")
-
-        def _do_insert(conn: sqlite3.Connection) -> None:
-            db_insert_work_item(
-                db_path,
-                queue_key=queue_key,
-                request_variant_id=request_variant_id,
-                service_id=service_id,
-                coverage_item_id=None,
-                auth_context=auth_context,
-                method=method,
-                url=url,
-                url_path=url_path,
-                query_params=params.get("query_params"),
-                body_params=params.get("body_params"),
-                path_params=params.get("path_params"),
-                cookie_params=params.get("cookie_params"),
-                headers=headers,
-                body=body,
-                content_type=content_type,
-                content_length=content_length,
-                request_body_truncated=request_body_truncated,
-                response_status=response_status,
-                response_headers=response_headers,
-                response_size=response_size,
-                response_snippet=response_snippet,
-                response_truncated=response_truncated,
-                case_type=case_type,
-                source="proxy",
-                params_key_sig=params_key_sig,
-                connection=conn,
-            )
-
-        connection = self._open_db_for(entry)
-        if connection is None:
-            return
-        try:
-            _do_insert(connection)
-        except sqlite3.OperationalError as exc:
-            ctx.log.warn(f"proxy_addon: DB busy/error for {entry.key} — {exc}")
-            return
-
-        # Verify the write is visible to independent readers (see _drop_db_for
-        # / _row_persisted). If it is not, the cached connection is stale:
-        # drop it, reopen fresh, and retry once. INSERT OR IGNORE on
-        # UNIQUE(queue_key) makes the retry idempotent.
-        if self._row_persisted(db_path, queue_key):
-            return
-        ctx.log.warn(
-            f"proxy_addon: write to {entry.key} not visible to readers "
-            f"(stale connection) — reconnecting and retrying"
-        )
-        self._drop_db_for(entry)
-        connection = self._open_db_for(entry)
-        if connection is None:
-            return
-        try:
-            _do_insert(connection)
-        except sqlite3.OperationalError as exc:
-            ctx.log.warn(
-                f"proxy_addon: DB busy/error for {entry.key} on retry — {exc}"
-            )
-            return
-        if not self._row_persisted(db_path, queue_key):
-            ctx.log.error(
-                f"proxy_addon: write to {entry.key} still not visible after "
-                f"reconnect — capture lost for {url}"
-            )
-
     # -- main entry point ---------------------------------------------------
+
+    def _any_required_headers(self) -> bool:
+        """True if any active engagement mandates attribution headers.
+
+        Lets the ``request`` hook skip its per-request scope match entirely on
+        the common (capture-only) path, so proxying stays zero-overhead for
+        engagements that do not configure ``required_headers``."""
+        with self._registry_lock:
+            return any(entry.required_headers for entry in self.registry.values())
+
+    def request(self, flow: http.HTTPFlow):
+        """Inject a matched engagement's scope.json ``required_headers`` onto its
+        outbound in-scope requests (ROE researcher-attribution markers, e.g.
+        BugCrowd's ``X-Bug-Bounty``).
+
+        The shared proxy is the single chokepoint every browser/proxied request
+        passes through, so this closes the attribution gap the tool-exec fail-
+        closed backstop (ADR 0010) cannot see: manual browsing / login capture
+        through FoxyProxy, and any proxied client that did not set the marker
+        itself. On a required-headers program, un-attributed in-scope traffic is
+        a ban-risk, not a nicety.
+
+        Gated + non-destructive: fires only for a request whose hostname a live
+        engagement claims (the SAME ``_match_engagement`` scope + out-of-scope
+        gating the capture path uses) AND that declares ``required_headers``;
+        never overwrites a header the client already set; leaves out-of-scope
+        hosts and header-less engagements untouched."""
+        if self.engagements_root is None:
+            return
+        # Fast path: nothing to inject unless an engagement requires attribution.
+        if not self._any_required_headers():
+            return
+        req = flow.request
+        hostname = (urlparse(req.pretty_url).hostname or "").lower()
+        if not hostname:
+            return
+        # The upstream server IP may be unresolved at request time (pre-connect);
+        # that is fine — _match_engagement keys on hostname and only uses the IP
+        # to tighten the out-of-scope CIDR carve-out. Defer that CIDR fail-closed
+        # to the response path (where the IP is resolved) so a required-header
+        # engagement that ALSO carries a CIDR out_of_scope entry still gets its
+        # attribution header injected on in-scope browser traffic.
+        resolved_ip = self._resolved_server_ip(flow)
+        entry = self._match_engagement(
+            hostname, resolved_ip=resolved_ip, defer_unresolved_cidr=True
+        )
+        if entry is None:
+            return
+        for name, value in entry.required_headers.items():
+            # mitmproxy Headers membership is case-insensitive — never overwrite
+            # or duplicate a marker the client already sent.
+            if name not in req.headers:
+                req.headers[name] = value
 
     def response(self, flow: http.HTTPFlow):
         """Called by mitmproxy for every completed request/response pair."""
@@ -1557,6 +1589,12 @@ class CaseCollector:
             params.get("query_params"), params.get("body_params")
         )
 
+        # POST the observation with its work-item block. The backend derives the
+        # assessment_work_items row from the block in the SAME transaction as the
+        # request-variant/coverage item — no local cases.db write. The observation
+        # POST was already the capture's hard dependency, so this adds no new
+        # failure mode: the "silent capture loss" invariant is preserved because a
+        # captured flow still results in exactly one backend row.
         assessment_record = self._post_request_observation(
             entry=entry,
             url=req.pretty_url,
@@ -1570,43 +1608,29 @@ class CaseCollector:
                 "request_headers": req_headers_dict,
                 "response_headers": dict(resp.headers),
             },
+            request_headers=req_headers_dict,
+            case_type=case_type,
+            url_path=path,
+            request_content_type=request_content_type,
+            headers=req_headers_json,
+            body=saved_body,
+            content_length=content_length,
+            request_body_truncated=request_body_truncated,
+            response_headers=resp_headers_json,
+            response_size=response_size,
+            response_snippet=response_snippet,
+            response_truncated=response_truncated,
+            params_key_sig=params_key_sig,
         )
 
         request_variant_id = None
         if assessment_record:
             request_variant_id = assessment_record["request_variant"]["id"]
-            service = assessment_record.get("service") or {}
-            service_id = service.get("id")
-            queue_key = f"variant:{request_variant_id}:{case_type}"
-
-            self._insert_case(
-                entry,
-                queue_key=queue_key,
-                request_variant_id=request_variant_id,
-                service_id=service_id,
-                auth_context=auth_context,
-                method=req.method,
-                url=req.pretty_url,
-                url_path=path,
-                params=params,
-                headers=req_headers_json,
-                body=saved_body,
-                content_type=request_content_type,
-                content_length=content_length,
-                request_body_truncated=request_body_truncated,
-                response_status=response_status,
-                response_headers=resp_headers_json,
-                response_size=response_size,
-                response_snippet=response_snippet,
-                response_truncated=response_truncated,
-                case_type=case_type,
-                params_key_sig=params_key_sig,
-            )
 
         # Phase 5 full-flow capture. Runs regardless of the observation POST
         # (which needs the backend) so raw sidecars + the JSONL index are still
         # written locally when the backend is unreachable — no silent data loss.
-        # A no-op when the engagement's capture policy leaves raw-body capture
+        # A no-op when the engagement's capture policy leaves full-flow metadata
         # OFF (the default). Never raises up through the flow hook.
         self._maybe_capture_full_flow(
             entry,
@@ -1764,10 +1788,11 @@ class CaseCollector:
         raw_req_body: bytes,
         resp_body: bytes,
     ) -> None:
-        """Write raw body sidecars + JSONL index and POST the full-flow record.
+        """Write the full-flow index/backend row and any selected body sidecars.
 
-        No-op unless the engagement's capture policy enables raw-body capture.
-        Wrapped so a capture failure NEVER crashes the flow hook.
+        No-op unless full-flow metadata recording is enabled. Request and response
+        bodies remain independently opt-in. Wrapped so a capture failure NEVER
+        crashes the flow hook.
         """
         try:
             policy = _normalize_capture_policy(entry.capture_policy)

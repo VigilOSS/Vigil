@@ -100,6 +100,12 @@ record *any* "unreachable" / "not exposed" conclusion against an authed API:
    discard every "unreachable" result you just collected. A dead-session 401/403 is **not**
    evidence of unreachability. (Prior `bank.acme.example` agents recorded "unreachable" verdicts that
    were entirely a dead captured token — see §C for the fix that decouples from token TTL.)
+   When the identity lives in the credential store, run this gate with the built-in probe —
+   `vigil assess auth status --probe --identity <name> --probe-url <authed-url>` — instead of a
+   one-off own-object curl: it never follows redirects and persists a real `live`/`dead`/`unknown`
+   verdict against that identity (declare `material.liveness` once via `vigil auth import`/`edit`
+   if it isn't set yet), so every subsequent dispatch reads the same ground truth rather than
+   re-deriving it.
 2. **Run the differential.** For each path under test, compare **bare (no-auth)** vs **full
    live-envelope** responses, in *both* the direct and the BFF-wrapped form. If bare and
    full-live are byte-identical `27368`, the path is not routed (auth is irrelevant — there's no

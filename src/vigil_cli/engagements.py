@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Iterator, Protocol
 from urllib.parse import urlparse
 
 from . import docker
@@ -29,9 +33,9 @@ from .paths import (
     resolve_orchestrator_data_dir,
 )
 
-# Persisted active-engagement pointer key in ~/.config/vigil/config.json. Kept
-# in lock-step with assess.lib.config.ACTIVE_ENGAGEMENT_CONFIG_KEY so the
-# top-level `vigil` verbs and `vigil assess` read the SAME pointer.
+# Persisted active-engagement pointer key in ~/.config/vigil/config.json. This
+# serves top-level `vigil` verbs and shared services; `vigil assess` deliberately
+# ignores it so concurrent assessment sessions cannot retarget each other.
 ACTIVE_ENGAGEMENT_CONFIG_KEY = "active_engagement_dir"
 
 ENGAGEMENT_TYPES = {"web", "code", "both", "android", "blue"}
@@ -166,6 +170,19 @@ def resolve_rate_limit(value: float | str | None) -> float | None:
     return rate
 
 
+def resolve_aggregate_rate_limit(value: float | str | None) -> float | None:
+    """Normalize the engagement-wide concurrent target-rate ceiling."""
+    if value is None:
+        return None
+    try:
+        rate = float(str(value).strip())
+    except ValueError as exc:
+        raise SystemExit("--aggregate-rate-limit must be a positive number") from exc
+    if rate <= 0:
+        raise SystemExit("--aggregate-rate-limit must be greater than 0 req/s")
+    return rate
+
+
 @dataclass(frozen=True, slots=True)
 class CreateEngagementOptions:
     install_root: Path
@@ -192,6 +209,8 @@ class CreateEngagementOptions:
     # gate). Written into scope.json's ``rate_limit`` only when set, for
     # HTTP-target engagements.
     rate_limit: float | None = None
+    # Concurrent target-facing runs acquire backend leases against this ceiling.
+    rate_limit_aggregate_rps: float | None = None
     # Blue-only fields (ignored unless engagement_type == "blue"):
     customer: str | None = None
     platforms: list[str] = field(default_factory=list)
@@ -460,9 +479,17 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
         # byte-identical and recon stages fall through to their tool defaults.
         if options.rate_limit is not None:
             scope["rate_limit"] = options.rate_limit
-    elif options.required_headers or options.out_of_scope or options.rate_limit is not None:
+        if options.rate_limit_aggregate_rps is not None:
+            scope["rate_limit_aggregate_rps"] = options.rate_limit_aggregate_rps
+    elif (
+        options.required_headers
+        or options.out_of_scope
+        or options.rate_limit is not None
+        or options.rate_limit_aggregate_rps is not None
+    ):
         raise SystemExit(
-            "--program/--header, --out-of-scope, and --rate-limit apply only to "
+            "--program/--header, --out-of-scope, --rate-limit, and "
+            "--aggregate-rate-limit apply only to "
             f"HTTP-target engagements (web/both/android), not '{options.engagement_type}'."
         )
 
@@ -523,6 +550,7 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
         repos=list(plan.repos),
         date_label=plan.date_label,
     )
+    _write_issues_doc(eng_dir)
     _write_engagement_brief_stub(agent_root, eng_dir)
     # No auth.json scaffold: credentials live in the centralized store and an
     # engagement with no credentials reads as anonymous (vigil auth import /
@@ -558,7 +586,9 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
         # on a missing path. The launcher's grep falls through to the
         # default when the file has no ORCHESTRATOR_BASE_URL line.
         (eng_dir / ".orchestrator.env").write_text("", encoding="utf-8")
-    _init_cases_db(agent_root, eng_dir)
+    # No local work-buffer DB is created: the work buffer lives in the
+    # orchestrator backend (assessment_work_items) and is populated on first
+    # ingest (ADR 0013). Fresh engagements start with an empty backend buffer.
 
     client_kind = _install_client_kind(agent_root)
     _write_prompt_wrappers(agent_root, eng_dir, client_kind, engagement_type=options.engagement_type)
@@ -584,7 +614,11 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
     _write_launchers(agent_root, eng_dir, client_kind, skip_permissions=options.skip_permissions)
     _emit_bootstrap_scope_summary(scope)
     _verify_backend_install_root(install_root, eng_dir)
-    _emit_post_create_footer(key)
+    # Blue engagements own their own footer (blue.py:_cmd_engage) and must not
+    # emit the red-infra footer (mitmproxy/oob are irrelevant to incident
+    # response). Skip entirely for blue so blue.py has sole footer ownership.
+    if options.engagement_type != "blue":
+        _emit_post_create_footer(key)
     return CreatedEngagement(key=key, path=eng_dir)
 
 
@@ -594,7 +628,8 @@ def _emit_post_create_footer(key: str, *, runner: docker.Runner = docker.run_com
     Reuses the existing helpers from ``docker`` and ``oob`` so we don't
     re-implement liveness probes. stdout still carries just the path so
     ``eng=$(vigil engagement create ...)`` keeps working — this writes to
-    stderr only.
+    stderr only. Blue engagements skip this entirely — blue.py owns its own
+    footer (no mitmproxy/oob lines).
     """
     try:
         mitm_running = docker.container_running("vigil-proxy", runner=runner)
@@ -720,19 +755,61 @@ def _emit_bootstrap_scope_summary(scope: dict[str, object]) -> None:
     print(f"[vigil] scope: {len(raw_hosts)} entries", file=sys.stderr)
 
 
-def _load_engagement_scope(install_root: Path, key: str) -> tuple[Path, dict[str, Any]]:
-    """Resolve an engagement's scope.json by key for in-place mutation."""
+def _engagement_scope_path(install_root: Path, key: str) -> Path:
+    """Resolve an engagement's scope.json by key."""
     eng_dir = engagements_root(install_root) / key
     scope_path = eng_dir / "scope.json"
     if not scope_path.is_file():
         raise SystemExit(f"engagement '{key}' not found (no scope.json at {scope_path}).")
-    scope = _read_json(scope_path)
-    if str(scope.get("engagement_type") or "") not in _HTTP_TARGET_TYPES:
-        raise SystemExit(
-            f"engagement '{key}' is type '{scope.get('engagement_type')}'; required "
-            "headers / out-of-scope apply only to HTTP-target engagements."
-        )
-    return scope_path, scope
+    return scope_path
+
+
+@contextmanager
+def _scope_file_lock(scope_path: Path) -> Iterator[None]:
+    """Use the same lock path as assess-side scope.json writers."""
+    lock_path = scope_path.parent / ".locks" / "scope-json.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def mutate_scope_file(
+    scope_path: Path,
+    mutator: Callable[[dict[str, Any]], object],
+) -> dict[str, Any]:
+    """Apply an in-place scope.json mutation under the shared writer lock."""
+    with _scope_file_lock(scope_path):
+        try:
+            scope = json.loads(scope_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"could not read scope.json at {scope_path}: {exc}") from exc
+        if not isinstance(scope, dict):
+            raise SystemExit(f"scope.json at {scope_path} is not a JSON object.")
+        mutator(scope)
+        _write_json_atomic(scope_path, scope)
+    return scope
+
+
+def _mutate_http_scope(
+    install_root: Path,
+    key: str,
+    mutator: Callable[[dict[str, Any]], object],
+) -> dict[str, Any]:
+    scope_path = _engagement_scope_path(install_root, key)
+
+    def checked_mutation(scope: dict[str, Any]) -> None:
+        if str(scope.get("engagement_type") or "") not in _HTTP_TARGET_TYPES:
+            raise SystemExit(
+                f"engagement '{key}' is type '{scope.get('engagement_type')}'; required "
+                "headers / out-of-scope apply only to HTTP-target engagements."
+            )
+        mutator(scope)
+
+    return mutate_scope_file(scope_path, checked_mutation)
 
 
 def set_engagement_header(install_root: Path, key: str, header: str) -> dict[str, str]:
@@ -743,29 +820,32 @@ def set_engagement_header(install_root: Path, key: str, header: str) -> dict[str
     name, value = name.strip(), value.strip()
     if not name:
         raise SystemExit(f"header '{header}' has an empty header name.")
-    scope_path, scope = _load_engagement_scope(install_root, key)
-    headers = scope.get("required_headers")
-    if not isinstance(headers, dict):
-        headers = {}
-    headers[name] = value
-    scope["required_headers"] = headers
-    _write_json(scope_path, scope)
-    return headers
+    def update(scope: dict[str, Any]) -> None:
+        headers = scope.get("required_headers")
+        if not isinstance(headers, dict):
+            headers = {}
+        headers[name] = value
+        scope["required_headers"] = headers
+
+    scope = _mutate_http_scope(install_root, key, update)
+    return dict(scope["required_headers"])
 
 
 def unset_engagement_header(install_root: Path, key: str, name: str) -> dict[str, str]:
     """Remove a `required_headers` entry from an existing engagement."""
-    scope_path, scope = _load_engagement_scope(install_root, key)
+    def update(scope: dict[str, Any]) -> None:
+        headers = scope.get("required_headers")
+        if not isinstance(headers, dict) or name not in headers:
+            raise SystemExit(f"engagement '{key}' has no required header '{name}'.")
+        del headers[name]
+        if headers:
+            scope["required_headers"] = headers
+        else:
+            scope.pop("required_headers", None)
+
+    scope = _mutate_http_scope(install_root, key, update)
     headers = scope.get("required_headers")
-    if not isinstance(headers, dict) or name not in headers:
-        raise SystemExit(f"engagement '{key}' has no required header '{name}'.")
-    del headers[name]
-    if headers:
-        scope["required_headers"] = headers
-    else:
-        scope.pop("required_headers", None)
-    _write_json(scope_path, scope)
-    return headers if isinstance(headers, dict) else {}
+    return dict(headers) if isinstance(headers, dict) else {}
 
 
 def add_out_of_scope(install_root: Path, key: str, entries: list[str]) -> list[str]:
@@ -773,33 +853,34 @@ def add_out_of_scope(install_root: Path, key: str, entries: list[str]) -> list[s
     new_entries = resolve_out_of_scope(entries)
     if not new_entries:
         raise SystemExit("no valid --out-of-scope entries given.")
-    scope_path, scope = _load_engagement_scope(install_root, key)
-    current = scope.get("out_of_scope")
-    if not isinstance(current, list):
-        current = []
-    merged = list(current)
-    for entry in new_entries:
-        if entry not in merged:
-            merged.append(entry)
-    scope["out_of_scope"] = merged
-    _write_json(scope_path, scope)
-    return merged
+    def update(scope: dict[str, Any]) -> None:
+        current = scope.get("out_of_scope")
+        merged = list(current) if isinstance(current, list) else []
+        for entry in new_entries:
+            if entry not in merged:
+                merged.append(entry)
+        scope["out_of_scope"] = merged
+
+    scope = _mutate_http_scope(install_root, key, update)
+    return list(scope["out_of_scope"])
 
 
 def remove_out_of_scope(install_root: Path, key: str, entry: str) -> list[str]:
     """Remove an out-of-scope carve-out from an existing engagement."""
     target = entry.strip().lower()
-    scope_path, scope = _load_engagement_scope(install_root, key)
-    current = scope.get("out_of_scope")
-    if not isinstance(current, list) or target not in current:
-        raise SystemExit(f"engagement '{key}' has no out-of-scope entry '{entry}'.")
-    remaining = [item for item in current if item != target]
-    if remaining:
-        scope["out_of_scope"] = remaining
-    else:
-        scope.pop("out_of_scope", None)
-    _write_json(scope_path, scope)
-    return remaining
+    def update(scope: dict[str, Any]) -> None:
+        current = scope.get("out_of_scope")
+        if not isinstance(current, list) or target not in current:
+            raise SystemExit(f"engagement '{key}' has no out-of-scope entry '{entry}'.")
+        remaining = [item for item in current if item != target]
+        if remaining:
+            scope["out_of_scope"] = remaining
+        else:
+            scope.pop("out_of_scope", None)
+
+    scope = _mutate_http_scope(install_root, key, update)
+    remaining = scope.get("out_of_scope")
+    return list(remaining) if isinstance(remaining, list) else []
 
 
 def list_engagements(install_root: Path) -> list[EngagementRow]:
@@ -829,9 +910,10 @@ def _both_engagements_missing_code_phase(install_root: Path) -> list[Path]:
 
     Dual-track phase tracking landed mid-flight: engagements created before
     that change only carry `current_phase` and confuse `transition-phase
-    --track code`. The migration in `migrate_legacy_both_engagements` sets
-    code_phase='ingest' for those engagements; this helper is the read-only
-    detector used by `vigil status` and the CLI summary.
+    --track code`. Setting code_phase='ingest' in scope.json clears this;
+    this helper is the read-only detector used by `vigil status` and the CLI
+    summary. (The one-shot `vigil engagement migrate-scope` command that used
+    to perform the write was retired in the 2026-07 CLI consolidation.)
     """
     affected: list[Path] = []
     root = engagements_root(install_root)
@@ -850,24 +932,6 @@ def _both_engagements_missing_code_phase(install_root: Path) -> list[Path]:
         if not scope.get("code_phase"):
             affected.append(eng_dir)
     return affected
-
-
-def migrate_legacy_both_engagements(install_root: Path, *, dry_run: bool = False) -> list[dict[str, str]]:
-    """Set code_phase='ingest' on legacy `engagement_type=both` engagements
-    that predate the dual-track phase change. Returns a list of
-    ``{"key", "from", "to"}`` dicts describing what was (or would be)
-    migrated. ``dry_run=True`` skips the write.
-    """
-    migrated: list[dict[str, str]] = []
-    for eng_dir in _both_engagements_missing_code_phase(install_root):
-        scope_path = eng_dir / "scope.json"
-        scope = _read_json(scope_path)
-        prior = str(scope.get("code_phase") or "")
-        scope["code_phase"] = "ingest"
-        migrated.append({"key": eng_dir.name, "from": prior, "to": "ingest"})
-        if not dry_run:
-            _write_json(scope_path, scope)
-    return migrated
 
 
 def resolve_engagement_path(install_root: Path, key: str | None = None, *, select: bool = False) -> Path:
@@ -925,15 +989,15 @@ def _warn_env_mismatch(resolved_dir: Path, tier: str) -> None:
 
 
 def resolve_current_engagement() -> tuple[Path, str] | None:
-    """Unified "current engagement" resolver for the top-level ``vigil`` verbs.
+    """Resolve context for top-level, non-assessment ``vigil`` verbs.
 
-    Mirrors the assess resolver's lower tiers (the ``--engagement-dir`` flag
-    tier is handled by callers via :func:`resolve_engagement_path`):
+    The ``--engagement-dir`` flag tier is handled by callers via
+    :func:`resolve_engagement_path`:
 
         CWD walk-up  ->  active pointer  ->  ``$ENGAGEMENT_DIR``
 
     Returns ``(path, tier)`` with tier in ``{"cwd", "pointer", "env"}`` or None.
-    Keeps ``vigil`` verbs and ``vigil assess`` agreeing on "current".
+    Assessment commands use their independent fail-closed session binding.
     """
     cwd = Path.cwd()
     for candidate in (cwd, *cwd.parents):
@@ -1046,6 +1110,26 @@ def _write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _write_json_atomic(path: Path, payload: object) -> None:
+    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp_path = Path(tmp_name)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+            tmp_file.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def _read_json(path: Path) -> dict[str, object]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -1063,10 +1147,47 @@ _CHROME_PATHS = [
 ]
 
 
+_OPERATOR_DETAILS_RE = re.compile(r"^##\s+OPERATOR DETAILS\b", re.MULTILINE)
+
+
+def _strip_operator_details(markdown: str) -> str:
+    """Drop the ``## OPERATOR DETAILS — NOT FOR SUBMISSION`` reference section.
+
+    ``vigil assess export submission`` appends an internal-only section (finding
+    metadata, hygiene warnings, structured proof, linked command runs) below a
+    second ``---`` divider. It must never reach a rendered submission PDF, so
+    truncate the document at that heading and drop the divider that introduces it.
+    A document without the heading (e.g. a blue-incident ``report.md``) is
+    returned unchanged.
+    """
+    match = _OPERATOR_DETAILS_RE.search(markdown)
+    if match is None:
+        return markdown
+    head = markdown[: match.start()]
+    # Also drop the trailing horizontal-rule divider that introduces the section.
+    head = re.sub(r"\n-{3,}[ \t]*\n?\s*$", "\n", head)
+    return head.rstrip() + "\n"
+
+
 def export_pdf(eng_dir: Path, output: Path | None = None) -> Path:
+    # Blue incident engagements still scaffold a report.md; render it as before.
+    # Red/code/android engagements no longer seed one — their closeout is the
+    # per-finding submissions tree (`vigil assess export submission` writes
+    # submissions/<slug>/submission.md), so fall back to rendering that tree.
     report_md = eng_dir / "report.md"
-    if not report_md.exists():
-        raise SystemExit(f"report.md not found in {eng_dir}")
+    if report_md.exists():
+        sources: list[Path] = [report_md]
+    else:
+        sources = sorted(
+            p for p in eng_dir.glob("submissions/*/submission.md") if p.is_file()
+        )
+        if not sources:
+            raise SystemExit(
+                f"nothing to export in {eng_dir}: no report.md and no "
+                "submissions/<slug>/submission.md. Generate per-finding submissions "
+                "first with `vigil assess export submission <finding-slug> "
+                "--platform <bugcrowd|hackerone|direct>`."
+            )
 
     pandoc = shutil.which("pandoc")
     if not pandoc:
@@ -1080,9 +1201,20 @@ def export_pdf(eng_dir: Path, output: Path | None = None) -> Path:
         output = eng_dir / "report.pdf"
 
     html_path = eng_dir / ".report_tmp.html"
+    # Render from stripped copies so the internal-only OPERATOR DETAILS reference
+    # section in each submission.md never lands in the pasteable report.pdf.
+    stripped_dir = eng_dir / ".submission_tmp"
     try:
+        stripped_dir.mkdir(exist_ok=True)
+        render_sources: list[Path] = []
+        for idx, src in enumerate(sources):
+            stripped = _strip_operator_details(src.read_text(encoding="utf-8"))
+            tmp = stripped_dir / f"{idx:03d}-{src.parent.name}.md"
+            tmp.write_text(stripped, encoding="utf-8")
+            render_sources.append(tmp)
         subprocess.run(
-            [pandoc, str(report_md), "-o", str(html_path), "--standalone", "--embed-resources",
+            [pandoc, *[str(src) for src in render_sources], "-o", str(html_path),
+             "--standalone", "--embed-resources",
              "--metadata", "title=Engagement Report"],
             check=True,
         )
@@ -1095,6 +1227,7 @@ def export_pdf(eng_dir: Path, output: Path | None = None) -> Path:
         )
     finally:
         html_path.unlink(missing_ok=True)
+        shutil.rmtree(stripped_dir, ignore_errors=True)
 
     return output
 
@@ -1152,10 +1285,10 @@ def _finding_render():
 
     The finding->markdown block is rendered by a single shared module that
     physically lives under ``agent/scripts/assess/lib`` so the assess
-    ``export-findings`` command can import it directly. This installable ``src``
+    ``export findings`` command can import it directly. This installable ``src``
     package reaches it through the same import bridge it already uses for
-    ``assess.lib.client`` / ``assess.lib.db`` (see ``paths.add_assess_import_path``
-    and ``_init_cases_db``): the production ``vigil engagement export`` path puts
+    ``assess.lib.client`` (see ``paths.add_assess_import_path`` and
+    ``_build_assessment_client``): the production ``vigil engagement export`` path puts
     ``agent/scripts`` on ``sys.path`` before this runs (via
     ``_build_assessment_client``), but tests and any direct caller may not — so
     fall back to discovering the repo root from this module's own location and
@@ -1203,8 +1336,8 @@ def _render_finding_draft(finding: dict) -> str:
 
     Uses the shared ``assess.lib.finding_render.render_finding`` so a single
     finding's draft block is identical to its section in the engagement-wide
-    ``findings.md`` (export-findings), but scoped to one finding per file. The
-    root-cause grouping bullets that export-findings includes inline are omitted
+    ``findings.md`` (export findings), but scoped to one finding per file. The
+    root-cause grouping bullets that export findings includes inline are omitted
     here because each finding's grouping context is rendered separately into its
     own ``report.md`` (see ``_render_finding_report``). The shared renderer
     returns the newline-stripped block; draft.md is newline-terminated so the
@@ -1222,10 +1355,14 @@ def _render_finding_report(record: dict, *, group: dict | None = None) -> str:
     rendering can note sibling findings the way the report-writer consumes
     them.
     """
+    # An unset field renders as ``(unset)``, matching ``render_finding`` in
+    # ``assess.lib.finding_render``: printing ``INFO`` for a finding whose severity
+    # nobody set states a triage decision the record does not contain, and the
+    # reader cannot tell it apart from a real one.
     report_id = str(record.get("report_id") or "---")
     slug = str(record.get("slug") or "")
-    title = str(record.get("title") or "(untitled)")
-    severity = str(record.get("severity") or "info").upper()
+    title = str(record.get("title") or "(unset)")
+    severity = str(record.get("severity") or "(unset)").upper()
     header = f"# {report_id} — {title}"
     lines = [header, ""]
     meta = f"- **ID**: {report_id}"
@@ -1248,7 +1385,11 @@ def _render_finding_report(record: dict, *, group: dict | None = None) -> str:
         score_str = f" ({cvss_score})" if cvss_score is not None else ""
         lines.append(f"- **CVSS**: {cvss_vector}{score_str}")
 
-    impact = record.get("impact") or record.get("summary") or ""
+    # No ``impact ← summary`` fallback: Summary prose under an Impact heading makes
+    # an unauthored impact statement look authored, and the reader cannot tell which
+    # field they are reading. ``render_finding`` and ``export submission`` refuse the
+    # same substitution, so all three renderings of one finding agree.
+    impact = record.get("impact") or ""
     if impact:
         lines.extend(["", "## Impact", "", str(impact)])
     evidence = record.get("evidence_detail") or record.get("evidence_ref") or ""
@@ -1257,8 +1398,16 @@ def _render_finding_report(record: dict, *, group: dict | None = None) -> str:
     steps = _string_list(record.get("steps_to_reproduce"))
     if steps:
         lines.extend(["", "## Steps to Reproduce", ""])
-        for i, step in enumerate(steps, 1):
-            lines.append(f"{i}. {step}")
+        # The shared ``step_lines`` helper, so report.md and draft.md render one
+        # finding's steps identically: each authored item verbatim, numbering left
+        # to the author.
+        lines.extend(_finding_render().step_lines(steps))
+        # The audit rows behind those steps, named right under them — same reason
+        # as ``render_finding``: without them a reader cannot tell a transcript
+        # from a reconstruction.
+        repro_runs = _string_list(record.get("repro_runs"))
+        if repro_runs:
+            lines.extend(["", f"Repro runs: {', '.join(repro_runs)}"])
     remediation = record.get("remediation") or ""
     if remediation:
         lines.extend(["", "## Remediation", "", str(remediation)])
@@ -1285,7 +1434,7 @@ def _placeholder_debate(finding: dict) -> str:
         "No verification-narrative artifact (kind=\"verification-narrative\") is "
         "linked to this finding yet.\n\n"
         "Register one during verification with:\n"
-        "    vigil assess verify-finding "
+        "    vigil assess finding verify "
         f"{finding.get('slug', '<slug>')} --disposition <disposition> "
         "--reason \"...\" --narrative <path-to-debate.md>\n"
     )
@@ -1296,7 +1445,7 @@ def _fetch_debate_narrative(client: FindingReader, slug: str, finding: dict) -> 
 
     Searches the artifact index for a ``verification-narrative`` artifact
     linked to ``slug`` (Phase 3 registers these via `vigil assess
-    verify-finding --narrative`). When found, the top hit's full content is
+    finding verify --narrative`). When found, the top hit's full content is
     read back via the per-artifact GET (which inlines ``content`` for textual
     files). Any miss — no artifact, an unreadable id, or a transport hiccup —
     degrades to the placeholder so a single broken narrative never aborts the
@@ -1447,32 +1596,49 @@ def export_engagement_tree(
 
 
 def _write_report(eng_dir: Path, engagement_type: str, *, name: str | None, target: str, repos: list[dict[str, str]], date_label: str) -> None:
+    # Red-family engagements (web/code/both/android, and any default/fallback
+    # type) no longer seed a `report.md`: their closeout artifact is the
+    # per-finding submissions tree written by `vigil assess export submission`
+    # and rendered to PDF by `export_pdf`. Only blue incident engagements keep a
+    # scaffolded `report.md` for the report-writer to render into.
+    if engagement_type != "blue":
+        return
+    # Blue incident engagements retain a minimal scaffold so report-writer
+    # dispatch always has a report.md to render into.
     lines = ["# Engagement Report", ""]
-    if engagement_type == "code":
-        lines.append(f"- **Name**: {name}")
-        display = ", ".join(repo["path"] for repo in repos) if repos else "(none - add source to ./source/)"
-        lines.append(f"- **Repositories**: {display}")
-    elif engagement_type == "android":
-        lines.append(f"- **Name**: {name}")
-        lines.append("- **Scope Mode**: Android artifact-only")
-    elif engagement_type == "web":
-        lines.append(f"- **Target**: {target}")
-    elif engagement_type == "blue":
-        # Blue report variant lives behind plan unit 16. Until then we seed a
-        # minimal scaffold mirroring the other branches so report-writer
-        # dispatch always has a report.md to render into.
-        lines.append(f"- **Customer**: {name or '-'}")
-        lines.append(f"- **Scope**: {target}")
-        lines.append("- **Report Kind**: Incident (blue)")
-    else:
-        lines.append(f"- **Name**: {name}")
-        lines.append(f"- **Target**: {target}")
+    lines.append(f"- **Customer**: {name or '-'}")
+    lines.append(f"- **Scope**: {target}")
+    lines.append("- **Report Kind**: Incident (blue)")
     lines.extend([f"- **Engagement Date**: {date_label}", "- **Status**: Pending - report not yet generated", "", "---", ""])
     (eng_dir / "report.md").write_text("\n".join(lines), encoding="utf-8")
 
 
-# Canonical program-brief section headings (PROMPT-TODO §2 / CONSOLIDATED-PLAN
-# §3.10). The stub mirrors the `agent/references/_template-engagement.md`
+def _write_issues_doc(eng_dir: Path) -> None:
+    """Seed ISSUES-AND-ENHANCEMENTS.md — the operator's log of REUSABLE lessons.
+
+    This file is for product / prompt / tooling improvements noticed DURING the
+    engagement that outlive it (a confusing CLI flag, a missing skill step, a
+    tool that needs a wrapper). It is deliberately NOT a findings log: findings,
+    evidence, reproducing commands, and specialist handoffs stay backend-owned
+    (recorded via `vigil assess`) and are never duplicated here.
+    """
+    lines = [
+        "# Issues & Enhancements",
+        "",
+        "> Operator-owned log of REUSABLE product / prompt / tooling lessons from",
+        "> this engagement — things worth fixing in Vigil itself (a confusing flag,",
+        "> a missing skill step, a tool that needs a wrapper), not per-target notes.",
+        ">",
+        "> NOT a findings log. Findings, evidence, reproducing commands, and",
+        "> specialist handoffs stay backend-owned — record them via `vigil assess`,",
+        "> do not duplicate them here.",
+        "",
+    ]
+    (eng_dir / "ISSUES-AND-ENHANCEMENTS.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+# Canonical program-brief section headings. The stub mirrors the
+# `agent/references/_template-engagement.md`
 # template's shape so an engagement starts with a structured, fill-in-the-blanks
 # program brief even before an operator authors one.
 _ENGAGEMENT_BRIEF_SECTIONS: tuple[tuple[str, str], ...] = (
@@ -1559,36 +1725,6 @@ def _write_engagement_brief_stub(agent_root: Path, eng_dir: Path) -> None:
     (eng_dir / "ENGAGEMENT.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
-def _init_cases_db(agent_root: Path, eng_dir: Path) -> None:
-    """Initialize the engagement work-buffer DB.
-
-    Delegates to `agent/scripts/assess/lib/db.py:db_init` so a fresh DB ends
-    up with the same schema, priority-column migration, and
-    `work_items_per_host` view as one created via the assess CLI. Reaching
-    into the agent module here keeps a single source of truth for cases.db
-    initialization — direct `executescript(schema.sql)` would skip the
-    runtime-applied view that owns IPv6/port-strip host extraction.
-    """
-    db_path = eng_dir / "cases.db"
-    db_path.touch()
-
-    scripts_dir = agent_root / "scripts"
-    sys_path_added = False
-    if str(scripts_dir) not in sys.path:
-        sys.path.insert(0, str(scripts_dir))
-        sys_path_added = True
-    try:
-        from assess.lib.db import db_init  # type: ignore[import-not-found]
-
-        db_init(str(db_path))
-    finally:
-        if sys_path_added:
-            try:
-                sys.path.remove(str(scripts_dir))
-            except ValueError:
-                pass
-
-
 def _snapshot_orchestrator_database(install_root: Path) -> None:
     data_dir = resolve_orchestrator_data_dir(install_root)
     db_path = data_dir / "orchestrator.sqlite3"
@@ -1659,7 +1795,7 @@ _SPECIALIST_STOP_SIGN = (
     "     this file. It is an OPERATOR pointer and its startup/runtime banner must not bleed\n"
     "     into your context. Load ONLY your own role file and every entry in its `Load First`.\n"
     "     Auto-loaded CLAUDE.md/AGENTS.md pointers up the directory tree do not apply to you.\n"
-    '     See agent/shared-constraints-core.md ("Specialist Context Isolation") for why. -->\n'
+    '     See agent/shared-specialist-core.md ("Specialist Context Isolation") for why. -->\n'
 )
 
 # Operator-only ROE pointer added to per-engagement wrappers. ENGAGEMENT.md carries this
@@ -1706,7 +1842,7 @@ def _write_prompt_wrappers(agent_root: Path, eng_dir: Path, client_kind: str, *,
 Artifacts:
 - Use `vigil assess artifact register <path>` to index engagement files explicitly
 - Use `vigil assess ...` for assessment operations from any directory
-- Start clients through this engagement directory's launcher so ENGAGEMENT_DIR is exported automatically
+- Start clients through this engagement directory's launcher so ENGAGEMENT_DIR is exported for artifact paths and VIGIL_SESSION_ENGAGEMENT_DIR binds assessment state
 - The local .orchestrator.env provides this engagement's orchestrator base URL; install-root env files are only fallbacks
 """
     # AGENTS.md is the canonical operator prompt (point engagement wrappers at
@@ -1835,7 +1971,7 @@ GOOSE_DISPATCH_DIRECTIVE = (
     "- Run `vigil assess kali` YOURSELF only for the Operator-executed exceptions (one login test, a\n"
     "  fingerprint/health smoke, backend-write helpers). The 'Sanctioned inline form' in AGENTS.md is\n"
     "  for OpenCode and those exceptions — on Goose, delegate the probing rather than doing it inline.\n"
-    "- **Record** findings and surfaces to the backend (`vigil assess record-finding` /\n"
+    "- **Record** findings and surfaces to the backend (`vigil assess finding record` /\n"
     "  `record-surface`) as you confirm them, even on a fast solve — backend state is the deliverable.\n"
 )
 
@@ -2093,6 +2229,7 @@ set -euo pipefail
 
 ENGAGEMENT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 export ENGAGEMENT_DIR
+export VIGIL_SESSION_ENGAGEMENT_DIR="$ENGAGEMENT_DIR"
 ENGAGEMENT_KEY="$(basename "$ENGAGEMENT_DIR")"
 export ENGAGEMENT_KEY
 VIGIL_AGENT_ROOT="{agent_root}"

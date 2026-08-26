@@ -33,7 +33,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from assess.lib.classify_buckets import INERT_TYPES, normalize_route_template
-from assess.lib.config import anchor_engagement_relative
+from assess.lib.client import AssessmentClient
+from assess.lib.config import load_config
 
 
 def _param_count(row: dict) -> int:
@@ -234,7 +235,6 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "arjun-select",
         help="Build a gated Arjun target list (live + dynamic + template-deduped + param-poor) from the work buffer.",
     )
-    p.add_argument("db_path", help="Path to cases.db")
     p.add_argument(
         "-o",
         "--out",
@@ -269,26 +269,13 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 
 
 def run(args: argparse.Namespace) -> None:
-    # Anchor a relative cases.db to the engagement dir (not the process cwd) so a
-    # subagent whose cwd drifted between bash calls can't probe/read an unrelated
-    # cwd database — the is_file() check below must test the engagement's DB.
-    db_path = anchor_engagement_relative(args.db_path, getattr(args, "engagement_dir", None))
-    if db_path != args.db_path:
-        print(
-            f"arjun-select: anchored relative db path '{args.db_path}' -> '{db_path}'",
-            file=sys.stderr,
-        )
-    if not Path(db_path).is_file():
-        print(f"ERROR: database not found: {db_path}", file=sys.stderr)
-        sys.exit(1)
+    # The work buffer now lives in the orchestrator backend; read every row over
+    # HTTP (the rows carry url/url_path/method/type/status/live_status and the
+    # param columns select_targets gates on) instead of opening a local cases.db.
+    cfg = load_config(getattr(args, "engagement_dir", None))
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        rows = client.get_all_pages("work-items")
 
-    from assess.lib.db import db_query
-
-    rows = db_query(
-        db_path,
-        "SELECT url, url_path, method, type, status, live_status, "
-        "query_params, body_params, path_params FROM work_items",
-    )
     drop_stats: dict = {}
     targets = select_targets(
         rows,
@@ -321,7 +308,7 @@ def run(args: argparse.Namespace) -> None:
             f"this {len(targets)}-target list (historic/Wayback rows may be dead .nsf/.do "
             "paths, 301 redirects, or PDFs). Arjun burns a full slow pass on each and "
             "finds nothing — a large junk list is the #1 cause of an arjun timeout that "
-            "reports a false 0. Prefer confirming liveness first (`vigil assess ingest-httpx` "
+            "reports a false 0. Prefer confirming liveness first (`vigil assess ingest httpx` "
             "then drop --include-unknown), and keep the list small enough to FINISH "
             "(`--max-per-host`, fewer targets).",
             file=sys.stderr,
@@ -333,7 +320,7 @@ def run(args: argparse.Namespace) -> None:
     if not targets and rows and not args.include_unknown:
         print(
             "arjun-select: 0 targets — work_items appear to have no live_status. "
-            "Run `vigil assess ingest-httpx` to populate liveness, or pass "
+            "Run `vigil assess ingest httpx` to populate liveness, or pass "
             "--include-unknown to include NULL/unknown rows.",
             file=sys.stderr,
         )
@@ -361,7 +348,6 @@ def run(args: argparse.Namespace) -> None:
 
     summary = {
         "verb": "arjun-select",
-        "db_path": db_path,
         "out": str(out_path),
         # Per-method sidecar files: scan each with its own `-m` so POST/JSON body
         # surfaces are not silently scanned under GET (or vice versa).

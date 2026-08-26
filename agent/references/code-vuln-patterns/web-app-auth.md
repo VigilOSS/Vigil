@@ -124,6 +124,57 @@ http.authorizeRequests()
 // Dev adds /v2/public/** but forgets the /api prefix → still not matched
 ```
 
+### 2b. Clickjacking / Frame-Protection Config Audit
+
+Security-headers middleware sets `X-Frame-Options` / CSP `frame-ancestors` globally,
+but the same allowlist/exclusion pattern from §2 applies: sensitive routes (login,
+payment, account-settings, admin) that are opted out of the global middleware — or
+that override headers locally — lose frame protection without a corresponding
+functional regression, so it goes unnoticed.
+
+```python
+# Django: X-Frame-Options set globally via middleware, but a view opts out
+class PaymentView(View):
+    @xframe_options_exempt        # ← removes X-Frame-Options for this view only
+    def get(self, request):
+        return render(request, "payment_form.html")
+    # Payment form can now be framed and clickjacked despite site-wide
+    # XFrameOptionsMiddleware being enabled.
+```
+
+```javascript
+// Express: helmet() sets frame-ancestors globally, but a route sets its own
+// CSP header afterward, overwriting the frame-ancestors directive
+app.use(helmet());  // sets default-src, frame-ancestors 'none', etc.
+
+app.get('/account/settings', (req, res) => {
+    res.setHeader('Content-Security-Policy', "default-src 'self'");
+    // BUG: this CSP has no frame-ancestors directive — it replaces (not merges
+    // with) helmet's policy for this response, silently dropping frame protection
+    // on the account-settings route.
+    res.render('settings');
+});
+```
+
+```java
+// Spring Security: frameOptions disabled per-chain for an API SecurityFilterChain
+// that also happens to serve an HTML admin console at the same base path
+http.headers(headers -> headers
+    .frameOptions(frame -> frame.disable())  // needed for an embedded API widget
+);
+// If /admin/console is routed through this same filter chain, it inherits the
+// disabled frame protection intended only for the API subset.
+```
+
+Grep for the security-headers middleware/config (`django.middleware.clickjacking`,
+`helmet()`, `Spring Security headers().frameOptions`, a hand-rolled
+`X-Frame-Options`/CSP setter) and enumerate every route that is exempted, overridden,
+or excluded from it. Cross-reference that exclusion list against the sensitive-route
+list (login, payment, account-settings, admin) the same way §2 cross-references the
+auth-exempt allowlist against newly added routes — an exclusion that made sense for
+one route (an embeddable widget) silently strips protection from an unrelated
+sensitive route sharing the same middleware scope or filter chain.
+
 ### 3. Role Check Logic Errors
 
 Role comparison using substring matching, locale-dependent ordering, or wrong bitfield operators.

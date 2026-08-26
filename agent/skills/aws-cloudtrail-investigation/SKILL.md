@@ -58,7 +58,7 @@ legacy-host exemptions into findings.
 | Identity context | `aws sts get-caller-identity`, `aws iam list-access-keys --user-name <u>`, `aws iam get-access-key-last-used --access-key-id <k>`, `aws iam get-account-summary`, `aws iam get-user --user-name <u>` | Resolve the alert's principal to a concrete identity; verify key age and last-use region before treating the key as live or stale |
 | Direct event lookup (≤90 days) | `aws cloudtrail lookup-events --lookup-attributes AttributeKey=Username,AttributeValue=<actor>` (also `AttributeKey=AccessKeyId`, `EventName`, `ResourceName`, `ResourceType`) | Fast for narrow actor/event slices; bounded to 90 days of management events, severe per-region rate cap — not a bulk tool |
 | Bulk Athena query | `aws athena start-query-execution` against partitioned `cloudtrail_logs` table; status via `aws athena get-query-execution`, results via `aws athena get-query-results` | Cross-link `agent/skills/athena-log-investigation/SKILL.md`. Required whenever the time window exceeds the lookup-events 90-day ceiling, when the alert needs grouping over millions of events, or when the L1 dispatch flagged a 30–60d look-back |
-| GuardDuty correlation | `aws guardduty list-detectors`, `aws guardduty list-findings --detector-id <id> --finding-criteria <json>`, `aws guardduty get-findings --detector-id <id> --finding-ids <ids>` | Pull every GuardDuty finding tied to the alerted principal and the time window; severity / confidence fields feed Check 2 corroboration |
+| GuardDuty correlation | `aws guardduty list-detectors`, `aws guardduty finding list --detector-id <id> --finding-criteria <json>`, `aws guardduty get-findings --detector-id <id> --finding-ids <ids>` | Pull every GuardDuty finding tied to the alerted principal and the time window; severity / confidence fields feed Check 2 corroboration |
 | Detective entity profile (where licensed) | `aws detective list-graphs`, then `aws detective list-members --graph-arn <arn>` and the graph-scoped entity-profile APIs | Pre-baked timeline view of the principal across CloudTrail + VPC Flow + GuardDuty; only available where the customer has paid for Detective and the engagement scope includes the graph account |
 | Auth-message decode | `aws sts decode-authorization-message --encoded-message <m>` | Decodes the encoded `AccessDenied` payload that surfaces in policy-simulator runs and some SDK exception traces; produces the exact evaluated context that explains why a call was allowed or denied |
 | VPC Flow Logs | Athena against `vpc_flow_logs` (cross-link `agent/skills/athena-log-investigation/SKILL.md`) | Confirms egress/ingress for compromised instances when CloudTrail data events are off; load-bearing on Step 6 |
@@ -313,8 +313,8 @@ in the timeline; severity recompute per `triage.md` rule 2):
 | `cloudtrail:StopLogging` / `cloudtrail:DeleteTrail` / `cloudtrail:PutEventSelectors` (downgrading scope) | T1562.008 | Defense evasion — disable audit logging |
 | `guardduty:DeleteDetector` / `guardduty:UpdateDetector --no-enable` | T1562.001 | Disable cloud detection |
 | `config:DeleteConfigurationRecorder` / `config:StopConfigurationRecorder` | T1562.001 | Disable AWS Config |
-| `iam:ListUsers` / `iam:ListAccessKeys` / `iam:ListRoles` bursts | T1580 | Cloud infra discovery |
-| `organizations:ListAccounts` from an unknown role | T1538 + T1580 | Org-level discovery |
+| `iam:ListUsers` / `iam:ListAccessKeys` / `iam:ListRoles` / `sts:GetCallerIdentity` bursts | T1580 | Cloud infra discovery |
+| `organizations:ListAccounts` from an unknown role, or `ConsoleLogin` from a federated session with unusual IdP context | T1538 + T1580 | Org-level discovery / federated console-access anomaly |
 
 **Evidence.** Event-count rollup table registered as `--kind ir_evidence`
 (markdown with the SQL embedded), and an event-by-event timeline for
@@ -471,7 +471,7 @@ principal, over the same window as Step 2:
 vigil assess host-exec --tool aws --intent "guardduty correlation" \
   --technique T1078.004 --phase investigate \
   --scope-host <aws-account-id> \
-  -- aws guardduty list-findings --detector-id <detector-id> \
+  -- aws guardduty finding list --detector-id <detector-id> \
        --finding-criteria '{
          "Criterion": {
            "resource.accessKeyDetails.principalId": {"Eq": ["<principal-id>"]},
@@ -513,28 +513,15 @@ silently dropped.
 
 ## MITRE Technique Mapping
 
-The techniques below are the ones this skill is expected to recognize
-and assign on findings. Sub-technique IDs are used where applicable
-(`triage.md` rule 11).
-
-| Technique | Name | AWS signal |
-|-----------|------|------------|
-| `T1078.004` | Valid Accounts: Cloud Accounts | Long-term key / role abuse from a new ASN; assumed-role chain to an unknown federated source |
-| `T1098.001` | Account Manipulation: Additional Cloud Credentials | `iam:CreateAccessKey` on another user; `iam:CreateLoginProfile` (combined with T1136.003) |
-| `T1098` | Account Manipulation (broader) | `iam:PutUserPolicy` / `iam:AttachUserPolicy` / `iam:PutRolePolicy` / `iam:AttachRolePolicy` / `iam:UpdateAssumeRolePolicy` |
-| `T1136.003` | Create Account: Cloud Account | `iam:CreateUser`, `iam:CreateLoginProfile` |
-| `T1213.002` | Data from Information Repositories: SharePoint/S3 | `s3:GetObject` burst from new ASN against documented data buckets |
-| `T1485` | Data Destruction | `kms:ScheduleKeyDeletion`, `s3:DeleteObject` / `s3:DeleteBucket` against backup or production buckets |
-| `T1496` | Resource Hijacking | `ec2:RunInstances` with cryptomining-shape instance type (large GPU / many-CPU) in a never-used region |
-| `T1525` | Implant Internal Image | `lambda:UpdateFunctionCode`, `lambda:CreateFunction` with admin role, `ec2:RunInstances` from an attacker AMI |
-| `T1538` | Cloud Service Dashboard | `ConsoleLogin` from a federated session whose IdP context is unusual; `organizations:ListAccounts` |
-| `T1550.001` | Use Alternate Authentication Material: Application Access Token | `sts:GetFederationToken` forge from a stolen long-term key |
-| `T1552.001` | Unsecured Credentials: Credentials In Files | `secretsmanager:GetSecretValue` / `ssm:GetParameter` outside the role's baseline access pattern |
-| `T1552.005` | Unsecured Credentials: Cloud Instance Metadata API | `ec2RoleDelivery=1.0` (IMDSv1) on an instance whose ID is not in the legacy register |
-| `T1556` | Modify Authentication Process | `additionalEventData.MFAUsed=No` on a privileged action where policy would normally require MFA |
-| `T1562.001` | Impair Defenses: Disable or Modify Tools | `guardduty:DeleteDetector` / `UpdateDetector --no-enable`, `config:StopConfigurationRecorder` |
-| `T1562.008` | Impair Defenses: Disable Cloud Logs | `cloudtrail:StopLogging`, `cloudtrail:DeleteTrail`, `cloudtrail:PutEventSelectors` (narrowing scope) |
-| `T1580` | Cloud Infrastructure Discovery | `iam:ListUsers` / `iam:ListAccessKeys` / `iam:ListRoles` / `sts:GetCallerIdentity` bursts |
+Technique assignment happens inline, at the step that produces the signal —
+not in a separate lookup table. Step 1's identity decision tree assigns
+`T1552.005` (IMDSv1) and `T1556` (MFA-gap on a privileged action); Step 4's
+table above is the consolidated index for the control-plane techniques
+(`T1078.004`, `T1098`, `T1098.001`, `T1136.003`, `T1496`, `T1525`, `T1538`,
+`T1550.001`, `T1552.001`, `T1562.001`, `T1562.008`, `T1580`); Step 5 assigns
+`T1213.002` and `T1485` for data-plane impact, corroborated by Step 6's
+network pivot. Sub-technique IDs are used where applicable (`triage.md`
+rule 11).
 
 ## Known-benign register additions
 
@@ -623,9 +610,10 @@ The activity entries themselves run through:
 ```bash
 vigil assess log <agent-name> \
   "<short title — Step N for <finding-slug>>" \
-  "<one-line action summary>" \
+  investigation_step \
+  "<one-line result summary>" \
   --actor-kind agent \
-  --metadata-json "$(cat metadata.json)"
+  --metadata-file metadata.json
 ```
 
 The CLI verb is `vigil assess log`. The legacy shorthand (`log` with
@@ -705,14 +693,15 @@ a malformed dispatch the verifier rejects.
    vigil assess artifact mark-scratch <artifact-id>
    ```
 
-4. **Log the handoff entry.** Use the verb `vigil assess log` (the
-   legacy shorthand with a trailing `-entry` does not route).
+4. **Log the handoff entry.** Use the verb `vigil assess log` (see
+   Activity Log Convention above for the shorthand pitfall).
 
    ```bash
    vigil assess log <agent-name> "aws-cloudtrail-handoff" \
+     handoff \
      "L2 AWS CloudTrail investigation closed: <one-line summary>" \
      --actor-kind agent \
-     --metadata-json "$(cat metadata.json)"
+     --metadata-file metadata.json
    ```
 
 5. **Emit the handoff JSON.**
@@ -775,9 +764,9 @@ does not address it.
   Steps 2 / 4 / 5 / 6 use its query shape and result-bucket
   discipline.
 - `agent/skills/m365-signin-investigation/SKILL.md` — federated
-  handoff when the IdP is Entra (P1, parallel build).
+  handoff when the IdP is Entra.
 - `agent/skills/okta-investigation/SKILL.md` — federated handoff
-  when the IdP is Okta (P2, parallel build).
+  when the IdP is Okta.
 - `agent/skills/ioc-enrichment/SKILL.md` — ASN / GeoIP /
   threat-intel enrichment for `sourceipaddress`.
 - `agent/skills/incident-containment/SKILL.md` — owns key rotation,

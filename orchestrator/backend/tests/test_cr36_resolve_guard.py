@@ -66,12 +66,19 @@ def _runtimes():
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_pin_injects_resolve_for_curl_on_docker_desktop():
+def test_pin_injects_resolve_for_curl_on_docker_desktop(monkeypatch):
+    # Multi-A selection is `secrets.choice` over the resolved set — deliberately
+    # randomized so a multi-A target does not concentrate every request on
+    # address zero (see `test_apply_resolve_pin_distributes_multi_address_hosts`
+    # in agent/scripts/assess/tests/test_kali_resolve.py). This test is about the
+    # INJECTION, not the selection, so pin the choice to make it deterministic;
+    # asserting a specific element made it a ~50% flake.
     kr = _import("assess.lib.kali_resolve")
     _rr, dd, _lx = _runtimes()
+    monkeypatch.setattr(kr.secrets, "choice", lambda values: values[0])
     cmd = ["curl", "-sS", "https://api.example.com/v1/users"]
     ip = kr.apply_resolve_pin(cmd, "curl", runtime=dd, ips=["203.0.113.7", "203.0.113.8"])
-    assert ip == "203.0.113.7"  # multi-A pins the FIRST address (documented)
+    assert ip == "203.0.113.7"
     assert cmd[-2:] == ["--resolve", "api.example.com:443:203.0.113.7"]
 
 
@@ -416,7 +423,6 @@ def test_kali_exec_pins_resolve_on_docker_desktop(monkeypatch, fake_engagement):
         phase="recon",
         timeout=30,
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="curl",
     )
     # --resolve was injected into the argv that actually ran in-container.
@@ -447,7 +453,6 @@ def test_kali_exec_no_pin_on_native_linux(monkeypatch, fake_engagement):
         phase="recon",
         timeout=30,
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="httpx",
     )
     assert "--resolve" not in seen["argv"]
@@ -493,7 +498,6 @@ def test_kali_exec_http000_retries_then_succeeds(monkeypatch, fake_engagement):
         phase="recon",
         timeout=30,
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="curl",
     )
     assert attempts["n"] == 2, "guard must auto-retry exactly once"
@@ -529,7 +533,6 @@ def test_kali_exec_http000_persists_flags_transport_error(monkeypatch, fake_enga
         phase="recon",
         timeout=30,
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="curl",
     )
     # Pre-flight already pinned, so the guard does NOT retry (same pin would fail).
@@ -568,7 +571,6 @@ def test_kali_exec_http000_native_linux_not_overflagged(monkeypatch, fake_engage
         phase="recon",
         timeout=30,
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="curl",
     )
     assert attempts["n"] == 1, "no retry on native Linux"
@@ -598,7 +600,6 @@ def test_kali_exec_pin_opt_out_env_disables_pin(monkeypatch, fake_engagement):
         phase="recon",
         timeout=30,
         engagement_dir=fake_engagement,
-        engagement_key=fake_engagement.name,
         tool_name="curl",
     )
     assert "--resolve" not in seen["argv"]

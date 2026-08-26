@@ -24,7 +24,7 @@ _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
 def register(subparsers) -> None:
     p = subparsers.add_parser(
-        "export-findings",
+        "findings",
         help=(
             "Generate the single findings.md report doc from backend state "
             "(one section per finding). For a diffable per-finding tree use "
@@ -46,7 +46,9 @@ def _render_finding(f: dict) -> str:
 
 def run(args) -> None:
     cfg = load_config(args.engagement_dir)
-    scope = load_scope(cfg.engagement_dir)
+    # Read-only: an export reads the engagement name out of scope.json and must
+    # not rewrite the file as a side effect of rendering a report.
+    scope = load_scope(cfg.engagement_dir, persist_migration=False)
     engagement_name = scope.get("engagement_name") or scope.get("name") or cfg.engagement_key
 
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:

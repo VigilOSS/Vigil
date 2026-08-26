@@ -17,7 +17,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from assess.commands import dns_discovery, web_discovery
 from assess.lib import kali, kali_output
 
@@ -152,7 +151,7 @@ def test_dns_host_dispatch_skips_dnsx_header(tmp_path, monkeypatch) -> None:
 def test_host_routed_non_injectable_http_tool_warns(tmp_path, monkeypatch, capsys, warn_tool) -> None:
     # An HTTP-capable tool whose header flag can't carry an inline value (wafw00f's
     # -H/--headers reads a FILE) WARNs (never blocks) and leaves argv untouched —
-    # same contract as the container path; the Layer-2 backstop is its safety net.
+    # same contract as the container path.
     eng_dir = tmp_path / "eng"
     _scope(eng_dir, required_headers={"X-Bug-Bounty": "vigiloss"})
     captured = _capture_host_exec(monkeypatch, web_discovery)

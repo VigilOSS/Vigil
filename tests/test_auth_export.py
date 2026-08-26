@@ -266,29 +266,50 @@ def test_export_curl_args_includes_csrf_on_post_only(tmp_path, monkeypatch):
 
 def test_classify_liveness_parity():
     cl = auth._classify_liveness
-    # (2) no liveness signature configured -> unknown (names the shape to set).
+    # `dead` requires POSITIVE evidence of death. Everything that merely fails
+    # to CONFIRM life is `unknown`, because a false `dead` retires a live
+    # session and hard-blocks `kali --identity` until it is re-imported.
+
+    # No signature configured -> unknown (the reason names the shape to set).
     assert cl(200, "Sign out", None)[0] == "unknown"
     assert cl(200, "Sign out", {})[0] == "unknown"
-    # (1) transport error (status None) wins even with a signature present.
+    # A bool is not a real int status config, so it configures nothing.
+    assert cl(200, "x", {"expect_status": True})[0] == "unknown"
+    # Transport error (status None) wins even with a signature present.
     assert cl(None, None, {"authed_marker": "Sign out"})[0] == "unknown"
-    # (3) dead_marker present in haystack -> dead.
+
+    # POSITIVE evidence of death.
     assert cl(200, "Please sign in", {"dead_marker": "sign in"})[0] == "dead"
-    # (4) authed_marker absent -> dead.
-    assert cl(200, "anonymous page", {"authed_marker": "Sign out"})[0] == "dead"
-    # (5) expect_status mismatch -> dead (marker present, status wrong).
-    assert cl(302, "Sign out", {"authed_marker": "Sign out", "expect_status": 200})[0] == "dead"
-    # (6) all configured checks pass -> live.
-    assert cl(200, "Welcome — Sign out", {"authed_marker": "Sign out", "expect_status": 200})[0] == "live"
-    # marker-only configs each stand alone.
+    assert cl(401, "nope", {"expect_status": 200})[0] == "dead"
+    assert cl(
+        302,
+        "x\nLocation: https://h/login\n",
+        {"authed_marker": "Sign out", "expect_status": 200},
+    )[0] == "dead"
+
+    # Absence of confirmation is NOT death.
+    assert cl(200, "anonymous page", {"authed_marker": "Sign out"})[0] == "unknown"
+    assert cl(500, "anything", {"expect_status": 200})[0] == "unknown"
+    # A 3xx that is not a login bounce is a redirect, not an expiry.
+    assert cl(
+        302, "Sign out", {"authed_marker": "Sign out", "expect_status": 200}
+    )[0] == "unknown"
+    # Markers are case-sensitive substrings; a miss is inconclusive, not dead.
+    assert cl(200, "sign out", {"authed_marker": "Sign out"})[0] == "unknown"
+
+    # 403 is an AUTHORIZATION verdict, not an authentication challenge. A 403 on
+    # another principal's object is the healthy IDOR/BOLA signal, so it must
+    # never kill the identity doing the testing.
+    assert cl(403, "forbidden", {"expect_status": 200})[0] == "unknown"
+
+    # Confirmed life.
+    assert cl(
+        200, "Welcome - Sign out", {"authed_marker": "Sign out", "expect_status": 200}
+    )[0] == "live"
     assert cl(200, "Sign out", {"authed_marker": "Sign out"})[0] == "live"
-    assert cl(200, "anon", {"authed_marker": "Sign out"})[0] == "dead"
     assert cl(200, "welcome home", {"dead_marker": "Log in"})[0] == "live"
     assert cl(200, "Log in to continue", {"dead_marker": "Log in"})[0] == "dead"
     assert cl(200, "anything", {"expect_status": 200})[0] == "live"
-    assert cl(500, "anything", {"expect_status": 200})[0] == "dead"
-    # markers are case-sensitive substrings; a bool expect_status is not a real int.
-    assert cl(200, "sign out", {"authed_marker": "Sign out"})[0] == "dead"
-    assert cl(200, "x", {"expect_status": True})[0] == "unknown"  # bool != int status config
 
 
 class _FakeResp:
@@ -409,19 +430,36 @@ def test_probe_liveness_dead_on_dead_marker_in_body(tmp_path, monkeypatch):
     assert result["http_status"] == 200
 
 
-def test_probe_liveness_dead_on_status_mismatch(tmp_path, monkeypatch):
+def test_probe_liveness_unknown_on_unexplained_status_mismatch(tmp_path, monkeypatch):
     eng = tmp_path / "agent" / "engagements" / "eng"
     eng.mkdir(parents=True)
     monkeypatch.setattr(
         auth, "_active_material",
         lambda _d: _identity_with_liveness(authed_marker="Sign out", expect_status=200),
     )
-    # authed_marker present but the status is wrong -> dead.
+    # A 500 is a server error, not an authentication challenge, and the
+    # authed_marker is present. Retiring the session here would kill a live
+    # identity over a transient upstream fault.
     _install_fake_conn(monkeypatch, 500, body=b"Sign out (but a 500)")
 
     result = auth.probe_liveness(eng, "https://portal.example.com/home")
-    assert result["liveness"] == "dead"
+    assert result["liveness"] == "unknown"
     assert result["http_status"] == 500
+
+
+def test_probe_liveness_dead_on_auth_challenge_status(tmp_path, monkeypatch):
+    eng = tmp_path / "agent" / "engagements" / "eng"
+    eng.mkdir(parents=True)
+    monkeypatch.setattr(
+        auth, "_active_material",
+        lambda _d: _identity_with_liveness(authed_marker="Sign out", expect_status=200),
+    )
+    # A 401 says "you are not authenticated" verbatim -> positive proof of death.
+    _install_fake_conn(monkeypatch, 401, body=b"unauthorized")
+
+    result = auth.probe_liveness(eng, "https://portal.example.com/home")
+    assert result["liveness"] == "dead"
+    assert result["http_status"] == 401
 
 
 def test_probe_liveness_unknown_without_liveness_signature(tmp_path, monkeypatch):
@@ -452,6 +490,53 @@ def test_probe_liveness_unknown_on_transport_error(tmp_path, monkeypatch):
     assert result["liveness"] == "unknown"  # never a false verdict on transport error
     assert result["http_status"] is None
     assert result["error"]
+
+
+def test_scoped_alias_transport_error_still_returns_resolved_identity(tmp_path, monkeypatch):
+    eng = tmp_path / "agent" / "engagements" / "eng"
+    eng.mkdir(parents=True)
+    monkeypatch.setattr(
+        auth,
+        "_api",
+        lambda *_args, **_kwargs: {
+            "identity_name": "cap-member-v2",
+            "material": _identity_with_liveness(authed_marker="Sign out"),
+        },
+    )
+    monkeypatch.setattr(auth.http.client, "HTTPSConnection", _FailingConn)
+    monkeypatch.setattr(auth.http.client, "HTTPConnection", _FailingConn)
+
+    result = auth.probe_liveness(
+        eng,
+        "https://portal.example.com/home",
+        "member",
+        scope_key="billing",
+    )
+
+    assert result["liveness"] == "unknown"
+    assert result["identity_name"] == "cap-member-v2"
+
+
+def test_missing_scoped_alias_is_not_probed_anonymously(tmp_path, monkeypatch):
+    eng = tmp_path / "agent" / "engagements" / "eng"
+    eng.mkdir(parents=True)
+    monkeypatch.setattr(auth, "_api", lambda *_args, **_kwargs: {})
+
+    def unexpected_connection(*_args, **_kwargs):
+        raise AssertionError("missing alias must fail before network execution")
+
+    monkeypatch.setattr(auth.http.client, "HTTPSConnection", unexpected_connection)
+
+    result = auth.probe_liveness(
+        eng,
+        "https://portal.example.com/home",
+        "member",
+        scope_key="billing",
+    )
+
+    assert result["liveness"] == "unknown"
+    assert result["identity_name"] is None
+    assert "identity" in result["error"]
 
 
 def test_probe_liveness_rejects_non_http_url_without_network(tmp_path, monkeypatch):

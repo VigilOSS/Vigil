@@ -17,15 +17,20 @@ from typing import Any
 
 from .client import AssessError, AssessmentClient, default_runtime_container
 from .config import Config, load_config
+from .kali_audit import _patch_finalize, _post_pre_exec_row, _resolve_engagement_dir
+from .kali_output import _scope_version
+from .kali_tool_naming import _derive_tool_name
 from .kali_runtime_exec import (
     _cat_container_pid_file,
     _container_running,
     _engagement_env_args,
 )
+from .rate_leases import acquire_target_rate_lease, release_target_rate_lease
 
 _DEFAULT_DTACH_DIR = "/tmp/vigil-jobs"
 _JOB_PID_DIR = "/tmp/vigil-jobs"
-_JOB_TERMINAL_STATUSES = {"completed", "failed", "killed", "lost", "stop_failed"}
+_JOB_TERMINAL_STATUSES = {"completed", "failed", "killed", "lost"}
+_JOB_IN_FLIGHT_STATUSES = ("running", "queued", "stop_failed")
 
 # Grace between the deadline SIGTERM and the escalation SIGKILL in the async
 # job watchdog. Mirrors the synchronous exec path's `process.wait(timeout=5)`
@@ -80,6 +85,93 @@ def _read_exit_marker(record: dict[str, Any]) -> int | None:
         return None
 
 
+def _release_job_rate_lease(
+    client: AssessmentClient, record: dict[str, Any]
+) -> None:
+    metadata = record.get("audit_metadata")
+    if not isinstance(metadata, dict):
+        return
+    token = str(metadata.get("rate_lease_token") or "")
+    if not token:
+        return
+    try:
+        release_target_rate_lease(token, client=client)
+    except AssessError:
+        # Expiry is the crash-safe backstop. Finalization truth must not be
+        # hidden merely because release raced an already-released token.
+        return
+
+
+def _read_job_preview(path_value: Any, *, limit: int = 16_384) -> str:
+    if not path_value:
+        return ""
+    try:
+        data = Path(str(path_value)).read_bytes()
+    except OSError:
+        return ""
+    return data[-limit:].decode("utf-8", errors="replace")
+
+
+def _job_duration_ms(record: dict[str, Any], ended_at_iso: str) -> int:
+    started_raw = str(record.get("started_at") or "").strip()
+    if not started_raw:
+        return 0
+    try:
+        started = _dt.datetime.fromisoformat(started_raw.replace("Z", "+00:00"))
+        ended = _dt.datetime.fromisoformat(ended_at_iso.replace("Z", "+00:00"))
+    except ValueError:
+        return 0
+    return max(0, int((ended - started).total_seconds() * 1000))
+
+
+def finalize_parent_command_run(
+    client: AssessmentClient,
+    record: dict[str, Any],
+    *,
+    status_value: str,
+    return_code: int | None,
+    ended_at_iso: str | None = None,
+) -> None:
+    """Converge the command-run paired with a terminal async job.
+
+    Command-run finalization is idempotent through ``accept_409``. A failed
+    patch is left for a later status/list/sweep reconciliation rather than
+    changing the already-observed job outcome.
+    """
+    parent_id = record.get("parent_command_run_id")
+    if parent_id is None or status_value not in _JOB_TERMINAL_STATUSES:
+        return
+    ended = ended_at_iso or str(record.get("ended_at") or "").strip() or _utcnow_iso()
+    stdout_preview = _read_job_preview(record.get("stdout_path"))
+    stderr_preview = _read_job_preview(record.get("stderr_path"))
+    try:
+        _patch_finalize(
+            client,
+            run_id=int(parent_id),
+            status=status_value,
+            return_code=return_code,
+            ended_at_iso=ended,
+            duration_ms=_job_duration_ms(record, ended),
+            stdout_preview=stdout_preview,
+            stderr_preview=stderr_preview,
+            timed_out=False,
+            partial_results=bool(stdout_preview or stderr_preview)
+            and status_value != "completed",
+            peak_rss_bytes=None,
+            cpu_user_seconds=None,
+            cpu_system_seconds=None,
+            # Same host paths the paired command-run row was opened with
+            # (``start_job`` writes one ``_job_paths`` pair to both rows), so
+            # the audit row records the byte count and digest of the spill it
+            # names rather than keeping the pre-exec placeholders. The previews
+            # read above are head+tail truncations and cannot supply them.
+            stdout_path=record.get("stdout_path"),
+            stderr_path=record.get("stderr_path"),
+        )
+    except AssessError:
+        return
+
+
 def _finalize_if_marker_present(
     client: AssessmentClient, record: dict[str, Any]
 ) -> dict[str, Any]:
@@ -92,6 +184,12 @@ def _finalize_if_marker_present(
     finalizer; a failing PATCH falls back to the unfinalized record."""
     status_val = str(record.get("status") or "").strip()
     if status_val in _JOB_TERMINAL_STATUSES:
+        finalize_parent_command_run(
+            client,
+            record,
+            status_value=status_val,
+            return_code=record.get("exit_code"),
+        )
         return record
     rc = _read_exit_marker(record)
     if rc is None:
@@ -101,11 +199,20 @@ def _finalize_if_marker_present(
         return record
     final_status = "completed" if rc == 0 else "failed"
     try:
-        return client.patch(
+        finalized = client.patch(
             f"jobs/{int(job_id)}",
             {"status": final_status, "exit_code": rc, "ended_at": _utcnow_iso()},
             accept_409=True,
         )
+        finalize_parent_command_run(
+            client,
+            record,
+            status_value=final_status,
+            return_code=rc,
+            ended_at_iso=str(finalized.get("ended_at") or "") or None,
+        )
+        _release_job_rate_lease(client, record)
+        return finalized
     except AssessError:
         return record
 
@@ -260,38 +367,73 @@ def start_job(
     container_name: str | None = None,
     dtach_socket_dir: str = _DEFAULT_DTACH_DIR,
     parent_command_run_id: int | None = None,
+    execution_policy: dict[str, Any] | None = None,
+    tool_name: str | None = None,
     config: Config | None = None,
 ) -> dict[str, Any]:
-    """POST a queued row, persist job paths, spawn dtach, mark it running.
+    """Pre-audit the command, POST its linked job, then spawn and mark running.
 
     Returns the backend job record (with `dtach_socket_path` populated).
     """
+    if parent_command_run_id is not None:
+        raise AssessError(
+            "parent_command_run_id is system-owned for async jobs; callers must not supply it"
+        )
+
     # Resolve the container name at call time so VIGIL_RUNTIME_CONTAINER is read
     # now, not when this module was imported. Default stays "vigil" when unset.
     container_name = container_name or default_runtime_container()
     cfg = config or load_config(str(engagement_dir) if engagement_dir else None)
-    eng_dir = Path(engagement_dir).resolve() if engagement_dir is not None else Path(cfg.engagement_dir).resolve()
-    if not _container_running(container_name):
-        raise AssessError(
-            f"runtime container '{container_name}' is not running. "
-            "Run `vigil runtime start` first."
-        )
-    _check_dtach_in_container(container_name)
-    _ensure_dtach_dir(container_name, dtach_socket_dir)
-
+    eng_dir = _resolve_engagement_dir(engagement_dir, cfg)
+    eng_key = eng_dir.name
     job_uuid = uuid.uuid4().hex
     socket_path = f"{dtach_socket_dir}/{job_uuid}.sock"
     pid_file = _job_pid_file(job_uuid)
     stdout_path, stderr_path = _job_paths(eng_dir, job_uuid)
 
-    client = AssessmentClient(cfg.base_url, cfg.engagement_key)
+    client = AssessmentClient(cfg.base_url, eng_key)
     spawned = False
     job_id: int | None = None
+    rate_lease_token = ""
+    command_run_id: int | None = None
     try:
+        command_row = _post_pre_exec_row(
+            client,
+            cmd=cmd,
+            technique=str(audit_meta.get("technique") or "RECON"),
+            intent=str(audit_meta.get("intent") or "async job"),
+            probe_kind=str(audit_meta.get("probe_kind") or "fingerprint"),
+            phase=str(audit_meta.get("phase") or "recon"),
+            destructive=bool(audit_meta.get("destructive")),
+            agent_name=str(audit_meta.get("agent_name") or "operator"),
+            engagement_dir=eng_dir,
+            container_name=container_name,
+            timeout=int(audit_meta.get("timeout_seconds_requested") or 0),
+            force=False,
+            started_at_iso=_utcnow_iso(),
+            stdout_path=str(stdout_path),
+            stderr_path=str(stderr_path),
+            working_dir=f"/engagements/{eng_key}",
+            scope_version=str(audit_meta.get("scope_version") or _scope_version(eng_dir)),
+            auth_context=str(audit_meta.get("auth_context") or "anonymous"),
+            tool_name=tool_name or _derive_tool_name(cmd),
+            run_uuid=job_uuid,
+            execution_policy=execution_policy,
+        )
+        command_run_id = int(command_row["id"])
+
+        if not _container_running(container_name):
+            raise AssessError(
+                f"runtime container '{container_name}' is not running. "
+                "Run `vigil runtime start` first."
+            )
+        _check_dtach_in_container(container_name)
+        _ensure_dtach_dir(container_name, dtach_socket_dir)
+
         created = client.post(
             "jobs",
             {
-                "parent_command_run_id": parent_command_run_id,
+                "parent_command_run_id": command_run_id,
                 "status": "queued",
                 "audit_metadata": audit_meta,
             },
@@ -302,13 +444,13 @@ def start_job(
         # /engagements bind mount: ${ENGAGEMENT_DIR} is mounted at
         # /engagements/${ENGAGEMENT_KEY} inside the runtime.
         container_stdout = (
-            f"/engagements/{cfg.engagement_key}/scans/kali/jobs/{stdout_path.name}"
+            f"/engagements/{eng_key}/scans/kali/jobs/{stdout_path.name}"
         )
         container_stderr = (
-            f"/engagements/{cfg.engagement_key}/scans/kali/jobs/{stderr_path.name}"
+            f"/engagements/{eng_key}/scans/kali/jobs/{stderr_path.name}"
         )
         container_exit = (
-            f"/engagements/{cfg.engagement_key}/scans/kali/jobs/{job_uuid}.exit"
+            f"/engagements/{eng_key}/scans/kali/jobs/{job_uuid}.exit"
         )
         client.patch(
             f"jobs/{job_id}",
@@ -318,6 +460,23 @@ def start_job(
                 "stderr_path": str(stderr_path),
             },
         )
+        effective_rate = audit_meta.get("effective_rate_rps")
+        if effective_rate is not None:
+            lease = acquire_target_rate_lease(
+                config=cfg,
+                owner=str(audit_meta.get("agent_name") or "operator"),
+                effective_rate_rps=float(effective_rate),
+                ttl_seconds=int(audit_meta.get("timeout_seconds_requested") or 300)
+                + _JOB_KILL_GRACE_SECONDS,
+                override_reason=str(audit_meta.get("rate_override_reason") or ""),
+                command_run_id=command_run_id,
+                client=client,
+            )
+            rate_lease_token = str(lease.get("lease_token") or "")
+            if not rate_lease_token:
+                raise AssessError("aggregate rate lease response omitted lease_token")
+            audit_meta = {**audit_meta, "rate_lease_token": rate_lease_token}
+            client.patch(f"jobs/{job_id}", {"audit_metadata": audit_meta})
         joined = " ".join(shlex.quote(part) for part in cmd)
         wrapped_shell = _build_job_wrapper(
             joined,
@@ -340,9 +499,9 @@ def start_job(
             "docker",
             "exec",
             "-d",
-            *_engagement_env_args(cfg.engagement_key),
+            *_engagement_env_args(eng_key),
             "-w",
-            f"/engagements/{cfg.engagement_key}",
+            f"/engagements/{eng_key}",
             container_name,
             "dtach",
             "-n",
@@ -383,6 +542,22 @@ def start_job(
         if job_id is not None:
             try:
                 client.patch(f"jobs/{job_id}", {"status": "failed"})
+            except Exception:
+                pass
+        if command_run_id is not None:
+            finalize_parent_command_run(
+                client,
+                {
+                    "parent_command_run_id": command_run_id,
+                    "stdout_path": str(stdout_path),
+                    "stderr_path": str(stderr_path),
+                },
+                status_value="failed",
+                return_code=None,
+            )
+        if rate_lease_token:
+            try:
+                release_target_rate_lease(rate_lease_token, client=client)
             except Exception:
                 pass
         raise
@@ -647,6 +822,15 @@ def job_stop(
         # converged the row via the marker during the kill window — we then
         # return the existing terminal record rather than raising a false error.
         record_out = client.patch(f"jobs/{int(job_id)}", patch_payload, accept_409=True)
+        if final_status != "stop_failed":
+            finalize_parent_command_run(
+                client,
+                record,
+                status_value=final_status,
+                return_code=final_exit_code,
+                ended_at_iso=str(record_out.get("ended_at") or "") or None,
+            )
+            _release_job_rate_lease(client, record)
     finally:
         client.close()
     if final_status == "stop_failed":
@@ -672,7 +856,7 @@ def reap_jobs(
 
     in_flight: list[dict[str, Any]] = []
     seen: set[int] = set()
-    for state in ("running", "queued"):
+    for state in _JOB_IN_FLIGHT_STATUSES:
         for row in job_list(status_value=state, config=cfg):
             jid = row.get("id")
             if jid is None:

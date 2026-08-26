@@ -192,8 +192,8 @@ CWE-style vocabulary and does not apply to IR findings.
 ## 12. Tenant-ref first — missing tenant ref halts the dispatch
 
 Before any platform CLI command runs (GAM, gcloud, az, splunk, crowdstrike,
-defender, etc.), the dispatched specialist loads the tenant ref path(s) from
-`scope.json:tenant_reference_paths[]`. If the tenant ref is missing, the dispatch
+defender, etc.), the dispatched specialist loads every tenant ref path injected
+in the dispatch. If a tenant ref is missing, the dispatch
 halts and the specialist returns a `blocked` handoff naming the missing path. Do
 not improvise platform calls without the tenant ref — that is the file that tells
 you which tool config, which admin email, which DWD scopes, and which known-benign
@@ -245,7 +245,7 @@ false-positive — it is only enough to set the disposition to `escalated`.
 
 ## 16. Severity ↔ technique alignment audit before report
 
-Before any report-writer dispatch, query `vigil assess list-findings` and verify
+Before any report-writer dispatch, query `vigil assess finding list` and verify
 each finding's `severity` matches its `details_json.mitre_techniques` and
 proved impact:
 
@@ -258,8 +258,8 @@ proved impact:
   `details_json.kill_reason` with the tenant-ref citation; severity is no longer
   the load-bearing field once disposition lands
 
-Fix mismatches via `vigil assess update-finding --inline '{"details":
-{"mitre_techniques": [...], "severity_rationale": "..."}}'`. A finding whose
+Fix mismatches via `vigil assess finding update <slug> --details-inline
+'{"mitre_techniques": [...], "severity_rationale": "..."}'`. A finding whose
 severity contradicts its technique makes the report look unverified to the
 client.
 
@@ -274,7 +274,7 @@ text and strip phrases that contradict current state:
 - "see updated timeline below" when the timeline is now the only timeline
 
 The executable recipe lives in `agent/skills/report-generation/SKILL.md`
-Review-and-Fix QA Mode (`vigil assess list-findings --json | jq -r .[].slug` loop).
+Review-and-Fix QA Mode (`vigil assess finding list --json | jq -r .[].slug` loop).
 Stale narrative is invisible to backend status fields and ends up in the
 incident report verbatim.
 

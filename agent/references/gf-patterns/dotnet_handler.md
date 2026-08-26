@@ -3,6 +3,7 @@ name: gf-patterns:dotnet_handler
 description: ASP.NET / WCF HTTP-handler path and ViewState parameter patterns (.axd/.ashx/.asmx/.svc, _vti_bin, ELMAH, trace.axd)
 origin: local overlay (no upstream gf equivalent)
 bucket: dotnet_handler
+skill: code-variant-analysis, code-vulnerability-analysis, deserialization-testing
 weight: 40
 ---
 
@@ -120,9 +121,8 @@ ViewState (param-key):
 before this bucket existed because the typer dropped the handler extensions to `unknown`
 (Issue A). The `dotnet_handler` bucket plus the typer Fix #15 `_APP_ROUTE_EXT` addition
 recover that surface. The zero-hit forward-looking endpoints (e.g. `/_vti_bin`, `?wsdl`)
-are coverage for future ASP.NET / SharePoint engagements per the plan's stated generic goal.
-See `docs/plans/classify-context-and-surface-buckets-2026-06.md` Part 2 (Issue A) and
-Part 3 §A.1.
+are coverage for future ASP.NET / SharePoint engagements under the generic
+coverage rule. See ADR 0008 and `DRIFT.md` for the accepted rationale.
 
 ## Sources
 

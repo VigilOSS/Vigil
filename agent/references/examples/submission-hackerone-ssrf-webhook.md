@@ -1,0 +1,56 @@
+---
+description: "Example: HackerOne submission for SSRF via webhook test-send stealing cloud IAM credentials"
+skill: report-generation
+category: Disclosure & Reporting Formats
+---
+
+**Title:** SSRF in webhook config lets any integration owner steal IAM credentials
+
+**Weakness:** CWE-918: Server-Side Request Forgery (SSRF)
+
+**Severity:** HIGH
+
+**CVSS:** CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N (7.7)
+
+**Run:** `python3 poc-ssrf-webhook.py`
+**Pass if:** the script prints the stolen `AccessKeyId`/`SecretAccessKey` pair
+
+---
+
+### Summary
+
+Any user holding webhook-config permission — a role many orgs hand to non-admin integration owners — points the outgoing-webhook URL at the instance metadata service. `POST /api/integrations/webhooks/test` fetches that URL server-side and returns the response body verbatim, to preview what the receiving endpoint would get. Nothing restricts that URL to the tenant's own domain or filters link-local ranges. The response carries the full fetched body rather than a pass/fail status, which is what turns a blind SSRF into a direct credential read.
+
+**Exploit flow**
+1. The PoC configures the webhook target as the instance metadata address and calls test-connection to read back the response body.
+2. It re-targets the same URL, appending `iam/security-credentials/` to enumerate the attached role's name.
+3. It re-targets the endpoint a second time with that role name appended.
+4. The server fetches the final URL and returns the role's live `AccessKeyId`, `SecretAccessKey`, and `Token` in the response body.
+
+### Steps to Reproduce
+
+1. [attacker] Authenticate as any user with webhook-config permission (a role many orgs hand to non-admin integration owners) and run it:
+```
+export SESSION_COOKIE="<value from an authenticated browser session>"
+python3 poc-ssrf-webhook.py
+```
+**Expect:** the script prints the stolen `AccessKeyId`/`SecretAccessKey` pair. Full output in Evidence.
+
+### Evidence
+
+```
+[*] role name discovered via metadata SSRF: app-prod-ec2-role
+[*] fetching http://169.254.169.254/latest/meta-data/iam/security-credentials/app-prod-ec2-role
+AccessKeyId:     ASIAABCDEFGHIJKLMNOP                              <-- proof: live temporary credential
+SecretAccessKey: wJalrXUt********************EXAMPLEKEY            <-- masked here, full value in script output
+Token:           IQoJb3JpZ2luX2Vj... (truncated)
+Expiration:      2026-07-06T21:00:00Z
+```
+
+### Impact
+
+Read access to the EC2 instance profile's live temporary AWS credentials, valid until the printed expiration and scoped to whatever policy the instance role carries. Those credentials work against the AWS API from anywhere until they expire; the blast radius is the role's full policy, not just the app's functionality.
+
+### Remediation
+
+Block outbound requests from the webhook-fetch path to RFC 1918 ranges, `169.254.169.254`, and other link-local/metadata addresses. Enforce it with a network-level egress rule or a fetch proxy, not just app-layer URL parsing that a redirect can bypass. Independently of that filter, require IMDSv2. Its session-token PUT/GET handshake is what defeats a URL-only SSRF primitive like this one, since the attacker can't perform that exchange through a simple fetch. A hop limit alone would not help here: this request already originates on the instance itself, with no extra hop to block.

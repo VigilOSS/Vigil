@@ -176,4 +176,4 @@ When a category fails, CVSS framing must update:
 - `agent/skills/heap-rce-evidence-ladder/SKILL.md` — per-rung evidence bar (runs alongside)
 - `agent/skills/exploit-playbook-authoring/SKILL.md` — playbook + lab-assist-equivalence (runs alongside)
 - `agent/rules/reporting.md` — disclosure-language rules; this skill enforces them on the deployment-shape side
-- `agent/agents/report-writer.md` — owning role; invokes this skill inline before sealing a critical-severity bundle
+- `agent/agents/report-writer.md` — reaches this skill indirectly, not by direct invocation: its QA pass runs the `agent/references/submission-format.md` checklist, whose critical-severity (`CVSS ≥ 8.0`) item is the trigger that pulls in this skill's eight-category audit before a critical bundle ships

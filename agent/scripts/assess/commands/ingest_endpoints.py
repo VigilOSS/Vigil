@@ -1,12 +1,16 @@
-"""vigil assess ingest-endpoints — read endpoint lines, POST observations, insert work items.
+"""vigil assess ingest endpoints — read endpoint lines, POST observations.
 
-Highest volume command. Key improvement: connection reuse eliminates ~3000 subprocess spawns per 500 endpoints.
+Highest-volume producer. Each in-scope endpoint is POSTed once as a
+request-observation carrying its work-buffer derivation block and gf-typed
+coverage candidates; the backend derives the request-variant, coverage items,
+and the ``assessment_work_items`` row in a single transaction (ADR 0013 — no
+dual write). Out-of-scope / egress-blocked URLs are recorded directly in the
+backend work buffer as skipped/deferred rows via ``work-items/bulk``.
 """
 from __future__ import annotations
 
 import json
 import re
-import sqlite3
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
@@ -15,60 +19,56 @@ from assess.lib import vuln_taxonomy
 from assess.lib.auth import auth_active_context
 from assess.lib.bulk_ingest import (
     DEFAULT_BULK_WRITE_SIZE,
-    post_coverage_items_bulk,
     post_request_observations_bulk,
 )
 from assess.lib.candidate_records import int_value, json_text
 from assess.lib.classify import classify_type
-from assess.lib.classify_buckets import classify_from_fields, weak_tokens_for_key
+from assess.lib.classify_buckets import (
+    CLASSIFIER_VERSION,
+    INERT_TYPES,
+    classify_from_fields,
+    tagged_terminal_reason,
+    weak_tokens_for_key,
+)
 from assess.lib.client import AssessmentClient
-from assess.lib.config import anchor_engagement_relative, load_config
-from assess.lib.db import db_init, db_insert_out_of_scope_work_item, db_insert_work_item
-from assess.lib.params import extract_url_path, extract_query_params, extract_path_params, generate_params_sig
+from assess.lib.config import load_config
+from assess.lib.params import (
+    extract_url_path,
+    extract_query_params,
+    extract_path_params,
+    generate_params_sig,
+    header_schema_from_headers,
+)
 from assess.lib.scope import host_admitted, ingest_scope_filter
 
 
-def _gf_coverage_item_payloads(
+_EMPTY_ASSIGNMENT = {
+    "priority_score": 0,
+    "priority_reason": None,
+    "cluster_key": None,
+    "terminal_reason": None,
+    "matched_buckets": [],
+    "secondary_buckets": [],
+}
+
+
+def _gf_coverage_candidates(
+    assignment: dict,
     *,
-    request_variant_id: int,
-    case_type: str,
-    url: str,
-    url_path: str,
     query_params,
     body_params,
     path_params,
     auth_context: str,
 ) -> list[dict]:
-    """Return class-typed coverage_items for matched gf buckets (2b/S14).
+    """Return class-typed coverage candidates for matched gf buckets (2b/S14).
 
-    For a row with a resolvable ``request_variant_id`` and matched gf buckets,
-    build one ``coverage_item`` per matched bucket with the canonical
-    ``attack_family = GF_BUCKET_TO_CLASS[bucket]`` (skipping generic buckets
-    whose map value is None). This is ADDITIVE to the generic baseline
-    ``_auto_request_coverage_candidates`` (which still runs server-side) — it
-    gives the depth ledger a real vuln-class obligation per endpoint, and per
-    S14 it bridges EVERY matched bucket, not just the cluster winner.
-
-    Posting is handled in batches by the caller so one endpoint corpus does not
-    become one HTTP request per matched bucket.
+    Shaped for an observation's ``coverage_candidates`` (``input_slot`` /
+    ``attack_family`` / ``status`` / ``notes``) so the backend links each to the
+    request-variant it creates in the same transaction — no separate POST and no
+    need for the (not-yet-assigned) variant id. ADDITIVE to the generic baseline
+    ``auto_generate_coverage``. Per S14 it bridges EVERY matched bucket, not just
+    the cluster winner.
     """
-    try:
-        assignment = classify_from_fields(
-            case_type=case_type,
-            url=url,
-            url_path=url_path,
-            query_params=json.dumps(query_params) if isinstance(query_params, dict) else str(query_params or "{}"),
-            body_params=json.dumps(body_params) if isinstance(body_params, dict) else str(body_params or "{}"),
-            path_params=json.dumps(path_params) if isinstance(path_params, dict) else str(path_params or "{}"),
-        )
-    except Exception as exc:  # noqa: BLE001 — classification must never abort ingest
-        print(
-            f"WARN ingest-endpoints: gf classification failed for variant "
-            f"{request_variant_id}: {exc}; skipping class-typed coverage.",
-            file=sys.stderr,
-        )
-        return []
-
     emitted_families: set[str] = set()
     payloads: list[dict] = []
     primary_buckets = assignment.get("matched_buckets", [])
@@ -88,19 +88,8 @@ def _gf_coverage_item_payloads(
 
     def _has_redirect_family_url_suffix() -> bool:
         redirect_family_tokens = {
-            "back",
-            "callback",
-            "continue",
-            "dest",
-            "destination",
-            "failure",
-            "forward",
-            "goto",
-            "next",
-            "origin",
-            "redirect",
-            "return",
-            "success",
+            "back", "callback", "continue", "dest", "destination", "failure",
+            "forward", "goto", "next", "origin", "redirect", "return", "success",
         }
         for key in (
             _iter_param_keys(query_params)
@@ -125,11 +114,6 @@ def _gf_coverage_item_payloads(
         attack_family = vuln_taxonomy.GF_BUCKET_TO_CLASS.get(bucket)
         if attack_family is None:
             return
-        # A weak (secondary) bucket whose attack_family is already covered by a
-        # primary (or earlier-emitted) bucket adds nothing — skip it so a row with
-        # primary `ssrf` + secondary `webhook` (both -> class `ssrf`) does not post
-        # a duplicate coverage item. Primary-vs-primary emission is left as-is
-        # (pre-existing S14 behavior).
         if weak and attack_family in emitted_families:
             return
         note = (
@@ -139,22 +123,15 @@ def _gf_coverage_item_payloads(
         )
         payloads.append(
             {
-                "request_variant_id": int(request_variant_id),
                 "auth_context": auth_context or "anonymous",
                 "input_slot": "endpoint",
                 "attack_family": attack_family,
-                "status_value": "pending",
+                "status": "pending",
                 "notes": note,
             }
         )
         emitted_families.add(attack_family)
 
-    # Strong matches create coverage items per attack class. Secondary (weak
-    # inner-token) buckets — from compound keys like `?return_url=` on a row whose
-    # cluster is owned by another bucket — ALSO create coverage items (marked
-    # weak) so a cross-class surface reaches every relevant specialist, not just
-    # the one that won the cluster. `matched_buckets` is byte-identical to before;
-    # `secondary_buckets` is the additive cross-routing signal (Fix 4).
     for bucket in primary_buckets:
         _emit_coverage(bucket, weak=False)
     for bucket in assignment.get("secondary_buckets", []):
@@ -164,8 +141,7 @@ def _gf_coverage_item_payloads(
 
 
 def register(subparsers) -> None:
-    p = subparsers.add_parser("ingest-endpoints", help="Ingest endpoint lines into assessment state")
-    p.add_argument("db_path", help="Path to cases.db")
+    p = subparsers.add_parser("endpoints", help="Ingest endpoint lines into assessment state")
     p.add_argument("source", help="Source name (e.g. recon, katana)")
     p.add_argument("--file", dest="input_file", default=None, help="Read endpoints from file instead of stdin")
     p.add_argument(
@@ -183,16 +159,7 @@ def register(subparsers) -> None:
 
 
 def _load_egress_blocked_hosts(path: str | None) -> set[str]:
-    """Return the set of hosts known to be CDN-edge-blocked (100% 403).
-
-    The egress reputation check (see
-    ``agent/references/runtime-guides/cdn-ip-blocking.md``) emits a small
-    list of representative hosts that responded with a 100% 403 cluster from
-    the runtime egress IP. URLs targeting those hosts are deferred with
-    ``cluster_key=deferred:egress-blocked`` so the operator can resolve the
-    egress block (allowlisting, residential proxy, browser-based tool) once
-    rather than letting specialists rediscover the failure per-URL.
-    """
+    """Return the set of hosts known to be CDN-edge-blocked (100% 403)."""
     if not path:
         return set()
     file_path = Path(path)
@@ -210,10 +177,7 @@ def _load_egress_blocked_hosts(path: str | None) -> set[str]:
 
 
 # Per-URL length cap for ingestion. A URL longer than this is skipped and
-# reported rather than carried into the bulk request-observation POST, where a
-# single over-long row can fail the WHOLE batch at the backend's length
-# validation and silently drop every good row with it (I-12). Matches the
-# per-line skip discipline already used for template/malformed/bad-JSON lines.
+# reported rather than carried into the bulk request-observation POST.
 MAX_INGEST_URL_LENGTH = 4096
 
 _FQDN_RE = re.compile(r"^[a-zA-Z0-9][-a-zA-Z0-9.]*\.[a-zA-Z]{2,}(?:[:/?#]|$)")
@@ -223,14 +187,7 @@ _BRACKETED_IPV6_RE = re.compile(r"^\[[0-9A-Fa-f:]+\](?:[:/?#]|$)")
 
 
 def _ensure_url_scheme(url: str) -> str | None:
-    """Return ``url`` with an ``https://`` scheme prefixed when it names a host.
-
-    Handles bare FQDNs, IPv4 literals, ``localhost``, and bracketed IPv6
-    authorities (``[::1]:8080/x``). Returns the URL unchanged when it already
-    carries a scheme. Returns ``None`` for a line that names no recognizable
-    host (a genuinely malformed token) so the caller can WARN+skip it rather
-    than passing it through to fail the POST (S12).
-    """
+    """Return ``url`` with an ``https://`` scheme prefixed when it names a host."""
     if not url:
         return None
     if url.startswith(("http://", "https://")):
@@ -246,14 +203,7 @@ def _ensure_url_scheme(url: str) -> str | None:
 
 
 def _payload_text(value) -> str:
-    """Coerce a JSON-provided request/response payload field to storable TEXT.
-
-    ``headers``/``response_headers`` may arrive as a dict (HAR-style header maps)
-    or as a pre-serialized string; ``body``/``response_snippet`` arrive as
-    strings. A dict is JSON-serialized; None/absent becomes ``""`` so the
-    passthrough is a clean no-op for the bare-URL sources that carry none of
-    these. Everything else is stringified defensively.
-    """
+    """Coerce a JSON-provided request/response payload field to storable TEXT."""
     if value is None:
         return ""
     if isinstance(value, str):
@@ -263,41 +213,24 @@ def _payload_text(value) -> str:
     return str(value)
 
 
+def _params_text(value) -> str:
+    return json.dumps(value) if isinstance(value, dict) else str(value)
+
+
 def run(args) -> None:
-    # Anchor a relative cases.db to the engagement dir (not the cwd) so the
-    # is_file() check and db_init() operate on the engagement's database even
-    # when invoked from a drifted cwd.
-    db_path = anchor_engagement_relative(args.db_path, args.engagement_dir)
-    if db_path != args.db_path:
-        print(f"ingest-endpoints: anchored relative db path '{args.db_path}' -> '{db_path}'", file=sys.stderr)
     source = args.source
-
-    if not Path(db_path).is_file():
-        print(f"ERROR: database not found: {db_path}", file=sys.stderr)
-        sys.exit(1)
-
-    db_init(db_path)
 
     cfg = load_config(args.engagement_dir)
     eng_dir = cfg.engagement_dir
     auth_context = auth_active_context(eng_dir)
     client = AssessmentClient(cfg.base_url, cfg.engagement_key)
 
-    # Egress-blocked deferral: hosts whose representative responses returned a
-    # 100% 403 cluster from the runtime egress IP get deferred at ingestion
-    # rather than admitted, so specialists do not rediscover the block per-URL.
-    # The earlier per-host URL budget gate was removed in the mid-engagement
-    # refactor: it silently deferred 4,300+ functional URLs in a single
-    # authenticated Katana crawl. Volume control now lives in inline
-    # classification at insert time (low-signal types stamp `status='skipped'`).
     egress_blocked_hosts = _load_egress_blocked_hosts(getattr(args, "egress_blocked_hosts", None))
     egress_blocked_count = 0
     egress_warned_hosts: set[str] = set()
 
-    # Scope admission gate (defense-in-depth). gau/wayback and other historical
-    # URL sources surface reachable-but-out-of-scope hosts; reachability is not
-    # scope (shared-constraints §1), so an out-of-scope host must never be
-    # admitted as probeable work. Inactive when scope.json has no allowlist.
+    # The shared gate is inactive when scope is absent/empty or the engagement
+    # explicitly enables the global bypass.
     scope_allow, scope_deny, scope_filter_active = ingest_scope_filter(eng_dir)
     out_of_scope_count = 0
     out_of_scope_warned_hosts: set[str] = set()
@@ -309,130 +242,41 @@ def run(args) -> None:
     skipped_malformed = 0
     skipped_badjson = 0
     skipped_overlong = 0
-    pending_rows: list[dict] = []
     pending_observations: list[dict] = []
-    pending_coverage_items: list[dict] = []
-
-    def _flush_coverage_items() -> None:
-        if not pending_coverage_items:
-            return
-        items = list(pending_coverage_items)
-        pending_coverage_items.clear()
-        post_coverage_items_bulk(client, items, warn_prefix="ingest-endpoints")
+    pending_direct: list[dict] = []
 
     def _flush_observations() -> None:
         nonlocal count, skipped_malformed
         if not pending_observations:
             return
-        rows = list(pending_rows)
         observations = list(pending_observations)
-        pending_rows.clear()
         pending_observations.clear()
-
         responses = post_request_observations_bulk(
             client,
             observations,
             warn_prefix="ingest-endpoints",
             fallback_individual=True,
         )
-        for row, response in zip(rows, responses, strict=True):
+        for observation, response in zip(observations, responses, strict=True):
             if isinstance(response, Exception):
                 skipped_malformed += 1
                 print(
-                    f"WARN ingest-endpoints: backend rejected {row['url']}: "
+                    f"WARN ingest-endpoints: backend rejected {observation['url']}: "
                     f"{response}; skipping this line",
                     file=sys.stderr,
                 )
                 continue
-            request_variant_id = None
-            service_id = None
-            try:
-                request_variant_id = response.get("request_variant", {}).get("id")
-            except (AttributeError, TypeError):
-                pass
-            try:
-                service_id = response.get("service", {}).get("id")
-            except (AttributeError, TypeError):
-                pass
-
-            if not request_variant_id and not service_id:
-                skipped_malformed += 1
-                print(
-                    f"WARN ingest-endpoints: backend response missing "
-                    f"request_variant.id/service.id for {row['url']}; skipping this line",
-                    file=sys.stderr,
-                )
-                continue
-
-            queue_key = ""
-            if request_variant_id:
-                queue_key = f"variant:{request_variant_id}:{row['case_type']}"
-            elif service_id:
-                queue_key = f"service:{service_id}:{row['case_type']}"
-
-            db_insert_work_item(
-                db_path,
-                queue_key=queue_key,
-                method=row["method"],
-                url=row["url"],
-                url_path=row["url_path"],
-                query_params=json.dumps(row["query_params"]) if isinstance(row["query_params"], dict) else str(row["query_params"]),
-                body_params=json.dumps(row["body_params"]) if isinstance(row["body_params"], dict) else str(row["body_params"]),
-                path_params=json.dumps(row["path_params"]) if isinstance(row["path_params"], dict) else str(row["path_params"]),
-                cookie_params=json.dumps(row["cookie_params"]) if isinstance(row["cookie_params"], dict) else str(row["cookie_params"]),
-                # P1-F: pass request/response payloads through to storage. These
-                # are "" for the current bare-URL sources (a harmless no-op), and
-                # carry real payloads once a producer (e.g. the deferred HAR
-                # ingest path) emits them — closing the second silent-truncation
-                # point where ingest-endpoints dropped body/response fields.
-                headers=row.get("headers", ""),
-                body=row.get("body", ""),
-                response_headers=row.get("response_headers", ""),
-                response_snippet=row.get("response_snippet", ""),
-                # A richer JSON/HAR ingest can re-visit a URL first admitted by a
-                # bare-URL source: the backend upsert returns the SAME
-                # request_variant id, so `queue_key` collides and the plain
-                # `INSERT OR IGNORE` path leaves the pre-existing empty
-                # headers/body/response in place. Mark payload-carrying rows as
-                # `curated` so db_insert_work_item takes its update-existing path
-                # and lands the new payload on the already-admitted row instead of
-                # dropping it. Bare-URL rows carry no payload, so they keep the
-                # cheap non-curated path (no operator-triage clobber, no extra
-                # lookups) exactly as before.
-                curated=bool(
-                    row.get("headers")
-                    or row.get("body")
-                    or row.get("response_headers")
-                    or row.get("response_snippet")
-                ),
-                content_type=row["row_content_type"],
-                response_status=row["response_status"] or 0,
-                case_type=row["case_type"],
-                source=source,
-                params_key_sig=row["params_sig"],
-                request_variant_id=int(request_variant_id) if request_variant_id else None,
-                service_id=int(service_id) if service_id else None,
-                auth_context=auth_context,
-                signals=json_text(row["signals"]),
-                live_status=row["live_status"],
-            )
-            if request_variant_id:
-                pending_coverage_items.extend(
-                    _gf_coverage_item_payloads(
-                        request_variant_id=int(request_variant_id),
-                        case_type=row["case_type"],
-                        url=row["url"],
-                        url_path=row["url_path"],
-                        query_params=row["query_params"],
-                        body_params=row["body_params"],
-                        path_params=row["path_params"],
-                        auth_context=auth_context,
-                    )
-                )
-                if len(pending_coverage_items) >= DEFAULT_BULK_WRITE_SIZE:
-                    _flush_coverage_items()
             count += 1
-        _flush_coverage_items()
+
+    def _flush_direct() -> None:
+        if not pending_direct:
+            return
+        items = list(pending_direct)
+        pending_direct.clear()
+        for start in range(0, len(items), DEFAULT_BULK_WRITE_SIZE):
+            chunk = items[start:start + DEFAULT_BULK_WRITE_SIZE]
+            if chunk:
+                client.post("work-items/bulk", {"items": chunk})
 
     try:
         for line in input_stream:
@@ -452,16 +296,11 @@ def run(args) -> None:
             body_params: dict = {}
             path_params: dict = {}
             cookie_params: dict = {}
-            # P1-F: request/response payload passthrough. Bare-URL sources
-            # (katana/gau/recon) carry none of these, so they default empty (a
-            # no-op — see the passthrough note at db_insert_work_item below). A
-            # richer JSON producer (e.g. the deferred HAR ingest path) that DOES
-            # emit them then lands them on the work item instead of being
-            # silently dropped at this second truncation point.
             headers = ""
             body = ""
             response_headers = ""
             response_snippet = ""
+            header_schema: dict = {}
 
             if line.startswith("{"):
                 try:
@@ -489,12 +328,8 @@ def run(args) -> None:
                 body_params = row.get("body_params") or {}
                 path_params = row.get("path_params") or {}
                 cookie_params = row.get("cookie_params") or {}
-                # P1-F: carry request/response payloads when a producer emits
-                # them. headers/response_headers may arrive as a dict (HAR-style)
-                # or a pre-serialized string; normalize dicts to JSON text since
-                # db_insert_work_item stores them as TEXT. body/response_snippet
-                # are already text (or absent -> "").
                 headers = _payload_text(row.get("headers"))
+                header_schema = header_schema_from_headers(row.get("headers"))
                 body = _payload_text(row.get("body"))
                 response_headers = _payload_text(row.get("response_headers"))
                 response_snippet = _payload_text(row.get("response_snippet"))
@@ -516,7 +351,7 @@ def run(args) -> None:
                     method = "GET"
                     url = line
 
-            url = url.split()[0] if url.split() else ""  # Take first token only
+            url = url.split()[0] if url.split() else ""
             method = method.upper()
 
             if not url:
@@ -559,36 +394,23 @@ def run(args) -> None:
             if not body_params:
                 body_params = {}
 
-            # An explicit producer `type` is authoritative ONLY when it is a real
-            # type. A sentinel `type=="unknown"` is NOT authoritative — it falls
-            # through to classify_type() so path/content-type shape can recover a
-            # real type. Mirrors the correct guard in
-            # `assess.lib.candidate_records.candidate_type()` (Issues 5/D).
             if override_type and override_type != "unknown":
                 case_type = override_type
             else:
-                # Thread a JSON-provided `content_type` (when present) into the
-                # typer instead of the historical `""`. The dominant bare-URL-list
-                # path leaves `row_content_type` empty, so the typer falls back to
-                # path-shape-only classification exactly as before — no regression.
                 case_type = classify_type(method, url_path, row_content_type, "")
 
             params_sig = generate_params_sig(query_params, body_params)
+            qp_text = _params_text(query_params)
+            bp_text = _params_text(body_params)
+            pp_text = _params_text(path_params)
+            cp_text = _params_text(cookie_params)
 
-            # Build observation payload
             parsed = urlparse(url)
             apex_host = (parsed.hostname or "").rstrip(".").lower()
 
-            # Scope admission gate (defense-in-depth) — fires BEFORE the egress
-            # check because out-of-scope is the harder boundary (never test) vs
-            # egress-blocked (resolve and retest). A reachable host not admitted
-            # by scope.json (no allowlist match, or matched an out_of_scope
-            # carve-out) is recorded as a skipped row with an auditable
-            # terminal_reason rather than admitted — reversible (no deletion),
-            # no request-observation POSTed (so no service/surface is created for
-            # it), and surfaced by `work-buffer stats --by reason`. This catches
-            # the gau/wayback historical-URL sources that bypass the recon
-            # pipeline's upstream scope filter.
+            # Scope admission gate (defense-in-depth) — out-of-scope hosts are
+            # recorded as skipped rows (no observation POST, so no service/surface
+            # is created) and surfaced by `work-buffer stats --by reason`.
             if (
                 scope_filter_active
                 and apex_host
@@ -604,30 +426,29 @@ def run(args) -> None:
                         f"admitting them to the work buffer.",
                         file=sys.stderr,
                     )
-                db_insert_out_of_scope_work_item(
-                    db_path,
-                    method=method,
-                    url=url,
-                    url_path=url_path,
-                    query_params=query_params,
-                    body_params=body_params,
-                    path_params=path_params,
-                    cookie_params=cookie_params,
-                    case_type=case_type,
-                    source=source,
-                    params_key_sig=params_sig,
-                    auth_context=auth_context,
-                    host=apex_host,
-                )
+                pending_direct.append({
+                    "queue_key": f"skipped:out-of-scope:{apex_host}:{url}",
+                    "method": method,
+                    "url": url,
+                    "url_path": url_path,
+                    "host": apex_host,
+                    "query_params": qp_text,
+                    "body_params": bp_text,
+                    "path_params": pp_text,
+                    "cookie_params": cp_text,
+                    "type": case_type,
+                    "source": source,
+                    "status": "skipped",
+                    "params_key_sig": params_sig,
+                    "auth_context": auth_context,
+                    "cluster_key": "skipped:out-of-scope",
+                    "terminal_reason": tagged_terminal_reason("out-of-scope", apex_host),
+                })
+                if len(pending_direct) >= DEFAULT_BULK_WRITE_SIZE:
+                    _flush_direct()
                 continue
 
-            # Egress-blocked deferral: when the egress reputation check (see
-            # cdn-ip-blocking.md) marks a host as CDN-edge-blocking the
-            # runtime IP (100% 403 cluster across representative samples),
-            # defer URLs to that host instead of admitting them. The work
-            # item is recorded with cluster_key=deferred:egress-blocked so
-            # the operator can resolve the block once rather than letting
-            # specialists rediscover it per-URL.
+            # Egress-blocked deferral: hosts CDN-edge-blocking the runtime IP.
             if apex_host and apex_host in egress_blocked_hosts:
                 egress_blocked_count += 1
                 if apex_host not in egress_warned_hosts:
@@ -638,22 +459,57 @@ def run(args) -> None:
                         f"See agent/references/runtime-guides/cdn-ip-blocking.md.",
                         file=sys.stderr,
                     )
-                _insert_egress_blocked_work_item(
-                    db_path=db_path,
-                    method=method,
-                    url=url,
-                    url_path=url_path,
-                    query_params=query_params,
-                    body_params=body_params,
-                    path_params=path_params,
-                    cookie_params=cookie_params,
-                    case_type=case_type,
-                    source=source,
-                    params_sig=params_sig,
-                    auth_context=auth_context,
-                    host=apex_host,
-                )
+                pending_direct.append({
+                    "queue_key": f"deferred:egress-blocked:{apex_host}:{url}",
+                    "method": method,
+                    "url": url,
+                    "url_path": url_path,
+                    "host": apex_host,
+                    "query_params": qp_text,
+                    "body_params": bp_text,
+                    "path_params": pp_text,
+                    "cookie_params": cp_text,
+                    "type": case_type,
+                    "source": source,
+                    "status": "deferred",
+                    "params_key_sig": params_sig,
+                    "auth_context": auth_context,
+                    "cluster_key": "deferred:egress-blocked",
+                    "terminal_reason": "egress-blocked",
+                })
+                if len(pending_direct) >= DEFAULT_BULK_WRITE_SIZE:
+                    _flush_direct()
                 continue
+
+            # Classify once; reused for the work-item scores AND the gf coverage
+            # candidates (the classifier globs the agent skills tree, so it stays
+            # client-side; the backend only stores the resulting facts).
+            try:
+                assignment = classify_from_fields(
+                    case_type=case_type,
+                    url_path=url_path,
+                    query_params=qp_text,
+                    body_params=bp_text,
+                    path_params=pp_text,
+                    url=url,
+                    source=source,
+                    live_status=live_status,
+                )
+            except Exception as exc:  # noqa: BLE001 — classification must never abort ingest
+                print(
+                    f"WARN ingest-endpoints: classification failed for {url}: {exc}",
+                    file=sys.stderr,
+                )
+                assignment = dict(_EMPTY_ASSIGNMENT)
+
+            gf_candidates = _gf_coverage_candidates(
+                assignment,
+                query_params=query_params,
+                body_params=body_params,
+                path_params=path_params,
+                auth_context=auth_context,
+            )
+            wi_status = "skipped" if case_type in INERT_TYPES else "pending"
 
             observation = {
                 "url": url,
@@ -664,7 +520,7 @@ def run(args) -> None:
                 "body_schema": body_params if isinstance(body_params, dict) else json.loads(body_params),
                 "path_schema": path_params if isinstance(path_params, dict) else json.loads(path_params),
                 "cookie_schema": cookie_params if isinstance(cookie_params, dict) else json.loads(cookie_params),
-                "header_schema": {},
+                "header_schema": header_schema,
                 "path_template": "",
                 "discovery_source": source,
                 "notes": "",
@@ -681,37 +537,41 @@ def run(args) -> None:
                 "target_ip_address": None,
                 "target_hostname": parsed.hostname,
                 "banner": "",
-                "coverage_candidates": [],
+                "coverage_candidates": gf_candidates,
                 "auto_generate_coverage": True,
-            }
-
-            pending_rows.append(
-                {
-                    "method": method,
-                    "url": url,
-                    "url_path": url_path,
-                    "query_params": query_params,
-                    "body_params": body_params,
-                    "path_params": path_params,
-                    "cookie_params": cookie_params,
-                    "row_content_type": row_content_type,
-                    "response_status": response_status,
-                    "live_status": live_status,
-                    "signals": signals,
+                # Work-buffer derivation block — the backend derives the
+                # assessment_work_items row from this in the same transaction.
+                "work_item": {
                     "case_type": case_type,
-                    "params_sig": params_sig,
-                    # P1-F payload passthrough (empty for bare-URL sources).
+                    "source": source,
+                    "status": wi_status,
+                    "url_path": url_path,
+                    "query_params": qp_text,
+                    "body_params": bp_text,
+                    "path_params": pp_text,
+                    "cookie_params": cp_text,
                     "headers": headers,
                     "body": body,
+                    "content_type": row_content_type,
+                    "response_status": response_status or 0,
                     "response_headers": response_headers,
                     "response_snippet": response_snippet,
-                }
-            )
+                    "params_key_sig": params_sig,
+                    "priority_score": assignment["priority_score"],
+                    "priority_reason": assignment["priority_reason"] or "",
+                    "cluster_key": assignment["cluster_key"] or "",
+                    "terminal_reason": assignment["terminal_reason"] or "",
+                    "classifier_version": CLASSIFIER_VERSION,
+                    "signals": json_text(signals) if signals else "",
+                    "live_status": live_status or "",
+                },
+            }
+
             pending_observations.append(observation)
             if len(pending_observations) >= DEFAULT_BULK_WRITE_SIZE:
                 _flush_observations()
         _flush_observations()
-        _flush_coverage_items()
+        _flush_direct()
     finally:
         if input_path and input_stream is not sys.stdin:
             input_stream.close()
@@ -742,65 +602,6 @@ def run(args) -> None:
             f"(status='skipped', terminal_reason='out-of-scope'). Reachable but not "
             f"in scope.json — these never reach a specialist. Fix scope.json and "
             f"re-ingest to admit them; review with "
-            f"`vigil assess work-buffer <db> stats --by reason`.",
+            f"`vigil assess work-buffer stats --by reason`.",
             file=sys.stderr,
         )
-
-
-def _insert_egress_blocked_work_item(
-    *,
-    db_path: str,
-    method: str,
-    url: str,
-    url_path: str,
-    query_params,
-    body_params,
-    path_params,
-    cookie_params,
-    case_type: str,
-    source: str,
-    params_sig: str,
-    auth_context: str,
-    host: str,
-) -> None:
-    """Insert a deferred work item for a URL whose host is egress-blocked.
-
-    Coexists with the wildcard-apex rejection path: the wildcard rejection
-    fires before this check, so URLs that fail BOTH gates land in the
-    rejected-apex bucket (the more restrictive one). Egress-blocked rows
-    use ``status='deferred'`` and a stable
-    ``cluster_key='deferred:egress-blocked'`` so the operator can list and
-    resolve them as one cluster after the egress reputation check is
-    cleared.
-    """
-    queue_key = f"deferred:egress-blocked:{host}:{url}"
-    qp = json.dumps(query_params) if isinstance(query_params, dict) else str(query_params)
-    bp = json.dumps(body_params) if isinstance(body_params, dict) else str(body_params)
-    pp = json.dumps(path_params) if isinstance(path_params, dict) else str(path_params)
-    cp = json.dumps(cookie_params) if isinstance(cookie_params, dict) else str(cookie_params)
-    conn = sqlite3.connect(db_path, timeout=5.0)
-    try:
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute(
-            """INSERT OR IGNORE INTO work_items (
-                queue_key, auth_context, method, url, url_path,
-                query_params, body_params, path_params, cookie_params,
-                type, source, status, params_key_sig,
-                cluster_key, terminal_reason
-            ) VALUES (
-                ?, ?, ?, ?, ?,
-                ?, ?, ?, ?,
-                ?, ?, ?, ?,
-                ?, ?
-            )""",
-            (
-                queue_key, auth_context, method, url, url_path,
-                qp, bp, pp, cp,
-                case_type, source, "deferred", params_sig,
-                "deferred:egress-blocked",
-                "egress-blocked",
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()

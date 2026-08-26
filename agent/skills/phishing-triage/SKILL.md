@@ -76,7 +76,7 @@ Load before the first command runs. Do not restate linked content.
 | M365 Defender Advanced Hunting (delivery, click-through, post-delivery rules) | `curl` POST `https://api.security.microsoft.com/api/advancedhunting/run` with KQL body | Tables: `EmailEvents`, `EmailUrlInfo`, `EmailAttachmentInfo`, `EmailPostDeliveryEvents`, `UrlClickEvents`. Auth via Azure AD app with `ThreatHunting.Read.All`. |
 | GWS Gmail mailflow pivot | `gam`, `gcloud` Reports API (`gmail`, `rules`) | Cross-link `agent/skills/google-workspaces/SKILL.md` §3 (content search) and §Gmail content for full message access via DWD. |
 | Offline JSON / header analysis | `jq`, `python3 -c '...'` | Read-only, no host-exec needed; manipulate already-pulled artifacts. |
-| Intel record + linkage | `vigil assess record-intel`, `vigil assess link-finding --intel <id>` | Records each IOC (sender domain, sender IP, lookalike domain, URL, attachment hash) and links it to the finding. |
+| Intel record + linkage | `vigil assess intel record`, `vigil assess finding link --intel <id>` | Records each IOC (sender domain, sender IP, lookalike domain, URL, attachment hash) and links it to the finding. |
 
 ### Negative tool list (do NOT invent these)
 
@@ -364,7 +364,7 @@ vigil assess host-exec --tool curl \
 Route each URL / hash / domain through
 `agent/skills/ioc-enrichment/SKILL.md` for the full reputation pass —
 that skill records `intel_*` rows and returns intel IDs for
-`link-finding` in the closing sequence.
+`finding link` in the closing sequence.
 
 **Evidence collected.**
 
@@ -373,7 +373,7 @@ that skill records `intel_*` rows and returns intel IDs for
 - `attachments-<short>/*` — each attachment + SHA-256
 - `vt-file-<hash>.json`, `vt-url-<id>.json`, `vt-domain-<d>.json` — VT
   reputation responses, one per IOC
-- Intel IDs from `record-intel` (per IOC, recorded via ioc-enrichment)
+- Intel IDs from `intel record` (per IOC, recorded via ioc-enrichment)
 
 **Common false positives.**
 
@@ -695,33 +695,29 @@ Run these four steps in order before returning the handoff JSON:
      "phishing-triage-handoff for <finding-slug>" \
      handoff \
      "<one-line disposition + key signals + blast radius>" \
-     --actor-kind agent
+     --actor-kind agent \
+     --metadata-inline '{"finding_slug":"<finding-slug>","disposition":"<recommended-disposition>"}'
    ```
 
-   The `metadata_json` shape under Activity Log Convention rides
-   alongside this row (via the backend client wrapper or the next CLI
-   iteration's `--metadata-json` flag).
+   Use `--metadata-file <path>` instead when the metadata is already in a
+   JSON object file.
 
 4. **Link IOCs to the finding** for the intel rows that
    `ioc-enrichment` created during Step 4:
 
    ```bash
-   vigil assess link-finding <finding-slug> --intel <intel-id> \
-     --note "URL <url> recorded as adversarial via urlscan + VT"
+   vigil assess finding link <finding-slug> --intel <intel-id> \
+     --reason "URL <url> recorded as adversarial via urlscan + VT"
    ```
 
-   The `--intel` flag is being added to `link-finding` in parallel
-   with this skill's v1; if the flag is not yet wired, fall back to
-   `vigil assess update-finding <slug> --inline
-   '{"details": {"related_intel_ids": [<id-1>, <id-2>]}}'` per the
-   pattern in `ioc-enrichment/SKILL.md` §6.
+   Repeat `--intel <intel-id>` in one invocation to attach several rows.
 
 5. **Emit the handoff JSON** via `vigil assess agent handoff
    --from-json /tmp/phishing-triage-handoff.json`. Shape per Output
    Contract above. `next_specialist` routes to:
    - `verifier` for any disposition recommendation with met
      evidence rigor
-   - `m365-signin-investigation` (P1, parallel build) when AiTM
+   - `m365-signin-investigation` when AiTM
      signals need a credential-entry pivot before the verifier
    - `google-workspaces` for GWS-tenant phish that surfaced a
      sign-in / token event needing the GWS audit pivot
@@ -745,10 +741,10 @@ Run these four steps in order before returning the handoff JSON:
   normalization this skill assumes is in `alert_normalized`.
 - **Writing a final disposition.** This skill emits a
   `disposition_recommendation`; final disposition is L3
-  `alert-fp-verification`'s. Calling `verify-finding` /
-  `kill-finding` from this skill is out of role.
+  `alert-fp-verification`'s. Calling `finding verify` (including
+  a `--disposition false_positive` kill) from this skill is out of role.
 - **Skipping IOC enrichment for "obvious" cases.** Record IOCs via
-  `record-intel` and `link-finding` even when the verdict is
+  `intel record` and `finding link` even when the verdict is
   unambiguous — the tenant intel repo is the cross-engagement signal.
 - **Conflating M365 SafeLinks with the attacker URL.** The
   `*.safelinks.protection.outlook.com/?url=` wrapper hides the actual
@@ -776,8 +772,8 @@ Run these four steps in order before returning the handoff JSON:
   via L3); consumes `containment_hints`.
 - `agent/skills/google-workspaces/SKILL.md` §Gmail content — GWS-side
   sister investigation.
-- `agent/skills/m365-signin-investigation/SKILL.md` (P1, parallel
-  build) — M365 sign-in side of an AiTM compromise.
+- `agent/skills/m365-signin-investigation/SKILL.md` — M365 sign-in
+  side of an AiTM compromise.
 - `agent/skills/osint-recon/SKILL.md` — cross-channel context for
   T1566.003 multi-channel lures.
 - MITRE T1566 tree: <https://attack.mitre.org/techniques/T1566/>

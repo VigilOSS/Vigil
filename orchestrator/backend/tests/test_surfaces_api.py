@@ -156,6 +156,37 @@ def test_patch_surface_supports_deferred_and_not_applicable(client, isolate_sett
     assert "no input vector after retest" in final_body["rationale"]
 
 
+def test_administratively_closed_surface_remains_an_uncovered_obligation(
+    client, isolate_settings
+):
+    """Administrative queue cleanup is explicit and never earns coverage."""
+    _seed_engagement(client, isolate_settings)
+    created = _create_surface(client)
+
+    closed = client.patch(
+        f"{ASSESSMENT_BASE}/surfaces/{created['id']}",
+        json={
+            "status": "administratively-closed",
+            "rationale": "bulk closeout; no specialist evidence",
+        },
+    )
+
+    assert closed.status_code == 200, closed.text
+    assert closed.json()["status"] == "administratively-closed"
+    brief = client.get(f"{ASSESSMENT_BASE}/resume-brief")
+    assert brief.status_code == 200, brief.text
+    surfaces = brief.json()["surfaces"]
+    assert surfaces["by_status"]["administratively-closed"] == 1
+    assert surfaces["open_count"] == 1
+    assert surfaces["top_uncovered"][0]["status"] == "administratively-closed"
+    readiness = client.get(f"{ASSESSMENT_BASE}/coverage-readiness")
+    assert readiness.status_code == 200, readiness.text
+    assert readiness.json()["blocker_count"] == 0
+    assert readiness.json()["advisory_surfaces"][0]["status"] == (
+        "administratively-closed"
+    )
+
+
 def test_patch_surface_rejects_empty_source_name(client, isolate_settings):
     _seed_engagement(client, isolate_settings)
     created = _create_surface(client)

@@ -95,8 +95,8 @@ candidate). Recipe: `openssl-sans.md` step 3.
   vhost-cert mismatch without collision detection misses the systemic-default-cert
   pattern.
 - Record collisions and mismatches as durable intel-notes via
-  `vigil assess record-intel note <intel-json>`; SAN-discovered subdomains feed Phase 1a
-  via `vigil assess ingest-endpoints` so they enter the work buffer.
+  `vigil assess intel record note <intel-json>`; SAN-discovered subdomains feed Phase 1a
+  via `vigil assess ingest endpoints` so they enter the work buffer.
 - Keep target-facing execution in `vigil assess kali ...` — host-side `openssl` /
   `dig` bypasses the audit pipeline that downstream specialists rely on.
 

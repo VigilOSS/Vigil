@@ -118,7 +118,7 @@ If CSRF cannot be passed in-session (token-binding to the originating session wo
 
 - Upload endpoint and filename parameter
 - Bypass technique used (extension, content-type, magic bytes)
-- Uploaded file URL and whether it executes — confirming the file was accepted and stored is not enough; you must show the **attacker outcome** (e.g., the uploaded `shell.php` executed via `GET /uploads/shell.php?c=id` and returned `uid=33(www-data)`, the SVG with XSS triggered JavaScript execution in the admin's browser when they viewed the file manager, the path traversal overwrote `/var/www/html/index.php` with a webshell confirming write access to the web root)
+- Uploaded file URL and whether it executes — prove the attacker outcome (`agent/rules/hunting.md` §2), e.g., the uploaded `shell.php` executed via `GET /uploads/shell.php?c=id` and returned `uid=33(www-data)`, the SVG with XSS triggered JavaScript execution in the admin's browser when they viewed the file manager, the path traversal overwrote `/var/www/html/index.php` with a webshell confirming write access to the web root
 - Webshell payload and confirmed RCE
 - Path traversal success and file overwritten
 - Severity: Critical (RCE via webshell) or High (XSS, file overwrite)

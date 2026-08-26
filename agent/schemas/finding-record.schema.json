@@ -40,7 +40,7 @@
       "minLength": 1,
       "title": "Workflow Status",
       "type": "string",
-      "description": "Lifecycle state settable at record time. New findings: 'active'. Post-exploitation confirmed: 'exploited'. WAF/control stopped testing: 'blocked'. Duplicate absorbed into another record: 'merged'. Delivered to client: 'reported'. NOTE: the blue-team/IR states (contained, eradicated, recovered) are intentionally NOT recordable here — they are applied only via `vigil assess update-finding`, so this record-finding enum is deliberately narrower than the full WorkflowStatus vocabulary.",
+      "description": "Lifecycle state settable at record time. New findings: 'active'. Post-exploitation confirmed: 'exploited'. WAF/control stopped testing: 'blocked'. Duplicate absorbed into another record: 'merged'. Delivered to client: 'reported'. NOTE: the blue-team/IR states (contained, eradicated, recovered) are intentionally NOT recordable here — they are applied only via `vigil assess finding update`, so this finding record enum is deliberately narrower than the full WorkflowStatus vocabulary.",
       "enum": [
         "draft",
         "active",
@@ -70,7 +70,7 @@
       "minLength": 1,
       "title": "Verification Disposition",
       "type": "string",
-      "description": "Verifier outcome (stored field). 'none': not yet checked. 'pending_runtime_proof': needs live PoC. 'blocked': the attempt could not even start (missing provisioning); requires details.block_reason and is held OUT of the report. 'confirmed': exploitability proven. 'downgraded': real but severity reduced. 'false_positive': not exploitable. NOTE: `vigil assess verify-finding --disposition` additionally accepts 'disputed', which is a verify ACTION that sets verification_state='disputed' and leaves this field at 'none' — 'disputed' is never persisted as a disposition, so it is intentionally absent from this stored enum.",
+      "description": "Verifier outcome (stored field). 'none': not yet checked. 'pending_runtime_proof': needs live PoC. 'blocked': the attempt could not even start (missing provisioning); requires details.block_reason and is held OUT of the report. 'confirmed': exploitability proven. 'downgraded': real but severity reduced. 'false_positive': not exploitable. NOTE: `vigil assess finding verify --disposition` additionally accepts 'disputed', which is a verify ACTION that sets verification_state='disputed' and leaves this field at 'none' — 'disputed' is never persisted as a disposition, so it is intentionally absent from this stored enum.",
       "enum": [
         "none",
         "pending_runtime_proof",
@@ -104,7 +104,7 @@
     },
     "canonical_location": {
       "default": "",
-      "maxLength": 1024,
+      "maxLength": 4096,
       "title": "Canonical Location",
       "type": "string",
       "description": "Primary affected location. URL for network findings (e.g. 'https://target.example/search?q'); 'file:path:line' for code findings."
@@ -213,20 +213,37 @@
         },
         "cvss_score": {
           "type": "number",
-          "exclusiveMinimum": 0,
+          "minimum": 0,
           "maximum": 10,
-          "description": "CVSS 3.1 base score (0.1-10.0). Must match cvss_vector."
+          "description": "CVSS 3.1 base score (0.0-10.0). Must match cvss_vector."
         },
         "remediation": {
           "type": "string",
           "description": "Specific fix or missing control (e.g. 'Use parameterized queries', 'Add bounds check on schemelen before memcpy')."
         },
         "steps_to_reproduce": {
-          "type": "array",
+          "type": [
+            "string",
+            "array"
+          ],
           "items": {
             "type": "string"
           },
-          "description": "Ordered reproduction steps, one action per string. Start from initial access state; end at impact observation."
+          "description": "Ordered reproduction steps, starting from initial access state and ending at impact observation. Write them FROM WHAT YOU ACTUALLY RAN, with concrete values (the real session cookie, the real object id, the real payload) — an unbound placeholder is a step nobody can follow, and reusing one placeholder across different objects corrupts the sequence. Redaction is the report-writer's job at submission time. Preferred form is ONE string holding the whole block with your own numbering — renderers emit it verbatim, and prose elsewhere in the submission that cites a step number only resolves against numbers you wrote. A list of strings is also accepted, one action per string."
+        },
+        "repro_runs": {
+          "type": "array",
+          "items": {
+            "type": [
+              "string",
+              "integer"
+            ]
+          },
+          "description": "Command-run ids (from `vigil assess command-run list`) that actually produced this reproduction, in step order. A step with no run id behind it was imagined, not executed. `export submission` fetches each row and renders its real argv under OPERATOR DETAILS, so the reproduction is transcribed rather than paraphrased. An id that does not resolve is reported as an advisory, never a refusal — an unreachable run row and an invented one look identical from there."
+        },
+        "attack_scenario": {
+          "type": "string",
+          "description": "Realistic adversary, starting access, and action, ending at first compromise. Renders as the submission's Attack Scenario section; omit when the reproduction already carries the narrative."
         },
         "poc_code": {
           "type": "string",
@@ -293,9 +310,145 @@
           },
           "description": "Concrete next steps needed to validate or complete the chain (e.g. 'Confirm reachable network caller for the URL parser')."
         },
+        "precondition_analysis": {
+          "type": [
+            "string",
+            "object",
+            "array"
+          ],
+          "description": "Conditions required for exploitation and evidence establishing whether each condition is attacker-reachable."
+        },
+        "severity_ceiling": {
+          "type": [
+            "string",
+            "object"
+          ],
+          "description": "Program- or precondition-derived upper bound on severity, including the reason for the cap when structured."
+        },
+        "root_cause_candidates": {
+          "type": [
+            "array",
+            "object"
+          ],
+          "description": "Candidate shared causes considered during deduplication or grouping."
+        },
+        "notes_provenance": {
+          "type": [
+            "string",
+            "array",
+            "object"
+          ],
+          "description": "Attribution for lifecycle-repair or analysis notes without changing the finding's discovery source."
+        },
         "roe_blocked": {
           "type": "boolean",
           "description": "Set true when the primitive is proved but the program's rules of engagement forbid the final proof step; grade at impact-if-true. Distinct from a provisioning/access wall (see block_reason) and from chain_required (which needs another bug)."
+        },
+        "vrt_category": {
+          "type": "string",
+          "description": "Bugcrowd VRT category for this finding (e.g. 'broken_access_control.idor'). Overridden by the --vrt-category flag on export."
+        },
+        "weakness": {
+          "type": "string",
+          "description": "HackerOne weakness for this finding (e.g. 'CWE-639 Authorization Bypass Through User-Controlled Key'). Overridden by the --weakness flag on export; falls back to cwe_id."
+        },
+        "crash_input": {
+          "type": "string",
+          "description": "Path to the minimized crash input that reproduces the fault."
+        },
+        "asan_report": {
+          "type": "string",
+          "description": "ASAN/UBSAN summary line identifying the fault class and location."
+        },
+        "attacker_trace": {
+          "type": "string",
+          "description": "Full byte-to-crash trace: how attacker-controlled input reaches the faulting operation."
+        },
+        "caller_feasibility": {
+          "type": "string",
+          "description": "Which real entry points reach this code path, and under what conditions."
+        },
+        "fp_gates": {
+          "type": [
+            "object",
+            "array",
+            "string"
+          ],
+          "description": "Results of every false-positive gate applied to this crash, so a reviewer sees which gates passed rather than a bare verdict."
+        },
+        "campaign_id": {
+          "type": [
+            "string",
+            "integer"
+          ],
+          "description": "Identifier of the fuzzing campaign that produced this crash."
+        },
+        "fuzzer_confirmation": {
+          "type": "boolean",
+          "description": "True when a fuzzer reproduced this finding, distinguishing it from a static-only inference."
+        },
+        "attacker_access_path": {
+          "type": "string",
+          "enum": [
+            "public_web_exposure",
+            "runtime_file_read_lfi",
+            "exposed_build_artifact",
+            "repository_or_backup_disclosure",
+            "privileged_insider",
+            "unknown"
+          ],
+          "description": "How a real attacker obtains the disclosed bytes. Severity must follow this access path."
+        },
+        "exposure_prerequisite": {
+          "type": "string",
+          "description": "The concrete condition that gives a real attacker the bytes (e.g. 'file is served from a public S3 path', 'confirmed LFI reads this path')."
+        },
+        "bounded_or_systemic": {
+          "type": "string",
+          "description": "Whether the observed impact is bounded to one object/tenant or systemic across them. Record the verdict when it is established — it cannot be reconstructed later."
+        },
+        "credential_id": {
+          "type": [
+            "string",
+            "integer"
+          ],
+          "description": "Identifier of the captured credential row this finding's PoC depends on, so a chain prerequisite stays traceable."
+        },
+        "related_intel_ids": {
+          "type": "array",
+          "description": "Identifiers of intel rows enriched from this finding's indicators."
+        },
+        "disposition": {
+          "type": "string",
+          "description": "Incident-response disposition in the blue vocabulary, carried for the report-writer."
+        },
+        "mitre_techniques": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "MITRE ATT&CK technique IDs (e.g. 'T1078') this finding maps to. Required on a blue-engagement finding before report readiness passes."
+        },
+        "timeline": {
+          "type": "array",
+          "description": "Ordered incident timeline entries, each a UTC ISO-8601 event citing its `source_file` and `command_run_id` per agent/rules/ir-evidence.md. Appended across investigation rungs, never replaced."
+        },
+        "iocs": {
+          "type": "array",
+          "description": "Indicators of compromise observed for this finding (IP, domain, email, file hash, OAuth client_id, URL). Each one gets an `intel_*` row via `vigil assess intel record`."
+        },
+        "confidence": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "description": "Stated confidence in the finding's disposition, paired with severity_rationale. Single-signal triage is `low` by definition."
+        },
+        "severity_rationale": {
+          "type": "string",
+          "description": "One-line justification for the assigned severity, per the impact-based severity model in agent/rules/triage.md."
         },
         "block_reason": {
           "type": "string",
@@ -303,7 +456,7 @@
         },
         "unblock_requirements": {
           "type": "object",
-          "description": "What must be provisioned to lift the block so the finding can be driven to proof. When the unblocker is another finding or chain, link it with `vigil assess link-finding <slug> --link-kind unblocked_by ...`.",
+          "description": "What must be provisioned to lift the block so the finding can be driven to proof. When the unblocker is another finding or chain, link it with `vigil assess finding link <slug> --link-kind unblocked_by ...`.",
           "properties": {
             "kind": {
               "type": "string",
@@ -330,14 +483,128 @@
         "original_pattern": {
           "type": "string",
           "description": "Abstract pattern signature copied verbatim from the root finding during variant analysis."
+        },
+        "run": {
+          "type": "string",
+          "description": "One-line reproduction command for the operational overlay (e.g. 'bash scans/va-003-poc.sh'). Surfaced by export submission as the **Run:** header line so a re-render/--overwrite rebuilds it from the finding instead of wiping the operator's hand-applied overlay."
+        },
+        "pass_if": {
+          "type": "string",
+          "description": "Success criterion for the operational overlay (e.g. 'HTTP 200 returns another member's order record'). Surfaced by export submission as the **Pass if:** header line."
+        },
+        "replies": {
+          "type": "array",
+          "description": "Append-only thread of OUTGOING replies to the program on this submitted finding (Bugcrowd comment / HackerOne activity reply / direct follow-up). Written by `vigil assess record-reply` via read-modify-write and re-rendered by `export reply`; never hand-edited (a shallow details merge would clobber the array).",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "seq": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "1-based, monotonic reply index. export reply/record-reply pick max(seq)+1 for a new reply."
+              },
+              "platform": {
+                "type": "string",
+                "enum": [
+                  "bugcrowd",
+                  "hackerone",
+                  "direct"
+                ],
+                "description": "Reply channel: bugcrowd (comment), hackerone (activity reply), or direct (reply email)."
+              },
+              "in_response_to": {
+                "type": "string",
+                "description": "Verbatim triager ask this reply answers."
+              },
+              "reply_to_seq": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "description": "Optional threading pointer to a prior reply seq (default: the last reply)."
+              },
+              "body": {
+                "type": "string",
+                "description": "Authored reply prose — exactly what is sent. The ONLY pasteable block in the rendered reply."
+              },
+              "new_evidence": {
+                "type": "string",
+                "description": "Optional NEW proof authored for THIS reply. Third-party PII partial-masked; self-owned/synthetic shown in full (submission-format.md PII rules)."
+              },
+              "new_evidence_ref": {
+                "type": "string",
+                "description": "Optional pointer to raw new-evidence (e.g. 'scans/<file>')."
+              },
+              "sent_status": {
+                "type": "string",
+                "enum": [
+                  "draft",
+                  "sent"
+                ],
+                "description": "Operator-marked send state. 'sent' is set only via `record-reply --sent`, never inferred."
+              },
+              "created_at": {
+                "type": "string",
+                "description": "ISO-8601 timestamp stamped when record-reply first created the entry."
+              },
+              "sent_at": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "ISO-8601 timestamp stamped when `--sent` marked the reply sent; null while a draft."
+              },
+              "author": {
+                "type": "string",
+                "description": "Agent/operator that authored the reply (e.g. 'report-writer')."
+              }
+            }
+          }
         }
       }
     },
     "provenance": {
       "additionalProperties": false,
-      "title": "Provenance",
-      "type": "object",
+      "description": "Typed reserved provenance with forward-compatible producer metadata.",
       "properties": {
+        "code_snapshot": {
+          "additionalProperties": false,
+          "description": "Immutable identity of the verified source snapshot behind a code finding.",
+          "properties": {
+            "repo_id": {
+              "description": "code_repos.id for the source snapshot reviewed for this finding.",
+              "minimum": 1,
+              "title": "Repo Id",
+              "type": "integer"
+            },
+            "repo_generation": {
+              "description": "The repository active_generation reviewed for this finding.",
+              "minimum": 1,
+              "title": "Repo Generation",
+              "type": "integer"
+            },
+            "source_manifest_digest": {
+              "description": "The repository source_manifest_digest reviewed for this finding.",
+              "maxLength": 64,
+              "minLength": 64,
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Source Manifest Digest",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repo_id",
+            "repo_generation",
+            "source_manifest_digest"
+          ],
+          "title": "CodeSnapshotProvenance",
+          "type": [
+            "object",
+            "null"
+          ],
+          "default": null
+        },
         "agent_name": {
           "type": "string",
           "description": "Agent that produced this finding (e.g. 'vulnerability-analyst'). Mirror of source_name."
@@ -346,7 +613,9 @@
           "type": "string",
           "description": "Path or ID of the artifact this finding was derived from."
         }
-      }
+      },
+      "title": "FindingProvenance",
+      "type": "object"
     },
     "evidence_type": {
       "enum": [
@@ -462,6 +731,11 @@
       },
       "title": "Links",
       "type": "array"
+    },
+    "allow_remint": {
+      "default": false,
+      "title": "Allow Remint",
+      "type": "boolean"
     }
   },
   "required": [
@@ -481,6 +755,37 @@
   ],
   "title": "Assessment Finding Record",
   "type": "object",
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "canonical_location"
+        ],
+        "properties": {
+          "canonical_location": {
+            "pattern": "^\\s*file:"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "provenance"
+        ],
+        "properties": {
+          "provenance": {
+            "required": [
+              "code_snapshot"
+            ],
+            "properties": {
+              "code_snapshot": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
   "examples": [
     {
       "title": "Blind SQL injection in search",
@@ -503,6 +808,10 @@
         "steps_to_reproduce": [
           "Send GET /search?q=test'+AND+1=1--+-",
           "Observe normal search results returned"
+        ],
+        "repro_runs": [
+          56052,
+          56054
         ],
         "poc_request": {
           "method": "GET",
@@ -542,6 +851,13 @@
       "defect_family": "buffer-overflow",
       "canonical_location": "file:lib/urlapi.c:342",
       "summary": "Attacker-controlled URL scheme exceeding 64 bytes overflows heap buffer in parseurl()",
+      "provenance": {
+        "code_snapshot": {
+          "repo_id": 7,
+          "repo_generation": 3,
+          "source_manifest_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        }
+      },
       "details": {
         "cwe_id": "CWE-122",
         "impact": "Remote code execution via heap corruption",
@@ -578,9 +894,6 @@
       "evidence_ref": "",
       "notes": "",
       "source_name": "vulnerability-analyst",
-      "provenance": {
-        "agent_name": "vulnerability-analyst"
-      },
       "links": []
     },
     {

@@ -1,12 +1,24 @@
 """vigil assess artifact — indexed engagement artifact operations."""
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from urllib.parse import quote, urlencode
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+
+
+class _RemovedPositionalQueryAction(argparse.Action):
+    """Reject the former positional query without advertising it in help."""
+
+    def __call__(self, parser, namespace, values, option_string=None) -> None:
+        if values:
+            parser.error(
+                "artifact search: positional query was removed; "
+                "use --q \"<free-text query>\""
+            )
 
 
 def register(subparsers) -> None:
@@ -18,8 +30,27 @@ def register(subparsers) -> None:
     action_sub.required = True
 
     # -- search ---------------------------------------------------------------
-    sp_search = action_sub.add_parser("search", help="FTS search over indexed artifacts.")
-    sp_search.add_argument("query", nargs="*", help="Search query words (joined with spaces)")
+    sp_search = action_sub.add_parser(
+        "search",
+        help="Search indexed artifacts by free text and/or typed filters.",
+        description=(
+            "Search indexed artifacts. Use --q for free text; combine it with "
+            "--finding or --kind to narrow the result."
+        ),
+    )
+    sp_search.add_argument(
+        "--q",
+        dest="query",
+        default="",
+        metavar="QUERY",
+        help="Free-text query. Quote multi-word values.",
+    )
+    sp_search.add_argument(
+        "removed_positional_query",
+        nargs="*",
+        action=_RemovedPositionalQueryAction,
+        help=argparse.SUPPRESS,
+    )
     sp_search.add_argument("--finding", default="", help="Filter/rank by finding slug")
     sp_search.add_argument("--kind", default="", help="Filter by artifact kind")
     sp_search.add_argument("--limit", type=int, default=50)
@@ -111,7 +142,7 @@ def _render_rows(rows: list[dict]) -> str:
 def _run_search(args) -> None:
     client = _client(args)
     try:
-        query = " ".join(args.query).strip() if args.query else ""
+        query = str(args.query or "").strip()
         params: list[tuple[str, str]] = []
         if query:
             params.append(("q", query))

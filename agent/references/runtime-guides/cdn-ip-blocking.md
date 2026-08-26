@@ -1,5 +1,5 @@
 ---
-description: CDN/edge IP-reputation block detection signals (403 + reference codes, TCP reset, 000-status), the egress reputation curl script, four mitigation options (program allowlist / residential proxy / browser-based tool / accept-gap), give-up-vs-escalate rule, and the vigil assess ingest-endpoints --egress-blocked-hosts cross-reference
+description: CDN/edge IP-reputation block detection signals (403 + reference codes, TCP reset, 000-status), the egress reputation curl script, four mitigation options (program allowlist / residential proxy / browser-based tool / accept-gap), give-up-vs-escalate rule, and the vigil assess ingest endpoints --egress-blocked-hosts cross-reference
 ---
 
 # CDN / Edge IP-Reputation Blocking — Detection and Mitigation
@@ -9,7 +9,7 @@ description: CDN/edge IP-reputation block detection signals (403 + reference cod
 > shared `reachability.classify_probe` verdict (a bare `connect=000` is NOT treated as blocked unless there is
 > no TCP connect AND no resolved IP; a TLS-1.3 reset is retried with `--tls-max 1.2`), records an advisory
 > `egress_decision` only when controls connect but the sample is overwhelmingly blackholed, and writes the
-> blocked-hosts file for `ingest-endpoints --egress-blocked-hosts`. The manual script below is the reference it
+> blocked-hosts file for `ingest endpoints --egress-blocked-hosts`. The manual script below is the reference it
 > implements — prefer the verb; reach for the script when you need to tune the probe by hand.
 
 When the runtime container's egress IP is on a CDN edge's reputation list,
@@ -130,9 +130,9 @@ those host strings to `$DIR/scans/egress_blocked_hosts.txt` and pass the
 file to subsequent ingestion runs:
 
 ```bash
-vigil assess ingest-endpoints \
+vigil assess ingest endpoints \
   --egress-blocked-hosts "$DIR/scans/egress_blocked_hosts.txt" \
-  "$DB" katana < "$DIR/scans/katana.txt"
+  katana < "$DIR/scans/katana.txt"
 ```
 
 URLs to those hosts defer with `cluster_key=deferred:egress-blocked` instead
@@ -229,7 +229,7 @@ real failure mode for some heavily-CDN-fronted programs.
 **How to set up.** Record the decision via
 `vigil assess agent decision --kind egress_decision --choice accept-gap --payload-json '{"blocked_pct": N}' --surfaced-to-user`,
 write the gap into `agent/skills/report-generation` Phase-4 coverage notes via
-`vigil assess record-intel note` so the report-writer surfaces it. Mark
+`vigil assess intel record note` so the report-writer surfaces it. Mark
 affected scope entries `status=deferred` in `scope.json` so the scope
 coverage gate accepts them as terminal.
 

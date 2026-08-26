@@ -3,6 +3,7 @@ name: gf-patterns:cloud_metadata
 description: Cloud instance-metadata (IMDS) SSRF probe signatures — AWS/Azure link-local address, GCP metadata host, IMDS paths, and obfuscated address forms
 origin: local overlay (no upstream gf equivalent)
 bucket: cloud_metadata
+skill: ssrf-testing
 weight: 40
 ---
 
@@ -103,8 +104,8 @@ never reorder an existing chain.
 Forward-looking coverage. This bucket had **zero hits** in the live work-buffer at the time of
 its introduction — it is added (alongside `devops_console` Jenkins/Jolokia, `cms_db_admin`
 phpMyAdmin, and `secret_vault`) as proactive coverage for future engagements where an archived
-or proof URL embeds an IMDS pivot, per the plan's stated generic-coverage goal. See
-`docs/plans/classify-context-and-surface-buckets-2026-06.md` Part 3 §B.10.
+or proof URL embeds an IMDS pivot, under the generic-coverage rule. See ADR 0008
+and `DRIFT.md` for the accepted rationale.
 
 ## Sources
 

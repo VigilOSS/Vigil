@@ -1,9 +1,12 @@
 # ADR 0004 — Deterministic-first modern surface taxonomy for URL triage
 
-- **Status:** Accepted — implemented. Code: `agent/scripts/assess/lib/classify_buckets.py` (`_TYPE_FLOOR`, the 13 new/extended `_BUCKETS`, the regex-fragment mechanism, `normalize_path_for_cluster`, and the `_PATH_OBJECT_REF_SEGMENT` redesign) + `orchestrator/backend/lib/vuln_taxonomy.py` (`GF_BUCKET_TO_CLASS` additions). Shipped TDD in commit b3a9a6d7 (floor-key reconciliation follow-up in 12b143bb).
+- **Status:** Accepted — implemented. Code: `agent/scripts/assess/lib/classify_buckets.py` (`_TYPE_FLOOR`, the 13 new/extended `_BUCKETS`, the regex-fragment mechanism, `normalize_path_for_cluster`, and the `_PATH_OBJECT_REF_SEGMENT` redesign) + `orchestrator/backend/lib/vuln_taxonomy.py` (`GF_BUCKET_TO_CLASS` additions). Shipped TDD in commit b3a9a6d7 (floor-key reconciliation in 12b143bb).
 - **Date:** 2026-06-15 (decided 2026-06-15; shipped same day).
 - **Deciders:** Project owner + Claude.
-- **Supersedes / relates to:** implements **Area C (C-1/C-2/C-4/C-5)** of `docs/plans/rd-prompt-recon-classify-2026-06-15.md`. The authoritative implementation contract is `docs/plans/research/classify-surface-2026-06/IMPLEMENTATION-SPEC.md`; the empirical basis is `docs/plans/research/classify-surface-2026-06/` (README + curated label artifacts). Relates to ADR 0001 (the "no silent drops" / harness-not-gate philosophy this extends to the classifier).
+- **Supersedes / relates to:** the authoritative implementation contract is
+  `docs/research/classify-surface-2026-06/IMPLEMENTATION-SPEC.md`; the empirical
+  basis is the adjacent README and curated label artifacts. Relates to ADR 0001
+  (the "no silent drops" philosophy this extends to the classifier).
 
 ---
 
@@ -25,11 +28,11 @@ A multi-corpus label study (~8,000 templates across cms-gov + xfinity + zendesk,
 
 The cumulative cms-gov lower bound after three additional deep sweeps reached **1,711 actionable / 723 high-missed** templates — the original sample materially *undercounted* the gap. Two precision problems compounded the recall problem: the `_PATH_OBJECT_REF_SEGMENT` IDOR regex was diluted by `/2024/` year and `/page/2` pagination matches (and was blind to pre-normalized `{id}` templates), and the `ssrf` bucket's `next`/`redirect`/`callback` param keys mis-classified open-redirect surfaces as SSRF at weight 45.
 
-A third corpus — **Zendesk** (a live modern SaaS, used qualitatively because its `cases.db` is malformed) — independently corroborated the two highest-value classes: of 1,540 proxy-captured rows, **1,023 are `api`-typed** and **392 are `graphql`-typed**, confirming that `api` and `graphql` are dominant surface shapes in production API-first architectures rather than niche classes (see §4b cross-corpus validation, now recorded in the research `README.md`).
+A third corpus — **Zendesk** (a live modern SaaS, used qualitatively because its `cases.db` is malformed — `cases.db` has since been folded into the backend `assessment_work_items` ledger, see `docs/adr/0013-work-buffer-folded-into-backend-ledger.md`) — independently corroborated the two highest-value classes: of 1,540 proxy-captured rows, **1,023 are `api`-typed** and **392 are `graphql`-typed**, confirming that `api` and `graphql` are dominant surface shapes in production API-first architectures rather than niche classes (see §4b cross-corpus validation, now recorded in the research `README.md`).
 
 ## Decision
 
-**Replace the gf-only triage with a deterministic-first modern surface taxonomy: a producer-`type` floor, 13 new/extended buckets, path-template cluster normalization, and precision tightenings — all running before any model pass.** The model classification pass (C-3) remains a *future second stage* scoped only to the residual fallback set; it is explicitly NOT the first stage.
+**Replace the gf-only triage with a deterministic modern surface taxonomy: a producer-`type` floor, 13 new/extended buckets, path-template cluster normalization, and precision tightenings.** Ambiguous residual rows remain visible in the fallback set; Vigil does not guess their class or spend model context relabeling evidence that cannot support a deterministic classification.
 
 1. **Type-floor (`_TYPE_FLOOR`) — rescue the producer's own signal first.** The producer assigns each row a `type` at ingest; the classifier previously discarded it for all non-inert rows. A 9-row `type → (floor_bucket, floor_weight)` table makes it a first-class input: `graphql→45`, `api_spec→40`, `auth_entry→40`, `portal_session→35`, `debug_config→35`, `form→30`, `workflow→idor 30`, `event_feed→ssrf 25`, `api_route→api 20`. The score becomes `max(match_weight, floor_weight)` — **a floor can never lower a bucket-driven score, and never changes cluster routing when a bucket matched**; when no bucket matches, the row clusters as `gf:<floor_bucket>` instead of the `path:*` fallback so specialist routing still fires. Zero new path/param heuristics, zero false-positive risk, zero model cost.
 
@@ -46,7 +49,7 @@ A third corpus — **Zendesk** (a live modern SaaS, used qualitatively because i
 7. **Drift-tested.** Every new bucket has a `GF_BUCKET_TO_CLASS` entry in `vuln_taxonomy.py` (so the 2b coverage bridge mints a class-typed coverage item and the taxonomy drift test passes), a `gf-patterns/*.md` reference doc, a DRIFT.md rationale entry, and ≥1 positive row + ≥1 negative guard in the 93-row consolidated test matrix.
 
 ### Owner constraints baked into the decision
-- Deterministic-first: free, zero-FP fixes (type-floor + boundary-anchored buckets + precision gates) land before any model spend; the model pass is scoped to the residual.
+- Deterministic classification: free, reproducible signals (type-floor + boundary-anchored buckets + precision gates) route supported classes; ambiguous residuals stay explicit instead of consuming model context or being guessed into a class.
 - No silent drops (ADR 0001): a buried surface is a missed bug; the floor + buckets exist so a real surface never disappears into a priority-0 `path:*` cluster.
 - Robustness over speed; the contract (IMPLEMENTATION-SPEC) wins over the plan where they conflict, and override #9 (no regression) wins over the research roster where *they* conflict.
 
@@ -58,24 +61,20 @@ A third corpus — **Zendesk** (a live modern SaaS, used qualitatively because i
 - One declaration-ordered bucket list keeps tie-break and reason-chain order deterministic and testable; the type-floor makes the producer's strongest cheap signal load-bearing.
 
 **Negative / risks**
-- Widening path regexes on a content-rich corpus risks queue noise; mitigated by mandatory route-context negative guards (the third targeted sweep over-called `workflow`/`admin`/`auth` on public-content page titles — `workflow` was a confirmed FP-trap and is deliberately a type-floor-only signal, deferred to the C-3 model pass for path-heuristic classification).
-- The deterministic taxonomy is calibrated against cms-gov/xfinity/zendesk; it must be validated against the `.mil` archive/legacy-breadth corpus before it can be trusted as overfit-free (the research README names the two comparison corpora).
-- The residual ambiguous single-row tail (~17.5k cms-gov templates) is not yet classified — by design; it is the input for the future C-3 model pass, not a gap in this decision.
-
-**Neutral**
-- The model classification pass (rd-plan C-3) and ingest observability (C-6) remain unshipped: C-3 is intentionally deferred as the second stage; C-6 is dropped.
+- Widening path regexes on a content-rich corpus risks queue noise; mitigated by mandatory route-context negative guards (the third targeted sweep over-called `workflow`/`admin`/`auth` on public-content page titles — `workflow` was a confirmed FP-trap and therefore remains a type-floor-only signal).
+- The deterministic taxonomy is calibrated against cms-gov/xfinity/zendesk. Its boundary guards and no-regression suite are the shipped trust boundary; new corpora can extend that evidence without being a prerequisite for the current contract.
+- The residual ambiguous single-row tail (~17.5k cms-gov templates) remains unclassified by design: the deterministic evidence is insufficient, so these rows stay outside this taxonomy rather than being guessed into a class.
 
 ## Alternatives considered
 
-1. **Model-only classification as the first stage.** Rejected as the first stage: the strongest cheap signal (producer `type`) and the deterministic path/param structure of an API-first corpus are free and zero-FP — spending model tokens to re-derive `/graphql → high-value` or `/v2/ → versioned-API` is wasteful and non-reproducible. The deterministic taxonomy is first; the model pass (C-3) is a *future second stage* scoped only to the rows still at `path:*` priority 0 after these fixes, deduped by normalized url-template. This is the recorded "deterministic-first, model-second" decision.
+1. **Model classification of the residual fallback set.** Rejected: the strongest cheap signal (producer `type`) and the deterministic path/param structure of an API-first corpus are free and reproducible, while ambiguous residuals lack evidence for a trustworthy class. Spending model tokens to re-derive `/graphql → high-value` or to guess at the long tail adds context pressure and non-determinism without improving the durable contract. Residual rows remain visible and available to coverage-driven specialist review.
 2. **Tune down the existing gf weights / penalties instead of adding buckets.** Rejected: re-weighting cannot create a class the taxonomy lacks (`graphql`, `oauth-oidc`, `api-versioning` have no bucket to re-weight), so it leaves the dominant modern surfaces at priority 0 regardless.
 3. **Rename `upload_fields → file-upload` and raise it to weight 35 (the research roster's proposal).** Rejected where it conflicts with override #9: the rename + reweight would break the pinned `gf:lfi+gf:upload_fields` reason string and the pinned `priority_score == 40` arithmetic. The recall intent (REST `/attachments` fragments + content-type keys) is delivered on the same `upload_fields` bucket at its existing name and weight instead.
 4. **Add a bare `/api/` path fragment to the `api` bucket** (the research §4b proposal). Rejected: a bare `/api/` fragment fires on `/api/users/avatar` and corrupts the regression-pinned reason chain. The generic params-less `/api/...` rescue is delivered by the `api_route` type-floor (the semantically correct home); `/api/v<n>/` is covered by the `api-versioning` regex.
 
 ## References
-- `docs/plans/research/classify-surface-2026-06/IMPLEMENTATION-SPEC.md` — the authoritative implementation CONTRACT (bucket declaration order, the `_TYPE_FLOOR` table, the `_PATH_OBJECT_REF_SEGMENT` redesign, `normalize_path_for_cluster`, the 11 soundness overrides, and the 93-row test matrix). Where the spec conflicts with the research findings, the spec wins.
-- `docs/plans/research/classify-surface-2026-06/README.md` — the empirical basis: four labeling sweeps, the three+one corpora, the curated label artifacts, and the §4b cross-corpus validation detail (Zendesk graphql/api counts and endpoint shapes).
+- `docs/research/classify-surface-2026-06/IMPLEMENTATION-SPEC.md` — the authoritative implementation CONTRACT (bucket declaration order, the `_TYPE_FLOOR` table, the `_PATH_OBJECT_REF_SEGMENT` redesign, `normalize_path_for_cluster`, the 11 soundness overrides, and the 93-row test matrix). Where the spec conflicts with the research findings, the spec wins.
+- `docs/research/classify-surface-2026-06/README.md` — the empirical basis: four labeling sweeps, the three+one corpora, the curated label artifacts, and the §4b cross-corpus validation detail (Zendesk graphql/api counts and endpoint shapes).
 - `agent/references/gf-patterns/DRIFT.md` — the per-bucket accept/skip drift rationale (type-floor mechanism, all 13 buckets, precision tightenings, regex mechanism, corpus grounding).
 - `agent/references/gf-patterns/*.md` — per-bucket reference docs (`graphql.md`, `api.md`, `auth.md`, `api-versioning.md`, `oauth-oidc.md`, `object-storage.md`, `deserialization.md`, `sso.md`, `webhook.md`, etc.), each carrying its corpus grounding and attack-class notes.
-- `docs/plans/rd-prompt-recon-classify-2026-06-15.md` — Area C (the plan this implements; C-1/C-2/C-4/C-5 shipped here, C-3 deferred, C-6 dropped).
 - ADR 0001 — the "no silent drops" / harness-not-gate philosophy this extends to URL triage.

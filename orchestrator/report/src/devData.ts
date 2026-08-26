@@ -34,11 +34,12 @@ const rootFinding = f({
     "GET /api/v1/admin/users returned the full user table (HTTP 200) with no session cookie present.",
   remediation:
     "Register the authorization guard at the router root before mounting admin sub-routes, and add a regression test asserting 401 for an unauthenticated admin request.",
-  steps_to_reproduce: [
-    "Open an incognito session (no auth cookie).",
-    "Issue `GET https://acme.example/api/v1/admin/users`.",
-    "Observe HTTP 200 with the full user list.",
-  ],
+  // One authored block, numbered by the author — the preferred shape, kept here
+  // so the dev preview exercises it alongside the list form used below.
+  steps_to_reproduce:
+    "1. Open an incognito session (no auth cookie).\n" +
+    "2. Issue `GET https://acme.example/api/v1/admin/users`.\n" +
+    "3. Observe HTTP 200 with the full user list returned by step 2.",
   cwe_id: "CWE-862",
   owasp_category: "A01:2021 Broken Access Control",
   cvss_score: 9.8,

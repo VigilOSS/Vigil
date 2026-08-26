@@ -22,7 +22,7 @@ escalated`), and the evidence sources are telemetry instead of source code.
   about to propose containment on must be `verified` first. The verifier
   is the only role that can write a disposition.
 - Reopening of a previously dispositioned finding when new evidence
-  contradicts the prior verdict (the `reset-finding` lifecycle transition
+  contradicts the prior verdict (the `finding update --status draft` lifecycle transition
   routes through this skill again).
 
 This skill is for L3 verification only. Initial triage belongs to L1's
@@ -45,7 +45,7 @@ investigator's annotations are inputs, never trusted on their own.
   customer's documented identities, schedules, change tickets, on-call
   calendar, vendor maintenance windows, and known-benign register that
   Check 5's devil's advocate searches against.
-- `agent/skills/code-finding-verification/SKILL.md` — the red-mode origin
+- `agent/skills/code-finding-verification/SKILL.md` — the owning definition
   of the five-check protocol. Skim it when in doubt about the rigor of a
   Check 1 or Check 4 evidence citation — the standard is identical, only
   the data source differs.
@@ -60,7 +60,7 @@ investigator's annotations are inputs, never trusted on their own.
   read its content (raw log JSON, timeline markdown, IOC dump). Always
   resolve evidence by artifact ID; never by local path. A local path is
   not citable across dispatches.
-- `vigil assess artifact search "<query>"` — locate corroborating
+- `vigil assess artifact search --q "<query>"` — locate corroborating
   artifacts in the engagement's artifact index — sibling pulls in the
   same actor's session, prior verifications of the same actor, change
   tickets, on-call calendar exports.
@@ -71,14 +71,14 @@ investigator's annotations are inputs, never trusted on their own.
   reproduction needs the token feed). Every cross-source pull lands in
   the audit pipeline with the same envelope as the investigator's pulls:
   `--technique`, `--intent`, `--phase verify`, `--scope-host <tenant>`.
-- `vigil assess verify-finding <slug>` — record `verified`, `downgraded`,
+- `vigil assess finding verify <slug>` — record `verified`, `downgraded`,
   or `escalated` disposition with cited evidence. (Note: the CLI's
   `--disposition` flag uses `confirmed | downgraded | false_positive |
   disputed`; the blue vocabulary maps `verified` → `confirmed` and
   `escalated` → `disputed` at the storage layer. Use the
-  `--inline` payload's `details.disposition` field to record the blue
+  `--details-inline` object's `disposition` field to record the blue
   vocabulary verbatim for the report-writer.)
-- `vigil assess kill-finding <slug>` — record `false_positive` disposition
+- `vigil assess finding verify <slug> --disposition false_positive` — record `false_positive` disposition
   with cited counter-evidence. Enforces required fields
   (`kill_check`, `kill_reason`) before the request leaves the CLI.
 - `vigil assess log` — every check outcome is recorded as an
@@ -96,47 +96,21 @@ investigator's annotations are inputs, never trusted on their own.
 
 ## Methodology — Five-Check Protocol
 
-### Preamble (verbatim from red-mode origin + blue translation)
+### Preamble
 
-Verbatim from `agent/skills/code-finding-verification/SKILL.md:36`:
+The four-outcome vocabulary (PASS, KILL, DOWNGRADE, ESCALATE), the evidence-symmetry
+bar behind it, and the Multi-Perspective Voting escalation are owned by
+`agent/skills/code-finding-verification/SKILL.md`'s "Methodology — Five-Check
+Protocol" section — read it once for the rigor bar, then apply the same discipline
+here against telemetry instead of source code. Blue disposition vocabulary maps onto
+that outcome set: PASS closes toward `verified`, KILL closes toward `false_positive`,
+DOWNGRADE narrows severity without closing the check, and an unresolved ESCALATE
+routes to voting below. "Symmetric Evidence Rule" states how the five checks resolve
+to one of the four blue dispositions.
 
-> *"absence of counter-evidence is not PASS evidence, and plausibility of
-> counter-evidence is not KILL evidence."*
-
-Blue translation (PASS → `verified`, KILL → `false_positive`): absence of
-counter-evidence is not enough to verify, and plausibility of a benign
-explanation is not enough to false-positive. The two dispositions carry
-identical evidence cost — a `verified` finding must cite supporting
-telemetry at the same rigor a `false_positive` finding cites the
-tenant-ref benign pattern or the change ticket. A vague "looks like normal
-admin behavior" is not `false_positive`; it is `escalated` until a
-citation lands. A vague "the actor seems suspicious" is not `verified`;
-it is also `escalated`.
-
-Each of the five checks below produces one outcome:
-
-- **PASS** — supporting evidence at the rigor bar (cited artifact IDs,
-  cited tenant-ref entries, cited log slices); the check confirms the
-  finding for this dimension.
-- **KILL** — counter-evidence at the same rigor bar; the check refutes the
-  finding for this dimension.
-- **DOWNGRADE** — counter-evidence reduces the alleged impact but does
-  not eliminate the adversarial primitive (e.g., the rule fired on
-  "credential theft + active use" but evidence only supports "failed
-  credential probe").
-- **ESCALATE** — evidence fits neither PASS nor KILL at the rigor bar;
-  route to the Multi-Perspective Voting Protocol section.
-
-Disposition synthesis after all five checks:
-
-- All five PASS (or PASS-equivalent with cited DOWNGRADE rationale) →
-  `verified` (`downgraded` if any DOWNGRADE landed).
-- Any one check produces a KILL with same-bar counter-evidence and the
-  remaining checks do not contradict the kill → `false_positive`.
-- Mixed evidence with at least one ESCALATE that voting did not resolve
-  → `escalated` (handoff to operator with FOR/AGAINST summary).
-- Symmetric outcomes that cannot be reconciled → ESCALATE (do not
-  default to either disposition).
+Each check below keeps the code-mode check's name and evidence discipline; only the
+evidence source and platform vocabulary change — telemetry and tenant-ref citations
+in place of source-code citations.
 
 ### Check 1: Reachability from external entry
 
@@ -354,8 +328,7 @@ The reproduction is registered as a new artifact (`kind=evidence`,
 `finding=<slug>`) with the cross-source query embedded.
 
 **(B) Prove a specific constraint prevents the alleged exploit
-trajectory.** Symmetric to red-mode Check 4's "specific blocking
-constraint" — name the constraint and demonstrate the attacker
+trajectory.** Name the constraint and demonstrate the attacker
 cannot route around it.
 
 Standard constraint shapes:
@@ -439,7 +412,7 @@ support it with same-bar evidence.
   is still calibrated to the prior baseline. Search: tenant config
   change history; CA policy version artifact.
 
-**Rigor requirement (verbatim from red-mode Check 5):** A DA
+**Rigor requirement:** A DA
 counter-argument must meet the same evidence bar as the original
 finding. The investigator provided MITRE technique, actor + target +
 time, evidence_refs from registered artifacts, and a confidence
@@ -506,15 +479,15 @@ Forbidden vocabulary: `partially_verified`, `pending`, `unknown`,
 `under_review`, `confirmed-but`, anything not in the four-value list.
 `unreviewed` is the lifecycle default and is never a disposition.
 
-The CLI's `verify-finding --disposition` flag uses the legacy
+The CLI's `finding verify --disposition` flag uses the legacy
 red-mode vocabulary (`confirmed | downgraded | false_positive |
 disputed`). The blue mapping is:
 
-- `verified` → `--disposition confirmed` + `--inline '{"details": {"disposition": "verified", ...}}'`
-- `false_positive` → `vigil assess kill-finding` (preferred — enforces
+- `verified` → `--disposition confirmed` + `--details-inline '{"disposition": "verified", ...}'`
+- `false_positive` → `vigil assess finding verify --disposition false_positive` (preferred — enforces
   required fields)
 - `downgraded` → `--disposition downgraded` + `--new-severity <new>`
-- `escalated` → `--disposition disputed` + `--inline '{"details": {"disposition": "escalated", "voting_summary": "..."}}'`
+- `escalated` → `--disposition disputed` + `--details-inline '{"disposition": "escalated", "voting_summary": "..."}'`
 
 The report-writer reads `details.disposition` (blue vocabulary) for
 narrative, not the CLI's storage field. Keep both in sync.
@@ -524,88 +497,79 @@ narrative, not the CLI's storage field. Keep both in sync.
 `verified`:
 
 ```bash
-vigil assess verify-finding <slug> \
+vigil assess finding verify <slug> \
   --disposition confirmed \
   --reason "Five-check complete: Checks 1-4 PASS, Check 5 survives" \
   --evidence-ref <artifact-id-1>,<artifact-id-2>,<artifact-id-3> \
-  --inline '{
-    "details": {
-      "disposition": "verified",
-      "five_check": {
-        "check_1": "PASS",
-        "check_2": "PASS",
-        "check_3": "PASS",
-        "check_4": "PASS",
-        "check_5": "PASS"
-      },
-      "evidence_refs": [<id-1>, <id-2>, <id-3>],
-      "confidence": "high",
-      "confidence_rationale": "Three independent telemetry streams corroborate; legitimate-actor hypotheses ruled out per artifact <id-3>"
-    }
+  --details-inline '{
+    "disposition": "verified",
+    "five_check": {
+      "check_1": "PASS",
+      "check_2": "PASS",
+      "check_3": "PASS",
+      "check_4": "PASS",
+      "check_5": "PASS"
+    },
+    "evidence_refs": [<id-1>, <id-2>, <id-3>],
+    "confidence": "high",
+    "confidence_rationale": "Three independent telemetry streams corroborate; legitimate-actor hypotheses ruled out per artifact <id-3>"
   }'
 ```
 
 `false_positive`:
 
 ```bash
-vigil assess kill-finding <slug> \
+vigil assess finding verify <slug> --disposition false_positive \
   --kill-reason "Mailbox rule add was the delegate's routine — Gmail delegate-list confirms" \
   --kill-check 5 \
   --reason "DA hypothesis confirmed: delegated mailbox owner" \
   --evidence-ref <artifact-id-delegate-list>,<artifact-id-tenant-ref> \
-  --inline '{
-    "details": {
-      "disposition": "false_positive",
-      "kill_check": 5,
-      "kill_reason": "Mailbox rule add was the delegate user@acme.example; delegate-list artifact <id> attests; tenant ref §4.1 documents this delegation pattern as benign",
-      "evidence_refs": [<id-delegate-list>, <id-tenant-ref>],
-      "da_hypothesis_confirmed": "delegated_mailbox_owner"
-    }
+  --details-inline '{
+    "disposition": "false_positive",
+    "kill_check": 5,
+    "kill_reason": "Mailbox rule add was the delegate user@acme.example; delegate-list artifact <id> attests; tenant ref §4.1 documents this delegation pattern as benign",
+    "evidence_refs": [<id-delegate-list>, <id-tenant-ref>],
+    "da_hypothesis_confirmed": "delegated_mailbox_owner"
   }'
 ```
 
 `downgraded`:
 
 ```bash
-vigil assess verify-finding <slug> \
+vigil assess finding verify <slug> \
   --disposition downgraded \
   --new-severity medium \
   --reason "Check 4 DOWNGRADE: reproduction confirms sign-in anomaly but not exfil action" \
   --evidence-ref <artifact-id-1>,<artifact-id-2> \
-  --inline '{
-    "details": {
-      "disposition": "downgraded",
-      "original_severity": "high",
-      "new_severity": "medium",
-      "severity_rationale": "Sign-in from unfamiliar IP confirmed (Check 1 PASS) but no subsequent OAuth grant or mailbox-rule activity in session (Check 4 DOWNGRADE)",
-      "five_check": { ... }
-    }
+  --details-inline '{
+    "disposition": "downgraded",
+    "original_severity": "high",
+    "new_severity": "medium",
+    "severity_rationale": "Sign-in from unfamiliar IP confirmed (Check 1 PASS) but no subsequent OAuth grant or mailbox-rule activity in session (Check 4 DOWNGRADE)",
+    "five_check": { ... }
   }'
 ```
 
 `escalated`:
 
 ```bash
-vigil assess verify-finding <slug> \
+vigil assess finding verify <slug> \
   --disposition disputed \
   --reason "Check 5 ESCALATE: travel-approval ticket exists but covers different window" \
-  --inline '{
-    "details": {
-      "disposition": "escalated",
-      "voting_summary": {
-        "FOR": "Sign-in IP outside ASN baseline; post-signin mailbox-rule unexplained",
-        "AGAINST": "Travel-approval ticket #4521 covers 2026-05-15 to 2026-05-22; sign-in IP geo-resolves to listed destination city",
-        "BLOCKER": "Travel-approval window ends 2026-05-22T17:00Z; alert sign-in at 2026-05-22T22:14Z — 5h after ticket end. Need user confirmation of late return."
-      },
-      "next_action": "Out-of-band user confirmation of travel return time"
-    }
+  --details-inline '{
+    "disposition": "escalated",
+    "voting_summary": {
+      "FOR": "Sign-in IP outside ASN baseline; post-signin mailbox-rule unexplained",
+      "AGAINST": "Travel-approval ticket #4521 covers 2026-05-15 to 2026-05-22; sign-in IP geo-resolves to listed destination city",
+      "BLOCKER": "Travel-approval window ends 2026-05-22T17:00Z; alert sign-in at 2026-05-22T22:14Z — 5h after ticket end. Need user confirmation of late return."
+    },
+    "next_action": "Out-of-band user confirmation of travel return time"
   }'
 ```
 
 ## Multi-Perspective Voting Protocol
 
-Entered when any of Checks 1-5 returns ESCALATE. The voting protocol is
-intentionally identical in shape to red-mode's: a second verifier
+Entered when any of Checks 1-5 returns ESCALATE: a second verifier
 dispatch with explicit disagreement scope, then operator decision.
 
 **When to invoke voting:**
@@ -692,8 +656,8 @@ The verifier's dispatch closes with the following steps in order. Skipping
 any step breaks resume-brief, the artifact chain of custody, or the
 handoff schema.
 
-1. **Record the disposition** via `verify-finding` (verified, downgraded,
-   escalated) or `kill-finding` (false_positive). The `--inline` payload
+1. **Record the disposition** via `finding verify` — `--disposition confirmed|downgraded|disputed`
+   (verified, downgraded, escalated) or `--disposition false_positive` (false_positive). The `--details-inline` object
    carries the blue vocabulary in `details.disposition` even when the
    CLI's `--disposition` flag uses the legacy red vocabulary.
 2. **Register devil's-advocate research notes** if Check 5 produced
@@ -706,8 +670,8 @@ handoff schema.
    `severity` no longer aligns with `details.mitre_techniques` (e.g.,
    downgraded from `critical` to `medium` but the technique list still
    reads `T1486` ransomware), update the finding via
-   `update-finding --inline '{"details": {"mitre_techniques": [...],
-   "severity_rationale": "..."}}'`.
+   `finding update <slug> --details-inline '{"mitre_techniques": [...],
+   "severity_rationale": "..."}'`.
 5. **Record the closing activity entry:**
 
    ```bash
@@ -752,9 +716,9 @@ handoff schema.
 
 ## Reference Block
 
-- `agent/skills/code-finding-verification/SKILL.md` — red-mode origin of
-  the five-check; the symmetric evidence rule (line 36) is verbatim
-  the same in blue.
+- `agent/skills/code-finding-verification/SKILL.md` — the "Methodology —
+  Five-Check Protocol" section this skill's five checks translate to
+  blue evidence sources and disposition vocabulary.
 - `agent/rules/triage.md` — disposition vocabulary (rule 3), symmetric
   evidence bar (rule 4), devil's advocate mandate (rule 15), severity
   ↔ technique alignment (rule 16).

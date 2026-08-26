@@ -79,15 +79,15 @@ The browser result is only useful as a delta against this baseline.
 Use the smallest tool that answers the trigger:
 
 1. **Katana headless** for broad JS-aware crawling and endpoint discovery.
-2. **Playwright/system Chromium** for precise request/DOM/console/screenshot
-   evidence when an audited runner or operator-approved one-off script exists.
+2. **`vigil assess kali browser`** for precise Playwright request/DOM/console/
+   screenshot evidence and bounded scripted interactions.
 3. **Headed browser plus mitmproxy** when visual/manual state, headless-vs-headed
    deltas, browser-extension traffic labeling, or proxy history is the actual
    evidence source.
 
-Current repo reality: `vigil assess kali katana` exposes `-headless`; a clean
-first-class Playwright runner is not yet a stable CLI contract. Do not report a
-Playwright observation unless you actually ran one through `vigil assess kali`.
+Both automated paths are audited `vigil assess kali` contracts. Prefer Katana
+for breadth and `kali browser` when browser state or an exact interaction is the
+evidence question.
 
 ### 4. Run browser-mode collection conservatively
 
@@ -101,10 +101,27 @@ vigil assess kali katana \
   --probe-kind fingerprint --phase <recon|collect|consume-test> --timeout 1800
 ```
 
-For a headed browser, ask the operator to start or confirm mitmproxy, then keep
-navigation scoped to `scope.json` hosts. Do not continue through CAPTCHA,
-proof-of-human, policy-acceptance, or device-binding prompts unless the operator
-confirms that the engagement authorization covers it.
+For a bounded Playwright observation:
+
+```bash
+vigil assess kali browser https://TARGET \
+  --wait-selector '#app' \
+  --screenshot scans/browser/TARGET.png \
+  --dom-out scans/browser/TARGET.html \
+  --har-out scans/browser/TARGET.har \
+  --technique DISCOVERY --intent "browser-semantic observation: <trigger>" \
+  --probe-kind fingerprint --phase <recon|collect|consume-test> --timeout 180
+```
+
+Use `--steps-file` for a bounded typed interaction sequence and
+`--storage-state` with `--identity` for approved authenticated flows. Check
+`vigil assess kali browser --help` for the step and capture controls.
+
+For a headed browser, ask the operator to start or confirm mitmproxy, then
+follow the engagement boundary in `agent/shared-constraints.md` §1. Do not
+continue through CAPTCHA, proof-of-human, policy-acceptance, or device-binding
+prompts unless the operator confirms that the engagement authorization covers
+it.
 
 ### 5. Reduce to structured evidence
 
@@ -112,10 +129,12 @@ Return bounded facts, not a transcript dump:
 
 - trigger and baseline command-run ids;
 - browser command-run ids and artifact paths;
-- final URL, title, visible-text sample, and screenshot path if captured;
-- same-site requests grouped by type: document, script, fetch/XHR, WebSocket,
-  SSE, GraphQL, form/action, download/preview;
-- status, content type, content length, and body hash for material responses;
+- final URL, title, DOM length, screenshot/DOM paths, and a bounded visible-text
+  sample only when collected explicitly with `--eval` or a typed eval step;
+- in-scope requests grouped by the runner's recorded resource type;
+- response status and captured-body byte count for material responses; when
+  content type or a body hash matters, derive it from the metadata-only HAR or
+  registered bounded body artifact rather than inventing it from the summary;
 - newly discovered routes and parameters to ingest;
 - soft-error random-path comparison when relevant;
 - console/security-policy errors when relevant;
@@ -123,9 +142,9 @@ Return bounded facts, not a transcript dump:
 
 ### 6. Route follow-up
 
-- New requestable endpoints: ingest with `vigil assess ingest-endpoints "$DB"
-  browser-semantic` or include them in a curated candidate JSONL for
-  `ingest-candidates`.
+- New requestable endpoints: ingest with `vigil assess ingest endpoints browser-semantic`
+  or include them in a curated candidate JSONL for
+  `ingest candidates`.
 - Browser-enforced vulnerability lead: dispatch `vulnerability-analyst` with the
   matching vuln-class skill and this skill as secondary context.
 - Edge or bot-management block: surface an operator decision with the exact
@@ -148,8 +167,8 @@ Stop and report a coverage gap when:
 
 - [ ] Trigger named.
 - [ ] Non-browser baseline command-run id(s) cited.
-- [ ] Browser-mode command-run id(s) and artifacts cited, or the missing runner
-      recorded as a coverage gap.
+- [ ] Browser-mode command-run id(s) and artifacts cited, or an unavailable
+      browser runtime recorded as a coverage gap.
 - [ ] Delta summarized in bounded JSON/prose.
 - [ ] Newly discovered same-site routes ingested or handed off for ingestion.
 - [ ] CAPTCHA/challenge/out-of-scope/state-mutation blockers surfaced instead

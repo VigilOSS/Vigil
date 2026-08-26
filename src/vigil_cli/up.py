@@ -4,13 +4,13 @@ import getpass
 import select
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config as config_module
 from . import docker
+from .image_freshness import image_outdated, proxy_image_drift
 from .install import InstallOptions, install_from_source
-from .mitmproxy import MitmproxyOptions, start_proxy
+from .mitmproxy import MitmproxyOptions, build_image as build_mitmproxy_image, mitmproxy_image_inputs, start_proxy
 from .oob import OobOptions, oob_options as _oob_options, oob_status, start_oob
 from .orchestrator import OrchestratorOptions, start_orchestrator
 from .paths import default_runtime_container, resolve_source_root
@@ -48,7 +48,9 @@ def run_up(options: UpOptions, *, runner: docker.Runner = docker.run_command) ->
     runtime_built = False
     if options.no_build:
         print("runtime image\tbuild skipped")
-    elif _image_outdated("vigil:latest", _runtime_image_inputs(install_root), runner=runner):
+    elif image_outdated(
+        "vigil:latest", _runtime_image_inputs(install_root), root=install_root, runner=runner
+    ):
         print("runtime image\tbuilding")
         build_runtime(install_root, runner=runner)
         runtime_built = True
@@ -59,7 +61,12 @@ def run_up(options: UpOptions, *, runner: docker.Runner = docker.run_command) ->
 
     if options.no_build:
         print("mitmproxy image\tbuild skipped")
-    elif _image_outdated("vigil-proxy:latest", _mitmproxy_image_inputs(install_root), runner=runner):
+    elif image_outdated(
+        "vigil-proxy:latest",
+        mitmproxy_image_inputs(install_root),
+        root=install_root,
+        runner=runner,
+    ):
         print("mitmproxy image\tbuilding")
         _build_mitmproxy_image(install_root, runner=runner)
     else:
@@ -125,7 +132,11 @@ def _confirm_runtime_restart(options: UpOptions) -> bool:
 
 def _start_mitmproxy_if_needed(install_root: Path, options: UpOptions, *, runner: docker.Runner) -> None:
     if docker.container_running("vigil-proxy", runner=runner):
-        print("mitmproxy\talready running")
+        if proxy_image_drift(runner=runner):
+            print("mitmproxy\trunning old image; restart to pick up rebuilt image")
+            print("Run `vigil mitmproxy start` to recreate the container on the current image.")
+        else:
+            print("mitmproxy\talready running")
         return
     engagements_root = install_root / "agent" / "engagements"
     engagements_root.mkdir(parents=True, exist_ok=True)
@@ -138,12 +149,27 @@ def _start_mitmproxy_if_needed(install_root: Path, options: UpOptions, *, runner
 
 
 def _start_oob_if_needed(install_root: Path, *, runner: docker.Runner) -> None:
-    status = oob_status(runner=runner, deep=False)  # only needs server/frpc liveness
+    options = _oob_options(install_root)
+    status = oob_status(
+        oob_domain=options.oob_domain,
+        tenant_prefix=options.tenant_prefix,
+        dns_remote_port=options.dns_remote_port,
+        reverse_remote_port=options.reverse_remote_port,
+        runner=runner,
+        deep=False,
+    )  # only needs server/frpc liveness
     if status.get("server") or status.get("frpc"):
+        route_matches = status.get("route_matches")
+        if route_matches is False or (
+            route_matches is None and options.tenant_prefix != "legacy"
+        ):
+            raise SystemExit(
+                "OOB sessions are already active for another tenant, or their tenant route cannot be verified. "
+                "Run `vigil oob restart` intentionally before switching tenant routes."
+            )
         print("oob\talready active; existing FRP/interactsh sessions left untouched")
         return
 
-    options = _oob_options(install_root)
     if not options.frp_token:
         token = _prompt_frp_token()
         if token:
@@ -154,6 +180,10 @@ def _start_oob_if_needed(install_root: Path, *, runner: docker.Runner) -> None:
                 frp_port=options.frp_port,
                 frp_token=token,
                 oob_domain=options.oob_domain,
+                tenant_prefix=options.tenant_prefix,
+                dns_remote_port=options.dns_remote_port,
+                reverse_remote_port=options.reverse_remote_port,
+                tenant_route=options.tenant_route,
             )
         else:
             print("oob\tskipped; missing FRP token")
@@ -175,67 +205,6 @@ def _runtime_image_inputs(install_root: Path) -> list[Path]:
     return runtime_image_inputs(install_root)
 
 
-def _mitmproxy_image_inputs(install_root: Path) -> list[Path]:
-    return [
-        install_root / "agent" / "docker" / "mitmproxy" / "Dockerfile",
-        install_root / "agent" / "scripts" / "proxy_addon.py",
-    ]
-
-
-def _image_outdated(image: str, inputs: list[Path], *, runner: docker.Runner) -> bool:
-    created = _image_created_at(image, runner=runner)
-    if created is None:
-        return True
-    latest_input = _latest_mtime(inputs)
-    return latest_input is not None and latest_input > created.timestamp()
-
-
-def _image_created_at(image: str, *, runner: docker.Runner) -> datetime | None:
-    result = runner(["docker", "image", "inspect", "-f", "{{.Created}}", image])
-    if result.returncode != 0:
-        return None
-    value = result.stdout.strip()
-    if not value:
-        return None
-    try:
-        return _parse_docker_timestamp(value).astimezone(timezone.utc)
-    except ValueError:
-        return None
-
-
-def _parse_docker_timestamp(value: str) -> datetime:
-    normalized = value
-    if normalized.endswith("Z"):
-        normalized = normalized[:-1] + "+00:00"
-    if "." in normalized:
-        prefix, suffix = normalized.split(".", 1)
-        tz_index = len(suffix)
-        for marker in ("+", "-"):
-            index = suffix.find(marker)
-            if index != -1:
-                tz_index = index
-                break
-        fraction = suffix[:tz_index]
-        timezone_part = suffix[tz_index:]
-        normalized = f"{prefix}.{fraction[:6].ljust(6, '0')}{timezone_part}"
-    parsed = datetime.fromisoformat(normalized)
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
-
-
-def _latest_mtime(paths: list[Path]) -> float | None:
-    latest: float | None = None
-    for path in paths:
-        if path.is_file():
-            latest = max(latest or 0, path.stat().st_mtime)
-        elif path.is_dir():
-            for child in path.rglob("*"):
-                if child.is_file():
-                    latest = max(latest or 0, child.stat().st_mtime)
-    return latest
-
-
 def _runtime_image_drift(options: RuntimeOptions, *, runner: docker.Runner) -> bool:
     container_id = docker.container_image_id(options.container_name, runner=runner)
     configured_id = docker.image_id(options.image, runner=runner)
@@ -243,6 +212,10 @@ def _runtime_image_drift(options: RuntimeOptions, *, runner: docker.Runner) -> b
 
 
 def _build_mitmproxy_image(install_root: Path, *, runner: docker.Runner = docker.run_command_streaming) -> None:
-    dockerfile = install_root / "agent" / "docker" / "mitmproxy" / "Dockerfile"
-    argv = ["docker", "build", "-t", "vigil-proxy:latest", "-f", str(dockerfile), str(install_root / "agent")]
-    docker.require_success(runner(argv), argv)
+    """Delegate to the one proxy-image builder.
+
+    `vigil up` used to assemble its own `docker build` argv here, which omitted
+    the input-digest label. An unstamped image can never be proven current, so
+    the very next `vigil up` rebuilt it again — forever.
+    """
+    build_mitmproxy_image(install_root, runner=runner)

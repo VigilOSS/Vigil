@@ -1,5 +1,6 @@
 ---
 description: Scaffold tenant reference for EDR fleet alert investigations (MDE, CrowdStrike Falcon, SentinelOne)
+skill: edr-alert-triage
 ---
 
 # <CUSTOMER> — EDR Tenant Reference

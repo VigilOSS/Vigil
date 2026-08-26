@@ -2,17 +2,230 @@ from __future__ import annotations
 
 import sqlite3
 from typing import Any
+from urllib.parse import urlsplit
+
 from fastapi import HTTPException, status
 
+from ..code_security_policy import NATIVE_MEMORY_SAFETY_DEFECT_FAMILIES
 from ..events import _engagement_or_404
 from ..search import (
     canonical_finding_alias,
     is_canonical_finding_slug,
 )
-
 from . import _common
-from ._common import ROOT_CAUSE_LINK_KIND, SEVERITY_RANK, VERIFICATION_DISPOSITION_RANK, VERIFICATION_STATE_RANK, WORKFLOW_STATUS_RANK, VerificationDisposition, VerificationState, WorkflowStatus, _finding_confidence_tuple, _finding_not_found, _json_object, _json_text, _merge_object_text, _normalize_severity, _normalize_submission_status, _normalize_verification_disposition, _normalize_verification_state, _normalize_workflow_status, _require_canonical_finding_slug, _resolve_existing_finding_slug, _row_verification_disposition, _row_verification_state, _row_workflow_status, _serialize_finding_record, _slugify, _stronger_severity
+from ._common import (
+    ROOT_CAUSE_LINK_KIND,
+    SEVERITY_RANK,
+    VERIFICATION_DISPOSITION_RANK,
+    VERIFICATION_STATE_RANK,
+    WORKFLOW_STATUS_RANK,
+    VerificationDisposition,
+    VerificationState,
+    WorkflowStatus,
+    _finding_confidence_tuple,
+    _finding_not_found,
+    _json_object,
+    _json_text,
+    _merge_object_text,
+    _normalize_severity,
+    _normalize_submission_status,
+    _normalize_verification_disposition,
+    _normalize_verification_state,
+    _normalize_workflow_status,
+    _require_canonical_finding_slug,
+    _resolve_existing_finding_slug,
+    _row_verification_disposition,
+    _row_verification_state,
+    _row_workflow_status,
+    _serialize_finding_record,
+    _slugify,
+    _stronger_severity,
+)
+from .cvss import CvssVectorError, base_score
 from .links import _is_root_cause_link, _upsert_finding_link
+
+CODE_SNAPSHOT_PROVENANCE_KEY = "code_snapshot"
+_CODE_SNAPSHOT_WRITE_MODES = frozenset({"record", "patch", "verify"})
+
+
+def is_file_finding(canonical_location: str) -> bool:
+    return str(canonical_location or "").strip().startswith("file:")
+
+
+def _code_snapshot_binding(
+    provenance: dict[str, Any] | None,
+    *,
+    strict: bool,
+) -> dict[str, Any] | None:
+    payload = provenance or {}
+    if CODE_SNAPSHOT_PROVENANCE_KEY not in payload:
+        return None
+    binding = payload.get(CODE_SNAPSHOT_PROVENANCE_KEY)
+    valid = (
+        isinstance(binding, dict)
+        and type(binding.get("repo_id")) is int
+        and binding["repo_id"] >= 1
+        and type(binding.get("repo_generation")) is int
+        and binding["repo_generation"] >= 1
+        and isinstance(binding.get("source_manifest_digest"), str)
+        and len(binding["source_manifest_digest"]) == 64
+        and all(
+            character in "0123456789abcdef"
+            for character in binding["source_manifest_digest"]
+        )
+    )
+    if not valid:
+        if strict:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "provenance.code_snapshot requires positive integer repo_id and "
+                    "repo_generation plus a lowercase SHA-256 source_manifest_digest"
+                ),
+            )
+        return None
+    return {
+        "repo_id": int(binding["repo_id"]),
+        "repo_generation": int(binding["repo_generation"]),
+        "source_manifest_digest": str(binding["source_manifest_digest"]),
+    }
+
+
+def _finding_provenance(record: dict[str, Any]) -> dict[str, Any]:
+    provenance = record.get("provenance")
+    if isinstance(provenance, dict):
+        return provenance
+    return _json_object(record.get("provenance_json", "{}"))
+
+
+def load_code_repo_snapshot_states(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+) -> dict[int, dict[str, Any]]:
+    """Load all repository identities once for batch finding classification."""
+
+    return {
+        int(row["id"]): dict(row)
+        for row in connection.execute(
+            """
+            SELECT id, active_generation, source_manifest_digest,
+                   source_snapshot_quality
+            FROM code_repos
+            WHERE engagement_id = ?
+            """,
+            (engagement_id,),
+        ).fetchall()
+    }
+
+
+def finding_code_snapshot_status(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    finding: dict[str, Any] | sqlite3.Row,
+    *,
+    repo_states: dict[int, dict[str, Any]] | None = None,
+) -> str:
+    """Classify file-like or explicitly bound findings against verified source."""
+
+    record = dict(finding)
+    provenance = _finding_provenance(record)
+    if CODE_SNAPSHOT_PROVENANCE_KEY not in provenance:
+        return (
+            "unbound"
+            if is_file_finding(str(record.get("canonical_location", "")))
+            else "not_applicable"
+        )
+    binding = _code_snapshot_binding(provenance, strict=False)
+    if binding is None:
+        return "stale"
+    repo = (
+        repo_states.get(binding["repo_id"])
+        if repo_states is not None
+        else connection.execute(
+            """
+            SELECT active_generation, source_manifest_digest, source_snapshot_quality
+            FROM code_repos
+            WHERE id = ? AND engagement_id = ?
+            """,
+            (binding["repo_id"], engagement_id),
+        ).fetchone()
+    )
+    if repo is None:
+        return "stale"
+    if str(repo["source_snapshot_quality"]) != "verified":
+        return "stale"
+    if int(repo["active_generation"]) != binding["repo_generation"]:
+        return "stale"
+    if str(repo["source_manifest_digest"]) != binding["source_manifest_digest"]:
+        return "stale"
+    return "current"
+
+
+def finding_has_current_code_snapshot(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    finding: dict[str, Any] | sqlite3.Row,
+) -> bool:
+    return finding_code_snapshot_status(connection, engagement_id, finding) == "current"
+
+
+def _serialize_finding_with_code_snapshot_status(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    finding: dict[str, Any] | sqlite3.Row,
+    *,
+    repo_states: dict[int, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    record = _serialize_finding_record(finding)
+    record["code_snapshot_status"] = finding_code_snapshot_status(
+        connection, engagement_id, record, repo_states=repo_states
+    )
+    return record
+
+
+def _require_current_code_snapshot(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    provenance: dict[str, Any] | None,
+) -> dict[str, Any]:
+    binding = _code_snapshot_binding(provenance, strict=True)
+    if binding is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "file findings require provenance.code_snapshot bound to the "
+                "current verified repository snapshot"
+            ),
+        )
+    repo = connection.execute(
+        """
+        SELECT active_generation, source_manifest_digest, source_snapshot_quality
+        FROM code_repos
+        WHERE id = ? AND engagement_id = ?
+        """,
+        (binding["repo_id"], engagement_id),
+    ).fetchone()
+    if repo is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="code snapshot repository is not part of this engagement",
+        )
+    if str(repo["source_snapshot_quality"]) != "verified":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="code snapshot repository is not a verified source snapshot",
+        )
+    if int(repo["active_generation"]) != binding["repo_generation"]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="code snapshot repository generation is stale; refetch and re-review",
+        )
+    if str(repo["source_manifest_digest"]) != binding["source_manifest_digest"]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="code snapshot source manifest digest is stale; refetch and re-review",
+        )
+    return binding
 
 
 
@@ -122,15 +335,128 @@ def _raise_finding_clobber_conflict(
             f"it under a different slug, and merging would silently overwrite a {existing_status} "
             f"finding. If this is a distinct sibling on the same root cause, give it a DISTINCT "
             f"root_cause_key/defect_family and attach it with "
-            f"`vigil assess link-finding <new-slug> --root-cause {existing_slug}`; to "
+            f"`vigil assess finding link <new-slug> --root-cause {existing_slug}`; to "
             f"intentionally modify '{existing_slug}', re-record with --update {existing_slug} "
             f"(or POST with slug={existing_slug!r})."
         ),
     )
 
 
+# D4 (kill re-mint guard): a KILLED (``false_positive``) finding is deliberately
+# OUTSIDE the reported/active clobber-guard set above, and the sticky-FP coalesce
+# (``_coalesce_workflow_status``) only fires on the EXACT dedup tuple. So two
+# agents that express the SAME underlying defect at DIFFERENT canonical_locations
+# — a source-line ``file:x:42`` vs a runtime endpoint URL — miss the tuple, and
+# one silently RE-MINTS a finding the other already DISPROVED, with no flag.
+# Guard it with a BROADER match than the exact tuple: same ``defect_family``
+# (technique) AND a shared endpoint/canonical-location signal. Refuse-with-
+# override — the operator either reopens the real prior kill with ``finding update``
+# (the earlier kill was wrong), or forces an intentional distinct re-mint with
+# ``--allow-remint`` / ``--force`` (a genuinely new finding that only coincidentally
+# shares the endpoint + technique). ``merged`` stays out (it is a different concept
+# — a duplicate folded elsewhere, reachable via its canonical target).
+def _canonical_location_endpoint(location: str) -> str:
+    """Normalize a canonical_location to a comparable endpoint signal.
+
+    URL locations collapse to ``netloc + path`` (query/fragment/trailing-slash
+    stripped) so ``/api/fetch?url=…`` and ``/api/fetch`` share a signal; ``file:``
+    locations collapse to the file path (a trailing ``:line[:col]`` stripped) so two
+    source findings in the same file share a signal; anything else compares by its
+    stripped/lower-cased self. Empty in → empty out (an empty signal never matches).
+    """
+    text = (location or "").strip().lower()
+    if not text:
+        return ""
+    if text.startswith(("http://", "https://")):
+        parts = urlsplit(text)
+        path = parts.path.rstrip("/")
+        combined = f"{parts.netloc}{path}"
+        return combined or text
+    if text.startswith("file:"):
+        segments = text[len("file:"):].split(":")
+        while len(segments) > 1 and segments[-1].isdigit():
+            segments.pop()
+        return "file:" + ":".join(segments)
+    return text
+
+
+def _find_killed_remint_collision(
+    connection,
+    engagement_id: int,
+    *,
+    defect_family: str,
+    root_cause_key: str,
+    auth_context: str,
+    canonical_location: str,
+) -> dict[str, Any] | None:
+    """Return a KILLED finding this net-new record would silently re-mint, or None.
+
+    Broader than the exact dedup tuple: matches an existing ``false_positive``
+    finding that shares the same (non-empty) ``defect_family`` AND either the exact
+    tuple OR a shared endpoint/canonical-location signal. Same ``defect_family`` is
+    REQUIRED so a genuinely-different vuln class at the same endpoint is NOT caught.
+    """
+    family = (defect_family or "").strip()
+    if not family:
+        # No technique to key on; the exact-tuple sticky-FP upsert (handled by the
+        # normal ``_semantic_finding_match`` path) is the only backstop here.
+        return None
+    new_endpoint = _canonical_location_endpoint(canonical_location)
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM assessment_findings
+        WHERE engagement_id = ?
+          AND status = 'false_positive'
+        ORDER BY id ASC
+        """,
+        (engagement_id,),
+    ).fetchall()
+    for row in rows:
+        existing = dict(row)
+        if str(existing.get("defect_family") or "").strip() != family:
+            continue
+        exact_tuple = (
+            str(existing.get("root_cause_key") or "") == (root_cause_key or "")
+            and str(existing.get("auth_context") or "") == (auth_context or "")
+            and str(existing.get("canonical_location") or "") == (canonical_location or "")
+        )
+        if exact_tuple:
+            return existing
+        existing_endpoint = _canonical_location_endpoint(
+            str(existing.get("canonical_location") or "")
+        )
+        if new_endpoint and existing_endpoint and new_endpoint == existing_endpoint:
+            return existing
+    return None
+
+
+def _raise_killed_remint_conflict(
+    killed: dict[str, Any],
+    *,
+    defect_family: str,
+    canonical_location: str,
+) -> None:
+    killed_slug = str(killed.get("slug", ""))
+    killed_location = str(killed.get("canonical_location", ""))
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=(
+            f"Refusing to re-mint disproven finding '{killed_slug}': it was killed "
+            f"(false_positive) for defect_family={defect_family!r} at canonical_location "
+            f"{killed_location!r}, and this net-new record targets the SAME technique + "
+            f"endpoint at {canonical_location!r} under a different location/slug — minting it "
+            f"would silently resurrect a disproven finding as a fresh duplicate. If the earlier "
+            f"kill was WRONG and this should re-open, run `vigil assess finding update "
+            f"{killed_slug} --status draft --reason \"...\"`. If this is a genuinely "
+            f"NEW finding that only coincidentally shares the endpoint + technique, re-record "
+            f"with --allow-remint (a.k.a. --force) to override."
+        ),
+    )
+
+
 # CR-31 (slug atomicity): the (engagement_id, slug) UNIQUE index in db.py is the
-# hard DB-level backstop against two concurrent record-finding lanes minting the
+# hard DB-level backstop against two concurrent finding record lanes minting the
 # same auto-assigned slug (e.g. both VA-012). ``BEGIN IMMEDIATE`` serializes the
 # MAX-scan + INSERT so the second lane normally sees the first's committed slug,
 # but we still treat the constraint as authoritative: an auto-generated slug that
@@ -384,6 +710,88 @@ def _semantic_finding_match(
     ).fetchone()
     return dict(row) if row is not None else None
 
+
+# CVSS is a PAIR: the vector is the derivation and the score is its result. When
+# they disagree, every downstream consumer that reads only one of them (severity
+# banding, the submission export, the report render) states something the other
+# half contradicts.
+_CVSS_KEYS = ("cvss_score", "cvss_vector")
+# CVSS scores are published to one decimal; anything closer than half a step is
+# float noise, not an authoring error. Same threshold the readiness backstop uses.
+_CVSS_SCORE_TOLERANCE = 0.05
+
+
+def _cvss_pair_disagreement(details: dict[str, Any]) -> tuple[str, str] | None:
+    """Describe how ``details``' CVSS pair contradicts itself, or ``None``.
+
+    Returns ``(kind, message)`` where ``kind`` is ``vector_invalid``,
+    ``score_not_numeric``, or ``score_mismatch``. Kept separate from the
+    write-time gate so the same judgement can be REPORTED instead of enforced
+    where refusing costs more than the contradiction — see ``merge_findings``.
+    """
+    vector = details.get("cvss_vector")
+    if vector is None:
+        return None
+    try:
+        computed = base_score(str(vector))
+    except CvssVectorError as exc:
+        return (
+            "vector_invalid",
+            f"details.cvss_vector '{vector}' is not a valid CVSS v3.1 base "
+            f"vector: {exc}",
+        )
+    score = details.get("cvss_score")
+    if score is None:
+        return None
+    try:
+        stored = float(score)
+    except (TypeError, ValueError):
+        return (
+            "score_not_numeric",
+            f"details.cvss_score must be a number, got {score!r}",
+        )
+    if abs(stored - computed) >= _CVSS_SCORE_TOLERANCE:
+        return (
+            "score_mismatch",
+            f"details.cvss_score={stored} disagrees with details.cvss_vector "
+            f"'{vector}', which computes to {computed}; correct whichever of "
+            "the two is wrong",
+        )
+    return None
+
+
+def _validate_cvss_pair(
+    authored_details: dict[str, Any], effective_details: dict[str, Any]
+) -> None:
+    """Reject a ``cvss_score`` that contradicts its own ``cvss_vector``, on write.
+
+    ``authored_details`` is what this write actually CONTRIBUTES (the caller
+    applies the same empty-value filter the merge write does, so a key whose
+    value never lands is not authored); ``effective_details`` is the pair as it
+    will be stored. The gate fires only when the write authors one of the two
+    keys and judges the EFFECTIVE MERGED pair — so a patch supplying just a
+    score is scored against the stored vector. Deliberately not "recompute and
+    overwrite": a silent correction hides the authoring error that produced it.
+
+    A write authoring neither key is never blocked, so a row that already holds
+    a legacy mismatch stays editable — otherwise the mismatch would trap the
+    very patch that fixes it. The ``cvss_vector_score_mismatch`` /
+    ``cvss_vector_invalid`` report-readiness blockers remain the backstop for
+    those pre-existing rows.
+    """
+    if not any(key in authored_details for key in _CVSS_KEYS):
+        return
+    problem = _cvss_pair_disagreement(effective_details)
+    if problem is None:
+        return
+    kind, message = problem
+    if kind == "vector_invalid" and "cvss_vector" not in authored_details:
+        # The STORED vector was already broken; readiness owns it. Blocking here
+        # would strand every later edit to the finding.
+        return
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=message)
+
+
 def create_finding(
     engagement_id: int,
     *,
@@ -415,16 +823,22 @@ def create_finding(
     explicit_verification_disposition_override: bool = False,
     explicit_severity_override: bool = False,
     allow_existing_noncanonical_slug: bool = False,
+    allow_remint: bool = False,
     transition_action: str | None = None,
     transition_reason_code: str = "",
     transition_reason_text: str = "",
     transition_artifact_ref: str = "",
     transition_metadata: dict[str, Any] | None = None,
-    expected_updated_at: str | None = None,
+    transition_actor: str = "",
+    expected_row_version: int | None = None,
     notes_mode: str = "append",
     details_mode: str = "merge",
+    code_snapshot_write_mode: str = "record",
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+    canonical_location = str(canonical_location).strip()
+    if code_snapshot_write_mode not in _CODE_SNAPSHOT_WRITE_MODES:
+        raise ValueError(f"unknown code snapshot write mode: {code_snapshot_write_mode}")
     if slug:
         slug = str(slug).strip()
         if not allow_existing_noncanonical_slug:
@@ -440,6 +854,22 @@ def create_finding(
     incoming_submission_status = _normalize_submission_status(submission_status)
     with _common.get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
+        incoming_binding = _code_snapshot_binding(provenance, strict=True)
+        if code_snapshot_write_mode == "patch" and incoming_binding is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "provenance.code_snapshot is reserved and cannot be changed "
+                    "by a generic finding patch"
+                ),
+            )
+        if (
+            is_file_finding(canonical_location)
+            and code_snapshot_write_mode in {"record", "verify"}
+        ) or incoming_binding is not None:
+            incoming_binding = _require_current_code_snapshot(
+                connection, engagement.id, provenance
+            )
         existing = _semantic_finding_match(
             connection,
             engagement.id,
@@ -451,6 +881,51 @@ def create_finding(
             title=title,
         )
         if existing is not None:
+            existing_family = str(existing["defect_family"] or "").strip().lower()
+            requested_family = str(defect_family or "").strip().lower()
+            if (
+                code_snapshot_write_mode in {"record", "patch"}
+                and requested_family
+                and requested_family != existing_family
+                and existing_family in NATIVE_MEMORY_SAFETY_DEFECT_FAMILIES
+                and _row_verification_state(existing) == "verified"
+                and _row_verification_disposition(existing) == "confirmed"
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "ordinary finding mutation cannot relabel a verified/confirmed "
+                        "memory-safety defect_family; preserve the confirmed record "
+                        "until the verification lifecycle kills or merges it, then "
+                        "record the corrected distinct finding"
+                    ),
+                )
+            if code_snapshot_write_mode == "record" and is_file_finding(
+                canonical_location
+            ) != is_file_finding(str(existing["canonical_location"])):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "finding re-record cannot change canonical-location category "
+                        "between file and non-file; disposition the stored finding and "
+                        "record a separately reviewed destination finding"
+                    ),
+                )
+            existing_binding = _code_snapshot_binding(
+                _json_object(existing["provenance_json"]), strict=False
+            )
+            if (
+                code_snapshot_write_mode == "record"
+                and existing_binding != incoming_binding
+                and (existing_binding is not None or incoming_binding is not None)
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "finding code snapshot binding differs from the stored binding; "
+                        "re-review and use finding verify to rebind it"
+                    ),
+                )
             # I-21: the operator "named" this exact finding only when the
             # incoming slug resolves to it (matched by slug in
             # ``_semantic_finding_match``'s first tier). A tuple/title dedup
@@ -468,6 +943,28 @@ def create_finding(
                     auth_context=auth_context,
                     canonical_location=canonical_location,
                 )
+        # D4: a true net-new INSERT (no slug/tuple/title match resolved ``existing``)
+        # that nonetheless re-mints an already-DISPROVEN (false_positive) finding
+        # under the broader technique+endpoint match is refused unless forced. Only
+        # fires when ``existing is None`` — an exact-tuple upsert onto a sticky-FP,
+        # an ``--update`` by slug, and a live active/reported dedup match all resolve
+        # ``existing`` and are handled by the paths above, so this never disturbs the
+        # existing sticky-FP coalesce or the reported/active clobber guard.
+        if existing is None and not allow_remint:
+            killed = _find_killed_remint_collision(
+                connection,
+                engagement.id,
+                defect_family=defect_family,
+                root_cause_key=root_cause_key,
+                auth_context=auth_context,
+                canonical_location=canonical_location,
+            )
+            if killed is not None:
+                _raise_killed_remint_conflict(
+                    killed,
+                    defect_family=defect_family,
+                    canonical_location=canonical_location,
+                )
         # A ``blocked`` disposition REQUIRES a ``block_reason`` on the create/record
         # path too — not only via /verify. Without this guard, POST /findings with
         # verification_disposition='blocked' and no block_reason would 201 and then
@@ -481,6 +978,28 @@ def create_finding(
                     _json_object(existing["details_json"]) if existing is not None else {}
                 ),
             )
+        # Every finding write — record, `finding update` (patch_finding), and the
+        # verify checkpoint — funnels through here, so this is the one layer that
+        # can hold cvss_score and cvss_vector to each other at write time. What
+        # the write AUTHORS has to be computed the same way the write itself
+        # stores it, or a value that never lands would let pre-existing data
+        # reject a patch that never touched the pair.
+        if existing is None or details_mode == "replace":
+            # Both store the payload verbatim (`_json_text(details)`).
+            authored_details = dict(details or {})
+            effective_details = authored_details
+        else:
+            # Merge mode drops empty incoming values, so an empty CVSS key is a
+            # no-op, not an authoring act.
+            authored_details = {
+                key: value
+                for key, value in (details or {}).items()
+                if value not in (None, "", [], {})
+            }
+            effective_details = _json_object(
+                _merge_object_text(existing["details_json"], details)
+            )
+        _validate_cvss_pair(authored_details, effective_details)
         before_state = _finding_state_snapshot(existing) if existing is not None else None
         if existing is None:
             # CR-31: allocate the slug + INSERT under the (engagement_id, slug)
@@ -544,7 +1063,7 @@ def create_finding(
             assert cursor is not None
             row = connection.execute("SELECT * FROM assessment_findings WHERE id = ?", (cursor.lastrowid,)).fetchone()
         else:
-            if expected_updated_at is not None and str(existing["updated_at"]) != expected_updated_at:
+            if expected_row_version is not None and int(existing["row_version"]) != expected_row_version:
                 _raise_stale_finding_conflict()
             existing_workflow = _row_workflow_status(existing)
             existing_verification_state = _row_verification_state(existing)
@@ -570,8 +1089,9 @@ def create_finding(
                     evidence_type = COALESCE(?, evidence_type),
                     submission_status = COALESCE(?, submission_status),
                     last_seen_at = CURRENT_TIMESTAMP,
+                    row_version = row_version + 1,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                WHERE id = ? AND (? IS NULL OR row_version = ?)
                 """,
                 (
                     title,
@@ -599,7 +1119,7 @@ def create_finding(
                     summary,
                     summary,
                     evidence_ref,
-                    # Default appends (record-finding/verify-finding checkpoints);
+                    # Default appends (finding record/finding verify checkpoints);
                     # notes_mode="replace" overwrites so stale text can be scrubbed.
                     notes if notes_mode == "replace" else _common._append_notes(existing["notes"], notes),
                     # CR-31: details default-merge (so checkpoints accrete keys);
@@ -615,8 +1135,12 @@ def create_finding(
                     # value => an explicit operator override of the submission axis.
                     incoming_submission_status if explicit_submission_override else None,
                     existing["id"],
+                    expected_row_version,
+                    expected_row_version,
                 ),
             )
+            if connection.execute("SELECT changes()").fetchone()[0] != 1:
+                _raise_stale_finding_conflict()
             row = connection.execute("SELECT * FROM assessment_findings WHERE id = ?", (existing["id"],)).fetchone()
         assert row is not None
         finding = dict(row)
@@ -647,7 +1171,11 @@ def create_finding(
         transition = None
         if _finding_state_changed(before_state, after_state):
             action = transition_action or _infer_transition_action(before_state, after_state)
-            actor = source_name or str((provenance or {}).get("agent_name", "") or (provenance or {}).get("verified_by", "") or (provenance or {}).get("reviewed_by", ""))
+            actor = transition_actor or source_name or str(
+                (provenance or {}).get("agent_name", "")
+                or (provenance or {}).get("verified_by", "")
+                or (provenance or {}).get("reviewed_by", "")
+            )
             transition = _record_finding_transition(
                 connection,
                 engagement_id=engagement.id,
@@ -687,8 +1215,17 @@ def create_finding(
         )
         with _common.get_connection() as connection:
             connection.execute(
-                "UPDATE assessment_findings SET evidence_artifact_id = ? WHERE id = ?",
-                (artifact_id, int(finding["id"])),
+                """
+                UPDATE assessment_findings
+                SET evidence_artifact_id = ?
+                WHERE id = ? AND row_version = ? AND evidence_ref = ?
+                """,
+                (
+                    artifact_id,
+                    int(finding["id"]),
+                    int(finding["row_version"]),
+                    str(finding["evidence_ref"]),
+                ),
             )
             finding = connection.execute(
                 "SELECT * FROM assessment_findings WHERE id = ?",
@@ -802,10 +1339,12 @@ def patch_finding(
     transition_artifact_ref: str = "",
     transition_metadata: dict[str, Any] | None = None,
     allow_verification_mutation: bool = False,
-    expected_updated_at: str | None = None,
+    expected_row_version: int | None = None,
     notes_mode: str = "append",
     details_mode: str = "merge",
 ) -> dict[str, Any]:
+    if canonical_location is not None:
+        canonical_location = str(canonical_location).strip()
     if notes_mode == "replace" and notes is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -819,6 +1358,13 @@ def patch_finding(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="details_mode='replace' requires details",
         )
+    if (
+        notes_mode == "replace" or details_mode == "replace"
+    ) and (type(expected_row_version) is not int or expected_row_version < 1):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="replacement modes require a positive expected_row_version",
+        )
 
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
@@ -830,7 +1376,19 @@ def patch_finding(
 
     existing_workflow = _row_workflow_status(existing)
     existing_verification = _row_verification_state(existing)
-    current_updated_at = str(existing["updated_at"])
+    current_row_version = int(existing["row_version"])
+
+    if canonical_location is not None and is_file_finding(
+        canonical_location
+    ) != is_file_finding(str(existing["canonical_location"])):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "generic finding patch cannot change canonical-location category "
+                "between file and non-file; re-record and review the finding through "
+                "the destination workflow"
+            ),
+        )
 
     if not allow_verification_mutation:
         if verification_state is not None or verification_disposition is not None:
@@ -855,8 +1413,8 @@ def patch_finding(
             verification_disposition = "none"
         elif existing_verification == "disputed" and workflow_status is not None:
             # CR-31 (clear-disputed): a `disputed` verdict previously could only
-            # be cleared by the verifier re-issuing verify-finding (which lands
-            # `verified`, not a re-queue). Let a specialist reopen via reset-finding
+            # be cleared by the verifier re-issuing finding verify (which lands
+            # `verified`, not a re-queue). Let a specialist reopen via finding update
             # return it to `unreviewed`/`none` — re-queues for verification without
             # forcing a verdict. Only on an explicit workflow reopen, and only out
             # of `disputed` (does not touch verified/false_positive verdicts).
@@ -876,11 +1434,17 @@ def patch_finding(
         defect_family=defect_family or "",
         root_cause_key=root_cause_key or "",
         auth_context=auth_context or "",
-        canonical_location=canonical_location or "",
+        canonical_location=(
+            str(existing["canonical_location"])
+            if canonical_location is None
+            else canonical_location
+        ),
         summary="" if summary is None else summary,
         evidence_ref=evidence_ref or "",
         notes="" if notes is None else notes,
-        source_name=source_name or "",
+        # Discovery attribution is immutable on patch. ``source_name`` names
+        # the mutation actor and is retained in transition audit when state changes.
+        source_name="",
         details=details,
         provenance=provenance,
         evidence_type=evidence_type,
@@ -900,9 +1464,15 @@ def patch_finding(
         transition_reason_text=transition_reason_text,
         transition_artifact_ref=transition_artifact_ref,
         transition_metadata=transition_metadata,
-        expected_updated_at=expected_updated_at or current_updated_at,
+        transition_actor=source_name,
+        expected_row_version=(
+            current_row_version if expected_row_version is None else expected_row_version
+        ),
         notes_mode=notes_mode,
         details_mode=details_mode,
+        code_snapshot_write_mode=(
+            "verify" if allow_verification_mutation else "patch"
+        ),
     )
 
 # Documented (not hard-enforced) vocabulary for what a blocked finding is
@@ -987,6 +1557,19 @@ def verify_finding(
         normalized_disposition = _normalize_verification_disposition(disposition)
     if normalized_disposition == "none" and disposition != "disputed":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="verification disposition cannot be none")
+    if new_severity and normalized_disposition != "downgraded":
+        # ``new_severity`` is only ever consumed by the downgraded branch. Any
+        # other disposition silently dropped it, so a verifier who believed they
+        # had re-banded the finding got a 200 and the OLD severity. Verification
+        # is not the severity-editing verb; ``patch_finding`` owns that axis.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"new_severity applies only to disposition='downgraded' (got "
+                f"'{disposition}'); change the band with "
+                f"`vigil assess finding update {slug} --severity {new_severity}`"
+            ),
+        )
 
     with _common.get_connection() as connection:
         slug = _resolve_existing_finding_slug(connection, engagement.id, slug)
@@ -994,8 +1577,17 @@ def verify_finding(
             "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
             (engagement.id, slug),
         ).fetchone()
+        severity_transitions = connection.execute(
+            """
+            SELECT from_severity, to_severity
+            FROM assessment_finding_transitions
+            WHERE engagement_id = ? AND finding_id = ?
+            ORDER BY id DESC
+            """,
+            (engagement.id, int(existing["id"])),
+        ).fetchall()
 
-    expected_updated_at = str(existing["updated_at"])
+    expected_row_version = int(existing["row_version"])
     existing_workflow = _row_workflow_status(existing)
     if existing_workflow == "merged":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="merged findings cannot be re-verified")
@@ -1010,11 +1602,41 @@ def verify_finding(
         if not new_severity:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="downgraded verification requires new_severity")
         normalized_new_severity = _normalize_severity(new_severity)
-        if SEVERITY_RANK[normalized_new_severity] >= SEVERITY_RANK[_normalize_severity(str(existing["severity"]))]:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="new_severity must be lower than the current severity")
+        current_severity = _normalize_severity(str(existing["severity"]))
+        if SEVERITY_RANK[normalized_new_severity] > SEVERITY_RANK[current_severity]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="new_severity cannot be higher than the current severity",
+            )
+        prior_higher_severity = next(
+            (
+                _normalize_severity(str(row["from_severity"]))
+                for row in severity_transitions
+                if row["from_severity"]
+                and _normalize_severity(str(row["to_severity"])) == current_severity
+                and SEVERITY_RANK[_normalize_severity(str(row["from_severity"]))]
+                > SEVERITY_RANK[current_severity]
+            ),
+            None,
+        )
+        if (
+            normalized_new_severity == current_severity
+            and prior_higher_severity is None
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "new_severity must be lower than the current severity unless "
+                    "a prior severity-lowering transition proves it was pre-lowered"
+                ),
+            )
         target_severity = normalized_new_severity
         transition_action = "verified_downgraded"
-        transition_metadata["previous_severity"] = _normalize_severity(str(existing["severity"]))
+        transition_metadata["previous_severity"] = (
+            prior_higher_severity or current_severity
+        )
+        if normalized_new_severity == current_severity:
+            transition_metadata["prelowered"] = True
     elif normalized_disposition == "false_positive":
         if not details_payload.get("kill_reason") or details_payload.get("kill_check") is None:
             raise HTTPException(
@@ -1068,7 +1690,7 @@ def verify_finding(
         transition_artifact_ref=artifact_ref or evidence_ref,
         transition_metadata=transition_metadata or None,
         allow_verification_mutation=True,
-        expected_updated_at=expected_updated_at,
+        expected_row_version=expected_row_version,
     )
     if artifact_ref:
         _common._register_artifact_reference(
@@ -1080,6 +1702,29 @@ def verify_finding(
         )
     return result
 
+def _merge_details_precedence(winner: dict[str, Any], loser: dict[str, Any]) -> str:
+    """Merge two ``details_json`` payloads so the WINNING side survives on key
+    conflict while still inheriting keys the winner lacks from the loser.
+
+    ``merge_findings`` keeps the stronger finding's severity
+    (``_stronger_severity``) and its summary/evidence (``source_stronger``).
+    The canonical (kept) finding's CVSS/impact live as flat ``details_json``
+    keys (``cvss_score``/``cvss_vector``/``impact``), so its details MUST follow
+    the same side that won — otherwise a weaker duplicate overwrites the
+    canonical's CVSS/impact and trips the severity↔CVSS readiness gate. Seed
+    from the losing side (fill gaps), then overlay the winning side's non-empty
+    values (win conflicts). Empties are dropped with the same filter shared
+    ``_merge_object_text`` uses, so a blank winner value never clobbers a real
+    loser value.
+    """
+    def _non_empty(payload: dict[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in payload.items() if value not in (None, "", [], {})}
+
+    merged = _non_empty(loser)
+    merged.update(_non_empty(winner))
+    return _json_text(merged)
+
+
 def merge_findings(
     engagement_id: int,
     *,
@@ -1087,6 +1732,8 @@ def merge_findings(
     target_slug: str,
     reason: str,
     source_name: str,
+    expected_source_row_version: int | None = None,
+    expected_target_row_version: int | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
@@ -1101,8 +1748,103 @@ def merge_findings(
         if source is None or target is None:
             missing = source_slug if source is None else target_slug
             raise _finding_not_found(connection, engagement.id, missing)
+        if (
+            expected_source_row_version is not None
+            and int(source["row_version"]) != expected_source_row_version
+        ) or (
+            expected_target_row_version is not None
+            and int(target["row_version"]) != expected_target_row_version
+        ):
+            _raise_stale_finding_conflict()
         if source["id"] == target["id"]:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="cannot merge a finding into itself")
+        if int(source["engagement_id"]) != engagement.id or int(target["engagement_id"]) != engagement.id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="cannot merge findings from different engagements",
+            )
+        if _row_workflow_status(source) == "merged":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"source finding {source_slug} is already merged",
+            )
+        if _row_workflow_status(target) == "merged":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"target finding {target_slug} is already merged",
+            )
+        if source["merged_into_finding_id"] is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"source finding {source_slug} has a merge target but is not marked merged",
+            )
+        if target["merged_into_finding_id"] is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"target finding {target_slug} has a merge target but is not marked merged",
+            )
+        source_provenance = _json_object(source["provenance_json"])
+        target_provenance = _json_object(target["provenance_json"])
+        source_binding = _code_snapshot_binding(source_provenance, strict=False)
+        target_binding = _code_snapshot_binding(target_provenance, strict=False)
+        source_is_file = is_file_finding(str(source["canonical_location"]))
+        target_is_file = is_file_finding(str(target["canonical_location"]))
+        if source_is_file != target_is_file:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "cannot merge findings across the file/non-file "
+                    "canonical-location category boundary"
+                ),
+            )
+        either_has_binding = (
+            CODE_SNAPSHOT_PROVENANCE_KEY in source_provenance
+            or CODE_SNAPSHOT_PROVENANCE_KEY in target_provenance
+        )
+        if either_has_binding and (
+            source_binding is None
+            or target_binding is None
+            or source_binding != target_binding
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="cannot merge findings bound to different code snapshots",
+            )
+        merged_children = connection.execute(
+            """
+            SELECT slug
+            FROM assessment_findings
+            WHERE engagement_id = ? AND merged_into_finding_id = ?
+            ORDER BY slug
+            """,
+            (engagement.id, source["id"]),
+        ).fetchall()
+        if merged_children:
+            child_slugs = ", ".join(str(row["slug"]) for row in merged_children)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"cannot merge source finding {source_slug}; it represents merged findings "
+                    f"{child_slugs} and moving it would create a merge chain"
+                ),
+            )
+        foreign_child = connection.execute(
+            """
+            SELECT 1
+            FROM assessment_findings
+            WHERE engagement_id != ? AND merged_into_finding_id = ?
+            LIMIT 1
+            """,
+            (engagement.id, source["id"]),
+        ).fetchone()
+        if foreign_child is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"cannot merge source finding {source_slug}; a finding from another "
+                    "engagement references it"
+                ),
+            )
         if _row_workflow_status(target) == "false_positive" and _row_workflow_status(source) != "false_positive":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -1118,6 +1860,7 @@ def merge_findings(
               AND links.target_kind = 'finding'
               AND links.target_ref = ?
               AND findings.status != 'merged'
+              AND links.retired_at IS NULL
             """,
             (engagement.id, ROOT_CAUSE_LINK_KIND, source_slug),
         ).fetchall()
@@ -1135,6 +1878,7 @@ def merge_findings(
               AND finding_id = ?
               AND link_kind = ?
               AND target_kind = 'finding'
+              AND retired_at IS NULL
             LIMIT 1
             """,
             (engagement.id, int(source["id"]), ROOT_CAUSE_LINK_KIND),
@@ -1149,8 +1893,8 @@ def merge_findings(
             )
         source_confidence = _finding_confidence_tuple(source)
         target_confidence = _finding_confidence_tuple(target)
-        source_updated_at = str(source["updated_at"])
-        target_updated_at = str(target["updated_at"])
+        source_row_version = int(source["row_version"])
+        target_row_version = int(target["row_version"])
         source_stronger = source_confidence > target_confidence
         source_workflow = _row_workflow_status(source)
         target_workflow = _row_workflow_status(target)
@@ -1164,7 +1908,58 @@ def merge_findings(
             _common._append_notes(target["notes"], f"Merged {source_slug}: {reason}"),
             source["notes"],
         )
-        merged_details = _merge_object_text(target["details_json"], _json_object(source["details_json"]))
+        source_details = _json_object(source["details_json"])
+        target_details = _json_object(target["details_json"])
+        # The explicitly selected target is the canonical record. Source
+        # details fill missing keys but never overwrite canonical narrative.
+        merged_details_obj = _json_object(
+            _merge_details_precedence(target_details, source_details)
+        )
+        # CVSS-bearing keys are the exception: they must follow the SEVERITY winner
+        # (kept below via `_stronger_severity`), NOT the confidence winner. Otherwise
+        # a more-progressed but lower-severity duplicate leaves a higher-severity
+        # canonical carrying the duplicate's weaker CVSS and trips the severity↔CVSS
+        # readiness gate.
+        severity_winner_details = (
+            source_details
+            if (
+                _stronger_severity(target["severity"], source["severity"]) == source["severity"]
+                and source["severity"] != target["severity"]
+            )
+            else target_details
+        )
+        # The pair moves ATOMICALLY. Filling only the half the winner lacks from
+        # the loser manufactures a score that its own vector never produced — a
+        # mismatch neither input finding had. Once the winner declares either
+        # half, its absences win too.
+        if any(
+            severity_winner_details.get(key) not in (None, "", [], {})
+            for key in _CVSS_KEYS
+        ):
+            for _cvss_key in _CVSS_KEYS:
+                _cvss_value = severity_winner_details.get(_cvss_key)
+                if _cvss_value not in (None, "", [], {}):
+                    merged_details_obj[_cvss_key] = _cvss_value
+                else:
+                    merged_details_obj.pop(_cvss_key, None)
+        # A pair that still disagrees arrived WHOLE on one of the two inputs —
+        # the atomic move above means merge can never assemble a mismatch that
+        # neither side had. So refusing here would dead-end a correct duplicate
+        # consolidation over a data defect this caller did not author, and the
+        # two duplicates would stay separate in the report. Merge instead, and
+        # say so: `cvss_vector_score_mismatch` / `cvss_vector_invalid` in
+        # report-readiness still block the report until the pair is repaired.
+        merge_warnings: list[str] = []
+        cvss_problem = _cvss_pair_disagreement(merged_details_obj)
+        if cvss_problem is not None:
+            merge_warnings.append(
+                f"merge completed, but {target_slug} carries a contradictory CVSS "
+                f"pair inherited from one of the two findings: {cvss_problem[1]}. "
+                f"Repair it with `vigil assess finding update {target_slug} "
+                "--details-inline '{\"cvss_score\": <n>, \"cvss_vector\": \"<v>\"}'` "
+                "— the report is blocked until the pair agrees."
+            )
+        merged_details = _json_text(merged_details_obj)
         merged_provenance_payload = _json_object(target["provenance_json"])
         merged_provenance_payload.update(_json_object(source["provenance_json"]))
         merged_provenance_payload["merge"] = {
@@ -1174,21 +1969,26 @@ def merge_findings(
             "source_name": source_name,
         }
         source_links = connection.execute(
-            "SELECT * FROM assessment_finding_links WHERE engagement_id = ? AND finding_id = ?",
+            "SELECT * FROM assessment_finding_links "
+            "WHERE engagement_id = ? AND finding_id = ? AND retired_at IS NULL",
             (engagement.id, source["id"]),
         ).fetchall()
         source_cursor = connection.execute(
             """
             UPDATE assessment_findings
             SET status = 'merged',
-                verification_state = 'unreviewed',
-                verification_disposition = 'none',
                 merged_into_finding_id = ?,
                 notes = ?,
+                row_version = row_version + 1,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE id = ? AND updated_at = ?
+            WHERE id = ? AND row_version = ?
             """,
-            (target["id"], _common._append_notes(source["notes"], reason), source["id"], source_updated_at),
+            (
+                target["id"],
+                _common._append_notes(source["notes"], reason),
+                source["id"],
+                source_row_version,
+            ),
         )
         if source_cursor.rowcount != 1:
             _raise_stale_finding_conflict()
@@ -1217,9 +2017,10 @@ def merge_findings(
                 notes = ?,
                 details_json = ?,
                 provenance_json = ?,
+                row_version = row_version + 1,
                 updated_at = CURRENT_TIMESTAMP,
                 last_seen_at = CURRENT_TIMESTAMP
-            WHERE id = ? AND updated_at = ?
+            WHERE id = ? AND row_version = ?
             """,
             (
                 _stronger_severity(target["severity"], source["severity"]),
@@ -1257,7 +2058,7 @@ def merge_findings(
                 merged_details,
                 _json_text(merged_provenance_payload),
                 target["id"],
-                target_updated_at,
+                target_row_version,
             ),
         )
         if target_cursor.rowcount != 1:
@@ -1277,7 +2078,12 @@ def merge_findings(
                 provenance=_json_object(row["provenance_json"]),
             )
         connection.execute(
-            "DELETE FROM assessment_finding_links WHERE engagement_id = ? AND finding_id = ?",
+            """
+            UPDATE assessment_finding_links
+            SET retired_at = COALESCE(retired_at, CURRENT_TIMESTAMP),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE engagement_id = ? AND finding_id = ?
+            """,
             (engagement.id, source["id"]),
         )
         link = _upsert_finding_link(
@@ -1328,6 +2134,9 @@ def merge_findings(
         "source": _serialize_finding_record(source_row),
         "target": _serialize_finding_record(target_row),
         "link": link,
+        # Always present so a consumer can read it unconditionally; non-empty
+        # only when the merge carried a pre-existing defect into the canonical.
+        "warnings": merge_warnings,
     }
 
 def list_findings(
@@ -1425,7 +2234,13 @@ def list_findings(
             """,
             tuple(params),
         ).fetchall()
-    return [_serialize_finding_record(row) for row in rows]
+        repo_states = load_code_repo_snapshot_states(connection, engagement.id)
+        return [
+            _serialize_finding_with_code_snapshot_status(
+                connection, engagement.id, row, repo_states=repo_states
+            )
+            for row in rows
+        ]
 
 
 def _escape_like(value: str) -> str:
@@ -1446,7 +2261,9 @@ def get_finding(engagement_id: int, slug: str) -> dict[str, Any]:
         ).fetchone()
         if row is None:
             raise _finding_not_found(connection, engagement.id, slug)
-    return _serialize_finding_record(row)
+        return _serialize_finding_with_code_snapshot_status(
+            connection, engagement.id, row
+        )
 
 def list_exploit_candidates(engagement_id: int) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)

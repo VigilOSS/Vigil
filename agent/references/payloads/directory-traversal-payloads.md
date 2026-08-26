@@ -1,5 +1,6 @@
 ---
 description: Encoding variants, null byte, double URL encoding, OS-specific paths
+skill: file-inclusion
 source: PayloadsAllTheThings — Directory Traversal
 ---
 

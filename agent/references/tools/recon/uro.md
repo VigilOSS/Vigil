@@ -15,9 +15,9 @@ uro is **not** a `vigil assess kali` verb — it is a non-target dedup stage wir
 
 | Pipeline | Where uro runs |
 |---|---|
-| `gau-secrets` | between the inert-extension filter and the httpx body-fetch (the body-fetch needs the trimmed list — a uro failure aborts the run). |
-| `gau-endpoints` | between the gau corpus and `ingest-endpoints` (WARN + fall back to the raw corpus on a uro failure — the classifier dedupes by template again downstream). |
-| `gau-js-endpoints` | on the `.js` target list before the JS-only body-fetch (collapses cache-busted bundle variants; WARN + fall back on failure). |
+| `gau secrets` | between the inert-extension filter and the httpx body-fetch (the body-fetch needs the trimmed list — a uro failure aborts the run). |
+| `gau endpoints` | between the gau corpus and `ingest endpoints` (WARN + fall back to the raw corpus on a uro failure — the classifier dedupes by template again downstream). |
+| `gau js-endpoints` | on the `.js` target list before the JS-only body-fetch (collapses cache-busted bundle variants; WARN + fall back on failure). |
 
 `run_uro_dedup` runs `uro -i <in> -o <out>` inside the runtime container via `kali_exec` (so the stage is audited as `tool_bin=uro`) and returns the deduped line count. The pure argv builder is `build_uro_command`.
 
