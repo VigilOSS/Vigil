@@ -6,7 +6,7 @@ from fastapi import HTTPException, status
 from ..events import _engagement_or_404
 
 from . import _common
-from ._common import ROOT_CAUSE_EFFECTS, ROOT_CAUSE_LINK_KIND, SEVERITY_RANK, _is_suppressed_workflow_status, _json_object, _json_text, _merge_object_text, _resolve_existing_finding_slug, _row_workflow_status, _serialize_finding_record
+from ._common import DUPLICATE_LINK_KIND, ROOT_CAUSE_EFFECTS, ROOT_CAUSE_LINK_KIND, SEVERITY_RANK, _is_suppressed_workflow_status, _json_object, _json_text, _merge_object_text, _resolve_existing_finding_slug, _row_workflow_status, _serialize_finding_record
 
 
 
@@ -118,6 +118,23 @@ def create_finding_link(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="finding cannot link to itself",
                 )
+        elif link_kind == DUPLICATE_LINK_KIND:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"{DUPLICATE_LINK_KIND} links must target another finding "
+                    "(target_kind='finding')"
+                ),
+            )
+        if link_kind == DUPLICATE_LINK_KIND and not target_ref:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{DUPLICATE_LINK_KIND} links require the duplicated finding's slug",
+            )
+        # A SUPPRESSED target is deliberately allowed here, and only here: pointing
+        # at the false positive this rediscovery duplicates is the whole point.
+        # ``list_finding_groups`` reads root-cause links only, so a duplicate link
+        # cannot fold a killed finding back into a report group.
         return _upsert_finding_link(
             connection,
             engagement.id,
@@ -165,9 +182,23 @@ def set_root_cause_link(
         if int(finding["id"]) == int(root["id"]):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="finding cannot be its own root cause")
         if _is_suppressed_workflow_status(_row_workflow_status(finding)):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="merged or false-positive findings cannot be linked as siblings")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "merged or false-positive findings cannot be linked as siblings; "
+                    f"record the relation with `vigil assess finding link {finding_slug} "
+                    f"--target-finding {root_cause_slug} --link-kind {DUPLICATE_LINK_KIND}`"
+                ),
+            )
         if _is_suppressed_workflow_status(_row_workflow_status(root)):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="merged or false-positive findings cannot be root causes")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "merged or false-positive findings cannot be root causes; "
+                    f"record the duplication with `vigil assess finding link {finding_slug} "
+                    f"--target-finding {root_cause_slug} --link-kind {DUPLICATE_LINK_KIND}`"
+                ),
+            )
         root_parent = connection.execute(
             """
             SELECT 1

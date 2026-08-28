@@ -853,7 +853,7 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
     finding_detail = client.get("/engagements/2026-03-30-120000-example/assessment/findings/VA-001")
     assert finding_detail.status_code == 200
     assert finding_detail.json()["slug"] == "VA-001"
-    assert json.loads(finding_detail.json()["details_json"])["cwe_id"] == "CWE-639"
+    assert finding_detail.json()["details"]["cwe_id"] == "CWE-639"
 
     missing_finding = client.get("/engagements/2026-03-30-120000-example/assessment/findings/VA-404")
     assert missing_finding.status_code == 404
@@ -1841,8 +1841,8 @@ def test_findings_verify_updates_existing_finding_and_records_transition(client,
     assert finding["workflow_status"] == "draft"
     assert finding["verification_state"] == "verified"
     assert finding["verification_disposition"] == "confirmed"
-    assert json.loads(finding["details_json"])["impact"] == "Confirmed cross-tenant order read"
-    assert json.loads(finding["provenance_json"])["verified_by"] == "code-vuln-verifier"
+    assert finding["details"]["impact"] == "Confirmed cross-tenant order read"
+    assert finding["provenance"]["verified_by"] == "code-vuln-verifier"
 
 
 def test_findings_verify_pending_runtime_proof_roundtrips_and_holds(client, isolate_settings):
@@ -2457,8 +2457,8 @@ def test_false_positive_findings_are_suppressed_but_semantically_sticky(client, 
     assert len(payload) == 1
     assert payload[0]["workflow_status"] == "false_positive"
     assert "Re-raised by later LLM pass." in payload[0]["notes"]
-    assert json.loads(payload[0]["details_json"])["kill_check"] == 2
-    assert json.loads(payload[0]["details_json"])["kill_reason"] == "upstream guard bounds header length to 8192 bytes."
+    assert payload[0]["details"]["kill_check"] == 2
+    assert payload[0]["details"]["kill_reason"] == "upstream guard bounds header length to 8192 bytes."
 
 
 def test_false_positive_title_fallback_does_not_suppress_distinct_finding(client, isolate_settings):
@@ -2719,7 +2719,7 @@ def test_merge_false_positive_source_preserves_live_target(client, isolate_setti
             "notes": "Killed during verification.",
             "source_name": "code-vuln-verifier",
             "details": {
-                "kill_check": 6,
+                "kill_check": 5,
                 "kill_reason": "Old triage considered the path dead.",
                 "evidence": "Verifier marked the duplicate as unreachable.",
                 "impact": "No separate issue remained.",
@@ -3622,7 +3622,7 @@ def test_patch_finding_details_replace_overwrites_stale_keys(client, isolate_set
         client,
         location="https://example.com/details/replace",
         summary="Details replace target.",
-        details={"stale_key": "leaked-from-other-lane", "keep": "original"},
+        details={"attempts_summary": "leaked-from-other-lane", "impact": "original"},
     )
     assert created.status_code == 201, created.text
     slug = created.json()["finding"]["slug"]
@@ -3630,22 +3630,22 @@ def test_patch_finding_details_replace_overwrites_stale_keys(client, isolate_set
     # Default merge: a new key accretes, prior keys survive.
     merged = client.patch(
         f"/engagements/2026-03-30-120000-example/assessment/findings/{slug}",
-        json={"details": {"added": "by-merge"}},
+        json={"details": {"entry_point": "by-merge"}},
     )
     assert merged.status_code == 200, merged.text
 
     findings = client.get("/engagements/2026-03-30-120000-example/assessment/findings")
     row = next(item for item in findings.json() if item["slug"] == slug)
-    merged_details = json.loads(row["details_json"])
-    assert merged_details.get("stale_key") == "leaked-from-other-lane"
-    assert merged_details.get("added") == "by-merge"
+    merged_details = row["details"]
+    assert merged_details.get("attempts_summary") == "leaked-from-other-lane"
+    assert merged_details.get("entry_point") == "by-merge"
 
-    # Replace: only the supplied keys remain; stale_key is GONE (merge could
-    # never delete it).
+    # Replace: only the supplied keys remain; attempts_summary is GONE (merge
+    # could never delete it).
     replaced = client.patch(
         f"/engagements/2026-03-30-120000-example/assessment/findings/{slug}",
         json={
-            "details": {"clean": "rewritten"},
+            "details": {"sink": "rewritten"},
             "details_mode": "replace",
             "expected_row_version": 2,
         },
@@ -3654,10 +3654,10 @@ def test_patch_finding_details_replace_overwrites_stale_keys(client, isolate_set
 
     findings = client.get("/engagements/2026-03-30-120000-example/assessment/findings")
     row = next(item for item in findings.json() if item["slug"] == slug)
-    replaced_details = json.loads(row["details_json"])
-    assert replaced_details == {"clean": "rewritten"}, replaced_details
-    assert "stale_key" not in replaced_details
-    assert "keep" not in replaced_details
+    replaced_details = row["details"]
+    assert replaced_details == {"sink": "rewritten"}, replaced_details
+    assert "attempts_summary" not in replaced_details
+    assert "impact" not in replaced_details
 
 
 def test_patch_finding_details_replace_without_details_rejected(client, isolate_settings):
@@ -3669,7 +3669,7 @@ def test_patch_finding_details_replace_without_details_rejected(client, isolate_
         client,
         location="https://example.com/details/guard",
         summary="Replace guard.",
-        details={"keep": "me"},
+        details={"impact": "me"},
     )
     assert created.status_code == 201, created.text
     slug = created.json()["finding"]["slug"]

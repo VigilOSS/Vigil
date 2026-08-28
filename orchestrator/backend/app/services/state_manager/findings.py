@@ -14,11 +14,14 @@ from ..search import (
 )
 from . import _common
 from ._common import (
+    DUPLICATE_LINK_KIND,
+    FINDING_NOTES_MAX_LENGTH,
     ROOT_CAUSE_LINK_KIND,
     SEVERITY_RANK,
     VERIFICATION_DISPOSITION_RANK,
     VERIFICATION_STATE_RANK,
     WORKFLOW_STATUS_RANK,
+    SubmissionStatus,
     VerificationDisposition,
     VerificationState,
     WorkflowStatus,
@@ -42,9 +45,23 @@ from ._common import (
     _stronger_severity,
 )
 from .cvss import CvssVectorError, base_score
+from .finding_details import validate_finding_details
 from .links import _is_root_cause_link, _upsert_finding_link
 
 CODE_SNAPSHOT_PROVENANCE_KEY = "code_snapshot"
+# Names the binding an audited relocation out of ``file:`` reserved rather than
+# deleted — it is the record of which bytes were reviewed while the finding was a
+# file finding.
+SUPERSEDED_CODE_SNAPSHOT_PROVENANCE_KEY = "superseded_code_snapshot"
+# WHO asserted the binding, and under which audited work. The gate proves the
+# snapshot identity is well-formed and current for the repo; it cannot prove that
+# THIS verifier read THESE bytes for THIS finding, so a binding copied verbatim
+# from another finding satisfies it while attesting nothing — a laundered binding
+# that is indistinguishable from a genuine one, which is strictly worse for the
+# sealed-evidence guarantee than an honest refusal. This sibling block is stamped
+# SERVER-SIDE on every write that asserts a binding, from identities the backend
+# resolves itself, so the two cases stop looking alike.
+CODE_SNAPSHOT_ATTESTATION_PROVENANCE_KEY = "code_snapshot_attestation"
 _CODE_SNAPSHOT_WRITE_MODES = frozenset({"record", "patch", "verify"})
 
 
@@ -89,6 +106,121 @@ def _code_snapshot_binding(
         "repo_generation": int(binding["repo_generation"]),
         "source_manifest_digest": str(binding["source_manifest_digest"]),
     }
+
+
+def _resolve_dispatch_id(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    agent_id: Any,
+) -> int | None:
+    """Resolve a claimed ``agent_id`` to a real dispatch row in this engagement.
+
+    Resolved, never taken on trust: an id that names no dispatch yields ``None``,
+    which is exactly the signal that the binding arrived outside audited work.
+    """
+
+    if not isinstance(agent_id, str) or not agent_id.strip():
+        return None
+    row = connection.execute(
+        """
+        SELECT id
+        FROM assessment_dispatches
+        WHERE engagement_id = ? AND agent_id = ?
+        """,
+        (engagement_id, agent_id.strip()),
+    ).fetchone()
+    return int(row["id"]) if row is not None else None
+
+
+def _resolve_command_run_id(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    command_run_id: Any,
+) -> int | None:
+    """Resolve a claimed command-run id to a real audited run in this engagement."""
+
+    if type(command_run_id) is not int or command_run_id < 1:
+        return None
+    row = connection.execute(
+        """
+        SELECT id
+        FROM assessment_command_runs
+        WHERE id = ? AND engagement_id = ?
+        """,
+        (command_run_id, engagement_id),
+    ).fetchone()
+    return int(row["id"]) if row is not None else None
+
+
+def _code_snapshot_attestation(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    *,
+    incoming_provenance: dict[str, Any] | None,
+    stored_provenance: dict[str, Any],
+    finding_slug: str,
+    source_name: str,
+    write_mode: str,
+) -> dict[str, Any]:
+    """Build the attestation for a write that asserts a code-snapshot binding.
+
+    Two things make a copied binding visible:
+
+    * ``dispatch_id`` / ``command_run_id`` are RESOLVED against real rows rather
+      than believed. A binding asserted outside any audited dispatch or run
+      resolves to ``None`` on both and reads as unattested — which is the honest
+      description of a claim with nothing behind it.
+    * An incoming attestation naming a DIFFERENT finding is preserved as
+      ``copied_from_finding_slug`` instead of being silently overwritten. Copying
+      another finding's provenance is precisely the reported workaround, and it
+      carries this block along with the binding it was meant to justify.
+    """
+
+    incoming = incoming_provenance or {}
+    prior = incoming.get(CODE_SNAPSHOT_ATTESTATION_PROVENANCE_KEY)
+    if not isinstance(prior, dict):
+        prior = stored_provenance.get(CODE_SNAPSHOT_ATTESTATION_PROVENANCE_KEY)
+    attestation: dict[str, Any] = {
+        "finding_slug": finding_slug,
+        "recorded_by": str(source_name or ""),
+        "write_mode": write_mode,
+        "agent_id": str(incoming.get("agent_id") or ""),
+        "dispatch_id": _resolve_dispatch_id(
+            connection, engagement_id, incoming.get("agent_id")
+        ),
+        "command_run_id": _resolve_command_run_id(
+            connection, engagement_id, incoming.get("command_run_id")
+        ),
+        "at": _common._utcnow_iso_dispatch(),
+    }
+    if isinstance(prior, dict):
+        prior_slug = str(prior.get("finding_slug") or "")
+        if prior_slug and prior_slug != finding_slug:
+            attestation["copied_from_finding_slug"] = prior_slug
+    return attestation
+
+
+def code_snapshot_attestation_status(
+    finding: dict[str, Any] | sqlite3.Row,
+) -> str:
+    """How much the stored binding's attestation is worth.
+
+    ``legacy`` is deliberately NOT a violation: rows written before the
+    attestation existed carry no stamp and must stay readable and writable.
+    """
+
+    record = dict(finding)
+    provenance = _finding_provenance(record)
+    if CODE_SNAPSHOT_PROVENANCE_KEY not in provenance:
+        return "not_applicable"
+    attestation = provenance.get(CODE_SNAPSHOT_ATTESTATION_PROVENANCE_KEY)
+    if not isinstance(attestation, dict):
+        return "legacy"
+    if attestation.get("copied_from_finding_slug"):
+        return "copied"
+    if attestation.get("dispatch_id") is None and attestation.get("command_run_id") is None:
+        return "unattested"
+    return "attested"
 
 
 def _finding_provenance(record: dict[str, Any]) -> dict[str, Any]:
@@ -179,6 +311,12 @@ def _serialize_finding_with_code_snapshot_status(
     record = _serialize_finding_record(finding)
     record["code_snapshot_status"] = finding_code_snapshot_status(
         connection, engagement_id, record, repo_states=repo_states
+    )
+    # Beside the binding's currency, how much that binding is WORTH: the gate can
+    # only prove the snapshot identity is current for the repo, never that this
+    # verifier read these bytes for this finding.
+    record["code_snapshot_attestation_status"] = code_snapshot_attestation_status(
+        record
     )
     return record
 
@@ -380,6 +518,189 @@ def _canonical_location_endpoint(location: str) -> str:
     return text
 
 
+ORIGINAL_CANONICAL_LOCATION_PROVENANCE_KEY = "original_canonical_location"
+
+
+def _normalize_file_location(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    location: str,
+    *,
+    repo_id: int | None = None,
+) -> str:
+    """Re-emit a ``file:`` location repo-relative.
+
+    ``canonical_location`` is the primary dedup key, and it was stored as
+    author-supplied free text: ``file:<origin-root>/pkg/x.rb:12`` and
+    ``file:pkg/x.rb:12`` describe one line of one file and collided in NOTHING —
+    not the dedup tuple, not the title tier, not the killed-remint guard. The repo
+    root is knowable at write time, so the normalisation was always available and
+    simply never applied.
+
+    Two properties keep it from misrouting, which matters because normalisation
+    changes the dedup key:
+
+    * The candidate prefix is a contiguous SUFFIX of a real repo root's path
+      segments (longest first), so it strips the origin root the author echoed,
+      not an arbitrary leading directory.
+    * A one-segment candidate — the repo's own directory name — is accepted ONLY
+      when the backend's file inventory corroborates it: the stripped form must
+      name a known ``code_files`` path and the authored form must not. Without
+      that, a repository whose directory happens to be called ``src`` would eat
+      the ``src/`` of every correctly-authored path in it.
+
+    Deliberately scoped to ``file:`` locations. URL locations keep their query
+    strings, which the exact-tuple dedup tier depends on.
+    """
+
+    text = str(location or "").strip()
+    if not text.startswith("file:"):
+        return text
+    body = text[len("file:"):].lstrip("/")
+    while body.startswith("./"):
+        body = body[2:]
+    if not body:
+        return text
+    rows = connection.execute(
+        """
+        SELECT id, repo_path, source_origin_path
+        FROM code_repos
+        WHERE engagement_id = ?
+        """,
+        (engagement_id,),
+    ).fetchall()
+    candidates: list[tuple[int, str]] = []
+    for row in rows:
+        if repo_id is not None and int(row["id"]) != repo_id:
+            continue
+        for raw_root in (row["repo_path"], row["source_origin_path"]):
+            segments = [part for part in str(raw_root or "").split("/") if part]
+            for depth in range(len(segments), 0, -1):
+                prefix = "/".join(segments[-depth:]) + "/"
+                if body.startswith(prefix) and len(body) > len(prefix):
+                    candidates.append((depth, prefix))
+                    break
+    if not candidates:
+        return f"file:{body}"
+    depth, prefix = max(candidates)
+    stripped = body[len(prefix):]
+    if depth == 1 and not _stripped_path_is_the_known_one(
+        connection, engagement_id, body, stripped, repo_id=repo_id
+    ):
+        return f"file:{body}"
+    return f"file:{stripped}"
+
+
+def _file_path_only(location_body: str) -> str:
+    """Drop a trailing ``:line[:col]`` so the body can be matched against a path."""
+
+    segments = location_body.split(":")
+    while len(segments) > 1 and segments[-1].isdigit():
+        segments.pop()
+    return ":".join(segments)
+
+
+def _stripped_path_is_the_known_one(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    body: str,
+    stripped: str,
+    *,
+    repo_id: int | None,
+) -> bool:
+    """Does the ingested file inventory agree that ``stripped`` is the real path?"""
+
+    params: list[Any] = [engagement_id, _file_path_only(body), _file_path_only(stripped)]
+    repo_clause = ""
+    if repo_id is not None:
+        repo_clause = " AND repo_id = ?"
+        params.append(int(repo_id))
+    row = connection.execute(
+        f"""
+        SELECT
+            SUM(CASE WHEN file_path = ? THEN 1 ELSE 0 END) AS authored,
+            SUM(CASE WHEN file_path = ? THEN 1 ELSE 0 END) AS stripped
+        FROM code_files
+        WHERE engagement_id = ?{repo_clause}
+        """,
+        (params[1], params[2], params[0], *params[3:]),
+    ).fetchone()
+    if row is None:
+        return False
+    return int(row["stripped"] or 0) > 0 and int(row["authored"] or 0) == 0
+
+
+def _duplicate_advisories(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    *,
+    finding_id: int,
+    canonical_location: str,
+    root_cause_key: str,
+    details: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Siblings that were already FILED and this record probably duplicates.
+
+    Advisory, never a refusal: a legitimate variant shares an endpoint with its
+    root by definition, and the exact-tuple clobber guard already owns the refusal
+    semantics. What was missing is any signal at all — ``root_cause_key`` is
+    author-invented free text with no collision surface, so a rediscovery of an
+    already-submitted defect landed silently beside it.
+    """
+
+    entry_point = str(details.get("entry_point", "") or "").strip()
+    parameter = str(details.get("parameter", "") or "").strip()
+    root_key = str(root_cause_key or "").strip()
+    location = str(canonical_location or "").strip()
+    rows = connection.execute(
+        """
+        SELECT slug, title, submission_status, submission_ref, canonical_location,
+               root_cause_key, details_json
+        FROM assessment_findings
+        WHERE engagement_id = ?
+          AND id != ?
+          AND submission_status != 'none'
+        ORDER BY id ASC
+        """,
+        (engagement_id, finding_id),
+    ).fetchall()
+    advisories: list[dict[str, Any]] = []
+    for row in rows:
+        sibling_details = _json_object(row["details_json"])
+        reasons: list[str] = []
+        if location and str(row["canonical_location"] or "").strip() == location:
+            reasons.append("canonical_location")
+        if root_key and str(row["root_cause_key"] or "").strip() == root_key:
+            reasons.append("root_cause_key")
+        if (
+            entry_point
+            and parameter
+            and str(sibling_details.get("entry_point", "") or "").strip() == entry_point
+            and str(sibling_details.get("parameter", "") or "").strip() == parameter
+        ):
+            reasons.append("entry_point+parameter")
+        if not reasons:
+            continue
+        sibling_slug = str(row["slug"])
+        advisories.append(
+            {
+                "slug": sibling_slug,
+                "title": str(row["title"] or ""),
+                "submission_status": str(row["submission_status"] or ""),
+                "submission_ref": str(row["submission_ref"] or ""),
+                "matched_on": reasons,
+                "detail": (
+                    f"{sibling_slug} is already submission_status="
+                    f"'{row['submission_status']}' and matches on "
+                    f"{', '.join(reasons)}. If this is the same defect, link it: "
+                    f"`vigil assess finding link <slug> --target-finding {sibling_slug} "
+                    f"--link-kind {DUPLICATE_LINK_KIND}`."
+                ),
+            }
+        )
+    return advisories
+
+
 def _find_killed_remint_collision(
     connection,
     engagement_id: int,
@@ -487,6 +808,94 @@ def _finding_state_changed(before: dict[str, str] | None, after: dict[str, str])
         return True
     return any(before[key] != after[key] for key in after)
 
+
+# Cap on each content blob the transition ledger stores. The ledger exists to
+# make a clobbered value RECOVERABLE, not to become a second copy of every
+# finding, so an oversized blob is stored truncated with an explicit marker
+# rather than silently dropped. Sized above FINDING_NOTES_MAX_LENGTH so a
+# rotation of an over-cap notes column lands whole.
+_TRANSITION_CONTENT_CAP = 65536
+_TRANSITION_TRUNCATION_MARKER = "\n[truncated by the finding transition ledger]"
+
+
+def _capped_transition_blob(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    if len(text) <= _TRANSITION_CONTENT_CAP:
+        return text
+    return text[:_TRANSITION_CONTENT_CAP] + _TRANSITION_TRUNCATION_MARKER
+
+
+def _finding_content_snapshot(row: dict[str, Any] | Any) -> dict[str, str]:
+    """The mutable CONTENT axes the lifecycle snapshot does not cover.
+
+    A details / notes / canonical-location write moves none of the four lifecycle
+    axes, so before this existed a details patch wrote no transition row at all
+    and a clobbered key's prior value survived nowhere. Kept SEPARATE from
+    ``_finding_state_snapshot`` so the lifecycle transition vocabulary and
+    ``_infer_transition_action``'s inference stay exactly as they were.
+    """
+
+    if isinstance(row, dict):
+        get = row.get
+    else:
+        def get(key: str, default: str = "") -> Any:
+            return row[key] if key in row.keys() else default
+
+    return {
+        "canonical_location": str(get("canonical_location", "") or ""),
+        "details_json": str(get("details_json", "{}") or "{}"),
+        "notes": str(get("notes", "") or ""),
+        # A rebind moves ONLY this. Without it in the snapshot, the one write
+        # whose purpose is to change the source binding emitted no ledger row.
+        "provenance_json": str(get("provenance_json", "{}") or "{}"),
+    }
+
+def _resolved_details(
+    existing_details_json: str,
+    details: dict[str, Any] | None,
+    details_mode: str,
+) -> str:
+    """Apply the requested details mode to the stored column."""
+
+    if details_mode == "replace":
+        return _json_text(details)
+    if details_mode == "append":
+        return _common._append_object_text(existing_details_json, details, path="details")
+    return _merge_object_text(existing_details_json, details)
+
+
+def _resolved_notes(
+    existing_notes: str,
+    incoming: str,
+    notes_mode: str,
+    *,
+    slug: str,
+) -> str:
+    """Apply the requested notes mode, bounded where the field actually grows."""
+
+    if notes_mode == "replace":
+        return incoming
+    if notes_mode == "rotate":
+        # The prior text is preserved verbatim on the transition row this write
+        # emits (``notes_before_json``), so the pointer is a real address rather
+        # than a euphemism for a delete. This is the exit for a row whose notes
+        # already exceed the append cap: it is the only mode that can shrink the
+        # column without discarding what was there.
+        pointer = (
+            f"[notes rotated {_common._utcnow_iso_dispatch()}; the prior "
+            f"{len(existing_notes)} characters are on this finding's transition "
+            f"ledger \u2014 read them with `vigil assess finding history {slug}`]"
+        )
+        return _common._append_notes(
+            pointer, incoming, max_length=FINDING_NOTES_MAX_LENGTH
+        )
+    return _common._append_notes(
+        existing_notes, incoming, max_length=FINDING_NOTES_MAX_LENGTH
+    )
+
+
 def _infer_transition_action(before: dict[str, str] | None, after: dict[str, str]) -> str:
     if before is None:
         return "created"
@@ -554,6 +963,10 @@ def _default_transition_reason(action: str, after: dict[str, str]) -> str:
         return "Finding merged into another canonical record."
     if action == "workflow_blocked":
         return "Finding workflow moved to blocked."
+    if action == "details_patched":
+        return "Finding details/notes rewritten; prior content preserved on this transition."
+    if action == "location_relocated":
+        return "Finding canonical location relocated under review."
     return f"Finding state updated to {after['workflow_status']}."
 
 def _record_finding_transition(
@@ -569,7 +982,31 @@ def _record_finding_transition(
     reason_text: str,
     artifact_ref: str,
     metadata: dict[str, Any] | None,
+    before_content: dict[str, str] | None = None,
+    after_content: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    # Content history is recorded ONLY on the axes this write actually moved.
+    # Storing an unchanged blob on every row would turn the ledger into a second
+    # copy of the finding without making anything recoverable that was not
+    # already readable on the finding itself.
+    location_before = location_after = None
+    details_before = details_after = None
+    notes_before = notes_after = None
+    if before_content is not None and after_content is not None:
+        if before_content["canonical_location"] != after_content["canonical_location"]:
+            location_before = before_content["canonical_location"]
+            location_after = after_content["canonical_location"]
+        if before_content["details_json"] != after_content["details_json"]:
+            details_before = _capped_transition_blob(before_content["details_json"])
+            details_after = _capped_transition_blob(after_content["details_json"])
+        if before_content["notes"] != after_content["notes"] and not after_content[
+            "notes"
+        ].startswith(before_content["notes"]):
+            # An append leaves the prior text in place and needs no copy; only a
+            # destructive rewrite (replace / rotate) removes content the ledger
+            # is the last record of.
+            notes_before = _capped_transition_blob(before_content["notes"])
+            notes_after = _capped_transition_blob(after_content["notes"])
     cursor = connection.execute(
         """
         INSERT INTO assessment_finding_transitions (
@@ -578,9 +1015,12 @@ def _record_finding_transition(
             from_verification_state, to_verification_state,
             from_verification_disposition, to_verification_disposition,
             from_severity, to_severity,
+            from_canonical_location, to_canonical_location,
+            details_before_json, details_after_json,
+            notes_before_json, notes_after_json,
             reason_code, reason_text, artifact_ref, metadata_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             engagement_id,
@@ -595,6 +1035,12 @@ def _record_finding_transition(
             after["verification_disposition"],
             None if before is None else before["severity"],
             after["severity"],
+            location_before,
+            location_after,
+            details_before,
+            details_after,
+            notes_before,
+            notes_after,
             reason_code,
             reason_text,
             artifact_ref,
@@ -813,6 +1259,9 @@ def create_finding(
     provenance: dict[str, Any] | None,
     evidence_type: str | None = None,
     submission_status: str | None = None,
+    submission_platform: str | None = None,
+    submission_ref: str | None = None,
+    submission_url: str | None = None,
     request_variant_id: int | None,
     service_id: int | None,
     surface_id: int | None,
@@ -855,6 +1304,23 @@ def create_finding(
     with _common.get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
         incoming_binding = _code_snapshot_binding(provenance, strict=True)
+        # Normalise BEFORE anything reads the location — the dedup match, the
+        # category guards, and the re-mint guard all key on it, so normalising
+        # afterwards would leave each of them comparing a different string.
+        authored_canonical_location = canonical_location
+        canonical_location = _normalize_file_location(
+            connection,
+            engagement.id,
+            canonical_location,
+            repo_id=(incoming_binding or {}).get("repo_id"),
+        )
+        if canonical_location != authored_canonical_location:
+            # Keep what the author wrote; the audit trail should not be rewritten
+            # by a normalisation the author never saw.
+            provenance = {
+                **(provenance or {}),
+                ORIGINAL_CANONICAL_LOCATION_PROVENANCE_KEY: authored_canonical_location,
+            }
         if code_snapshot_write_mode == "patch" and incoming_binding is not None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -988,6 +1454,15 @@ def create_finding(
             # Both store the payload verbatim (`_json_text(details)`).
             authored_details = dict(details or {})
             effective_details = authored_details
+        elif details_mode == "append":
+            # Append accretes, so every incoming key is authored (nothing is
+            # dropped as an empty no-op the way merge drops it).
+            authored_details = dict(details or {})
+            effective_details = _json_object(
+                _common._append_object_text(
+                    existing["details_json"], details, path="details"
+                )
+            )
         else:
             # Merge mode drops empty incoming values, so an empty CVSS key is a
             # no-op, not an authoring act.
@@ -999,8 +1474,41 @@ def create_finding(
             effective_details = _json_object(
                 _merge_object_text(existing["details_json"], details)
             )
+        # The details allow-list moved SERVER-side here so no CLI can be a hole in
+        # it again: `finding verify` skipped the client-side validator entirely,
+        # which is how the adjudication keys and an out-of-range kill_check got
+        # onto records that `finding update` then refused to maintain. Scoped to
+        # the keys this write AUTHORS, and permissive for keys already stored, so
+        # closing the door cannot strand what came through it.
+        validate_finding_details(
+            authored_details,
+            already_stored_keys=frozenset(
+                _json_object(existing["details_json"]) if existing is not None else {}
+            ),
+        )
+        _validate_submission_identity(
+            incoming_status=incoming_submission_status,
+            explicit_override=explicit_submission_override,
+            existing=existing,
+            submission_ref=submission_ref,
+            authored_details=authored_details,
+            effective_details=effective_details,
+        )
         _validate_cvss_pair(authored_details, effective_details)
         before_state = _finding_state_snapshot(existing) if existing is not None else None
+        before_content = (
+            _finding_content_snapshot(existing) if existing is not None else None
+        )
+        # Verify is the ONLY path that can rebind a stale file finding, so it is
+        # the one write whose caller needs the transition rather than the endpoint:
+        # a rebind that silently changed nothing is otherwise indistinguishable
+        # from one that worked. Captured before the UPDATE, surfaced on the write
+        # envelope, and recorded in the ledger.
+        code_snapshot_status_before: str | None = None
+        if code_snapshot_write_mode == "verify" and existing is not None:
+            code_snapshot_status_before = finding_code_snapshot_status(
+                connection, engagement.id, existing
+            )
         if existing is None:
             # CR-31: allocate the slug + INSERT under the (engagement_id, slug)
             # UNIQUE backstop. An auto-assigned slug that loses a race recomputes
@@ -1016,9 +1524,10 @@ def create_finding(
                         """
                         INSERT INTO assessment_findings (
                             engagement_id, slug, title, severity, status, verification_state, verification_disposition, defect_family, root_cause_key, auth_context,
-                            canonical_location, source_name, summary, evidence_ref, notes, details_json, provenance_json, evidence_type, submission_status
+                            canonical_location, source_name, summary, evidence_ref, notes, details_json, provenance_json, evidence_type, submission_status,
+                            submission_platform, submission_ref, submission_url
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             engagement.id,
@@ -1040,6 +1549,9 @@ def create_finding(
                             _json_text(provenance),
                             evidence_type,
                             incoming_submission_status,
+                            submission_platform or "",
+                            submission_ref or "",
+                            submission_url or "",
                         ),
                     )
                     break
@@ -1088,6 +1600,9 @@ def create_finding(
                     provenance_json = ?,
                     evidence_type = COALESCE(?, evidence_type),
                     submission_status = COALESCE(?, submission_status),
+                    submission_platform = COALESCE(?, submission_platform),
+                    submission_ref = COALESCE(?, submission_ref),
+                    submission_url = COALESCE(?, submission_url),
                     last_seen_at = CURRENT_TIMESTAMP,
                     row_version = row_version + 1,
                     updated_at = CURRENT_TIMESTAMP
@@ -1120,20 +1635,31 @@ def create_finding(
                     summary,
                     evidence_ref,
                     # Default appends (finding record/finding verify checkpoints);
-                    # notes_mode="replace" overwrites so stale text can be scrubbed.
-                    notes if notes_mode == "replace" else _common._append_notes(existing["notes"], notes),
+                    # "replace" overwrites so stale text can be scrubbed, "rotate"
+                    # banks the accumulated text on the transition ledger.
+                    _resolved_notes(
+                        str(existing["notes"] or ""),
+                        notes,
+                        notes_mode,
+                        slug=str(existing["slug"]),
+                    ),
                     # CR-31: details default-merge (so checkpoints accrete keys);
                     # details_mode="replace" overwrites the whole object so
                     # cross-contaminated/stale detail keys can be fully removed,
                     # not just shadowed (merge cannot delete keys). The CLI/API
                     # require details to be present when replace is requested, so
                     # this won't silently null an unspecified payload.
-                    _json_text(details) if details_mode == "replace" else _merge_object_text(existing["details_json"], details),
+                    _resolved_details(existing["details_json"], details, details_mode),
                     _merge_object_text(existing["provenance_json"], provenance),
                     evidence_type,
                     # None => COALESCE preserves the stored submission_status; a
                     # value => an explicit operator override of the submission axis.
                     incoming_submission_status if explicit_submission_override else None,
+                    # None => COALESCE preserves; the identity fields are only
+                    # rewritten when the caller actually supplies them.
+                    submission_platform,
+                    submission_ref,
+                    submission_url,
                     existing["id"],
                     expected_row_version,
                     expected_row_version,
@@ -1144,7 +1670,52 @@ def create_finding(
             row = connection.execute("SELECT * FROM assessment_findings WHERE id = ?", (existing["id"],)).fetchone()
         assert row is not None
         finding = dict(row)
+        # Stamped AFTER the row lands because the attestation names the finding it
+        # justifies, and an auto-allocated slug is not known until the INSERT
+        # returns. Only writes that actually asserted a binding are stamped, so a
+        # patch that never touched provenance leaves a legacy row exactly as it
+        # found it.
+        if incoming_binding is not None:
+            stored_provenance = _json_object(finding["provenance_json"])
+            stored_provenance[CODE_SNAPSHOT_ATTESTATION_PROVENANCE_KEY] = (
+                _code_snapshot_attestation(
+                    connection,
+                    engagement.id,
+                    incoming_provenance=provenance,
+                    stored_provenance=(
+                        _json_object(existing["provenance_json"])
+                        if existing is not None
+                        else {}
+                    ),
+                    finding_slug=str(finding["slug"]),
+                    source_name=source_name or transition_actor,
+                    write_mode=code_snapshot_write_mode,
+                )
+            )
+            connection.execute(
+                "UPDATE assessment_findings SET provenance_json = ? WHERE id = ?",
+                (_json_text(stored_provenance), int(finding["id"])),
+            )
+            finding["provenance_json"] = _json_text(stored_provenance)
+        code_snapshot_status = finding_code_snapshot_status(
+            connection, engagement.id, finding
+        )
+        if code_snapshot_status_before is not None:
+            transition_metadata = {
+                **(transition_metadata or {}),
+                "code_snapshot_status_before": code_snapshot_status_before,
+                "code_snapshot_status_after": code_snapshot_status,
+            }
         after_state = _finding_state_snapshot(finding)
+        after_content = _finding_content_snapshot(finding)
+        duplicate_advisories = _duplicate_advisories(
+            connection,
+            engagement.id,
+            finding_id=int(finding["id"]),
+            canonical_location=str(finding["canonical_location"] or ""),
+            root_cause_key=str(finding["root_cause_key"] or ""),
+            details=_json_object(finding["details_json"]),
+        )
         derived_links = list(links or [])
         if request_variant_id is not None:
             derived_links.append({"link_kind": "related", "target_kind": "request_variant", "target_id": request_variant_id, "target_ref": "", "notes": "", "provenance": provenance or {}})
@@ -1169,8 +1740,22 @@ def create_finding(
             for item in derived_links
         ]
         transition = None
-        if _finding_state_changed(before_state, after_state):
-            action = transition_action or _infer_transition_action(before_state, after_state)
+        lifecycle_changed = _finding_state_changed(before_state, after_state)
+        # A pure details / notes / location rewrite moves no lifecycle axis, so
+        # without this branch it wrote NO ledger row and the clobbered value was
+        # unrecoverable. The row is what makes `finding history` able to answer
+        # "what did this key say before".
+        content_changed = (
+            before_content is not None
+            and after_content is not None
+            and before_content != after_content
+        )
+        if lifecycle_changed or content_changed:
+            action = transition_action or (
+                _infer_transition_action(before_state, after_state)
+                if lifecycle_changed
+                else "details_patched"
+            )
             actor = transition_actor or source_name or str(
                 (provenance or {}).get("agent_name", "")
                 or (provenance or {}).get("verified_by", "")
@@ -1188,6 +1773,8 @@ def create_finding(
                 reason_text=transition_reason_text or notes or _default_transition_reason(action, after_state),
                 artifact_ref=transition_artifact_ref or evidence_ref,
                 metadata=transition_metadata,
+                before_content=before_content,
+                after_content=after_content,
             )
     if evidence_ref:
         # NOTE (atomicity): this runs in a separate transaction from the finding
@@ -1240,10 +1827,24 @@ def create_finding(
                 producer_agent_role=source_name or None,
                 related_finding_slug=str(finding["slug"]),
             )
+    # The write envelope carries the snapshot standing too — it used to be on 2 of
+    # 9 finding projections, which is what made a rebind unreadable at the one verb
+    # whose purpose is to move it. Reuses the status computed inside the
+    # transaction; the optional evidence-artifact back-fill above cannot change it.
+    record = _serialize_finding_record(finding)
+    record["code_snapshot_status"] = code_snapshot_status
+    record["code_snapshot_attestation_status"] = code_snapshot_attestation_status(
+        record
+    )
+    if code_snapshot_status_before is not None:
+        record["code_snapshot_status_before"] = code_snapshot_status_before
     return {
-        "finding": _serialize_finding_record(finding),
+        "finding": record,
         "links": finding_links,
         "transition": transition,
+        # Always present so a caller can read it unconditionally; empty on a clean
+        # record. A backstop for the CLI-side preflight, so a raw POST is warned too.
+        "duplicate_advisories": duplicate_advisories,
     }
 
 def update_finding(
@@ -1333,6 +1934,9 @@ def patch_finding(
     provenance: dict[str, Any] | None = None,
     evidence_type: str | None = None,
     submission_status: str | None = None,
+    submission_platform: str | None = None,
+    submission_ref: str | None = None,
+    submission_url: str | None = None,
     transition_action: str | None = None,
     transition_reason_code: str = "",
     transition_reason_text: str = "",
@@ -1359,7 +1963,7 @@ def patch_finding(
             detail="details_mode='replace' requires details",
         )
     if (
-        notes_mode == "replace" or details_mode == "replace"
+        notes_mode in {"replace", "rotate"} or details_mode == "replace"
     ) and (type(expected_row_version) is not int or expected_row_version < 1):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1449,6 +2053,9 @@ def patch_finding(
         provenance=provenance,
         evidence_type=evidence_type,
         submission_status=submission_status,
+        submission_platform=submission_platform,
+        submission_ref=submission_ref,
+        submission_url=submission_url,
         request_variant_id=None,
         service_id=None,
         surface_id=None,
@@ -1501,6 +2108,131 @@ def _validate_unblock_requirements(value: Any) -> None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="details.unblock_requirements.kind must be a string",
+        )
+
+
+# Phrases that say the experiment NEVER RAN. A kill whose own text admits it could
+# not be tested is not a false positive — it is an unrun experiment, and
+# ``blocked`` (which requires a ``block_reason`` and keeps the finding visible)
+# already carries those semantics. Deliberately NOT a new disposition: adding a
+# sixth would duplicate a vocabulary every consumer already handles.
+_UNTESTABILITY_MARKERS: tuple[str, ...] = (
+    "could not",
+    "couldn't",
+    "no second organization",
+    "no test account",
+    "unable to provision",
+    "not testable",
+    "untestable",
+    "fixture unbuildable",
+    "no identity",
+    "lacked",
+    "unavailable",
+)
+
+
+def _validate_kill_names_a_settling_test(
+    *,
+    incoming_details: dict[str, Any],
+    existing_details: dict[str, Any],
+) -> None:
+    """A kill citing an absent capability must name the test that would settle it.
+
+    Satisfiable by simply naming the settling test — NEVER by rewording the kill,
+    which is why the refusal points at ``required_followup`` and at ``blocked``
+    rather than at the prose. ``required_followup`` was a free-form array nothing
+    read; the readiness advisory now surfaces it, so recording one is no longer a
+    write into a void.
+    """
+
+    kill_reason = incoming_details.get("kill_reason")
+    if not (isinstance(kill_reason, str) and kill_reason.strip()):
+        kill_reason = existing_details.get("kill_reason")
+    if not isinstance(kill_reason, str):
+        return
+    lowered = kill_reason.lower()
+    if not any(marker in lowered for marker in _UNTESTABILITY_MARKERS):
+        return
+    followup = incoming_details.get("required_followup")
+    if followup is None:
+        followup = existing_details.get("required_followup")
+    if isinstance(followup, list) and any(
+        isinstance(item, str) and item.strip() for item in followup
+    ):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=(
+            "this kill_reason says the experiment could not be run, which is "
+            "`blocked`, not `false_positive`. Either re-verify with "
+            "`--disposition blocked --details-inline '{\"block_reason\": \"...\"}'`, "
+            "or name the test that would settle it in "
+            "details.required_followup (a non-empty list of strings)."
+        ),
+    )
+
+
+def _validate_submission_identity(
+    *,
+    incoming_status: str,
+    explicit_override: bool,
+    existing: Any,
+    submission_ref: str | None,
+    authored_details: dict[str, Any],
+    effective_details: dict[str, Any],
+) -> None:
+    """A non-``none`` submission status must name the report it refers to.
+
+    Enforced on a NEW TRANSITION only — the write that actually moves the axis —
+    never on every patch. A hard requirement on any patch would freeze exactly the
+    legacy rows that need backfilling: they already carry a status with no ref, so
+    an unrelated workflow patch would become unwritable.
+
+    ``withdrawn`` additionally requires a reason. It is the one status that
+    asserts a RESEARCHER action rather than a program decision, so the record has
+    to say why; mirrors ``block_reason`` in accepting a reason already stored.
+    """
+
+    stored_status = (
+        _normalize_submission_status(existing["submission_status"])
+        if existing is not None
+        else SubmissionStatus.NONE
+    )
+    # On a true INSERT the incoming value always lands; on an upsert it lands only
+    # when the caller explicitly set the axis (otherwise COALESCE preserves the
+    # stored one). Compute what this write actually RESULTS in, so a net-new
+    # finding recorded straight into 'submitted' is gated exactly like a patch.
+    resulting_status = (
+        incoming_status if (existing is None or explicit_override) else stored_status
+    )
+    if resulting_status == SubmissionStatus.NONE or resulting_status == stored_status:
+        return
+    resolved_ref = submission_ref
+    if not (isinstance(resolved_ref, str) and resolved_ref.strip()):
+        resolved_ref = (
+            str(existing["submission_ref"] or "") if existing is not None else ""
+        )
+    if not resolved_ref.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"submission_ref is required when moving submission_status to "
+                f"'{resulting_status}'; a submission state with no referent cannot "
+                "be joined back to the report it describes"
+            ),
+        )
+    if resulting_status != SubmissionStatus.WITHDRAWN:
+        return
+    reason = authored_details.get("withdrawal_reason") or effective_details.get(
+        "withdrawal_reason"
+    )
+    if not (isinstance(reason, str) and reason.strip()):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "details.withdrawal_reason is required when submission_status is "
+                "'withdrawn'"
+            ),
         )
 
 
@@ -1643,6 +2375,10 @@ def verify_finding(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="false_positive verification requires details.kill_reason and details.kill_check",
             )
+        _validate_kill_names_a_settling_test(
+            incoming_details=details_payload,
+            existing_details=_json_object(existing["details_json"]),
+        )
         target_workflow = "false_positive"
         transition_action = "verified_false_positive"
     elif normalized_disposition == "blocked":
@@ -1701,6 +2437,134 @@ def verify_finding(
             related_finding_slug=slug,
         )
     return result
+
+def relocate_finding(
+    engagement_id: int,
+    *,
+    slug: str,
+    canonical_location: str,
+    reason_text: str,
+    source_name: str,
+    expected_row_version: int,
+    provenance: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Move a finding across the file/non-file canonical-location boundary.
+
+    The generic patch keeps refusing that crossing, and must: it exists so a
+    non-file finding cannot acquire ``file:`` semantics — and with them the
+    snapshot gate — through a metadata patch nobody reviewed. But the legitimate
+    inverse is real: a static hypothesis whose runtime proof relocates the defect
+    server-side. So the absolute becomes a REVIEWED, AUDITED transition on its own
+    route rather than a hole in the generic one.
+    """
+
+    engagement = _engagement_or_404(engagement_id)
+    canonical_location = str(canonical_location).strip()
+    if not canonical_location:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="relocation requires a non-empty canonical_location",
+        )
+    if not str(reason_text).strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="relocation requires a reason_text",
+        )
+    with _common.get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        slug = _resolve_existing_finding_slug(connection, engagement.id, slug)
+        existing = connection.execute(
+            "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+            (engagement.id, slug),
+        ).fetchone()
+        if int(existing["row_version"]) != expected_row_version:
+            _raise_stale_finding_conflict()
+        incoming_provenance = dict(provenance or {})
+        merged_provenance = _json_object(existing["provenance_json"])
+        stored_binding = _code_snapshot_binding(merged_provenance, strict=False)
+        from_location = str(existing["canonical_location"] or "")
+        canonical_location = _normalize_file_location(
+            connection,
+            engagement.id,
+            canonical_location,
+            repo_id=(
+                _code_snapshot_binding(incoming_provenance, strict=False)
+                or stored_binding
+                or {}
+            ).get("repo_id"),
+        )
+        if canonical_location == from_location:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="relocation must change the canonical_location",
+            )
+        if is_file_finding(canonical_location):
+            # Moving INTO file: must satisfy the same binding requirement as a
+            # record, or the route is a back door around the snapshot gate.
+            binding_source = (
+                incoming_provenance
+                if CODE_SNAPSHOT_PROVENANCE_KEY in incoming_provenance
+                else merged_provenance
+            )
+            _require_current_code_snapshot(connection, engagement.id, binding_source)
+            merged_provenance.update(incoming_provenance)
+        else:
+            merged_provenance.update(incoming_provenance)
+            if not is_file_finding(canonical_location) and stored_binding is not None:
+                # Reserve the binding rather than delete it: it is the record of
+                # which bytes were reviewed while the finding was a file finding.
+                merged_provenance.pop(CODE_SNAPSHOT_PROVENANCE_KEY, None)
+                merged_provenance[SUPERSEDED_CODE_SNAPSHOT_PROVENANCE_KEY] = {
+                    "slug": slug,
+                    CODE_SNAPSHOT_PROVENANCE_KEY: stored_binding,
+                    "reason": str(reason_text).strip(),
+                    "at": _common._utcnow_iso_dispatch(),
+                }
+        merged_provenance[ORIGINAL_CANONICAL_LOCATION_PROVENANCE_KEY] = from_location
+        before_state = _finding_state_snapshot(existing)
+        before_content = _finding_content_snapshot(existing)
+        cursor = connection.execute(
+            """
+            UPDATE assessment_findings
+            SET canonical_location = ?,
+                provenance_json = ?,
+                row_version = row_version + 1,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND row_version = ?
+            """,
+            (
+                canonical_location,
+                _json_text(merged_provenance),
+                int(existing["id"]),
+                expected_row_version,
+            ),
+        )
+        if cursor.rowcount != 1:
+            _raise_stale_finding_conflict()
+        row = connection.execute(
+            "SELECT * FROM assessment_findings WHERE id = ?", (int(existing["id"]),)
+        ).fetchone()
+        assert row is not None
+        transition = _record_finding_transition(
+            connection,
+            engagement_id=engagement.id,
+            finding_id=int(row["id"]),
+            actor=source_name,
+            action="location_relocated",
+            before=before_state,
+            after=_finding_state_snapshot(row),
+            reason_code="relocation",
+            reason_text=str(reason_text).strip(),
+            artifact_ref="",
+            metadata={"from": from_location, "to": canonical_location},
+            before_content=before_content,
+            after_content=_finding_content_snapshot(row),
+        )
+        record = _serialize_finding_with_code_snapshot_status(
+            connection, engagement.id, row
+        )
+    return {"finding": record, "transition": transition}
+
 
 def _merge_details_precedence(winner: dict[str, Any], loser: dict[str, Any]) -> str:
     """Merge two ``details_json`` payloads so the WINNING side survives on key
@@ -2102,6 +2966,12 @@ def merge_findings(
         assert source_row is not None and target_row is not None
         source_after = _finding_state_snapshot(source_row)
         target_after = _finding_state_snapshot(target_row)
+        source_record = _serialize_finding_with_code_snapshot_status(
+            connection, engagement.id, source_row
+        )
+        target_record = _serialize_finding_with_code_snapshot_status(
+            connection, engagement.id, target_row
+        )
         if _finding_state_changed(source_before, source_after):
             _record_finding_transition(
                 connection,
@@ -2131,8 +3001,8 @@ def merge_findings(
                 metadata={"source_slug": source_slug},
             )
     return {
-        "source": _serialize_finding_record(source_row),
-        "target": _serialize_finding_record(target_row),
+        "source": source_record,
+        "target": target_record,
         "link": link,
         # Always present so a consumer can read it unconditionally; non-empty
         # only when the merge carried a pre-existing defect into the canonical.
@@ -2277,10 +3147,16 @@ def list_exploit_candidates(engagement_id: int) -> list[dict[str, Any]]:
             """,
             (engagement.id,),
         ).fetchall()
+        repo_states = load_code_repo_snapshot_states(connection, engagement.id)
+        records = [
+            _serialize_finding_with_code_snapshot_status(
+                connection, engagement.id, row, repo_states=repo_states
+            )
+            for row in rows
+        ]
 
     candidates: list[dict[str, Any]] = []
-    for row in rows:
-        record = _serialize_finding_record(row)
+    for record in records:
         workflow_status = record.get("workflow_status", "draft")
         if workflow_status in {"merged", "false_positive", "reported", "exploited"}:
             continue
@@ -2288,7 +3164,7 @@ def list_exploit_candidates(engagement_id: int) -> list[dict[str, Any]]:
             continue
         if record.get("verification_disposition") not in {"confirmed", "downgraded"}:
             continue
-        details = _json_object(record.get("details_json", "{}"))
+        details = _json_object(record.get("details"))
         severity = _normalize_severity(str(record.get("severity", "info")))
         chain_required = details.get("chain_required") is True
         if SEVERITY_RANK[severity] < SEVERITY_RANK["medium"] and not chain_required:

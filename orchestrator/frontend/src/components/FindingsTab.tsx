@@ -114,26 +114,25 @@ function isDetail(finding: FindingLike): finding is AssessmentFindingDetail {
   return "id" in finding;
 }
 
+// The API returns `details` / `provenance` already parsed, under the same names
+// the writer used, so these are shape guards rather than parsers.
 function parseDetails(finding: FindingLike): FindingDetails {
   if (!isDetail(finding)) return {};
-  try {
-    return JSON.parse(finding.details_json || "{}") as FindingDetails;
-  } catch {
-    return {};
-  }
+  return asObject(finding.details) as FindingDetails;
 }
 
-function parseProvenance(raw: string | undefined | null): FindingProvenance | null {
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return parsed as FindingProvenance;
-    }
-  } catch {
-    // ignore
+function asObject(value: unknown): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
   }
-  return null;
+  return {};
+}
+
+function parseProvenance(
+  value: FindingProvenance | undefined | null,
+): FindingProvenance | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value;
 }
 
 function verificationKey(finding: FindingLike): string {
@@ -340,7 +339,7 @@ export type Derived = {
   summary: string;
   source_name: string;
   updated_at: string;
-  // details_json-derived
+  // details-derived
   cwe_id?: string;
   owasp_category?: string;
   cvss_vector?: string;
@@ -790,7 +789,7 @@ export function FindingsTab({
   const derivedList = useMemo<Derived[]>(() => {
     return allFindingsRaw.map((f) => {
       const details = parseDetails(f);
-      const provenance = isDetail(f) ? parseProvenance(f.provenance_json) : null;
+      const provenance = isDetail(f) ? parseProvenance(f.provenance) : null;
 
       const findingLinks = findingLinksBySlug.get(f.slug) || [];
       const chainLinkSet = chainLinksByFindingSlug.get(f.slug) || [];

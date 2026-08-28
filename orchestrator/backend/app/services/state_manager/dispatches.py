@@ -677,6 +677,25 @@ def list_decisions(
         rows = connection.execute(query, tuple(params)).fetchall()
     return [_serialize_decision(row) for row in rows]
 
+def get_decision(engagement_id: int, *, decision_id: int) -> dict[str, Any]:
+    """Read one dispatch decision by id.
+
+    ``PATCH /dispatch-decisions/{id}`` already owned this path template; the read
+    was list-only, so "show me decision 3056" fell through the SPA catch-all and
+    came back as a 200 HTML page.
+    """
+
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM assessment_dispatch_decisions WHERE engagement_id = ? AND id = ?",
+            (engagement.id, decision_id),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="decision not found")
+    return _serialize_decision(row)
+
+
 def update_decision(
     engagement_id: int,
     *,

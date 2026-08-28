@@ -12,6 +12,7 @@ from ..artifact_index import _normalize_relative_path
 from ..events import _engagement_or_404
 from . import _common
 from ._common import (
+    FINDING_NOTES_MAX_LENGTH,
     ROOT_CAUSE_LINK_KIND,
     SEVERITY_RANK,
     _json_object,
@@ -20,6 +21,7 @@ from ._common import (
 from .coverage import coverage_readiness, web_uncovered_high_route_hosts
 from .cvss import CvssVectorError, base_score
 from .findings import (
+    code_snapshot_attestation_status,
     finding_code_snapshot_status,
     is_file_finding,
     load_code_repo_snapshot_states,
@@ -255,6 +257,33 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 draft_snapshot_statuses[str(row.get("slug", ""))] = snapshot_status
             if row.get("workflow_status") not in reportable_statuses:
                 continue
+            # ADVISORY, never a blocker: the gate's verdict is unchanged, and a
+            # legacy row that predates the attestation is not a violation. What
+            # this surfaces is a binding that nothing corroborates — asserted
+            # outside any audited dispatch or run, or carried over from another
+            # finding — which the gate alone cannot tell from a genuine one.
+            attestation_status = code_snapshot_attestation_status(row)
+            if attestation_status in {"copied", "unattested"}:
+                advisories.append(
+                    {
+                        "kind": "finding_code_snapshot_unattested",
+                        "slug": row.get("slug", ""),
+                        "title": row.get("title", ""),
+                        "attestation_status": attestation_status,
+                        "detail": (
+                            "reportable code finding's provenance.code_snapshot is "
+                            f"{attestation_status}: no audited dispatch or command run "
+                            "stands behind it"
+                            + (
+                                ", and its attestation names a different finding"
+                                if attestation_status == "copied"
+                                else ""
+                            )
+                            + ". Re-verify it from the dispatch that reviewed the "
+                            "source so the binding attests something."
+                        ),
+                    }
+                )
             if snapshot_status not in {"stale", "unbound"}:
                 continue
             blockers.append(
@@ -436,7 +465,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
             continue
         slug = row.get("slug", "")
         title = row.get("title", "")
-        details = _json_object(row.get("details_json", "{}"))
+        details = _json_object(row.get("details"))
         missing_fields: list[str] = []
         if is_blue:
             mitre = details.get("mitre_techniques")
@@ -534,14 +563,40 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 else "info"
             )
             if score >= 0 and severity != expected:
-                blockers.append(
-                    {
-                        "kind": "severity_cvss_mismatch",
-                        "slug": slug,
-                        "title": title,
-                        "detail": f"severity={severity} but cvss_score={score} expects {expected}",
-                    }
+                # The band and the CVSS score are two INDEPENDENT scales, and they
+                # can legitimately disagree (business context a vector cannot
+                # express). An authored ``severity_band_rationale`` is the channel
+                # for saying so, and it demotes THIS check only: the two
+                # CVSS-arithmetic blockers above are internal errors, not scale
+                # disagreements, and no rationale excuses them.
+                band_rationale = details.get("severity_band_rationale")
+                declared = isinstance(band_rationale, str) and band_rationale.strip()
+                detail = (
+                    f"severity={severity} but cvss_score={score} expects {expected}"
                 )
+                if declared:
+                    advisories.append(
+                        {
+                            "kind": "severity_cvss_band_divergence",
+                            "slug": slug,
+                            "title": title,
+                            "detail": f"{detail}; declared: {band_rationale.strip()}",
+                        }
+                    )
+                else:
+                    blockers.append(
+                        {
+                            "kind": "severity_cvss_mismatch",
+                            "slug": slug,
+                            "title": title,
+                            "detail": (
+                                f"{detail}. Correct whichever is wrong, or declare the "
+                                "divergence with `vigil assess finding update "
+                                f"{slug} --details-inline "
+                                "'{\"severity_band_rationale\": \"...\"}'`."
+                            ),
+                        }
+                    )
 
     for slug, root_slug in sorted(root_link_by_slug.items()):
         if root_slug not in candidate_slugs:
@@ -916,6 +971,115 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 }
             )
 
+    # ── Submission-axis integrity, and the two backlogs nothing surfaced ──
+    #
+    # ``submission_status`` is orthogonal to ``workflow_status`` and no readiness
+    # gate reads it, which is precisely why a withdrawn-but-still-reported finding
+    # kept looking filable. Blocking on the CONTRADICTION is the honest fix: a
+    # withdrawal that silently re-banded the finding would move an axis the
+    # operator did not ask to move.
+    with _common.get_connection() as connection:
+        submission_rows = connection.execute(
+            """
+            SELECT slug, title, status, submission_status, submission_ref,
+                   verification_disposition, details_json, notes
+            FROM assessment_findings
+            WHERE engagement_id = ?
+              AND merged_into_finding_id IS NULL
+            ORDER BY id ASC
+            """,
+            (engagement_id,),
+        ).fetchall()
+    for row in submission_rows:
+        slug = str(row["slug"] or "")
+        title = str(row["title"] or "")
+        submission_status = str(row["submission_status"] or "none")
+        if submission_status == "withdrawn" and str(row["status"] or "") == "reported":
+            blockers.append(
+                {
+                    "kind": "finding_withdrawn_but_reported",
+                    "slug": slug,
+                    "title": title,
+                    "detail": (
+                        f"finding {slug} was withdrawn from the program but is still "
+                        "workflow_status='reported', so the report still claims it. "
+                        f"Move the workflow axis too: `vigil assess finding update {slug} "
+                        "--status draft --reason-text 'withdrawn from program'`."
+                    ),
+                }
+            )
+        if submission_status != "none" and not str(row["submission_ref"] or "").strip():
+            advisories.append(
+                {
+                    "kind": "finding_submission_ref_missing",
+                    "slug": slug,
+                    "title": title,
+                    "detail": (
+                        f"finding {slug} carries submission_status='{submission_status}' "
+                        "with no submission_ref, so it cannot be joined back to the "
+                        f"external report. Backfill it: `vigil assess finding update {slug} "
+                        "--submission-ref <program-id> --submission-platform <platform>`."
+                    ),
+                }
+            )
+        row_details = _json_object(row["details_json"])
+        if len(str(row["notes"] or "")) > FINDING_NOTES_MAX_LENGTH:
+            advisories.append(
+                {
+                    "kind": "finding_notes_over_cap",
+                    "slug": slug,
+                    "title": title,
+                    "detail": (
+                        f"finding {slug} notes are {len(str(row['notes'] or ''))} characters, "
+                        f"past the {FINDING_NOTES_MAX_LENGTH}-character append cap, so the "
+                        "next checkpoint append will be refused. Bank them with "
+                        f"`vigil assess finding update {slug} --notes-rotate`."
+                    ),
+                }
+            )
+        # A kill that names a settling test nobody ran is a real backlog item, and
+        # ``false_positive`` findings are dropped from every report projection, so
+        # without this it vanishes entirely. ADVISORY, never a blocker: the kill
+        # itself is legitimate; what is missing is the follow-up.
+        if str(row["verification_disposition"] or "") == "false_positive":
+            followup = row_details.get("required_followup")
+            if isinstance(followup, list) and any(
+                isinstance(item, str) and item.strip() for item in followup
+            ):
+                blocked_items = ", ".join(
+                    str(item).strip()
+                    for item in followup
+                    if isinstance(item, str) and item.strip()
+                )
+                advisories.append(
+                    {
+                        "kind": "killed_finding_settling_test_outstanding",
+                        "slug": slug,
+                        "title": title,
+                        "detail": (
+                            f"killed finding {slug} names a settling test that was never "
+                            f"run: {blocked_items}. If the experiment could not start, "
+                            "`--disposition blocked` keeps it visible instead."
+                        ),
+                    }
+                )
+
+    # A reportable finding with no root_cause_key has no mechanical duplicate
+    # signal at all — the estate's only collision surface is that string.
+    for row in candidates:
+        if not str(row.get("root_cause_key", "") or "").strip():
+            advisories.append(
+                {
+                    "kind": "finding_root_cause_key_missing",
+                    "slug": str(row.get("slug", "")),
+                    "title": str(row.get("title", "")),
+                    "detail": (
+                        "reportable finding carries no root_cause_key, so duplicate "
+                        "detection has nothing to key on for it"
+                    ),
+                }
+            )
+
     return {
         "ready": len(blockers) == 0,
         "blocker_count": len(blockers),
@@ -943,14 +1107,14 @@ def _as_string_list(value: Any) -> list[str]:
 
 def _report_record(record: dict[str, Any], report_id: str) -> dict[str, Any]:
     item = dict(record)
-    details = _json_object(item.get("details_json", "{}"))
+    details = _json_object(item.get("details"))
     item["report_id"] = report_id
     item["cvss_vector"] = details.get("cvss_vector", "")
     item["cvss_score"] = details.get("cvss_score")
     item["remediation"] = details.get("remediation", "")
     item["steps_to_reproduce"] = _as_string_list(details.get("steps_to_reproduce"))
     # The command-run ids behind those steps, projected alongside them so a report
-    # renderer can show what backs each reproduction without re-parsing details_json.
+    # renderer can show what backs each reproduction without re-parsing details.
     item["repro_runs"] = _as_string_list(details.get("repro_runs"))
     item["cwe_id"] = details.get("cwe_id", "")
     item["owasp_category"] = details.get("owasp_category", "")
@@ -1025,7 +1189,7 @@ def list_report_findings(engagement_id: int, *, mode: str = "draft") -> list[dic
     """Return findings formatted for report generation.
 
     Excludes merged and false-positive findings, orders by severity (critical
-    first), and extracts structured fields from the ``details_json`` blob so
+    first), and extracts structured fields from the ``details`` object so
     the report-writer has them at the top level without manual JSON parsing:
     CVSS, remediation, steps_to_reproduce, repro_runs, CWE, OWASP, impact,
     evidence, entry_point, sink, poc_code, poc_request, poc_response, and

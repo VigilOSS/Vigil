@@ -100,6 +100,54 @@ def test_every_technique_enum_value_is_mapped_and_canonical():
     )
 
 
+def test_every_web_testable_class_has_a_technique_tag():
+    """REVERSE drift guard: a canonical class that is not explicitly exempt must
+    be RUNNABLE as `kali exec --technique <X>`.
+
+    The forward guard above only proves the tags that exist are canonical. Without
+    this direction a class can be added to VULN_CLASSES, get a skill, become a
+    legal `record-probe --attack-family` (which only WARNs out-of-vocab) and still
+    hard-fail `kali exec --technique` with CI green — the "record it" and "run it"
+    surfaces silently disagreeing. Reachability is measured through TECHNIQUE_ENUM,
+    not through TECHNIQUE_TO_CLASS keys, because the enum is what the host-side CLI
+    validates against: a mapping row with no enum value is still not runnable.
+    """
+    canonical = vuln_taxonomy.all_classes()
+    exempt = vuln_taxonomy.TECHNIQUE_EXEMPT_CLASSES
+    mapping = vuln_taxonomy.TECHNIQUE_TO_CLASS
+
+    stale = sorted(exempt - canonical)
+    assert not stale, (
+        "TECHNIQUE_EXEMPT_CLASSES names classes that are not in VULN_CLASSES — a "
+        "rename or removal left a stale exemption. Fix TECHNIQUE_EXEMPT_CLASSES in "
+        "agent/scripts/assess/lib/vuln_taxonomy.py:\n  " + "\n  ".join(stale)
+    )
+
+    both = sorted(exempt & {cls for cls in mapping.values() if cls is not None})
+    assert not both, (
+        "classes are BOTH exempt and mapped by a --technique tag; the two sets are "
+        "disjoint by construction. Drop the entry from TECHNIQUE_EXEMPT_CLASSES in "
+        "agent/scripts/assess/lib/vuln_taxonomy.py:\n  " + "\n  ".join(both)
+    )
+
+    runnable = {
+        mapping[technique]
+        for technique in audit_enums.TECHNIQUE_ENUM
+        if mapping.get(technique) is not None
+    }
+    untagged = sorted(canonical - runnable - exempt)
+    assert not untagged, (
+        "canonical vuln classes have no `kali exec --technique` tag, so a "
+        "specialist can record them as --attack-family but cannot RUN them:\n  "
+        + "\n  ".join(untagged)
+        + "\nAdd the tag to TECHNIQUE_ENUM in "
+        "agent/scripts/assess/lib/audit_enums.py AND the matching row to "
+        "TECHNIQUE_TO_CLASS in agent/scripts/assess/lib/vuln_taxonomy.py. If no "
+        "network probe can carry the tag (code-track or coarse-rollup class), add "
+        "it to TECHNIQUE_EXEMPT_CLASSES in vuln_taxonomy.py with a one-line reason."
+    )
+
+
 def test_every_surface_type_is_mapped_and_canonical():
     """Every surface_type is a key in SURFACE_TYPE_TO_CLASSES; every mapped class
     is canonical."""

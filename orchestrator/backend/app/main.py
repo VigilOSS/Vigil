@@ -1,3 +1,4 @@
+import functools
 import logging
 import os
 import sqlite3
@@ -160,8 +161,65 @@ async def engagement_stream(websocket: WebSocket, engagement_key: str) -> None:
         broadcaster.disconnect(engagement_key, websocket)
 
 
+@functools.lru_cache(maxsize=1)
+def _engagement_api_segments() -> frozenset[str]:
+    """Path segments an API router owns under ``/engagements/{key}/``.
+
+    Derived from the app's own route table rather than hand-listed: the router
+    registrations ARE the list, so adding a router can never silently re-open the
+    SPA fallback over a new API family.
+    """
+
+    segments: set[str] = set()
+    for route in app.routes:
+        parts = str(getattr(route, "path", "")).strip("/").split("/")
+        if (
+            len(parts) >= 3
+            and parts[0] == "engagements"
+            and parts[1].startswith("{")
+            and not parts[2].startswith("{")
+        ):
+            segments.add(parts[2])
+    return frozenset(segments)
+
+
+def _is_unmatched_api_path(full_path: str) -> bool:
+    """Would an API client reasonably have expected a route here?
+
+    The SPA catch-all answered 200 + index.html for EVERY unmatched path, so a
+    misspelt endpoint was indistinguishable from a working one that returned an
+    HTML-shaped body — exit 0, no error, no route. UI deep links live in the same
+    namespace (``/engagements/<key>/findings`` is a real page), so the split is by
+    the API families the routers actually claim, never by the ``engagements/``
+    prefix alone.
+    """
+
+    parts = full_path.strip("/").split("/")
+    if not parts or not parts[0]:
+        return False
+    if parts[0] == "api":
+        return True
+    return (
+        len(parts) >= 3
+        and parts[0] == "engagements"
+        and parts[2] in _engagement_api_segments()
+    )
+
+
 @app.get("/{full_path:path}")
 def frontend_app(full_path: str):
+    if _is_unmatched_api_path(full_path):
+        return JSONResponse(
+            status_code=404,
+            content={
+                "detail": (
+                    f"no API route matches '/{full_path.strip('/')}'. Check the "
+                    "route name — path separators are slashes, not hyphens "
+                    "(e.g. 'code/files', not 'code-files')."
+                )
+            },
+        )
+
     if not settings.frontend_dist_dir.exists():
         return JSONResponse(
             status_code=503,

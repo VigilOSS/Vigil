@@ -292,7 +292,7 @@ def test_file_finding_record_accepts_current_verified_snapshot(
     response = _record(client, _finding_payload("VA-004", binding))
 
     assert response.status_code == 201, response.text
-    stored = json.loads(response.json()["finding"]["provenance_json"])
+    stored = response.json()["finding"]["provenance"]
     assert stored["code_snapshot"] == binding
 
 
@@ -307,7 +307,7 @@ def test_verify_is_the_only_path_that_can_rebind_a_stale_file_finding(
     listed = client.get(
         f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings"
     ).json()
-    assert json.loads(listed[0]["provenance_json"])["code_snapshot"] == stale_binding
+    assert listed[0]["provenance"]["code_snapshot"] == stale_binding
     assert listed[0]["code_snapshot_status"] == "stale"
 
     fetched = client.get(
@@ -341,7 +341,7 @@ def test_verify_is_the_only_path_that_can_rebind_a_stale_file_finding(
         },
     )
     assert verified.status_code == 200, verified.text
-    rebound = json.loads(verified.json()["finding"]["provenance_json"])
+    rebound = verified.json()["finding"]["provenance"]
     assert rebound["code_snapshot"] == current_binding
 
     relisted = client.get(
@@ -386,6 +386,12 @@ def test_finding_reads_distinguish_unbound_legacy_and_non_file_records(
 
     assert rows["VA-016"]["code_snapshot_status"] == "current"
     assert rows["VA-017"]["code_snapshot_status"] == "unbound"
+    # The derived status is only self-explaining beside the PARSED binding that
+    # produced it. While provenance was an opaque string with no parsed twin,
+    # two findings differing solely in provenance.code_snapshot read identically
+    # in every default response, and the status looked like a mystery.
+    assert rows["VA-016"]["provenance"]["code_snapshot"] == binding
+    assert "code_snapshot" not in rows["VA-017"]["provenance"]
 
 
 @pytest.mark.parametrize(
@@ -459,7 +465,7 @@ def test_generic_patch_preserves_same_category_location_corrections(
     )
     assert file_patch.status_code == 200, file_patch.text
     assert file_patch.json()["finding"]["canonical_location"] == "file:src/parser.c:42"
-    assert json.loads(file_patch.json()["finding"]["provenance_json"])[
+    assert file_patch.json()["finding"]["provenance"][
         "code_snapshot"
     ] == binding
 
@@ -751,3 +757,410 @@ def test_report_readiness_blocks_invalid_file_snapshot_in_every_reportable_statu
         f"/engagements/{_ENGAGEMENT_KEY}/assessment/report-findings?mode=final"
     )
     assert final.status_code == 409
+
+
+def _verify(client, slug: str, payload: dict[str, object]):
+    return client.post(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/{slug}/verify",
+        json=payload,
+    )
+
+
+def test_verify_reports_the_snapshot_transition_on_its_own_response(
+    client, isolate_settings
+) -> None:
+    """The one verb whose purpose is to MOVE the binding used to be in the set of
+    projections that never reported it."""
+    binding = _seed_repo(client, isolate_settings)
+    assert _record(
+        client, _finding_payload("VA-035", binding, location="file:src/parser.c:35")
+    ).status_code == 201
+    current = _advance_repo(binding)
+
+    rebound = _verify(
+        client,
+        "VA-035",
+        {
+            "disposition": "confirmed",
+            "reason_text": "Re-read the current source; the defect stands.",
+            "source_name": "code-vuln-verifier",
+            "provenance": {"code_snapshot": current},
+        },
+    )
+
+    assert rebound.status_code == 200, rebound.text
+    finding = rebound.json()["finding"]
+    assert finding["code_snapshot_status_before"] == "stale"
+    assert finding["code_snapshot_status"] == "current"
+    transitions = client.get(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/VA-035/transitions"
+    ).json()
+    metadata = json.loads(transitions[0]["metadata_json"])
+    assert metadata["code_snapshot_status_before"] == "stale"
+    assert metadata["code_snapshot_status_after"] == "current"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Audited relocation across the file/non-file boundary
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_relocation_crosses_the_category_boundary_and_records_both_locations(
+    client, isolate_settings
+) -> None:
+    binding = _seed_repo(client, isolate_settings)
+    assert _record(
+        client, _finding_payload("VA-040", binding, location="file:src/parser.c:40")
+    ).status_code == 201
+    row_version = client.get(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/VA-040"
+    ).json()["row_version"]
+
+    moved = client.put(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/VA-040/canonical-location",
+        json={
+            "canonical_location": "https://example.com/api/parse",
+            "reason_text": "Runtime proof relocated the defect to the edge service.",
+            "source_name": "exploit-specialist",
+            "expected_row_version": row_version,
+        },
+    )
+
+    assert moved.status_code == 200, moved.text
+    finding = moved.json()["finding"]
+    assert finding["canonical_location"] == "https://example.com/api/parse"
+    # The binding is RESERVED, not deleted: it records which bytes were reviewed.
+    assert "code_snapshot" not in finding["provenance"]
+    assert finding["provenance"]["superseded_code_snapshot"]["code_snapshot"] == binding
+    transitions = client.get(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/VA-040/transitions"
+    ).json()
+    assert transitions[0]["action"] == "location_relocated"
+    assert transitions[0]["from_canonical_location"] == "file:src/parser.c:40"
+    assert transitions[0]["to_canonical_location"] == "https://example.com/api/parse"
+
+
+def test_relocation_into_file_still_requires_a_current_binding(
+    client, isolate_settings
+) -> None:
+    """The dedicated route must not become a back door around the snapshot gate."""
+    _seed_repo(client, isolate_settings)
+    assert _record(
+        client, _finding_payload("VA-041", None, location="https://example.com/api/x")
+    ).status_code == 201
+    row_version = client.get(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/VA-041"
+    ).json()["row_version"]
+
+    refused = client.put(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/VA-041/canonical-location",
+        json={
+            "canonical_location": "file:src/parser.c:41",
+            "reason_text": "Source review located the defect.",
+            "source_name": "code-vuln-verifier",
+            "expected_row_version": row_version,
+        },
+    )
+
+    assert refused.status_code == 400, refused.text
+    assert "code_snapshot" in refused.json()["detail"]
+
+
+def _ingest_file(repo_id: int, file_path: str) -> None:
+    """Seed one row of the backend's file inventory for this repo."""
+    with db_module.get_connection() as connection:
+        engagement_id = int(
+            connection.execute(
+                "SELECT id FROM engagements WHERE key = ?", (_ENGAGEMENT_KEY,)
+            ).fetchone()["id"]
+        )
+        connection.execute(
+            """
+            INSERT INTO code_files (engagement_id, repo_id, file_path, language)
+            VALUES (?, ?, ?, 'ruby')
+            """,
+            (engagement_id, repo_id, file_path),
+        )
+
+
+def test_the_origin_path_form_and_the_repo_relative_form_collide(
+    client, isolate_settings
+) -> None:
+    """The two forms describe one line of one file, and used to collide in
+    nothing — not the dedup tuple, not the title tier, not the killed-remint
+    guard. The stripped prefix is a contiguous SUFFIX of the real repo root, so
+    it removes the origin root the author echoed rather than an arbitrary
+    leading directory."""
+    binding = _seed_repo(client, isolate_settings)
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "UPDATE code_repos SET source_origin_path = ? WHERE id = ?",
+            ("/work/engagements/e1/source/acme-firstparty-0731", binding["repo_id"]),
+        )
+
+    first = _record(
+        client,
+        _finding_payload(
+            "VA-042", binding, location="file:source/acme-firstparty-0731/pkg/x.rb:12"
+        ),
+    )
+
+    assert first.status_code == 201, first.text
+    finding = first.json()["finding"]
+    assert finding["canonical_location"] == "file:pkg/x.rb:12"
+    # The audit trail keeps what the author actually wrote.
+    assert (
+        finding["provenance"]["original_canonical_location"]
+        == "file:source/acme-firstparty-0731/pkg/x.rb:12"
+    )
+
+    # The two forms now resolve to ONE finding rather than two.
+    again = _record(
+        client, _finding_payload("VA-042", binding, location="file:pkg/x.rb:12")
+    )
+    assert again.status_code in (200, 201), again.text
+    listing = client.get(f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings").json()
+    assert [row["slug"] for row in listing].count("VA-042") == 1
+
+
+def test_a_bare_repo_directory_name_is_stripped_only_when_the_inventory_agrees(
+    client, isolate_settings
+) -> None:
+    """A one-segment candidate is the repo's own directory name, which is exactly
+    the case a heuristic gets wrong: a repository whose directory is called
+    ``src`` would otherwise eat the ``src/`` of every correctly-authored path."""
+    binding = _seed_repo(client, isolate_settings)
+    _ingest_file(int(binding["repo_id"]), "pkg/x.rb")
+
+    corroborated = _record(
+        client, _finding_payload("VA-043", binding, location="file:bound-repo/pkg/x.rb:12")
+    )
+    assert corroborated.status_code == 201, corroborated.text
+    assert corroborated.json()["finding"]["canonical_location"] == "file:pkg/x.rb:12"
+
+
+def test_a_correctly_authored_path_is_never_eaten_by_a_repo_named_after_it(
+    client, isolate_settings
+) -> None:
+    binding = _seed_repo(client, isolate_settings)
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "UPDATE code_repos SET repo_path = ?, source_origin_path = ? WHERE id = ?",
+            ("/work/src", "/work/src", binding["repo_id"]),
+        )
+    _ingest_file(int(binding["repo_id"]), "src/parser.c")
+
+    recorded = _record(
+        client, _finding_payload("VA-044", binding, location="file:src/parser.c:41")
+    )
+
+    assert recorded.status_code == 201, recorded.text
+    assert recorded.json()["finding"]["canonical_location"] == "file:src/parser.c:41"
+    assert (
+        "original_canonical_location"
+        not in recorded.json()["finding"]["provenance"]
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Provenance attestation: the gate proves the snapshot is CURRENT, never that
+# THIS verifier read THESE bytes for THIS finding
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _dispatch(client, agent_id: str, role: str = "code-vuln-hunter") -> None:
+    created = client.post(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/dispatches",
+        json={
+            "agent_id": agent_id,
+            "agent_role": role,
+            "task": "Review the parser for unbounded copies.",
+            "status": "in-progress",
+            "skills": "code-review",
+        },
+    )
+    assert created.status_code in (200, 201), created.text
+
+
+def _attestation(client, slug: str) -> dict | None:
+    provenance = client.get(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/{slug}"
+    ).json()["provenance"]
+    return provenance.get("code_snapshot_attestation")
+
+
+def _attestation_status(client, slug: str) -> str:
+    return client.get(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/{slug}"
+    ).json()["code_snapshot_attestation_status"]
+
+
+def test_a_genuine_binding_round_trips_with_its_recording_identity(
+    client, isolate_settings
+) -> None:
+    binding = _seed_repo(client, isolate_settings)
+    _dispatch(client, "cvh-001")
+    payload = _finding_payload("VA-050", binding, location="file:src/parser.c:50")
+    payload["provenance"] = {**payload["provenance"], "agent_id": "cvh-001"}
+
+    created = _record(client, payload)
+
+    assert created.status_code == 201, created.text
+    # The binding itself is untouched — the attestation is a SIBLING, so exact
+    # comparisons against a declared binding keep working.
+    assert created.json()["finding"]["provenance"]["code_snapshot"] == binding
+    stamped = _attestation(client, "VA-050")
+    assert stamped["finding_slug"] == "VA-050"
+    assert stamped["write_mode"] == "record"
+    assert stamped["agent_id"] == "cvh-001"
+    assert isinstance(stamped["dispatch_id"], int)
+    assert "copied_from_finding_slug" not in stamped
+    assert _attestation_status(client, "VA-050") == "attested"
+
+
+def test_a_binding_copied_verbatim_from_another_finding_is_distinguishable(
+    client, isolate_settings
+) -> None:
+    """Copying another finding's provenance is the reported workaround. It carries
+    the attestation along with the binding it was meant to justify, so the copy
+    names the finding it came from instead of looking identical to a real one."""
+    binding = _seed_repo(client, isolate_settings)
+    _dispatch(client, "cvh-002")
+    genuine = _finding_payload("VA-051", binding, location="file:src/parser.c:51")
+    genuine["provenance"] = {**genuine["provenance"], "agent_id": "cvh-002"}
+    assert _record(client, genuine).status_code == 201
+    stolen = client.get(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/VA-051"
+    ).json()["provenance"]
+
+    laundered = _finding_payload("VA-052", None, location="file:src/other.c:52")
+    laundered["provenance"] = {
+        "agent_name": "code-vuln-hunter",
+        "code_snapshot": stolen["code_snapshot"],
+        "code_snapshot_attestation": stolen["code_snapshot_attestation"],
+    }
+    created = _record(client, laundered)
+
+    # The gate still ACCEPTS it — this change is additive and does not alter the
+    # gate's verdict. What changes is that the copy is now visible.
+    assert created.status_code == 201, created.text
+    stamped = _attestation(client, "VA-052")
+    assert stamped["finding_slug"] == "VA-052"
+    assert stamped["copied_from_finding_slug"] == "VA-051"
+    assert _attestation_status(client, "VA-052") == "copied"
+    assert _attestation_status(client, "VA-051") == "attested"
+
+
+def test_a_binding_asserted_outside_audited_work_reads_as_unattested(
+    client, isolate_settings
+) -> None:
+    """A claimed agent_id that names no dispatch resolves to None rather than
+    being believed — a claim with nothing behind it says so."""
+    binding = _seed_repo(client, isolate_settings)
+    payload = _finding_payload("VA-053", binding, location="file:src/parser.c:53")
+    payload["provenance"] = {**payload["provenance"], "agent_id": "never-dispatched"}
+
+    assert _record(client, payload).status_code == 201
+
+    stamped = _attestation(client, "VA-053")
+    assert stamped["agent_id"] == "never-dispatched"
+    assert stamped["dispatch_id"] is None
+    assert stamped["command_run_id"] is None
+    assert _attestation_status(client, "VA-053") == "unattested"
+
+
+def test_an_unattested_reportable_finding_is_an_advisory_never_a_blocker(
+    client, isolate_settings
+) -> None:
+    binding = _seed_repo(client, isolate_settings)
+    payload = _finding_payload(
+        "VA-054", binding, location="file:src/parser.c:54", severity="high"
+    )
+    assert _record(client, payload).status_code == 201
+
+    readiness = client.get(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/report-readiness"
+    ).json()
+
+    assert any(
+        item.get("kind") == "finding_code_snapshot_unattested"
+        and item.get("slug") == "VA-054"
+        for item in readiness["advisories"]
+    )
+    assert not any(
+        item.get("kind") == "finding_code_snapshot_unattested"
+        for item in readiness["blockers"]
+    )
+
+
+def test_a_legacy_row_with_no_attestation_stays_readable_and_writable(
+    client, isolate_settings
+) -> None:
+    """Rows written before the attestation existed carry no stamp. That is legacy,
+    NOT a violation: they must keep reading and keep accepting writes."""
+    binding = _seed_repo(client, isolate_settings)
+    assert _record(
+        client, _finding_payload("VA-055", binding, location="file:src/parser.c:55")
+    ).status_code == 201
+    with db_module.get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE assessment_findings
+            SET provenance_json = ?
+            WHERE engagement_id = (SELECT id FROM engagements WHERE key = ?)
+              AND slug = 'VA-055'
+            """,
+            (json.dumps({"agent_name": "legacy", "code_snapshot": binding}), _ENGAGEMENT_KEY),
+        )
+
+    fetched = client.get(f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/VA-055")
+    assert fetched.status_code == 200, fetched.text
+    assert fetched.json()["code_snapshot_attestation_status"] == "legacy"
+    assert fetched.json()["code_snapshot_status"] == "current"
+
+    patched = client.patch(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/VA-055",
+        json={"summary": "Still maintainable."},
+    )
+    assert patched.status_code == 200, patched.text
+    # A patch that never asserted a binding leaves the legacy row exactly as found.
+    assert _attestation_status(client, "VA-055") == "legacy"
+    # And it is not surfaced as unattested — legacy is not a violation.
+    readiness = client.get(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/report-readiness"
+    ).json()
+    assert not any(
+        item.get("slug") == "VA-055"
+        and item.get("kind") == "finding_code_snapshot_unattested"
+        for item in readiness["advisories"]
+    )
+
+
+def test_a_verify_rebind_re_attests_under_the_verifying_agent(
+    client, isolate_settings
+) -> None:
+    binding = _seed_repo(client, isolate_settings)
+    _dispatch(client, "cvh-003")
+    payload = _finding_payload("VA-056", binding, location="file:src/parser.c:56")
+    payload["provenance"] = {**payload["provenance"], "agent_id": "cvh-003"}
+    assert _record(client, payload).status_code == 201
+    current = _advance_repo(binding)
+    _dispatch(client, "cvv-001", role="code-vuln-verifier")
+
+    rebound = _verify(
+        client,
+        "VA-056",
+        {
+            "disposition": "confirmed",
+            "reason_text": "Re-read the current source; the defect stands.",
+            "source_name": "code-vuln-verifier",
+            "provenance": {"code_snapshot": current, "agent_id": "cvv-001"},
+        },
+    )
+
+    assert rebound.status_code == 200, rebound.text
+    stamped = _attestation(client, "VA-056")
+    assert stamped["write_mode"] == "verify"
+    assert stamped["agent_id"] == "cvv-001"
+    assert stamped["recorded_by"] == "code-vuln-verifier"
+    assert _attestation_status(client, "VA-056") == "attested"

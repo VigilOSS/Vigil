@@ -1073,6 +1073,30 @@ def _supersede_chain_reaches(
     return False
 
 
+def get_intel_row(
+    engagement_id: int,
+    intel_type: str,
+    intel_id: int,
+) -> dict[str, Any]:
+    """Read one intel row by id.
+
+    ``PATCH``/``supersede`` already assumed this route existed; without it the
+    only read was the list, and the obvious workaround (``fetch intel/notes/1``)
+    fell through the SPA catch-all and returned an HTML page with exit 0.
+    """
+
+    engagement = _engagement_or_404(engagement_id)
+    table = _resolve_intel_table(intel_type)
+    with get_connection() as connection:
+        row = _fetch_intel_row(connection, table, engagement.id, intel_id)
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"intel/{intel_type} id={intel_id} not found",
+        )
+    return _post_process_intel_row(intel_type, row)
+
+
 def update_intel(
     engagement_id: int,
     intel_type: str,

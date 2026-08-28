@@ -447,6 +447,27 @@ def _resolve_intel_plural(intel_type_plural: str) -> str:
     return intel_type
 
 
+# DECLARATION ORDER IS LOAD-BEARING: FastAPI matches in declaration order, so this
+# parameterised GET must stay AFTER every literal-path GET above (``/summary``,
+# ``/search``, ``/credentials``, ``/notes``, ...) or it would shadow them.
+@router.get("/{intel_type_plural}/{intel_id}")
+async def get_intel_record(
+    engagement_key: str,
+    intel_type_plural: str,
+    intel_id: int,
+) -> dict[str, Any]:
+    """Read one intel row by id.
+
+    Three distinct 404s, matching the PATCH on the same path template: engagement
+    not found, unknown intel type segment, and intel id not found.
+    """
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    intel_type = _resolve_intel_plural(intel_type_plural)
+    return await anyio.to_thread.run_sync(
+        functools.partial(intel_service.get_intel_row, engagement.id, intel_type, intel_id)
+    )
+
+
 @router.patch("/{intel_type_plural}/{intel_id}")
 async def patch_intel_record(
     engagement_key: str,

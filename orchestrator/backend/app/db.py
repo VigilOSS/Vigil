@@ -1247,6 +1247,9 @@ def _create_assessment_finding_tables(connection: sqlite3.Connection) -> None:
                 provenance_json TEXT NOT NULL DEFAULT '{}',
                 evidence_type TEXT,
                 submission_status TEXT NOT NULL DEFAULT 'none',
+                submission_platform TEXT NOT NULL DEFAULT '',
+                submission_ref TEXT NOT NULL DEFAULT '',
+                submission_url TEXT NOT NULL DEFAULT '',
                 merged_into_finding_id INTEGER,
                 last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 row_version INTEGER NOT NULL DEFAULT 1,
@@ -1300,10 +1303,11 @@ def _create_assessment_finding_tables(connection: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_assessment_findings_status_updated "
         "ON assessment_findings(engagement_id, status, updated_at DESC, id DESC)"
     )
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS idx_assessment_findings_verification "
-        "ON assessment_findings(engagement_id, verification_state, verification_disposition)"
-    )
+    # NOTE: indexes over additively-migrated columns (verification_state,
+    # verification_disposition, submission_ref) are NOT created here. On an
+    # existing database ``CREATE TABLE IF NOT EXISTS`` above is a no-op, so those
+    # columns do not exist yet -- they are added by ``_apply_additive_migrations``,
+    # which runs later. See ``_create_post_migration_indexes``.
     connection.execute(
         """
             CREATE TABLE IF NOT EXISTS assessment_finding_transitions (
@@ -1320,6 +1324,12 @@ def _create_assessment_finding_tables(connection: sqlite3.Connection) -> None:
                 to_verification_disposition TEXT NOT NULL DEFAULT '',
                 from_severity TEXT,
                 to_severity TEXT NOT NULL DEFAULT '',
+                from_canonical_location TEXT,
+                to_canonical_location TEXT,
+                details_before_json TEXT,
+                details_after_json TEXT,
+                notes_before_json TEXT,
+                notes_after_json TEXT,
                 reason_code TEXT NOT NULL DEFAULT '',
                 reason_text TEXT NOT NULL DEFAULT '',
                 artifact_ref TEXT NOT NULL DEFAULT '',
@@ -2790,6 +2800,13 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         # 'none' default; new findings track submitted/accepted/needs_info/
         # rejected/duplicate independently of workflow_status.
         "submission_status": "TEXT NOT NULL DEFAULT 'none'",
+        # The submission axis's IDENTITY. A status with no referent cannot be
+        # joined back to the external report it describes, so `duplicate` records
+        # that a duplicate exists while making the thing it duplicates
+        # unrecoverable. Additive; legacy rows backfill to '' and stay writable.
+        "submission_platform": "TEXT NOT NULL DEFAULT ''",
+        "submission_ref": "TEXT NOT NULL DEFAULT ''",
+        "submission_url": "TEXT NOT NULL DEFAULT ''",
         "merged_into_finding_id": "INTEGER",
         "last_seen_at": "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
         "row_version": "INTEGER NOT NULL DEFAULT 1",
@@ -2800,6 +2817,28 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
             connection.execute(
                 f"ALTER TABLE assessment_findings ADD COLUMN {column_name} {definition}"
             )
+
+    # Transition-ledger history columns. All nullable and additive: a legacy row
+    # simply has no recorded before/after for the axis, which is honest — the
+    # ledger cannot invent history it never captured. ``details_*``/``notes_*``
+    # make a clobbering details or notes write recoverable (there was previously
+    # no record of the prior value anywhere); ``*_canonical_location`` records an
+    # audited relocation.
+    transition_columns = _table_columns(connection, "assessment_finding_transitions")
+    if transition_columns:
+        for column_name in (
+            "from_canonical_location",
+            "to_canonical_location",
+            "details_before_json",
+            "details_after_json",
+            "notes_before_json",
+            "notes_after_json",
+        ):
+            if column_name not in transition_columns:
+                connection.execute(
+                    "ALTER TABLE assessment_finding_transitions "
+                    f"ADD COLUMN {column_name} TEXT"
+                )
 
     if finding_columns:
         connection.execute(
@@ -3934,6 +3973,29 @@ def _create_assessment_work_items_table(connection: sqlite3.Connection) -> None:
     )
 
 
+def _create_post_migration_indexes(connection: sqlite3.Connection) -> None:
+    """Indexes whose columns only exist after ``_apply_additive_migrations``.
+
+    ``_create_*_tables`` runs before the additive migrations, and on an existing
+    database its ``CREATE TABLE IF NOT EXISTS`` is a no-op -- so a column added by
+    migration is absent at that point and ``CREATE INDEX`` over it raises
+    ``sqlite3.OperationalError: no such column`` and fails startup outright. Any
+    index over a key in the additive-migration column maps therefore belongs here,
+    after the columns are guaranteed to exist.
+    """
+
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_findings_verification "
+        "ON assessment_findings(engagement_id, verification_state, verification_disposition)"
+    )
+    # The submission axis is only joinable to the external program when the
+    # report's own identifier is indexed beside the engagement.
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_findings_submission_ref "
+        "ON assessment_findings(engagement_id, submission_ref)"
+    )
+
+
 def init_db() -> None:
     global _connection_generation, _startup_database_fingerprint
 
@@ -3960,6 +4022,7 @@ def init_db() -> None:
         _create_rate_leases_table(connection)
         _create_code_analysis_tables(connection)
         _apply_additive_migrations(connection)
+        _create_post_migration_indexes(connection)
         _create_intel_tables(connection)
         _create_activity_table(connection)
         _create_dispatch_tables(connection)

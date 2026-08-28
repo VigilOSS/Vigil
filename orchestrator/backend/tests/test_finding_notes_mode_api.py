@@ -270,5 +270,193 @@ def test_patch_allows_empty_details_replacement_with_cas(client, isolate_setting
 
     assert resp.status_code == 200, resp.text
     finding = resp.json()["finding"]
-    assert json.loads(finding["details_json"]) == {}
+    assert finding["details"] == {}
     assert finding["row_version"] == 2
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# The cap is enforced where the field GROWS (and there is an exit for the rows
+# that already grew past it)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _row_version(client, slug: str = "VA-001") -> int:
+    return client.get(f"{_base()}/findings/{slug}").json()["row_version"]
+
+
+def _stored_notes(slug: str = "VA-001") -> str:
+    with db_module.get_connection() as connection:
+        row = connection.execute(
+            "SELECT notes FROM assessment_findings WHERE slug = ?", (slug,)
+        ).fetchone()
+    return str(row["notes"])
+
+
+def _grow_notes_past_the_cap(client, isolate_settings) -> None:
+    _seed(client, isolate_settings)
+    assert client.post(f"{_base()}/findings", json=_finding_payload()).status_code in (200, 201)
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_findings SET notes = ? WHERE slug = ?",
+            ("x" * (state_manager.FINDING_NOTES_MAX_LENGTH + 4005), "VA-001"),
+        )
+
+
+def test_an_append_that_would_cross_the_cap_is_refused_loudly(client, isolate_settings):
+    """The cap used to be asserted on the DELTA while the accumulator was
+    unbounded, so every append fit and only the repair write 422'd."""
+    _grow_notes_past_the_cap(client, isolate_settings)
+
+    refused = client.patch(
+        f"{_base()}/findings/VA-001", json={"notes": "one more checkpoint"}
+    )
+
+    assert refused.status_code == 400, refused.text
+    detail = refused.json()["detail"]
+    assert "past the" in detail and "--notes-rotate" in detail
+
+
+def test_a_row_already_over_the_cap_can_be_rewritten_whole(client, isolate_settings):
+    """The replace ceiling is deliberately higher than the append cap: the repair
+    write is the one that has to carry the whole over-cap field."""
+    _grow_notes_past_the_cap(client, isolate_settings)
+
+    replaced = client.patch(
+        f"{_base()}/findings/VA-001",
+        json={
+            "notes": "y" * (state_manager.FINDING_NOTES_MAX_LENGTH + 1),
+            "notes_mode": "replace",
+            "expected_row_version": _row_version(client),
+        },
+    )
+
+    assert replaced.status_code == 200, replaced.text
+    assert len(_stored_notes()) == state_manager.FINDING_NOTES_MAX_LENGTH + 1
+
+
+def test_rotate_banks_the_prior_notes_on_the_transition_ledger(client, isolate_settings):
+    """Rotation is the exit that SHRINKS the column without discarding anything:
+    the prior text lands on the ledger row this write emits, so the pointer left
+    behind is a real address."""
+    _grow_notes_past_the_cap(client, isolate_settings)
+    original = _stored_notes()
+
+    rotated = client.patch(
+        f"{_base()}/findings/VA-001",
+        json={
+            "notes": "Rotated; see the ledger for the accumulated checkpoints.",
+            "notes_mode": "rotate",
+            "expected_row_version": _row_version(client),
+        },
+    )
+
+    assert rotated.status_code == 200, rotated.text
+    now = _stored_notes()
+    assert len(now) < state_manager.FINDING_NOTES_MAX_LENGTH
+    assert "notes rotated" in now and "finding history VA-001" in now
+
+    transitions = client.get(f"{_base()}/findings/VA-001/transitions").json()
+    banked = transitions[0]["notes_before_json"]
+    assert banked == original
+    # And an append works again afterwards.
+    assert (
+        client.patch(f"{_base()}/findings/VA-001", json={"notes": "next checkpoint"}).status_code
+        == 200
+    )
+
+
+def test_an_oversized_row_is_surfaced_as_a_readiness_advisory(client, isolate_settings):
+    """Make the condition visible BEFORE it blocks a write."""
+    _grow_notes_past_the_cap(client, isolate_settings)
+
+    readiness = client.get(f"{_base()}/report-readiness").json()
+
+    assert any(
+        item["kind"] == "finding_notes_over_cap" and item["slug"] == "VA-001"
+        for item in readiness["advisories"]
+    )
+
+
+def test_a_details_clobber_is_recoverable_from_the_transition_ledger(
+    client, isolate_settings
+):
+    """"Merge" means dict.update(): a repeated top-level key's value is wholly
+    replaced, and the prior value used to exist nowhere — a pure details patch
+    wrote no transition row at all."""
+    _seed(client, isolate_settings)
+    assert client.post(f"{_base()}/findings", json=_finding_payload()).status_code in (200, 201)
+
+    clobbered = client.patch(
+        f"{_base()}/findings/VA-001",
+        json={"details": {"impact": "Rewritten, losing the original wording."}},
+    )
+    assert clobbered.status_code == 200, clobbered.text
+
+    transitions = client.get(f"{_base()}/findings/VA-001/transitions").json()
+    latest = transitions[0]
+    assert latest["action"] == "details_patched"
+    before = json.loads(latest["details_before_json"])
+    assert before["impact"] == "Anonymous attackers read any user's PII."
+    after = json.loads(latest["details_after_json"])
+    assert after["impact"] == "Rewritten, losing the original wording."
+
+
+def test_details_append_concatenates_lists_and_deep_merges_objects(
+    client, isolate_settings
+):
+    """``merge`` unions at the TOP LEVEL and REPLACES a repeated key's whole
+    value. ``append`` is the non-destructive sibling for the keys that accrete."""
+    _seed(client, isolate_settings)
+    assert client.post(f"{_base()}/findings", json=_finding_payload()).status_code in (200, 201)
+    assert (
+        client.patch(
+            f"{_base()}/findings/VA-001",
+            json={
+                "details": {
+                    "required_followup": ["Confirm the reachable caller."],
+                    "poc_request": {"method": "GET", "url": "/api/users/2"},
+                }
+            },
+        ).status_code
+        == 200
+    )
+
+    appended = client.patch(
+        f"{_base()}/findings/VA-001",
+        json={
+            "details": {
+                "required_followup": ["Replay as a second tenant."],
+                "poc_request": {"headers": {"Cookie": "session=..."}},
+            },
+            "details_mode": "append",
+        },
+    )
+
+    assert appended.status_code == 200, appended.text
+    details = client.get(f"{_base()}/findings/VA-001").json()["details"]
+    assert details["required_followup"] == [
+        "Confirm the reachable caller.",
+        "Replay as a second tenant.",
+    ]
+    assert details["poc_request"] == {
+        "method": "GET",
+        "url": "/api/users/2",
+        "headers": {"Cookie": "session=..."},
+    }
+
+
+def test_details_append_refuses_a_scalar_rather_than_guessing(client, isolate_settings):
+    """Silently concatenating strings is how you get a new instance of this bug,
+    and there is no defensible guess between extend and overwrite for a number."""
+    _seed(client, isolate_settings)
+    assert client.post(f"{_base()}/findings", json=_finding_payload()).status_code in (200, 201)
+
+    refused = client.patch(
+        f"{_base()}/findings/VA-001",
+        json={"details": {"impact": " — and cross-tenant."}, "details_mode": "append"},
+    )
+
+    assert refused.status_code == 400, refused.text
+    detail = refused.json()["detail"]
+    assert "details.impact already holds a str" in detail
+    assert "append cannot extend" in detail

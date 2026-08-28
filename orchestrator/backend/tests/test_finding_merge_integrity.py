@@ -159,7 +159,7 @@ def test_merge_medium_into_high_preserves_canonical_cvss_and_impact(client, isol
 
     target = response.json()["target"]
     assert target["severity"] == "high"
-    details = json.loads(target["details_json"])
+    details = target["details"]
     assert details["cvss_score"] == 8.1
     assert details["cvss_vector"] == _HIGH_VECTOR
     assert details["impact"] == "Full account takeover"
@@ -194,7 +194,7 @@ def test_merge_high_source_into_medium_target_lets_stronger_source_cvss_win(
 
     target = response.json()["target"]
     assert target["severity"] == "high"
-    details = json.loads(target["details_json"])
+    details = target["details"]
     assert details["cvss_score"] == 8.1
     assert details["cvss_vector"] == _HIGH_VECTOR
     assert details["impact"] == "Limited disclosure"
@@ -222,12 +222,12 @@ def test_merge_source_only_fills_missing_narrative_keys(
     )
     # Give both rows colliding narrative fields, with one source-only field.
     for slug, chain, followup, extra in (
-        ("MI-407", "Canonical chain.", "Canonical follow-up.", {}),
+        ("MI-407", "Canonical chain.", ["Canonical follow-up."], {}),
         (
             "MI-408",
             "Duplicate chain.",
-            "Merge into canonical.",
-            {"source_only_evidence": "preserve this additional fact"},
+            ["Merge into canonical."],
+            {"attempts_summary": "preserve this additional fact"},
         ),
     ):
         response = client.patch(
@@ -244,10 +244,10 @@ def test_merge_source_only_fills_missing_narrative_keys(
 
     merged = _merge(client, source["slug"], target["slug"])
     assert merged.status_code == 200, merged.text
-    details = json.loads(merged.json()["target"]["details_json"])
+    details = merged.json()["target"]["details"]
     assert details["chain_rationale"] == "Canonical chain."
-    assert details["required_followup"] == "Canonical follow-up."
-    assert details["source_only_evidence"] == "preserve this additional fact"
+    assert details["required_followup"] == ["Canonical follow-up."]
+    assert details["attempts_summary"] == "preserve this additional fact"
 
 
 def test_merge_retires_source_links_instead_of_deleting_evidence(
@@ -316,7 +316,7 @@ def test_merge_progressed_low_severity_source_keeps_canonical_high_cvss(
 
     target = response.json()["target"]
     assert target["severity"] == "high"
-    details = json.loads(target["details_json"])
+    details = target["details"]
     # CVSS follows the severity winner (target/high), NOT the confidence winner (source/medium).
     assert details["cvss_score"] == 8.1
     assert details["cvss_vector"] == _HIGH_VECTOR
@@ -647,9 +647,7 @@ def test_merge_never_completes_a_half_cvss_pair_from_the_losing_side(
     response = _merge(client, "CV-902", "CV-901")
     assert response.status_code == 200, response.text
 
-    details = json.loads(
-        client.get(f"{ASSESSMENT_BASE}/findings/CV-901").json()["details_json"]
-    )
+    details = client.get(f"{ASSESSMENT_BASE}/findings/CV-901").json()["details"]
     assert details["cvss_vector"] == _HIGH_VECTOR
     # The severity winner declared no score, so it inherits none — the loser's
     # 5.3 belongs to the loser's vector, not to this one.

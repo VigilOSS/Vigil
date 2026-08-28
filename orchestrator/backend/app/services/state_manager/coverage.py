@@ -1223,14 +1223,46 @@ def record_coverage_items_bulk(
 def list_coverage_items(
     engagement_id: int,
     *,
+    status: str = "",
+    attack_family: str = "",
+    input_slot: str = "",
+    auth_context: str = "",
+    target_host: str = "",
+    request_variant_id: int | None = None,
+    service_id: int | None = None,
     limit: int = DEFAULT_COVERAGE_ITEM_LIMIT,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
     limit, offset = _bounded_assessment_list_window(limit, offset)
+    # Optional exact-match filters, mirroring ``list_probe_runs``. Column names
+    # are a fixed allowlist, never caller text, so the f-string interpolation is
+    # safe; every value is bound. An unknown VALUE narrows to zero rows — the
+    # ledger fails closed rather than returning the whole table, which is the
+    # "measured nothing looks like measured everything" shape.
+    clauses = ["coverage.engagement_id = ?"]
+    params: list[Any] = [engagement.id]
+    for column, value in (
+        ("coverage.status", status),
+        ("coverage.attack_family", attack_family),
+        ("coverage.input_slot", input_slot),
+        ("coverage.auth_context", auth_context),
+        ("request_variants.host", target_host),
+    ):
+        if value:
+            clauses.append(f"{column} = ?")
+            params.append(value)
+    for column, numeric in (
+        ("coverage.request_variant_id", request_variant_id),
+        ("coverage.service_id", service_id),
+    ):
+        if numeric is not None:
+            clauses.append(f"{column} = ?")
+            params.append(int(numeric))
+    params.extend([limit, offset])
     with _common.get_connection() as connection:
         rows = connection.execute(
-            """
+            f"""
             SELECT
                 coverage.*,
                 request_variants.method,
@@ -1242,11 +1274,11 @@ def list_coverage_items(
             FROM assessment_coverage_items AS coverage
             LEFT JOIN assessment_request_variants AS request_variants ON request_variants.id = coverage.request_variant_id
             LEFT JOIN assessment_services AS services ON services.id = coverage.service_id
-            WHERE coverage.engagement_id = ?
+            WHERE {" AND ".join(clauses)}
             ORDER BY coverage.updated_at DESC, coverage.id DESC
             LIMIT ? OFFSET ?
             """,
-            (engagement.id, limit, offset),
+            tuple(params),
         ).fetchall()
     return [dict(row) for row in rows]
 

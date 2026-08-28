@@ -8,7 +8,13 @@ keys on ``workflow_status`` only and is intentionally untouched.
 
 Canonical vocabulary (single source of truth, mirrored across the two packages):
 ``none`` | ``submitted`` | ``accepted`` | ``needs_info`` | ``rejected`` |
-``duplicate``.
+``duplicate`` | ``withdrawn``.
+
+``withdrawn`` is the researcher-initiated retraction; it exists so an operator
+never has to assert ``rejected`` (a program decision that did not happen) to
+record that they pulled a filing. Moving onto ANY non-``none`` status requires a
+``submission_ref`` — a submission state with no referent cannot be joined back
+to the report it describes.
 
 This module covers BOTH enforcement seams (the CLI ``update-finding`` argparse
 boundary and the backend HTTP layer) plus the additive ALTER-TABLE migration,
@@ -42,8 +48,27 @@ ENGAGEMENT_KEY = "2026-06-30-120000-submission"
 
 # The canonical vocabulary, written out literally here so the test pins the exact
 # contract independently of either package's constant.
-ALL_STATES = ["none", "submitted", "accepted", "needs_info", "rejected", "duplicate"]
-NON_DEFAULT_STATES = ["submitted", "accepted", "needs_info", "rejected", "duplicate"]
+ALL_STATES = [
+    "none",
+    "submitted",
+    "accepted",
+    "needs_info",
+    "rejected",
+    "duplicate",
+    "withdrawn",
+]
+NON_DEFAULT_STATES = [state for state in ALL_STATES if state != "none"]
+# ``withdrawn`` additionally demands a reason; the plain-ref cases exclude it.
+REF_ONLY_STATES = [state for state in NON_DEFAULT_STATES if state != "withdrawn"]
+
+
+def _submission_patch(state: str, **over) -> dict:
+    """A submission-status patch that satisfies the identity requirement."""
+    payload = {"submission_status": state, "submission_ref": f"REP-{state}-1"}
+    if state == "withdrawn":
+        payload["details"] = {"withdrawal_reason": "Duplicate of our own earlier filing."}
+    payload.update(over)
+    return payload
 
 
 def _seed(client, isolate_settings) -> None:
@@ -133,21 +158,122 @@ def test_patch_sets_each_valid_submission_state(client, isolate_settings, state)
     _seed(client, isolate_settings)
     assert client.post(f"{_base()}/findings", json=_finding_payload()).status_code in (200, 201)
 
-    resp = client.patch(f"{_base()}/findings/VA-001", json={"submission_status": state})
+    resp = client.patch(f"{_base()}/findings/VA-001", json=_submission_patch(state))
     assert resp.status_code == 200, resp.text
     assert resp.json()["finding"]["submission_status"] == state
+    assert resp.json()["finding"]["submission_ref"] == f"REP-{state}-1"
 
     fetched = client.get(f"{_base()}/findings/VA-001")
     assert fetched.json()["submission_status"] == state
+    assert fetched.json()["submission_ref"] == f"REP-{state}-1"
 
 
 def test_create_accepts_explicit_submission_status(client, isolate_settings):
     _seed(client, isolate_settings)
     created = client.post(
-        f"{_base()}/findings", json=_finding_payload(submission_status="submitted")
+        f"{_base()}/findings",
+        json=_finding_payload(
+            submission_status="submitted",
+            submission_platform="bugcrowd",
+            submission_ref="BC-9911",
+            submission_url="https://bugcrowd.com/submissions/BC-9911",
+        ),
     )
     assert created.status_code in (200, 201), created.text
-    assert created.json()["finding"]["submission_status"] == "submitted"
+    finding = created.json()["finding"]
+    assert finding["submission_status"] == "submitted"
+    assert finding["submission_platform"] == "bugcrowd"
+    assert finding["submission_ref"] == "BC-9911"
+    assert finding["submission_url"] == "https://bugcrowd.com/submissions/BC-9911"
+
+
+def test_a_net_new_record_straight_into_submitted_needs_a_reference(
+    client, isolate_settings
+):
+    """The gate is on the RESULTING status, so the create path is not a hole in it."""
+    _seed(client, isolate_settings)
+
+    refused = client.post(
+        f"{_base()}/findings", json=_finding_payload(submission_status="submitted")
+    )
+
+    assert refused.status_code == 400, refused.text
+    assert "submission_ref" in refused.json()["detail"]
+
+
+def test_moving_onto_a_submitted_status_requires_a_reference(client, isolate_settings):
+    """The identity requirement fires on the write that MOVES the axis."""
+    _seed(client, isolate_settings)
+    assert client.post(f"{_base()}/findings", json=_finding_payload()).status_code in (200, 201)
+
+    refused = client.patch(f"{_base()}/findings/VA-001", json={"submission_status": "submitted"})
+    assert refused.status_code == 400, refused.text
+    assert "submission_ref" in refused.json()["detail"]
+    assert client.get(f"{_base()}/findings/VA-001").json()["submission_status"] == "none"
+
+
+def test_a_legacy_row_with_a_status_but_no_ref_stays_writable(client, isolate_settings):
+    """A hard requirement on ANY patch would freeze exactly the rows that need
+    backfilling. The gate is a NEW TRANSITION gate, not a row invariant."""
+    _seed(client, isolate_settings)
+    assert client.post(f"{_base()}/findings", json=_finding_payload()).status_code in (200, 201)
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_findings SET submission_status = 'submitted' WHERE slug = ?",
+            ("VA-001",),
+        )
+
+    # An unrelated patch on the legacy row is unaffected.
+    unrelated = client.patch(f"{_base()}/findings/VA-001", json={"summary": "still open"})
+    assert unrelated.status_code == 200, unrelated.text
+    # Re-asserting the SAME status is not a new transition either.
+    same = client.patch(f"{_base()}/findings/VA-001", json={"submission_status": "submitted"})
+    assert same.status_code == 200, same.text
+    # Backfilling the ref is the repair.
+    fixed = client.patch(f"{_base()}/findings/VA-001", json={"submission_ref": "H1-4242"})
+    assert fixed.status_code == 200, fixed.text
+    assert client.get(f"{_base()}/findings/VA-001").json()["submission_ref"] == "H1-4242"
+
+
+def test_withdrawn_requires_a_reason(client, isolate_settings):
+    _seed(client, isolate_settings)
+    assert client.post(f"{_base()}/findings", json=_finding_payload()).status_code in (200, 201)
+
+    refused = client.patch(
+        f"{_base()}/findings/VA-001",
+        json={"submission_status": "withdrawn", "submission_ref": "BC-1"},
+    )
+    assert refused.status_code == 400, refused.text
+    assert "withdrawal_reason" in refused.json()["detail"]
+
+    accepted = client.patch(
+        f"{_base()}/findings/VA-001", json=_submission_patch("withdrawn")
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["finding"]["submission_status"] == "withdrawn"
+
+
+def test_withdrawn_while_still_reported_is_a_readiness_blocker(client, isolate_settings):
+    """A withdrawal moves the SUBMISSION axis; readiness reads the WORKFLOW axis.
+    Rather than silently re-band the finding, make the contradiction loud."""
+    _seed(client, isolate_settings)
+    assert client.post(f"{_base()}/findings", json=_finding_payload()).status_code in (200, 201)
+    assert (
+        client.patch(
+            f"{_base()}/findings/VA-001",
+            json={"workflow_status": "reported", "reason_text": "Published"},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.patch(f"{_base()}/findings/VA-001", json=_submission_patch("withdrawn")).status_code
+        == 200
+    )
+
+    readiness = client.get(f"{_base()}/report-readiness")
+    assert readiness.status_code == 200, readiness.text
+    kinds = [item["kind"] for item in readiness.json()["blockers"]]
+    assert "finding_withdrawn_but_reported" in kinds
 
 
 def test_api_rejects_invalid_submission_status_on_create(client, isolate_settings):
@@ -175,7 +301,7 @@ def test_setting_submission_status_does_not_change_workflow_status(client, isola
     _seed(client, isolate_settings)
     assert client.post(f"{_base()}/findings", json=_finding_payload()).status_code in (200, 201)
 
-    resp = client.patch(f"{_base()}/findings/VA-001", json={"submission_status": "accepted"})
+    resp = client.patch(f"{_base()}/findings/VA-001", json=_submission_patch("accepted"))
     assert resp.status_code == 200, resp.text
     finding = resp.json()["finding"]
     assert finding["submission_status"] == "accepted"
@@ -189,7 +315,7 @@ def test_setting_workflow_status_does_not_change_submission_status(client, isola
 
     # First park the finding at submission_status=accepted.
     assert (
-        client.patch(f"{_base()}/findings/VA-001", json={"submission_status": "accepted"}).status_code
+        client.patch(f"{_base()}/findings/VA-001", json=_submission_patch("accepted")).status_code
         == 200
     )
 
@@ -211,7 +337,7 @@ def test_re_record_upsert_preserves_submission_status(client, isolate_settings):
     _seed(client, isolate_settings)
     assert client.post(f"{_base()}/findings", json=_finding_payload()).status_code in (200, 201)
     assert (
-        client.patch(f"{_base()}/findings/VA-001", json={"submission_status": "accepted"}).status_code
+        client.patch(f"{_base()}/findings/VA-001", json=_submission_patch("accepted")).status_code
         == 200
     )
 

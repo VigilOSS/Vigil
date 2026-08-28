@@ -934,7 +934,7 @@ class FindingRecordRequest(BaseModel):
     canonical_location: str = Field(default="", max_length=4096)
     summary: str = Field(default="", max_length=4096)
     evidence_ref: str = Field(default="", max_length=1024)
-    notes: str = Field(default="", max_length=20000)
+    notes: str = Field(default="", max_length=state_manager.FINDING_NOTES_MAX_LENGTH)
     source_name: str = Field(default="", max_length=128)
     details: dict[str, Any] = Field(default_factory=dict)
     provenance: FindingProvenance = Field(default_factory=FindingProvenance)
@@ -950,6 +950,12 @@ class FindingRecordRequest(BaseModel):
     # submission tracking is never clobbered by an unrelated record). Validated
     # against the canonical state_manager.SUBMISSION_STATUSES set below.
     submission_status: str | None = Field(default=None, min_length=1, max_length=32)
+    # The submission axis's IDENTITY. Required by the model validator below on a
+    # NEW transition into a non-'none' status; nullable so an untouched legacy row
+    # stays writable and a plain re-record never has to restate it.
+    submission_platform: str | None = Field(default=None, max_length=64)
+    submission_ref: str | None = Field(default=None, max_length=256)
+    submission_url: str | None = Field(default=None, max_length=2048)
     request_variant_id: int | None = None
     service_id: int | None = None
     surface_id: int | None = None
@@ -997,16 +1003,27 @@ class FindingPatchRequest(BaseModel):
     canonical_location: str | None = Field(default=None, max_length=4096)
     summary: str | None = Field(default=None, max_length=4096)
     evidence_ref: str | None = Field(default=None, max_length=1024)
-    notes: str | None = Field(default=None, max_length=20000)
+    # The replace/rotate ceiling is deliberately HIGHER than the append cap: the
+    # column grew unbounded for years, so the repair write is the one that has to
+    # be able to carry a whole over-cap field. An append is bounded where it
+    # actually grows, in ``_common._append_notes``.
+    notes: str | None = Field(
+        default=None, max_length=state_manager.FINDING_NOTES_REPLACE_MAX_LENGTH
+    )
     # "append" (default) keeps the historical checkpoint behavior; "replace"
-    # overwrites notes so stale/contradicted internal text can be scrubbed.
-    notes_mode: Literal["append", "replace"] = "append"
+    # overwrites notes so stale/contradicted internal text can be scrubbed;
+    # "rotate" banks the accumulated notes on the transition ledger and leaves a
+    # pointer behind — the exit for a row already past the append cap.
+    notes_mode: Literal["append", "replace", "rotate"] = "append"
     source_name: str | None = Field(default=None, max_length=128)
     details: dict[str, Any] | None = None
-    # CR-31: "merge" (default) accretes detail keys across checkpoints; "replace"
-    # overwrites the whole details object so cross-contaminated/stale keys can be
-    # fully removed (merge cannot delete keys). Requires details to be present.
-    details_mode: Literal["merge", "replace"] = "merge"
+    # CR-31: "merge" (default) accretes detail KEYS across checkpoints but
+    # REPLACES a repeated key's whole value; "replace" overwrites the whole
+    # details object so cross-contaminated/stale keys can be fully removed (merge
+    # cannot delete keys); "append" is the non-destructive sibling of merge —
+    # lists concatenate, objects deep-merge, and a scalar is refused rather than
+    # silently concatenated. "replace" requires details to be present.
+    details_mode: Literal["merge", "replace", "append"] = "merge"
     provenance: dict[str, Any] | None = None
     # Allow retroactive labeling via vigil assess finding update.
     evidence_type: Literal[
@@ -1016,6 +1033,9 @@ class FindingPatchRequest(BaseModel):
     # workflow axis can move without disturbing the submission axis). Validated
     # against the canonical state_manager.SUBMISSION_STATUSES set.
     submission_status: str | None = Field(default=None, min_length=1, max_length=32)
+    submission_platform: str | None = Field(default=None, max_length=64)
+    submission_ref: str | None = Field(default=None, max_length=256)
+    submission_url: str | None = Field(default=None, max_length=2048)
     reason_code: str = Field(default="", max_length=128)
     reason_text: str = Field(default="", max_length=4096)
     artifact_ref: str = Field(default="", max_length=1024)
@@ -1038,6 +1058,23 @@ class FindingPatchRequest(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _bound_appended_notes(self) -> "FindingPatchRequest":
+        # The raised ceiling exists for the repair write only. An append still
+        # has to respect the cap the accumulator is bounded at, or the delta
+        # alone could exceed what the column may hold.
+        if (
+            self.notes_mode == "append"
+            and self.notes is not None
+            and len(self.notes) > state_manager.FINDING_NOTES_MAX_LENGTH
+        ):
+            raise ValueError(
+                "appended notes must be at most "
+                f"{state_manager.FINDING_NOTES_MAX_LENGTH} characters; "
+                "use notes_mode='replace' or 'rotate' to rewrite the whole field"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _require_details_when_replacing(self) -> "FindingPatchRequest":
         # details_mode='replace' overwrites the column; without a details payload
         # it would silently null it. Reject (mirrors the notes_mode guard).
@@ -1048,7 +1085,8 @@ class FindingPatchRequest(BaseModel):
     @model_validator(mode="after")
     def _require_cas_when_replacing(self) -> "FindingPatchRequest":
         if (
-            self.notes_mode == "replace" or self.details_mode == "replace"
+            self.notes_mode in {"replace", "rotate"}
+            or self.details_mode == "replace"
         ) and self.expected_row_version is None:
             raise ValueError(
                 "replacement modes require expected_row_version"
@@ -1070,10 +1108,14 @@ class FindingPatchRequest(BaseModel):
             self.source_name,
             self.evidence_type,
             self.submission_status,
+            self.submission_platform,
+            self.submission_ref,
+            self.submission_url,
         )
         has_scalar_mutation = any(value not in (None, "") for value in scalar_values)
-        has_notes_mutation = self.notes is not None and (
-            self.notes != "" or self.notes_mode == "replace"
+        has_notes_mutation = self.notes_mode == "rotate" or (
+            self.notes is not None
+            and (self.notes != "" or self.notes_mode == "replace")
         )
         has_details_mutation = self.details is not None and (
             self.details != {} or self.details_mode == "replace"
@@ -1112,7 +1154,7 @@ class FindingVerifyRequest(BaseModel):
     new_severity: str | None = Field(default=None, min_length=1, max_length=32)
     evidence_ref: str = Field(default="", max_length=1024)
     artifact_ref: str = Field(default="", max_length=1024)
-    notes: str = Field(default="", max_length=20000)
+    notes: str = Field(default="", max_length=state_manager.FINDING_NOTES_MAX_LENGTH)
     source_name: str = Field(default="", max_length=128)
     details: dict[str, Any] = Field(default_factory=dict)
     provenance: FindingProvenance = Field(default_factory=FindingProvenance)
@@ -1400,11 +1442,29 @@ def get_request_observations(
 @router.get("/coverage-items")
 def get_coverage_items(
     engagement_key: str,
+    status: str = "",
+    attack_family: str = "",
+    input_slot: str = "",
+    auth_context: str = "",
+    target_host: str = "",
+    request_variant_id: int | None = Query(default=None, ge=1),
+    service_id: int | None = Query(default=None, ge=1),
     limit: int = Query(default=DEFAULT_COVERAGE_ITEM_LIMIT, ge=1, le=MAX_ASSESSMENT_LIST_LIMIT),
     offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.list_coverage_items(engagement.id, limit=limit, offset=offset)
+    return state_manager.list_coverage_items(
+        engagement.id,
+        status=status,
+        attack_family=attack_family,
+        input_slot=input_slot,
+        auth_context=auth_context,
+        target_host=target_host,
+        request_variant_id=request_variant_id,
+        service_id=service_id,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/probe-runs")
@@ -1492,7 +1552,7 @@ def get_command_runs(
     show_matches: bool = False,
     exact: bool = False,
     require_all: bool = False,
-    limit: int = Query(default=100, ge=1, le=1000),
+    limit: int = Query(default=100, ge=1, le=MAX_ASSESSMENT_LIST_LIMIT),
     offset: int = Query(default=0, ge=0),
     include_output: bool = False,
 ) -> list[dict[str, Any]]:
@@ -1789,7 +1849,7 @@ def get_findings(
     slug: str | None = None,
     search: str | None = None,
     holding: bool = False,
-    limit: int | None = Query(default=None, ge=1, le=1000),
+    limit: int | None = Query(default=None, ge=1, le=MAX_ASSESSMENT_LIST_LIMIT),
     offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
@@ -2911,6 +2971,9 @@ async def create_finding(engagement_key: str, request: FindingRecordRequest) -> 
             provenance=request.provenance.model_dump(exclude_none=True),
             evidence_type=request.evidence_type,
             submission_status=request.submission_status,
+            submission_platform=request.submission_platform,
+            submission_ref=request.submission_ref,
+            submission_url=request.submission_url,
             request_variant_id=request.request_variant_id,
             service_id=request.service_id,
             surface_id=request.surface_id,
@@ -2962,6 +3025,9 @@ async def patch_finding(
             provenance=request.provenance,
             evidence_type=request.evidence_type,
             submission_status=request.submission_status,
+            submission_platform=request.submission_platform,
+            submission_ref=request.submission_ref,
+            submission_url=request.submission_url,
             transition_reason_code=request.reason_code,
             transition_reason_text=request.reason_text,
             transition_artifact_ref=request.artifact_ref,
@@ -3015,6 +3081,62 @@ async def set_finding_root_cause(
         )
     )
     await _broadcast(engagement.key, "finding_root_cause", record)
+    return record
+
+
+class FindingRelocateRequest(BaseModel):
+    """Audited crossing of the file/non-file canonical-location boundary.
+
+    Deliberately a DEDICATED route rather than a loosening of the generic patch:
+    the generic guard exists so a non-file finding cannot acquire ``file:``
+    semantics through an unreviewed metadata patch, and it stays exactly as strict.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    canonical_location: str = Field(min_length=1, max_length=4096)
+    reason_text: str = Field(min_length=1, max_length=4096)
+    source_name: str = Field(default="operator", min_length=1, max_length=128)
+    expected_row_version: int = Field(ge=1)
+    provenance: FindingProvenance = Field(default_factory=FindingProvenance)
+
+    @field_validator("canonical_location")
+    @classmethod
+    def _normalize_canonical_location(cls, value: str) -> str:
+        return value.strip()
+
+
+@router.put("/findings/{finding_slug}/canonical-location")
+async def relocate_finding(
+    engagement_key: str,
+    finding_slug: str,
+    request: FindingRelocateRequest,
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.relocate_finding,
+            engagement.id,
+            slug=finding_slug,
+            canonical_location=request.canonical_location,
+            reason_text=request.reason_text,
+            source_name=request.source_name,
+            expected_row_version=request.expected_row_version,
+            provenance=request.provenance.model_dump(exclude_none=True),
+        )
+    )
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_assessment_mutation,
+            engagement.id,
+            title="finding-relocate",
+            action=f"finding={finding_slug} to={request.canonical_location}",
+            actor_name=request.source_name,
+            result=request.reason_text,
+            metadata={"finding_slug": finding_slug},
+        )
+    )
+    await _broadcast(engagement.key, "finding_patch", record)
     return record
 
 
@@ -3665,7 +3787,7 @@ def get_dispatches(
     status_value: str = Query(default="", alias="status"),
     since: str = "",
     task_q: str = "",
-    limit: int = Query(default=100, ge=1, le=1000),
+    limit: int = Query(default=100, ge=1, le=MAX_ASSESSMENT_LIST_LIMIT),
     offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
@@ -3762,7 +3884,7 @@ def get_handoffs(
     engagement_key: str,
     role: str = "",
     since: str = "",
-    limit: int = Query(default=100, ge=1, le=1000),
+    limit: int = Query(default=100, ge=1, le=MAX_ASSESSMENT_LIST_LIMIT),
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
     return state_manager.list_handoffs(
@@ -3863,6 +3985,14 @@ def get_decisions(
         limit=limit,
         offset=offset,
     )
+
+
+# Declared AFTER the literal-path ``GET /dispatch-decisions`` above so the
+# parameterised route cannot shadow the list.
+@router.get("/dispatch-decisions/{decision_id}")
+def get_decision(engagement_key: str, decision_id: int) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.get_decision(engagement.id, decision_id=int(decision_id))
 
 
 @router.patch("/dispatch-decisions/{decision_id}")

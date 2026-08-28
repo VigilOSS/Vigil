@@ -11,6 +11,8 @@ Private names are re-exported BY OBJECT REFERENCE so identity is preserved
 from __future__ import annotations
 
 from ._common import (
+    FINDING_NOTES_MAX_LENGTH,
+    FINDING_NOTES_REPLACE_MAX_LENGTH,
     SEVERITY_RANK,
     WORKFLOW_STATUSES,
     WORKFLOW_STATUS_RANK,
@@ -21,6 +23,7 @@ from ._common import (
     VERIFICATION_DISPOSITIONS,
     VERIFICATION_DISPOSITION_RANK,
     COMMAND_RUN_TERMINAL_STATUSES,
+    DUPLICATE_LINK_KIND,
     ROOT_CAUSE_LINK_KIND,
     ROOT_CAUSE_EFFECTS,
     SLUG_RE,
@@ -39,6 +42,7 @@ from .findings import (
     patch_finding,
     verify_finding,
     merge_findings,
+    relocate_finding,
     list_findings,
     get_finding,
     list_exploit_candidates,
@@ -54,6 +58,7 @@ from .dispatches import (
     get_handoff,
     list_handoffs,
     record_decision,
+    get_decision,
     list_decisions,
     update_decision,
 )
@@ -208,6 +213,8 @@ from ._common import (  # noqa: F401
 from .command_runs import _retention_config  # noqa: F401
 
 __all__ = [
+    "FINDING_NOTES_MAX_LENGTH",
+    "FINDING_NOTES_REPLACE_MAX_LENGTH",
     "SEVERITY_RANK",
     "WORKFLOW_STATUSES",
     "WORKFLOW_STATUS_RANK",
@@ -218,6 +225,7 @@ __all__ = [
     "VERIFICATION_DISPOSITIONS",
     "VERIFICATION_DISPOSITION_RANK",
     "COMMAND_RUN_TERMINAL_STATUSES",
+    "DUPLICATE_LINK_KIND",
     "ROOT_CAUSE_LINK_KIND",
     "ROOT_CAUSE_EFFECTS",
     "SLUG_RE",
@@ -231,6 +239,7 @@ __all__ = [
     "patch_finding",
     "verify_finding",
     "merge_findings",
+    "relocate_finding",
     "list_findings",
     "get_finding",
     "list_exploit_candidates",
@@ -244,6 +253,7 @@ __all__ = [
     "get_handoff",
     "list_handoffs",
     "record_decision",
+    "get_decision",
     "list_decisions",
     "update_decision",
     "COVERAGE_STATUSES",

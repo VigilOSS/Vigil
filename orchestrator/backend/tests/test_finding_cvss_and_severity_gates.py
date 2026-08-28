@@ -162,7 +162,7 @@ def test_patch_scores_a_partial_update_against_the_stored_vector(
         json={"details": {"cvss_score": 0.0, "cvss_vector": _INFO_VECTOR}},
     )
     assert good.status_code == 200, good.text
-    stored = json.loads(client.get(f"{BASE}/findings/VA-012").json()["details_json"])
+    stored = client.get(f"{BASE}/findings/VA-012").json()["details"]
     assert stored["cvss_score"] == 0.0
     assert stored["cvss_vector"] == _INFO_VECTOR
 
@@ -224,7 +224,7 @@ def test_an_empty_cvss_key_is_not_an_authoring_write(client, isolate_settings, e
     )
 
     assert response.status_code == 200, response.text
-    stored = json.loads(client.get(f"{BASE}/findings/VA-015").json()["details_json"])
+    stored = client.get(f"{BASE}/findings/VA-015").json()["details"]
     assert stored["impact"] == "still exploitable"
     # The no-op stayed a no-op: the stored (bad) score is untouched, not nulled.
     assert stored["cvss_score"] == 2.0
@@ -247,7 +247,9 @@ def test_a_replace_patch_still_judges_an_empty_cvss_key(client, isolate_settings
     )
 
     assert response.status_code == 400, response.text
-    assert "must be a number" in response.json()["detail"]
+    # The details-schema check is the outer gate and answers first with the same
+    # verdict the CVSS-pair check would give; both name the offending value.
+    assert "details.cvss_score must be of type number, got ''" in response.json()["detail"]
 
 
 def test_an_info_finding_is_representable_end_to_end(client, isolate_settings):

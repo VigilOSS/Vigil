@@ -450,6 +450,30 @@
           "type": "string",
           "description": "One-line justification for the assigned severity, per the impact-based severity model in agent/rules/triage.md."
         },
+        "severity_band_rationale": {
+          "type": "string",
+          "description": "Why the assigned severity band DIVERGES from the band the CVSS base score implies (e.g. business context the vector cannot express). Present and non-empty demotes report-readiness' severity_cvss_mismatch blocker to an advisory; it never excuses the two CVSS-arithmetic blockers."
+        },
+        "honest_bounds": {
+          "type": "string",
+          "description": "What this finding does NOT establish — the limits of the evidence, stated by the author so a reader cannot over-read the claim."
+        },
+        "intent_basis_caveat": {
+          "type": "string",
+          "description": "Caveat on any inference about the target's intent or design rationale, naming what is observed versus what is assumed."
+        },
+        "scope_metric_note": {
+          "type": "string",
+          "description": "Qualification of a count or coverage figure cited by this finding (what the denominator is, and what it excludes)."
+        },
+        "self_obtainability_verdict": {
+          "type": "string",
+          "description": "Whether the attacker can obtain the required precondition themselves ('self'), needs a victim action, or needs a privilege they cannot acquire."
+        },
+        "mechanism_verdict": {
+          "type": "string",
+          "description": "Adjudicated verdict on the proposed mechanism after review — what the mechanism actually is, versus what it was first believed to be. Undated: the transition ledger, not a date-stamped key, carries when it was written."
+        },
         "block_reason": {
           "type": "string",
           "description": "Why the finding cannot be advanced right now — a provisioning/access wall blocking the next proof step (as opposed to an ROE policy wall or a missing-bug chain park). Surfaced in the resume-brief Attempts ledger."
@@ -561,6 +585,17 @@
               }
             }
           }
+        },
+        "correction_history": {
+          "type": [
+            "array",
+            "string"
+          ],
+          "description": "Retraction/correction history for this finding — quoted supersessions naming the internal slugs they retract. Rendered ONLY under OPERATOR DETAILS; never in the pasteable submission body, so naming a slug here cannot trip the export hygiene gate."
+        },
+        "withdrawal_reason": {
+          "type": "string",
+          "description": "Why the researcher withdrew this submission. REQUIRED when submission_status is set to 'withdrawn' — a retraction is researcher-initiated, so the record must say why rather than assert a program decision."
         }
       }
     },
@@ -641,15 +676,46 @@
       ],
       "default": null,
       "title": "Submission Status",
-      "description": "External bug-bounty/program submission state, ORTHOGONAL to workflow_status (report-inclusion). 'none': not submitted. 'submitted': sent to the program. 'accepted'/'rejected'/'duplicate': program triage outcome. 'needs_info': program requested more detail. Omit to keep the default 'none'.",
+      "description": "External bug-bounty/program submission state, ORTHOGONAL to workflow_status (report-inclusion). 'none': not submitted. 'submitted': sent to the program. 'accepted'/'rejected'/'duplicate': program triage outcome. 'needs_info': program requested more detail. 'withdrawn': the RESEARCHER retracted the submission (requires details.withdrawal_reason; never use 'rejected' for this, which asserts a program decision that did not happen). Moving to any non-'none' value requires submission_ref. Omit to keep the default 'none'.",
       "enum": [
         "none",
         "submitted",
         "accepted",
         "needs_info",
         "rejected",
-        "duplicate"
+        "duplicate",
+        "withdrawn"
       ]
+    },
+    "submission_platform": {
+      "maxLength": 64,
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null,
+      "title": "Submission Platform",
+      "description": "Where the report was filed: 'bugcrowd', 'hackerone', or 'direct'."
+    },
+    "submission_ref": {
+      "maxLength": 256,
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null,
+      "title": "Submission Ref",
+      "description": "The program's own identifier for the report (e.g. a Bugcrowd submission id or HackerOne report number). REQUIRED when moving submission_status to a non-'none' value — a submission state with no referent cannot be joined back to the report it describes."
+    },
+    "submission_url": {
+      "maxLength": 2048,
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null,
+      "title": "Submission Url",
+      "description": "Direct URL to the filed report, when the platform exposes one."
     },
     "request_variant_id": {
       "type": "integer",

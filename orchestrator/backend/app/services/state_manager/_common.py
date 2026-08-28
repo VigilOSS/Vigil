@@ -60,6 +60,10 @@ class SubmissionStatus(enum.StrEnum):
     NEEDS_INFO = "needs_info"
     REJECTED = "rejected"
     DUPLICATE = "duplicate"
+    # Researcher-initiated retraction. Without it the operator had to either
+    # leave the record asserting a live filing or use ``rejected``, which
+    # asserts a third-party decision that never happened.
+    WITHDRAWN = "withdrawn"
 
 
 class VerificationState(enum.StrEnum):
@@ -221,6 +225,13 @@ LEAD_OPEN_STATUSES = LEAD_STATUSES - LEAD_TERMINAL_STATUSES
 
 ROOT_CAUSE_LINK_KIND = "root_cause"
 
+# "This finding duplicates one we already disproved" is exactly the edge a
+# re-discovery needs, and the root-cause graph cannot express it: that graph
+# models "these LIVE findings share one defect", so a killed node is excluded by
+# construction. A first-class duplicate link carries the relation without
+# re-admitting the suppressed finding to any report projection.
+DUPLICATE_LINK_KIND = "duplicate_of"
+
 ROOT_CAUSE_EFFECTS = {"eliminates_finding", "eliminates_attack_path"}
 
 SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -245,14 +256,85 @@ def _merge_object_text(existing: str, incoming: dict[str, Any] | None) -> str:
         current.update({key: value for key, value in incoming.items() if value not in (None, "", [], {})})
     return _json_text(current)
 
-def _append_notes(existing: str, incoming: str) -> str:
+
+def _append_object_text(existing: str, incoming: dict[str, Any] | None, *, path: str) -> str:
+    """Union that ACCRETES instead of replacing, for the keys that accrete.
+
+    ``merge`` is ``dict.update()``: union at the top level, REPLACEMENT at the
+    value level. That reads as "safe to re-send a key I already used" and is not
+    — a repeated key's whole value is destroyed. ``append`` is the non-destructive
+    sibling: lists concatenate, dicts deep-merge, and a scalar is REFUSED.
+
+    Refusing scalars is the load-bearing part. Silently concatenating strings is
+    how you get a new instance of this exact bug, and there is no defensible
+    guess between "extend" and "overwrite" for a number or a boolean, so append
+    says so rather than picking one.
+
+    List concatenation skips items already present, so a retried append is
+    idempotent rather than doubling the list — the same rule ``_append_notes``
+    applies per line.
+    """
+
+    current = _json_object(existing)
+    for key, value in (incoming or {}).items():
+        if key not in current:
+            current[key] = value
+            continue
+        stored = current[key]
+        if isinstance(stored, list) and isinstance(value, list):
+            current[key] = stored + [item for item in value if item not in stored]
+        elif isinstance(stored, dict) and isinstance(value, dict):
+            current[key] = _json_object(
+                _append_object_text(_json_text(stored), value, path=f"{path}.{key}")
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"{path}.{key} already holds a "
+                    f"{type(stored).__name__}, which append cannot extend. Append "
+                    "concatenates lists and deep-merges objects only; to change a "
+                    "scalar, send it with the default merge mode (which REPLACES "
+                    "the whole value) after reading the current one."
+                ),
+            )
+    return _json_text(current)
+
+# Canonical bounds for the finding ``notes`` column. The API models import these
+# so the HTTP layer and the persistence layer cannot disagree about the cap.
+#
+# The cap used to be asserted on the INCOMING field only while the stored column
+# was unbounded, so the field was append-only-forever: appends always fit, and
+# the one write that must carry the whole field — the repair — was the only one
+# that could exceed 20000 and 422. The accumulator is now bounded where it grows
+# (``_append_notes``), and the replace path is allowed a larger payload so a row
+# that is already past the append cap can still be rewritten.
+FINDING_NOTES_MAX_LENGTH = 20000
+FINDING_NOTES_REPLACE_MAX_LENGTH = 65536
+
+
+def _append_notes(existing: str, incoming: str, *, max_length: int | None = None) -> str:
     if not incoming:
         return existing
     if not existing:
-        return incoming
-    if incoming in existing.splitlines():
+        appended = incoming
+    elif incoming in existing.splitlines():
         return existing
-    return f"{existing}\n{incoming}"
+    else:
+        appended = f"{existing}\n{incoming}"
+    if max_length is not None and len(appended) > max_length:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"finding notes would grow to {len(appended)} characters, past the "
+                f"{max_length}-character cap (stored: {len(existing)}). Rotate the "
+                "accumulated notes into the transition ledger with "
+                "`vigil assess finding update <slug> --notes-rotate --notes '<summary>' "
+                "--expected-row-version <n>`, or replace them with "
+                "`--notes-replace`."
+            ),
+        )
+    return appended
 
 def _normalize_severity(value: str) -> str:
     severity = (value or "info").strip().lower()
@@ -356,6 +438,13 @@ def _serialize_finding_record(row: dict[str, Any] | Any) -> dict[str, Any]:
         record["submission_status"] = _normalize_submission_status(record.get("submission_status"))
     except HTTPException:
         record["submission_status"] = str(record.get("submission_status", "none") or "none").strip().lower()
+    # The DB stores these as TEXT; the wire contract is the parsed object under
+    # the SAME name the writer used. Parse and POP (the intel projection's rule,
+    # ``services/intel.py``): emitting both a parsed key and its string twin would
+    # leave every reader guessing which one is authoritative. ``_json_object``
+    # returns {} on malformed content, keeping the read path crash-proof.
+    record["details"] = _json_object(record.pop("details_json", "{}"))
+    record["provenance"] = _json_object(record.pop("provenance_json", "{}"))
     record.pop("status", None)
     return record
 

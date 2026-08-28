@@ -960,6 +960,11 @@ class _FakePopen:
             raise subprocess.TimeoutExpired(cmd=["fake"], timeout=timeout)
         return self._returncode
 
+    def poll(self):
+        # The I-163 signal handler asks whether the worker is still alive
+        # before reaping it.
+        return self._returncode if self._waits else None
+
 
 @pytest.fixture(autouse=True)
 def _stub_container_helpers(monkeypatch):
@@ -5676,8 +5681,16 @@ def _run_emit_case(
     engagement_type=None,
     cmd=None,
     tool_name="sqlmap",
+    stdout_preview=None,
 ):
     kali = _setup_fake_config(monkeypatch, fake_engagement)
+    if stdout_preview is not None:
+        # The probe's own bytes are the only place an HTTP verdict can come from.
+        monkeypatch.setattr(
+            kali,
+            "_read_safely",
+            lambda path: stdout_preview if str(path).endswith(".out") else "",
+        )
     if engagement_type is not None:
         (fake_engagement / "scope.json").write_text(
             json.dumps({"hostname": "example.com", "engagement_type": engagement_type})
@@ -6118,3 +6131,342 @@ def test_probe_emit_shell_wrapped_curl_parses_inner_url(monkeypatch, fake_engage
     probe = _probe_posts(fake_client)[0]
     assert probe["target_host"] == "shop.example.com"
     assert probe["target_path"] == "/api/v2/orders/7"
+
+
+# --------------------------------------------------------------------------- #
+# I-163 / I-180 — process lifetime: an outer kill must not strand the worker
+#                 AND the audit row.
+# --------------------------------------------------------------------------- #
+
+
+class _CallerKilled(BaseException):
+    """Stands in for the process actually dying at the handler's re-raise."""
+
+
+def _arm_signal_capture(monkeypatch, kali):
+    """Capture the handlers ``kali_exec`` installs and neutralise the re-raise.
+
+    The handler ends by restoring SIG_DFL and re-signalling itself, which would
+    take pytest down with it. Recording the ``os.kill`` and raising a sentinel
+    models that death without ending the test session, and lets the assertions
+    see everything the handler did on its way out.
+    """
+    installed: dict[int, object] = {}
+    previous = object()
+
+    def fake_signal(signum, handler):
+        # ``kali_exec`` restores the previous disposition in its ``finally``;
+        # keep the handler it installed so the test can still fire it.
+        if callable(handler):
+            installed[signum] = handler
+        return previous
+
+    reraised: list[tuple[int, int]] = []
+
+    def fake_kill(pid, signum):
+        reraised.append((pid, signum))
+        raise _CallerKilled()
+
+    monkeypatch.setattr(kali.signal, "signal", fake_signal)
+    monkeypatch.setattr(kali.os, "kill", fake_kill)
+    return installed, reraised
+
+
+def test_caller_sigterm_reaps_the_worker_and_finalizes_the_row_killed(
+    monkeypatch, fake_engagement, capsys
+):
+    """The load-bearing half of I-163.
+
+    ``docker exec`` is spawned with ``start_new_session=True``, so it sits
+    OUTSIDE the caller's kill domain: an outer SIGTERM used to remove the
+    recorder and leave the worker running against a live tenant, with its audit
+    row stuck at ``status=running`` and 0 bytes. The handler must run the SAME
+    two-namespace cascade the ``--timeout`` path runs, then finalize the row as
+    ``killed``, then die honestly.
+    """
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    monkeypatch.setattr(kali, "_read_container_pid", lambda *a, **k: 4321)
+
+    docker_kills: list[str] = []
+    monkeypatch.setattr(
+        kali,
+        "_kill_in_container",
+        lambda container, pid, sig: docker_kills.append(sig),
+    )
+    cleaned: list[str] = []
+    monkeypatch.setattr(
+        kali,
+        "_cleanup_container_pid_file",
+        lambda container, run_uuid: cleaned.append(run_uuid),
+    )
+    host_signals: list[int] = []
+    monkeypatch.setattr(kali.os, "killpg", lambda pgid, sig: host_signals.append(sig))
+    monkeypatch.setattr(kali.os, "getpgid", lambda pid: pid)
+
+    installed, reraised = _arm_signal_capture(monkeypatch, kali)
+
+    class _KilledFromOutsidePopen:
+        def __init__(self):
+            self.pid = 4242
+            self._signalled = False
+            self._reaped = False
+
+        def poll(self):
+            return -signal.SIGTERM if self._reaped else None
+
+        def wait(self, timeout=None):
+            if not self._signalled:
+                # The caller kills us while we are blocked on the worker.
+                self._signalled = True
+                installed[signal.SIGTERM](signal.SIGTERM, None)
+                raise AssertionError("the handler must not return")
+            self._reaped = True
+            return -signal.SIGTERM
+
+    monkeypatch.setattr(
+        kali.subprocess, "Popen", lambda *a, **k: _KilledFromOutsidePopen()
+    )
+
+    with pytest.raises(_CallerKilled):
+        kali.kali_exec(
+            ["curl", "-sS", "https://shop.example.com/api/orders/1"],
+            technique="IDOR",
+            intent="i-163 outer kill",
+            probe_kind="payload",
+            phase="consume-test",
+            timeout=1800,
+            agent_name="vulnerability-analyst",
+            engagement_dir=fake_engagement,
+            tool_name="curl",
+        )
+
+    # The worker was reaped across BOTH namespaces, not just the host one.
+    assert docker_kills[:1] == ["TERM"]
+    assert host_signals[:1] == [signal.SIGTERM]
+    assert cleaned  # the in-container pid file did not leak
+
+    # The row is finalized, and finalized honestly.
+    finalize = [payload for _ep, payload in fake_client.patches]
+    assert len(finalize) == 1
+    assert finalize[0]["status"] == "killed"
+    assert "killed by caller signal SIGTERM" in finalize[0]["stderr_preview"]
+
+    # And the process really does die of the signal it was sent.
+    assert reraised == [(os.getpid(), signal.SIGTERM)]
+    assert "SIGTERM received" in capsys.readouterr().err
+
+
+def test_signal_handler_does_not_double_finalize_a_completed_row(
+    monkeypatch, fake_engagement
+):
+    """The handler owns the window between the pre-exec POST and the terminal
+    finalize — and only that window. A signal after the row is finalized must
+    not issue a second PATCH."""
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    monkeypatch.setattr(kali.os, "killpg", lambda pgid, sig: None)
+    monkeypatch.setattr(kali.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(kali.subprocess, "Popen", lambda *a, **k: _FakePopen())
+
+    installed, reraised = _arm_signal_capture(monkeypatch, kali)
+
+    kali.kali_exec(
+        ["curl", "-sS", "https://shop.example.com/api/orders/1"],
+        technique="IDOR",
+        intent="i-163 late signal",
+        probe_kind="payload",
+        phase="consume-test",
+        timeout=60,
+        agent_name="vulnerability-analyst",
+        engagement_dir=fake_engagement,
+        tool_name="curl",
+    )
+    assert len(fake_client.patches) == 1  # the normal finalize
+
+    with pytest.raises(_CallerKilled):
+        installed[signal.SIGTERM](signal.SIGTERM, None)
+
+    assert len(fake_client.patches) == 1  # no second, contradicting PATCH
+    assert reraised == [(os.getpid(), signal.SIGTERM)]
+
+
+def test_repeat_signal_during_cleanup_stops_trying(monkeypatch, fake_engagement):
+    """A handler that swallows a repeated Ctrl-C would be worse than the bug."""
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    monkeypatch.setattr(kali.os, "killpg", lambda pgid, sig: None)
+    monkeypatch.setattr(kali.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(kali.subprocess, "Popen", lambda *a, **k: _FakePopen())
+
+    installed, reraised = _arm_signal_capture(monkeypatch, kali)
+    kali.kali_exec(
+        ["curl", "-sS", "https://shop.example.com/api/orders/1"],
+        technique="IDOR",
+        intent="i-163 repeat signal",
+        probe_kind="payload",
+        phase="consume-test",
+        timeout=60,
+        agent_name="vulnerability-analyst",
+        engagement_dir=fake_engagement,
+        tool_name="curl",
+    )
+    handler = installed[signal.SIGINT]
+    with pytest.raises(_CallerKilled):
+        handler(signal.SIGINT, None)
+    with pytest.raises(_CallerKilled):
+        handler(signal.SIGINT, None)
+    assert reraised == [(os.getpid(), signal.SIGINT)] * 2
+
+
+# --- (a) the --timeout ceiling ---------------------------------------------- #
+
+
+def test_timeout_above_the_caller_ceiling_is_refused(monkeypatch, fake_engagement):
+    """``--timeout`` is a promise only the recorder can keep. A run sized past
+    the caller's own ceiling is an orphan waiting to happen, so refuse it BEFORE
+    any target traffic."""
+    kali_cli = _import("assess.lib.kali_cli")
+    monkeypatch.setenv("VIGIL_CALLER_TIMEOUT_S", "600")
+    args = SimpleNamespace(
+        technique="RECON", intent="x", probe_kind="fingerprint", phase="recon",
+        timeout=1800, destructive=False, force=False, container_name=None,
+        identity=None, identity_scope="", identity_target="",
+        rate_override_reason="", engagement_dir=None,
+        kali_agent_name="recon-specialist", kali_agent_id=None,
+    )
+    with pytest.raises(kali_cli.AssessError) as excinfo:
+        kali_cli.kali_args_to_kwargs(args)
+    message = str(excinfo.value)
+    assert "VIGIL_CALLER_TIMEOUT_S=600" in message
+    assert "kali job start" in message
+
+
+def test_timeout_within_the_caller_ceiling_is_untouched(monkeypatch):
+    kali_cli = _import("assess.lib.kali_cli")
+    monkeypatch.setenv("VIGIL_CALLER_TIMEOUT_S", "600")
+    assert kali_cli.enforce_caller_timeout_ceiling(600) == 600
+
+
+def test_no_ceiling_is_invented_when_the_env_is_unset_or_junk(monkeypatch):
+    """Opt-in by design: a wrong ceiling is worse than none, and inventing a
+    default would break every operator-driven long scan."""
+    kali_cli = _import("assess.lib.kali_cli")
+    monkeypatch.delenv("VIGIL_CALLER_TIMEOUT_S", raising=False)
+    assert kali_cli.enforce_caller_timeout_ceiling(86400) == 86400
+    monkeypatch.setenv("VIGIL_CALLER_TIMEOUT_S", "not-a-number")
+    assert kali_cli.enforce_caller_timeout_ceiling(86400) == 86400
+    monkeypatch.setenv("VIGIL_CALLER_TIMEOUT_S", "0")
+    assert kali_cli.enforce_caller_timeout_ceiling(86400) == 86400
+
+
+def test_preflight_guard_refuses_instead_of_auto_raising_past_the_ceiling(monkeypatch):
+    """Auto-raise is boost-only, so past the ceiling it does not rescue the run —
+    it converts a TRUNCATED result into an ORPHANED one."""
+    kali_cli = _import("assess.lib.kali_cli")
+    monkeypatch.setenv("VIGIL_CALLER_TIMEOUT_S", "600")
+    with pytest.raises(kali_cli.AssessError) as excinfo:
+        kali_cli.preflight_timeout_guard(
+            verb="katana",
+            internal_budget_s=1800,
+            timeout=300,
+            warn=lambda _m: None,
+            auto_raise=True,
+            exact=True,
+        )
+    assert "VIGIL_CALLER_TIMEOUT_S=600" in str(excinfo.value)
+
+
+def test_preflight_guard_still_auto_raises_under_the_ceiling(monkeypatch):
+    kali_cli = _import("assess.lib.kali_cli")
+    monkeypatch.setenv("VIGIL_CALLER_TIMEOUT_S", "3600")
+    warnings: list[str] = []
+    assert kali_cli.preflight_timeout_guard(
+        verb="katana",
+        internal_budget_s=1800,
+        timeout=300,
+        warn=warnings.append,
+        auto_raise=True,
+        exact=True,
+    ) == 1800
+    assert warnings and "Auto-raising" in warnings[0]
+
+
+# --------------------------------------------------------------------------- #
+# I-135 — the audit row's only outcome axis was the process exit code, so a
+#         curl that fetched a 404 read `success=true, return_code=0`.
+# --------------------------------------------------------------------------- #
+
+
+_CURL_404 = (
+    "HTTP/1.1 404 Not Found\r\n"
+    "Content-Type: text/html\r\n"
+    "\r\n"
+    "<html><body>Not Found</body></html>"
+)
+_CURL_200 = (
+    "HTTP/1.1 200 OK\r\n"
+    "Content-Type: application/json\r\n"
+    "\r\n"
+    '{"order": 7}'
+)
+
+
+def test_probe_emit_records_the_observed_http_status(monkeypatch, fake_engagement):
+    _result, fake_client = _run_emit_case(
+        monkeypatch, fake_engagement, technique="SSRF", probe_kind="payload",
+        cmd=["curl", "-i", "https://shop.example.com/api/fetch?u=x"],
+        tool_name="curl", stdout_preview=_CURL_200,
+    )
+    probe = _probe_posts(fake_client)[0]
+    assert probe["observed_http_status"] == 200
+    assert probe["result_status"] == "tested"
+
+
+def test_a_404_probe_is_not_recorded_as_covering_the_class(
+    monkeypatch, fake_engagement
+):
+    """The exchange completed, so exit 0 is honest — but the request never
+    reached the code path SSRF lives in, and crediting coverage for it is how a
+    blind spot gets closed on paper."""
+    _result, fake_client = _run_emit_case(
+        monkeypatch, fake_engagement, technique="SSRF", probe_kind="payload",
+        cmd=["curl", "-i", "https://shop.example.com/api/fetch?u=x"],
+        tool_name="curl", stdout_preview=_CURL_404,
+    )
+    probe = _probe_posts(fake_client)[0]
+    assert probe["observed_http_status"] == 404
+    assert probe["result_status"] == "error"
+
+
+def test_a_403_still_covers_an_access_control_probe(monkeypatch, fake_engagement):
+    """A 403 on another principal's object is the healthy IDOR signal — the
+    measurement, not a failed request."""
+    forbidden = _CURL_404.replace("404 Not Found", "403 Forbidden")
+    _result, fake_client = _run_emit_case(
+        monkeypatch, fake_engagement, technique="IDOR", probe_kind="payload",
+        cmd=["curl", "-i", "https://shop.example.com/api/orders/9"],
+        tool_name="curl", stdout_preview=forbidden,
+    )
+    probe = _probe_posts(fake_client)[0]
+    assert probe["observed_http_status"] == 403
+    assert probe["result_status"] == "tested"
+
+
+def test_a_body_only_probe_invents_no_http_status(monkeypatch, fake_engagement):
+    """``curl -sS`` emits no headers; the status is unrecoverable, and an
+    unrecoverable status must stay null rather than be guessed."""
+    _result, fake_client = _run_emit_case(
+        monkeypatch, fake_engagement, technique="SSRF", probe_kind="payload",
+        cmd=["curl", "-sS", "https://shop.example.com/api/fetch?u=x"],
+        tool_name="curl", stdout_preview='{"ok": true}',
+    )
+    probe = _probe_posts(fake_client)[0]
+    assert probe["observed_http_status"] is None
+    assert probe["result_status"] == "tested"

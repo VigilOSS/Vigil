@@ -87,8 +87,8 @@ def test_discovered_password_flags_finding_no_mint(client, isolate_settings):
     finding = findings[0]
     assert finding["severity"] == "info"
     assert finding["workflow_status"] == "draft"
-    assert _obj(finding["details_json"])["discovered_credential"]["credential_key"] == "leaked-admin-login"
-    assert _obj(finding["details_json"])["discovered_credential"]["session_minted"] is False
+    assert finding["details"]["discovered_credential"]["credential_key"] == "leaked-admin-login"
+    assert finding["details"]["discovered_credential"]["session_minted"] is False
     # Credential row cross-links back to its originating finding via provenance.
     assert _obj(record["provenance_json"])["candidate_finding_slug"] == finding["slug"]
 
@@ -119,8 +119,8 @@ def test_discovered_session_cookie_mints_identity(client, isolate_settings):
     # Candidate finding flagged and marked as session-minting.
     findings = _credential_findings(eng_id)
     assert len(findings) == 1
-    assert _obj(findings[0]["details_json"])["discovered_credential"]["session_minted"] is True
-    assert _obj(findings[0]["details_json"])["discovered_credential"]["minted_identity"] == minted
+    assert findings[0]["details"]["discovered_credential"]["session_minted"] is True
+    assert findings[0]["details"]["discovered_credential"]["minted_identity"] == minted
     assert _obj(record["provenance_json"])["minted_identity"] == minted
 
 
@@ -183,7 +183,7 @@ def test_discovered_bearer_jwt_mints_identity(client, isolate_settings):
     assert identities[minted]["headers"].get("Authorization") == f"Bearer {token}"
     findings = _credential_findings(eng_id)
     assert len(findings) == 1
-    assert _obj(findings[0]["details_json"])["discovered_credential"]["session_minted"] is True
+    assert findings[0]["details"]["discovered_credential"]["session_minted"] is True
 
 
 def test_rerecording_same_credential_no_duplicate(client, isolate_settings):

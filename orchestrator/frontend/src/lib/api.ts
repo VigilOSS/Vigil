@@ -166,9 +166,16 @@ export type AssessmentFindingDetail = AssessmentFinding & {
   defect_family: string;
   root_cause_key: string;
   auth_context: string;
-  details_json: string;
-  provenance_json?: string;
+  // The backend returns these PARSED, under the same names the writer used.
+  // There is no `details_json` / `provenance_json` string twin: emitting both
+  // would leave every reader guessing which one is authoritative.
+  details: FindingDetails;
+  provenance: FindingProvenance;
   code_snapshot_status?: "current" | "stale" | "unbound" | "not_applicable";
+  code_snapshot_status_before?: string;
+  submission_platform?: string;
+  submission_ref?: string;
+  submission_url?: string;
   merged_into_slug?: string | null;
 };
 
@@ -184,6 +191,12 @@ export type AssessmentFindingTransition = {
   to_verification_disposition: string;
   from_severity: string | null;
   to_severity: string;
+  from_canonical_location?: string | null;
+  to_canonical_location?: string | null;
+  details_before_json?: string | null;
+  details_after_json?: string | null;
+  notes_before_json?: string | null;
+  notes_after_json?: string | null;
   reason_code: string;
   reason_text: string;
   artifact_ref: string;
