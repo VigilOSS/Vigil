@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import shlex
 import sys
@@ -136,7 +137,11 @@ def add_required_kali_flags(parser) -> None:
         "--timeout",
         required=True,
         type=int,
-        help="Wall-clock budget in seconds. Suggested baseline: 1800.",
+        help=(
+            "Wall-clock budget in seconds. Suggested baseline: 1800. Must not "
+            f"exceed the caller's own ceiling when {_CALLER_TIMEOUT_ENV} is "
+            "exported — a run that outlives its caller is orphaned, not audited."
+        ),
     )
     parser.add_argument(
         "--force",
@@ -187,6 +192,26 @@ def add_required_kali_flags(parser) -> None:
             "it as the probe's auth_context so cross-identity access-control "
             "(IDOR/BOLA/BFLA) depth is measurable. Omit for anonymous/no "
             "credential injection."
+        ),
+    )
+    parser.add_argument(
+        "--identity-env",
+        dest="identity_env",
+        action="append",
+        default=None,
+        metavar="NAME=IDENTITY",
+        help=(
+            "Export an identity's material into the runtime environment as "
+            "VIGIL_IDENTITY_<NAME>, VIGIL_HEADERS_<NAME> (newline-joined "
+            "'Header: value'), VIGIL_COOKIE_<NAME> and VIGIL_AUTH_<NAME>. "
+            "Repeatable, and the ONLY way to run one command as TWO identities "
+            "— which is what every access-control proof needs. Also the only "
+            "carrier that reaches a shell SCRIPT FILE, where an appended -H "
+            "would become the script's $1. Every named identity is recorded in "
+            "the row's auth_context (sorted, comma-joined), so a two-identity "
+            "proof is credited as one. Example: --identity-env ADMIN=org2_admin "
+            "--identity-env MEMBER=lowpriv, then "
+            "`curl -H \"Cookie: $VIGIL_COOKIE_ADMIN\" ...`."
         ),
     )
     parser.add_argument(
@@ -305,13 +330,14 @@ def kali_args_to_kwargs(args) -> dict[str, Any]:
         "probe_kind": args.probe_kind,
         "phase": args.phase,
         "destructive": bool(getattr(args, "destructive", False)),
-        "timeout": int(args.timeout),
+        "timeout": int(enforce_caller_timeout_ceiling(args.timeout)),
         "agent_name": resolved_agent_name,
         "force": bool(getattr(args, "force", False)),
         "container_name": getattr(args, "container_name", None),
         "identity": getattr(args, "identity", None),
         "identity_scope": getattr(args, "identity_scope", "") or "",
         "identity_target": getattr(args, "identity_target", "") or "",
+        "identity_env": getattr(args, "identity_env", None) or None,
         "rate_override_reason": getattr(args, "rate_override_reason", "") or "",
     }
     if explicit_dir is not None:
@@ -354,6 +380,9 @@ def emit_result(result: KaliResult) -> None:
                 # transparent header / --resolve-pin / exclude-tags injections —
                 # so the operator sees what executed, not just what it typed.
                 "resolved_argv": result.resolved_argv,
+                # What this run can HONESTLY say about ROE attribution-header
+                # compliance — checked, not assumed. See KaliResult.
+                "required_header_status": result.required_header_status,
                 "stdout_preview": result.stdout_preview,
                 "stderr_preview": result.stderr_preview,
             },
@@ -602,6 +631,62 @@ def estimate_list_sweep_seconds(
     return targets * passes * float(per_request_seconds) / effective
 
 
+# The caller's own wall-clock ceiling, exported by the client wrappers
+# ``vigil install`` generates and by ``vigil engagement start``. It exists
+# because ``--timeout`` is a promise only the RECORDER can keep: the docker-exec
+# worker is spawned into its own session, so when the caller kills the recorder
+# first, the worker keeps running against a live tenant with no audit row to
+# finalize it. Sizing every run under the caller's ceiling is what keeps the
+# kill domain and the audit domain the same domain.
+#
+# Deliberately OPT-IN. Inventing a default ceiling would break every legitimate
+# operator-driven long scan, and a wrong ceiling is worse than none.
+_CALLER_TIMEOUT_ENV = "VIGIL_CALLER_TIMEOUT_S"
+
+
+def caller_timeout_ceiling() -> int:
+    """The caller's wall-clock ceiling in seconds, or ``0`` when unset/invalid."""
+    raw = (os.environ.get(_CALLER_TIMEOUT_ENV) or "").strip()
+    if not raw:
+        return 0
+    try:
+        ceiling = int(float(raw))
+    except ValueError:
+        return 0
+    return ceiling if ceiling > 0 else 0
+
+
+def _over_ceiling_message(verb: str, wall: int, ceiling: int, cause: str) -> str:
+    return (
+        f"{verb}: --timeout {wall}s exceeds the caller's own ceiling "
+        f"({_CALLER_TIMEOUT_ENV}={ceiling}s){cause}. A run that outlives its "
+        "caller is killed from OUTSIDE this process: the worker keeps running "
+        "inside the container while its audit row is stranded at "
+        "status=running, and a --destructive run's trapped EXIT restore never "
+        "fires. Size the run under the ceiling, or hand a genuinely long run to "
+        "the operator for `vigil assess kali job start` (dtach-supervised, "
+        "survives caller exit, finalized by `kali sweep-orphans`)."
+    )
+
+
+def enforce_caller_timeout_ceiling(timeout, *, verb: str = "kali"):
+    """Refuse a ``--timeout`` larger than the caller's own ceiling.
+
+    No-op when the ceiling is unset (the default) or the value is unparseable —
+    a unit-test namespace without ``--timeout`` must stay usable.
+    """
+    ceiling = caller_timeout_ceiling()
+    if not ceiling:
+        return timeout
+    try:
+        wall = int(timeout)
+    except (TypeError, ValueError):
+        return timeout
+    if wall <= ceiling:
+        return timeout
+    raise AssessError(_over_ceiling_message(verb, wall, ceiling, ""))
+
+
 def preflight_timeout_guard(
     *,
     verb: str,
@@ -636,6 +721,21 @@ def preflight_timeout_guard(
         f"Raise --timeout to ≥{needed}s, or shrink the run so it finishes in time."
     )
     if auto_raise:
+        ceiling = caller_timeout_ceiling()
+        if ceiling and needed > ceiling:
+            # Auto-raise is boost-only, so past a caller ceiling it does not
+            # rescue the run — it converts a truncated result into an ORPHANED
+            # one, which is strictly worse: the worker outlives the recorder and
+            # the row is stranded. Refuse and name the real remedy.
+            raise AssessError(
+                _over_ceiling_message(
+                    verb,
+                    needed,
+                    ceiling,
+                    f" once raised to fit this run's {kind} internal budget "
+                    f"(≈{needed}s)",
+                )
+            )
         warn(
             f"{verb}: {kind} internal runtime budget ≈ {needed}s exceeds --timeout "
             f"{wall}s — the run would be SIGTERM-killed mid-flight and its truncated "

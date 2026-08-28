@@ -30,7 +30,9 @@ from assess.lib.kali import (
     _resolve_agent_name,
     _scope_version,
     _utcnow_iso,
+    merge_auth_context,
     prepare_execution_command,
+    resolve_identity_env,
 )
 from assess.lib.kali_audit import _enum_reject_message
 from assess.lib.kali_jobs import (
@@ -107,6 +109,19 @@ def register(subparsers) -> None:
         "--identity",
         default=None,
         help="Named engagement identity whose material is injected before the job starts.",
+    )
+    start.add_argument(
+        "--identity-env",
+        dest="identity_env",
+        action="append",
+        default=None,
+        metavar="NAME=IDENTITY",
+        help=(
+            "Export an identity's material into the job's runtime environment "
+            "(VIGIL_IDENTITY_/VIGIL_HEADERS_/VIGIL_COOKIE_/VIGIL_AUTH_<NAME>). "
+            "Repeatable; identical semantics to the synchronous verbs, including "
+            "recording every named identity in the row's auth_context."
+        ),
     )
     start.add_argument(
         "--identity-scope",
@@ -227,6 +242,13 @@ def _run_start(args) -> None:
             "--parent-command-run-id is system-owned for async jobs and cannot be supplied"
         )
     try:
+        identity_env_pairs, identity_env_names = resolve_identity_env(
+            getattr(args, "identity_env", None),
+            engagement_dir=engagement_dir,
+            tool_name=derived_tool_name,
+            cmd=command,
+            identity_scope=getattr(args, "identity_scope", "") or "",
+        )
         auth_context = prepare_execution_command(
             command,
             tool_name=derived_tool_name,
@@ -236,6 +258,7 @@ def _run_start(args) -> None:
             identity_target=getattr(args, "identity_target", "") or "",
             prepared_auth_context=getattr(args, "prepared_auth_context", None),
         )
+        auth_context = merge_auth_context(auth_context, *identity_env_names)
         execution_policy = scope_lib.enforce_execution_policy(
             command,
             tool_name=derived_tool_name,
@@ -300,6 +323,7 @@ def _run_start(args) -> None:
         tool_name=derived_tool_name,
         engagement_dir=engagement_dir,
         config=cfg,
+        env_pairs=identity_env_pairs,
     )
     print(json.dumps(record, indent=2, ensure_ascii=False))
 

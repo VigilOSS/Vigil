@@ -11,11 +11,15 @@ makes it onto the wire at all.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
+from . import scope as scope_lib
 from .audit_enums import (
     PROBE_KIND_ENUM,
     TECHNIQUE_ENUM,
@@ -25,7 +29,11 @@ from .audit_enums import (
 from .client import AssessError, AssessmentClient
 from .scope import execution_policy_notes
 from .config import Config
-from .kali_output import _utcnow_iso
+from .kali_output import (
+    _CURL_NON_ARM_URL_FLAGS,
+    _utcnow_iso,
+    _wrapped_shell_script_index,
+)
 
 
 # Allowed phase enum mirrors orchestrator/backend/app/api/assessment.py
@@ -181,49 +189,248 @@ def _extract_target_host(tool_name: str, cmd: list[str]) -> str:
     return ""
 
 
+# Where a probe's target anchor comes from, and what it is allowed to be.
+#
+# The anchor (host + path + port) feeds THREE consumers with different failure
+# modes: the ``--resolve`` IP pin (which decides where the runtime connects),
+# the identity host scope (which decides whose cookies ride the request), and
+# the auto-emitted probe_run (which decides which app unit earns depth credit).
+# Its predecessor was one loose scan — "the first whitespace-delimited word in
+# argv that starts with http:// or contains a dot" — which meant a `-H 'Origin:
+# https://attacker'` value outranked the real positional URL, a `bash -c` body
+# was invisible because its URL carried a leading quote, and a JWT or a line of
+# Python source parsed as a 300-char "hostname". The rosters and shape checks
+# below are what make the anchor a parse rather than a guess.
+
+# Flags whose VALUE is (or can embed) a URL but is never the transfer target:
+# proxies, referers, request headers, cookies, request bodies, upload/output
+# files. Seeded from ``kali_output._CURL_NON_ARM_URL_FLAGS`` — the same
+# "URL-valued but not a transfer arm" idea — so the two rosters cannot drift.
+# A hazard flag's value is DROPPED, never demoted to a fallback candidate:
+# ``Origin`` is attacker-controlled request content on half the tests run here
+# and must never steer runtime networking, not even as a last resort.
+_NON_TARGET_VALUE_FLAGS: frozenset[str] = _CURL_NON_ARM_URL_FLAGS | frozenset(
+    {
+        "-H", "--header",
+        "-b", "--cookie",
+        "-c", "--cookie-jar",
+        "-d", "--data", "--data-raw", "--data-binary", "--data-ascii",
+        "--data-urlencode", "--url-query",
+        "-F", "--form", "--form-string",
+        "-A", "--user-agent",
+        "-o", "--output",
+        "-w", "--write-out",
+        "-D", "--dump-header",
+        "-T", "--upload-file",
+        "--resolve", "--connect-to",
+    }
+)
+
+# curl-family only. ``-u`` is credentials for curl but THE TARGET URL for httpx,
+# nuclei, sqlmap, katana, ffuf and arjun, so this set must never be applied
+# globally — doing so would un-anchor every arjun run.
+_CURL_ONLY_NON_TARGET_VALUE_FLAGS: frozenset[str] = frozenset(
+    {"-u", "--user", "-K", "--config", "--trace", "--trace-ascii"}
+)
+_CURL_FAMILY_TOOLS: frozenset[str] = frozenset({"curl", "wget"})
+
+# Tools that name their target with a flag rather than a positional argument.
+# These branches are authoritative and never fall through to the generic scan.
+_FLAG_DRIVEN_TARGET_TOOLS: dict[str, tuple[str, ...]] = {
+    "httpx": ("-u", "--url", "--target", "-target"),
+    "nuclei": ("-u", "--url", "--target", "-target"),
+    "sqlmap": ("-u", "--url", "--target", "-target"),
+    "katana": ("-u", "--url", "--target", "-target"),
+    "ffuf": ("-u", "--url"),
+}
+
+# RFC 1035 label + total-length bounds, and the backend's ``target_path`` cap
+# (``ProbeRunRecordRequest.target_path``, max_length=2048). The host bound is
+# deliberately tighter than the backend's 256-char ``target_host`` column: a
+# name longer than 253 octets is not resolvable, so submitting one only ever
+# earns a 422 that discards the whole probe row.
+_HOST_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+_MAX_HOSTNAME_LEN = 253
+MAX_TARGET_PATH_LEN = 2048
+
+
+def _is_ip_literal(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_plausible_host(host: str) -> bool:
+    """True when ``host`` has the shape of something we could connect to.
+
+    The last-line bound on every anchor, whichever branch produced it — an argv
+    "word" is not a host just because a URL parser accepted it. A 332-char
+    session cookie and a line of Python source both used to reach the wire as
+    ``target_host``; the backend refused them on its length cap, and the client
+    swallowed the 422, losing the probe row and silently skipping the depth
+    harness for that run.
+
+    Deliberately permissive about SHAPE — a single-label container/compose alias
+    (``target``) and an IP literal are both real hosts here. It rejects only what
+    cannot be a hostname at all.
+    """
+    if not host or len(host) > _MAX_HOSTNAME_LEN:
+        return False
+    if _is_ip_literal(host):
+        return True
+    return all(
+        _HOST_LABEL_RE.match(label) for label in host.rstrip(".").split(".")
+    )
+
+
+def _looks_like_bare_target(word: str) -> bool:
+    """True when a scheme-less argv word is plausibly ``host[:port][/path]``.
+
+    The strict half of the parse, and the one that matters: a scheme-less word is
+    a GUESS, so it has to look like a real address — an IP literal, a bracketed
+    IPv6, a dotted name ending in a plausible TLD, or a single-label host made
+    concrete by an explicit port (an internal or compose-alias target). The
+    predecessor accepted any non-flag word with a dot before the first ``/``,
+    which is true of a JWT, a base64 blob, and ``requests.get(...)`` alike.
+
+    A scheme-BEARING URL is not a guess and never reaches this gate.
+    """
+    head = word.split("/", 1)[0]
+    if "@" in head:
+        head = head.split("@", 1)[1]
+    if not head:
+        return False
+    if head.startswith("["):
+        end = head.find("]")
+        return end > 1 and _is_ip_literal(head[1:end])
+    host, separator, port = head.rpartition(":")
+    if not separator:
+        host, port = head, ""
+    if not host or (port and not port.isdigit()):
+        return False
+    if _is_ip_literal(host):
+        return True
+    if not _is_plausible_host(host):
+        return False
+    labels = host.rstrip(".").split(".")
+    if len(labels) == 1:
+        return bool(port)
+    tld = labels[-1]
+    return len(tld) >= 2 and (tld.isalpha() or tld.lower().startswith("xn--"))
+
+
+def _flag_value(tokens: list[str], flags: tuple[str, ...]) -> str:
+    """Value of the first occurrence of any flag in ``flags`` (separate or ``=``)."""
+    for idx, token in enumerate(tokens):
+        text = str(token)
+        if text in flags and idx + 1 < len(tokens):
+            return str(tokens[idx + 1])
+        head, separator, attached = text.partition("=")
+        if separator and head in flags:
+            return attached
+    return ""
+
+
+def _target_url_from_tokens(tokens: list[str], *, hazard_flags: frozenset[str]) -> str:
+    """The transfer-target URL in ONE simple command's arguments (program excluded).
+
+    Two ordered passes over the POSITIONAL tokens only: an explicit
+    ``http(s)://`` URL first, then a scheme-less ``host[:port][/path]``. Tokens
+    are never split on whitespace — a single argv token that reads
+    ``Origin: https://x`` is one header value, never a target.
+    """
+    candidates: list[str] = []
+    skip_next = False
+    for raw in tokens:
+        token = str(raw)
+        if skip_next:
+            skip_next = False
+            continue
+        if token.startswith("-") and token != "-":
+            head, separator, attached = token.partition("=")
+            if head in hazard_flags:
+                # ``--header=X`` carries its value inline; ``--header X`` does not.
+                skip_next = not separator
+                continue
+            if (
+                not separator
+                and not token.startswith("--")
+                and token[:2] in hazard_flags
+            ):
+                continue  # curl's glued short form (``-eURL``, ``-d@file``)
+            if separator and attached:
+                candidates.append(attached)  # ``--url=https://x``
+            continue
+        candidates.append(token)
+    url = next(
+        (c for c in candidates if c.lower().startswith(("http://", "https://"))),
+        "",
+    )
+    if url:
+        return url
+    return next((c for c in candidates if _looks_like_bare_target(c)), "")
+
+
+def _extract_target_url(tool_name: str, cmd: list[str]) -> str:
+    """The raw target-URL token of a kali argv, or ``""`` for list-mode shapes.
+
+    Single source for "which token is the target", shared by
+    :func:`_extract_target_anchor` and the ``--resolve`` pin's scheme-derived
+    default port, so the two cannot disagree about what is being probed.
+
+    A shell wrapper is LEXED into simple commands, not whitespace-split:
+    ``bash -c "curl -s 'https://api.example.com/v1/x'"`` is ONE argv token whose
+    URL carries a leading quote, so the naive scan found no host — which is why
+    ``--identity`` refused to run on the documented ``bash -c`` escape hatch
+    (the credential was fine; the request host was empty). A multi-command body
+    anchors on the first sub-command that names a target.
+    """
+    if not cmd:
+        return ""
+    tool = (tool_name or "").lower()
+    hazard = _NON_TARGET_VALUE_FLAGS
+    if tool in _CURL_FAMILY_TOOLS:
+        hazard = hazard | _CURL_ONLY_NON_TARGET_VALUE_FLAGS
+
+    script_idx = _wrapped_shell_script_index(cmd)
+    if script_idx is not None and script_idx < len(cmd):
+        segments, ambiguous = scope_lib._shell_command_segments(str(cmd[script_idx]))
+        if ambiguous:
+            # An unbalanced quote means we cannot reason about token boundaries;
+            # an unanchored probe is honest, a mis-anchored one is not.
+            return ""
+    else:
+        segments = [[str(token) for token in cmd]]
+
+    target_flags = _FLAG_DRIVEN_TARGET_TOOLS.get(tool)
+    for segment in segments:
+        args = segment[1:]
+        if target_flags is not None:
+            url = _flag_value(args, target_flags)
+        else:
+            url = _target_url_from_tokens(args, hazard_flags=hazard)
+        if url:
+            return url
+    return ""
+
+
 def _extract_target_anchor(tool_name: str, cmd: list[str]) -> tuple[str, str, int | None]:
     """Extract ``(host, path, port)`` of a probe's target URL from a kali argv.
 
     The depth ledger maps a null-FK probe_run to an app unit by host + PATH
     containment, so a probe against ``/api/...`` MUST carry its path or it can
     never cover that unit and the terminal backstop keeps blocking despite real
-    tests. Unlike ``_extract_target_host`` (host only), this returns
-    the path and port too, and also handles the raw ``kali exec curl <url>``
-    fallback (a positional URL token), which the host-only switch missed.
+    tests. Unlike ``_extract_target_host`` (host only), this returns the path and
+    port too, and also handles the raw ``kali exec curl <url>`` fallback (a
+    positional URL token), which the host-only switch missed.
 
-    Returns ``("", "", None)`` for list-mode / unrecognized argv shapes.
+    Returns ``("", "", None)`` for list-mode / unrecognized argv shapes, and for
+    anything whose parsed host is not a plausible hostname — an honest UNKNOWN
+    anchor beats one derived from a header value or a blob of program source.
     """
-    from urllib.parse import urlsplit
-
-    if not cmd:
-        return "", "", None
-    tool = (tool_name or "").lower()
-
-    def _flag_value(flags: tuple[str, ...]) -> str:
-        for idx, token in enumerate(cmd):
-            if token in flags and idx + 1 < len(cmd):
-                return cmd[idx + 1]
-        return ""
-
-    url = ""
-    if tool in ("httpx", "nuclei", "sqlmap", "katana"):
-        url = _flag_value(("-u", "--url", "--target", "-target"))
-    elif tool == "ffuf":
-        raw = _flag_value(("-u", "--url"))
-        url = raw.split("FUZZ", 1)[0] if raw else ""
-    else:
-        words = [w for token in cmd[1:] for w in str(token).split()]
-        url = next((w for w in words if w.startswith(("http://", "https://"))), "")
-        if not url:
-            url = next((w for w in words if "://" in w), "")
-        if not url:
-            for word in words:
-                if word.startswith("-"):
-                    continue
-                head = word.split("/", 1)[0]
-                if word.startswith("[") or "." in head:
-                    url = word
-                    break
+    url = _extract_target_url(tool_name, cmd)
     if not url:
         return "", "", None
     url = url.split("FUZZ", 1)[0]
@@ -235,7 +442,9 @@ def _extract_target_anchor(tool_name: str, cmd: list[str]) -> tuple[str, str, in
         port = split.port
     except ValueError:
         return "", "", None
-    return host, path, port
+    if not _is_plausible_host(host):
+        return "", "", None
+    return host, path[:MAX_TARGET_PATH_LEN], port
 
 
 def _validate_inputs(

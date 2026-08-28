@@ -10,8 +10,11 @@ SOURCE_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 # Usage:
 #   render-operator-prompts.sh [MODE] [OUTPUT_DIR] [--type red|blue]
 #
-# MODE: repo | claude-install | codex-install | check | render-check
+# MODE: repo | claude-install | codex-install | check | render-check | source-sha
 #   - `check` and `render-check` are aliases (CI/tests historically pass `check`).
+#   - `source-sha` prints the current prompt-source digest for --type and exits;
+#     it is the value a consumer compares an already-rendered copy's stamp
+#     against (see "Prompt stamp" below).
 #
 # --type: red (default) | blue
 #   - red  → uses agent/operator-core.md + injected red roster (unchanged
@@ -34,10 +37,11 @@ TYPE=""
 TYPE_EXPLICIT=0
 
 usage() {
-  echo "Usage: $0 [repo|claude-install|codex-install|check|render-check] [output-dir] [--type red|blue]" >&2
+  echo "Usage: $0 [repo|claude-install|codex-install|check|render-check|source-sha] [output-dir] [--type red|blue]" >&2
   echo "" >&2
   echo "  check/render-check  Render to a temp dir and diff against existing files. Exits 1 if any drift." >&2
   echo "                      With no --type, runs BOTH red and blue checks." >&2
+  echo "  source-sha          Print the current prompt-source digest for --type and exit." >&2
 }
 
 while [[ $# -gt 0 ]]; do
@@ -141,6 +145,91 @@ BLUE_AGENT_NAMES=(
   osint-analyst
   report-writer
 )
+
+# -----------------------------------------------------------------------------
+# Prompt stamp
+# -----------------------------------------------------------------------------
+# A render written OUTSIDE the source tree (an engagement directory, an install
+# root) is a copy nothing ever re-renders: the operator reading it has no way to
+# tell it is weeks behind the prompt it should be reading. Every such mirror
+# therefore carries
+#
+#   <!-- vigil-prompt-stamp: <source-sha> <iso8601> -->      (md/html files)
+#   # vigil-prompt-stamp: <source-sha> <iso8601>             (toml/yaml files)
+#
+# right below the GENERATED-FILE header. `<source-sha>` is the digest this
+# script prints for `source-sha` mode, so a consumer compares
+# `<copy>` stamp vs `render-operator-prompts.sh source-sha --type <t>` and warns
+# on a mismatch — no second copy of the digest rule anywhere.
+#
+# Renders INTO the source tree are deliberately NOT stamped: those artifacts are
+# committed and already guarded byte-for-byte by render-check, so a wall-clock
+# line would churn every tracked wrapper on every render while adding nothing.
+# render-check itself compares modulo the stamp (it renders into a temp dir), so
+# a stamped copy never registers as prompt drift.
+STAMP_MARKER="vigil-prompt-stamp"
+STAMP_ENABLED=1
+if [[ "$(cd "$OUTPUT_DIR" 2>/dev/null && pwd)" == "$SOURCE_DIR" ]]; then
+  STAMP_ENABLED=0
+fi
+# One timestamp for the whole render, so every mirror written by one invocation
+# agrees on when it was produced.
+RENDER_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+# Cached per $TYPE — render-check flips $TYPE between the red and blue passes.
+SOURCE_SHA_CACHE=""
+SOURCE_SHA_CACHE_TYPE=""
+
+sha256_stdin() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum
+  else
+    shasum -a 256
+  fi | awk '{ print $1 }'
+}
+
+# Digest of everything that determines the render for the current $TYPE: the
+# renderer itself (rosters, descriptions, boilerplate), the operator core, and
+# every role source in roster order. Content-addressed rather than git-derived
+# so it also works from an install root (not a checkout) and still moves when a
+# prompt is edited but not yet committed.
+source_stamp_sha() {
+  if [[ "$SOURCE_SHA_CACHE_TYPE" != "$TYPE" ]]; then
+    local roster=() core agent_name
+    if [[ "$TYPE" == "blue" ]]; then
+      roster=("${BLUE_AGENT_NAMES[@]}")
+      core="$CORE_BLUE_FILE"
+    else
+      roster=("${AGENT_NAMES[@]}")
+      core="$CORE_FILE"
+    fi
+    SOURCE_SHA_CACHE=$(
+      {
+        cat "$SCRIPT_DIR/${BASH_SOURCE[0]##*/}"
+        cat "$core"
+        for agent_name in "${roster[@]}"; do
+          if [[ -f "$SOURCE_DIR/agents/$agent_name.md" ]]; then
+            cat "$SOURCE_DIR/agents/$agent_name.md"
+          fi
+        done
+      } | sha256_stdin
+    )
+    SOURCE_SHA_CACHE_TYPE="$TYPE"
+  fi
+  printf '%s\n' "$SOURCE_SHA_CACHE"
+}
+
+# Emit the stamp line in $1 comment syntax ("md" or "hash"), or nothing at all
+# when this render targets the source tree.
+render_stamp() {
+  [[ "$STAMP_ENABLED" -eq 1 ]] || return 0
+  local sha
+  sha=$(source_stamp_sha)
+  if [[ "$1" == "hash" ]]; then
+    printf '# %s: %s %s\n' "$STAMP_MARKER" "$sha" "$RENDER_TIMESTAMP"
+  else
+    printf '<!-- %s: %s %s -->\n' "$STAMP_MARKER" "$sha" "$RENDER_TIMESTAMP"
+  fi
+}
 
 agent_description() {
   case "$1" in
@@ -360,8 +449,9 @@ render_operator_prompt() {
 <!-- GENERATED FILE — DO NOT EDIT. -->
 <!-- Source: agent/operator-core.md (+ agent/agents/*.md for embedded specialist text) -->
 <!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
-
 EOF
+    render_stamp md
+    printf '\n'
     render_specialist_stop_sign
     cat <<'EOF'
 
@@ -404,8 +494,9 @@ render_operator_prompt_blue() {
 <!-- GENERATED FILE — DO NOT EDIT. -->
 <!-- Source: agent/operator-core-blue.md (+ agent/agents/*.md for embedded specialist text) -->
 <!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo --type blue -->
-
 EOF
+    render_stamp md
+    printf '\n'
     render_specialist_stop_sign
     cat <<'EOF'
 
@@ -429,8 +520,9 @@ render_claude() {
 <!-- This file is intentionally a thin pointer to AGENTS.md so Claude Code -->
 <!-- does not load the same operator prompt twice. -->
 <!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
-
 EOF
+    render_stamp md
+    printf '\n'
     render_specialist_stop_sign
     cat <<'EOF'
 
@@ -465,7 +557,8 @@ render_claude_wrapper() {
   mkdir -p "$(dirname "$out")"
 
   if [[ "$agent_name" == "operator" ]]; then
-    cat > "$out" <<'EOF'
+    {
+      cat <<'EOF'
 ---
 name: operator
 description: Lead red team operator. Drives pentest methodology, coordinates phases, and manages state.
@@ -474,12 +567,16 @@ description: Lead red team operator. Drives pentest methodology, coordinates pha
 <!-- GENERATED FILE — DO NOT EDIT. -->
 <!-- Source: agent/agents/operator.md -->
 <!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
+EOF
+      render_stamp md
+      cat <<'EOF'
 
 You are the lead red team operator.
 
 Load and follow the complete operator instructions from `AGENTS.md` in the project root.
 This wrapper exists only so Claude Code can expose an `operator` agent entrypoint without duplicating prompt text.
 EOF
+    } > "$out"
     return
   fi
 
@@ -493,8 +590,9 @@ description: $description
 <!-- GENERATED FILE — DO NOT EDIT. -->
 <!-- Source: agent/agents/$agent_name.md -->
 <!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
-
 EOF
+    render_stamp md
+    printf '\n'
     agent_prompt_body "$agent_name"
   } > "$out"
   perl -0pi -e 's/\n+\z/\n/' "$out"
@@ -513,10 +611,14 @@ render_codex_wrapper() {
   mkdir -p "$(dirname "$out")"
 
   if [[ "$agent_name" == "operator" ]]; then
-    cat > "$out" <<'EOF'
+    {
+      cat <<'EOF'
 # GENERATED FILE — DO NOT EDIT.
 # Source: agent/agents/operator.md
 # Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo
+EOF
+      render_stamp hash
+      cat <<'EOF'
 
 name = "operator"
 description = "Lead red team operator. Drives methodology, coordinates phases, and manages state."
@@ -526,6 +628,7 @@ Load and follow the complete operator instructions from AGENTS.md in the project
 This wrapper exists only so Codex can expose an operator agent entrypoint without duplicating prompt text.
 """
 EOF
+    } > "$out"
     return
   fi
 
@@ -534,6 +637,9 @@ EOF
 # GENERATED FILE — DO NOT EDIT.
 # Source: agent/agents/$agent_name.md
 # Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo
+EOF
+    render_stamp hash
+    cat <<EOF
 
 name = "$agent_name"
 description = "$description"
@@ -579,7 +685,8 @@ render_one_opencode_wrapper() {
   # `model` is pinned on EVERY role because OpenCode subagents otherwise inherit
   # the invoking primary's model, defeating routing.
   if [[ "$agent_name" == "operator" ]]; then
-    cat > "$out" <<EOF
+    {
+      cat <<EOF
 ---
 description: Lead red team operator. Drives pentest methodology, coordinates phases, and manages state.$desc_suffix
 mode: primary
@@ -589,12 +696,16 @@ model: $model
 <!-- GENERATED FILE — DO NOT EDIT. -->
 <!-- Source: agent/agents/operator.md -->
 <!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
+EOF
+      render_stamp md
+      cat <<EOF
 
 You are the lead red team operator.
 
 Load and follow the complete operator instructions from \`AGENTS.md\` in the project root.
 This wrapper exists only so OpenCode can expose an \`operator\` agent entrypoint without duplicating prompt text.
 EOF
+    } > "$out"
     return
   fi
 
@@ -609,8 +720,9 @@ model: $model
 <!-- GENERATED FILE — DO NOT EDIT. -->
 <!-- Source: agent/agents/$agent_name.md -->
 <!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
-
 EOF
+    render_stamp md
+    printf '\n'
     agent_prompt_body "$agent_name"
   } > "$out"
   perl -0pi -e 's/\n+\z/\n/' "$out"
@@ -660,6 +772,9 @@ render_goose_recipe() {
 # GENERATED FILE — DO NOT EDIT.
 # Source: agent/agents/$agent_name.md
 # Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo
+EOF
+    render_stamp hash
+    cat <<EOF
 version: "1.0.0"
 title: $agent_name
 description: "$description_yaml"
@@ -715,6 +830,25 @@ blue_sources_ready() {
   return 0
 }
 
+# Drift comparison ignores the prompt stamp: it is provenance metadata (source
+# digest + render time), not prompt content, so a differing or absent stamp must
+# never read as prompt drift. Everything else is still compared byte-for-byte.
+strip_stamp() {
+  grep -v "$STAMP_MARKER" "$1" || true
+}
+
+# 0 (true) when the two rendered files differ in prompt content, or either is
+# missing — the caller reports that as drift, matching the old `diff -q` contract.
+prompt_files_differ() {
+  [[ -f "$1" && -f "$2" ]] || return 0
+  ! diff -q <(strip_stamp "$1") <(strip_stamp "$2") >/dev/null 2>&1
+}
+
+# Print the content diff for a drifting pair (stamp lines excluded, as above).
+print_prompt_diff() {
+  diff -u <(strip_stamp "$1") <(strip_stamp "$2") >&2 || true
+}
+
 # Inner render-check for a single type. Renders into a fresh temp dir, diffs
 # against the committed files under $source_output_dir, and returns 0 if
 # clean / 1 if drift. Resets OUTPUT_DIR-derived paths back to the caller's
@@ -754,9 +888,9 @@ check_render_one() {
     check_files=(CLAUDE.md AGENTS.md)
   fi
   for f in ${check_files[@]+"${check_files[@]}"}; do
-    if ! diff -q "$source_output_dir/$f" "$tmp_dir/$f" >/dev/null 2>&1; then
+    if prompt_files_differ "$source_output_dir/$f" "$tmp_dir/$f"; then
       printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$f" >&2
-      diff -u "$source_output_dir/$f" "$tmp_dir/$f" >&2 || true
+      print_prompt_diff "$source_output_dir/$f" "$tmp_dir/$f"
       drift=1
     fi
   done
@@ -774,25 +908,25 @@ check_render_one() {
     if [[ ! -f "$target_claude" ]]; then
       printf 'DRIFT (%s): %s missing — expected rendered wrapper not present in repo\n' "$check_type" "$claude_rel" >&2
       drift=1
-    elif ! diff -q "$target_claude" "$tmp_dir/$claude_rel" >/dev/null 2>&1; then
+    elif prompt_files_differ "$target_claude" "$tmp_dir/$claude_rel"; then
       printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$claude_rel" >&2
-      diff -u "$target_claude" "$tmp_dir/$claude_rel" >&2 || true
+      print_prompt_diff "$target_claude" "$tmp_dir/$claude_rel"
       drift=1
     fi
     if [[ ! -f "$target_codex" ]]; then
       printf 'DRIFT (%s): %s missing — expected rendered wrapper not present in repo\n' "$check_type" "$codex_rel" >&2
       drift=1
-    elif ! diff -q "$target_codex" "$tmp_dir/$codex_rel" >/dev/null 2>&1; then
+    elif prompt_files_differ "$target_codex" "$tmp_dir/$codex_rel"; then
       printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$codex_rel" >&2
-      diff -u "$target_codex" "$tmp_dir/$codex_rel" >&2 || true
+      print_prompt_diff "$target_codex" "$tmp_dir/$codex_rel"
       drift=1
     fi
     if [[ ! -f "$target_opencode" ]]; then
       printf 'DRIFT (%s): %s missing — expected rendered wrapper not present in repo\n' "$check_type" "$opencode_rel" >&2
       drift=1
-    elif ! diff -q "$target_opencode" "$tmp_dir/$opencode_rel" >/dev/null 2>&1; then
+    elif prompt_files_differ "$target_opencode" "$tmp_dir/$opencode_rel"; then
       printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$opencode_rel" >&2
-      diff -u "$target_opencode" "$tmp_dir/$opencode_rel" >&2 || true
+      print_prompt_diff "$target_opencode" "$tmp_dir/$opencode_rel"
       drift=1
     fi
     # OpenCode-only opposite-tier variant sibling (fast+deep pair). No
@@ -806,9 +940,9 @@ check_render_one() {
     if [[ ! -f "$target_opencode_variant" ]]; then
       printf 'DRIFT (%s): %s missing — expected rendered wrapper not present in repo\n' "$check_type" "$opencode_variant_rel" >&2
       drift=1
-    elif ! diff -q "$target_opencode_variant" "$tmp_dir/$opencode_variant_rel" >/dev/null 2>&1; then
+    elif prompt_files_differ "$target_opencode_variant" "$tmp_dir/$opencode_variant_rel"; then
       printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$opencode_variant_rel" >&2
-      diff -u "$target_opencode_variant" "$tmp_dir/$opencode_variant_rel" >&2 || true
+      print_prompt_diff "$target_opencode_variant" "$tmp_dir/$opencode_variant_rel"
       drift=1
     fi
     # Goose specialist recipe. No operator recipe exists by design (operator prompt
@@ -819,9 +953,9 @@ check_render_one() {
       if [[ ! -f "$target_goose" ]]; then
         printf 'DRIFT (%s): %s missing — expected rendered recipe not present in repo\n' "$check_type" "$goose_rel" >&2
         drift=1
-      elif ! diff -q "$target_goose" "$tmp_dir/$goose_rel" >/dev/null 2>&1; then
+      elif prompt_files_differ "$target_goose" "$tmp_dir/$goose_rel"; then
         printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$goose_rel" >&2
-        diff -u "$target_goose" "$tmp_dir/$goose_rel" >&2 || true
+        print_prompt_diff "$target_goose" "$tmp_dir/$goose_rel"
         drift=1
       fi
     fi
@@ -919,6 +1053,10 @@ case "$MODE" in
     ;;
   check|render-check)
     check_render
+    ;;
+  source-sha)
+    # The value a rendered copy's `vigil-prompt-stamp` is compared against.
+    source_stamp_sha
     ;;
   *)
     usage

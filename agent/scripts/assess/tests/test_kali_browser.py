@@ -923,6 +923,124 @@ def test_run_refuses_requested_identity_without_engagement_context():
 
 
 # --------------------------------------------------------------------------- #
+# artifact paths — the shared kali path convention
+# --------------------------------------------------------------------------- #
+
+# (args attribute, execution-plan key, the field name the error must name)
+_OUTPUT_PATH_FLAGS = (
+    ("screenshot", "screenshot", "screenshot"),
+    ("dom_out", "dom_path", "dom-out"),
+    ("har_out", "har_out", "har-out"),
+    ("body_dir", "body_dir", "body-dir"),
+)
+
+# Rejected for every path flag: another engagement's tree, an unrelated absolute
+# path, a traversal, and a prefix with nothing after it. Containment is the point
+# of _artifact_path — accepting the container form must not widen it.
+_REJECTED_PATHS = (
+    "/engagements/other-eng/x",
+    "/etc/passwd",
+    "../x",
+    "/engagements/eng/",
+)
+
+
+@pytest.mark.parametrize(
+    "attr, plan_key", [(attr, key) for attr, key, _field in _OUTPUT_PATH_FLAGS]
+)
+def test_container_absolute_artifact_path_matches_the_relative_form(
+    tmp_path, monkeypatch, attr, plan_key
+):
+    """`/engagements/<key>/scans/x` and a bare `scans/x` resolve identically.
+
+    The container-absolute form is what the tool itself prints and what every
+    other kali verb accepts (``kali_cli._anchor_list_path``); browser used to
+    reject it outright, inverting the convention for this one verb.
+    """
+    eng_dir = tmp_path / "eng"
+    _write_scope(eng_dir)
+    relative = _capture_run(
+        monkeypatch, _browser_args(engagement_dir=str(eng_dir), **{attr: "scans/x"})
+    )
+    absolute = _capture_run(
+        monkeypatch,
+        _browser_args(engagement_dir=str(eng_dir), **{attr: "/engagements/eng/scans/x"}),
+    )
+    assert json.loads(relative["cmd"][3])[plan_key] == "scans/x"
+    assert json.loads(absolute["cmd"][3])[plan_key] == "scans/x"
+
+
+@pytest.mark.parametrize("bad", _REJECTED_PATHS)
+@pytest.mark.parametrize(
+    "attr, field", [(attr, field) for attr, _key, field in _OUTPUT_PATH_FLAGS]
+)
+def test_artifact_path_rejection_names_its_own_flag(
+    tmp_path, monkeypatch, attr, field, bad
+):
+    eng_dir = tmp_path / "eng"
+    _write_scope(eng_dir)
+    with pytest.raises(AssessError) as excinfo:
+        _capture_run(
+            monkeypatch, _browser_args(engagement_dir=str(eng_dir), **{attr: bad})
+        )
+    message = str(excinfo.value)
+    assert message.startswith(f"browser {field} must be engagement-relative")
+    assert "/engagements/eng/" in message  # the accepted container form is named
+    assert repr(bad) in message
+
+
+def test_storage_state_accepts_the_container_absolute_form(tmp_path, monkeypatch):
+    eng_dir = tmp_path / "eng"
+    _write_scope(eng_dir)
+    artifact = eng_dir / "tools" / "auth" / "browser-state.json"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(
+        json.dumps(
+            {"cookies": [], "origins": [{"origin": "https://api.example.com"}]}
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        kb,
+        "prepare_browser_identity_material",
+        lambda *_a, **_k: (
+            "member",
+            {"headers": {}, "cookies": [], "storage_state": None},
+        ),
+    )
+    cap = _capture_run(
+        monkeypatch,
+        _browser_args(
+            engagement_dir=str(eng_dir),
+            identity="member",
+            storage_state="/engagements/eng/tools/auth/browser-state.json",
+        ),
+    )
+    config = json.loads(cap["cmd"][3])
+    assert config["storage_state"]["origins"][0]["origin"] == "https://api.example.com"
+
+
+@pytest.mark.parametrize("bad", _REJECTED_PATHS)
+def test_storage_state_rejection_names_its_own_flag(tmp_path, monkeypatch, bad):
+    eng_dir = tmp_path / "eng"
+    _write_scope(eng_dir)
+    with pytest.raises(AssessError) as excinfo:
+        kb.run(_browser_args(engagement_dir=str(eng_dir), storage_state=bad))
+    message = str(excinfo.value)
+    assert message.startswith("browser storage-state must be engagement-relative")
+    assert "/engagements/eng/" in message
+    assert repr(bad) in message
+
+
+def test_artifact_path_error_is_honest_when_the_engagement_is_unresolvable():
+    """With no engagement there is no key to strip, so the message says so
+    rather than naming a key it could not resolve."""
+    with pytest.raises(AssessError) as excinfo:
+        kb.run(_browser_args(engagement_dir=None, screenshot="/engagements/eng/x.png"))
+    assert "/engagements/<this-key>/" in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------- #
 # contract discoverability
 # --------------------------------------------------------------------------- #
 

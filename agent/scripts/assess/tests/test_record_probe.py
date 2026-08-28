@@ -413,6 +413,60 @@ def test_record_probe_input_slot_bad_prefix_did_you_mean(tmp_path, monkeypatch, 
     assert fake.posts == []
 
 
+@pytest.mark.parametrize(
+    "slot",
+    ["js:URL.createObjectURL", "dom:#preview", "storage:cart", "postmessage:https://cdn.example.com"],
+)
+def test_record_probe_accepts_browser_instrumentation_slots(
+    tmp_path, monkeypatch, capsys, slot
+):
+    """A browser/JS-instrumentation observation has no network slot.
+
+    Before these classes existed the operator had to file such a probe under
+    `endpoint:`, which made the per-input coverage grid assert something false.
+    The value round-trips VERBATIM: the backend keys the grid on the full
+    `input_slot` string, so `js:URL.createObjectURL` is its own cell.
+    """
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(_probe_argv(**{"--input-slot": slot}), str(tmp_path))
+    record_probe.run(args)
+    capsys.readouterr()
+
+    _endpoint, payload = fake.posts[0]
+    assert payload["input_slot"] == slot
+
+
+def test_record_probe_still_rejects_a_genuinely_unknown_slot_class(
+    tmp_path, monkeypatch, capsys
+):
+    """The set stays CLOSED — widening it for browser slots must not open it."""
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(_probe_argv(**{"--input-slot": "frobnicate:x"}), str(tmp_path))
+    with pytest.raises(SystemExit):
+        record_probe.run(args)
+    err = capsys.readouterr().err
+    assert "'frobnicate' is not a known slot class" in err
+    assert "js|dom|storage|postmessage" in err  # the new classes are advertised
+    assert "See: vigil assess contract record-probe" in err
+    assert fake.posts == []
+
+
+def test_record_probe_new_slot_class_typo_gets_did_you_mean(
+    tmp_path, monkeypatch, capsys
+):
+    """The did-you-mean suggester covers the new classes too, not just the old ones."""
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(_probe_argv(**{"--input-slot": "storag:cart"}), str(tmp_path))
+    with pytest.raises(SystemExit):
+        record_probe.run(args)
+    err = capsys.readouterr().err
+    assert "Did you mean: storage?" in err
+    assert fake.posts == []
+
+
 def test_record_probe_rejects_missing_auth_context(tmp_path, monkeypatch, capsys):
     fake = _FakeClient()
     _install(monkeypatch, tmp_path, fake)

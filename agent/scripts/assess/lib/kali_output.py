@@ -65,6 +65,19 @@ class KaliResult:
     # can diverge, and that gap is the most common source of "why did this probe
     # behave unexpectedly". Empty list only when a caller never populates it.
     resolved_argv: list[str] = dataclasses.field(default_factory=list)
+    # ROE attribution-header compliance for THIS run, so the record STATES what
+    # was checked instead of leaving it assumed. One of:
+    #   ``none_required``      — the program declares no required_headers;
+    #   ``injected``/``noop``  — the headers are on the argv (or already were);
+    #   ``self_attributed``    — the tool applies them itself (the browser verb);
+    #   ``skipped``            — a passive/DNS/L3-L4 tool that sends no HTTP to
+    #                            the in-scope target, so none can ride;
+    #   ``verified_in_script`` — a script FILE, whose text references every
+    #                            required header (a text scan, not a proof —
+    #                            see ``kali._script_references_required_headers``);
+    #   ``warned``             — an unclassifiable tool with no script to read;
+    #                            the run proceeded unattributed.
+    required_header_status: str = "none_required"
 
 
 # --------------------------------------------------------------------------- #
@@ -413,8 +426,14 @@ def _strip_leading_header_block(text: str) -> str:
     return stripped[match.end():] if match else text
 
 
-def _extract_http_status(body: str, headers: Optional[dict]) -> int | None:
-    """Best-effort HTTP status for the generic-shape pass.
+def extract_http_status(body: str, headers: Optional[dict]) -> int | None:
+    """Best-effort HTTP status from a finished probe's own output.
+
+    Public because it answers a question the audit row could not: a curl that
+    fetched a 404 exits 0, so ``success``/``return_code`` alone report a
+    complete exchange and say nothing about what came back. Paired with
+    :func:`extract_probe_response_headers` it recovers the HTTP verdict for the
+    WAF guard AND for the auto-emitted probe_run.
 
     Reads an explicit status off a ``headers`` mapping (``status`` /
     ``http_status`` / ``:status`` / ``status_code``) first, then falls back to a
@@ -614,7 +633,7 @@ def detect_waf_challenge(
     # The shape pass measures the real BODY (curl ``-i`` header block stripped) and
     # uses the best-effort status from the threaded headers or a leading HTTP line.
     body = _strip_leading_header_block(raw)
-    status = _extract_http_status(raw, headers)
+    status = extract_http_status(raw, headers)
     is_shape, shape_detail = _looks_like_generic_challenge(
         body, header_text.lower(), status
     )
@@ -1276,6 +1295,42 @@ def shell_script_file_argv(cmd: list[str]) -> str:
     for token in effective[1:]:
         if not token.startswith("-"):
             return token
+    return ""
+
+
+# Interpreter heads whose first non-flag argument is a SCRIPT FILE, not a target.
+# Same argv shape as ``bash poc.sh``: there is no request on the command line to
+# rewrite, so an appended ``-H`` lands on the interpreter as ``sys.argv[1]``.
+_SCRIPT_INTERPRETERS = frozenset(
+    {"python", "python3", "perl", "ruby", "node", "nodejs", "php"}
+)
+
+
+def interpreter_script_argv(cmd: list[str]) -> str:
+    """The script path when ``cmd`` runs a SCRIPT FILE, else ``""``.
+
+    A superset of :func:`shell_script_file_argv` that also covers the language
+    interpreters, because ROE attribution is a property of the REQUESTS a run
+    makes and ``python3 probe.py`` makes exactly the same requests ``bash
+    probe.sh`` does. Kept separate from the shell-only helper, whose message
+    ("re-shape it as ``bash -c``") is advice only a shell invocation can take.
+    """
+    shell = shell_script_file_argv(cmd)
+    if shell:
+        return shell
+    effective = scope_lib._unwrap_launcher_argv([str(token) for token in cmd])
+    if not effective:
+        return ""
+    head = os.path.basename(str(effective[0])).lower()
+    if head not in _SCRIPT_INTERPRETERS:
+        return ""
+    for index, token in enumerate(effective[1:]):
+        if token.startswith("-"):
+            # ``-c <program-text>`` is source on the command line, not a file.
+            if token == "-c":
+                return ""
+            continue
+        return effective[1 + index]
     return ""
 
 

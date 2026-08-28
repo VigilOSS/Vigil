@@ -133,6 +133,61 @@ def test_apply_resolve_pin_distributes_multi_address_hosts(monkeypatch):
     assert cmd[cmd.index("--resolve") + 1] == "example.com:443:203.0.113.12"
 
 
+def test_resolve_pin_ignores_origin_header_host(monkeypatch):
+    """The pin must follow the REQUEST URL, never a header value.
+
+    ``Origin``/``Referer`` are attacker-controlled content on CORS/CSRF work, and
+    the pin decides where the runtime actually connects. The positional URL here
+    is LAST in argv, so a positional scan is not enough on its own — the header
+    values have to be skipped."""
+    monkeypatch.setattr(kali_resolve, "resolve_host_ips", lambda _h: ["203.0.113.7"])
+    cmd = [
+        "curl",
+        "-sS",
+        "-H",
+        "Origin: https://attacker.example.com",
+        "-H",
+        "Referer: https://attacker.example.com/x",
+        "https://api.target.example.net:8443/v1/orders",
+    ]
+
+    pinned = kali_resolve.apply_resolve_pin(
+        cmd, "curl", runtime=_docker_desktop(), ips=["203.0.113.7"]
+    )
+
+    assert pinned == "203.0.113.7"
+    assert cmd[cmd.index("--resolve") + 1] == (
+        "api.target.example.net:8443:203.0.113.7"
+    )
+
+
+def test_resolve_pin_is_a_noop_when_only_a_header_names_a_host(monkeypatch):
+    """No positional URL, no pin. Pinning off the header would point the runtime
+    at the attacker's host to run the operator's probe."""
+    monkeypatch.setattr(kali_resolve, "resolve_host_ips", lambda _h: ["203.0.113.7"])
+    cmd = ["curl", "-sS", "-H", "Origin: https://attacker.example.com"]
+
+    pinned = kali_resolve.apply_resolve_pin(
+        cmd, "curl", runtime=_docker_desktop(), ips=["203.0.113.7"]
+    )
+
+    assert pinned is None
+    assert "--resolve" not in cmd
+
+
+def test_resolve_pin_reaches_a_shell_wrapped_curl(monkeypatch):
+    """``bash -c '<curl>'`` is the documented escape hatch; its URL lives inside a
+    single argv token, which the pre-lexing scan could not see."""
+    monkeypatch.setattr(kali_resolve, "resolve_host_ips", lambda _h: ["203.0.113.8"])
+    cmd = ["bash", "-c", "curl -s 'https://api.example.com/v1/x'"]
+
+    assert kali_resolve.target_host_port("curl", cmd) == ("api.example.com", 443)
+    # The shell argv itself takes no --resolve (bash is not in RESOLVE_PIN_TOOLS),
+    # so the pin stays a no-op — but the HOST is now known, which is what the
+    # identity host scope needs.
+    assert kali_resolve.apply_resolve_pin(cmd, "curl", runtime=_docker_desktop()) is None
+
+
 # --------------------------------------------------------------------------- #
 # I-10 — ffuf takes no --resolve pin: must be OUT of RESOLVE_PIN_TOOLS.
 # --------------------------------------------------------------------------- #

@@ -46,7 +46,7 @@ import socket
 import sys
 
 from . import runtime_route
-from .kali_audit import _extract_target_anchor
+from .kali_audit import _extract_target_anchor, _extract_target_url
 
 # Tools whose HTTP request honors a ``--resolve host:port:ip`` pin with curl's
 # syntax. ONLY curl does — ``--resolve`` is a curl-specific feature. httpx,
@@ -119,17 +119,17 @@ def _is_ip_literal(host: str) -> bool:
         return False
 
 
-def _default_port_for(cmd: list[str], host: str) -> int:
+def _default_port_for(tool_name: str, cmd: list[str]) -> int:
     """Pick the port to pin when the target URL carried no explicit port.
 
-    Defaults to 443 unless an ``http://<host>`` (non-TLS) URL for this host is
-    present in the argv, in which case 80. Mirrors curl/httpx scheme defaults.
+    Reads the scheme of the SAME URL the anchor came from (443 unless it is
+    ``http://``), rather than re-scanning argv for any ``http://``-prefixed word:
+    that scan could read the scheme off an unrelated token — a proxy URL, a
+    ``Referer`` header — and pin port 80 for an HTTPS target.
     """
-    host_l = (host or "").lower()
-    for token in cmd[1:]:
-        text = str(token)
-        if host_l and host_l in text.lower() and text.lower().startswith("http://"):
-            return _DEFAULT_PORT_HTTP
+    url = _extract_target_url(tool_name, cmd)
+    if url.lower().startswith("http://"):
+        return _DEFAULT_PORT_HTTP
     return _DEFAULT_PORT_HTTPS
 
 
@@ -145,7 +145,7 @@ def _resolve_target(tool_name: str, cmd: list[str]) -> tuple[str, int]:
     if not host or _is_ip_literal(host):
         return "", 0
     if not port:
-        port = _default_port_for(cmd, host)
+        port = _default_port_for(tool_name, cmd)
     return host, int(port)
 
 

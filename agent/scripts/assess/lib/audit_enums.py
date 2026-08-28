@@ -9,10 +9,17 @@ Consumed by:
 - The runtime container image (copied to ``/opt/mcp-tools/audit_enums.py``
   for legacy in-container scripts that still import it).
 
-Enum values are **additive**. The host-side CLI fails closed when a caller
-uses an out-of-enum value so prompt drift is caught before an audit row is
-written. The backend stores plain TEXT for forward compatibility with older
-or externally-written rows.
+Enum values are **additive**: never remove or rename one, because historical
+``command_runs.technique`` rows carry them as plain TEXT. The host-side CLI
+fails closed when a caller uses an out-of-enum value so prompt drift is caught
+before an audit row is written. The backend stores plain TEXT for forward
+compatibility with older or externally-written rows.
+
+Every ``TECHNIQUE_ENUM`` value needs a matching ``TECHNIQUE_TO_CLASS`` row in
+``vuln_taxonomy``, and every web-testable canonical vuln class needs a tag here
+(or an explicit ``TECHNIQUE_EXEMPT_CLASSES`` entry). Both directions are pinned
+by ``orchestrator/backend/tests/test_vuln_taxonomy.py``, so the "record it" and
+"run it" surfaces cannot drift apart.
 """
 from __future__ import annotations
 
@@ -23,19 +30,25 @@ TECHNIQUE_ENUM: tuple[str, ...] = (
     "XXE",
     "SQLI",
     "NOSQLI",
+    "LDAP-INJECTION",
+    "XPATH-INJECTION",
+    "ELASTICSEARCH-INJECTION",
     "SSTI",
+    "SSI-INJECTION",
     "RCE",
     "CMDI",
     "LFI",
     "RFI",
     "PATH-TRAVERSAL",
     "CRLF",
+    "CSV-INJECTION",
     "DESERIALIZATION",
     "PROTOTYPE-POLLUTION",
     "MASS-ASSIGNMENT",
     "IDOR",
     "BOLA",
     "BFLA",
+    "PATH-AUTHZ",
     "AUTH",
     "JWT",
     "OAUTH",
@@ -45,6 +58,7 @@ TECHNIQUE_ENUM: tuple[str, ...] = (
     "OPEN-REDIRECT",
     "CSRF",
     "CORS",
+    "CLICKJACKING",
     "REQUEST-SMUGGLING",
     "HOST-HEADER",
     "CACHE-POISONING",
@@ -54,7 +68,14 @@ TECHNIQUE_ENUM: tuple[str, ...] = (
     "BUSINESS-LOGIC",
     "RACE-CONDITION",
     "RATE-LIMIT",
+    "ALGORITHMIC-DOS",
+    "CRYPTO-MISUSE",
     "INFO-DISCLOSURE",
+    "SECRETS-EXPOSURE",
+    "SOURCE-DISCLOSURE",
+    "DEBUG-EXPOSURE",
+    "PROMPT-INJECTION",
+    "AI-ML-SECURITY",
     "RECON",
     "DISCOVERY",
     "PARAM-DISCOVERY",

@@ -159,6 +159,33 @@ def test_apply_no_warn_when_bucket_matches(capsys) -> None:
     assert "carries captured host_cookies" not in capsys.readouterr().err
 
 
+def test_apply_injects_into_a_shell_wrapped_curl_for_the_body_host() -> None:
+    """The documented ``bash -c '<curl>'`` escape hatch must carry the identity.
+
+    The injector always handled a ``-c`` body; what failed was the REQUEST HOST
+    it was scoped by. A whitespace scan over the shell argv could not see the
+    quoted URL inside the body, so ``request_host`` came back empty, no
+    ``host_cookies`` bucket matched, and the cross-host-bleed guard correctly
+    omitted every cookie — leaving ``prepare_execution_command`` to refuse a
+    perfectly good credential. Correct policy, wrong input."""
+    cmd = ["bash", "-c", "curl -s 'https://portal.example.com/my.policy'"]
+    applied = kali._apply_identity_material(cmd, "curl", _material())
+    assert applied == "injected"
+    assert "JSESSIONID=PORTAL" in cmd[2]
+    # The header lands INSIDE the script body, never on the shell's own argv,
+    # where it would become the script's $1.
+    assert "-H" not in cmd[:2]
+
+
+def test_apply_shell_wrapped_curl_still_omits_a_mismatched_host_bucket(capsys) -> None:
+    """Resolving the body host must not weaken the cross-host bleed guard: a body
+    aimed at a host this identity has no bucket for still sends no cookie."""
+    cmd = ["bash", "-c", "curl -s 'https://nomatch.test/x'"]
+    assert kali._apply_identity_material(cmd, "curl", _material()) == "unavailable"
+    assert "Cookie:" not in cmd[2]
+    assert "nomatch.test" in capsys.readouterr().err
+
+
 def test_apply_non_injectable_tool_reports_no_head() -> None:
     # nmap takes no -H; identity must not be stamped (matches existing contract).
     # The reason is the ARGV SHAPE, not the credential — the refusal message

@@ -93,20 +93,40 @@ def _cat_container_pid_file(container_name: str, pid_file: str) -> tuple[int | N
         return None, "pid-file-invalid"
 
 
-def _engagement_env_args(engagement_key: str | None) -> list[str]:
-    """Canonical ``--env ENGAGEMENT_KEY=<key>`` docker-exec argument pair.
+def _env_args(pairs) -> list[str]:
+    """``--env NAME=value`` docker-exec argument pairs, in the given order.
 
     Single source for the env mirror shared by the synchronous exec wrapper
     (:func:`_build_docker_exec`) and the async dtach job argv
     (``kali_jobs.start_job``) — CODE-MAP flags this as a deliberate coupling, so
-    they must not drift. Surfacing ``ENGAGEMENT_KEY`` inside the runtime lets
-    skill examples like ``nuclei -l /engagements/$ENGAGEMENT_KEY/scans/...``
-    expand to the engagement name rather than the empty string. Returns ``[]``
-    for an empty key so the sync path's prior ``if engagement_key`` guard is
-    preserved verbatim."""
+    they must not drift. Anything routed through here reaches BOTH lanes for
+    free, which is why identity material for script-driven runs is carried as
+    env rather than as an argv rewrite: env crosses into a script FILE, where an
+    appended ``-H`` would only become the script's ``$1``.
+
+    Values are passed to ``docker exec`` as a single argv token, so no shell
+    quoting is applied or needed — but a NAME containing ``=`` would silently
+    truncate the value, so callers must validate names (see
+    ``kali.resolve_identity_env``).
+    """
+    args: list[str] = []
+    for name, value in pairs:
+        if not name:
+            continue
+        args.extend(["--env", f"{name}={value}"])
+    return args
+
+
+def _engagement_env_args(engagement_key: str | None) -> list[str]:
+    """Canonical ``--env ENGAGEMENT_KEY=<key>`` docker-exec argument pair.
+
+    Surfacing ``ENGAGEMENT_KEY`` inside the runtime lets skill examples like
+    ``nuclei -l /engagements/$ENGAGEMENT_KEY/scans/...`` expand to the engagement
+    name rather than the empty string. Returns ``[]`` for an empty key so the
+    sync path's prior ``if engagement_key`` guard is preserved verbatim."""
     if not engagement_key:
         return []
-    return ["--env", f"ENGAGEMENT_KEY={engagement_key}"]
+    return _env_args([("ENGAGEMENT_KEY", engagement_key)])
 
 
 def _build_docker_exec(
@@ -116,6 +136,7 @@ def _build_docker_exec(
     run_uuid: str,
     working_dir: str | None = None,
     engagement_key: str | None = None,
+    env_pairs=None,
 ) -> list[str]:
     """Wrap the user command in a tiny shell that records the in-container
     PID before ``exec``-ing the real command.
@@ -158,6 +179,9 @@ def _build_docker_exec(
     # empty string and output landed at `/engagements//scans/...`. Shared with
     # the async dtach argv via _engagement_env_args so the two cannot drift.
     docker_argv.extend(_engagement_env_args(engagement_key))
+    # Identity material for --identity-env, carried the one way that reaches a
+    # shell SCRIPT FILE's own requests.
+    docker_argv.extend(_env_args(env_pairs or []))
     if working_dir:
         docker_argv.extend(["-w", working_dir])
     docker_argv.extend(

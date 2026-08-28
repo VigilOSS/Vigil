@@ -29,7 +29,9 @@ Anti-staleness: this list is DATA, additive without touching
 control flow — adding a framework/class is a one-line edit here. Drift tests in
 ``test_vuln_taxonomy.py`` fail CI when a skill, gf-bucket, surface_type, code
 family, or technique references a class that is not declared here, so the rubric
-cannot rot silently.
+cannot rot silently. The technique guard runs BOTH ways: a class that is neither
+``--technique``-taggable nor listed in ``TECHNIQUE_EXEMPT_CLASSES`` fails CI, so
+"record it as an attack_family" and "run it as a technique" cannot diverge.
 """
 from __future__ import annotations
 
@@ -191,19 +193,25 @@ TECHNIQUE_TO_CLASS: dict[str, str | None] = {
     "XXE": "xxe",
     "SQLI": "sqli",
     "NOSQLI": "nosqli",
+    "LDAP-INJECTION": "ldap-injection",
+    "XPATH-INJECTION": "xpath-injection",
+    "ELASTICSEARCH-INJECTION": "elasticsearch-injection",
     "SSTI": "ssti",
+    "SSI-INJECTION": "ssi-injection",
     "RCE": "cmdi",
     "CMDI": "cmdi",
     "LFI": "lfi",
     "RFI": "rfi",
     "PATH-TRAVERSAL": "path-traversal",
     "CRLF": "crlf",
+    "CSV-INJECTION": "csv-injection",
     "DESERIALIZATION": "deserialization",
     "PROTOTYPE-POLLUTION": "prototype-pollution",
     "MASS-ASSIGNMENT": "mass-assignment",
     "IDOR": "idor",
     "BOLA": "bola",
     "BFLA": "bfla",
+    "PATH-AUTHZ": "path-authz",
     "AUTH": "auth-bypass",
     "JWT": "jwt",
     "OAUTH": "oauth",
@@ -213,6 +221,7 @@ TECHNIQUE_TO_CLASS: dict[str, str | None] = {
     "OPEN-REDIRECT": "open-redirect",
     "CSRF": "csrf",
     "CORS": "cors",
+    "CLICKJACKING": "clickjacking",
     "REQUEST-SMUGGLING": "request-smuggling",
     "HOST-HEADER": "host-header-injection",
     "CACHE-POISONING": "cache-poisoning",
@@ -222,7 +231,14 @@ TECHNIQUE_TO_CLASS: dict[str, str | None] = {
     "BUSINESS-LOGIC": "business-logic",
     "RACE-CONDITION": "race-condition",
     "RATE-LIMIT": "rate-limit",
+    "ALGORITHMIC-DOS": "algorithmic-dos",
+    "CRYPTO-MISUSE": "crypto-misuse",
     "INFO-DISCLOSURE": "info-disclosure",
+    "SECRETS-EXPOSURE": "secrets-exposure",
+    "SOURCE-DISCLOSURE": "source-disclosure",
+    "DEBUG-EXPOSURE": "debug-exposure",
+    "PROMPT-INJECTION": "prompt-injection",
+    "AI-ML-SECURITY": "ai-ml-security",
     "RECON": None,
     "DISCOVERY": None,
     "PARAM-DISCOVERY": None,
@@ -235,6 +251,33 @@ TECHNIQUE_TO_CLASS: dict[str, str | None] = {
     "LOG-READ": None,
     "OTHER": None,
 }
+
+# Canonical classes that intentionally have NO ``kali exec --technique`` tag.
+#
+# The reverse drift guard in ``test_vuln_taxonomy.py`` requires every OTHER
+# class in ``VULN_CLASSES`` to be reachable as a ``TECHNIQUE_ENUM`` value, so a
+# newly-added class cannot become a legal ``record-probe --attack-family`` while
+# ``kali exec --technique <X>`` still hard-fails on it — the two surfaces
+# silently disagreeing is the drift this set exists to prevent. An entry here is
+# a DECISION with a stated reason, never silence: if a specialist CAN run a
+# network probe for the class, it belongs in ``TECHNIQUE_ENUM`` instead.
+TECHNIQUE_EXEMPT_CLASSES: frozenset[str] = frozenset(
+    {
+        "buffer-overflow",  # memory safety: proven by a crashing input in code/fuzz, not by a network probe
+        "integer-overflow",  # memory safety: an arithmetic defect read out of source, not probed over HTTP
+        "format-string",  # memory safety: a format-specifier sink found in source, not a network technique
+        "null-dereference",  # memory safety: a robustness/crash defect with no attacker-input probe to tag
+        "use-after-free",  # memory safety: an object-lifetime defect proven in code or under a fuzz harness
+        "uninitialized-memory",  # memory safety: needs instrumented (ASan/MSan) execution, not a remote probe
+        "type-confusion",  # memory safety: a type-punning defect found in source, not a network technique
+        "injection",  # coarse code-track rollup (code_analysis slot families); probe the specific class
+        "web-app-injection",  # coarse code-track rollup of the injection classes; tag the specific one
+        "web-app-auth",  # coarse code-track rollup of the auth classes; tag AUTH/JWT/OAUTH/SAML/SESSION
+        "web-app-data-exposure",  # coarse code-track rollup; tag INFO-DISCLOSURE/SECRETS-EXPOSURE instead
+        "error-handling",  # code-track robustness; a black-box error page is INFO-DISCLOSURE/DEBUG-EXPOSURE
+        "img-traversal",  # gf-bucket refinement of path-traversal; the probe technique IS PATH-TRAVERSAL
+    }
+)
 
 
 def all_classes() -> frozenset[str]:
@@ -338,6 +381,7 @@ __all__ = [
     "GF_BUCKET_TO_CLASS",
     "SURFACE_TYPE_TO_CLASSES",
     "TECHNIQUE_TO_CLASS",
+    "TECHNIQUE_EXEMPT_CLASSES",
     "all_classes",
     "is_valid_class",
     "family_of",

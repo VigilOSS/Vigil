@@ -21,12 +21,23 @@ from assess.lib.evidence_ref import warn_evidence_ref
 from assess.lib.schema_validation import suggest_close_match
 
 
-# The closed set of coarse input-slot classes the coverage machinery understands
-# (one per input class the auto-generator emits + `service`). A bare --input-slot
-# must be one of these; a `slot:name` value's prefix (before the ':') must be one
-# of these. The NAME after the ':' is free-form (any header/param/path name).
+# The closed set of coarse input-slot classes the coverage machinery understands.
+# A bare --input-slot must be one of these; a `slot:name` value's prefix (before
+# the ':') must be one of these. The NAME after the ':' is free-form (any
+# header/param/path/API name).
+#
+# The first seven are network slots — one per input class the coverage
+# auto-generator emits, plus `service`. The last four are BROWSER/JS
+# instrumentation slots: a probe that observes a runtime API call inside the page
+# has no network slot, and filing it under `endpoint:` makes the per-input
+# coverage grid assert something false. `input_slot` is stored verbatim and the
+# grid keys on the full string, so these are additive with no schema change.
+#
+# CLOSED ON PURPOSE: every addition permanently widens the coverage grid's key
+# space, so a new class needs a real input surface that none of these describe.
 _KNOWN_SLOT_CLASSES: tuple[str, ...] = (
     "query", "body", "header", "path", "cookie", "endpoint", "service",
+    "js", "dom", "storage", "postmessage",
 )
 
 
@@ -84,7 +95,11 @@ def add_common_probe_args(parser) -> None:
             "as 'slot:name' (e.g. 'header:X-Forwarded-Host', 'query:uid', "
             "'body:idProofUser') so 'which input was tested' stays queryable; a bare "
             "coarse slot (query|body|header|path|cookie|endpoint|service) is fine "
-            "for a whole-slot probe. 'unknown'/empty is rejected."
+            "for a whole-slot probe. A browser/JS-instrumentation observation has "
+            "no network slot — use 'js:<global-or-api>' (js:URL.createObjectURL, "
+            "js:Worker), 'dom:<selector-or-sink>' (dom:#preview), 'storage:<key>' "
+            "(localStorage/sessionStorage/IndexedDB) or 'postmessage:<origin>' "
+            "rather than filing it under 'endpoint:'. 'unknown'/empty is rejected."
         ),
     )
     parser.add_argument("--payload-family", dest="payload_family", default="", help="Optional payload family tag.")

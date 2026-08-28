@@ -24,6 +24,7 @@ from .kali_runtime_exec import (
     _cat_container_pid_file,
     _container_running,
     _engagement_env_args,
+    _env_args,
 )
 from .rate_leases import acquire_target_rate_lease, release_target_rate_lease
 
@@ -370,6 +371,7 @@ def start_job(
     execution_policy: dict[str, Any] | None = None,
     tool_name: str | None = None,
     config: Config | None = None,
+    env_pairs=None,
 ) -> dict[str, Any]:
     """Pre-audit the command, POST its linked job, then spawn and mark running.
 
@@ -500,6 +502,9 @@ def start_job(
             "exec",
             "-d",
             *_engagement_env_args(eng_key),
+            # --identity-env material, carried into the dtach worker exactly as
+            # the sync lane carries it (shared _env_args, so the two cannot drift).
+            *_env_args(env_pairs or []),
             "-w",
             f"/engagements/{eng_key}",
             container_name,

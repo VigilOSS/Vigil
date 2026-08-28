@@ -33,9 +33,11 @@ from urllib.parse import quote, urlencode
 
 from assess.lib.client import AssessError, AssessmentClient, default_runtime_container
 from assess.lib.config import load_config
+from assess.lib.kali_audit import _stream_output_truth
 from assess.lib.kali_jobs import _job_pid_file as _job_pid_file_in_container
 from assess.lib.kali_jobs import _read_exit_marker as _read_job_exit_marker
 from assess.lib.kali_jobs import finalize_parent_command_run
+from assess.lib.kali_output import _read_safely
 from assess.lib.kali_runtime_exec import _cat_container_pid_file, _container_pid_file
 from assess.lib.host_processes import reap_registered_processes
 from assess.lib.rate_leases import release_target_rate_lease
@@ -330,7 +332,61 @@ def _list_command_run_rows(client: AssessmentClient) -> list[dict]:
     return rows
 
 
-def _finalize_lost(client: AssessmentClient, *, run_id: int, now_iso: str) -> dict:
+def _command_output_path(raw_path: object, *, engagement_root: Path) -> Path | None:
+    """The row's output file, but only if it really is a command-output artifact.
+
+    Same containment rule ``command-run get`` applies when it tails these files:
+    inside the engagement, and under ``scans/kali`` or ``scans/host-exec``. A
+    ``stdout_path`` is a value the row carries, not a value we may trust.
+    """
+    if not raw_path:
+        return None
+    try:
+        path = Path(str(raw_path)).resolve()
+        root = engagement_root.resolve()
+    except OSError:
+        return None
+    allowed = (root / "scans" / "kali", root / "scans" / "host-exec")
+    if not any(path.is_relative_to(candidate) for candidate in allowed):
+        return None
+    return path
+
+
+def _recover_on_disk_output(row: dict, *, engagement_root: Path) -> dict:
+    """Byte truth for a row whose worker died before its finalize PATCH ran.
+
+    A dead PID means we lost the OUTCOME, not the OUTPUT: the run streamed to a
+    file this CLI opened and the bind mount still holds it. Without this the
+    ``lost`` PATCH omitted every byte field, the backend left the pre-exec
+    placeholders in place, and a completed-but-orphaned scan reported
+    ``stdout_bytes 0`` with its whole measurement sitting on disk.
+
+    Bounded and non-raising by construction — the sweep also runs inside resume
+    hydration, so it must never become a way for a resume to fail.
+    """
+    recovered: dict = {}
+    for stream in ("stdout", "stderr"):
+        path = _command_output_path(
+            row.get(f"{stream}_path"), engagement_root=engagement_root
+        )
+        if path is None:
+            continue
+        truth = _stream_output_truth(path)
+        if truth is None:
+            continue
+        recovered[f"{stream}_bytes"], recovered[f"{stream}_sha256"] = truth
+        if truth[0]:
+            recovered[f"{stream}_preview"] = _read_safely(path)
+    return recovered
+
+
+def _finalize_lost(
+    client: AssessmentClient,
+    *,
+    run_id: int,
+    now_iso: str,
+    recovered: dict | None = None,
+) -> dict:
     payload = {
         "status": "lost",
         "ended_at": now_iso,
@@ -338,7 +394,37 @@ def _finalize_lost(client: AssessmentClient, *, run_id: int, now_iso: str) -> di
         "timed_out": False,
         "partial_results": False,
     }
+    # Reporting recovered bytes is what makes the backend write a real
+    # ``output_retention_status`` (retained/empty) instead of leaving the
+    # pre-exec placeholder — a dead PID with 10 KiB on disk and a dead PID with
+    # nothing are not the same outcome, and the row should say which it was.
+    payload.update(recovered or {})
     return client.patch(f"command-runs/{int(run_id)}", payload, accept_409=True)
+
+
+def _warn_mutating_run_terminated_abnormally(row: dict, *, run_id: int, status: str) -> str:
+    """Loudly flag a --destructive run finalized without a proven clean exit.
+
+    A destructive dispatch is authorized on the promise that its trapped ``EXIT``
+    restore puts the target back. When the wrapper dies outside its own control
+    flow that trap never fires, so the row is not merely lost — a live tenant may
+    still be holding whatever the run granted, renamed, or deleted. The reaper
+    used to finalize such a row exactly like a lost ``curl``.
+    """
+    argv = row.get("argv")
+    command = " ".join(str(token) for token in argv) if isinstance(argv, list) else str(
+        row.get("command") or ""
+    )
+    line = (
+        f"mutating_run_terminated_abnormally id={run_id} new_status={status} "
+        f"agent={row.get('agent_name') or 'unknown'} "
+        f"phase={row.get('phase') or 'unknown'}: this run was dispatched "
+        "--destructive and did NOT exit through its own cleanup, so its trapped "
+        "EXIT restore is UNVERIFIED. Read the target state back before "
+        f"continuing. command: {command}"
+    )
+    print(f"warning: {line}", file=sys.stderr)
+    return line
 
 
 def _sweep_command_runs(
@@ -347,6 +433,7 @@ def _sweep_command_runs(
     now: _dt.datetime,
     now_iso: str,
     max_age: int,
+    engagement_root: Path,
 ) -> dict:
     """Reconcile stale in-flight rows and committed terminal pending output."""
     # ``skipped`` is a conflated union — split into two sub-counters so the
@@ -375,6 +462,12 @@ def _sweep_command_runs(
         "pending_recovery_failed_ids": [],
         "pending_recovery_failed_ids_omitted": 0,
         "output_attention_action": "",
+        # I-138(d) — a dead PID lost the OUTCOME, not necessarily the OUTPUT.
+        "output_recovered": 0,
+        # I-180 — a --destructive run that never reached its trapped EXIT
+        # restore is a live-tenant safety signal, not a bookkeeping one.
+        "mutating_terminated_abnormally": 0,
+        "mutating_terminated_abnormally_warnings": [],
     }
     rows = _list_command_run_rows(client)
 
@@ -513,18 +606,36 @@ def _sweep_command_runs(
             )
             continue
 
-        # PID file missing OR pid is gone — treat the row as lost.
+        # PID file missing OR pid is gone — treat the row as lost, but ask the
+        # filesystem what the run actually produced first.
+        recovered = _recover_on_disk_output(row, engagement_root=engagement_root)
+        recovered_bytes = int(recovered.get("stdout_bytes") or 0) + int(
+            recovered.get("stderr_bytes") or 0
+        )
+        destructive = bool(row.get("destructive"))
         if args.dry_run:
             summary["finalized"] += 1
+            if recovered_bytes:
+                summary["output_recovered"] += 1
             reason = pid_read.reason if container_pid is None else "pid-dead"
             print(
                 f"would-finalize id={row_id} age={int(age_seconds)} "
-                f"reason={reason} new_status=lost"
+                f"reason={reason} new_status=lost "
+                f"recovered_output_bytes={recovered_bytes}"
             )
+            if destructive:
+                summary["mutating_terminated_abnormally"] += 1
+                summary["mutating_terminated_abnormally_warnings"].append(
+                    _warn_mutating_run_terminated_abnormally(
+                        row, run_id=int(row_id), status="lost"
+                    )
+                )
             continue
 
         try:
-            _finalize_lost(client, run_id=int(row_id), now_iso=now_iso)
+            _finalize_lost(
+                client, run_id=int(row_id), now_iso=now_iso, recovered=recovered
+            )
         except AssessError as exc:
             summary["skipped"] += 1
             summary["skipped_unverifiable"] += 1
@@ -534,10 +645,19 @@ def _sweep_command_runs(
             )
             continue
         summary["finalized"] += 1
+        if recovered_bytes:
+            summary["output_recovered"] += 1
         print(
             f"finalized id={row_id} previous_status=running new_status=lost "
-            f"age={int(age_seconds)}"
+            f"age={int(age_seconds)} recovered_output_bytes={recovered_bytes}"
         )
+        if destructive:
+            summary["mutating_terminated_abnormally"] += 1
+            summary["mutating_terminated_abnormally_warnings"].append(
+                _warn_mutating_run_terminated_abnormally(
+                    row, run_id=int(row_id), status="lost"
+                )
+            )
     return summary
 
 
@@ -770,7 +890,10 @@ def run(args) -> None:
             now = _dt.datetime.now(_dt.timezone.utc)
             now_iso = _utcnow_iso()
             if scope in ("command-runs", "all"):
-                cr_summary = _sweep_command_runs(client, args, now, now_iso, max_age)
+                cr_summary = _sweep_command_runs(
+                    client, args, now, now_iso, max_age,
+                    Path(cfg.engagement_dir),
+                )
             if scope in ("jobs", "all"):
                 job_summary = _sweep_jobs(client, args, now, now_iso, max_age)
     if scope in ("host-processes", "all"):

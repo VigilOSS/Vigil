@@ -374,13 +374,32 @@ def _http_url(value: Any, *, field: str) -> str:
     return text
 
 
-def _artifact_path(value: str, *, field: str) -> str:
+def _artifact_path(value: str, *, field: str, engagement_key: str = "") -> str:
+    """Normalize an artifact path to an engagement-relative POSIX path.
+
+    Accepts BOTH forms every other kali verb accepts (``kali_cli._anchor_list_path``):
+    an engagement-relative path, and the container-absolute
+    ``/engagements/<key>/<rest>`` path the tool itself prints — the operator reads
+    that form out of a previous run's output, so rejecting it inverted the
+    convention for this one verb. Only the CURRENT engagement's key is stripped:
+    another engagement's key, any other absolute path, and ``..`` stay rejected,
+    because the caller joins this result onto the engagement root and containment
+    is the whole point of the function.
+    """
     text = str(value or "").strip()
     if not text:
         return ""
-    path = Path(text)
-    if path.is_absolute() or ".." in path.parts:
-        raise AssessError(f"browser {field} must be engagement-relative without '..'")
+    remainder = text
+    prefix = f"/engagements/{engagement_key}/" if engagement_key else ""
+    if prefix and remainder.startswith(prefix):
+        remainder = remainder[len(prefix):].strip()
+    path = Path(remainder)
+    if not remainder or path.is_absolute() or ".." in path.parts:
+        raise AssessError(
+            f"browser {field} must be engagement-relative (e.g. scans/browser/x.png) "
+            f"or container-absolute under /engagements/{engagement_key or '<this-key>'}/"
+            f" — got {text!r}"
+        )
     return path.as_posix()
 
 
@@ -429,7 +448,11 @@ def _load_steps(path: Path) -> list[dict[str, Any]]:
 
 
 def _load_storage_state(value: str, engagement_dir: Path | None) -> dict[str, Any] | None:
-    relative = _artifact_path(value, field="storage-state")
+    relative = _artifact_path(
+        value,
+        field="storage-state",
+        engagement_key=engagement_dir.name if engagement_dir is not None else "",
+    )
     if not relative:
         return None
     if engagement_dir is None:
@@ -569,12 +592,22 @@ def _warn_unattributed_navigations(
 
 def run(args) -> None:
     url = _http_url(getattr(args, "url", ""), field="url")
+    # Resolved before the artifact paths: normalizing the container-absolute
+    # `/engagements/<key>/...` form needs THIS engagement's key.
+    eng_dir = _engagement_dir(args)
+    eng_key = eng_dir.name if eng_dir is not None else ""
     token = uuid.uuid4().hex[:8]
     stem = f"scans/browser/{_safe_slug(url)}-{token}"
-    screenshot = _artifact_path(getattr(args, "screenshot", "") or f"{stem}.png", field="screenshot")
-    dom_out = _artifact_path(getattr(args, "dom_out", "") or f"{stem}.html", field="dom-out")
-    har_out = _artifact_path(getattr(args, "har_out", ""), field="har-out")
-    body_dir = _artifact_path(getattr(args, "body_dir", "") or f"{stem}-bodies", field="body-dir")
+    screenshot = _artifact_path(
+        getattr(args, "screenshot", "") or f"{stem}.png", field="screenshot", engagement_key=eng_key
+    )
+    dom_out = _artifact_path(
+        getattr(args, "dom_out", "") or f"{stem}.html", field="dom-out", engagement_key=eng_key
+    )
+    har_out = _artifact_path(getattr(args, "har_out", ""), field="har-out", engagement_key=eng_key)
+    body_dir = _artifact_path(
+        getattr(args, "body_dir", "") or f"{stem}-bodies", field="body-dir", engagement_key=eng_key
+    )
     max_body_bytes = int(getattr(args, "max_body_bytes", 262_144))
     if not 1 <= max_body_bytes <= 10_485_760:
         raise AssessError("browser --max-body-bytes must be between 1 and 10485760")
@@ -585,7 +618,6 @@ def run(args) -> None:
     wait_selector = str(getattr(args, "wait_selector", "") or "")
     _warn_timeout_budget(int(getattr(args, "timeout", 0) or 0), page_timeout, settle, wait_selector)
 
-    eng_dir = _engagement_dir(args)
     required_headers, allow_entries, deny_entries = _scope_attribution(eng_dir)
     attribution_scope = str(getattr(args, "attribution_scope", "scope"))
     if required_headers:
