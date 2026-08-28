@@ -141,6 +141,35 @@ def run(args) -> None:
         sys.exit(1)
 
 
+def _repo_selector(repo_id: object) -> str:
+    return f"--repo-id {repo_id}" if repo_id not in (None, '') else "--repo-id <repo-id>"
+
+
+# The repair verb for each integrity blocker an operator can actually clear.
+# Without these the blocker reads as "no repair path exists" and the operator
+# reaches for a re-ingest, which advances the generation and invalidates every
+# generation-bound review, index, and threat model.
+_BLOCKER_REPAIRS = {
+    'structural_index_stale': lambda repo_id: (
+        f"vigil assess code-index build <snapshot-path> {_repo_selector(repo_id)} "
+        f"then vigil assess code-index sync {_repo_selector(repo_id)} "
+        "(rebinds the existing generation; neither advances it)"
+    ),
+    'structural_index_metadata_incomplete': lambda repo_id: (
+        f"vigil assess code-index build <snapshot-path> {_repo_selector(repo_id)} "
+        f"then vigil assess code-index sync {_repo_selector(repo_id)} "
+        "(rebinds the existing generation; neither advances it)"
+    ),
+    'threat_model_stale': lambda repo_id: (
+        "vigil assess code-record threat-model for the current generation"
+    ),
+    'source_snapshot_unverified': lambda repo_id: (
+        "vigil assess code-ingest <repo-path> --repo-key <key> — a verified "
+        "re-ingest, which advances the generation by design"
+    ),
+}
+
+
 def _print_transition_readiness(target_phase: str, readiness: dict) -> None:
     bound_target = readiness.get('target_phase')
     ready = bound_target == target_phase and readiness.get('transition_ready') is True
@@ -154,7 +183,14 @@ def _print_transition_readiness(target_phase: str, readiness: dict) -> None:
             code = blocker.get('code', 'unknown')
             message = blocker.get('message', 'Unnamed readiness blocker')
             integrity = " [integrity; non-overrideable]" if blocker.get('overrideable') is False else ""
-            print(f"  - [{code}] {message}{integrity}")
+            # With several repos in scope, a blocker without its repo_id names
+            # no repair target.
+            repo_id = blocker.get('repo_id')
+            scope = f" (repo {repo_id})" if repo_id not in (None, '') else ""
+            print(f"  - [{code}]{scope} {message}{integrity}")
+            repair = _BLOCKER_REPAIRS.get(str(code))
+            if repair:
+                print(f"      repair: {repair(repo_id)}")
 
     quality = readiness.get('quality_gate')
     if isinstance(quality, dict):
@@ -418,6 +454,67 @@ def _print_vuln_class_summary(data: dict) -> None:
         print()
 
 
+_ANALYSIS_STATUS_ORDER = (
+    'analyzed', 'in_progress', 'needs_context', 'queued', 'classified', 'pending',
+)
+
+
+def _print_analysis_status(data: dict) -> None:
+    """Render the per-file analysis-status census the backend already computes.
+
+    Without it, a repo whose files were classified but never queued shows only
+    "0 analyzed" against a full classification table — indistinguishable from
+    lost work, when the real state is "the queue was never populated".
+    """
+    by_status = data.get('by_status')
+    if not isinstance(by_status, dict) or not by_status:
+        return
+    print("\nBy Analysis Status:")
+    for status in _ANALYSIS_STATUS_ORDER:
+        if status in by_status:
+            print(f"  {status:14s}: {by_status.get(status, 0):>5}")
+    for status, count in sorted(by_status.items()):
+        if status not in _ANALYSIS_STATUS_ORDER:
+            print(f"  {str(status):14s}: {count:>5}")
+
+    classified = int(by_status.get('classified', 0) or 0)
+    queued = int(by_status.get('queued', 0) or 0)
+    if classified > 0 and queued == 0:
+        print(
+            f"  NOTE: {classified} file(s) classified but never queued — run "
+            "`vigil assess code-dispatch queue <queue-items-json-file>`; "
+            "`analyzed` counts require queue receipts."
+        )
+
+
+def _print_source_identity(data: dict) -> None:
+    """Surface per-repo binding state here, where it is cheap to discover.
+
+    The structural-index binding is written by exactly one verb (`code-index
+    sync`) and read as a hard gate by a much later one (`agent start`), so
+    without this block the gap is only discovered at dispatch-composition time.
+    """
+    repos = data.get('repos')
+    if not isinstance(repos, list) or not repos:
+        return
+    print("\nSource Identity:")
+    for repo in repos:
+        if not isinstance(repo, dict):
+            continue
+        repo_id = repo.get('repo_id', '?')
+        generation = repo.get('active_generation', '?')
+        quality = repo.get('source_snapshot_quality') or 'unknown'
+        structural_bound = bool(repo.get('structural_index_bound'))
+        threat_bound = bool(repo.get('threat_model_bound'))
+        print(
+            f"  repo {repo_id}: generation {generation} | snapshot {quality} | "
+            f"structural index {'bound' if structural_bound else 'UNBOUND'} | "
+            f"threat model {'bound' if threat_bound else 'unbound'}"
+        )
+        if not structural_bound:
+            print(f"      {_BLOCKER_REPAIRS['structural_index_stale'](repo_id)}")
+
+
 def _print_coverage(data: dict) -> None:
     total_files = data.get('total_files', 0)
 
@@ -443,6 +540,9 @@ def _print_coverage(data: dict) -> None:
             elif isinstance(tier_data, int):
                 # Simple count format
                 print(f"  {tier:10s}: {tier_data:>4} files")
+
+    _print_analysis_status(data)
+    _print_source_identity(data)
 
     # Function-Level
     func_level = data.get('function_level', {})

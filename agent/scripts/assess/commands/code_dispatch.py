@@ -292,6 +292,14 @@ def _stats(cfg) -> None:
         for key, val in result.items():
             if key not in ('pending', 'processing', 'done', 'error', 'needs_context', 'total'):
                 print(f"  {key}: {val}")
+        if not total:
+            # An all-zero queue reads like lost work. It is not: the queue has
+            # exactly one writer, and classification is not it.
+            print(
+                "\nThe analysis queue is empty — classification does not populate it. "
+                "Run `vigil assess code-dispatch queue <queue-items-json-file>` to "
+                "queue classified files; `analyzed` counts require queue receipts."
+            )
     else:
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
@@ -1100,7 +1108,25 @@ def _resolve_triggers(cfg, triggers_file: str, resolution_status: str, note: str
         metadata={"command": "code-dispatch resolve-triggers", "count": len(items)},
     )
     resolved_count = result.get("resolved", 0) if isinstance(result, dict) else 0
-    print(f"Resolved {resolved_count} trigger(s)")
+    not_resolved = result.get("not_resolved", []) if isinstance(result, dict) else []
+    if not isinstance(not_resolved, list):
+        not_resolved = [not_resolved]
+    print(f"Resolved {resolved_count} of {len(items)} trigger(s)")
     print(f"Audit snapshots: {submit_snapshot.name}, {response_snapshot.name}")
     if isinstance(result, dict) and result:
         print(json.dumps(result, indent=2, ensure_ascii=False))
+    # `resolve` is a one-way pending -> terminal transition, so a request that
+    # wrote nothing is not a no-op the caller can shrug off: it means the item
+    # shapes never addressed a pending trigger. Exit loudly rather than 0.
+    if not_resolved:
+        for label in not_resolved:
+            print(f"  unresolved: {label}", file=sys.stderr)
+    if resolved_count == 0 or not_resolved:
+        print(
+            f"code-dispatch resolve-triggers: resolved {resolved_count} of "
+            f"{len(items)} item(s); {len(not_resolved)} unresolved. Re-check each "
+            "item's trigger_id/file_path against `code-dispatch list-triggers` — a "
+            "trigger that already left `pending` can no longer be resolved.",
+            file=sys.stderr,
+        )
+        sys.exit(1)

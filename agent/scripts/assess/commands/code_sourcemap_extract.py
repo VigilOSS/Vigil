@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import hashlib
 import json
 import os
@@ -19,6 +20,7 @@ from assess.lib.config import resolve_engagement_dir
 _SNAPSHOT_FORMAT_VERSION = 1
 _MAP_SUFFIXES = (".js.map", ".css.map")
 _WINDOWS_ABSOLUTE = re.compile(r"^[A-Za-z]:[/\\]")
+_EXTRACTED_STATUSES = frozenset({"extracted", "extracted_duplicate"})
 
 
 def register(subparsers) -> None:
@@ -71,7 +73,11 @@ def _snapshot_hash(map_root: Path, map_files: list[Path]) -> str:
     return digest.hexdigest()
 
 
-def _safe_source_path(source_root: object, source: object) -> PurePosixPath | None:
+def _safe_source_path(
+    source_root: object,
+    source: object,
+    map_dir_parts: tuple[str, ...] = (),
+) -> PurePosixPath | None:
     if not isinstance(source, str) or not source.strip():
         return None
     source_value = source.strip()
@@ -85,20 +91,39 @@ def _safe_source_path(source_root: object, source: object) -> PurePosixPath | No
     if "\0" in raw:
         return None
     parsed = urlsplit(raw)
+    anchor: tuple[str, ...] = map_dir_parts
     if parsed.scheme == "webpack":
         # webpack:// paths are virtual source identifiers, not network URLs.
         # Preserve a non-empty bundle namespace while normalizing the common
-        # webpack:///./src form into the extracted tree.
+        # webpack:///./src form into the extracted tree. They are absolute
+        # within their bundle namespace, so the map's own directory is not
+        # their anchor.
         raw = "/".join(part for part in (parsed.netloc, parsed.path) if part)
         raw = raw.lstrip("/")
+        anchor = ()
     elif parsed.scheme or parsed.netloc or raw.startswith("//"):
         return None
     if raw.startswith("/") or _WINDOWS_ABSOLUTE.match(raw):
         return None
     raw_parts = [part for part in raw.split("/") if part not in {"", "."}]
-    if not raw_parts or any(part == ".." for part in raw_parts):
+    if not raw_parts:
         return None
-    return PurePosixPath(*raw_parts)
+    # A map's `sources` are defined relative to the map file's own location, so
+    # `..` is resolved against that directory — the single most common Rollup /
+    # Vite / tsc shape — instead of being refused on sight. A path that climbs
+    # past the extracted tree root has no faithful location here, so it still
+    # fails closed.
+    resolved: list[str] = list(anchor)
+    for part in raw_parts:
+        if part != "..":
+            resolved.append(part)
+            continue
+        if not resolved:
+            return None
+        resolved.pop()
+    if not resolved:
+        return None
+    return PurePosixPath(*resolved)
 
 
 def _collision_path(
@@ -124,14 +149,50 @@ def _map_payloads(payload: object):
             yield f"sections[{index}]", section["map"]
 
 
-def _extract_snapshot(map_root: Path, snapshot_dir: Path, map_files: list[Path], digest: str) -> None:
-    source_dir = snapshot_dir / "sources"
+def _extracted_count(records: list[dict[str, object]]) -> int:
+    return sum(1 for record in records if record.get("status") in _EXTRACTED_STATUSES)
+
+
+def _status_census(records: list[dict[str, object]]) -> str:
+    counts = collections.Counter(str(record.get("status") or "unknown") for record in records)
+    return ", ".join(f"{status}: {count}" for status, count in sorted(counts.items()))
+
+
+def _repo_key(map_root: Path) -> str:
+    source_identity = hashlib.sha256(str(map_root).encode("utf-8")).hexdigest()[:12]
+    return f"sourcemap-{map_root.name.lower().replace(' ', '-')}-{source_identity}"
+
+
+def _ingest_command(map_root: Path, snapshot_dir: Path) -> str:
+    """Compose the code-ingest handoff for a PUBLISHED snapshot directory."""
+    return (
+        f"vigil assess code-ingest {shlex.quote(str(snapshot_dir / 'sources'))} "
+        f"--name {shlex.quote(map_root.name + '-source-map')} "
+        f"--repo-key {shlex.quote(_repo_key(map_root))}"
+    )
+
+
+def _extract_snapshot(
+    map_root: Path,
+    staging_dir: Path,
+    publish_dir: Path,
+    map_files: list[Path],
+    digest: str,
+) -> list[dict[str, object]]:
+    """Extract into `staging_dir`, addressing the handoff at `publish_dir`.
+
+    The two directories differ: extraction writes into a private `.tmp-<uuid>`
+    that is renamed to the content-addressed snapshot afterwards, so every path
+    recorded for a later reader must name the post-rename location.
+    """
+    source_dir = staging_dir / "sources"
     source_dir.mkdir(parents=True)
     records: list[dict[str, object]] = []
     claimed_paths: dict[str, str] = {}
 
     for map_path in map_files:
         map_relative = map_path.relative_to(map_root).as_posix()
+        map_dir_parts = PurePosixPath(map_relative).parent.parts
         try:
             payload = json.loads(map_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -172,7 +233,7 @@ def _extract_snapshot(map_root: Path, snapshot_dir: Path, map_files: list[Path],
                     "source": source if isinstance(source, str) else "",
                     "source_index": index,
                 }
-                relative = _safe_source_path(source_root, source)
+                relative = _safe_source_path(source_root, source, map_dir_parts)
                 if relative is None:
                     records.append({**base_record, "status": "rejected_path"})
                     continue
@@ -231,17 +292,7 @@ def _extract_snapshot(map_root: Path, snapshot_dir: Path, map_files: list[Path],
         if payload_count == 0:
             records.append({"map_path": map_relative, "status": "malformed_map"})
 
-    source_identity = hashlib.sha256(str(map_root).encode("utf-8")).hexdigest()[:12]
-    repo_key = (
-        f"sourcemap-{map_root.name.lower().replace(' ', '-')}-{source_identity}"
-    )
-    ingest_path = snapshot_dir / "sources"
-    ingest_command = (
-        f"vigil assess code-ingest {shlex.quote(str(ingest_path))} "
-        f"--name {shlex.quote(map_root.name + '-source-map')} "
-        f"--repo-key {shlex.quote(repo_key)}"
-    )
-    manifest = {
+    manifest: dict[str, object] = {
         "format_version": _SNAPSHOT_FORMAT_VERSION,
         "snapshot_sha256": digest,
         "map_root": str(map_root),
@@ -253,17 +304,59 @@ def _extract_snapshot(map_root: Path, snapshot_dir: Path, map_files: list[Path],
             "publish_via_code_ingest_only": True,
         },
         "records": records,
-        "next_step": {
-            "kind": "explicit_code_ingest",
-            "command": ingest_command,
-            "repo_key": repo_key,
-            "repo_path": str(ingest_path),
-        },
     }
-    (snapshot_dir / "manifest.json").write_text(
+    # An empty extraction gets no handoff — in the manifest either, so a reader
+    # that never sees the console cannot ingest an empty tree as if it were the
+    # product's source.
+    if _extracted_count(records):
+        manifest["next_step"] = {
+            "kind": "explicit_code_ingest",
+            "command": _ingest_command(map_root, publish_dir),
+            "repo_key": _repo_key(map_root),
+            "repo_path": str(publish_dir / "sources"),
+        }
+    (staging_dir / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    return records
+
+
+def _report_outcome(
+    map_root: Path,
+    snapshot_dir: Path,
+    records: list[dict[str, object]],
+    map_count: int,
+) -> None:
+    """Print the extraction census and either the handoff or a loud refusal.
+
+    An extraction that produced nothing must not look like one that succeeded,
+    and must never hand a downstream `code-ingest` an empty tree — that is what
+    turns a visible failure into a durable "this product has no source".
+    """
+    census = _status_census(records) or "no source records"
+    extracted = _extracted_count(records)
+    if extracted == 0:
+        print(
+            f"Extracted 0 source file(s) from {map_count} source map(s): nothing to ingest.",
+            file=sys.stderr,
+        )
+        print(f"Source-record census: {census}", file=sys.stderr)
+        print(f"Snapshot (audit only): {snapshot_dir}", file=sys.stderr)
+        print(f"Manifest: {snapshot_dir / 'manifest.json'}", file=sys.stderr)
+        print(
+            "No code-ingest handoff is emitted for an empty extraction; inspect "
+            "the manifest's records[].source before re-running.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    print(
+        f"Extracted {extracted} source file(s) from {map_count} source map(s) "
+        f"into immutable snapshot: {snapshot_dir}"
+    )
+    print(f"Source-record census: {census}")
+    print(f"Manifest: {snapshot_dir / 'manifest.json'}")
+    print(f"Next step (not run automatically): {_ingest_command(map_root, snapshot_dir)}")
 
 
 def run(args) -> None:
@@ -293,7 +386,16 @@ def run(args) -> None:
     if snapshot_dir.is_dir():
         print(f"Reused immutable source-map snapshot: {snapshot_dir}")
         manifest = json.loads((snapshot_dir / "manifest.json").read_text(encoding="utf-8"))
-        print(f"Next step (not run automatically): {manifest['next_step']['command']}")
+        # The handoff is recomposed from the snapshot's real location rather than
+        # replayed from the manifest: manifests written before the staging-path
+        # fix name a `.tmp-<uuid>` directory that no longer exists.
+        records = manifest.get("records")
+        _report_outcome(
+            map_root,
+            snapshot_dir,
+            records if isinstance(records, list) else [],
+            len(map_files),
+        )
         return
 
     prior_snapshots = [
@@ -310,7 +412,7 @@ def run(args) -> None:
 
     temporary = output_root / f".tmp-{uuid.uuid4()}"
     try:
-        _extract_snapshot(map_root, temporary, map_files, digest)
+        records = _extract_snapshot(map_root, temporary, snapshot_dir, map_files, digest)
         try:
             temporary.rename(snapshot_dir)
         except FileExistsError:
@@ -319,12 +421,4 @@ def run(args) -> None:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
 
-    manifest = json.loads((snapshot_dir / "manifest.json").read_text(encoding="utf-8"))
-    extracted = sum(
-        1
-        for record in manifest["records"]
-        if record["status"] in {"extracted", "extracted_duplicate"}
-    )
-    print(f"Extracted {extracted} source file(s) into immutable snapshot: {snapshot_dir}")
-    print(f"Manifest: {snapshot_dir / 'manifest.json'}")
-    print(f"Next step (not run automatically): {manifest['next_step']['command']}")
+    _report_outcome(map_root, snapshot_dir, records, len(map_files))

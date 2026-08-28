@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from assess.lib.client import AssessmentClient
+from assess.lib.code_languages import CANONICAL_CODE_LANGUAGES, CODE_LANGUAGE_ALIASES
 from assess.lib.config import load_config
 from assess.lib.schema_validation import load_schema
 
@@ -114,11 +115,32 @@ def _resolve_matching_file_ids(item: dict, code_files: list[dict]) -> list[int]:
 _LOCAL_ONLY_FIELDS = frozenset({"file_path", "repo_id"})
 
 
+def _canonical_language(value: object) -> object:
+    """Fold documented aliases and casing to the parser-canonical language.
+
+    The backend treats a `language` that differs from the stored one as proof
+    that the repo's parser-derived facts are invalid. Restating the SAME
+    language as `c++` or `TypeScript` must therefore not read as a change.
+    An unrecognized label is passed through untouched: the backend, not this
+    command, is authoritative over what a classification may name.
+    """
+    if not isinstance(value, str):
+        return value
+    trimmed = value.strip()
+    if not trimmed:
+        return trimmed
+    lowered = trimmed.lower()
+    candidate = CODE_LANGUAGE_ALIASES.get(lowered, lowered)
+    return candidate if candidate in CANONICAL_CODE_LANGUAGES else trimmed
+
+
 def _strip_local_fields(payload: list[dict]) -> list[dict]:
     """Remove client-side lookup fields before sending to the backend."""
     result: list[dict] = []
     for item in payload:
         cleaned = {k: v for k, v in item.items() if k not in _LOCAL_ONLY_FIELDS}
+        if 'language' in cleaned:
+            cleaned['language'] = _canonical_language(cleaned['language'])
         result.append(cleaned)
     return result
 
@@ -132,6 +154,10 @@ def _normalize_classifications(payload: list[dict], code_files: list[dict]) -> l
             normalized_item.pop('file_path', None)
             normalized_item.pop('repo_id', None)
             normalized_item['file_id'] = file_id
+            if 'language' in normalized_item:
+                normalized_item['language'] = _canonical_language(
+                    normalized_item['language']
+                )
             normalized.append(normalized_item)
     return normalized
 
@@ -246,3 +272,41 @@ def run(args) -> None:
     print("\nBreakdown by tier:")
     for tier in sorted(tier_counts.keys()):
         print(f"  {tier}: {tier_counts[tier]}")
+
+    _warn_on_structural_invalidation(result)
+
+
+def _warn_on_structural_invalidation(result: object) -> None:
+    """Say so when a classification changed a repo's structural-index binding.
+
+    A `language` that names a different parser genuinely invalidates
+    tree-sitter-derived facts, and the backend acts on that. Silently, until
+    now: one restated language on one file out of hundreds could leave a repo
+    undispatchable with nothing in the classify output to say so.
+    """
+    if not isinstance(result, dict):
+        return
+    repo_ids = result.get('structural_index_invalidated_repo_ids')
+    if not isinstance(repo_ids, list) or not repo_ids:
+        return
+    print(
+        "\nWARNING: a language change in this batch invalidated the structural-index "
+        f"binding for repo(s): {', '.join(str(repo_id) for repo_id in repo_ids)}.",
+        file=sys.stderr,
+    )
+    changes = result.get('language_changes')
+    if isinstance(changes, list):
+        for change in changes[:20]:
+            if isinstance(change, dict):
+                print(
+                    f"  {change.get('file_path', change.get('file_id', '?'))}: "
+                    f"{change.get('previous_language', '?')} -> {change.get('language', '?')}",
+                    file=sys.stderr,
+                )
+    for repo_id in repo_ids:
+        print(
+            f"  repair repo {repo_id}: vigil assess code-index build <snapshot-path> "
+            f"--repo-id {repo_id} then vigil assess code-index sync --repo-id {repo_id} "
+            "(neither advances the generation)",
+            file=sys.stderr,
+        )

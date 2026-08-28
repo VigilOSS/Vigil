@@ -54,7 +54,29 @@ SKIP_EXTENSIONS = frozenset({
 })
 
 BUILD_ARTIFACT_DIRS = frozenset({'dist', 'build', '.next', '.nuxt'})
+
+# Generated symbol/cross-reference indexes. They carry no extension, so the
+# extension denylist never sees them, and a multi-megabyte ctags file admitted
+# as source poisons every grep and every LOC-based percentage downstream.
+SKIP_BASENAMES = frozenset({
+    'tags', 'TAGS', 'cscope.out', 'cscope.in.out', 'cscope.po.out',
+    'GPATH', 'GRTAGS', 'GTAGS', 'ID',
+})
+
+# Policy presets shape which build-output directories count as generated.
+# `package` is for a shipped-bundle repo where dist/ IS the executed bytes;
+# node_modules stays excluded either way because it is someone else's code.
+POLICY_PRESETS = ('application', 'package')
+_PACKAGE_PRESET_ADMITTED_DIRS = frozenset({'dist', 'build', '.next', '.nuxt'})
+
 DEFAULT_MAX_INCLUDED_SKIPPED_BYTES = 2_000_000
+DEFAULT_MAX_SOURCE_FILE_BYTES = 5_000_000
+
+# A collapsed admitted/total ratio is warned about, never refused: a
+# legitimately doc-heavy monorepo hits the same ratio, and a hard refusal on
+# the first Phase 0 command is worse than a loud one.
+_COLLAPSED_ADMISSION_RATIO = 0.25
+_COLLAPSED_ADMISSION_MIN_SKIPPED = 100
 
 
 _C_EXTENSIONS = frozenset({'.c', '.h', '.cpp', '.cc', '.cxx', '.hpp', '.hh'})
@@ -221,13 +243,38 @@ def register(subparsers) -> None:
         "--include-path",
         action="append",
         default=[],
-        help="Glob path to include even if it is normally skipped; repeatable (e.g. '**/ResetPassword.min.js').",
+        help=(
+            "Glob matched against the full relative FILE path, to include even if normally "
+            "skipped; repeatable (e.g. '**/ResetPassword.min.js'). A bare directory is not an "
+            "implicit glob \u2014 'dist' is auto-expanded to 'dist/**' and a pattern that matches "
+            "nothing is reported."
+        ),
+    )
+    p.add_argument(
+        "--policy-preset",
+        choices=POLICY_PRESETS,
+        default="application",
+        help=(
+            "Skip policy for this ingest. 'application' (default) treats dist/build/.next/.nuxt "
+            "as generated output; 'package' admits them because a shipped-bundle repo's dist/ IS "
+            "the executed bytes. node_modules stays excluded under both."
+        ),
     )
     p.add_argument(
         "--max-included-skipped-bytes",
         type=int,
         default=DEFAULT_MAX_INCLUDED_SKIPPED_BYTES,
         help=f"Maximum size for an explicitly included skipped artifact (default {DEFAULT_MAX_INCLUDED_SKIPPED_BYTES}).",
+    )
+    p.add_argument(
+        "--max-source-file-bytes",
+        type=int,
+        default=DEFAULT_MAX_SOURCE_FILE_BYTES,
+        help=(
+            f"Maximum size for an ordinarily-admitted source file (default "
+            f"{DEFAULT_MAX_SOURCE_FILE_BYTES}). Larger files are recorded in the exclusion "
+            "manifest as oversize_source:<bytes> instead of entering the LOC denominator."
+        ),
     )
     p.add_argument(
         "--skipped-manifest",
@@ -245,8 +292,34 @@ def register(subparsers) -> None:
     p.set_defaults(func=run)
 
 
-def _skip_file_reason(rel_path: str, filename: str) -> str | None:
+def _max_included_skipped_bytes(args) -> int:
+    return int(
+        getattr(args, "max_included_skipped_bytes", DEFAULT_MAX_INCLUDED_SKIPPED_BYTES)
+    )
+
+
+def _max_source_file_bytes(args) -> int:
+    return int(getattr(args, "max_source_file_bytes", DEFAULT_MAX_SOURCE_FILE_BYTES))
+
+
+def _effective_skip_dirs(args) -> frozenset[str]:
+    """Return the directory denylist this invocation ingests against.
+
+    Presets are threaded through the callers rather than mutating the
+    module-level frozensets: `code_index` imports `SKIP_DIRS`/`_should_skip_file`
+    and re-walks with them, and its view of the policy must not shift under it.
+    """
+    if getattr(args, "policy_preset", "application") == "package":
+        return SKIP_DIRS - _PACKAGE_PRESET_ADMITTED_DIRS
+    return SKIP_DIRS
+
+
+def _skip_file_reason(
+    rel_path: str, filename: str, skip_dirs: frozenset[str] = SKIP_DIRS
+) -> str | None:
     """Return the skip reason for a file, or None if it is normally ingestible."""
+    if filename in SKIP_BASENAMES:
+        return f'skipped_basename:{filename}'
     ext = Path(filename).suffix.lower()
     if ext in SKIP_EXTENSIONS:
         if ext in {'.min.js', '.bundle.js', '.min.css', '.bundle.css'}:
@@ -262,7 +335,7 @@ def _skip_file_reason(rel_path: str, filename: str) -> str | None:
     if lower_name.endswith(('.woff', '.woff2')):
         return 'skipped_extension:font'
     for part in PurePosixPath(rel_path.replace(os.sep, "/")).parts[:-1]:
-        if part in SKIP_DIRS:
+        if part in skip_dirs:
             return f"skipped_dir:{part}"
     return None
 
@@ -276,15 +349,175 @@ def _should_skip_file(rel_path: str, filename: str) -> bool:
     return _skip_file_reason(rel_path, filename) is not None
 
 
-def _include_path_match(rel_path: str, patterns: list[str] | None) -> str | None:
+def _pattern_matches(normalized: str, pattern: str) -> bool:
+    return fnmatch.fnmatch(normalized, pattern) or (
+        pattern.startswith("**/")
+        and fnmatch.fnmatch(normalized, pattern.removeprefix("**/"))
+    )
+
+
+def _include_path_matches(rel_path: str, patterns: list[str] | None) -> list[str]:
+    """Every supplied pattern this path satisfies, not just the first."""
     normalized = rel_path.replace(os.sep, '/')
-    for pattern in patterns or []:
-        if fnmatch.fnmatch(normalized, pattern) or (
-            pattern.startswith("**/")
-            and fnmatch.fnmatch(normalized, pattern.removeprefix("**/"))
+    return [pattern for pattern in patterns or [] if _pattern_matches(normalized, pattern)]
+
+
+def _include_path_match(rel_path: str, patterns: list[str] | None) -> str | None:
+    matches = _include_path_matches(rel_path, patterns)
+    return matches[0] if matches else None
+
+
+def _expand_directory_include_patterns(repo_path: str, args) -> None:
+    """Turn a metacharacter-free `--include-path` directory into a real glob.
+
+    `--include-path` is documented as a glob and matched against the full
+    relative FILE path, so a bare directory can never match anything — while
+    the walker still descends into it. Expand only a pattern that names a real
+    directory and carries no glob metacharacter, so an invocation that already
+    works cannot widen.
+    """
+    patterns = list(getattr(args, "include_path", []) or [])
+    if not patterns:
+        return
+    expanded: list[str] = []
+    for pattern in patterns:
+        candidate = pattern.rstrip('/')
+        if (
+            candidate
+            and not any(char in candidate for char in '*?[')
+            and os.path.isdir(os.path.join(repo_path, candidate))
         ):
-            return pattern
-    return None
+            replacement = f"{candidate}/**"
+            print(
+                f"code-ingest: --include-path '{pattern}' names a directory; "
+                f"expanded to '{replacement}'.",
+                file=sys.stderr,
+            )
+            expanded.append(replacement)
+            continue
+        expanded.append(pattern)
+    args.include_path = expanded
+
+
+def _size_capped_include_patterns(records: list[dict[str, object]]) -> set[str]:
+    """Patterns that DID match, but whose file exceeded the include size cap.
+
+    Reporting those as "matched 0 files" would send the operator after a glob
+    bug that is not there; the real remedy is --max-included-skipped-bytes.
+    """
+    capped: set[str] = set()
+    for record in records:
+        reason = str(record.get("reason", ""))
+        marker = "include requested by include_path:"
+        if marker not in reason:
+            continue
+        remainder = reason.split(marker, 1)[1]
+        capped.add(remainder.split(" but ", 1)[0])
+    return capped
+
+
+def _report_unmatched_include_patterns(
+    matched: set[str], capped: set[str], args
+) -> bool:
+    """Warn per pattern that admitted nothing.
+
+    Returns True when EVERY supplied pattern matched nothing — the run did not
+    do what was asked, so the caller refuses rather than committing a
+    generation that silently omits all of it.
+    """
+    patterns = list(getattr(args, "include_path", []) or [])
+    if not patterns:
+        return False
+    for pattern in patterns:
+        if pattern in capped and pattern not in matched:
+            print(
+                f"code-ingest: --include-path '{pattern}' matched a file that "
+                "exceeds --max-included-skipped-bytes; it is recorded in the "
+                "exclusion manifest, not ingested.",
+                file=sys.stderr,
+            )
+    unmatched = [
+        pattern
+        for pattern in patterns
+        if pattern not in matched and pattern not in capped
+    ]
+    for pattern in unmatched:
+        message = f"code-ingest: --include-path '{pattern}' matched 0 files."
+        if not any(char in pattern for char in '*?['):
+            bare = pattern.rstrip('/')
+            message += (
+                " Directory patterns are not implicit globs — use "
+                f"'{bare}/**' or '**/{bare}/*'."
+            )
+        print(message, file=sys.stderr)
+    ineffective = [pattern for pattern in patterns if pattern not in matched]
+    if len(ineffective) != len(patterns):
+        return False
+    print(
+        "code-ingest: no --include-path pattern admitted a single file; refusing "
+        "to commit a generation that omits everything you asked to include.",
+        file=sys.stderr,
+    )
+    return True
+
+
+def _skip_reason_census(records: list[dict[str, object]]) -> list[tuple[str, int]]:
+    """Per-reason skipped-file census, most-discarded first.
+
+    Directory records are excluded: each skipped directory is also enumerated
+    file-by-file, so counting both would double-count the same bytes.
+    """
+    counts: dict[str, int] = {}
+    for record in records:
+        if record.get("kind") == "directory":
+            continue
+        reason = str(record.get("reason", "")) or "unknown"
+        counts[reason] = counts.get(reason, 0) + 1
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+
+
+def _print_skip_census(census: list[tuple[str, int]], admitted: int, stream) -> None:
+    total = admitted + sum(count for _, count in census)
+    print(f"Admitted files: {admitted} of {total} total ({total - admitted} skipped)", file=stream)
+    for reason, count in census:
+        print(f"  skipped {reason}: {count}", file=stream)
+
+
+def _warn_on_collapsed_admission(census: list[tuple[str, int]], admitted: int) -> None:
+    """Say so, loudly, when the skip policy discarded almost the whole repo."""
+    skipped = sum(count for _, count in census)
+    total = admitted + skipped
+    if not total or skipped < _COLLAPSED_ADMISSION_MIN_SKIPPED:
+        return
+    if admitted / total >= _COLLAPSED_ADMISSION_RATIO:
+        return
+    print(
+        f"code-ingest: WARNING — admitted {admitted} of {total} files "
+        f"({admitted / total:.1%}); the default skip policy discarded most of "
+        "this repository.",
+        file=sys.stderr,
+    )
+    for reason, count in census[:3]:
+        print(f"  {reason}: {count}", file=sys.stderr)
+    dominant = census[0][0] if census else ""
+    if dominant.startswith("skipped_dir:"):
+        directory = dominant.split(":", 1)[1]
+        remedy = (
+            "--policy-preset package"
+            if directory in BUILD_ARTIFACT_DIRS
+            else f"--include-path '**/{directory}/**'"
+        )
+    elif dominant == "minified_or_bundle":
+        remedy = "--include-minified"
+    elif dominant:
+        remedy = "--include-skipped"
+    else:
+        remedy = "--include-path '<glob>'"
+    print(
+        "  If those bytes are the executed product (a shipped bundle repo), "
+        f"re-run with {remedy} — it advances the repository generation by design.",
+        file=sys.stderr,
+    )
 
 
 def _should_descend_skipped_dir(rel_dir: str, dirname: str, args) -> bool:
@@ -327,7 +560,14 @@ def _admitted_source_paths(
     args,
     snapshots_root: Path,
 ):
-    """Yield the exact path set eligible for the sealed source manifest."""
+    """Yield the exact path set eligible for the sealed source manifest.
+
+    This predicate and `_collect_excluded_records` partition the same tree, so
+    every admission rule here needs its exact mirror there — otherwise
+    `_verify_source_inventory` raises on every run.
+    """
+    skip_dirs = _effective_skip_dirs(args)
+    max_source_bytes = _max_source_file_bytes(args)
     repo_root = source_tree.root.resolve()
     snapshots_resolved = snapshots_root.resolve(strict=False)
     try:
@@ -345,7 +585,7 @@ def _admitted_source_paths(
                 relative == snapshots_relative or relative.is_relative_to(snapshots_relative)
             ):
                 continue
-            if dirname in SKIP_DIRS and not _should_descend_skipped_dir(rel_dir, dirname, args):
+            if dirname in skip_dirs and not _should_descend_skipped_dir(rel_dir, dirname, args):
                 continue
             kept.append(dirname)
         listing.directories[:] = kept
@@ -355,22 +595,21 @@ def _admitted_source_paths(
             )
             if rel_path == ".git" or rel_path.startswith(".git/"):
                 continue
-            skip_reason = _skip_file_reason(rel_path, filename)
+            skip_reason = _skip_file_reason(rel_path, filename, skip_dirs)
             include_reason = _include_reason(rel_path, skip_reason, args)
             if skip_reason and not include_reason:
                 continue
+            try:
+                size = source_tree.regular_file_size(rel_path)
+            except (OSError, ValueError) as exc:
+                raise SourceSnapshotRaceError(
+                    f"{rel_path} changed while verifying the sealed source"
+                ) from exc
             if skip_reason and include_reason:
-                try:
-                    size = source_tree.regular_file_size(rel_path)
-                except (OSError, ValueError) as exc:
-                    raise SourceSnapshotRaceError(
-                        f"{rel_path} changed while verifying the sealed source"
-                    ) from exc
-                max_bytes = int(
-                    getattr(args, "max_included_skipped_bytes", DEFAULT_MAX_INCLUDED_SKIPPED_BYTES)
-                )
-                if size > max_bytes:
+                if size > _max_included_skipped_bytes(args):
                     continue
+            elif size > max_source_bytes:
+                continue
             yield rel_path
 
 
@@ -524,7 +763,14 @@ def _collect_excluded_records(
     args,
     snapshots_root: Path,
 ) -> list[dict[str, object]]:
-    """Capture every excluded file/special entry for the sealed audit boundary."""
+    """Capture every excluded file/special entry for the sealed audit boundary.
+
+    The exclusion predicate here is the exact complement of
+    `_admitted_source_paths`; the two are verified against each other on every
+    run by `_verify_source_inventory`.
+    """
+    skip_dirs = _effective_skip_dirs(args)
+    max_source_bytes = _max_source_file_bytes(args)
 
     records: list[dict[str, object]] = []
     repo_root = source_tree.root.resolve()
@@ -549,7 +795,7 @@ def _collect_excluded_records(
                 or relative.is_relative_to(snapshots_relative)
             ):
                 continue
-            if dirname in SKIP_DIRS and not _should_descend_skipped_dir(
+            if dirname in skip_dirs and not _should_descend_skipped_dir(
                 rel_dir, dirname, args
             ):
                 records.append(
@@ -588,9 +834,21 @@ def _collect_excluded_records(
             )
             if rel_path == ".git" or rel_path.startswith(".git/"):
                 continue
-            skip_reason = _skip_file_reason(rel_path, filename)
+            skip_reason = _skip_file_reason(rel_path, filename, skip_dirs)
             include_reason = _include_reason(rel_path, skip_reason, args)
             if not skip_reason:
+                # An admitted file is still excluded when it is too large to be
+                # reviewable source at all; the record keeps that auditable.
+                if source_tree.regular_file_size(rel_path) <= max_source_bytes:
+                    continue
+                captured = source_tree.capture(rel_path, retain_spool=False)
+                records.append(
+                    _captured_skipped_record(
+                        rel_path,
+                        f"oversize_source:{captured.size}",
+                        captured,
+                    )
+                )
                 continue
             captured = source_tree.capture(rel_path, retain_spool=False)
             if not include_reason:
@@ -598,13 +856,7 @@ def _collect_excluded_records(
                     _captured_skipped_record(rel_path, skip_reason, captured)
                 )
                 continue
-            max_bytes = int(
-                getattr(
-                    args,
-                    "max_included_skipped_bytes",
-                    DEFAULT_MAX_INCLUDED_SKIPPED_BYTES,
-                )
-            )
+            max_bytes = _max_included_skipped_bytes(args)
             if captured.size > max_bytes:
                 records.append(
                     _captured_skipped_record(
@@ -675,17 +927,15 @@ def _write_skipped_manifest(
         "snapshot_digest": snapshot_digest,
         "snapshot_manifest_path": snapshot_manifest_path,
         "policy": {
-            "default_skip_generated_output": True,
+            "preset": str(getattr(args, "policy_preset", "application")),
+            "default_skip_generated_output": (
+                str(getattr(args, "policy_preset", "application")) != "package"
+            ),
             "include_minified": bool(getattr(args, "include_minified", False)),
             "include_skipped": bool(getattr(args, "include_skipped", False)),
             "include_path": list(getattr(args, "include_path", []) or []),
-            "max_included_skipped_bytes": int(
-                getattr(
-                    args,
-                    "max_included_skipped_bytes",
-                    DEFAULT_MAX_INCLUDED_SKIPPED_BYTES,
-                )
-            ),
+            "max_included_skipped_bytes": _max_included_skipped_bytes(args),
+            "max_source_file_bytes": _max_source_file_bytes(args),
         },
         "excluded_entries": records,
     }
@@ -1009,6 +1259,7 @@ def run(args) -> None:
         print(f"Repository path not found: {repo_path}", file=sys.stderr)
         sys.exit(1)
 
+    _expand_directory_include_patterns(repo_path, args)
     repo_name = args.name or os.path.basename(repo_path)
     try:
         repo_key = (
@@ -1058,6 +1309,9 @@ def run(args) -> None:
     skipped = 0
     skipped_records: list[dict[str, object]] = []
     included_skipped = 0
+    effective_skip_dirs = _effective_skip_dirs(args)
+    include_patterns = list(getattr(args, "include_path", []) or [])
+    matched_include_patterns: set[str] = set()
     source_bindings: dict[str, tuple[str, int, bool]] = {}
     builder = None if getattr(args, "dry_run", False) else SnapshotBuilder(snapshots_root, repo_key)
     try:
@@ -1076,7 +1330,10 @@ def run(args) -> None:
                     ) from exc
                 try:
                     filename = Path(rel_path).name
-                    skip_reason = _skip_file_reason(rel_path, filename)
+                    skip_reason = _skip_file_reason(rel_path, filename, effective_skip_dirs)
+                    matched_include_patterns.update(
+                        _include_path_matches(rel_path, include_patterns)
+                    )
                     if skip_reason and _include_reason(rel_path, skip_reason, args):
                         included_skipped += 1
 
@@ -1125,6 +1382,7 @@ def run(args) -> None:
         raise
 
     skipped = sum(record.get("kind") != "directory" for record in skipped_records)
+    skip_census = _skip_reason_census(skipped_records)
     # Language support controls structural indexing, not whether sealed source
     # remains reviewable through direct source analysis.
     analyzable_files = len(files)
@@ -1134,7 +1392,20 @@ def run(args) -> None:
             file=sys.stderr,
         )
 
+    _warn_on_collapsed_admission(skip_census, len(files))
+    # A --dry-run must produce the same warnings as a real run, or the warning
+    # is untestable by the operator before the generation is committed.
+    if _report_unmatched_include_patterns(
+        matched_include_patterns,
+        _size_capped_include_patterns(skipped_records),
+        args,
+    ):
+        if builder is not None:
+            builder.abort()
+        sys.exit(1)
+
     if getattr(args, "dry_run", False):
+        _print_skip_census(skip_census, len(files), sys.stderr)
         with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
             preview = client.post(
                 "code/repos/refresh/preview", {"repo_key": repo_key, "files": files}
@@ -1314,7 +1585,7 @@ def run(args) -> None:
     print(f"Snapshot digest: {snapshot.snapshot_digest}")
     print(f"Source manifest digest: {committed_digest}")
     print(f"Repository generation: {repo_generation}")
-    print(f"Total files: {len(files)} ({skipped} skipped)")
+    _print_skip_census(skip_census, len(files), sys.stdout)
     print(f"Analyzable files: {analyzable_files}")
     if included_skipped:
         print(f"Included skipped artifacts: {included_skipped}")

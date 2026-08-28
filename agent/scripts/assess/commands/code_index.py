@@ -921,6 +921,16 @@ def _publish_aggregate(out_base: Path, repo_id: int, manifest_path: Path, manife
         }
         payload = {
             "schema": STRUCTURAL_AGGREGATE_SCHEMA,
+            # This file sits at a stable, guessable, top-level path and shares a
+            # stem with the per-repo manifest, so a consumer without a populated
+            # structural_index_manifest_path finds it by name and reads it
+            # against the per-repo schema — getting nulls for every field rather
+            # than an error. It announces what it is instead of answering.
+            "kind": "aggregate",
+            "per_repo_manifest_hint": (
+                "resolve repos[<repo_id>].manifest_path; path_to_index lives in "
+                "the per-repo manifest, not here"
+            ),
             "updated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "repos": repos,
         }
