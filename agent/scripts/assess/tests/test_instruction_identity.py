@@ -163,7 +163,7 @@ def test_dispatch_instruction_identity_retains_known_client_without_specialist_w
     assert any("does not install a specialist wrapper" in warning for warning in warnings)
 
 
-def test_agent_start_overwrites_forged_provenance_and_marks_observed_model_unknown(
+def test_agent_start_overwrites_forged_provenance_and_omits_caller_observed_identity(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -196,8 +196,8 @@ def test_agent_start_overwrites_forged_provenance_and_marks_observed_model_unkno
     assert payload["source_revision"] == "a" * 40
     assert payload["operator_instruction_sha256"] == _sha256(operator_bytes)
     assert payload["specialist_instruction_sha256"] == _sha256(specialist_bytes)
-    assert payload["actual_model"] == "unknown"
-    assert payload["actual_reasoning"] == "unknown"
+    assert "actual_model" not in payload
+    assert "actual_reasoning" not in payload
     assert any("provider-observed model identity" in warning for warning in warnings)
 
 

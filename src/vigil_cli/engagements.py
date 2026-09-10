@@ -1741,7 +1741,12 @@ def _prune_orchestrator_database_snapshots(data_dir: Path, *, max_copies: int) -
         return []
     removed: list[Path] = []
     for path in snapshots[: len(snapshots) - max_copies]:
-        path.unlink()
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            # Another engagement creator may have pruned the same snapshot after
+            # this process enumerated it. The retention postcondition already holds.
+            continue
         removed.append(path)
     return removed
 
@@ -2088,7 +2093,7 @@ _CLAUDE_EXTRA_ENV = (
 
 
 _SKIP_PERMISSION_ARGS = {
-    "codex": "--full-auto",
+    "codex": "--dangerously-bypass-approvals-and-sandbox",
     "claude": "--dangerously-skip-permissions",
     "opencode": "--dangerously-skip-permissions",
     "kimi": "--auto",
@@ -2176,8 +2181,8 @@ def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_
         )
     # Kimi Code reads the same engagement-local AGENTS.md natively and needs no
     # generated roster, so — like opencode/goose — always emit start_kimi.sh.
-    # `--auto` (fully autonomous, no questions) mirrors codex --full-auto / claude
-    # --dangerously-skip-permissions. The model is deliberately NOT pinned: the CLI's
+    # `--auto` (fully autonomous, no questions) mirrors Codex's approval/sandbox
+    # bypass and Claude's --dangerously-skip-permissions. The model is deliberately NOT pinned: the CLI's
     # own default_model is Moonshot's current flagship, so the best model is the
     # default and upgrades land without a repo change.
     if client_kind in {"codex", "claude", "both"}:

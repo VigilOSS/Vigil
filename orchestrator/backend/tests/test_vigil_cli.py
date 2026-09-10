@@ -110,7 +110,7 @@ def test_engagement_create_web_writes_scope_launchers_and_list_entry(
     assert 'export VIGIL_CLIENT_NAME="claude"' in claude_launcher
     assert 'export CLAUDE_CODE_DISABLE_AUTO_MEMORY="1"' in claude_launcher
     assert "CLAUDE_CODE_DISABLE_AUTO_MEMORY" not in codex_launcher
-    assert "codex --full-auto" in codex_launcher
+    assert "codex --dangerously-bypass-approvals-and-sandbox" in codex_launcher
     assert (created.path / "start_kimi.sh").exists()
     assert "kimi --auto" in (created.path / "start_kimi.sh").read_text(encoding="utf-8")
     engagement_pointer = (created.path / "AGENTS.md").read_text(encoding="utf-8")
@@ -432,6 +432,37 @@ def test_engagement_create_prunes_old_backend_snapshots(tmp_path: Path, monkeypa
     created = next(path for path in remaining if path not in old_snapshots)
     with sqlite3.connect(created) as connection:
         assert connection.execute("SELECT value FROM marker").fetchone() == ("live",)
+
+
+def test_snapshot_pruning_tolerates_a_concurrent_pruner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli import engagements as engagements_module
+
+    snapshots = [
+        tmp_path / f"orchestrator.sqlite3.bak.20260910T12000{index}Z.100"
+        for index in range(3)
+    ]
+    for snapshot in snapshots:
+        snapshot.write_text("snapshot\n", encoding="utf-8")
+
+    real_unlink = Path.unlink
+    raced = False
+
+    def unlink_after_peer(path: Path, *args, **kwargs) -> None:
+        nonlocal raced
+        if path == snapshots[0] and not raced:
+            raced = True
+            real_unlink(path)
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink_after_peer)
+
+    removed = engagements_module._prune_orchestrator_database_snapshots(tmp_path, max_copies=2)
+
+    assert raced is True
+    assert removed == []
+    assert sorted(tmp_path.glob("orchestrator.sqlite3.bak.*")) == snapshots[1:]
 
 
 class _TTYStdin:

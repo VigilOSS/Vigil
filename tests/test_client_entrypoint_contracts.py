@@ -252,7 +252,16 @@ def test_physical_client_roster_refresh_rejects_collision_before_any_write(
 @pytest.mark.parametrize(
     ("client", "expected_argv"),
     [
-        ("codex", ["codex", "--full-auto", "--model", "test-model", "operator task"]),
+        (
+            "codex",
+            [
+                "codex",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--model",
+                "test-model",
+                "operator task",
+            ],
+        ),
         (
             "claude",
             ["claude", "--dangerously-skip-permissions", "--model", "test-model", "operator task"],
@@ -472,7 +481,7 @@ def test_install_upgrade_reconciles_all_client_entrypoints_for_existing_engageme
         executable.chmod(0o755)
 
     permission_args = {
-        "codex": ["--full-auto"] if skip_permissions else [],
+        "codex": ["--dangerously-bypass-approvals-and-sandbox"] if skip_permissions else [],
         "claude": ["--dangerously-skip-permissions"] if skip_permissions else [],
         "opencode": ["--dangerously-skip-permissions"] if skip_permissions else [],
         "goose": [],
@@ -614,7 +623,7 @@ def test_entrypoint_repair_skips_conflicting_existing_permission_modes(
     )
     codex_launcher = engagement_dir / "start_codex.sh"
     codex_launcher.write_text(
-        codex_launcher.read_text().replace(" --full-auto ", "  ")
+        codex_launcher.read_text().replace(" --dangerously-bypass-approvals-and-sandbox ", "  ")
     )
     for client in ("opencode", "goose", "kimi"):
         (engagement_dir / f"start_{client}.sh").unlink()
@@ -648,7 +657,7 @@ def test_entrypoint_repair_explicit_skip_override_normalizes_recognized_conflict
     )
     codex_launcher = engagement_dir / "start_codex.sh"
     codex_launcher.write_text(
-        codex_launcher.read_text().replace(" --full-auto ", "  ")
+        codex_launcher.read_text().replace(" --dangerously-bypass-approvals-and-sandbox ", "  ")
     )
     for client in ("opencode", "goose", "kimi"):
         (engagement_dir / f"start_{client}.sh").unlink()
@@ -660,7 +669,9 @@ def test_entrypoint_repair_explicit_skip_override_normalizes_recognized_conflict
     assert result.reconciled == ("legacy-conflict",)
     assert result.permission_overrides == ("legacy-conflict",)
     assert result.skipped == ()
-    assert "--full-auto" in (engagement_dir / "start_codex.sh").read_text()
+    assert "--dangerously-bypass-approvals-and-sandbox" in (
+        engagement_dir / "start_codex.sh"
+    ).read_text()
     assert "--dangerously-skip-permissions" in (
         engagement_dir / "start_claude.sh"
     ).read_text()
@@ -719,7 +730,9 @@ def test_entrypoint_repair_explicit_skip_override_upgrades_config_only_legacy_en
     assert evidence.read_bytes() == b"retain\x00exactly"
     for client in ("codex", "claude", "opencode", "goose", "kimi"):
         assert (engagement_dir / f"start_{client}.sh").is_file()
-    assert "--full-auto" in (engagement_dir / "start_codex.sh").read_text()
+    assert "--dangerously-bypass-approvals-and-sandbox" in (
+        engagement_dir / "start_codex.sh"
+    ).read_text()
     assert "--dangerously-skip-permissions" in (
         engagement_dir / "start_claude.sh"
     ).read_text()

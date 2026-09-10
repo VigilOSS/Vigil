@@ -2896,7 +2896,7 @@ def test_start_swarm_records_N_rows_with_worker_encoded_task(
     assert all(r["dispatch_mode"] == "swarm" for r in recorded)
     assert all("source_revision" in r for r in recorded)
     assert all("instruction_identity_status" in r for r in recorded)
-    assert all(r["actual_model"] == "unknown" for r in recorded)
+    assert all("actual_model" not in r and "actual_reasoning" not in r for r in recorded)
     # Each task encodes worker index and contiguous item range.
     assert "[swarm 1/3 items 1-5 from items.txt]" in recorded[0]["task"]
     assert "[swarm 2/3 items 6-10 from items.txt]" in recorded[1]["task"]

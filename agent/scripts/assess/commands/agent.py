@@ -932,12 +932,15 @@ def _attach_dispatch_provenance(payload: dict, cfg) -> list[str]:
         agent_role=str(payload.get("agent_role") or ""),
     )
     # These fields describe installed bytes observed by this process. A JSON
-    # payload must not be able to self-attest different provenance.
+    # payload must not be able to self-attest different provenance. Provider-
+    # observed model identity belongs to the backend/runtime boundary, so remove
+    # any caller value instead of sending forbidden self-attestation fields.
+    payload.pop("actual_model", None)
+    payload.pop("actual_reasoning", None)
     payload.update(identity)
-    payload["actual_model"] = "unknown"
-    payload["actual_reasoning"] = "unknown"
     warnings.append(
-        "provider-observed model identity and reasoning are unavailable; recording actual values as unknown"
+        "provider-observed model identity and reasoning are unavailable; "
+        "the backend records actual values as unknown"
     )
     return warnings
 
