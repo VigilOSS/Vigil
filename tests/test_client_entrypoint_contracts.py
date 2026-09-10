@@ -606,6 +606,40 @@ def test_entrypoint_repair_preserves_existing_primary_client_kind(
         assert (engagement_dir / f"start_{client}.sh").is_file()
 
 
+def test_entrypoint_repair_migrates_legacy_generated_codex_skip_flag(
+    tmp_path: Path,
+) -> None:
+    install_root = tmp_path / "install"
+    agent_root = install_root / "agent"
+    engagement_dir = agent_root / "engagements" / "legacy-codex-skip"
+    engagement_dir.mkdir(parents=True)
+    _write_agent_sources(agent_root)
+    (engagement_dir / "scope.json").write_text("{}\n")
+    engagements._write_prompt_wrappers(
+        agent_root, engagement_dir, "both", engagement_type="web"
+    )
+    engagements._write_codex_config(agent_root, engagement_dir)
+    engagements._write_claude_config(agent_root, engagement_dir)
+    engagements._write_launchers(
+        agent_root, engagement_dir, "both", skip_permissions=True
+    )
+    codex_launcher = engagement_dir / "start_codex.sh"
+    codex_launcher.write_text(
+        codex_launcher.read_text().replace(
+            "--dangerously-bypass-approvals-and-sandbox", "--full-auto"
+        )
+    )
+
+    result = engagements.repair_engagement_client_entrypoints(install_root)
+
+    assert result.reconciled == ("legacy-codex-skip",)
+    assert result.skipped == ()
+    assert result.permission_overrides == ()
+    repaired = codex_launcher.read_text()
+    assert "--dangerously-bypass-approvals-and-sandbox" in repaired
+    assert "--full-auto" not in repaired
+
+
 def test_entrypoint_repair_skips_conflicting_existing_permission_modes(
     tmp_path: Path,
 ) -> None:

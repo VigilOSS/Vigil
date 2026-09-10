@@ -2098,6 +2098,9 @@ _SKIP_PERMISSION_ARGS = {
     "opencode": "--dangerously-skip-permissions",
     "kimi": "--auto",
 }
+_LEGACY_SKIP_PERMISSION_ARGS = {
+    "codex": ("--full-auto",),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -2225,9 +2228,13 @@ def _generated_primary_launcher_permission_mode(
         return None, "unreadable_generated_file"
     if not body.startswith(_GENERATED_LAUNCHER_PREAMBLE):
         return None, "unrecognized_generated_preamble"
-    permission_arg = re.escape(_SKIP_PERMISSION_ARGS[client])
+    permission_args = (
+        _SKIP_PERMISSION_ARGS[client],
+        *_LEGACY_SKIP_PERMISSION_ARGS.get(client, ()),
+    )
+    permission_arg = "|".join(re.escape(value) for value in permission_args)
     exec_pattern = re.compile(
-        rf'^exec {client}[ \t]+(?:(?P<permission>{permission_arg})[ \t]+)?"\$@"$'
+        rf'^exec {client}[ \t]+(?:(?P<permission>(?:{permission_arg}))[ \t]+)?"\$@"$'
     )
     exec_lines = [line for line in body.splitlines() if line.startswith("exec ")]
     if len(exec_lines) != 1:
