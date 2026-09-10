@@ -185,9 +185,12 @@ def main(argv: list[str] | None = None) -> None:
         export_submission,
         export_surfaces,
         fetch,
+        finding_history,
         fixture_identity,
         gau,
         get_command_run,
+        get_finding,
+        get_intel,
         host_exec,
         http_cmd,
         ingest,
@@ -234,6 +237,8 @@ def main(argv: list[str] | None = None) -> None:
         resolve,
         resume_brief,
         post,
+        proof_receipt,
+        proof_run,
         recon,
         recon_status,
         record_chain,
@@ -242,6 +247,8 @@ def main(argv: list[str] | None = None) -> None:
         record_probe,
         record_reply,
         record_surface,
+        retract_finding_claim,
+        run_audit,
         scaffold_probe,
         scope,
         supersede_intel,
@@ -260,6 +267,9 @@ def main(argv: list[str] | None = None) -> None:
         artifact,
         fixture_identity,
         post,
+        proof_receipt,
+        proof_run,
+        run_audit,
         resolve,
         emit_event,
         log_entry,
@@ -314,24 +324,33 @@ def main(argv: list[str] | None = None) -> None:
     _register_subcommand_group(
         sub,
         name="finding",
-        help_text="Finding lifecycle: record, update, verify, merge, link, list, report.",
+        help_text="Finding lifecycle: record, update, verify, retract-claim, merge, link, list, get, history, report.",
         dest="finding_action",
         leaf_modules=(
             record_finding,
             update_finding,
             verify_finding,
+            retract_finding_claim,
             merge_finding,
             link_finding,
             list_findings,
+            get_finding,
+            finding_history,
             list_report_findings,
         ),
     )
     _register_subcommand_group(
         sub,
         name="intel",
-        help_text="Structured intel: record, update, list, supersede.",
+        help_text="Structured intel: record, update, list, get, supersede.",
         dest="intel_action",
-        leaf_modules=(record_intel, update_intel, list_intel, supersede_intel),
+        leaf_modules=(
+            record_intel,
+            update_intel,
+            list_intel,
+            get_intel,
+            supersede_intel,
+        ),
     )
     _register_subcommand_group(
         sub,
@@ -420,9 +439,7 @@ def main(argv: list[str] | None = None) -> None:
     argv = _hoist_root_flags(list(argv))
     command_index = _root_command_index(argv)
     if command_index is not None and command_index < len(argv):
-        if argv[command_index] == "agent":
-            agent.maybe_print_action_help(argv[command_index + 1 :])
-        elif argv[command_index] == "code-dispatch":
+        if argv[command_index] == "code-dispatch":
             code_dispatch.maybe_print_action_help(argv[command_index + 1 :])
         elif argv[command_index] == "work-buffer":
             work_buffer.maybe_print_action_help(argv[command_index + 1 :])

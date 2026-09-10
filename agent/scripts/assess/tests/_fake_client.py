@@ -162,7 +162,15 @@ class FakeAssessmentClient:
     def _observation_record(self, observation: dict) -> dict:
         variant_id, row = self._derive_from_observation(observation)
         return {
-            "request_variant": {"id": variant_id},
+            "request_variant": {
+                "id": variant_id,
+                "method": str(observation.get("method") or "GET").upper(),
+            },
+            "request_observation": {
+                "id": variant_id,
+                "request_variant_id": variant_id,
+                "observed_url": observation.get("url"),
+            },
             "service": {"id": variant_id},
             "coverage_items": list(observation.get("coverage_candidates") or []),
             "work_item": dict(row),
@@ -249,9 +257,27 @@ class FakeAssessmentClient:
             return {"id": len(self.links), **payload}
 
         if endpoint == "coverage-items/bulk":
-            return {"count": len(payload.get("items", [])), "records": []}
+            records = [
+                {
+                    "id": index,
+                    "request_variant_id": item.get("request_variant_id"),
+                    "service_id": item.get("service_id"),
+                    "auth_context": item.get("auth_context", "anonymous"),
+                    "input_slot": item.get("input_slot", "endpoint"),
+                    "attack_family": item.get("attack_family"),
+                }
+                for index, item in enumerate(payload.get("items", []), start=1)
+            ]
+            return {"count": len(records), "records": records}
 
         if endpoint == "coverage-items":
-            return {"id": len(self.posts)}
+            return {
+                "id": len(self.posts),
+                "request_variant_id": payload.get("request_variant_id"),
+                "service_id": payload.get("service_id"),
+                "auth_context": payload.get("auth_context", "anonymous"),
+                "input_slot": payload.get("input_slot", "endpoint"),
+                "attack_family": payload.get("attack_family"),
+            }
 
         return {}

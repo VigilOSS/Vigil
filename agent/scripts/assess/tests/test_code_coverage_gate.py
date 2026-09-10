@@ -45,7 +45,7 @@ def _load_transition_module(name: str):
 _ACTIVE_CODE_FINDING = {
     "slug": "code-1",
     "severity": "high",
-    "verification_state": "verified",
+    "verification_status": "confirmed",
     "workflow_status": "active",
     "canonical_location": "file:src/other.py:3",
 }
@@ -359,6 +359,42 @@ def test_complete_blocks_on_uncovered_high_risk_file(monkeypatch, tmp_path, caps
     assert json.loads((eng / "scope.json").read_text())["current_phase"] == "fuzz"
 
 
+def test_force_cannot_manufacture_code_completion_with_open_debt(
+    monkeypatch, tmp_path, capsys
+):
+    module = _load_transition_module("tp_cov_complete_force_refused")
+    eng, recorded = _setup_env(
+        monkeypatch,
+        module,
+        tmp_path,
+        scope={"engagement_type": "code", "current_phase": "fuzz"},
+        coverage=_coverage(uncovered=[]),
+        findings=[],
+        readiness=_readiness(
+            blockers=[
+                _blocker(
+                    "unresolved_analysis_queue",
+                    "2 error queue items remain",
+                )
+            ]
+        ),
+    )
+
+    with pytest.raises(SystemExit):
+        module.run(
+            _args(
+                eng,
+                "complete",
+                force=True,
+                reason="deadline does not erase durable debt",
+            )
+        )
+
+    assert "cannot be forced to complete" in capsys.readouterr().err
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "fuzz"
+    assert not [row for row in recorded if row["kind"] == "forced_transition_override"]
+
+
 # ---------------------------------------------------------------------------
 # A-R2: the track-agnostic blind-triage gate also guards the CODE complete edge
 # (code-phase-4-fuzz.md makes the blind Pass-2 mandatory for every Medium+
@@ -369,7 +405,7 @@ def test_complete_blocks_on_uncovered_high_risk_file(monkeypatch, tmp_path, caps
 _MEDIUM_CODE_FINDING = {
     "slug": "code-med-1",
     "severity": "medium",
-    "verification_state": "verified",
+    "verification_status": "confirmed",
     "workflow_status": "active",
     "canonical_location": "file:src/handler.py:42",
 }

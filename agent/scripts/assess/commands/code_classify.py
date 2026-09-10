@@ -6,7 +6,7 @@ import json
 import sys
 from pathlib import Path
 
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessmentClient, AssessError, require_write_result
 from assess.lib.code_languages import CANONICAL_CODE_LANGUAGES, CODE_LANGUAGE_ALIASES
 from assess.lib.config import load_config
 from assess.lib.schema_validation import load_schema
@@ -260,7 +260,19 @@ def run(args) -> None:
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.post('code/files/bulk-classify', {'classifications': normalized_payload})
 
-    classified_count = result.get('updated', len(normalized_payload))
+    result = require_write_result(
+        result,
+        operation="classify code files",
+        expected={"total": len(normalized_payload)},
+        nonnegative_counts=("updated",),
+    )
+    classified_count = result['updated']
+    if classified_count > len(normalized_payload):
+        raise AssessError(
+            "classify code files: backend response reported more updated rows than "
+            "were submitted; the write may have committed, so inspect durable state "
+            "and do not retry automatically"
+        )
 
     tier_counts: dict[str, int] = {}
     for item in normalized_payload:

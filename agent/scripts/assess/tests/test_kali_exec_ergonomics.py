@@ -11,7 +11,7 @@ Six behaviors an LLM operator depends on, none of which existed before:
 3. hand-written credentials on an identity-less run are called out rather
    than silently filed as `auth_context=anonymous`;
 4. `browser` no longer claims required-header injection failed when it did not;
-5. `command-run get --include-output` is accepted as a documented no-op;
+5. `command-run get` rejects the list-only `--include-output` flag;
 6. multi-arm curl's global last-wins `-w`/`-D` semantics are surfaced.
 """
 from __future__ import annotations
@@ -304,7 +304,6 @@ def test_job_start_registers_identity_target(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(kali_job, "prepare_execution_command", fake_prepare)
     monkeypatch.setattr(kali_job.scope_lib, "enforce_execution_policy", lambda *a, **k: {})
     monkeypatch.setattr(kali_job, "_scope_version", lambda _dir: "v1")
-    monkeypatch.setattr(kali_job, "aggregate_rate_reservation", lambda *a, **k: None)
     monkeypatch.setattr(kali_job, "start_job", lambda *a, **k: {"id": 1})
     monkeypatch.setattr(
         kali_job,
@@ -333,7 +332,6 @@ def test_job_start_identity_target_defaults_to_no_override(monkeypatch, tmp_path
     monkeypatch.setattr(kali_job, "prepare_execution_command", fake_prepare)
     monkeypatch.setattr(kali_job.scope_lib, "enforce_execution_policy", lambda *a, **k: {})
     monkeypatch.setattr(kali_job, "_scope_version", lambda _dir: "v1")
-    monkeypatch.setattr(kali_job, "aggregate_rate_reservation", lambda *a, **k: None)
     monkeypatch.setattr(kali_job, "start_job", lambda *a, **k: {"id": 1})
     monkeypatch.setattr(
         kali_job,
@@ -438,7 +436,7 @@ def test_a_genuinely_uninjectable_tool_still_warns(monkeypatch, tmp_path, capsys
 
 
 # --------------------------------------------------------------------------- #
-# 5 — `command-run get --include-output` is a documented no-op
+# 5 — `command-run get` rejects the list-only `--include-output` flag
 # --------------------------------------------------------------------------- #
 
 def _leaf_parser(module, name):
@@ -448,14 +446,12 @@ def _leaf_parser(module, name):
     return root, sub.choices[name]
 
 
-def test_command_run_get_accepts_include_output() -> None:
-    """The flag exists on `list`; `get` already always returns full previews.
-    Rejecting the muscle-memory spelling with an argparse usage dump reads like
-    a much larger CLI breakage than a no-op flag."""
+def test_command_run_get_rejects_list_only_include_output() -> None:
     root, _leaf = _leaf_parser(get_command_run, "get")
-    args = root.parse_args(["get", "42", "--include-output"])
-    assert args.command_run_id == 42
-    assert args.include_output is True
+    with pytest.raises(SystemExit) as exc:
+        root.parse_args(["get", "42", "--include-output"])
+
+    assert exc.value.code == 2
 
 
 def test_list_include_output_help_does_not_promise_a_table_column() -> None:

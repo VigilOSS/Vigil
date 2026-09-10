@@ -18,10 +18,10 @@
    d. For each reviewed finding, the reviewer decides a disposition per its own Decision Framework
       (`agent/agents/vulnerability-analyst.md` — `PASS`/`UPGRADE`/`DOWNGRADE`/`KILL`), then the
       operator maps it to the backend disposition set and runs the matching command:
-      - **Confirmed** (`PASS`) → `vigil assess finding verify <slug> --disposition confirmed --reason "..."`
-      - **Upgraded** (`UPGRADE`) → `vigil assess finding update <slug> --severity <higher> --reason "severity upgrade: ..."` then `vigil assess finding verify <slug> --disposition confirmed --reason "..."`
-      - **Downgraded** (`DOWNGRADE`) → `vigil assess finding verify <slug> --disposition downgraded --reason "..." --new-severity <lower>`
-      - **Killed** (`KILL`) → `vigil assess finding verify <slug> --disposition false_positive --reason "..." --kill-reason "..." --kill-check <1-5>`
+      - **Confirmed** (`PASS`) → `vigil assess finding verify <slug> --status confirmed --reason "..." --proof-receipt-id <id>`
+      - **Upgraded** (`UPGRADE`) → `vigil assess finding update <slug> --severity <higher> --reason "severity upgrade: ..."` then `vigil assess finding verify <slug> --status confirmed --reason "..." --proof-receipt-id <id>`
+      - **Downgraded** (`DOWNGRADE`) → `vigil assess finding verify <slug> --status downgraded --reason "..." --new-severity <lower> --proof-receipt-id <id>`
+      - **Killed** (`KILL`) → `vigil assess finding verify <slug> --status false_positive --reason "..." --counter-check-file <counter-check.json>`
    e. **Dedup pass**: check for findings with overlapping `canonical_location` and similar `defect_family` across different agent prefixes. Merge the weaker into the stronger:
       `vigil assess finding merge <source-slug> <target-slug> "<reason>"`
    f. **Chain-only primitives stay in the normal finding table**: when a finding is real only as part of a proved or expected escalation path, update it with `vigil assess finding update <slug> ...` so `details.chain_required`, `details.chain_rationale`, and `details.required_followup` are populated. Do not invent a chain-specific workflow status.

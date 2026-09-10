@@ -9,7 +9,9 @@ installable package surface even without backend test infrastructure.
 from __future__ import annotations
 
 import io
+import re
 import shutil
+import subprocess
 import sys
 import urllib.error
 from pathlib import Path
@@ -18,6 +20,8 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
+RENDER_SCRIPT = REPO_ROOT / "agent" / "scripts" / "render-operator-prompts.sh"
+STAMP_MARKER = "vigil-prompt-stamp"
 
 
 def test_vigil_runtime_resources_helper_renders_against_stub_container(monkeypatch, capsys):
@@ -263,3 +267,117 @@ def test_readyz_http_error_preserves_readiness_payload(tmp_path, monkeypatch):
     assert readiness["database_connected"] is True
     assert readiness["assessment_schema_ready"] is False
     assert readiness["code_analysis_schema_ready"] is True
+
+
+# --------------------------------------------------------------------------- #
+# I-104: `vigil auth` and `vigil assess auth` are a deliberate split (operator-
+# side vs agent-side, different engagement resolution). A verb that lives on
+# only one side must name the other rather than dead-ending on argparse's
+# "invalid choice" — a POINTER, never a second listing that would resolve the
+# engagement differently.
+# --------------------------------------------------------------------------- #
+
+
+def test_vigil_auth_unknown_verb_points_at_the_assess_sibling(capsys):
+    from vigil_cli.main import main
+
+    with pytest.raises(SystemExit) as exc:
+        main(["auth", "list"])
+
+    # argparse's usage-error exit code is unchanged: this adds a route, not a verb.
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "invalid choice" in err
+    assert "vigil assess auth list" in err
+
+
+def test_vigil_auth_valid_verb_is_not_given_the_sibling_hint(capsys, tmp_path):
+    """The hint fires only on an unknown subcommand, never on a real error."""
+    from vigil_cli.main import main
+
+    with pytest.raises(SystemExit):
+        # `--identity` is required for quarantine; this is a normal usage error.
+        main(["--root", str(tmp_path), "auth", "quarantine"])
+
+    err = capsys.readouterr().err
+    assert "vigil assess auth list" not in err
+
+
+# --------------------------------------------------------------------------- #
+# I-149(a): a rendered operator prompt materialised into an engagement or an
+# install root is a copy nothing ever re-renders. Every out-of-tree mirror
+# carries a `vigil-prompt-stamp` so a consumer can compare it against
+# `render-operator-prompts.sh source-sha` and warn on a stale prompt.
+# --------------------------------------------------------------------------- #
+
+requires_bash = pytest.mark.skipif(
+    shutil.which("bash") is None, reason="bash not available on host"
+)
+
+
+def _render(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", str(RENDER_SCRIPT), *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+@requires_bash
+def test_render_stamps_every_out_of_tree_mirror_with_the_source_digest(tmp_path):
+    sha_proc = _render("source-sha")
+    assert sha_proc.returncode == 0, sha_proc.stderr
+    source_sha = sha_proc.stdout.strip()
+    assert len(source_sha) == 64
+
+    out = tmp_path / "engagement"
+    out.mkdir()
+    rendered = _render("repo", str(out))
+    assert rendered.returncode == 0, rendered.stderr
+
+    mirrors = [
+        out / "AGENTS.md",
+        out / "CLAUDE.md",
+        out / ".claude" / "agents" / "operator.md",
+        out / ".claude" / "agents" / "fuzzer.md",
+        out / ".codex" / "agents" / "operator.toml",
+        out / ".codex" / "agents" / "fuzzer.toml",
+        out / ".opencode" / "agent" / "fuzzer.md",
+        out / ".goose" / "recipes" / "fuzzer.yaml",
+    ]
+    # `<!-- vigil-prompt-stamp: <sha> <iso8601> -->` in markdown mirrors,
+    # `# vigil-prompt-stamp: <sha> <iso8601>` in the toml/yaml ones.
+    stamp_pattern = re.compile(
+        rf"^(?:<!--|#) {STAMP_MARKER}: (?P<sha>[0-9a-f]{{64}}) "
+        r"(?P<rendered_at>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)(?: -->)?$"
+    )
+    for mirror in mirrors:
+        stamps = [
+            line
+            for line in mirror.read_text(encoding="utf-8").splitlines()
+            if STAMP_MARKER in line
+        ]
+        assert len(stamps) == 1, f"{mirror} carries {len(stamps)} stamps"
+        match = stamp_pattern.match(stamps[0])
+        assert match is not None, f"{mirror} stamp is malformed: {stamps[0]!r}"
+        assert match.group("sha") == source_sha
+
+
+@requires_bash
+def test_repo_tree_artifacts_stay_unstamped_and_render_check_stays_clean():
+    """In-tree artifacts are committed and byte-guarded by render-check already.
+
+    Stamping them would churn every tracked wrapper on every render for no
+    staleness signal, so the stamp is out-of-tree only — and render-check
+    compares modulo the stamp, so a stamped copy never reads as prompt drift.
+    """
+    for tracked in (
+        REPO_ROOT / "agent" / "AGENTS.md",
+        REPO_ROOT / "agent" / "CLAUDE.md",
+        REPO_ROOT / "agent" / ".codex" / "agents" / "fuzzer.toml",
+    ):
+        assert STAMP_MARKER not in tracked.read_text(encoding="utf-8")
+
+    check = _render("check")
+    assert check.returncode == 0, check.stdout + check.stderr

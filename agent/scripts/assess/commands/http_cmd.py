@@ -21,20 +21,33 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessmentClient, AssessError, require_write_result
 from assess.lib.config import load_config
 from assess.lib.contracts import render_contract_epilog
+from assess.lib.finding_render import warn_untrusted_data
+from assess.lib.list_output import ListPage, lookahead_limit, page_from_backend, report_page
+
+
+_DEFAULT_LIST_LIMIT = 250
+_MAX_LIST_LIMIT = 5000
 
 
 # Shared server-side filter flags for list / search / export-har. Query-param
 # names mirror the backend GET /http-flows signature exactly (host, method,
 # response_status, content_type_family, auth_context, truncated, q, limit,
 # offset) so a filter drift on either side surfaces immediately.
-def _add_filter_args(sp, *, with_q: bool = True) -> None:
+def _add_filter_args(
+    sp,
+    *,
+    with_q: bool = True,
+    default_limit: int | None = None,
+    default_offset: int | None = None,
+) -> None:
     sp.add_argument("--host", default="", help="Filter by request host (exact).")
     sp.add_argument("--method", default="", help="Filter by HTTP method (GET/POST/...).")
     sp.add_argument(
@@ -71,8 +84,8 @@ def _add_filter_args(sp, *, with_q: bool = True) -> None:
     )
     if with_q:
         sp.add_argument("--q", default="", help="LIKE text query over url/path/host.")
-    sp.add_argument("--limit", type=int, default=None, help="Max rows (backend caps at 5000).")
-    sp.add_argument("--offset", type=int, default=None, help="Row offset for paging.")
+    sp.add_argument("--limit", type=int, default=default_limit, help="Max rows (backend caps at 5000).")
+    sp.add_argument("--offset", type=int, default=default_offset, help="Row offset for paging.")
 
 
 def register(subparsers) -> None:
@@ -87,7 +100,17 @@ def register(subparsers) -> None:
 
     # -- list -----------------------------------------------------------------
     sp_list = action_sub.add_parser("list", help="List captured HTTP flows with server-side filters.")
-    _add_filter_args(sp_list, with_q=True)
+    _add_filter_args(
+        sp_list,
+        with_q=True,
+        default_limit=_DEFAULT_LIST_LIMIT,
+        default_offset=0,
+    )
+    sp_list.add_argument(
+        "--paginate",
+        action="store_true",
+        help="Fetch every matching flow page from --offset.",
+    )
     sp_list.add_argument("--json", dest="as_json", action="store_true", help="Emit raw JSON rows.")
     sp_list.set_defaults(func=_run_list)
 
@@ -100,7 +123,17 @@ def register(subparsers) -> None:
     # -- search ---------------------------------------------------------------
     sp_search = action_sub.add_parser("search", help="Text search over url/path/host (convenience over list).")
     sp_search.add_argument("query", nargs="*", help="Search words (joined with spaces → the LIKE `q`).")
-    _add_filter_args(sp_search, with_q=False)
+    _add_filter_args(
+        sp_search,
+        with_q=False,
+        default_limit=_DEFAULT_LIST_LIMIT,
+        default_offset=0,
+    )
+    sp_search.add_argument(
+        "--paginate",
+        action="store_true",
+        help="Fetch every matching flow page from --offset.",
+    )
     sp_search.add_argument("--json", dest="as_json", action="store_true", help="Emit raw JSON rows.")
     sp_search.set_defaults(func=_run_search)
 
@@ -173,8 +206,12 @@ def register(subparsers) -> None:
     sp_policy_set.add_argument(
         "--redaction-profile",
         dest="redaction_profile",
+        choices=("none",),
         default=None,
-        help="Named redaction profile (default 'none').",
+        help=(
+            "Effective redaction profile. Only 'none' is supported while raw evidence "
+            "preservation and Phase 3D redaction design remain authoritative."
+        ),
     )
     sp_policy_set.set_defaults(func=_run_policy_set)
 
@@ -195,7 +232,13 @@ def _flatten_ctypes(values) -> list[str]:
     return out
 
 
-def _build_flow_query(args, *, q_value: str | None = None) -> str:
+def _build_flow_query(
+    args,
+    *,
+    q_value: str | None = None,
+    limit_override: int | None = None,
+    offset_override: int | None = None,
+) -> str:
     """Assemble the /http-flows query string from the shared filter flags.
 
     Only non-empty values are emitted so an unset filter never over-constrains
@@ -223,10 +266,10 @@ def _build_flow_query(args, *, q_value: str | None = None) -> str:
     q = q_value if q_value is not None else (getattr(args, "q", "") or "")
     if q:
         params.append(("q", q))
-    limit = getattr(args, "limit", None)
+    limit = limit_override if limit_override is not None else getattr(args, "limit", None)
     if limit is not None:
         params.append(("limit", str(limit)))
-    offset = getattr(args, "offset", None)
+    offset = offset_override if offset_override is not None else getattr(args, "offset", None)
     if offset is not None:
         params.append(("offset", str(offset)))
     return urlencode(params, quote_via=quote)
@@ -281,29 +324,121 @@ def _render_rows(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _run_list(args) -> None:
+def _require_flow_rows(value, *, operation: str) -> list[dict]:
+    if not isinstance(value, list) or any(
+        not isinstance(row, dict)
+        or not isinstance(row.get("id"), int)
+        or isinstance(row.get("id"), bool)
+        or row["id"] < 1
+        or not isinstance(row.get("flow_uid"), str)
+        or not row["flow_uid"].strip()
+        for row in value
+    ):
+        raise AssessError(f"{operation}: malformed backend response")
+    return value
+
+
+def _flow_continuation(args, *, operation: str, q_value: str, offset: int) -> str:
+    parts = ["vigil", "assess", "http", operation]
+    if operation == "search" and q_value:
+        parts.append(q_value)
+    for flag, value in (
+        ("--host", args.host),
+        ("--method", args.method),
+        ("--status", args.status),
+        ("--content-type", args.content_type),
+        ("--auth-context", args.auth_context),
+    ):
+        if value:
+            parts.extend((flag, str(value)))
+    if args.truncated is not None:
+        parts.append("--truncated" if args.truncated else "--no-truncated")
+    if operation == "list" and q_value:
+        parts.extend(("--q", q_value))
+    parts.extend(("--limit", str(args.limit), "--offset", str(offset)))
+    return shlex.join(parts)
+
+
+def _run_flow_rows(args, *, operation: str, q_value: str) -> None:
+    limit = int(args.limit)
+    offset = int(args.offset)
     client = _client(args)
     try:
-        query = _build_flow_query(args)
-        rows = client.get(_flows_endpoint(query))
-        if not isinstance(rows, list):
-            rows = []
-        print(json.dumps(rows, indent=2, ensure_ascii=False) if args.as_json else _render_rows(rows))
+        if getattr(args, "paginate", False):
+            rows: list[dict] = []
+            next_offset = offset
+            while True:
+                query = _build_flow_query(
+                    args,
+                    q_value=q_value,
+                    limit_override=limit,
+                    offset_override=next_offset,
+                )
+                page_rows = _require_flow_rows(
+                    client.get(_flows_endpoint(query)),
+                    operation=f"http {operation}",
+                )
+                rows.extend(page_rows)
+                if len(page_rows) < limit:
+                    break
+                next_offset += len(page_rows)
+        else:
+            request_limit, used_lookahead = lookahead_limit(
+                limit, maximum=_MAX_LIST_LIMIT
+            )
+            query = _build_flow_query(
+                args,
+                q_value=q_value,
+                limit_override=request_limit,
+                offset_override=offset,
+            )
+            rows = _require_flow_rows(
+                client.get(_flows_endpoint(query)),
+                operation=f"http {operation}",
+            )
     finally:
         client.close()
+
+    if getattr(args, "paginate", False):
+        exact_total = offset + len(rows) if rows or offset == 0 else None
+        page = ListPage(
+            rows=rows,
+            offset=offset,
+            total=exact_total,
+            total_at_least=exact_total,
+            has_more=False,
+        )
+    else:
+        page = page_from_backend(
+            rows,
+            limit=limit,
+            offset=offset,
+            used_lookahead=used_lookahead,
+        )
+    report_page(
+        page,
+        noun="HTTP flows",
+        continuation_command=_flow_continuation(
+            args,
+            operation=operation,
+            q_value=q_value,
+            offset=page.offset + len(page.rows),
+        ),
+        point_read_hint="`vigil assess http show <flow_uid>`",
+    )
+    rows = page.rows
+    if rows:
+        warn_untrusted_data()
+    print(json.dumps(rows, indent=2, ensure_ascii=False) if args.as_json else _render_rows(rows))
+
+
+def _run_list(args) -> None:
+    _run_flow_rows(args, operation="list", q_value=str(args.q or "").strip())
 
 
 def _run_search(args) -> None:
-    client = _client(args)
-    try:
-        q = " ".join(args.query).strip() if args.query else ""
-        query = _build_flow_query(args, q_value=q)
-        rows = client.get(_flows_endpoint(query))
-        if not isinstance(rows, list):
-            rows = []
-        print(json.dumps(rows, indent=2, ensure_ascii=False) if args.as_json else _render_rows(rows))
-    finally:
-        client.close()
+    q = " ".join(args.query).strip() if args.query else ""
+    _run_flow_rows(args, operation="search", q_value=q)
 
 
 def _flow_text(row: dict) -> str:
@@ -354,6 +489,7 @@ def _run_show(args) -> None:
         if not isinstance(row, dict):
             print(f"http show: unexpected response for {args.flow!r}", file=sys.stderr)
             sys.exit(1)
+        warn_untrusted_data()
         print(json.dumps(row, indent=2, ensure_ascii=False) if args.as_json else _flow_text(row))
     finally:
         client.close()
@@ -402,10 +538,23 @@ def _run_import_har(args) -> None:
         result = client.post("http-flows/import-har", payload)
     finally:
         client.close()
+    result = require_write_result(
+        result,
+        operation="import HAR flows",
+        positive_ids=("engagement_id",),
+        nonnegative_counts=("count",),
+    )
+    flows = result.get("flows")
+    if not isinstance(flows, list) or len(flows) != result["count"]:
+        raise AssessError(
+            "import HAR flows: backend response flow list does not match its count; "
+            "the write may have committed, so inspect durable state and do not retry "
+            "automatically"
+        )
     if getattr(args, "as_json", False):
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return
-    count = result.get("count", 0) if isinstance(result, dict) else 0
+    count = result["count"]
     print(f"Imported {count} flow(s) from {fp}")
 
 
@@ -471,6 +620,9 @@ def _run_policy_set(args) -> None:
         policy = client.put("capture-policy", payload)
     finally:
         client.close()
-    if not isinstance(policy, dict):
-        policy = {}
+    policy = require_write_result(
+        policy,
+        operation="update capture policy",
+        expected=payload,
+    )
     print(_render_policy(policy))

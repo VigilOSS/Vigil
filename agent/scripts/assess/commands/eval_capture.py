@@ -11,12 +11,9 @@ that is DROP-IN compatible with the offline eval harness (tests/eval): a flat
 JSON array of finding-records validating against
 ``agent/schemas/finding-record.schema.json``. Replay stays zero-token.
 
-The #1 risk (blueprint G1/G4): ``GET /findings`` returns the raw DB row —
-``details_json``/``provenance_json`` are JSON STRINGS and ~10 extra DB columns
-(id, engagement_id, *_json, merged_into_*, timestamps, evidence_artifact_id)
-ride along. The fixture schema is ``additionalProperties:false`` with NESTED
-``details``/``provenance`` objects, so a naive dump fails ``test_parsing``. Every
-row is transformed via :func:`_to_fixture_record` and then VALIDATED with
+``GET /findings`` returns parsed ``details``/``provenance`` objects alongside
+backend metadata the fixture schema does not accept. Every API row is projected
+via :func:`_to_fixture_record` and then VALIDATED with
 ``collect_validation_errors`` before writing. The validate-before-write guard is
 UNCONDITIONAL (not behind a flag): a backend-model change surfaces here as a
 capture failure because the schema is generated from ``FindingRecordRequest``.
@@ -54,8 +51,7 @@ _SCHEMA_SCALARS = (
     "evidence_ref",
     "notes",
     "workflow_status",
-    "verification_state",
-    "verification_disposition",
+    "verification_status",
     "root_cause_key",
     "auth_context",
     "source_name",
@@ -105,8 +101,7 @@ def _add_capture_arguments(p) -> None:
     # Reuse the list_findings CLI-side filters (list_findings.py:24-41).
     p.add_argument("--severity")
     p.add_argument("--workflow-status", "--status", dest="workflow_status")
-    p.add_argument("--verification-state")
-    p.add_argument("--verification-disposition")
+    p.add_argument("--verification-status")
     p.add_argument("--source-name")
     p.add_argument("--slug")
     p.add_argument(
@@ -133,38 +128,26 @@ def register(subparsers) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _json_object(row: dict, key: str) -> dict:
-    """Parse a ``*_json`` column into a dict.
-
-    Reuses the proven parser logic from export_findings.py:20-28: the column is
-    a JSON STRING on the raw DB row, but a dict if the backend ever pre-parsed
-    it. Malformed/non-object values degrade to ``{}`` so capture never crashes
-    on a single bad row (the validate-before-write guard still rejects the
-    record downstream if the resulting object is wrong).
-    """
-    value = row.get(key)
-    if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-        except (json.JSONDecodeError, TypeError):
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
-    return value if isinstance(value, dict) else {}
-
-
 def _to_fixture_record(row: dict) -> dict:
     """Transform a serialized backend finding row into a fixture record.
 
-    Allow-lists the schema scalars, parses ``details_json``/``provenance_json``
-    into nested objects, injects ``links: []`` (G2: links live in a separate
+    Allow-lists the schema scalars, preserves ``details``/``provenance``
+    for unconditional schema validation, injects ``links: []`` (G2: links live in a separate
     table and are not on the row; goldens use ``[]``), includes
     ``evidence_type`` only when non-null, and DROPS everything else (id,
     engagement_id, *_json, merged_into_*, timestamps, evidence_artifact_id,
     slug, request_variant_id/service_id/surface_id).
     """
     out = {k: row[k] for k in _SCHEMA_SCALARS if k in row}
-    out["details"] = _json_object(row, "details_json")
-    out["provenance"] = _json_object(row, "provenance_json")
+    out["details"] = row.get("details", {})
+    out["provenance"] = row.get("provenance", {})
+    if isinstance(out["provenance"], dict):
+        # Server-issued receipts are not authorable or portable fixture input.
+        out["provenance"] = {
+            key: value
+            for key, value in out["provenance"].items()
+            if key != "code_snapshot_attestation"
+        }
     out["links"] = []
     if row.get("evidence_type"):
         out["evidence_type"] = row["evidence_type"]
@@ -199,15 +182,12 @@ def _filter_rows(rows: list[dict], args) -> list[dict]:
         filtered = [
             r for r in filtered if str(r.get("workflow_status", "")).lower() == args.workflow_status.lower()
         ]
-    if args.verification_state:
-        filtered = [
-            r for r in filtered if str(r.get("verification_state", "")).lower() == args.verification_state.lower()
-        ]
-    if args.verification_disposition:
+    if args.verification_status:
         filtered = [
             r
             for r in filtered
-            if str(r.get("verification_disposition", "")).lower() == args.verification_disposition.lower()
+            if str(r.get("verification_status", "")).lower()
+            == args.verification_status.lower()
         ]
     if args.source_name:
         filtered = [r for r in filtered if str(r.get("source_name", "")).lower() == args.source_name.lower()]

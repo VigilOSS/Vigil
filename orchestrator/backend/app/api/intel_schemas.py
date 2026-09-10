@@ -159,6 +159,9 @@ class OrgFactRecordRequest(_IntelRequestBase):
     source_name: str = Field(default="", max_length=128)
     notes: str = Field(default="", max_length=4096)
     provenance: dict[str, Any] = Field(default_factory=dict)
+    authored_by: str | None = Field(default=None, min_length=1, max_length=4096)
+    scope: str | None = Field(default=None, min_length=1, max_length=4096)
+    validity_context: str | None = Field(default=None, min_length=1, max_length=4096)
 
 
 class NoteRecordRequest(_IntelRequestBase):
@@ -168,6 +171,9 @@ class NoteRecordRequest(_IntelRequestBase):
     tags: list[str] = Field(default_factory=list)
     source_name: str = Field(default="", max_length=128)
     provenance: dict[str, Any] = Field(default_factory=dict)
+    authored_by: str | None = Field(default=None, min_length=1, max_length=4096)
+    scope: str | None = Field(default=None, min_length=1, max_length=4096)
+    validity_context: str | None = Field(default=None, min_length=1, max_length=4096)
     # A note with lead_status set is a tracked *lead* (actionable hypothesis);
     # None = a plain reference note. Titles are UNIQUE per engagement, so lead
     # titles must be unique or a re-record overwrites the prior disposition.

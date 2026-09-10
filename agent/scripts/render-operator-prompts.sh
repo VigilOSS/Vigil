@@ -26,9 +26,9 @@ SOURCE_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 #   - `check` (or `render-check`) with NO --type runs BOTH red and blue
 #     checks. Blue is skipped (with stderr warning) if any of its required
 #     specialist source files are missing.
-#   - `repo --type blue` against the agent/ SOURCE_DIR refuses to overwrite
-#     agent/AGENTS.md (which is the canonical red rendering checked into the
-#     repo). Blue is rendered per-engagement only.
+#   - `repo --type blue` against the agent/ SOURCE_DIR writes the canonical
+#     agent/AGENTS-blue.md without overwriting agent/AGENTS.md (the canonical
+#     red rendering). Engagements point at these canonical installed files.
 # -----------------------------------------------------------------------------
 
 MODE=""
@@ -249,7 +249,7 @@ agent_description() {
     code-fuzz-engineer) printf '%s\n' "AI-driven fuzz campaign orchestration for memory-safety vulnerability discovery." ;;
     alert-triage-specialist) printf '%s\n' "L1 alert triage. Normalize, classify, auto-close mechanical noise with cited tenant-ref pattern, dispatch to L2 with platform skill named." ;;
     investigator) printf '%s\n' "L2 platform investigator. Pulls telemetry, builds evidence ladder, drafts findings with timeline + IOCs + MITRE techniques. Loads one platform skill per dispatch." ;;
-    incident-verifier) printf '%s\n' "L3 false-positive verifier. Five-check protocol with symmetric evidence bar. Only role that flips verification_state away from unreviewed." ;;
+    incident-verifier) printf '%s\n' "L3 false-positive verifier. Five-check protocol with symmetric evidence bar. Only role that records terminal verification_status decisions." ;;
     ir-lead) printf '%s\n' "L4 incident response lead. Containment / eradication / recovery proposals via propose-contain → operator approval → host-exec → contain. No automated WRITE actions." ;;
   esac
 }
@@ -880,9 +880,11 @@ check_render_one() {
   local f
   local check_files=()
   if [[ "$check_type" == "blue" ]]; then
-    # Blue renders to engagement dirs, not the agent/ source tree, so do not
-    # compare CLAUDE.md/AGENTS.md at the source tree. Only the specialist
-    # wrappers belong under agent/.claude/.codex.
+    if prompt_files_differ "$source_output_dir/AGENTS-blue.md" "$tmp_dir/AGENTS.md"; then
+      printf 'DRIFT (%s): AGENTS-blue.md differs from source render\n' "$check_type" >&2
+      print_prompt_diff "$source_output_dir/AGENTS-blue.md" "$tmp_dir/AGENTS.md"
+      drift=1
+    fi
     check_files=()
   else
     check_files=(CLAUDE.md AGENTS.md)
@@ -1012,13 +1014,9 @@ check_render() {
 # -----------------------------------------------------------------------------
 case "$MODE" in
   repo)
-    # In source-tree-blue mode (TYPE=blue against the canonical agent/
-    # source dir), agent/AGENTS.md and agent/CLAUDE.md are the checked-in red
-    # canonical files and MUST NOT be overwritten. We still render the blue
-    # specialist wrappers under agent/.claude/agents/ and agent/.codex/agents/
-    # so the blue roster is dispatchable from the source tree. Per-engagement
-    # blue renders (OUTPUT_DIR != SOURCE_DIR) write everything including
-    # AGENTS.md.
+    # In source-tree-blue mode, preserve the canonical red AGENTS.md/CLAUDE.md
+    # and write the full blue doctrine to its own canonical AGENTS-blue.md.
+    # Specialist wrappers remain shared under agent/.claude/.codex/.opencode.
     SOURCE_TREE_BLUE=0
     if [[ "$TYPE" == "blue" && "$(cd "$OUTPUT_DIR" && pwd)" == "$SOURCE_DIR" ]]; then
       SOURCE_TREE_BLUE=1
@@ -1028,7 +1026,8 @@ case "$MODE" in
       exit 1
     fi
     if [[ "$SOURCE_TREE_BLUE" -eq 1 ]]; then
-      echo "render (blue, source-tree): skipping AGENTS.md and CLAUDE.md to preserve the red canonical files; writing specialist wrappers only." >&2
+      render_operator_prompt_blue "$SOURCE_DIR/AGENTS-blue.md"
+      echo "render (blue, source-tree): wrote canonical AGENTS-blue.md; preserved red AGENTS.md and CLAUDE.md." >&2
     else
       render_claude
       render_agents

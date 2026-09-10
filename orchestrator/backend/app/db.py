@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import os
 import re
 import sqlite3
 import threading
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,6 +18,88 @@ from .config import settings
 from .models.engagement import Engagement
 from .models.engagement_session import EngagementSession
 from .models.event import Event
+from .retry_state import RETRY_STATES, map_legacy_retry_state
+
+
+logger = logging.getLogger(__name__)
+
+_VERIFICATION_STATUS_MIGRATION_ID = "finding-verification-status-v1"
+_DISPATCH_SCHEMA_MIGRATION_ID = "dispatch-provenance-and-fossils-v1"
+_RETRY_STATE_MIGRATION_ID = "blocked-technique-retry-state-v1"
+_RUN_ACCOUNTING_MIGRATION_ID = "assessment-run-accounting-v1"
+_RUN_ACCOUNTING_V2_MIGRATION_ID = "assessment-run-accounting-v2"
+_RATE_LEASE_RETIREMENT_MIGRATION_ID = "aggregate-rate-lease-retirement-v1"
+_RATE_LEASE_COLUMNS = (
+    "id",
+    "engagement_id",
+    "lease_token",
+    "owner",
+    "effective_rate_rps",
+    "aggregate_limit_rps",
+    "override_reason",
+    "command_run_id",
+    "expires_at",
+    "released_at",
+    "created_at",
+    "updated_at",
+)
+_RUN_ACCOUNTING_TABLES = frozenset(
+    {
+        "assessment_runs",
+        "assessment_run_lifecycle_events",
+        "assessment_run_sources",
+        "assessment_run_source_reads",
+        "assessment_run_obligations",
+        "assessment_run_obligation_events",
+        "assessment_run_candidates",
+        "assessment_run_candidate_events",
+        "assessment_run_comparisons",
+        "assessment_proof_receipts",
+        "assessment_finding_proof_receipts",
+    }
+)
+_RUN_ACCOUNTING_V2_TABLES = frozenset(
+    {
+        "assessment_run_tool_signals",
+        "assessment_run_discovery_passes",
+        "assessment_run_code_receipt_links",
+    }
+)
+_RUN_ACCOUNTING_RUN_COLUMNS = frozenset(
+    {
+        "run_purpose",
+        "target_identity_json",
+        "source_generations_json",
+        "exclusions_json",
+        "resumed_from_run_id",
+        "started_at",
+        "finished_at",
+        "seal_json",
+        "seal_sha256",
+    }
+)
+_RETIRED_DISPATCH_COLUMNS = (
+    "model",
+    "reasoning",
+    "skill_loaded",
+    "scope_host",
+    "permission",
+    "command_budget",
+    "output_schema",
+    "files_allowed_json",
+    "scope_path_prefix",
+)
+_VERIFICATION_STATUSES = frozenset(
+    {
+        "unreviewed",
+        "disputed",
+        "pending_runtime_proof",
+        "blocked",
+        "confirmed",
+        "downgraded",
+        "false_positive",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +156,912 @@ def _table_columns(connection: sqlite3.Connection, table_name: str) -> set[str]:
         row[1]
         for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
     }
+
+
+def _database_needs_verification_status_migration(db_path: Path) -> bool:
+    if not db_path.exists():
+        return False
+    with closing(sqlite3.connect(str(db_path))) as connection:
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        if "assessment_findings" not in tables:
+            return False
+        finding_columns = _table_columns(connection, "assessment_findings")
+        if "verification_status" not in finding_columns:
+            return True
+        if "assessment_finding_transitions" not in tables:
+            return False
+        transition_columns = _table_columns(
+            connection, "assessment_finding_transitions"
+        )
+        return bool(
+            {
+                "from_verification_state",
+                "to_verification_state",
+                "from_verification_disposition",
+                "to_verification_disposition",
+            }.intersection(transition_columns)
+            or not {
+                "from_verification_status",
+                "to_verification_status",
+                "verification_event_version",
+            }.issubset(transition_columns)
+        )
+
+
+def _database_needs_dispatch_schema_migration(db_path: Path) -> bool:
+    if not db_path.exists():
+        return False
+    with closing(sqlite3.connect(str(db_path))) as connection:
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        if "assessment_dispatches" not in tables:
+            return False
+        columns = _table_columns(connection, "assessment_dispatches")
+        return bool(columns.intersection(_RETIRED_DISPATCH_COLUMNS))
+
+
+def _database_needs_retry_state_migration(db_path: Path) -> bool:
+    if not db_path.exists():
+        return False
+    with closing(sqlite3.connect(str(db_path))) as connection:
+        row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'assessment_blocked_techniques'"
+        ).fetchone()
+    if row is None:
+        return False
+    table_sql = str(row[0] or "").lower()
+    return "check" not in table_sql or "retry_state in" not in table_sql
+
+
+def _database_needs_rate_lease_retirement(db_path: Path) -> bool:
+    """Return whether the retired active lease table needs archival."""
+
+    if not db_path.exists():
+        return False
+    with closing(sqlite3.connect(str(db_path))) as connection:
+        return connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'assessment_rate_leases'"
+        ).fetchone() is not None
+
+
+def _database_run_accounting_migration_reasons(db_path: Path) -> tuple[str, ...]:
+    """Describe Phase 2 run/proof schema that requires a protected upgrade."""
+
+    if not db_path.exists():
+        return ()
+    with closing(sqlite3.connect(str(db_path))) as connection:
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        anchors = {
+            "assessment_runs",
+            "assessment_proof_receipts",
+            "assessment_finding_proof_receipts",
+        }
+        if not tables.intersection(anchors):
+            return ()
+        reasons = [
+            f"missing_table:{table_name}"
+            for table_name in sorted(_RUN_ACCOUNTING_TABLES - tables)
+        ]
+        if "assessment_runs" in tables:
+            missing_columns = _RUN_ACCOUNTING_RUN_COLUMNS - _table_columns(
+                connection, "assessment_runs"
+            )
+            reasons.extend(
+                f"assessment_runs.missing_column:{column_name}"
+                for column_name in sorted(missing_columns)
+            )
+            if connection.execute(
+                "SELECT 1 FROM assessment_runs WHERE status = 'started' LIMIT 1"
+            ).fetchone() is not None:
+                reasons.append("assessment_runs.legacy_status:started")
+        if "assessment_proof_receipts" in tables:
+            proof_columns = _table_columns(connection, "assessment_proof_receipts")
+            for column_name in ("command_run_id", "source_read_id"):
+                if column_name not in proof_columns:
+                    reasons.append(
+                        f"assessment_proof_receipts.missing_column:{column_name}"
+                    )
+        if "assessment_finding_proof_receipts" in tables and "transition_id" not in _table_columns(
+            connection, "assessment_finding_proof_receipts"
+        ):
+            reasons.append(
+                "assessment_finding_proof_receipts.missing_column:transition_id"
+            )
+    return tuple(sorted(set(reasons)))
+
+
+def _database_run_accounting_v2_migration_reasons(db_path: Path) -> tuple[str, ...]:
+    """Describe additive automatic-signal schema requiring a protected upgrade."""
+
+    if not db_path.exists():
+        return ()
+    with closing(sqlite3.connect(str(db_path))) as connection:
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        if not tables.intersection(_RUN_ACCOUNTING_TABLES):
+            return ()
+        reasons = [
+            f"missing_table:{table_name}"
+            for table_name in sorted(_RUN_ACCOUNTING_V2_TABLES - tables)
+        ]
+        if (
+            "assessment_run_candidates" in tables
+            and "originating_signal_id"
+            not in _table_columns(connection, "assessment_run_candidates")
+        ):
+            reasons.append(
+                "assessment_run_candidates.missing_column:originating_signal_id"
+            )
+        if (
+            "assessment_run_code_receipt_links" in tables
+            and "target_key"
+            not in _table_columns(connection, "assessment_run_code_receipt_links")
+        ):
+            reasons.append(
+                "assessment_run_code_receipt_links.missing_column:target_key"
+            )
+    return tuple(sorted(set(reasons)))
+
+
+def _create_adjacent_migration_backup(db_path: Path, *, label: str) -> Path:
+    """Create and verify a pre-migration snapshot before opening a writer."""
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    backup_path = db_path.with_name(
+        f"{db_path.name}.pre-{label}.{timestamp}.bak"
+    )
+    temporary_path = backup_path.with_suffix(backup_path.suffix + ".tmp")
+    with closing(sqlite3.connect(str(db_path))) as source, closing(
+        sqlite3.connect(str(temporary_path))
+    ) as destination:
+        source.backup(destination)
+        quick_check = destination.execute("PRAGMA quick_check").fetchone()
+        if quick_check is None or str(quick_check[0]).lower() != "ok":
+            raise RuntimeError(
+                f"pre-{label} database backup failed integrity check: {backup_path}"
+            )
+    temporary_path.replace(backup_path)
+    return backup_path.resolve()
+
+
+def _create_adjacent_verification_backup(db_path: Path) -> Path:
+    return _create_adjacent_migration_backup(db_path, label="verification-status")
+
+
+def _create_adjacent_dispatch_backup(db_path: Path) -> Path:
+    return _create_adjacent_migration_backup(db_path, label="dispatch-schema")
+
+
+def _create_adjacent_retry_state_backup(db_path: Path) -> Path:
+    return _create_adjacent_migration_backup(db_path, label="retry-state")
+
+
+def _create_adjacent_run_accounting_backup(db_path: Path) -> Path:
+    return _create_adjacent_migration_backup(db_path, label="run-accounting")
+
+
+def _create_adjacent_run_accounting_v2_backup(db_path: Path) -> Path:
+    return _create_adjacent_migration_backup(db_path, label="run-accounting-v2")
+
+
+def _create_adjacent_rate_lease_retirement_backup(db_path: Path) -> Path:
+    return _create_adjacent_migration_backup(
+        db_path, label="rate-lease-retirement"
+    )
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verification_status_from_legacy_pair(
+    state_value: Any, disposition_value: Any
+) -> tuple[str, str]:
+    state = str(state_value or "").strip().lower()
+    disposition = str(disposition_value or "").strip().lower()
+    explicit_pairs = {
+        ("unreviewed", "none"): "unreviewed",
+        ("disputed", "none"): "disputed",
+        ("verified", "pending_runtime_proof"): "pending_runtime_proof",
+        ("verified", "blocked"): "blocked",
+        ("verified", "confirmed"): "confirmed",
+        ("verified", "downgraded"): "downgraded",
+        ("verified", "false_positive"): "false_positive",
+    }
+    mapped = explicit_pairs.get((state, disposition))
+    if mapped is not None:
+        return mapped, ""
+    return (
+        "unreviewed",
+        f"invalid legacy verification pair state={state!r}, disposition={disposition!r}; "
+        "mapped to unreviewed",
+    )
+
+
+def _create_migration_history_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            migration_id TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            from_version TEXT NOT NULL,
+            to_version TEXT NOT NULL,
+            migrated_rows INTEGER NOT NULL,
+            warning_count INTEGER NOT NULL,
+            backup_path TEXT NOT NULL,
+            report_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dispatch_column_migration_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            migration_id TEXT NOT NULL,
+            dispatch_id INTEGER NOT NULL,
+            engagement_id INTEGER NOT NULL,
+            agent_id TEXT NOT NULL,
+            legacy_payload_json TEXT NOT NULL,
+            migrated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(migration_id, dispatch_id),
+            FOREIGN KEY(migration_id) REFERENCES schema_migrations(migration_id) ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS finding_verification_migration_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            migration_id TEXT NOT NULL,
+            finding_id INTEGER NOT NULL,
+            legacy_state TEXT NOT NULL,
+            legacy_disposition TEXT NOT NULL,
+            mapped_status TEXT NOT NULL,
+            warning TEXT NOT NULL DEFAULT '',
+            migrated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(migration_id, finding_id),
+            FOREIGN KEY(finding_id) REFERENCES assessment_findings(id) ON DELETE CASCADE,
+            FOREIGN KEY(migration_id) REFERENCES schema_migrations(migration_id) ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS finding_transition_verification_migration_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            migration_id TEXT NOT NULL,
+            transition_id INTEGER NOT NULL,
+            finding_id INTEGER NOT NULL,
+            legacy_from_state TEXT,
+            legacy_from_disposition TEXT,
+            legacy_to_state TEXT,
+            legacy_to_disposition TEXT,
+            mapped_from_status TEXT,
+            mapped_to_status TEXT NOT NULL,
+            warning TEXT NOT NULL DEFAULT '',
+            migrated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(migration_id, transition_id),
+            FOREIGN KEY(transition_id) REFERENCES assessment_finding_transitions(id)
+                ON DELETE CASCADE,
+            FOREIGN KEY(migration_id) REFERENCES schema_migrations(migration_id)
+                ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assessment_blocked_technique_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL,
+            blocked_technique_id INTEGER NOT NULL,
+            technique_key TEXT NOT NULL,
+            event_kind TEXT NOT NULL,
+            from_retry_state TEXT,
+            to_retry_state TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            evidence_ref TEXT NOT NULL DEFAULT '',
+            notes TEXT NOT NULL DEFAULT '',
+            provenance_json TEXT NOT NULL DEFAULT '{}',
+            revalidation_context_json TEXT NOT NULL DEFAULT '{}',
+            legacy_payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+        )
+        """
+    )
+
+
+def _blocked_technique_table_sql(table_name: str) -> str:
+    if table_name not in {
+        "assessment_blocked_techniques",
+        "assessment_blocked_techniques__retry_v1",
+    }:
+        raise ValueError(f"unsupported blocked-technique table name: {table_name}")
+    allowed = ", ".join(f"'{value}'" for value in RETRY_STATES)
+    return f"""
+        CREATE TABLE IF NOT EXISTS {table_name} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL,
+            technique_key TEXT NOT NULL,
+            technique TEXT NOT NULL,
+            target_kind TEXT NOT NULL DEFAULT '',
+            target_ref TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            retry_state TEXT NOT NULL DEFAULT 'pending'
+                CHECK (retry_state IN ({allowed})),
+            evidence_ref TEXT NOT NULL DEFAULT '',
+            notes TEXT NOT NULL DEFAULT '',
+            provenance_json TEXT NOT NULL DEFAULT '{{}}',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(engagement_id, technique_key),
+            FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
+        )
+    """
+
+
+def _create_blocked_techniques_table(
+    connection: sqlite3.Connection,
+    *,
+    table_name: str = "assessment_blocked_techniques",
+) -> None:
+    connection.execute(_blocked_technique_table_sql(table_name))
+
+
+def _migrate_blocked_technique_retry_state(
+    connection: sqlite3.Connection, *, backup_path: Path
+) -> None:
+    """Constrain retry state without promoting legacy prose into authority."""
+
+    _create_migration_history_tables(connection)
+    rows = connection.execute(
+        """
+        SELECT blocked.*, engagements.key AS engagement_key
+        FROM assessment_blocked_techniques AS blocked
+        LEFT JOIN engagements ON engagements.id = blocked.engagement_id
+        ORDER BY blocked.id
+        """
+    ).fetchall()
+    mappings: list[dict[str, Any]] = []
+    warning_count = 0
+    _create_blocked_techniques_table(
+        connection, table_name="assessment_blocked_techniques__retry_v1"
+    )
+    for row in rows:
+        mapped, warning = map_legacy_retry_state(row["retry_state"])
+        payload = {
+            key: row[key]
+            for key in (
+                "id",
+                "engagement_id",
+                "technique_key",
+                "technique",
+                "target_kind",
+                "target_ref",
+                "reason",
+                "retry_state",
+                "evidence_ref",
+                "notes",
+                "provenance_json",
+                "created_at",
+                "updated_at",
+            )
+        }
+        connection.execute(
+            """
+            INSERT INTO assessment_blocked_techniques__retry_v1 (
+                id, engagement_id, technique_key, technique, target_kind,
+                target_ref, reason, retry_state, evidence_ref, notes,
+                provenance_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payload["id"],
+                payload["engagement_id"],
+                payload["technique_key"],
+                payload["technique"],
+                payload["target_kind"],
+                payload["target_ref"],
+                payload["reason"],
+                mapped,
+                payload["evidence_ref"],
+                payload["notes"],
+                payload["provenance_json"],
+                payload["created_at"],
+                payload["updated_at"],
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO assessment_blocked_technique_history (
+                engagement_id, blocked_technique_id, technique_key, event_kind,
+                from_retry_state, to_retry_state, reason, evidence_ref, notes,
+                provenance_json, revalidation_context_json, legacy_payload_json
+            ) VALUES (?, ?, ?, 'migration', ?, ?, ?, ?, ?, ?, '{}', ?)
+            """,
+            (
+                int(row["engagement_id"]),
+                int(row["id"]),
+                str(row["technique_key"]),
+                str(row["retry_state"]),
+                mapped,
+                str(row["reason"]),
+                str(row["evidence_ref"]),
+                str(row["notes"]),
+                str(row["provenance_json"]),
+                json.dumps(payload, sort_keys=True),
+            ),
+        )
+        mapping = {
+            "engagement": str(row["engagement_key"] or ""),
+            "technique_key": str(row["technique_key"]),
+            "legacy_retry_state": str(row["retry_state"]),
+            "mapped_retry_state": mapped,
+            "warning": warning,
+        }
+        mappings.append(mapping)
+        if warning:
+            warning_count += 1
+            logger.warning(
+                "retry-state migration warning engagement=%s technique=%s: %s",
+                row["engagement_key"],
+                row["technique_key"],
+                warning,
+            )
+    connection.execute("DROP TABLE assessment_blocked_techniques")
+    connection.execute(
+        "ALTER TABLE assessment_blocked_techniques__retry_v1 "
+        "RENAME TO assessment_blocked_techniques"
+    )
+    connection.execute(
+        """
+        INSERT INTO schema_migrations (
+            migration_id, from_version, to_version, migrated_rows,
+            warning_count, backup_path, report_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            _RETRY_STATE_MIGRATION_ID,
+            "free-text-retry-state",
+            "retry-state-v1",
+            len(rows),
+            warning_count,
+            str(backup_path),
+            json.dumps(
+                {"backup_path": str(backup_path), "mappings": mappings},
+                sort_keys=True,
+            ),
+        ),
+    )
+
+
+def _migrate_finding_transition_verification_status(
+    connection: sqlite3.Connection,
+) -> list[dict[str, Any]]:
+    tables = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    if "assessment_finding_transitions" not in tables:
+        return []
+    columns = _table_columns(connection, "assessment_finding_transitions")
+    legacy_columns = {
+        "from_verification_state",
+        "to_verification_state",
+        "from_verification_disposition",
+        "to_verification_disposition",
+    }
+    has_legacy_columns = bool(legacy_columns.intersection(columns))
+    if not has_legacy_columns and {
+        "from_verification_status",
+        "to_verification_status",
+        "verification_event_version",
+    }.issubset(columns):
+        return []
+    for column_name, definition in (
+        ("from_verification_status", "TEXT"),
+        ("to_verification_status", "TEXT NOT NULL DEFAULT 'unreviewed'"),
+        ("verification_event_version", "INTEGER NOT NULL DEFAULT 2"),
+    ):
+        if column_name not in columns:
+            connection.execute(
+                "ALTER TABLE assessment_finding_transitions "
+                f"ADD COLUMN {column_name} {definition}"
+            )
+    if not has_legacy_columns:
+        # A partially upgraded database can already hold canonical transition
+        # statuses while lacking only the event-version column. Adding that
+        # column is sufficient; remapping from absent legacy columns would
+        # overwrite preserved values with NULL/unreviewed.
+        return []
+    expression = {
+        name: name if name in columns else "NULL"
+        for name in legacy_columns
+    }
+    rows = connection.execute(
+        f"""
+        SELECT transitions.id, transitions.finding_id, findings.slug,
+               engagements.key AS engagement_key,
+               {expression['from_verification_state']} AS legacy_from_state,
+               {expression['from_verification_disposition']} AS legacy_from_disposition,
+               {expression['to_verification_state']} AS legacy_to_state,
+               {expression['to_verification_disposition']} AS legacy_to_disposition
+        FROM assessment_finding_transitions AS transitions
+        LEFT JOIN assessment_findings AS findings ON findings.id = transitions.finding_id
+        LEFT JOIN engagements ON engagements.id = transitions.engagement_id
+        ORDER BY transitions.id
+        """
+    ).fetchall()
+    report_rows: list[dict[str, Any]] = []
+    for row in rows:
+        legacy_from = (
+            str(row["legacy_from_state"] or ""),
+            str(row["legacy_from_disposition"] or ""),
+        )
+        if legacy_from == ("", ""):
+            mapped_from, from_warning = None, ""
+        else:
+            mapped_from, from_warning = _verification_status_from_legacy_pair(
+                *legacy_from
+            )
+        mapped_to, to_warning = _verification_status_from_legacy_pair(
+            row["legacy_to_state"], row["legacy_to_disposition"]
+        )
+        warnings = "; ".join(
+            value
+            for value in (
+                f"from: {from_warning}" if from_warning else "",
+                f"to: {to_warning}" if to_warning else "",
+            )
+            if value
+        )
+        if warnings:
+            logger.warning(
+                "verification transition migration warning engagement=%s "
+                "finding=%s transition=%s: %s",
+                row["engagement_key"],
+                row["slug"],
+                row["id"],
+                warnings,
+            )
+        connection.execute(
+            """
+            UPDATE assessment_finding_transitions
+            SET from_verification_status = ?, to_verification_status = ?,
+                verification_event_version = 1
+            WHERE id = ?
+            """,
+            (mapped_from, mapped_to, int(row["id"])),
+        )
+        report_rows.append(
+            {
+                "transition_id": int(row["id"]),
+                "finding_id": int(row["finding_id"]),
+                "engagement": str(row["engagement_key"] or ""),
+                "finding": str(row["slug"] or ""),
+                "legacy_from_state": row["legacy_from_state"],
+                "legacy_from_disposition": row["legacy_from_disposition"],
+                "legacy_to_state": row["legacy_to_state"],
+                "legacy_to_disposition": row["legacy_to_disposition"],
+                "mapped_from_status": mapped_from,
+                "mapped_to_status": mapped_to,
+                "warning": warnings,
+            }
+        )
+    for column_name in legacy_columns:
+        if column_name in columns:
+            connection.execute(
+                "ALTER TABLE assessment_finding_transitions "
+                f"DROP COLUMN {column_name}"
+            )
+    return report_rows
+
+
+def _migrate_finding_verification_status(
+    connection: sqlite3.Connection, *, backup_path: Path
+) -> None:
+    """Backfill finding/event status, preserve history, and rebuild the index."""
+
+    _create_migration_history_tables(connection)
+    columns = _table_columns(connection, "assessment_findings")
+    migrate_findings = "verification_status" not in columns
+    rows: list[sqlite3.Row] = []
+    report_rows: list[dict[str, Any]] = []
+    warning_count = 0
+    if migrate_findings:
+        legacy_state_column = "verification_state" in columns
+        legacy_disposition_column = "verification_disposition" in columns
+        connection.execute(
+            "ALTER TABLE assessment_findings ADD COLUMN verification_status "
+            "TEXT NOT NULL DEFAULT 'unreviewed'"
+        )
+        state_expression = (
+            "findings.verification_state" if legacy_state_column else "''"
+        )
+        disposition_expression = (
+            "findings.verification_disposition"
+            if legacy_disposition_column
+            else "''"
+        )
+        rows = connection.execute(
+            f"""
+            SELECT findings.id, findings.slug, engagements.key AS engagement_key,
+                   {state_expression} AS legacy_state,
+                   {disposition_expression} AS legacy_disposition
+            FROM assessment_findings AS findings
+            LEFT JOIN engagements ON engagements.id = findings.engagement_id
+            ORDER BY findings.id
+            """
+        ).fetchall()
+        for row in rows:
+            mapped, warning = _verification_status_from_legacy_pair(
+                row["legacy_state"], row["legacy_disposition"]
+            )
+            if mapped not in _VERIFICATION_STATUSES:
+                raise RuntimeError(
+                    f"verification migration produced invalid status: {mapped}"
+                )
+            connection.execute(
+                "UPDATE assessment_findings SET verification_status = ? WHERE id = ?",
+                (mapped, int(row["id"])),
+            )
+            report_rows.append(
+                {
+                    "engagement": str(row["engagement_key"] or ""),
+                    "finding": str(row["slug"] or ""),
+                    "legacy_state": str(row["legacy_state"] or ""),
+                    "legacy_disposition": str(row["legacy_disposition"] or ""),
+                    "verification_status": mapped,
+                    "warning": warning,
+                }
+            )
+            if warning:
+                warning_count += 1
+                logger.warning(
+                    "verification migration warning engagement=%s finding=%s: %s",
+                    row["engagement_key"],
+                    row["slug"],
+                    warning,
+                )
+
+        connection.execute("DROP INDEX IF EXISTS idx_assessment_findings_verification")
+        if legacy_state_column:
+            connection.execute(
+                "ALTER TABLE assessment_findings DROP COLUMN verification_state"
+            )
+        if legacy_disposition_column:
+            connection.execute(
+                "ALTER TABLE assessment_findings DROP COLUMN verification_disposition"
+            )
+    transition_rows = _migrate_finding_transition_verification_status(connection)
+    warning_count += sum(bool(row["warning"]) for row in transition_rows)
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_findings_verification "
+        "ON assessment_findings(engagement_id, verification_status)"
+    )
+    connection.execute(
+        """
+        INSERT INTO schema_migrations (
+            migration_id, from_version, to_version, migrated_rows,
+            warning_count, backup_path, report_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(migration_id) DO UPDATE SET
+            to_version = excluded.to_version,
+            migrated_rows = schema_migrations.migrated_rows + excluded.migrated_rows,
+            warning_count = schema_migrations.warning_count + excluded.warning_count,
+            report_json = excluded.report_json
+        """,
+        (
+            _VERIFICATION_STATUS_MIGRATION_ID,
+            "verification-pair",
+            "verification-status-v1",
+            len(rows) + len(transition_rows),
+            warning_count,
+            str(backup_path),
+            json.dumps(
+                {
+                    "finding_rows": report_rows,
+                    "transition_rows": transition_rows,
+                    "backup_path": str(backup_path),
+                },
+                sort_keys=True,
+            ),
+        ),
+    )
+    for row in rows:
+        mapped, warning = _verification_status_from_legacy_pair(
+            row["legacy_state"], row["legacy_disposition"]
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO finding_verification_migration_history (
+                migration_id, finding_id, legacy_state, legacy_disposition,
+                mapped_status, warning
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _VERIFICATION_STATUS_MIGRATION_ID,
+                int(row["id"]),
+                str(row["legacy_state"] or ""),
+                str(row["legacy_disposition"] or ""),
+                mapped,
+                warning,
+            ),
+        )
+    for row in transition_rows:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO finding_transition_verification_migration_history (
+                migration_id, transition_id, finding_id,
+                legacy_from_state, legacy_from_disposition,
+                legacy_to_state, legacy_to_disposition,
+                mapped_from_status, mapped_to_status, warning
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _VERIFICATION_STATUS_MIGRATION_ID,
+                row["transition_id"],
+                row["finding_id"],
+                row["legacy_from_state"],
+                row["legacy_from_disposition"],
+                row["legacy_to_state"],
+                row["legacy_to_disposition"],
+                row["mapped_from_status"],
+                row["mapped_to_status"],
+                row["warning"],
+            ),
+        )
+
+
+def _normalize_unobserved_dispatch_actual_identity(
+    connection: sqlite3.Connection,
+) -> None:
+    columns = _table_columns(connection, "assessment_dispatches")
+    for column in ("actual_model", "actual_reasoning"):
+        if column in columns:
+            connection.execute(
+                f"UPDATE assessment_dispatches SET {column} = 'unknown' "
+                f"WHERE {column} IS NULL OR "
+                f"trim({column}, ' ' || char(9) || char(10) || char(11) || "
+                "char(12) || char(13)) = ''"
+            )
+
+
+def _migrate_dispatch_schema(
+    connection: sqlite3.Connection, *, backup_path: Path
+) -> None:
+    """Preserve retired dispatch data and add exact instruction provenance."""
+
+    columns = _table_columns(connection, "assessment_dispatches")
+    retired = [name for name in _RETIRED_DISPATCH_COLUMNS if name in columns]
+    if not retired:
+        return
+    _create_migration_history_tables(connection)
+
+    additions = {
+        "requested_model": "TEXT",
+        "actual_model": "TEXT NOT NULL DEFAULT 'unknown'",
+        "requested_reasoning": "TEXT",
+        "actual_reasoning": "TEXT NOT NULL DEFAULT 'unknown'",
+        "client_name": "TEXT NOT NULL DEFAULT 'unknown'",
+        "source_revision": "TEXT NOT NULL DEFAULT 'unknown'",
+        "operator_instruction_path": "TEXT",
+        "operator_instruction_sha256": "TEXT",
+        "specialist_instruction_path": "TEXT",
+        "specialist_instruction_sha256": "TEXT",
+        "instruction_identity_status": "TEXT NOT NULL DEFAULT 'incomplete'",
+        "instructions_stale": "INTEGER",
+    }
+    for name, definition in additions.items():
+        if name not in columns:
+            connection.execute(
+                f"ALTER TABLE assessment_dispatches ADD COLUMN {name} {definition}"
+            )
+    _normalize_unobserved_dispatch_actual_identity(connection)
+    if "model" in columns:
+        connection.execute(
+            "UPDATE assessment_dispatches SET requested_model = model "
+            "WHERE requested_model IS NULL"
+        )
+    if "reasoning" in columns:
+        connection.execute(
+            "UPDATE assessment_dispatches SET requested_reasoning = reasoning "
+            "WHERE requested_reasoning IS NULL"
+        )
+
+    select_columns = ", ".join(["id", "engagement_id", "agent_id", *retired])
+    rows = connection.execute(
+        f"SELECT {select_columns} FROM assessment_dispatches ORDER BY id"
+    ).fetchall()
+    report_rows: list[dict[str, Any]] = []
+    for row in rows:
+        legacy = {name: row[name] for name in retired}
+        report_rows.append(
+            {
+                "dispatch_id": int(row["id"]),
+                "engagement_id": int(row["engagement_id"]),
+                "agent_id": str(row["agent_id"]),
+                "legacy": legacy,
+            }
+        )
+
+    for index_row in connection.execute(
+        "PRAGMA index_list(assessment_dispatches)"
+    ).fetchall():
+        index_name = str(index_row[1])
+        indexed_columns = {
+            str(info[2])
+            for info in connection.execute(f'PRAGMA index_info("{index_name}")')
+        }
+        if indexed_columns.intersection(retired) and not index_name.startswith(
+            "sqlite_autoindex_"
+        ):
+            escaped = index_name.replace('"', '""')
+            connection.execute(f'DROP INDEX "{escaped}"')
+    for name in retired:
+        connection.execute(f"ALTER TABLE assessment_dispatches DROP COLUMN {name}")
+
+    connection.execute(
+        """
+        INSERT INTO schema_migrations (
+            migration_id, from_version, to_version, migrated_rows,
+            warning_count, backup_path, report_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            _DISPATCH_SCHEMA_MIGRATION_ID,
+            "dispatch-legacy-columns",
+            "dispatch-provenance-v1",
+            len(rows),
+            0,
+            str(backup_path),
+            json.dumps(
+                {"retired_columns": retired, "rows": report_rows}, sort_keys=True
+            ),
+        ),
+    )
+    for row in report_rows:
+        connection.execute(
+            """
+            INSERT INTO dispatch_column_migration_history (
+                migration_id, dispatch_id, engagement_id, agent_id,
+                legacy_payload_json
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                _DISPATCH_SCHEMA_MIGRATION_ID,
+                row["dispatch_id"],
+                row["engagement_id"],
+                row["agent_id"],
+                json.dumps(row["legacy"], sort_keys=True),
+            ),
+        )
 
 
 def _has_unique_index_on_columns(
@@ -498,11 +1488,11 @@ _ENGAGEMENT_SCOPED_TABLES = {
     "assessment_pivots",
     "assessment_tunnels",
     "assessment_blocked_techniques",
+    "assessment_blocked_technique_history",
     "assessment_command_runs",
     "assessment_artifacts",
     "assessment_artifact_path_reservations",
     "assessment_jobs",
-    "assessment_rate_leases",
     "code_repos",
     "code_modules",
     "code_files",
@@ -546,7 +1536,7 @@ def _check_database_compatibility(db_path: Path) -> None:
         return
 
     try:
-        with sqlite3.connect(str(db_path)) as connection:
+        with closing(sqlite3.connect(str(db_path))) as connection, connection:
             tables = {
                 row[0]
                 for row in connection.execute(
@@ -1233,8 +2223,7 @@ def _create_assessment_finding_tables(connection: sqlite3.Connection) -> None:
                 title TEXT NOT NULL,
                 severity TEXT NOT NULL DEFAULT 'info',
                 status TEXT NOT NULL DEFAULT 'draft',
-                verification_state TEXT NOT NULL DEFAULT 'unreviewed',
-                verification_disposition TEXT NOT NULL DEFAULT 'none',
+                verification_status TEXT NOT NULL DEFAULT 'unreviewed',
                 defect_family TEXT NOT NULL DEFAULT '',
                 root_cause_key TEXT NOT NULL DEFAULT '',
                 auth_context TEXT NOT NULL DEFAULT 'anonymous',
@@ -1303,8 +2292,8 @@ def _create_assessment_finding_tables(connection: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_assessment_findings_status_updated "
         "ON assessment_findings(engagement_id, status, updated_at DESC, id DESC)"
     )
-    # NOTE: indexes over additively-migrated columns (verification_state,
-    # verification_disposition, submission_ref) are NOT created here. On an
+    # NOTE: indexes over additively-migrated columns (verification_status,
+    # submission_ref) are NOT created here. On an
     # existing database ``CREATE TABLE IF NOT EXISTS`` above is a no-op, so those
     # columns do not exist yet -- they are added by ``_apply_additive_migrations``,
     # which runs later. See ``_create_post_migration_indexes``.
@@ -1318,10 +2307,9 @@ def _create_assessment_finding_tables(connection: sqlite3.Connection) -> None:
                 action TEXT NOT NULL DEFAULT '',
                 from_workflow_status TEXT,
                 to_workflow_status TEXT NOT NULL DEFAULT '',
-                from_verification_state TEXT,
-                to_verification_state TEXT NOT NULL DEFAULT '',
-                from_verification_disposition TEXT,
-                to_verification_disposition TEXT NOT NULL DEFAULT '',
+                from_verification_status TEXT,
+                to_verification_status TEXT NOT NULL DEFAULT 'unreviewed',
+                verification_event_version INTEGER NOT NULL DEFAULT 2,
                 from_severity TEXT,
                 to_severity TEXT NOT NULL DEFAULT '',
                 from_canonical_location TEXT,
@@ -1521,27 +2509,7 @@ def _create_assessment_finding_tables(connection: sqlite3.Connection) -> None:
             )
             """
     )
-    connection.execute(
-        """
-            CREATE TABLE IF NOT EXISTS assessment_blocked_techniques (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                engagement_id INTEGER NOT NULL,
-                technique_key TEXT NOT NULL,
-                technique TEXT NOT NULL,
-                target_kind TEXT NOT NULL DEFAULT '',
-                target_ref TEXT NOT NULL DEFAULT '',
-                reason TEXT NOT NULL DEFAULT '',
-                retry_state TEXT NOT NULL DEFAULT 'pending',
-                evidence_ref TEXT NOT NULL DEFAULT '',
-                notes TEXT NOT NULL DEFAULT '',
-                provenance_json TEXT NOT NULL DEFAULT '{}',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(engagement_id, technique_key),
-                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
-            )
-            """
-    )
+    _create_blocked_techniques_table(connection)
 
 
 def _create_command_runs_table_and_fts(connection: sqlite3.Connection) -> None:
@@ -1772,6 +2740,23 @@ def _create_command_runs_table_and_fts(connection: sqlite3.Connection) -> None:
               AND (
                     output_recovery_observed_at IS NULL
                     OR TRIM(output_recovery_observed_at) = ''
+                  )
+            """
+        )
+        # Older non-host finalizers could persist a preview while leaving the
+        # pre-exec ``empty`` placeholder intact when the wrapper omitted byte
+        # totals. The preview proves output was observed, but not its full size.
+        # Repair only that contradiction; rows with no preview remain ambiguous
+        # and must not acquire invented totals, hashes, or an unmeasured label.
+        connection.execute(
+            """
+            UPDATE assessment_command_runs
+            SET output_retention_status = 'preview_only'
+            WHERE status NOT IN ('queued', 'running')
+              AND output_retention_status = 'empty'
+              AND (
+                    COALESCE(stdout_preview, '') <> ''
+                    OR COALESCE(stderr_preview, '') <> ''
                   )
             """
         )
@@ -2203,6 +3188,76 @@ def _create_artifacts_table_and_fts(connection: sqlite3.Connection) -> None:
         )
 
 
+def _create_submission_version_tables(connection: sqlite3.Connection) -> None:
+    """Create the append-only records behind immutable submission exports.
+
+    This is an additive table creation, not a data migration: existing finding
+    rows are not rewritten and therefore no migration backup is required.
+    """
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assessment_submission_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+            finding_id INTEGER NOT NULL REFERENCES assessment_findings(id) ON DELETE RESTRICT,
+            version_number INTEGER NOT NULL CHECK(version_number >= 1),
+            status TEXT NOT NULL CHECK(status IN ('staging', 'complete', 'failed')),
+            platform TEXT NOT NULL CHECK(platform IN ('bugcrowd', 'hackerone', 'direct')),
+            package_format TEXT NOT NULL CHECK(package_format IN ('markdown', 'zip')),
+            actor_surface TEXT NOT NULL CHECK(actor_surface IN ('vigil-assess', 'web-ui')),
+            relative_path TEXT NOT NULL,
+            staging_relative_path TEXT NOT NULL,
+            media_type TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
+            sha256 TEXT NOT NULL,
+            submission_sha256 TEXT NOT NULL,
+            source_finding_row_version INTEGER NOT NULL CHECK(source_finding_row_version >= 1),
+            source_finding_updated_at TEXT NOT NULL,
+            attachment_ids_json TEXT NOT NULL DEFAULT '[]',
+            manifest_json TEXT NOT NULL DEFAULT '{}',
+            sources_json TEXT NOT NULL DEFAULT '{}',
+            request_sha256 TEXT NOT NULL,
+            artifact_id INTEGER REFERENCES assessment_artifacts(id) ON DELETE SET NULL,
+            failure_reason TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            completed_at TEXT,
+            UNIQUE(engagement_id, finding_id, version_number),
+            UNIQUE(engagement_id, finding_id, request_sha256)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_submission_versions_finding "
+        "ON assessment_submission_versions(engagement_id, finding_id, version_number DESC)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_submission_versions_status "
+        "ON assessment_submission_versions(engagement_id, status)"
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS assessment_submission_versions_immutable_update
+        BEFORE UPDATE ON assessment_submission_versions
+        WHEN OLD.status = 'complete'
+        BEGIN
+            SELECT RAISE(ABORT, 'completed submission versions are immutable');
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS assessment_submission_versions_immutable_delete
+        BEFORE DELETE ON assessment_submission_versions
+        WHEN OLD.status = 'complete'
+          AND EXISTS (SELECT 1 FROM engagements WHERE id = OLD.engagement_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'completed submission versions are immutable');
+        END
+        """
+    )
+
+
 def _create_jobs_table(connection: sqlite3.Connection) -> None:
     # assessment_jobs tracks long-running dtach-supervised workers spawned
     # by `vigil assess kali job start`. parent_command_run_id links the
@@ -2238,34 +3293,160 @@ def _create_jobs_table(connection: sqlite3.Connection) -> None:
     )
 
 
-def _create_rate_leases_table(connection: sqlite3.Connection) -> None:
-    """Durable engagement-wide target-rate reservations.
+def _sqlite_rows_digest(
+    connection: sqlite3.Connection, table_name: str, columns: tuple[str, ...]
+) -> tuple[int, str]:
+    """Return a deterministic, type-preserving digest for a SQLite row set."""
 
-    Tool-local throttles remain the execution mechanism. This table is the
-    concurrency truth that prevents several individually polite agents from
-    exceeding an engagement's aggregate ceiling together.
+    column_sql = ", ".join(columns)
+    rows = connection.execute(
+        f"SELECT {column_sql} FROM {table_name} ORDER BY id"
+    )
+    digest = hashlib.sha256()
+    row_count = 0
+    for row in rows:
+        row_count += 1
+        for value in row:
+            if value is None:
+                encoded = b"n"
+            elif isinstance(value, bytes):
+                encoded = b"b" + value
+            elif isinstance(value, bool):
+                encoded = b"i" + str(int(value)).encode("ascii")
+            elif isinstance(value, int):
+                encoded = b"i" + str(value).encode("ascii")
+            elif isinstance(value, float):
+                encoded = b"f" + value.hex().encode("ascii")
+            else:
+                encoded = b"s" + str(value).encode("utf-8")
+            digest.update(len(encoded).to_bytes(8, "big"))
+            digest.update(encoded)
+    return row_count, digest.hexdigest()
+
+
+def _migrate_rate_lease_history(
+    connection: sqlite3.Connection, *, backup_path: Path
+) -> None:
+    """Archive every retired aggregate-lease value, verify, then drop its surface.
+
+    The legacy table is accepted only in its known schema. Unknown columns or
+    missing fields stop the transaction instead of coercing historical evidence.
+    The archive intentionally has no foreign-key actions: later lifecycle cleanup
+    must not rewrite the preserved engagement/command identifiers.
     """
+
+    actual_columns = tuple(
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info(assessment_rate_leases)"
+        ).fetchall()
+    )
+    if actual_columns != _RATE_LEASE_COLUMNS:
+        raise RuntimeError(
+            "cannot retire malformed assessment_rate_leases schema: "
+            f"expected {_RATE_LEASE_COLUMNS!r}, observed {actual_columns!r}"
+        )
+
     connection.execute(
         """
-        CREATE TABLE IF NOT EXISTS assessment_rate_leases (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
-            lease_token TEXT NOT NULL UNIQUE,
+        CREATE TABLE IF NOT EXISTS assessment_rate_lease_history (
+            id INTEGER PRIMARY KEY,
+            engagement_id INTEGER NOT NULL,
+            lease_token TEXT NOT NULL,
             owner TEXT NOT NULL,
             effective_rate_rps REAL NOT NULL,
             aggregate_limit_rps REAL,
             override_reason TEXT,
-            command_run_id INTEGER REFERENCES assessment_command_runs(id) ON DELETE SET NULL,
+            command_run_id INTEGER,
             expires_at TEXT NOT NULL,
             released_at TEXT,
-            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            archived_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
+    archive_columns = tuple(
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info(assessment_rate_lease_history)"
+        ).fetchall()
+    )
+    expected_archive_columns = (*_RATE_LEASE_COLUMNS, "archived_at")
+    if archive_columns != expected_archive_columns:
+        raise RuntimeError(
+            "cannot retire aggregate leases into malformed archive schema: "
+            f"expected {expected_archive_columns!r}, observed {archive_columns!r}"
+        )
+
+    source_count, source_digest = _sqlite_rows_digest(
+        connection, "assessment_rate_leases", _RATE_LEASE_COLUMNS
+    )
+    column_sql = ", ".join(_RATE_LEASE_COLUMNS)
     connection.execute(
-        "CREATE INDEX IF NOT EXISTS idx_assessment_rate_leases_active "
-        "ON assessment_rate_leases(engagement_id, released_at, expires_at)"
+        f"INSERT OR IGNORE INTO assessment_rate_lease_history ({column_sql}) "
+        f"SELECT {column_sql} FROM assessment_rate_leases"
+    )
+    archive_count, archive_digest = _sqlite_rows_digest(
+        connection, "assessment_rate_lease_history", _RATE_LEASE_COLUMNS
+    )
+    if source_count != archive_count or source_digest != archive_digest:
+        raise RuntimeError(
+            "aggregate-rate lease archive verification failed: "
+            f"source count/digest={source_count}/{source_digest}, "
+            f"archive count/digest={archive_count}/{archive_digest}"
+        )
+
+    connection.execute("DROP INDEX IF EXISTS idx_assessment_rate_leases_active")
+    connection.execute("DROP TABLE assessment_rate_leases")
+    active_table_removed = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+        "AND name = 'assessment_rate_leases'"
+    ).fetchone() is None
+    if not active_table_removed:
+        raise RuntimeError("aggregate-rate lease retirement did not remove active table")
+
+    backup_size = backup_path.stat().st_size
+    backup_sha256 = _file_sha256(backup_path)
+    _create_migration_history_tables(connection)
+    connection.execute(
+        """
+        INSERT INTO schema_migrations (
+            migration_id, from_version, to_version, migrated_rows,
+            warning_count, backup_path, report_json
+        ) VALUES (?, ?, ?, ?, 0, ?, ?)
+        ON CONFLICT(migration_id) DO UPDATE SET
+            migrated_rows = excluded.migrated_rows,
+            warning_count = excluded.warning_count,
+            backup_path = excluded.backup_path,
+            report_json = excluded.report_json
+        """,
+        (
+            _RATE_LEASE_RETIREMENT_MIGRATION_ID,
+            "aggregate-rate-leases-active",
+            "aggregate-rate-lease-history-archive",
+            source_count,
+            str(backup_path),
+            json.dumps(
+                {
+                    "archive_count": archive_count,
+                    "archive_sha256": archive_digest,
+                    "archive_table": "assessment_rate_lease_history",
+                    "backup_path": str(backup_path),
+                    "backup_sha256": backup_sha256,
+                    "backup_size_bytes": backup_size,
+                    "legacy_table": "assessment_rate_leases",
+                    "postconditions": {
+                        "active_table_removed": active_table_removed,
+                        "digest_equal": source_digest == archive_digest,
+                        "row_count_equal": source_count == archive_count,
+                    },
+                    "source_count": source_count,
+                    "source_sha256": source_digest,
+                },
+                sort_keys=True,
+            ),
+        ),
     )
 
 
@@ -2296,6 +3477,10 @@ _HTTP_FLOW_ADDITIVE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("response_body_bytes", "INTEGER NOT NULL DEFAULT 0"),
     ("request_body_truncated", "INTEGER NOT NULL DEFAULT 0"),
     ("response_body_truncated", "INTEGER NOT NULL DEFAULT 0"),
+    ("request_body_capture_status", "TEXT NOT NULL DEFAULT 'unknown'"),
+    ("response_body_capture_status", "TEXT NOT NULL DEFAULT 'unknown'"),
+    ("request_body_capture_error", "TEXT NOT NULL DEFAULT ''"),
+    ("response_body_capture_error", "TEXT NOT NULL DEFAULT ''"),
     ("request_body_artifact_path", "TEXT"),
     ("response_body_artifact_path", "TEXT"),
     # Header maps are small and load-bearing for HAR export/import (which the
@@ -2345,6 +3530,10 @@ def _create_http_flow_tables(connection: sqlite3.Connection) -> None:
                 response_body_bytes INTEGER NOT NULL DEFAULT 0,
                 request_body_truncated INTEGER NOT NULL DEFAULT 0,
                 response_body_truncated INTEGER NOT NULL DEFAULT 0,
+                request_body_capture_status TEXT NOT NULL DEFAULT 'unknown',
+                response_body_capture_status TEXT NOT NULL DEFAULT 'unknown',
+                request_body_capture_error TEXT NOT NULL DEFAULT '',
+                response_body_capture_error TEXT NOT NULL DEFAULT '',
                 request_body_artifact_path TEXT,
                 response_body_artifact_path TEXT,
                 request_headers_json TEXT NOT NULL DEFAULT '{}',
@@ -2779,8 +3968,6 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         ).fetchall()
     }
     finding_column_defaults = {
-        "verification_state": "TEXT NOT NULL DEFAULT 'unreviewed'",
-        "verification_disposition": "TEXT NOT NULL DEFAULT 'none'",
         "defect_family": "TEXT NOT NULL DEFAULT ''",
         "root_cause_key": "TEXT NOT NULL DEFAULT ''",
         "auth_context": "TEXT NOT NULL DEFAULT 'anonymous'",
@@ -2841,34 +4028,10 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
                 )
 
     if finding_columns:
-        connection.execute(
-            """
-                UPDATE assessment_findings
-                SET verification_state = CASE status
-                    WHEN 'draft' THEN 'unreviewed'
-                    WHEN 'merged' THEN 'unreviewed'
-                    WHEN 'false_positive' THEN 'verified'
-                    ELSE 'verified'
-                END
-                WHERE status IN ('draft', 'merged', 'false_positive', 'confirmed', 'exploited', 'reported', 'blocked')
-                  AND (verification_state = '' OR verification_state = 'unreviewed')
-                """
-        )
-        connection.execute(
-            """
-                UPDATE assessment_findings
-                SET verification_disposition = CASE status
-                    WHEN 'confirmed' THEN 'confirmed'
-                    WHEN 'exploited' THEN 'confirmed'
-                    WHEN 'reported' THEN 'confirmed'
-                    WHEN 'blocked' THEN 'confirmed'
-                    WHEN 'false_positive' THEN 'false_positive'
-                    ELSE 'none'
-                END
-                WHERE status IN ('draft', 'merged', 'false_positive', 'confirmed', 'exploited', 'reported', 'blocked')
-                  AND (verification_disposition = '' OR verification_disposition = 'none')
-                """
-        )
+        # The obsolete one-axis ``status='confirmed'`` value predates the
+        # workflow/verification split. Keep its workflow repair separate from
+        # verification migration: verification is now mapped ONLY from the two
+        # legacy verification columns, never inferred from workflow state.
         connection.execute(
             """
                 UPDATE assessment_findings
@@ -3294,6 +4457,9 @@ def _create_intel_tables(connection: sqlite3.Connection) -> None:
                 source_name TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                authored_by TEXT NOT NULL DEFAULT 'unknown',
+                scope TEXT NOT NULL DEFAULT 'engagement',
+                validity_context TEXT NOT NULL DEFAULT 'unreviewed; revalidate before relying on this interpretation',
                 superseded_by_id INTEGER REFERENCES intel_org_facts(id) ON DELETE SET NULL,
                 superseded_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -3314,6 +4480,9 @@ def _create_intel_tables(connection: sqlite3.Connection) -> None:
                 tags_json TEXT NOT NULL DEFAULT '[]',
                 source_name TEXT NOT NULL DEFAULT '',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
+                authored_by TEXT NOT NULL DEFAULT 'unknown',
+                scope TEXT NOT NULL DEFAULT 'engagement',
+                validity_context TEXT NOT NULL DEFAULT 'unreviewed; revalidate before relying on this interpretation',
                 superseded_by_id INTEGER REFERENCES intel_notes(id) ON DELETE SET NULL,
                 superseded_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -3323,6 +4492,21 @@ def _create_intel_tables(connection: sqlite3.Connection) -> None:
             )
             """
     )
+
+    authored_context_columns = {
+        "authored_by": "TEXT NOT NULL DEFAULT 'unknown'",
+        "scope": "TEXT NOT NULL DEFAULT 'engagement'",
+        "validity_context": (
+            "TEXT NOT NULL DEFAULT 'unreviewed; revalidate before relying on this interpretation'"
+        ),
+    }
+    for table_name in ("intel_org_facts", "intel_notes"):
+        columns = _table_columns(connection, table_name)
+        for column_name, definition in authored_context_columns.items():
+            if column_name not in columns:
+                connection.execute(
+                    f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"
+                )
 
     # Additive migration: lead lifecycle. A note with a non-NULL lead_status is
     # a tracked *lead* (an actionable hypothesis/thread); NULL means a plain
@@ -3417,12 +4601,18 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
                 dispatched_at TEXT NOT NULL,
                 completed_at TEXT,
                 status TEXT NOT NULL,
-                model TEXT,
-                reasoning TEXT,
                 requested_model TEXT,
-                actual_model TEXT,
+                actual_model TEXT NOT NULL DEFAULT 'unknown',
                 requested_reasoning TEXT,
-                actual_reasoning TEXT,
+                actual_reasoning TEXT NOT NULL DEFAULT 'unknown',
+                client_name TEXT NOT NULL DEFAULT 'unknown',
+                source_revision TEXT NOT NULL DEFAULT 'unknown',
+                operator_instruction_path TEXT,
+                operator_instruction_sha256 TEXT,
+                specialist_instruction_path TEXT,
+                specialist_instruction_sha256 TEXT,
+                instruction_identity_status TEXT NOT NULL DEFAULT 'incomplete',
+                instructions_stale INTEGER,
                 dispatch_mode TEXT,
                 finding_slugs_json TEXT,
                 skills TEXT,
@@ -3442,24 +4632,22 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
         connection.execute(
             "ALTER TABLE assessment_dispatches ADD COLUMN requested_model TEXT"
         )
-        connection.execute(
-            "UPDATE assessment_dispatches SET requested_model = model WHERE requested_model IS NULL"
-        )
     if dispatch_columns and "actual_model" not in dispatch_columns:
         connection.execute(
-            "ALTER TABLE assessment_dispatches ADD COLUMN actual_model TEXT"
+            "ALTER TABLE assessment_dispatches ADD COLUMN actual_model "
+            "TEXT NOT NULL DEFAULT 'unknown'"
         )
     if dispatch_columns and "requested_reasoning" not in dispatch_columns:
         connection.execute(
             "ALTER TABLE assessment_dispatches ADD COLUMN requested_reasoning TEXT"
         )
-        connection.execute(
-            "UPDATE assessment_dispatches SET requested_reasoning = reasoning WHERE requested_reasoning IS NULL"
-        )
     if dispatch_columns and "actual_reasoning" not in dispatch_columns:
         connection.execute(
-            "ALTER TABLE assessment_dispatches ADD COLUMN actual_reasoning TEXT"
+            "ALTER TABLE assessment_dispatches ADD COLUMN actual_reasoning "
+            "TEXT NOT NULL DEFAULT 'unknown'"
         )
+    if dispatch_columns:
+        _normalize_unobserved_dispatch_actual_identity(connection)
     # Blue-engagement tier tag ('L1' | 'L2' | 'L3' | 'L4'). Enforced in
     # the Pydantic layer; stored as free-form TEXT so the enum can evolve
     # without a schema rebuild. Existing rows stay NULL.
@@ -3470,6 +4658,21 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
             "ALTER TABLE assessment_dispatches ADD COLUMN application_unit_id INTEGER "
             "REFERENCES assessment_application_units(id) ON DELETE SET NULL"
         )
+    provenance_columns = {
+        "client_name": "TEXT NOT NULL DEFAULT 'unknown'",
+        "source_revision": "TEXT NOT NULL DEFAULT 'unknown'",
+        "operator_instruction_path": "TEXT",
+        "operator_instruction_sha256": "TEXT",
+        "specialist_instruction_path": "TEXT",
+        "specialist_instruction_sha256": "TEXT",
+        "instruction_identity_status": "TEXT NOT NULL DEFAULT 'incomplete'",
+        "instructions_stale": "INTEGER",
+    }
+    for _col, _definition in provenance_columns.items():
+        if dispatch_columns and _col not in dispatch_columns:
+            connection.execute(
+                f"ALTER TABLE assessment_dispatches ADD COLUMN {_col} {_definition}"
+            )
     for _col in ("vuln_classes", "identity"):
         if dispatch_columns and _col not in dispatch_columns:
             connection.execute(
@@ -3586,6 +4789,596 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_decisions_engagement_kind "
         "ON assessment_dispatch_decisions(engagement_id, kind)"
+    )
+
+
+def _create_verification_evidence_tables(connection: sqlite3.Connection) -> None:
+    """Shared run/proof identities used by code, web, and blue workflows."""
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assessment_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+            run_uuid TEXT NOT NULL,
+            run_kind TEXT NOT NULL,
+            run_purpose TEXT NOT NULL DEFAULT 'proof',
+            producer_dispatch_id INTEGER NOT NULL
+                REFERENCES assessment_dispatches(id) ON DELETE RESTRICT,
+            status TEXT NOT NULL DEFAULT 'queued',
+            target_identity_json TEXT NOT NULL DEFAULT '{}',
+            source_generations_json TEXT NOT NULL DEFAULT '[]',
+            exclusions_json TEXT NOT NULL DEFAULT '[]',
+            resumed_from_run_id INTEGER REFERENCES assessment_runs(id) ON DELETE RESTRICT,
+            started_at TEXT,
+            finished_at TEXT,
+            seal_json TEXT,
+            seal_sha256 TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(engagement_id, run_uuid)
+        )
+        """
+    )
+    run_columns = _table_columns(connection, "assessment_runs")
+    run_column_additions = {
+        "run_purpose": "TEXT NOT NULL DEFAULT 'proof'",
+        "target_identity_json": "TEXT NOT NULL DEFAULT '{}'",
+        "source_generations_json": "TEXT NOT NULL DEFAULT '[]'",
+        "exclusions_json": "TEXT NOT NULL DEFAULT '[]'",
+        "resumed_from_run_id": "INTEGER REFERENCES assessment_runs(id) ON DELETE RESTRICT",
+        "started_at": "TEXT",
+        "finished_at": "TEXT",
+        "seal_json": "TEXT",
+        "seal_sha256": "TEXT NOT NULL DEFAULT ''",
+    }
+    for column_name, column_definition in run_column_additions.items():
+        if run_columns and column_name not in run_columns:
+            connection.execute(
+                f"ALTER TABLE assessment_runs ADD COLUMN {column_name} {column_definition}"
+            )
+    # ``started`` was the Phase 2 name for an unsealed active proof run. Phase 3
+    # distinguishes queued from running; preserving it as a public alias would
+    # leave two names for the same durable state.
+    connection.execute(
+        "UPDATE assessment_runs SET status = 'running', "
+        "started_at = COALESCE(started_at, created_at) WHERE status = 'started'"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_runs_dispatch "
+        "ON assessment_runs(engagement_id, producer_dispatch_id, created_at DESC)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assessment_run_lifecycle_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+            run_id INTEGER NOT NULL REFERENCES assessment_runs(id) ON DELETE RESTRICT,
+            from_status TEXT,
+            to_status TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_run_lifecycle "
+        "ON assessment_run_lifecycle_events(engagement_id, run_id, id)"
+    )
+    # Add one truthful baseline event for Phase 2 rows. This is a migration
+    # write, never a GET-side repair, so status reads remain side-effect free.
+    connection.execute(
+        """
+        INSERT INTO assessment_run_lifecycle_events (
+            engagement_id, run_id, from_status, to_status, reason, created_at
+        )
+        SELECT runs.engagement_id, runs.id, NULL, runs.status,
+               'migrated Phase 2 run state', runs.created_at
+        FROM assessment_runs AS runs
+        WHERE NOT EXISTS (
+            SELECT 1 FROM assessment_run_lifecycle_events AS events
+            WHERE events.run_id = runs.id
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assessment_run_sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+            run_id INTEGER NOT NULL REFERENCES assessment_runs(id) ON DELETE RESTRICT,
+            target_key TEXT NOT NULL,
+            declared_root TEXT NOT NULL,
+            path TEXT NOT NULL,
+            content_sha256 TEXT NOT NULL,
+            byte_size INTEGER NOT NULL,
+            line_count INTEGER NOT NULL,
+            encoding TEXT NOT NULL,
+            inventory_status TEXT NOT NULL,
+            exclusion_reason TEXT NOT NULL DEFAULT '',
+            parser_status TEXT NOT NULL,
+            parser_error TEXT NOT NULL DEFAULT '',
+            identity_sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(run_id, target_key, declared_root, path)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_run_sources_page "
+        "ON assessment_run_sources(engagement_id, run_id, target_key, path, id)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assessment_run_source_reads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+            run_id INTEGER NOT NULL REFERENCES assessment_runs(id) ON DELETE RESTRICT,
+            source_id INTEGER NOT NULL REFERENCES assessment_run_sources(id) ON DELETE RESTRICT,
+            dispatch_id INTEGER NOT NULL REFERENCES assessment_dispatches(id) ON DELETE RESTRICT,
+            attempt INTEGER NOT NULL,
+            byte_start INTEGER NOT NULL,
+            byte_end INTEGER NOT NULL,
+            line_start INTEGER NOT NULL,
+            line_end INTEGER NOT NULL,
+            proof_receipt_id INTEGER REFERENCES assessment_proof_receipts(id) ON DELETE RESTRICT,
+            read_fingerprint TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(run_id, read_fingerprint)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_run_source_reads_page "
+        "ON assessment_run_source_reads(engagement_id, run_id, source_id, id)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assessment_run_obligations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+            run_id INTEGER NOT NULL REFERENCES assessment_runs(id) ON DELETE RESTRICT,
+            identity_key TEXT NOT NULL,
+            obligation_kind TEXT NOT NULL,
+            object_type TEXT NOT NULL,
+            object_key TEXT NOT NULL,
+            hard INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL DEFAULT 'open',
+            resolution TEXT NOT NULL DEFAULT '',
+            proof_receipt_ids_json TEXT NOT NULL DEFAULT '[]',
+            record_sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(run_id, identity_key)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_run_obligations_page "
+        "ON assessment_run_obligations(engagement_id, run_id, status, id)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assessment_run_obligation_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+            run_id INTEGER NOT NULL REFERENCES assessment_runs(id) ON DELETE RESTRICT,
+            obligation_id INTEGER NOT NULL REFERENCES assessment_run_obligations(id) ON DELETE RESTRICT,
+            from_status TEXT,
+            to_status TEXT NOT NULL,
+            resolution TEXT NOT NULL DEFAULT '',
+            proof_receipt_ids_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_run_obligation_history "
+        "ON assessment_run_obligation_events(engagement_id, run_id, obligation_id, id)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assessment_run_candidates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+            run_id INTEGER NOT NULL REFERENCES assessment_runs(id) ON DELETE RESTRICT,
+            identity_key TEXT NOT NULL,
+            target_key TEXT NOT NULL,
+            source_id INTEGER REFERENCES assessment_run_sources(id) ON DELETE RESTRICT,
+            source_anchor TEXT NOT NULL,
+            vulnerability_family TEXT NOT NULL,
+            hypothesis TEXT NOT NULL,
+            originating_result_id INTEGER REFERENCES code_analysis_results(id) ON DELETE RESTRICT,
+            originating_signal_id INTEGER,
+            dispatch_id INTEGER NOT NULL REFERENCES assessment_dispatches(id) ON DELETE RESTRICT,
+            proof_receipt_ids_json TEXT NOT NULL DEFAULT '[]',
+            state TEXT NOT NULL DEFAULT 'open',
+            finding_slug TEXT NOT NULL DEFAULT '',
+            record_sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(run_id, identity_key)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_run_candidates_page "
+        "ON assessment_run_candidates(engagement_id, run_id, state, id)"
+    )
+    candidate_columns = _table_columns(connection, "assessment_run_candidates")
+    if candidate_columns and "originating_signal_id" not in candidate_columns:
+        connection.execute(
+            "ALTER TABLE assessment_run_candidates ADD COLUMN originating_signal_id INTEGER"
+        )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assessment_run_candidate_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+            run_id INTEGER NOT NULL REFERENCES assessment_runs(id) ON DELETE RESTRICT,
+            candidate_id INTEGER NOT NULL REFERENCES assessment_run_candidates(id) ON DELETE RESTRICT,
+            from_state TEXT,
+            to_state TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            proof_receipt_ids_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assessment_run_tool_signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+            run_id INTEGER NOT NULL REFERENCES assessment_runs(id) ON DELETE RESTRICT,
+            identity_key TEXT NOT NULL,
+            signal_kind TEXT NOT NULL,
+            dispatch_id INTEGER NOT NULL REFERENCES assessment_dispatches(id) ON DELETE RESTRICT,
+            target_key TEXT NOT NULL,
+            source_id INTEGER REFERENCES assessment_run_sources(id) ON DELETE RESTRICT,
+            source_anchor TEXT NOT NULL,
+            vulnerability_family TEXT NOT NULL,
+            hypothesis TEXT NOT NULL,
+            observed_signature TEXT NOT NULL,
+            exact_input_sha256 TEXT NOT NULL DEFAULT '',
+            command_run_id INTEGER REFERENCES assessment_command_runs(id) ON DELETE RESTRICT,
+            proof_receipt_ids_json TEXT NOT NULL,
+            candidate_id INTEGER NOT NULL REFERENCES assessment_run_candidates(id) ON DELETE RESTRICT,
+            record_sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(run_id, identity_key)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_run_tool_signals_page "
+        "ON assessment_run_tool_signals(engagement_id, run_id, id)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assessment_run_discovery_passes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+            run_id INTEGER NOT NULL REFERENCES assessment_runs(id) ON DELETE RESTRICT,
+            identity_key TEXT NOT NULL,
+            dispatch_id INTEGER NOT NULL REFERENCES assessment_dispatches(id) ON DELETE RESTRICT,
+            frontier_identity_sha256 TEXT NOT NULL,
+            terminal_reason TEXT NOT NULL,
+            candidate_identity_keys_json TEXT NOT NULL,
+            candidate_delta INTEGER NOT NULL,
+            proof_receipt_ids_json TEXT NOT NULL,
+            record_sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(run_id, identity_key)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_run_discovery_passes_page "
+        "ON assessment_run_discovery_passes(engagement_id, run_id, id)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assessment_run_code_receipt_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+            run_id INTEGER NOT NULL REFERENCES assessment_runs(id) ON DELETE RESTRICT,
+            receipt_kind TEXT NOT NULL,
+            receipt_id INTEGER NOT NULL,
+            target_key TEXT NOT NULL,
+            obligation_id INTEGER NOT NULL
+                REFERENCES assessment_run_obligations(id) ON DELETE RESTRICT,
+            candidate_ids_json TEXT NOT NULL,
+            signal_ids_json TEXT NOT NULL,
+            proof_receipt_ids_json TEXT NOT NULL,
+            obligation_status TEXT NOT NULL,
+            record_sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(run_id, receipt_kind, receipt_id, obligation_id)
+        )
+        """
+    )
+    if "target_key" not in _table_columns(
+        connection, "assessment_run_code_receipt_links"
+    ):
+        connection.execute(
+            "ALTER TABLE assessment_run_code_receipt_links "
+            "ADD COLUMN target_key TEXT NOT NULL DEFAULT ''"
+        )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_run_code_receipts_page "
+        "ON assessment_run_code_receipt_links(engagement_id, run_id, id)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assessment_run_comparisons (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+            run_id INTEGER NOT NULL REFERENCES assessment_runs(id) ON DELETE RESTRICT,
+            baseline_run_id INTEGER NOT NULL REFERENCES assessment_runs(id) ON DELETE RESTRICT,
+            selection TEXT NOT NULL,
+            target_compatible INTEGER NOT NULL,
+            source_compatible INTEGER NOT NULL,
+            comparison_json TEXT NOT NULL,
+            comparison_sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(run_id, baseline_run_id)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_run_comparisons "
+        "ON assessment_run_comparisons(engagement_id, run_id, id DESC)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assessment_proof_receipts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+            run_id INTEGER NOT NULL REFERENCES assessment_runs(id) ON DELETE RESTRICT,
+            producer_dispatch_id INTEGER NOT NULL
+                REFERENCES assessment_dispatches(id) ON DELETE RESTRICT,
+            evidence_kind TEXT NOT NULL,
+            expected_result TEXT NOT NULL DEFAULT '',
+            observed_result TEXT NOT NULL DEFAULT '',
+            artifact_id INTEGER REFERENCES assessment_artifacts(id) ON DELETE SET NULL,
+            source_read_id INTEGER
+                REFERENCES assessment_run_source_reads(id) ON DELETE RESTRICT,
+            command_run_id INTEGER REFERENCES assessment_command_runs(id) ON DELETE RESTRICT,
+            artifact_relative_path TEXT NOT NULL DEFAULT '',
+            evidence_sha256 TEXT NOT NULL,
+            recorded_health TEXT NOT NULL DEFAULT 'healthy',
+            redaction_status TEXT NOT NULL DEFAULT 'raw',
+            derivative_of_receipt_id INTEGER
+                REFERENCES assessment_proof_receipts(id) ON DELETE RESTRICT,
+            tombstone_reason TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    proof_receipt_columns = _table_columns(connection, "assessment_proof_receipts")
+    if proof_receipt_columns and "source_read_id" not in proof_receipt_columns:
+        connection.execute(
+            "ALTER TABLE assessment_proof_receipts "
+            "ADD COLUMN source_read_id INTEGER "
+            "REFERENCES assessment_run_source_reads(id) ON DELETE RESTRICT"
+        )
+    if proof_receipt_columns and "command_run_id" not in proof_receipt_columns:
+        connection.execute(
+            "ALTER TABLE assessment_proof_receipts "
+            "ADD COLUMN command_run_id INTEGER "
+            "REFERENCES assessment_command_runs(id) ON DELETE RESTRICT"
+        )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_proof_receipts_run "
+        "ON assessment_proof_receipts(engagement_id, run_id, id DESC)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_proof_receipts_derivative "
+        "ON assessment_proof_receipts(engagement_id, derivative_of_receipt_id)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assessment_finding_proof_receipts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+            finding_id INTEGER NOT NULL REFERENCES assessment_findings(id) ON DELETE CASCADE,
+            transition_id INTEGER NOT NULL
+                REFERENCES assessment_finding_transitions(id) ON DELETE RESTRICT,
+            proof_receipt_id INTEGER NOT NULL
+                REFERENCES assessment_proof_receipts(id) ON DELETE RESTRICT,
+            relation TEXT NOT NULL DEFAULT 'verification',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(finding_id, proof_receipt_id, relation)
+        )
+        """
+    )
+    proof_link_columns = _table_columns(
+        connection, "assessment_finding_proof_receipts"
+    )
+    if "transition_id" not in proof_link_columns:
+        connection.execute(
+            "ALTER TABLE assessment_finding_proof_receipts "
+            "ADD COLUMN transition_id INTEGER "
+            "REFERENCES assessment_finding_transitions(id) ON DELETE RESTRICT"
+        )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_finding_proof_receipts_finding "
+        "ON assessment_finding_proof_receipts(engagement_id, finding_id, id)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_finding_proof_receipts_transition "
+        "ON assessment_finding_proof_receipts"
+        "(engagement_id, finding_id, transition_id, id)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assessment_finding_counterchecks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+            finding_id INTEGER NOT NULL REFERENCES assessment_findings(id) ON DELETE CASCADE,
+            transition_id INTEGER NOT NULL
+                REFERENCES assessment_finding_transitions(id) ON DELETE RESTRICT,
+            verifier_dispatch_id INTEGER NOT NULL
+                REFERENCES assessment_dispatches(id) ON DELETE RESTRICT,
+            method TEXT NOT NULL,
+            expected_result TEXT NOT NULL,
+            observed_result TEXT NOT NULL,
+            falsified_claim TEXT NOT NULL,
+            completed INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assessment_finding_countercheck_receipts (
+            countercheck_id INTEGER NOT NULL
+                REFERENCES assessment_finding_counterchecks(id) ON DELETE CASCADE,
+            proof_receipt_id INTEGER NOT NULL
+                REFERENCES assessment_proof_receipts(id) ON DELETE RESTRICT,
+            PRIMARY KEY(countercheck_id, proof_receipt_id)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_finding_counterchecks_finding "
+        "ON assessment_finding_counterchecks(engagement_id, finding_id, id DESC)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assessment_finding_severity_variances (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+            finding_id INTEGER NOT NULL REFERENCES assessment_findings(id) ON DELETE CASCADE,
+            transition_id INTEGER NOT NULL
+                REFERENCES assessment_finding_transitions(id) ON DELETE RESTRICT,
+            normal_band TEXT NOT NULL,
+            chosen_severity TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            proof_receipt_id INTEGER NOT NULL
+                REFERENCES assessment_proof_receipts(id) ON DELETE RESTRICT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_finding_severity_variances_finding "
+        "ON assessment_finding_severity_variances(engagement_id, finding_id, id DESC)"
+    )
+
+
+def _migrate_run_accounting_schema(
+    connection: sqlite3.Connection,
+    *,
+    backup_path: Path,
+    reasons: tuple[str, ...],
+) -> None:
+    """Upgrade the Phase 2 run/proof ledger and record its preservation report."""
+
+    tables_before = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    preserved_counts = {
+        table_name: int(
+            connection.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+        )
+        for table_name in sorted(_RUN_ACCOUNTING_TABLES.intersection(tables_before))
+    }
+    status_mappings: list[dict[str, Any]] = []
+    if "assessment_runs" in tables_before:
+        status_mappings = [
+            {
+                "run_id": int(row["id"]),
+                "run_uuid": str(row["run_uuid"]),
+                "from_status": "started",
+                "to_status": "running",
+            }
+            for row in connection.execute(
+                "SELECT id, run_uuid FROM assessment_runs "
+                "WHERE status = 'started' ORDER BY id"
+            ).fetchall()
+        ]
+
+    _create_verification_evidence_tables(connection)
+    _create_migration_history_tables(connection)
+    connection.execute(
+        """
+        INSERT INTO schema_migrations (
+            migration_id, from_version, to_version, migrated_rows,
+            warning_count, backup_path, report_json
+        ) VALUES (?, ?, ?, ?, 0, ?, ?)
+        """,
+        (
+            _RUN_ACCOUNTING_MIGRATION_ID,
+            "phase-2-run-proof-ledger",
+            "phase-3-run-accounting-v1",
+            len(status_mappings),
+            str(backup_path),
+            json.dumps(
+                {
+                    "backup_path": str(backup_path),
+                    "preserved_counts": preserved_counts,
+                    "reasons": list(reasons),
+                    "status_mappings": status_mappings,
+                },
+                sort_keys=True,
+            ),
+        ),
+    )
+
+
+def _migrate_run_accounting_v2_schema(
+    connection: sqlite3.Connection,
+    *,
+    backup_path: Path,
+    reasons: tuple[str, ...],
+) -> None:
+    """Add automatic-signal accounting without rewriting the v1 ledger."""
+
+    tables_before = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    preserved_counts = {
+        table_name: int(
+            connection.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+        )
+        for table_name in sorted(
+            (_RUN_ACCOUNTING_TABLES | _RUN_ACCOUNTING_V2_TABLES).intersection(
+                tables_before
+            )
+        )
+    }
+    _create_verification_evidence_tables(connection)
+    _create_migration_history_tables(connection)
+    connection.execute(
+        """
+        INSERT INTO schema_migrations (
+            migration_id, from_version, to_version, migrated_rows,
+            warning_count, backup_path, report_json
+        ) VALUES (?, ?, ?, 0, 0, ?, ?)
+        """,
+        (
+            _RUN_ACCOUNTING_V2_MIGRATION_ID,
+            "phase-3-run-accounting-v1",
+            "phase-3-run-accounting-v2",
+            str(backup_path),
+            json.dumps(
+                {
+                    "backup_path": str(backup_path),
+                    "preserved_counts": preserved_counts,
+                    "reasons": list(reasons),
+                },
+                sort_keys=True,
+            ),
+        ),
     )
 
 
@@ -3986,7 +5779,7 @@ def _create_post_migration_indexes(connection: sqlite3.Connection) -> None:
 
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_assessment_findings_verification "
-        "ON assessment_findings(engagement_id, verification_state, verification_disposition)"
+        "ON assessment_findings(engagement_id, verification_status)"
     )
     # The submission axis is only joinable to the external program when the
     # report's own identifier is indexed beside the engagement.
@@ -4002,7 +5795,44 @@ def init_db() -> None:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     db_path = database_path()
     _check_database_compatibility(db_path)
-    with sqlite3.connect(str(db_path)) as connection:
+    verification_backup = (
+        _create_adjacent_verification_backup(db_path)
+        if _database_needs_verification_status_migration(db_path)
+        else None
+    )
+    dispatch_backup = (
+        _create_adjacent_dispatch_backup(db_path)
+        if _database_needs_dispatch_schema_migration(db_path)
+        else None
+    )
+    retry_state_backup = (
+        _create_adjacent_retry_state_backup(db_path)
+        if _database_needs_retry_state_migration(db_path)
+        else None
+    )
+    rate_lease_retirement_backup = (
+        _create_adjacent_rate_lease_retirement_backup(db_path)
+        if _database_needs_rate_lease_retirement(db_path)
+        else None
+    )
+    run_accounting_migration_reasons = _database_run_accounting_migration_reasons(
+        db_path
+    )
+    run_accounting_backup = (
+        _create_adjacent_run_accounting_backup(db_path)
+        if run_accounting_migration_reasons
+        else None
+    )
+    run_accounting_v2_migration_reasons = (
+        _database_run_accounting_v2_migration_reasons(db_path)
+    )
+    run_accounting_v2_backup = (
+        _create_adjacent_run_accounting_v2_backup(db_path)
+        if run_accounting_v2_migration_reasons
+        else None
+    )
+    with closing(sqlite3.connect(str(db_path))) as connection, connection:
+        connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         # WAL mode lets readers (including `sqlite3 .backup` snapshots and the
         # 15-minute backend backup task) run concurrently with writers without
@@ -4017,15 +5847,93 @@ def init_db() -> None:
         _create_assessment_finding_tables(connection)
         _create_command_runs_table_and_fts(connection)
         _create_artifacts_table_and_fts(connection)
+        _create_submission_version_tables(connection)
         _create_http_flow_tables(connection)
         _create_jobs_table(connection)
-        _create_rate_leases_table(connection)
         _create_code_analysis_tables(connection)
         _apply_additive_migrations(connection)
+        if verification_backup is not None:
+            if connection.in_transaction:
+                connection.commit()
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                _migrate_finding_verification_status(
+                    connection, backup_path=verification_backup
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        else:
+            _create_migration_history_tables(connection)
+        if dispatch_backup is not None:
+            if connection.in_transaction:
+                connection.commit()
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                _migrate_dispatch_schema(connection, backup_path=dispatch_backup)
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        if retry_state_backup is not None:
+            if connection.in_transaction:
+                connection.commit()
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                _migrate_blocked_technique_retry_state(
+                    connection, backup_path=retry_state_backup
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        if rate_lease_retirement_backup is not None:
+            if connection.in_transaction:
+                connection.commit()
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                _migrate_rate_lease_history(
+                    connection, backup_path=rate_lease_retirement_backup
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
         _create_post_migration_indexes(connection)
         _create_intel_tables(connection)
         _create_activity_table(connection)
         _create_dispatch_tables(connection)
+        if run_accounting_backup is not None:
+            if connection.in_transaction:
+                connection.commit()
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                _migrate_run_accounting_schema(
+                    connection,
+                    backup_path=run_accounting_backup,
+                    reasons=run_accounting_migration_reasons,
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        elif run_accounting_v2_backup is None:
+            _create_verification_evidence_tables(connection)
+        if run_accounting_v2_backup is not None:
+            if connection.in_transaction:
+                connection.commit()
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                _migrate_run_accounting_v2_schema(
+                    connection,
+                    backup_path=run_accounting_v2_backup,
+                    reasons=run_accounting_v2_migration_reasons,
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
         _create_oob_correlation_tables(connection)
         _create_intel_and_activity_fts(connection)
         _run_data_migrations(connection)

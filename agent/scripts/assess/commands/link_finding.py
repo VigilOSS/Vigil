@@ -5,7 +5,11 @@ import argparse
 import json
 import sys
 
-from assess.lib.client import AssessmentClient
+from assess.lib.client import (
+    AssessmentClient,
+    require_finding_write_response,
+    require_write_result,
+)
 from assess.lib.config import load_config
 from assess.lib.contracts import render_contract_epilog
 from assess.lib.json_inputs import parse_optional_inline_json
@@ -149,13 +153,6 @@ def _link_intel(client, finding_slug: str, raw_intel_ids: list[str], note: str) 
     if not isinstance(existing, dict):
         raise ValueError(f"finding link --intel: finding {finding_slug} not found")
     details = existing.get("details") if isinstance(existing.get("details"), dict) else None
-    if details is None:
-        details = existing.get("details_json")
-        if isinstance(details, str):
-            try:
-                details = json.loads(details)
-            except json.JSONDecodeError:
-                details = {}
     if not isinstance(details, dict):
         details = {}
     prior_raw = details.get("related_intel_ids") if isinstance(details, dict) else None
@@ -173,7 +170,33 @@ def _link_intel(client, finding_slug: str, raw_intel_ids: list[str], note: str) 
     payload = {"details": {"related_intel_ids": merged}}
     if note:
         payload["reason_text"] = note
-    return client.patch(f"findings/{finding_slug}", payload)
+    return require_finding_write_response(
+        client.patch(f"findings/{finding_slug}", payload),
+        finding_slug=finding_slug,
+        operation="link finding intel",
+    )
+
+
+def _require_generic_link_result(
+    response: dict,
+    *,
+    finding_slug: str,
+    payload: dict,
+) -> dict:
+    expected = {
+        "link_kind": payload["link_kind"],
+        "target_kind": payload["target_kind"],
+    }
+    if payload.get("target_ref"):
+        expected["target_ref"] = payload["target_ref"]
+    elif payload.get("target_id") is not None:
+        expected["target_id"] = payload["target_id"]
+    return require_write_result(
+        response,
+        operation=f"link finding {finding_slug}",
+        expected=expected,
+        positive_ids=("id",),
+    )
 
 
 def run(args) -> None:
@@ -359,16 +382,37 @@ def run(args) -> None:
                         args.reason_text or "",
                     )
                 elif link_update_selected:
-                    result = client.patch(
-                        f"findings/{slug}/links/{args.link_id}",
-                        link_update_payload,
+                    result = require_write_result(
+                        client.patch(
+                            f"findings/{slug}/links/{args.link_id}",
+                            link_update_payload,
+                        ),
+                        operation=f"update finding link {args.link_id}",
+                        expected={"id": args.link_id, "finding_slug": slug},
                     )
                 elif generic_selected:
-                    result = client.post(f"findings/{slug}/links", generic_payload)
+                    result = _require_generic_link_result(
+                        client.post(f"findings/{slug}/links", generic_payload),
+                        finding_slug=slug,
+                        payload=generic_payload,
+                    )
                 elif args.clear_root_cause:
-                    result = client.delete(f"findings/{slug}/root-cause")
+                    result = require_write_result(
+                        client.delete(f"findings/{slug}/root-cause"),
+                        operation=f"clear root cause for {slug}",
+                        expected={"finding_slug": slug},
+                        nonnegative_counts=("cleared",),
+                    )
                 else:
-                    result = client.put(f"findings/{slug}/root-cause", root_cause_payload)
+                    result = require_write_result(
+                        client.put(f"findings/{slug}/root-cause", root_cause_payload),
+                        operation=f"set root cause for {slug}",
+                        expected={
+                            "finding_slug": slug,
+                            "root_cause_slug": root_cause_payload["root_cause_slug"],
+                        },
+                        positive_ids=("id",),
+                    )
             except Exception as exc:  # noqa: BLE001 - one bad sibling must not drop the rest
                 failed += 1
                 print(f"finding link: {slug} failed: {exc}", file=sys.stderr)

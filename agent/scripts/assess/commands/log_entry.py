@@ -18,7 +18,7 @@ import os
 import re
 import sys
 
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessmentClient, require_write_result
 from assess.lib.config import load_config
 from assess.lib.json_inputs import parse_json_argument, parse_optional_inline_json
 
@@ -112,11 +112,21 @@ def run(args) -> None:
 
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         try:
-            client.post_engagement("activity-entries", payload)
+            require_write_result(
+                client.post_engagement("activity-entries", payload),
+                operation="record activity entry",
+                expected={
+                    "actor_kind": payload["actor_kind"],
+                    "actor_name": payload["actor_name"],
+                    "title": payload["title"],
+                },
+                positive_ids=("id",),
+            )
         except Exception as exc:
             # activity.py is async-friendly but the CLI must never lose the
-            # operator's log entry. Print the error and exit non-zero so
-            # callers can retry; do NOT silently drop.
+            # operator's log entry. Print the error and exit non-zero; an
+            # unreadable acknowledgement may already be durable, so its
+            # diagnostic directs callers to inspect instead of retrying.
             print(f"vigil assess log: failed to record activity entry: {exc}", file=sys.stderr)
             sys.exit(1)
 

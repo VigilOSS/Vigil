@@ -48,7 +48,17 @@ DEFAULT_CAPTURE_POLICY: dict[str, Any] = {
     "content_type_allow": [],
     "content_type_deny": [],
     "redaction_profile": "none",
+    "redaction_warning": "",
+    "retention": "until_engagement_deletion",
 }
+
+
+class CapturePolicyMirrorError(RuntimeError):
+    """The DB policy was saved but its engagement-local mirror was not."""
+
+    def __init__(self, record: dict[str, Any], error: str) -> None:
+        super().__init__(error)
+        self.record = record
 
 # Hard cap on inlined HAR body text so an export of a large corpus can't balloon
 # unbounded regardless of the per-flow byte counts recorded.
@@ -139,6 +149,10 @@ def insert_http_flow(
     response_body_bytes: int = 0,
     request_body_truncated: bool = False,
     response_body_truncated: bool = False,
+    request_body_capture_status: str = "unknown",
+    response_body_capture_status: str = "unknown",
+    request_body_capture_error: str = "",
+    response_body_capture_error: str = "",
     request_body_artifact_path: str | None = None,
     response_body_artifact_path: str | None = None,
     request_headers: dict[str, Any] | None = None,
@@ -172,11 +186,13 @@ def insert_http_flow(
                 response_content_type, content_type_family, auth_context,
                 request_body_sha256, response_body_sha256, request_body_bytes,
                 response_body_bytes, request_body_truncated, response_body_truncated,
+                request_body_capture_status, response_body_capture_status,
+                request_body_capture_error, response_body_capture_error,
                 request_body_artifact_path, response_body_artifact_path,
                 request_headers_json, response_headers_json, redaction_status,
                 host_mismatch, url_authority, host_header, sni, timing_ms, started_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 engagement.id,
@@ -199,6 +215,10 @@ def insert_http_flow(
                 int(response_body_bytes or 0),
                 1 if request_body_truncated else 0,
                 1 if response_body_truncated else 0,
+                str(request_body_capture_status or "unknown"),
+                str(response_body_capture_status or "unknown"),
+                str(request_body_capture_error or "")[:1000],
+                str(response_body_capture_error or "")[:1000],
                 request_body_artifact_path or None,
                 response_body_artifact_path or None,
                 _json_object_text(request_headers),
@@ -322,6 +342,13 @@ def get_http_flow(engagement_id: int, flow_uid_or_id: str | int) -> dict[str, An
 
 def _serialize_capture_policy(row: Any) -> dict[str, Any]:
     data = dict(row)
+    stored_redaction = str(data["redaction_profile"] or "none")
+    redaction_warning = ""
+    if stored_redaction != "none":
+        redaction_warning = (
+            f"stored redaction profile {stored_redaction!r} is unsupported; "
+            "raw evidence remains unredacted and the effective profile is 'none'"
+        )
     return {
         "enabled": bool(data["enabled"]),
         "capture_request_bodies": bool(data["capture_request_bodies"]),
@@ -329,7 +356,9 @@ def _serialize_capture_policy(row: Any) -> dict[str, Any]:
         "max_body_bytes": int(data["max_body_bytes"]),
         "content_type_allow": _parse_json_list(data["content_type_allow_json"]),
         "content_type_deny": _parse_json_list(data["content_type_deny_json"]),
-        "redaction_profile": str(data["redaction_profile"] or "none"),
+        "redaction_profile": "none",
+        "redaction_warning": redaction_warning,
+        "retention": "until_engagement_deletion",
         "updated_at": str(data["updated_at"] or ""),
     }
 
@@ -360,6 +389,13 @@ def normalize_capture_policy(raw: dict[str, Any] | None) -> dict[str, Any]:
         max_body = int(source.get("max_body_bytes", DEFAULT_MAX_BODY_BYTES))
     except (TypeError, ValueError):
         max_body = DEFAULT_MAX_BODY_BYTES
+    stored_redaction = str(source.get("redaction_profile") or "none")
+    redaction_warning = ""
+    if stored_redaction != "none":
+        redaction_warning = (
+            f"stored redaction profile {stored_redaction!r} is unsupported; "
+            "raw evidence remains unredacted and the effective profile is 'none'"
+        )
     return {
         "enabled": _flag("enabled"),
         "capture_request_bodies": _flag("capture_request_bodies"),
@@ -367,7 +403,9 @@ def normalize_capture_policy(raw: dict[str, Any] | None) -> dict[str, Any]:
         "max_body_bytes": max(0, max_body),
         "content_type_allow": _parse_json_list(source.get("content_type_allow", [])),
         "content_type_deny": _parse_json_list(source.get("content_type_deny", [])),
-        "redaction_profile": str(source.get("redaction_profile") or "none"),
+        "redaction_profile": "none",
+        "redaction_warning": redaction_warning,
+        "retention": "until_engagement_deletion",
     }
 
 
@@ -428,7 +466,7 @@ def set_capture_policy(
         "redaction_profile": (
             current["redaction_profile"]
             if redaction_profile is None
-            else str(redaction_profile or "none")
+            else str(redaction_profile)
         ),
     }
     with _common.get_connection() as connection:
@@ -464,9 +502,10 @@ def set_capture_policy(
     stored = get_capture_policy(engagement.id)
     # Mirror to capture-policy.json next to scope.json so the shared proxy addon
     # has a durable filesystem fallback (mirrors the scope.json pattern) when the
-    # backend is unreachable. Best-effort: a filesystem failure must not fail the
-    # authoritative DB write.
-    _write_capture_policy_file(Path(engagement.engagement_root), stored)
+    # backend is unreachable. The DB remains authoritative, but a filesystem
+    # failure is not a successful policy rollout because the proxy's offline
+    # path would keep using an older value.
+    mirror_error = _write_capture_policy_file(Path(engagement.engagement_root), stored)
     # The /engagements registry payload (which the proxy polls) reads the policy
     # off the filesystem mirror through a 1s-TTL list cache keyed on scope-file
     # signatures — a capture-policy.json change is NOT in that signature, so drop
@@ -474,10 +513,12 @@ def set_capture_policy(
     from .. import engagements as _engagements  # local import avoids any cycle
 
     _engagements.clear_list_engagements_cache()
+    if mirror_error is not None:
+        raise CapturePolicyMirrorError(stored, mirror_error)
     return stored
 
 
-def _write_capture_policy_file(root: Path, policy: dict[str, Any]) -> None:
+def _write_capture_policy_file(root: Path, policy: dict[str, Any]) -> str | None:
     try:
         root.mkdir(parents=True, exist_ok=True)
         payload = {key: value for key, value in policy.items() if key != "updated_at"}
@@ -485,8 +526,9 @@ def _write_capture_policy_file(root: Path, policy: dict[str, Any]) -> None:
         tmp = target.with_name(f"{target.name}.tmp")
         tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         tmp.rename(target)
-    except OSError:
-        return
+    except OSError as exc:
+        return str(exc)[:1000]
+    return None
 
 
 # ── HAR 1.2 export / import ──────────────────────────────────────────────────
@@ -735,6 +777,10 @@ def har_from_flows(
                     "response_body_bytes": flow.get("response_body_bytes"),
                     "request_body_truncated": bool(flow.get("request_body_truncated")),
                     "response_body_truncated": bool(flow.get("response_body_truncated")),
+                    "request_body_capture_status": flow.get("request_body_capture_status"),
+                    "response_body_capture_status": flow.get("response_body_capture_status"),
+                    "request_body_capture_error": flow.get("request_body_capture_error"),
+                    "response_body_capture_error": flow.get("response_body_capture_error"),
                     "request_body_artifact_path": flow.get("request_body_artifact_path"),
                     "response_body_artifact_path": flow.get("response_body_artifact_path"),
                     "request_variant_id": flow.get("request_variant_id"),
@@ -826,6 +872,26 @@ def flows_from_har(
                 vigil.get("response_body_bytes"),
             )
         )
+        request_capture_status = str(
+            vigil.get("request_body_capture_status")
+            or (
+                "retained_truncated"
+                if request_body_artifact_path and vigil.get("request_body_truncated")
+                else "retained"
+                if request_body_artifact_path
+                else "unknown"
+            )
+        )
+        response_capture_status = str(
+            vigil.get("response_body_capture_status")
+            or (
+                "retained_truncated"
+                if response_body_artifact_path and vigil.get("response_body_truncated")
+                else "retained"
+                if response_body_artifact_path
+                else "unknown"
+            )
+        )
         results.append(
             {
                 "flow_uid": flow_uid,
@@ -846,6 +912,14 @@ def flows_from_har(
                 "response_body_bytes": int(response_body_bytes or 0),
                 "request_body_truncated": bool(vigil.get("request_body_truncated")),
                 "response_body_truncated": bool(vigil.get("response_body_truncated")),
+                "request_body_capture_status": request_capture_status,
+                "response_body_capture_status": response_capture_status,
+                "request_body_capture_error": str(
+                    vigil.get("request_body_capture_error") or ""
+                )[:1000],
+                "response_body_capture_error": str(
+                    vigil.get("response_body_capture_error") or ""
+                )[:1000],
                 "request_body_artifact_path": request_body_artifact_path,
                 "response_body_artifact_path": response_body_artifact_path,
                 "request_headers": request_headers,

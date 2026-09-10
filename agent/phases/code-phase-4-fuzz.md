@@ -84,7 +84,7 @@ Provide:
   with `defect_family` in `buffer-overflow`, `format-string`, `integer-overflow`,
   `null-dereference`, `type-confusion`, `uninitialized-memory`, or `use-after-free`.
   Include slugs, canonical locations, severity, and
-  `verification_state` (confirmed/unreviewed). Pass as a concise summary, not raw JSON dump.
+  `verification_status` (confirmed/unreviewed). Pass as a concise summary, not raw JSON dump.
 - File classifications: `vigil assess fetch "code/files?repo_id=<id>&limit=5000"` —
   identify critical/high C/C++ files with relevant slot types. The fuzz engineer uses these to
   cross-reference targets against structural index data.
@@ -185,7 +185,17 @@ ls tools/fuzz-state/reports/*-triage.json
 # Persist one terminal receipt per required target only after crash triage.
 vigil assess contract code-record fuzz-campaign
 vigil assess code-record fuzz-campaign <campaign-receipt-json-file>
+vigil assess run-audit code-receipt record <run-id> <campaign-link-json>
 ```
+
+Record each sanitizer violation or reproducible crash first with `vigil assess run-audit
+tool-signal record <run-id> <signal-json>`. A code signal binds the exact inventoried source,
+terminal command receipt, observed signature, and (for a crash) exact input digest, and creates one
+deterministic candidate in the same transaction. Promote a confirmed candidate in the single
+`finding record` action by including `run_candidate {run_id, candidate_id, reason,
+proof_receipt_ids}` in the finding JSON. Every triaged crash signal/candidate and the campaign's
+exact current-generation receipt must be retained in the campaign link; failed campaigns stay
+blocked debt rather than generic failure text.
 
 The campaign receipt names its fuzz-engineer dispatch, current source tuple, selected target,
 covered current finding slugs, engine/sanitizers, bounded budget and executions, terminal outcome,

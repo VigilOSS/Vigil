@@ -4,6 +4,7 @@ import { listEngagements } from "./lib/api";
 import type { Engagement } from "./lib/api";
 import { EngagementPage } from "./routes/EngagementPage";
 import { EngagementsPage } from "./routes/EngagementsPage";
+import { parseRunAuditQuery } from "./lib/runAudit";
 
 function currentRoute(): string {
   const hashRoute = window.location.hash.replace(/^#/, "");
@@ -15,11 +16,15 @@ type EngagementRoute = {
   initialTab?: string;
   initialFindingSlug?: string;
   initialDrawerTab?: string;
+  initialRunId?: number;
+  initialRunSection?: string;
+  initialRunObject?: string;
 };
 
 // Hash scheme: #/engagements/{key}?tab={tabKey}&finding={slug}&dtab={drawerTab}
+// or #/engagements/{key}?tab=runs&run={id}&section={childKind}&object={id}.
 // The `?query` tail is optional and split off before decoding the key so
-// the deep-link params (tab, finding, dtab) don't get folded into the
+// the deep-link params don't get folded into the
 // engagement key. FindingsTab rewrites these via history.replaceState as the
 // drawer opens/closes; replaceState does not emit `hashchange`, so the
 // listener below never re-routes on a self-write (no loop).
@@ -33,7 +38,16 @@ function parseEngagementRoute(route: string): EngagementRoute | null {
   const initialTab = params.get("tab") ?? undefined;
   const initialFindingSlug = params.get("finding") ?? undefined;
   const initialDrawerTab = params.get("dtab") ?? undefined;
-  return { engagementKey, initialTab, initialFindingSlug, initialDrawerTab };
+  const runAudit = parseRunAuditQuery(params);
+  return {
+    engagementKey,
+    initialTab,
+    initialFindingSlug,
+    initialDrawerTab,
+    initialRunId: runAudit.runId,
+    initialRunSection: runAudit.section,
+    initialRunObject: runAudit.object,
+  };
 }
 
 function navigate(route: string) {
@@ -110,6 +124,9 @@ export default function App() {
         initialTab={engagementRoute.initialTab}
         initialFindingSlug={engagementRoute.initialFindingSlug}
         initialDrawerTab={engagementRoute.initialDrawerTab}
+        initialRunId={engagementRoute.initialRunId}
+        initialRunSection={engagementRoute.initialRunSection}
+        initialRunObject={engagementRoute.initialRunObject}
         onBack={() => navigate("/engagements")}
       />
     );

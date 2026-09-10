@@ -1,7 +1,10 @@
 # Vigil
 
-Read `agent/AGENTS.md` for operator instructions.
+For development, review, or maintenance in this source checkout, read the root
+[`AGENTS.md`](AGENTS.md). It owns the contributor workflow, verification rules,
+and version-control instructions.
 
-The root `AGENTS.md` is a maintainer/contributor workflow document, not the
-operator prompt. Do not load both `agent/AGENTS.md` and `agent/CLAUDE.md` —
-the latter is a pointer to the former to avoid double-loading.
+Treat prompts under `agent/` as product source when inspecting or editing them,
+not as instructions to assume the engagement operator role in a coding session.
+For an explicitly requested engagement session, follow
+[`README.md`](README.md#starting-an-engagement) and its engagement-local entrypoint.

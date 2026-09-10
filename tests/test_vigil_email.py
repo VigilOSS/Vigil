@@ -791,3 +791,278 @@ def test_jxa_scan_wiring_present_in_source():
         assert f'"{folder}"' in jxa
     # The aggregate Inbox stays a flagged fallback, never a silent default.
     assert "used_aggregate_inbox = true" in jxa
+
+
+# ---------------------------------------------------------------------------
+# I-181: duration flags.
+#
+# `--within` took a bare int while every sibling was explicitly unit-suffixed,
+# so `--within 10m` — the natural guess for a flag whose name carries no unit —
+# died on argparse's "invalid int value". All four duration flags now accept the
+# same forms, and a bare integer on `--within` MUST still mean minutes.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "expected_minutes"),
+    [
+        ("10", 10),  # bare = minutes; the back-compatible form
+        ("10m", 10),
+        ("2h", 120),
+        ("90s", 2),  # rounds UP: a window may be wider, never narrower
+        ("30S", 1),
+        ("1.5h", 90),
+    ],
+)
+def test_duration_minutes_accepts_bare_minutes_and_suffixed_durations(value, expected_minutes):
+    from vigil_cli.email import duration_minutes
+
+    assert duration_minutes(value) == expected_minutes
+
+
+@pytest.mark.parametrize("value", ["10x", "-5", "0", "", "m", "10 minutes", "1e3"])
+def test_duration_minutes_rejects_anything_else_naming_the_accepted_forms(value):
+    import argparse
+
+    from vigil_cli.email import duration_minutes
+
+    with pytest.raises(argparse.ArgumentTypeError) as exc:
+        duration_minutes(value)
+    message = str(exc.value)
+    assert "minutes" in message
+    assert "90s, 30m, 2h" in message
+
+
+@pytest.mark.parametrize(
+    ("value", "expected_seconds"),
+    [("90", 90.0), ("90s", 90.0), ("2m", 120.0), ("1h", 3600.0)],
+)
+def test_duration_seconds_accepts_bare_seconds_and_suffixed_durations(value, expected_seconds):
+    from vigil_cli.email import duration_seconds
+
+    assert duration_seconds(value) == expected_seconds
+
+
+def test_duration_seconds_or_zero_allows_zero_but_still_rejects_garbage():
+    import argparse
+
+    from vigil_cli.email import duration_seconds, duration_seconds_or_zero
+
+    assert duration_seconds_or_zero("0") == 0.0
+    with pytest.raises(argparse.ArgumentTypeError):
+        duration_seconds("0")  # a zero read timeout / poll interval is nonsense
+    with pytest.raises(argparse.ArgumentTypeError):
+        duration_seconds_or_zero("later")
+
+
+def test_email_cli_accepts_a_duration_for_within(monkeypatch, capsys):
+    from vigil_cli import email as email_module
+    from vigil_cli.main import main
+
+    monkeypatch.setattr(
+        email_module, "read_messages", lambda **_: [_msg(received_at=datetime.now(UTC))]
+    )
+
+    main(["email", "researcher@example.com", "--within", "10m", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["within_minutes"] == 10
+
+
+def test_email_cli_rejects_a_malformed_within_naming_the_accepted_forms(capsys):
+    from vigil_cli.main import main
+
+    with pytest.raises(SystemExit) as exc:
+        main(["email", "researcher@example.com", "--within", "10x"])
+
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "--within" in err
+    assert "90s, 30m, 2h" in err
+
+
+def test_email_read_timeout_default_is_the_measured_generous_bound():
+    """30s was a guess. Too short aborts a lane mid-flight; too long only waits."""
+    import inspect
+
+    from vigil_cli import email as email_module
+
+    assert email_module.DEFAULT_READ_TIMEOUT_SECONDS == 90.0
+    signature = inspect.signature(email_module.read_messages)
+    assert signature.parameters["timeout_seconds"].default == 90.0
+
+
+# ---------------------------------------------------------------------------
+# I-181 / I-169(1)(2): regression pins for behaviour that is ALREADY correct.
+#
+# A timeout and a truncated scan must never look like an authoritative empty
+# result. Both already raise, carry an `error` key and exit 1 — these pin that
+# so the `count: 0` ambiguity cannot silently come back.
+# ---------------------------------------------------------------------------
+
+
+def test_email_cli_json_timeout_is_an_error_and_exits_nonzero(monkeypatch, capsys):
+    from vigil_cli import email as email_module
+    from vigil_cli.main import main
+
+    def fake_read(**_):
+        raise email_module.EmailReadError(
+            "osascript timed out after 90.0s", kind="timeout"
+        )
+
+    monkeypatch.setattr(email_module, "read_messages", fake_read)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["email", "researcher@example.com", "--json"])
+
+    assert exc.value.code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "timeout"
+    assert payload["count"] == 0
+    assert "timed out" in payload["error"]
+    # Absent coverage must be explicit: an omitted key could read as "complete".
+    assert payload["scan_coverage"] is None
+
+
+def test_email_cli_text_timeout_exits_nonzero_with_the_error(monkeypatch, capsys):
+    from vigil_cli import email as email_module
+    from vigil_cli.main import main
+
+    def fake_read(**_):
+        raise email_module.EmailReadError("osascript timed out after 90.0s", kind="timeout")
+
+    monkeypatch.setattr(email_module, "read_messages", fake_read)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["email", "researcher@example.com"])
+
+    assert exc.value.code != 0
+    assert "timed out" in str(exc.value)
+
+
+def test_email_cli_json_truncated_scan_is_reported_as_truncated(monkeypatch, capsys):
+    from vigil_cli import email as email_module
+    from vigil_cli.main import main
+
+    coverage = email_module.EmailScanCoverage(
+        complete=False,
+        candidate_limit=2_000,
+        page_size=200,
+        candidates_examined=2_000,
+        candidates_collected=2_000,
+        mailboxes=(),
+        truncated_mailboxes=("Provider/INBOX",),
+    )
+    monkeypatch.setattr(
+        email_module,
+        "read_messages",
+        lambda **_: email_module.EmailScan([], result_limit=200, coverage=coverage),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main(["email", "researcher@example.com", "--json"])
+
+    assert exc.value.code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "truncated"
+    assert payload["count"] == 0
+    assert payload["scan_coverage"]["complete"] is False
+    assert "incomplete Mail.app scan" in payload["error"]
+
+
+def test_email_cli_json_status_is_ok_on_an_authoritative_match(monkeypatch, capsys):
+    from vigil_cli import email as email_module
+    from vigil_cli.main import main
+
+    monkeypatch.setattr(
+        email_module, "read_messages", lambda **_: [_msg(received_at=datetime.now(UTC))]
+    )
+
+    main(["email", "researcher@example.com", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "ok"
+    assert payload["count"] == 1
+    assert payload["subaddress_aliases"] == []
+
+
+# ---------------------------------------------------------------------------
+# I-169(3): plus-addressing. Every test identity is provisioned through a
+# subaddressed mailbox, so literal `To:` matching made the DEFAULT path
+# invisible — while a tagged query must still never read a sibling lane's mail.
+# ---------------------------------------------------------------------------
+
+
+def test_filter_messages_matches_plus_addressed_recipient():
+    from vigil_cli.email import filter_messages
+
+    tagged = _msg(recipients=("researcher@example.com",))
+
+    assert filter_messages([tagged], mailbox_address="researcher@example.com") == [tagged]
+    # The tagged form still resolves to itself.
+    assert filter_messages(
+        [tagged], mailbox_address="researcher@example.com"
+    ) == [tagged]
+
+
+def test_filter_messages_plus_query_does_not_match_a_sibling_alias():
+    from vigil_cli.email import filter_messages
+
+    lane1 = _msg(recipients=("researcher@example.com",))
+
+    assert filter_messages([lane1], mailbox_address="researcher@example.com") == []
+    # ...and not a different base localpart that merely shares the domain.
+    assert filter_messages([lane1], mailbox_address="researcher@example.com") == []
+
+
+def test_filter_messages_mailbox_accepts_the_documented_bare_domain_form():
+    """The docstring always promised `acme-bank.example`; only `@acme-bank.example` used to work."""
+    from vigil_cli.email import filter_messages
+
+    message = _msg(recipients=("researcher@example.com",))
+
+    assert filter_messages([message], mailbox_address="researcher.example") == [message]
+    assert filter_messages([message], mailbox_address="@researcher.example") == [message]
+    assert filter_messages([message], mailbox_address="evil.example") == []
+
+
+def test_subaddress_aliases_names_the_siblings_a_tagged_query_missed():
+    from vigil_cli.email import subaddress_aliases
+
+    messages = [
+        _msg(recipients=("researcher@example.com",)),
+        _msg(recipients=("researcher@example.com", "researcher@example.com")),
+    ]
+
+    assert subaddress_aliases(messages, "researcher@example.com") == [
+        "researcher@example.com",
+        "researcher@example.com",
+    ]
+    # A domain filter has no base address to compare aliases against.
+    assert subaddress_aliases(messages, "@researcher.example") == []
+
+
+def test_email_cli_zero_for_a_tagged_query_names_the_aliases_it_saw(monkeypatch, capsys):
+    from vigil_cli import email as email_module
+    from vigil_cli.main import main
+
+    monkeypatch.setattr(
+        email_module,
+        "read_messages",
+        lambda **_: [
+            _msg(
+                recipients=("researcher@example.com",),
+                received_at=datetime.now(UTC),
+            )
+        ],
+    )
+
+    # An authoritative zero is a real measurement, so the JSON path returns 0;
+    # what it must not do is stay silent about why the zero happened.
+    main(["email", "researcher@example.com", "--json"])
+
+    captured = capsys.readouterr()
+    assert "researcher@example.com" in captured.err
+    payload = json.loads(captured.out)
+    assert payload["count"] == 0
+    assert payload["subaddress_aliases"] == ["researcher@example.com"]

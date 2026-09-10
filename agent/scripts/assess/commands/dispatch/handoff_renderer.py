@@ -20,6 +20,7 @@ import sys
 
 from assess.lib.client import AssessmentClient, AssessError
 from assess.lib.config import load_config
+from assess.lib.finding_render import UNTRUSTED_DATA_NOTICE
 
 
 def _render_handoff(args, extra: list[str]) -> None:
@@ -238,11 +239,13 @@ def _render_handoff_blob(
     Section order: header / summary / confidence / findings / coverage gaps /
     next steps / open questions / working artifacts / runtime issues /
     recommended next agent. Trim policy on overflow: findings list collapses
-    first ("... and N more"), then runtime_issues, then working_artifacts.
-    Summary, next_steps, coverage_gaps are NEVER trimmed (load-bearing content).
+    first ("... and N more"), then runtime_issues, then working_artifacts. If
+    multiline load-bearing prose alone still exceeds the caller's hard cap, the
+    final blob is visibly truncated rather than silently violating --max-lines.
     """
     head = [
         f"#### Handoff from {role} dispatch {agent_id}",
+        UNTRUSTED_DATA_NOTICE,
         f"- **Prior task:** {task}",
         f"- **Application unit:** {application_unit_id or '(none recorded)'}",
         f"- **Dispatched at:** {dispatched_at or '(unknown)'} (status: {status or 'unknown'})",
@@ -304,7 +307,7 @@ def _render_handoff_blob(
 
     composed = _compose(finding_lines, 0, artifact_states, runtime_issues, 0, 0)
     if len(composed) <= max_lines:
-        return "\n".join(composed)
+        return _join_with_hard_cap(composed, max_lines)
 
     # First-pass trim: findings.
     overhead_no_findings = len(_compose([], len(finding_lines), artifact_states, runtime_issues, 0, 0))
@@ -312,7 +315,7 @@ def _render_handoff_blob(
     findings_kept, findings_dropped = _truncate_findings(finding_lines, findings_budget)
     composed = _compose(findings_kept, findings_dropped, artifact_states, runtime_issues, 0, 0)
     if len(composed) <= max_lines:
-        return "\n".join(composed)
+        return _join_with_hard_cap(composed, max_lines)
 
     # Second-pass trim: runtime issues.
     overhead_no_runtime = len(
@@ -325,7 +328,7 @@ def _render_handoff_blob(
         findings_kept, findings_dropped, artifact_states, runtime_kept, runtime_dropped, 0
     )
     if len(composed) <= max_lines:
-        return "\n".join(composed)
+        return _join_with_hard_cap(composed, max_lines)
 
     # Third-pass trim: working artifacts.
     overhead_no_artifacts = len(
@@ -342,7 +345,22 @@ def _render_handoff_blob(
         runtime_dropped,
         artifacts_dropped,
     )
-    return "\n".join(composed)
+    return _join_with_hard_cap(composed, max_lines)
+
+
+def _join_with_hard_cap(lines: list[str], max_lines: int) -> str:
+    """Join renderer lines without letting embedded newlines defeat the cap."""
+    physical_lines = "\n".join(lines).splitlines()
+    if len(physical_lines) <= max_lines:
+        return "\n".join(physical_lines)
+    omitted = len(physical_lines) - max(0, max_lines - 1)
+    marker = (
+        f"... handoff truncated: {omitted} line(s) omitted; rerun "
+        "render-handoff with a larger --max-lines to inspect them"
+    )
+    if max_lines == 1:
+        return marker
+    return "\n".join([*physical_lines[: max_lines - 1], marker])
 
 
 def _handoff_provenance_line(

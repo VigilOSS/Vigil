@@ -38,7 +38,6 @@ def _args(repo: Path, **overrides) -> SimpleNamespace:
         include_path=[],
         policy_preset="application",
         max_included_skipped_bytes=code_ingest.DEFAULT_MAX_INCLUDED_SKIPPED_BYTES,
-        max_source_file_bytes=code_ingest.DEFAULT_MAX_SOURCE_FILE_BYTES,
         skipped_manifest=None,
         dry_run=True,
         engagement_dir=None,
@@ -104,15 +103,18 @@ def test_tags_is_excluded_from_source_and_re_admissible_by_include_path(tmp_path
     assert "tags" in _admitted(repo, _args(repo, include_path=["tags"]))
 
 
-def test_oversize_source_is_excluded_auditably_and_predicates_stay_symmetric(tmp_path):
+def test_large_ordinary_source_is_admitted_and_predicates_stay_symmetric(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "small.py").write_text("x = 1\n", encoding="utf-8")
-    (repo / "huge.py").write_text("# pad\n" * 2000, encoding="utf-8")
-    args = _args(repo, max_source_file_bytes=1000)
+    huge = repo / "huge.py"
+    with huge.open("wb") as handle:
+        handle.seek(6 * 1024 * 1024 - 1)
+        handle.write(b"\n")
+    args = _args(repo)
 
-    assert _admitted(repo, args) == ["small.py"]
-    assert _excluded(repo, args)["huge.py"].startswith("oversize_source:")
+    assert _admitted(repo, args) == ["huge.py", "small.py"]
+    assert "huge.py" not in _excluded(repo, args)
 
     # The admitted/excluded predicates partition the tree; a disagreement makes
     # _verify_source_inventory raise on every run.
@@ -123,6 +125,16 @@ def test_oversize_source_is_excluded_auditably_and_predicates_stay_symmetric(tmp
             bindings[rel_path] = (captured.sha256, captured.size, captured.executable)
         excluded = code_ingest._collect_excluded_records(tree, args, repo / ".none")
         code_ingest._verify_source_inventory(tree, args, repo / ".none", bindings, excluded)
+
+
+def test_ordinary_source_size_cap_is_not_a_supported_cli_option():
+    parser = argparse.ArgumentParser()
+    code_ingest.register(parser.add_subparsers(dest="cmd"))
+
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(["code-ingest", "/repo", "--max-source-file-bytes", "1"])
+
+    assert excinfo.value.code == 2
 
 
 # --- I-109: policy preset + census honesty ----------------------------------

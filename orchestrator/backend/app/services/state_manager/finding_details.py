@@ -16,7 +16,7 @@ from typing import Any
 
 from fastapi import HTTPException, status
 
-FINDING_DETAIL_PROPERTIES: dict[str, dict[str, Any]] = {
+FINDING_DETAIL_CORE_PROPERTIES: dict[str, dict[str, Any]] = {
     "discovered_by": {
         "type": "string",
         "description": "Agent name that first identified this finding (e.g. 'vulnerability-analyst').",
@@ -65,7 +65,8 @@ FINDING_DETAIL_PROPERTIES: dict[str, dict[str, Any]] = {
         "description": "Dangerous operation that consumes tainted data (e.g. 'memcpy(buf, scheme, schemelen) at lib/urlapi.c:342', 'sqlite3_exec(db, query)').",
     },
     "taint_path": {
-        "type": "string",
+        "type": ["string", "array"],
+        "items": {"type": "string"},
         "description": "Arrow-delimited data flow from entry_point to sink (e.g. 'curl_url_set -> parseurl() -> memcpy(buf, scheme, schemelen)').",
     },
     "guards_evaluated": {
@@ -119,25 +120,6 @@ FINDING_DETAIL_PROPERTIES: dict[str, dict[str, Any]] = {
     "poc_code": {
         "type": "string",
         "description": "Minimal exploit code or script that reproduces the finding. Omit if poc_request/poc_response is sufficient.",
-    },
-    "poc_request": {
-        "type": "object",
-        "description": "HTTP request that triggers the vulnerability.",
-        "properties": {
-            "method": {"type": "string"},
-            "url": {"type": "string"},
-            "headers": {"type": "object", "additionalProperties": {"type": "string"}},
-            "body": {"type": "string"},
-        },
-    },
-    "poc_response": {
-        "type": "object",
-        "description": "Observed HTTP response that confirms the vulnerability.",
-        "properties": {
-            "status": {"type": "integer"},
-            "headers": {"type": "object", "additionalProperties": {"type": "string"}},
-            "body_excerpt": {"type": "string"},
-        },
     },
     "references": {
         "type": "array",
@@ -254,24 +236,14 @@ FINDING_DETAIL_PROPERTIES: dict[str, dict[str, Any]] = {
         "type": "string",
         "description": "Incident-response disposition in the blue vocabulary, carried for the report-writer.",
     },
-    # Incident-response detail keys. Blue role prompts (investigator,
+    # Shared incident-response fields. Blue role prompts (investigator,
     # alert-triage-specialist) instruct these on every finding they record, and
-    # report readiness REQUIRES a non-empty ``mitre_techniques`` for a blue
-    # engagement — so ``details`` must accept them or `finding record` rejects the
-    # documented blue finding shape outright. Shapes stay permissive because the
-    # role prompts define the contents, not this schema.
+    # report readiness REQUIRES non-empty ``mitre_techniques`` for a blue
+    # engagement. Structured blue collections are versioned below.
     "mitre_techniques": {
         "type": "array",
         "items": {"type": "string"},
         "description": "MITRE ATT&CK technique IDs (e.g. 'T1078') this finding maps to. Required on a blue-engagement finding before report readiness passes.",
-    },
-    "timeline": {
-        "type": "array",
-        "description": "Ordered incident timeline entries, each a UTC ISO-8601 event citing its `source_file` and `command_run_id` per agent/rules/ir-evidence.md. Appended across investigation rungs, never replaced.",
-    },
-    "iocs": {
-        "type": "array",
-        "description": "Indicators of compromise observed for this finding (IP, domain, email, file hash, OAuth client_id, URL). Each one gets an `intel_*` row via `vigil assess intel record`.",
     },
     "confidence": {
         "type": "string",
@@ -312,6 +284,7 @@ FINDING_DETAIL_PROPERTIES: dict[str, dict[str, Any]] = {
     },
     "unblock_requirements": {
         "type": "object",
+        "additionalProperties": False,
         "description": "What must be provisioned to lift the block so the finding can be driven to proof. When the unblocker is another finding or chain, link it with `vigil assess finding link <slug> --link-kind unblocked_by ...`.",
         "properties": {
             "kind": {
@@ -415,6 +388,123 @@ FINDING_DETAIL_PROPERTIES: dict[str, dict[str, Any]] = {
     },
 }
 
+
+# Workflow-owned fields evolve independently from the cross-workflow core. Keep
+# their namespace and version explicit here, while retaining the established flat
+# wire shape so existing records and callers do not need a data migration.  The
+# annotation is also projected into the generated agent schema.
+FINDING_DETAIL_EXTENSION_PROPERTIES: dict[str, dict[str, dict[str, Any]]] = {
+    "web/v1": {
+        "poc_request": {
+            "type": "object",
+            "additionalProperties": False,
+            "description": "HTTP request that triggers the vulnerability.",
+            "properties": {
+                "method": {"type": "string"},
+                "url": {"type": "string"},
+                "headers": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                },
+                "body": {"type": "string"},
+            },
+        },
+        "poc_response": {
+            "type": "object",
+            "additionalProperties": False,
+            "description": "Observed HTTP response that confirms the vulnerability.",
+            "properties": {
+                "status": {"type": "integer"},
+                "headers": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                },
+                "body_excerpt": {"type": "string"},
+            },
+        },
+    },
+    "code/v1": {
+        "function": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "Function or method containing the vulnerable operation.",
+        },
+        "discovery_stage": {
+            "type": "string",
+            "enum": ["hunt", "variant"],
+            "description": "Code workflow stage that identified the finding.",
+        },
+        "source_anchor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "Verbatim source expression anchoring the finding in the reviewed snapshot.",
+        },
+        "proof_complete": {
+            "type": "boolean",
+            "description": "True when the code-verification path established a complete source-to-sink proof.",
+        },
+    },
+    "credential/v1": {
+        "discovered_credential": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "credential_key",
+                "credential_id",
+                "principal",
+                "kind",
+                "minted_identity",
+                "session_minted",
+            ],
+            "properties": {
+                "credential_key": {"type": "string", "minLength": 1},
+                "credential_id": {"type": ["integer", "null"]},
+                "principal": {"type": "string"},
+                "kind": {"type": "string"},
+                "minted_identity": {"type": ["string", "null"]},
+                "session_minted": {"type": "boolean"},
+            },
+            "description": "Credential-store record and optional replay identity created from a discovered secret.",
+        },
+    },
+    "blue/v1": {
+        "timeline": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Ordered incident timeline entries, each a UTC ISO-8601 event citing its `source_file` and `command_run_id` per agent/rules/ir-evidence.md. Appended across investigation rungs, never replaced.",
+        },
+        "iocs": {
+            "type": "array",
+            "items": {"type": ["string", "object"]},
+            "description": "Indicators of compromise observed for this finding (IP, domain, email, file hash, OAuth client_id, URL). Each one gets an `intel_*` row via `vigil assess intel record`.",
+        },
+    },
+}
+
+
+def _detail_properties() -> dict[str, dict[str, Any]]:
+    properties = dict(FINDING_DETAIL_CORE_PROPERTIES)
+    for extension, extension_properties in FINDING_DETAIL_EXTENSION_PROPERTIES.items():
+        duplicate = properties.keys() & extension_properties.keys()
+        if duplicate:
+            rendered = ", ".join(sorted(duplicate))
+            raise RuntimeError(
+                f"finding detail keys registered more than once: {rendered}"
+            )
+        properties.update(
+            {
+                key: {**schema, "x-vigil-extension": extension}
+                for key, schema in extension_properties.items()
+            }
+        )
+    return properties
+
+
+FINDING_DETAIL_PROPERTIES = _detail_properties()
+
+
 def _type_matches(value: Any, declared: str) -> bool:
     if declared == "string":
         return isinstance(value, str)
@@ -433,6 +523,74 @@ def _type_matches(value: Any, declared: str) -> bool:
         return value is None
     # An unrecognised JSON-Schema type is not a reason to refuse a write.
     return True
+
+
+def _declared_types(schema: dict[str, Any]) -> list[str]:
+    declared = schema.get("type")
+    return [declared] if isinstance(declared, str) else list(declared or [])
+
+
+def _invalid(path: str, message: str) -> None:
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=f"{path} {message}",
+    )
+
+
+def _validate_schema_value(value: Any, schema: dict[str, Any], *, path: str) -> None:
+    """Validate the JSON-Schema subset used by finding-detail contracts."""
+
+    declared_types = _declared_types(schema)
+    if declared_types and not any(_type_matches(value, one) for one in declared_types):
+        _invalid(
+            path,
+            f"must be of type {' or '.join(declared_types)}, got {value!r}",
+        )
+
+    allowed = schema.get("enum")
+    if allowed is not None and value not in allowed:
+        rendered = ", ".join(repr(item) for item in allowed)
+        _invalid(path, f"must be one of: {rendered}")
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        minimum = schema.get("minimum")
+        if minimum is not None and value < minimum:
+            _invalid(path, f"must be >= {minimum}")
+        maximum = schema.get("maximum")
+        if maximum is not None and value > maximum:
+            _invalid(path, f"must be <= {maximum}")
+
+    if isinstance(value, str):
+        minimum_length = schema.get("minLength")
+        if minimum_length is not None and len(value) < minimum_length:
+            _invalid(path, f"must contain at least {minimum_length} characters")
+        maximum_length = schema.get("maxLength")
+        if maximum_length is not None and len(value) > maximum_length:
+            _invalid(path, f"must contain at most {maximum_length} characters")
+
+    if isinstance(value, list) and isinstance(schema.get("items"), dict):
+        item_schema = schema["items"]
+        for index, item in enumerate(value):
+            _validate_schema_value(item, item_schema, path=f"{path}[{index}]")
+
+    if not isinstance(value, dict):
+        return
+    properties = schema.get("properties", {})
+    if not isinstance(properties, dict):
+        return
+    additional = schema.get("additionalProperties", True)
+    for key, item in value.items():
+        item_path = f"{path}.{key}"
+        item_schema = properties.get(key)
+        if item_schema is not None:
+            _validate_schema_value(item, item_schema, path=item_path)
+        elif additional is False:
+            _invalid(item_path, "is not an allowed field")
+        elif isinstance(additional, dict):
+            _validate_schema_value(item, additional, path=item_path)
+    for key in schema.get("required", []):
+        if key not in value:
+            _invalid(f"{path}.{key}", "is required")
 
 
 def validate_finding_details(
@@ -470,33 +628,4 @@ def validate_finding_details(
             )
         if value is None:
             continue
-        declared = schema.get("type")
-        declared_types = [declared] if isinstance(declared, str) else list(declared or [])
-        if declared_types and not any(_type_matches(value, one) for one in declared_types):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"details.{key} must be of type "
-                    f"{' or '.join(declared_types)}, got {value!r}"
-                ),
-            )
-        allowed = schema.get("enum")
-        if allowed is not None and value not in allowed:
-            rendered = ", ".join(repr(item) for item in allowed)
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"details.{key} must be one of: {rendered}",
-            )
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            minimum = schema.get("minimum")
-            if minimum is not None and value < minimum:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"details.{key} must be >= {minimum}",
-                )
-            maximum = schema.get("maximum")
-            if maximum is not None and value > maximum:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"details.{key} must be <= {maximum}",
-                )
+        _validate_schema_value(value, schema, path=f"details.{key}")

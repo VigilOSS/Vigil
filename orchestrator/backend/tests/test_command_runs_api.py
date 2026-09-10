@@ -253,10 +253,35 @@ def test_list_command_runs_filters_by_phase_agent_tool_and_success(
     assert len(fetch("limit=1")) == 1
 
 
+def test_list_command_runs_filters_by_exact_auth_context(client, isolate_settings):
+    _write_engagement(isolate_settings["engagements_dir"])
+    # Insert the requested identity first so a backend that silently ignores
+    # ``auth_context`` returns the newer cap-alpha row under ``limit=1``.
+    for identity in ("cap-beta", "cap-alpha"):
+        response = _post(
+            client,
+            _base_payload(
+                command=f"curl https://example.com/whoami as {identity}",
+                tool_name="curl",
+                technique="AUTH",
+                auth_context=identity,
+            ),
+        )
+        assert response.status_code == 201, response.text
+
+    response = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs",
+        params={"technique": "AUTH", "auth_context": "cap-beta", "limit": 1},
+    )
+
+    assert response.status_code == 200, response.text
+    assert [row["auth_context"] for row in response.json()] == ["cap-beta"]
+
+
 def test_list_command_runs_filters_output_needing_attention(client, isolate_settings):
     _write_engagement(isolate_settings["engagements_dir"])
     row_ids = []
-    for index in range(3):
+    for index in range(7):
         response = _post(
             client,
             _base_payload(command=f"output-attention-{index}"),
@@ -273,13 +298,29 @@ def test_list_command_runs_filters_output_needing_attention(client, isolate_sett
             "UPDATE assessment_command_runs SET output_cleanup_status = 'warning' WHERE id = ?",
             (row_ids[1],),
         )
+        connection.execute(
+            "UPDATE assessment_command_runs SET output_retention_status = 'preview_only' WHERE id = ?",
+            (row_ids[2],),
+        )
+        connection.execute(
+            "UPDATE assessment_command_runs SET output_retention_status = 'unmeasured' WHERE id = ?",
+            (row_ids[3],),
+        )
+        connection.execute(
+            "UPDATE assessment_command_runs SET output_retention_status = 'partially_measured' WHERE id = ?",
+            (row_ids[4],),
+        )
+        connection.execute(
+            "UPDATE assessment_command_runs SET output_retention_status = 'measurement_conflict' WHERE id = ?",
+            (row_ids[5],),
+        )
 
     response = client.get(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs?output_attention=true"
     )
 
     assert response.status_code == 200, response.text
-    assert {row["id"] for row in response.json()} == set(row_ids[:2])
+    assert {row["id"] for row in response.json()} == set(row_ids[:6])
 
 
 def test_list_command_runs_fts_search_finds_keyword(client, isolate_settings):
@@ -4535,10 +4576,10 @@ def test_kali_route_finalize_records_the_wrapper_measured_output_truth(
     assert updated["output_retention_status"] == "retained"
 
 
-def test_kali_route_finalize_without_byte_truth_leaves_the_columns_alone(
+def test_kali_route_finalize_with_preview_but_no_byte_truth_marks_preview_only(
     client, isolate_settings
 ):
-    """A wrapper that reports no byte truth must not have one invented for it."""
+    """A preview is evidence of output, but not evidence of its total byte size."""
     _write_engagement(isolate_settings["engagements_dir"])
     created = _post(
         client,
@@ -4559,7 +4600,37 @@ def test_kali_route_finalize_without_byte_truth_leaves_the_columns_alone(
     assert response.status_code == 200, response.text
     updated = response.json()
     assert updated["stdout_bytes"] == 0
-    assert updated["output_retention_status"] == "empty"
+    assert updated["stdout_preview"] == "22/tcp open ssh"
+    assert updated["output_retention_status"] == "preview_only"
+
+
+def test_kali_route_finalize_without_preview_or_byte_truth_marks_unmeasured(
+    client, isolate_settings
+):
+    """Missing measurements must remain distinguishable from measured zero."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    created = _post(
+        client,
+        _base_payload(
+            status="running", route="vigil assess kali/nmap_scan", stdout="", stderr=""
+        ),
+    ).json()
+    response = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
+        json={
+            "status": "completed",
+            "return_code": 0,
+            "ended_at": "2026-04-17T12:00:05Z",
+            "duration_ms": 5000,
+        },
+    )
+    assert response.status_code == 200, response.text
+    updated = response.json()
+    assert updated["stdout_bytes"] == 0
+    assert updated["stderr_bytes"] == 0
+    assert updated["stdout_preview"] == ""
+    assert updated["stderr_preview"] == ""
+    assert updated["output_retention_status"] == "unmeasured"
 
 
 def test_kali_route_finalize_with_no_output_records_empty_retention(
@@ -4591,3 +4662,97 @@ def test_kali_route_finalize_with_no_output_records_empty_retention(
     assert updated["stdout_bytes"] == 0
     assert updated["stdout_sha256"] == ""
     assert updated["output_retention_status"] == "empty"
+
+
+def test_kali_route_finalize_rejects_false_empty_measurement_claim(
+    client, isolate_settings
+):
+    """A non-empty preview contradicts reported zero-byte output."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    created = _post(
+        client,
+        _base_payload(
+            status="running", route="vigil assess kali/nmap_scan", stdout="", stderr=""
+        ),
+    ).json()
+    response = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
+        json={
+            "status": "completed",
+            "return_code": 0,
+            "ended_at": "2026-04-17T12:00:05Z",
+            "stdout_preview": "observed output",
+            "stdout_bytes": 0,
+            "stderr_bytes": 0,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    updated = response.json()
+    assert updated["stdout_preview"] == "observed output"
+    assert updated["output_retention_status"] == "measurement_conflict"
+
+
+def test_kali_route_finalize_marks_partial_stream_measurement(
+    client, isolate_settings
+):
+    """One stream total cannot establish the combined output byte truth."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    created = _post(
+        client,
+        _base_payload(
+            status="running", route="vigil assess kali/nmap_scan", stdout="", stderr=""
+        ),
+    ).json()
+    response = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
+        json={
+            "status": "completed",
+            "return_code": 0,
+            "ended_at": "2026-04-17T12:00:05Z",
+            "stdout_bytes": 17,
+            "stdout_sha256": "a" * 64,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    updated = response.json()
+    assert updated["stdout_bytes"] == 17
+    assert updated["stderr_bytes"] == 0
+    assert updated["output_retention_status"] == "partially_measured"
+
+
+def test_kali_route_omitted_output_fields_preserve_existing_measured_truth(
+    client, isolate_settings
+):
+    """Final status-only PATCHes must not downgrade output already measured."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    created = _post(
+        client,
+        _base_payload(
+            status="running",
+            route="vigil assess kali/nmap_scan",
+            stdout="already measured",
+            stderr="",
+        ),
+    ).json()
+    assert created["stdout_bytes"] == len("already measured")
+    assert created["output_retention_status"] == "retained"
+
+    response = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
+        json={
+            "status": "completed",
+            "return_code": 0,
+            "ended_at": "2026-04-17T12:00:05Z",
+            "stdout_preview": "",
+            "stderr_preview": "",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    updated = response.json()
+    assert updated["stdout_bytes"] == created["stdout_bytes"]
+    assert updated["stdout_sha256"] == created["stdout_sha256"]
+    assert updated["stdout_preview"] == created["stdout_preview"]
+    assert updated["output_retention_status"] == "retained"

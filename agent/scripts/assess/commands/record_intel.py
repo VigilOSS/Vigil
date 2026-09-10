@@ -26,6 +26,25 @@ from assess.lib.intel_types import INTEL_TYPES
 from assess.lib.schema_validation import collect_validation_errors, load_schema
 
 
+_NATURAL_IDENTITY_FIELDS: dict[str, tuple[tuple[str, object], ...]] = {
+    "tech-component": (("component", ""), ("version", "")),
+    "person": (("name", ""),),
+    "email": (("address", ""),),
+    "domain": (("identity", ""), ("kind", "subdomain")),
+    "cve": (("cve_id", ""), ("affected_component", "")),
+    "dns-record": (("record_type", ""), ("name", ""), ("value", "")),
+    "social-profile": (
+        ("subject_kind", ""),
+        ("subject_ref", ""),
+        ("platform", ""),
+        ("handle", ""),
+    ),
+    "breach-record": (("subject", ""), ("breach_name", "")),
+    "org-fact": (("fact_key", ""),),
+    "note": (("title", ""),),
+}
+
+
 def register(subparsers) -> None:
     types_list = ", ".join(sorted(INTEL_TYPES.keys()))
     p = subparsers.add_parser(
@@ -109,15 +128,35 @@ def run(args) -> None:
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         response = client.post_engagement(endpoint, payload)
 
+    # An object alone is not this endpoint's success contract. The write may
+    # already be durable, so an absent canonical id is an uncertain outcome:
+    # stop before emitting the success event and tell the caller to inspect the
+    # exact typed list rather than blindly replaying the write.
+    record_id = response.get("id")
+    if (
+        not isinstance(record_id, int)
+        or isinstance(record_id, bool)
+        or record_id < 1
+        or any(
+            field not in response or response[field] != payload.get(field, default)
+            for field, default in _NATURAL_IDENTITY_FIELDS[intel_type]
+        )
+    ):
+        print(
+            f"record-intel: backend did not return a canonical {intel_type} record "
+            "with a positive id; the write may have committed, so inspect "
+            f"`vigil assess intel list {intel_type}` and do not retry automatically",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     # Emit event — fire-and-forget, outside the main call.
-    record_id = response.get("id") if isinstance(response, dict) else None
     summary_title = ""
-    if isinstance(response, dict):
-        for key in ("component", "name", "address", "identity", "cve_id", "handle", "fact_key", "title"):
-            value = response.get(key)
-            if value:
-                summary_title = str(value)
-                break
+    for key in ("component", "name", "address", "identity", "cve_id", "handle", "fact_key", "title"):
+        value = response.get(key)
+        if value:
+            summary_title = str(value)
+            break
 
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as event_client:
         event_client.post_event(
@@ -132,10 +171,4 @@ def run(args) -> None:
             }
         )
 
-    # Print a concise success marker.
-    if record_id is not None:
-        print(f"Recorded intel {intel_type} id={record_id}")
-    else:
-        # Response was not a canonical record (backend may still return
-        # envelope). Print the raw body so the caller can inspect.
-        print(json.dumps(response, indent=2, ensure_ascii=False))
+    print(f"Recorded intel {intel_type} id={record_id}")

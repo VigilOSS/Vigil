@@ -1,6 +1,7 @@
 """Immutable, content-addressed source snapshots for code assessment."""
 from __future__ import annotations
 
+import codecs
 import errno
 import hashlib
 import json
@@ -118,7 +119,12 @@ def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
 
 
 def _header_from_bytes(data: bytes, *, max_lines: int = 50, max_chars: int = 8192) -> str:
-    decoded = data.decode("utf-8", errors="replace")
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        if len(data) % 2:
+            data = data[:-1]
+        decoded = data.decode("utf-16", errors="replace")
+    else:
+        decoded = data.decode("utf-8", errors="replace")
     parts: list[str] = []
     count = 0
     for line_no, line in enumerate(decoded.splitlines(keepends=True)):
@@ -128,6 +134,69 @@ def _header_from_bytes(data: bytes, *, max_lines: int = 50, max_chars: int = 819
         parts.append(line[:remaining])
         count += min(len(line), remaining)
     return "".join(parts)
+
+
+class _StreamingLineCounter:
+    """Count logical source lines without materializing or misreading UTF-16."""
+
+    def __init__(self) -> None:
+        self._probe = bytearray()
+        self._mode: str | None = None
+        self._decoder = None
+        self._line_breaks = 0
+        self._previous_ended_cr = False
+        self._last_was_break = False
+
+    def feed(self, chunk: bytes) -> None:
+        if self._mode is None:
+            self._probe.extend(chunk)
+            if len(self._probe) < 2:
+                return
+            initial = bytes(self._probe)
+            self._probe.clear()
+            if initial.startswith((b"\xff\xfe", b"\xfe\xff")):
+                self._mode = "utf-16"
+                self._decoder = codecs.getincrementaldecoder("utf-16")(
+                    errors="replace"
+                )
+                self._feed_text(self._decoder.decode(initial, final=False))
+            else:
+                self._mode = "bytes"
+                self._feed_bytes(initial)
+            return
+        if self._mode == "utf-16":
+            assert self._decoder is not None
+            self._feed_text(self._decoder.decode(chunk, final=False))
+        else:
+            self._feed_bytes(chunk)
+
+    def finish(self) -> tuple[int, bool]:
+        if self._mode is None:
+            self._feed_bytes(bytes(self._probe))
+        elif self._mode == "utf-16":
+            assert self._decoder is not None
+            self._feed_text(self._decoder.decode(b"", final=True))
+        return self._line_breaks, self._last_was_break
+
+    def _feed_bytes(self, chunk: bytes) -> None:
+        if not chunk:
+            return
+        self._line_breaks += chunk.count(b"\n") + chunk.count(b"\r")
+        self._line_breaks -= chunk.count(b"\r\n")
+        if self._previous_ended_cr and chunk.startswith(b"\n"):
+            self._line_breaks -= 1
+        self._previous_ended_cr = chunk.endswith(b"\r")
+        self._last_was_break = chunk.endswith((b"\r", b"\n"))
+
+    def _feed_text(self, text: str) -> None:
+        if not text:
+            return
+        self._line_breaks += text.count("\n") + text.count("\r")
+        self._line_breaks -= text.count("\r\n")
+        if self._previous_ended_cr and text.startswith("\n"):
+            self._line_breaks -= 1
+        self._previous_ended_cr = text.endswith("\r")
+        self._last_was_break = text.endswith(("\r", "\n"))
 
 
 def _capture_open_file(
@@ -152,9 +221,7 @@ def _capture_open_file(
     materialized = bytearray() if materialize_limit is not None else None
     header_prefix = bytearray()
     size = 0
-    line_breaks = 0
-    previous_ended_cr = False
-    last_was_break = False
+    line_counter = _StreamingLineCounter()
     try:
         while True:
             chunk = os.read(fd, _READ_CHUNK_SIZE)
@@ -175,12 +242,7 @@ def _capture_open_file(
                 remaining = _HEADER_PREFIX_BYTES - len(header_prefix)
                 header_prefix.extend(chunk[:remaining])
 
-            line_breaks += chunk.count(b"\n") + chunk.count(b"\r")
-            line_breaks -= chunk.count(b"\r\n")
-            if previous_ended_cr and chunk.startswith(b"\n"):
-                line_breaks -= 1
-            previous_ended_cr = chunk.endswith(b"\r")
-            last_was_break = chunk.endswith((b"\r", b"\n"))
+            line_counter.feed(chunk)
         if spool is not None:
             spool.flush()
             spool.seek(0)
@@ -204,6 +266,7 @@ def _capture_open_file(
             spool.close()
         raise SourceSnapshotRaceError(f"{display_path} changed while being sealed")
 
+    line_breaks, last_was_break = line_counter.finish()
     return CapturedSourceFile(
         sha256=digest.hexdigest(),
         size=size,

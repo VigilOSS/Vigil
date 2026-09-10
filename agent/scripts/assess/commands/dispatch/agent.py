@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sys
+import uuid
 from typing import Any
 
 from assess.lib.client import AssessmentClient, AssessError
@@ -57,6 +58,9 @@ _HANDOFF_PATCHABLE_FIELDS = frozenset(
         "extras",
     }
 )
+_OVERLAP_PAGE_SIZE = 1000
+_OVERLAP_MAX_PAGES = 1000
+_OVERLAP_DISPLAY_LIMIT = 5
 
 
 def _client_for(args) -> tuple[AssessmentClient, Any]:
@@ -66,12 +70,14 @@ def _client_for(args) -> tuple[AssessmentClient, Any]:
 
 def _build_register_payload(args) -> dict:
     payload: dict[str, Any] = {}
+    json_has_budget = False
     if getattr(args, "from_json", None):
         loaded = _load_json_arg(args.from_json)
         if not isinstance(loaded, dict):
             print("agent start --from-json: file must contain a JSON object", file=sys.stderr)
             sys.exit(1)
         payload.update(loaded)
+        json_has_budget = "rate_budget" in payload or "no_target_traffic" in payload
     # CLI flags override / supplement the JSON payload.
     cli_fields = {
         "agent_id": getattr(args, "agent_id", None),
@@ -96,12 +102,77 @@ def _build_register_payload(args) -> dict:
         payload["agent_role"] = payload.pop("role")
     elif "role" in payload and "agent_role" in payload:
         payload.pop("role", None)
-    if not payload.get("agent_id"):
-        print("agent start: --agent-id is required (or include 'agent_id' in --from-json)", file=sys.stderr)
-        sys.exit(1)
+    json_rate_budget = payload.pop("rate_budget", None)
+    json_no_target_traffic = payload.pop("no_target_traffic", None)
+    json_prompt_context = payload.pop("prompt_context", None)
+    if json_prompt_context is not None:
+        if getattr(args, "prompt_context_json", None):
+            print(
+                "agent start: prompt context must come from either --from-json or "
+                "--prompt-context-json, not both",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        args.prompt_context = json_prompt_context
     if not payload.get("agent_role"):
         print("agent start: --agent-role is required (or include 'agent_role' in --from-json)", file=sys.stderr)
         sys.exit(1)
+    if not payload.get("agent_id"):
+        if getattr(args, "action", None) == "start":
+            role_slug = (
+                str(payload["agent_role"])
+                .replace("_", "-")
+                .replace(" ", "-")
+            )
+            payload["agent_id"] = f"{role_slug}-{uuid.uuid4().hex[:8]}"
+            args.agent_id = payload["agent_id"]
+        else:
+            print(
+                "agent start: --agent-id is required (or include 'agent_id' in --from-json)",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    has_traffic_contract = (
+        hasattr(args, "rate_budget")
+        or hasattr(args, "no_target_traffic")
+        or json_has_budget
+    )
+    if has_traffic_contract:
+        cli_rate_budget = str(getattr(args, "rate_budget", None) or "").strip()
+        cli_no_target_traffic = bool(getattr(args, "no_target_traffic", False))
+        if json_has_budget and (cli_rate_budget or cli_no_target_traffic):
+            print(
+                "agent start: traffic budget must come from either --from-json or "
+                "CLI flags, not both",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if json_has_budget:
+            if json_rate_budget is not None and not isinstance(json_rate_budget, str):
+                print("agent start --from-json: rate_budget must be a string", file=sys.stderr)
+                sys.exit(1)
+            if json_no_target_traffic is not None and not isinstance(
+                json_no_target_traffic, bool
+            ):
+                print(
+                    "agent start --from-json: no_target_traffic must be true or false",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            rate_budget = str(json_rate_budget or "").strip()
+            no_target_traffic = json_no_target_traffic is True
+        else:
+            rate_budget = cli_rate_budget
+            no_target_traffic = cli_no_target_traffic
+        if bool(rate_budget) == no_target_traffic:
+            print(
+                "agent start: pass exactly one of --rate-budget or "
+                "--no-target-traffic; Vigil does not infer a traffic budget",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        args.rate_budget = rate_budget or None
+        args.no_target_traffic = no_target_traffic
     if not payload.get("dispatch_mode"):
         _defaulted_mode = default_dispatch_mode_for_role(payload.get("agent_role"))
         payload["dispatch_mode"] = _defaulted_mode
@@ -128,7 +199,7 @@ def _register_dispatch(args) -> None:
     payload = _build_register_payload(args)
     client, _ = _client_for(args)
     try:
-        if getattr(args, "check_overlap", False) and not getattr(args, "allow_duplicate", False):
+        if not getattr(args, "allow_duplicate", False):
             _warn_on_overlapping_dispatch(client, payload)
         row = client.record_dispatch(payload)
     finally:
@@ -154,32 +225,111 @@ def _warn_on_overlapping_dispatch(client: AssessmentClient, payload: dict[str, A
     role = str(payload.get("agent_role") or "")
     if not role:
         return
+    overlap_count = 0
+    scanned_count = 0
+    ranked_overlaps: list[tuple[dict[str, Any], str]] = []
+    complete = True
     try:
-        rows = client.list_dispatches(role=role, status="in-progress", limit=1000)
+        for status in ("in-progress", "completed"):
+            offset = 0
+            prior_page_signature: tuple[tuple[Any, Any, Any], ...] | None = None
+            for _page_number in range(_OVERLAP_MAX_PAGES):
+                page = client.list_dispatches(
+                    role=role,
+                    status=status,
+                    limit=_OVERLAP_PAGE_SIZE,
+                    offset=offset,
+                )
+                page_signature = tuple(
+                    (
+                        row.get("id"),
+                        row.get("agent_id"),
+                        row.get("completed_at") or row.get("dispatched_at"),
+                    )
+                    for row in page
+                    if isinstance(row, dict)
+                )
+                if page_signature and page_signature == prior_page_signature:
+                    complete = False
+                    break
+                prior_page_signature = page_signature
+                for row in page:
+                    if not isinstance(row, dict):
+                        continue
+                    scanned_count += 1
+                    if str(row.get("agent_id") or "") == str(
+                        payload.get("agent_id") or ""
+                    ):
+                        continue
+                    reason = _dispatch_overlap_reason(payload, row)
+                    if not reason:
+                        continue
+                    overlap_count += 1
+                    ranked_overlaps.append((row, reason))
+                    _rank_overlaps(ranked_overlaps, payload)
+                    del ranked_overlaps[_OVERLAP_DISPLAY_LIMIT:]
+                if len(page) < _OVERLAP_PAGE_SIZE:
+                    break
+                offset += len(page)
+            else:
+                complete = False
     except AssessError as exc:
         print(f"WARN agent start: duplicate-overlap check skipped: {exc}", file=sys.stderr)
         return
-    current_agent_id = str(payload.get("agent_id") or "")
-    overlaps: list[tuple[dict[str, Any], str]] = []
-    for row in rows:
-        if str(row.get("agent_id") or "") == current_agent_id:
-            continue
-        reason = _dispatch_overlap_reason(payload, row)
-        if reason:
-            overlaps.append((row, reason))
-    if not overlaps:
+    if not overlap_count:
+        if not complete:
+            print(
+                "WARN agent start: duplicate-overlap history scan incomplete: "
+                f"{scanned_count} dispatch rows inspected and no overlap found in "
+                "the inspected rows, but backend history was not exhausted.",
+                file=sys.stderr,
+            )
         return
+
     print(
-        "WARN agent start: active dispatch rows appear to overlap this dispatch. "
+        "WARN agent start: dispatch rows appear to overlap this dispatch. "
         "Registration will continue; use --allow-duplicate to suppress this advisory "
         "when the overlap is intentional.",
         file=sys.stderr,
     )
-    for row, reason in overlaps[:5]:
+    for row, reason in ranked_overlaps:
         print(
-            f"  - {row.get('agent_id', '?')} ({row.get('agent_role', '?')}): {reason}",
+            f"  - {row.get('agent_id', '?')} ({row.get('agent_role', '?')}, "
+            f"{row.get('status', '?')}): {reason}",
             file=sys.stderr,
         )
+    shown = len(ranked_overlaps)
+    if complete:
+        count_text = f"{shown} of {overlap_count} overlapping dispatches shown"
+    else:
+        count_text = (
+            f"{shown} of at least {overlap_count} overlapping dispatches shown "
+            "(history scan bounded before the backend exhausted)"
+        )
+    print(f"  {count_text}", file=sys.stderr)
+
+
+def _rank_overlaps(
+    overlaps: list[tuple[dict[str, Any], str]], payload: dict[str, Any]
+) -> None:
+    """Rank in-place while retaining deterministic tie-breaks."""
+    overlaps.sort(key=lambda item: str(item[0].get("agent_id") or ""))
+    overlaps.sort(
+        key=lambda item: str(
+            item[0].get("completed_at")
+            or item[0].get("dispatched_at")
+            or ""
+        ),
+        reverse=True,
+    )
+    overlaps.sort(
+        key=lambda item: (
+            len(_set_overlap(payload.get("finding_slugs"), item[0].get("finding_slugs"))),
+            len(_string_set(item[0].get("finding_slugs"))),
+            _norm_text(payload.get("task")) == _norm_text(item[0].get("task")),
+        ),
+        reverse=True,
+    )
 
 
 def _dispatch_overlap_reason(payload: dict[str, Any], row: dict[str, Any]) -> str:
@@ -416,123 +566,21 @@ def _record_decision(args) -> None:
 
 
 def _build_handoff_payload(args) -> dict:
-    if getattr(args, "from_json", None):
-        loaded = _load_json_arg(args.from_json)
-        if not isinstance(loaded, dict):
-            print("agent handoff --from-json: file must contain a JSON object", file=sys.stderr)
-            sys.exit(1)
-        # When --from-json is given we honour it as the authoritative shape,
-        # but explicit identity flags are integrity checks. A mismatch usually
-        # means the handoff is about to be written under a label that the
-        # operator cannot retrieve by the actual spawned agent id.
-        for key, val in (
-            ("agent_id", getattr(args, "agent_id", None)),
-            ("agent_role", getattr(args, "agent_role", None)),
-            ("summary", getattr(args, "hf_summary", None)),
-        ):
-            if not val:
-                continue
-            existing = loaded.get(key)
-            if existing and str(existing) != str(val):
-                print(
-                    f"agent handoff: --from-json {key}={existing!r} does not match "
-                    f"explicit --{key.replace('_', '-')} {val!r}",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            loaded[key] = val
-        return loaded
-
-    payload: dict[str, Any] = {}
-    agent_id = getattr(args, "agent_id", None)
-    agent_role = getattr(args, "agent_role", None)
-    summary = getattr(args, "hf_summary", None)
-    if not agent_id:
-        print(
-            "agent handoff: --agent-id is required "
-            "(or pass --from-json with an agent_id)",
-            file=sys.stderr,
-        )
+    source = getattr(args, "from_json", None)
+    if not source:
+        print("agent handoff: --from-json is required", file=sys.stderr)
         sys.exit(1)
-    payload["agent_id"] = agent_id
-    if agent_role:
-        payload["agent_role"] = agent_role
-    if summary:
-        payload["summary"] = summary
-    if getattr(args, "hf_confidence", None):
-        payload["confidence"] = args.hf_confidence
-    finding_slugs = _split_csv(getattr(args, "finding_slugs", None))
-    if finding_slugs:
-        payload["finding_slugs"] = finding_slugs
-    next_steps_raw = getattr(args, "hf_next_steps", None) or []
-    if next_steps_raw:
-        payload["next_steps"] = [{"action": item} for item in next_steps_raw]
-    coverage_raw = getattr(args, "hf_coverage_gaps", None) or []
-    if coverage_raw:
-        coverage_rows = []
-        for item in coverage_raw:
-            area, _, reason = item.partition(":")
-            coverage_rows.append({"area": area.strip(), "reason": reason.strip()})
-        payload["coverage_gaps"] = coverage_rows
-    runtime_raw = getattr(args, "hf_runtime_issues", None) or []
-    if runtime_raw:
-        runtime_rows = []
-        for item in runtime_raw:
-            kind_part, _, detail = item.partition(":")
-            runtime_rows.append({
-                "kind": kind_part.strip(),
-                "detail": detail.strip(),
-                "severity": "info",
-            })
-        payload["runtime_issues"] = runtime_rows
-    artifacts_raw = getattr(args, "hf_working_artifacts", None) or []
-    if artifacts_raw:
-        payload["working_artifacts"] = [{"path": p} for p in artifacts_raw]
-    open_qs = getattr(args, "hf_open_questions", None) or []
-    if open_qs:
-        payload["open_questions"] = list(open_qs)
-    if getattr(args, "hf_recommended_next_agent", None):
-        payload["recommended_next_agent"] = args.hf_recommended_next_agent
-    if getattr(args, "hf_handoff_status", None):
-        payload["handoff_status"] = args.hf_handoff_status
-    if getattr(args, "hf_closed_dispatch_status", None):
-        payload["closed_dispatch_status"] = args.hf_closed_dispatch_status
-    extras_json = getattr(args, "hf_extras_json", None)
-    if extras_json:
-        loaded = _load_json_arg(extras_json)
-        if not isinstance(loaded, dict):
-            print("agent handoff --extras-json: must produce a JSON object", file=sys.stderr)
-            sys.exit(1)
-        payload["extras"] = loaded
-    return payload
+    loaded = _load_json_arg(source)
+    if not isinstance(loaded, dict):
+        print("agent handoff --from-json: file must contain a JSON object", file=sys.stderr)
+        sys.exit(1)
+    if not str(loaded.get("agent_id") or "").strip():
+        print("agent handoff --from-json: agent_id is required", file=sys.stderr)
+        sys.exit(1)
+    return loaded
 
 
 def _record_handoff(args) -> None:
-    # If both --from-json and flag-based content are given, honour --from-json
-    # but warn so the operator notices they're mixing modes (the JSON wins).
-    has_flag_based = any(
-        getattr(args, name, None)
-        for name in (
-            "hf_summary",
-            "hf_confidence",
-            "hf_next_steps",
-            "hf_coverage_gaps",
-            "hf_runtime_issues",
-            "hf_working_artifacts",
-            "hf_open_questions",
-            "hf_recommended_next_agent",
-            "hf_handoff_status",
-            "hf_closed_dispatch_status",
-            "hf_extras_json",
-        )
-    )
-    if getattr(args, "from_json", None) and has_flag_based:
-        print(
-            "agent handoff: --from-json is set and flag-based content was also "
-            "supplied; flag-based fields are ignored except as fallback for "
-            "agent_id / agent_role / summary.",
-            file=sys.stderr,
-        )
     payload = _build_handoff_payload(args)
     client, _ = _client_for(args)
     try:

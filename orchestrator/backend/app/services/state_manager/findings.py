@@ -12,18 +12,15 @@ from ..search import (
     canonical_finding_alias,
     is_canonical_finding_slug,
 )
-from . import _common
+from . import _common, run_accounting
 from ._common import (
     DUPLICATE_LINK_KIND,
     FINDING_NOTES_MAX_LENGTH,
     ROOT_CAUSE_LINK_KIND,
     SEVERITY_RANK,
-    VERIFICATION_DISPOSITION_RANK,
-    VERIFICATION_STATE_RANK,
     WORKFLOW_STATUS_RANK,
     SubmissionStatus,
-    VerificationDisposition,
-    VerificationState,
+    VerificationStatus,
     WorkflowStatus,
     _finding_confidence_tuple,
     _finding_not_found,
@@ -32,13 +29,11 @@ from ._common import (
     _merge_object_text,
     _normalize_severity,
     _normalize_submission_status,
-    _normalize_verification_disposition,
-    _normalize_verification_state,
+    _normalize_verification_status,
     _normalize_workflow_status,
     _require_canonical_finding_slug,
     _resolve_existing_finding_slug,
-    _row_verification_disposition,
-    _row_verification_state,
+    _row_verification_status,
     _row_workflow_status,
     _serialize_finding_record,
     _slugify,
@@ -46,7 +41,20 @@ from ._common import (
 )
 from .cvss import CvssVectorError, base_score
 from .finding_details import validate_finding_details
-from .links import _is_root_cause_link, _upsert_finding_link
+from .links import (
+    _active_finding_link,
+    _invalidate_relationship_verification,
+    _is_root_cause_link,
+    _relationship_change,
+    _upsert_finding_link,
+)
+from .proofs import (
+    TERMINAL_VERIFICATION_STATUSES,
+    proof_receipts_for_finding,
+    record_finding_verification_evidence,
+    verification_audit_by_transition,
+    verification_audit_for_finding,
+)
 
 CODE_SNAPSHOT_PROVENANCE_KEY = "code_snapshot"
 # Names the binding an audited relocation out of ``file:`` reserved rather than
@@ -230,6 +238,28 @@ def _finding_provenance(record: dict[str, Any]) -> dict[str, Any]:
     return _json_object(record.get("provenance_json", "{}"))
 
 
+def _provenance_update_preserving_author(
+    existing_provenance_json: Any,
+    incoming: dict[str, Any] | None,
+    *,
+    reject_rebind: bool,
+) -> dict[str, Any]:
+    """Return mutable provenance without rebinding the finding's author."""
+
+    payload = dict(incoming or {})
+    incoming_author = str(payload.get("agent_id") or "").strip()
+    stored_author = str(
+        _json_object(existing_provenance_json).get("agent_id") or ""
+    ).strip()
+    if reject_rebind and incoming_author and incoming_author != stored_author:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="finding provenance.agent_id is immutable after creation",
+        )
+    payload.pop("agent_id", None)
+    return payload
+
+
 def load_code_repo_snapshot_states(
     connection: sqlite3.Connection,
     engagement_id: int,
@@ -318,6 +348,9 @@ def _serialize_finding_with_code_snapshot_status(
     record["code_snapshot_attestation_status"] = code_snapshot_attestation_status(
         record
     )
+    record["proof_receipts"] = proof_receipts_for_finding(
+        connection, engagement_id, int(record["id"])
+    )
     return record
 
 
@@ -405,31 +438,17 @@ def _coalesce_workflow_status(existing: str, incoming: str, *, explicit_workflow
         else existing_normalized
     )
 
-def _coalesce_verification_state(existing: str, incoming: str, *, explicit_override: bool = False) -> VerificationState:
-    existing_normalized = _normalize_verification_state(existing)
-    incoming_normalized = _normalize_verification_state(incoming)
+def _coalesce_verification_status(
+    existing: str,
+    incoming: str,
+    *,
+    explicit_override: bool = False,
+) -> VerificationStatus:
+    existing_normalized = _normalize_verification_status(existing)
+    incoming_normalized = _normalize_verification_status(incoming)
     if explicit_override:
         return incoming_normalized
-    return (
-        incoming_normalized
-        if VERIFICATION_STATE_RANK[incoming_normalized] >= VERIFICATION_STATE_RANK[existing_normalized]
-        else existing_normalized
-    )
-
-def _coalesce_verification_disposition(existing: str, incoming: str, *, explicit_override: bool = False) -> VerificationDisposition:
-    existing_normalized = _normalize_verification_disposition(existing)
-    incoming_normalized = _normalize_verification_disposition(incoming)
-    if incoming_normalized == "false_positive":
-        return incoming_normalized
-    if existing_normalized == "false_positive" and not explicit_override:
-        return existing_normalized
-    if explicit_override:
-        return incoming_normalized
-    return (
-        incoming_normalized
-        if VERIFICATION_DISPOSITION_RANK[incoming_normalized] >= VERIFICATION_DISPOSITION_RANK[existing_normalized]
-        else existing_normalized
-    )
+    return existing_normalized
 
 def _raise_stale_finding_conflict() -> None:
     raise HTTPException(
@@ -798,8 +817,7 @@ def _finding_state_snapshot(row: dict[str, Any] | Any) -> dict[str, str]:
         severity_value = row["severity"]
     return {
         "workflow_status": _row_workflow_status(row),
-        "verification_state": _row_verification_state(row),
-        "verification_disposition": _row_verification_disposition(row),
+        "verification_status": _row_verification_status(row),
         "severity": _normalize_severity(str(severity_value)),
     }
 
@@ -809,22 +827,10 @@ def _finding_state_changed(before: dict[str, str] | None, after: dict[str, str])
     return any(before[key] != after[key] for key in after)
 
 
-# Cap on each content blob the transition ledger stores. The ledger exists to
-# make a clobbered value RECOVERABLE, not to become a second copy of every
-# finding, so an oversized blob is stored truncated with an explicit marker
-# rather than silently dropped. Sized above FINDING_NOTES_MAX_LENGTH so a
-# rotation of an over-cap notes column lands whole.
-_TRANSITION_CONTENT_CAP = 65536
-_TRANSITION_TRUNCATION_MARKER = "\n[truncated by the finding transition ledger]"
-
-
-def _capped_transition_blob(value: str | None) -> str | None:
-    if value is None:
-        return None
-    text = str(value)
-    if len(text) <= _TRANSITION_CONTENT_CAP:
-        return text
-    return text[:_TRANSITION_CONTENT_CAP] + _TRANSITION_TRUNCATION_MARKER
+_NOTES_HISTORY_STATUS_KEY = "notes_history_status"
+_NOTES_HISTORY_STATUSES = frozenset(
+    {"recorded", "unchanged", "initial", "historical_gap"}
+)
 
 
 def _finding_content_snapshot(row: dict[str, Any] | Any) -> dict[str, str]:
@@ -905,41 +911,37 @@ def _infer_transition_action(before: dict[str, str] | None, after: dict[str, str
         return "workflow_reported"
     if after["workflow_status"] == "blocked" and before["workflow_status"] != "blocked":
         return "workflow_blocked"
-    if (
-        after["verification_state"] == "verified"
-        and after["verification_disposition"] == "false_positive"
-        and (
-            before["verification_disposition"] != "false_positive"
-            or before["workflow_status"] != "false_positive"
-        )
+    if after["verification_status"] == "false_positive" and (
+        before["verification_status"] != "false_positive"
+        or before["workflow_status"] != "false_positive"
     ):
         return "verified_false_positive"
     if (
         before["workflow_status"] == "false_positive"
-        or before["verification_disposition"] == "false_positive"
+        or before["verification_status"] == "false_positive"
     ) and (
         after["workflow_status"] != "false_positive"
-        and after["verification_disposition"] != "false_positive"
+        and after["verification_status"] != "false_positive"
     ):
         return "operator_override"
-    if after["verification_state"] == "disputed" and before["verification_state"] != "disputed":
+    if after["verification_status"] == "disputed" and before["verification_status"] != "disputed":
         return "verification_disputed"
-    if after["verification_disposition"] == "downgraded" and before["verification_disposition"] != "downgraded":
+    if after["verification_status"] == "downgraded" and before["verification_status"] != "downgraded":
         return "verified_downgraded"
-    if (
-        after["verification_state"] == "verified"
-        and after["verification_disposition"] == "confirmed"
-        and (
-            before["verification_state"] != "verified"
-            or before["verification_disposition"] != "confirmed"
-        )
-    ):
+    if after["verification_status"] == "confirmed" and before["verification_status"] != "confirmed":
         return "verified_confirmed"
     if (
-        after["verification_disposition"] == "pending_runtime_proof"
-        and before["verification_disposition"] != "pending_runtime_proof"
+        after["verification_status"] == "pending_runtime_proof"
+        and before["verification_status"] != "pending_runtime_proof"
     ):
         return "verified_pending_runtime_proof"
+    if after["verification_status"] == "blocked" and before["verification_status"] != "blocked":
+        return "verified_blocked"
+    if (
+        after["verification_status"] == "unreviewed"
+        and before["verification_status"] != "unreviewed"
+    ):
+        return "verification_invalidated"
     return "operator_override"
 
 def _default_transition_reason(action: str, after: dict[str, str]) -> str:
@@ -957,6 +959,8 @@ def _default_transition_reason(action: str, after: dict[str, str]) -> str:
         return "Verification recorded the finding as blocked-for-provisioning; held out of the report."
     if action == "verification_disputed":
         return "Verification disputed the current finding assessment."
+    if action == "verification_invalidated":
+        return "A material finding change invalidated the prior verification."
     if action == "workflow_reported":
         return "Finding included in report output."
     if action == "workflow_merged":
@@ -986,41 +990,45 @@ def _record_finding_transition(
     after_content: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     # Content history is recorded ONLY on the axes this write actually moved.
-    # Storing an unchanged blob on every row would turn the ledger into a second
-    # copy of the finding without making anything recoverable that was not
-    # already readable on the finding itself.
+    # Notes are the exception to prefix-based compaction: every edit keeps the
+    # complete before/after values, because a later rotation or rewrite may make
+    # either side the only recoverable copy. Unchanged notes stay represented by
+    # a small status marker rather than duplicating the finding on every
+    # lifecycle transition.
     location_before = location_after = None
     details_before = details_after = None
     notes_before = notes_after = None
+    notes_history_status = "historical_gap"
     if before_content is not None and after_content is not None:
         if before_content["canonical_location"] != after_content["canonical_location"]:
             location_before = before_content["canonical_location"]
             location_after = after_content["canonical_location"]
         if before_content["details_json"] != after_content["details_json"]:
-            details_before = _capped_transition_blob(before_content["details_json"])
-            details_after = _capped_transition_blob(after_content["details_json"])
-        if before_content["notes"] != after_content["notes"] and not after_content[
-            "notes"
-        ].startswith(before_content["notes"]):
-            # An append leaves the prior text in place and needs no copy; only a
-            # destructive rewrite (replace / rotate) removes content the ledger
-            # is the last record of.
-            notes_before = _capped_transition_blob(before_content["notes"])
-            notes_after = _capped_transition_blob(after_content["notes"])
+            details_before = before_content["details_json"]
+            details_after = after_content["details_json"]
+        if before_content["notes"] != after_content["notes"]:
+            notes_before = before_content["notes"]
+            notes_after = after_content["notes"]
+            notes_history_status = "recorded"
+        else:
+            notes_history_status = "unchanged"
+    elif before_content is None and after_content is not None:
+        notes_history_status = "initial"
+    metadata_payload = dict(metadata or {})
+    metadata_payload[_NOTES_HISTORY_STATUS_KEY] = notes_history_status
     cursor = connection.execute(
         """
         INSERT INTO assessment_finding_transitions (
             engagement_id, finding_id, actor, action,
             from_workflow_status, to_workflow_status,
-            from_verification_state, to_verification_state,
-            from_verification_disposition, to_verification_disposition,
+            from_verification_status, to_verification_status,
             from_severity, to_severity,
             from_canonical_location, to_canonical_location,
             details_before_json, details_after_json,
             notes_before_json, notes_after_json,
             reason_code, reason_text, artifact_ref, metadata_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             engagement_id,
@@ -1029,10 +1037,8 @@ def _record_finding_transition(
             action,
             None if before is None else before["workflow_status"],
             after["workflow_status"],
-            None if before is None else before["verification_state"],
-            after["verification_state"],
-            None if before is None else before["verification_disposition"],
-            after["verification_disposition"],
+            None if before is None else before["verification_status"],
+            after["verification_status"],
             None if before is None else before["severity"],
             after["severity"],
             location_before,
@@ -1044,12 +1050,79 @@ def _record_finding_transition(
             reason_code,
             reason_text,
             artifact_ref,
-            _json_text(metadata),
+            _json_text(metadata_payload),
         ),
     )
     row = connection.execute("SELECT * FROM assessment_finding_transitions WHERE id = ?", (cursor.lastrowid,)).fetchone()
     assert row is not None
     return dict(row)
+
+
+def _invalidate_terminal_verification_for_relationship(
+    connection,
+    *,
+    engagement_id: int,
+    finding: dict[str, Any] | Any,
+    actor: str,
+    relationship_change: dict[str, Any] | None,
+    record_transition: bool = True,
+) -> tuple[dict[str, Any], bool]:
+    """Invalidate a terminal verdict when its reviewed relationship graph moves."""
+    finding_record = dict(finding)
+    if (
+        relationship_change is None
+        or _row_verification_status(finding_record)
+        not in TERMINAL_VERIFICATION_STATUSES
+    ):
+        return finding_record, False
+
+    before_state = _finding_state_snapshot(finding_record)
+    before_content = _finding_content_snapshot(finding_record)
+    cursor = connection.execute(
+        """
+        UPDATE assessment_findings
+        SET verification_status = 'unreviewed',
+            row_version = row_version + 1,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE engagement_id = ? AND id = ? AND row_version = ?
+        """,
+        (
+            engagement_id,
+            int(finding_record["id"]),
+            int(finding_record["row_version"]),
+        ),
+    )
+    if cursor.rowcount != 1:
+        _raise_stale_finding_conflict()
+    updated = connection.execute(
+        "SELECT * FROM assessment_findings WHERE id = ?",
+        (int(finding_record["id"]),),
+    ).fetchone()
+    assert updated is not None
+    updated_record = dict(updated)
+    if record_transition:
+        after_state = _finding_state_snapshot(updated_record)
+        _record_finding_transition(
+            connection,
+            engagement_id=engagement_id,
+            finding_id=int(updated_record["id"]),
+            actor=actor or "operator",
+            action="verification_invalidated",
+            before=before_state,
+            after=after_state,
+            reason_code="relationship_changed",
+            reason_text=(
+                "A material finding relationship changed after terminal verification."
+            ),
+            artifact_ref="",
+            metadata={
+                "material_change": True,
+                "relationship_change": relationship_change,
+            },
+            before_content=before_content,
+            after_content=_finding_content_snapshot(updated_record),
+        )
+    return updated_record, True
 
 def _finding_slug(
     connection,
@@ -1245,8 +1318,7 @@ def create_finding(
     title: str,
     severity: str,
     workflow_status: str,
-    verification_state: str,
-    verification_disposition: str,
+    verification_status: str,
     defect_family: str,
     root_cause_key: str,
     auth_context: str,
@@ -1268,8 +1340,7 @@ def create_finding(
     links: list[dict[str, Any]] | None,
     explicit_workflow_override: bool = False,
     explicit_submission_override: bool = False,
-    explicit_verification_state_override: bool = False,
-    explicit_verification_disposition_override: bool = False,
+    explicit_verification_override: bool = False,
     explicit_severity_override: bool = False,
     allow_existing_noncanonical_slug: bool = False,
     allow_remint: bool = False,
@@ -1283,6 +1354,11 @@ def create_finding(
     notes_mode: str = "append",
     details_mode: str = "merge",
     code_snapshot_write_mode: str = "record",
+    verification_proof_receipt_ids: list[int] | None = None,
+    verification_counter_check: dict[str, Any] | None = None,
+    verification_severity_variance: dict[str, Any] | None = None,
+    verification_normal_severity_band: str | None = None,
+    run_candidate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     canonical_location = str(canonical_location).strip()
@@ -1293,14 +1369,14 @@ def create_finding(
         if not allow_existing_noncanonical_slug:
             slug = _require_canonical_finding_slug(slug, field="slug")
     incoming_workflow_status = _normalize_workflow_status(workflow_status)
-    incoming_verification_state = _normalize_verification_state(verification_state)
-    incoming_verification_disposition = _normalize_verification_disposition(verification_disposition)
+    incoming_verification_status = _normalize_verification_status(verification_status)
     incoming_severity = _normalize_severity(severity)
     # submission_status is its own axis: validate + default to 'none' on a true
     # INSERT. On an UPDATE (upsert match), only overwrite when the caller
     # explicitly set it — otherwise preserve the stored value so a re-record /
     # an unrelated workflow patch never clobbers external submission tracking.
     incoming_submission_status = _normalize_submission_status(submission_status)
+    promoted_run_candidate: dict[str, Any] | None = None
     with _common.get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
         incoming_binding = _code_snapshot_binding(provenance, strict=True)
@@ -1346,7 +1422,18 @@ def create_finding(
             auth_context=auth_context,
             title=title,
         )
+        provenance_for_storage = dict(provenance or {})
         if existing is not None:
+            # ``provenance.agent_id`` names the finding's original author for
+            # verifier-independence checks. A later write may carry its own
+            # agent_id (notably a code-snapshot verifier attestation), but that
+            # cannot retroactively become the finding author. Verify still
+            # receives the unsanitized payload for its nested attestation below.
+            provenance_for_storage = _provenance_update_preserving_author(
+                existing["provenance_json"],
+                provenance,
+                reject_rebind=code_snapshot_write_mode != "verify",
+            )
             existing_family = str(existing["defect_family"] or "").strip().lower()
             requested_family = str(defect_family or "").strip().lower()
             if (
@@ -1354,8 +1441,7 @@ def create_finding(
                 and requested_family
                 and requested_family != existing_family
                 and existing_family in NATIVE_MEMORY_SAFETY_DEFECT_FAMILIES
-                and _row_verification_state(existing) == "verified"
-                and _row_verification_disposition(existing) == "confirmed"
+                and _row_verification_status(existing) == "confirmed"
             ):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -1431,13 +1517,13 @@ def create_finding(
                     defect_family=defect_family,
                     canonical_location=canonical_location,
                 )
-        # A ``blocked`` disposition REQUIRES a ``block_reason`` on the create/record
+        # A ``blocked`` status REQUIRES a ``block_reason`` on the create/record
         # path too — not only via /verify. Without this guard, POST /findings with
-        # verification_disposition='blocked' and no block_reason would 201 and then
+        # verification_status='blocked' and no block_reason would 201 and then
         # be silently excluded from the report (report-readiness drops 'blocked'),
         # producing a reasonless, invisible finding. Mirror verify_finding's invariant
         # (the reason may arrive in this record's details OR already be on the finding).
-        if incoming_verification_disposition == "blocked":
+        if incoming_verification_status == "blocked":
             _validate_blocked_verification_details(
                 incoming_details=details or {},
                 existing_details=(
@@ -1523,11 +1609,11 @@ def create_finding(
                     cursor = connection.execute(
                         """
                         INSERT INTO assessment_findings (
-                            engagement_id, slug, title, severity, status, verification_state, verification_disposition, defect_family, root_cause_key, auth_context,
+                            engagement_id, slug, title, severity, status, verification_status, defect_family, root_cause_key, auth_context,
                             canonical_location, source_name, summary, evidence_ref, notes, details_json, provenance_json, evidence_type, submission_status,
                             submission_platform, submission_ref, submission_url
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             engagement.id,
@@ -1535,8 +1621,7 @@ def create_finding(
                             title,
                             incoming_severity,
                             incoming_workflow_status,
-                            incoming_verification_state,
-                            incoming_verification_disposition,
+                            incoming_verification_status,
                             defect_family,
                             root_cause_key,
                             auth_context,
@@ -1578,16 +1663,14 @@ def create_finding(
             if expected_row_version is not None and int(existing["row_version"]) != expected_row_version:
                 _raise_stale_finding_conflict()
             existing_workflow = _row_workflow_status(existing)
-            existing_verification_state = _row_verification_state(existing)
-            existing_verification_disposition = _row_verification_disposition(existing)
+            existing_verification_status = _row_verification_status(existing)
             connection.execute(
                 """
                 UPDATE assessment_findings
                 SET title = ?,
                     severity = ?,
                     status = ?,
-                    verification_state = ?,
-                    verification_disposition = ?,
+                    verification_status = ?,
                     defect_family = COALESCE(NULLIF(?, ''), defect_family),
                     root_cause_key = COALESCE(NULLIF(?, ''), root_cause_key),
                     auth_context = COALESCE(NULLIF(?, ''), auth_context),
@@ -1616,15 +1699,10 @@ def create_finding(
                         incoming_workflow_status,
                         explicit_workflow_override=explicit_workflow_override,
                     ),
-                    _coalesce_verification_state(
-                        existing_verification_state,
-                        incoming_verification_state,
-                        explicit_override=explicit_verification_state_override,
-                    ),
-                    _coalesce_verification_disposition(
-                        existing_verification_disposition,
-                        incoming_verification_disposition,
-                        explicit_override=explicit_verification_disposition_override,
+                    _coalesce_verification_status(
+                        existing_verification_status,
+                        incoming_verification_status,
+                        explicit_override=explicit_verification_override,
                     ),
                     defect_family,
                     root_cause_key,
@@ -1650,7 +1728,9 @@ def create_finding(
                     # require details to be present when replace is requested, so
                     # this won't silently null an unspecified payload.
                     _resolved_details(existing["details_json"], details, details_mode),
-                    _merge_object_text(existing["provenance_json"], provenance),
+                    _merge_object_text(
+                        existing["provenance_json"], provenance_for_storage
+                    ),
                     evidence_type,
                     # None => COALESCE preserves the stored submission_status; a
                     # value => an explicit operator override of the submission axis.
@@ -1706,8 +1786,13 @@ def create_finding(
                 "code_snapshot_status_before": code_snapshot_status_before,
                 "code_snapshot_status_after": code_snapshot_status,
             }
-        after_state = _finding_state_snapshot(finding)
-        after_content = _finding_content_snapshot(finding)
+        verification_evidence_requested = any(
+            (
+                verification_proof_receipt_ids,
+                verification_counter_check is not None,
+                verification_severity_variance is not None,
+            )
+        )
         duplicate_advisories = _duplicate_advisories(
             connection,
             engagement.id,
@@ -1724,21 +1809,107 @@ def create_finding(
         if surface_id is not None:
             derived_links.append({"link_kind": "related", "target_kind": "surface", "target_id": surface_id, "target_ref": "", "notes": "", "provenance": provenance or {}})
         if evidence_ref:
-            derived_links.append({"link_kind": "evidence", "target_kind": "evidence_artifact", "target_id": None, "target_ref": evidence_ref, "notes": "", "provenance": provenance or {}})
-        finding_links = [
-            _upsert_finding_link(
+            derived_links.append({
+                "link_kind": "evidence",
+                "target_kind": "evidence_artifact",
+                "target_id": None,
+                "target_ref": evidence_ref,
+                "notes": "",
+                "provenance": provenance or {},
+                # ``evidence_ref`` is already part of the finding mutation
+                # contract. Treating its automatically mirrored index link as a
+                # second relationship mutation would invalidate a terminal
+                # verdict during the verification write that establishes it,
+                # and would defeat sticky false-positive rediscovery. An
+                # explicitly authored evidence link still uses the relationship
+                # invalidation lifecycle.
+                "implicit_evidence_ref": True,
+            })
+        finding_links: list[dict[str, Any]] = []
+        relationship_changes: list[dict[str, Any]] = []
+        for item in derived_links:
+            link_kind = str(item.get("link_kind", "related"))
+            target_kind = str(item.get("target_kind", "unknown"))
+            target_id = item.get("target_id")
+            target_ref = str(item.get("target_ref", ""))
+            if target_kind == "finding" and target_ref:
+                target_ref = _resolve_existing_finding_slug(
+                    connection,
+                    engagement.id,
+                    target_ref,
+                    field="target_ref",
+                )
+            before_link = _active_finding_link(
                 connection,
                 engagement.id,
-                finding_id=finding["id"],
-                link_kind=str(item.get("link_kind", "related")),
-                target_kind=str(item.get("target_kind", "unknown")),
-                target_id=item.get("target_id"),
-                target_ref=str(item.get("target_ref", "")),
+                finding_id=int(finding["id"]),
+                link_kind=link_kind,
+                target_kind=target_kind,
+                target_id=target_id,
+                target_ref=target_ref,
+            )
+            link = _upsert_finding_link(
+                connection,
+                engagement.id,
+                finding_id=int(finding["id"]),
+                link_kind=link_kind,
+                target_kind=target_kind,
+                target_id=target_id,
+                target_ref=target_ref,
                 notes=str(item.get("notes", "")),
                 provenance=item.get("provenance"),
             )
-            for item in derived_links
-        ]
+            finding_links.append(link)
+            change = _relationship_change(
+                operation="created",
+                before=before_link,
+                after=link,
+            )
+            if change is not None and not item.get("implicit_evidence_ref"):
+                relationship_changes.append(change)
+        if existing is not None and relationship_changes:
+            relationship_change = (
+                relationship_changes[0]
+                if len(relationship_changes) == 1
+                else {"operation": "recorded", "changes": relationship_changes}
+            )
+            finding, relationship_invalidated = _invalidate_relationship_verification(
+                connection,
+                engagement_id=engagement.id,
+                finding=finding,
+                actor=transition_actor or source_name or "operator",
+                relationship_change=relationship_change,
+                record_transition=False,
+            )
+            if relationship_invalidated:
+                transition_action = "verification_invalidated"
+                transition_reason_code = "relationship_changed"
+                transition_reason_text = (
+                    "A material finding relationship changed after terminal verification."
+                )
+                transition_metadata = {
+                    **(transition_metadata or {}),
+                    "material_change": True,
+                    "relationship_change": relationship_change,
+                }
+        after_state = _finding_state_snapshot(finding)
+        after_content = _finding_content_snapshot(finding)
+        terminal_verification_asserted = (
+            after_state["verification_status"] in TERMINAL_VERIFICATION_STATUSES
+            and (
+                before_state is None
+                or before_state["verification_status"]
+                != after_state["verification_status"]
+            )
+        )
+        if terminal_verification_asserted and not verification_evidence_requested:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "terminal verification must use the verification endpoint with "
+                    "independent proof_receipt_ids"
+                ),
+            )
         transition = None
         lifecycle_changed = _finding_state_changed(before_state, after_state)
         # A pure details / notes / location rewrite moves no lifecycle axis, so
@@ -1750,7 +1921,7 @@ def create_finding(
             and after_content is not None
             and before_content != after_content
         )
-        if lifecycle_changed or content_changed:
+        if lifecycle_changed or content_changed or verification_evidence_requested:
             action = transition_action or (
                 _infer_transition_action(before_state, after_state)
                 if lifecycle_changed
@@ -1775,6 +1946,34 @@ def create_finding(
                 metadata=transition_metadata,
                 before_content=before_content,
                 after_content=after_content,
+            )
+        verification_evidence = {
+            "proof_receipts": [],
+            "counter_check": None,
+            "severity_variance": None,
+        }
+        if verification_evidence_requested:
+            assert transition is not None
+            verification_evidence = record_finding_verification_evidence(
+                connection,
+                engagement_id=engagement.id,
+                finding=finding,
+                transition_id=int(transition["id"]),
+                verification_status=after_state["verification_status"],
+                proof_receipt_ids=list(verification_proof_receipt_ids or []),
+                counter_check=verification_counter_check,
+                severity_variance=verification_severity_variance,
+                normal_severity_band=verification_normal_severity_band,
+            )
+        if run_candidate is not None:
+            promoted_run_candidate = run_accounting.promote_run_candidate_with_connection(
+                connection,
+                engagement_id=engagement.id,
+                run_id=int(run_candidate["run_id"]),
+                candidate_id=int(run_candidate["candidate_id"]),
+                finding_slug=str(finding["slug"]),
+                reason=str(run_candidate["reason"]),
+                proof_receipt_ids=list(run_candidate["proof_receipt_ids"]),
             )
     if evidence_ref:
         # NOTE (atomicity): this runs in a separate transaction from the finding
@@ -1836,6 +2035,7 @@ def create_finding(
     record["code_snapshot_attestation_status"] = code_snapshot_attestation_status(
         record
     )
+    record["proof_receipts"] = verification_evidence["proof_receipts"]
     if code_snapshot_status_before is not None:
         record["code_snapshot_status_before"] = code_snapshot_status_before
     return {
@@ -1845,6 +2045,8 @@ def create_finding(
         # Always present so a caller can read it unconditionally; empty on a clean
         # record. A backstop for the CLI-side preflight, so a raw POST is warned too.
         "duplicate_advisories": duplicate_advisories,
+        "run_candidate": promoted_run_candidate,
+        **verification_evidence,
     }
 
 def update_finding(
@@ -1854,8 +2056,7 @@ def update_finding(
     title: str,
     severity: str | None = None,
     workflow_status: str | None = None,
-    verification_state: str | None = None,
-    verification_disposition: str | None = None,
+    verification_status: str | None = None,
     defect_family: str,
     root_cause_key: str,
     auth_context: str,
@@ -1869,7 +2070,7 @@ def update_finding(
     evidence_type: str | None = None,
     submission_status: str | None = None,
 ) -> dict[str, Any]:
-    # severity / workflow_status / verification_state / verification_disposition
+    # Severity / workflow_status / verification_status
     # are partial-update fields: ``None`` means "preserve the existing value".
     # Passing a value sets the matching ``explicit_*_override`` flag so the caller
     # can deliberately overwrite; ``None`` leaves the override False, and
@@ -1886,8 +2087,7 @@ def update_finding(
         title=title,
         severity=severity if severity is not None else "info",
         workflow_status=workflow_status if workflow_status is not None else "draft",
-        verification_state=verification_state if verification_state is not None else "unreviewed",
-        verification_disposition=verification_disposition if verification_disposition is not None else "none",
+        verification_status=verification_status if verification_status is not None else "unreviewed",
         defect_family=defect_family,
         root_cause_key=root_cause_key,
         auth_context=auth_context,
@@ -1906,8 +2106,7 @@ def update_finding(
         links=None,
         explicit_workflow_override=workflow_status is not None,
         explicit_submission_override=submission_status is not None,
-        explicit_verification_state_override=verification_state is not None,
-        explicit_verification_disposition_override=verification_disposition is not None,
+        explicit_verification_override=verification_status is not None,
         explicit_severity_override=severity is not None,
         allow_existing_noncanonical_slug=True,
     )
@@ -1920,8 +2119,7 @@ def patch_finding(
     title: str | None = None,
     severity: str | None = None,
     workflow_status: str | None = None,
-    verification_state: str | None = None,
-    verification_disposition: str | None = None,
+    verification_status: str | None = None,
     defect_family: str | None = None,
     root_cause_key: str | None = None,
     auth_context: str | None = None,
@@ -1946,6 +2144,10 @@ def patch_finding(
     expected_row_version: int | None = None,
     notes_mode: str = "append",
     details_mode: str = "merge",
+    verification_proof_receipt_ids: list[int] | None = None,
+    verification_counter_check: dict[str, Any] | None = None,
+    verification_severity_variance: dict[str, Any] | None = None,
+    verification_normal_severity_band: str | None = None,
 ) -> dict[str, Any]:
     if canonical_location is not None:
         canonical_location = str(canonical_location).strip()
@@ -1979,7 +2181,7 @@ def patch_finding(
         ).fetchone()
 
     existing_workflow = _row_workflow_status(existing)
-    existing_verification = _row_verification_state(existing)
+    existing_verification = _row_verification_status(existing)
     current_row_version = int(existing["row_version"])
 
     if canonical_location is not None and is_file_finding(
@@ -1995,7 +2197,7 @@ def patch_finding(
         )
 
     if not allow_verification_mutation:
-        if verification_state is not None or verification_disposition is not None:
+        if verification_status is not None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="verification lifecycle changes must use POST /findings/{slug}/verify",
@@ -2013,28 +2215,62 @@ def patch_finding(
                 detail="merged findings cannot be reopened via patch",
             )
         if existing_workflow == "false_positive" and workflow_status is not None and workflow_status != "false_positive":
-            verification_state = "unreviewed"
-            verification_disposition = "none"
+            verification_status = "unreviewed"
         elif existing_verification == "disputed" and workflow_status is not None:
             # CR-31 (clear-disputed): a `disputed` verdict previously could only
             # be cleared by the verifier re-issuing finding verify (which lands
             # `verified`, not a re-queue). Let a specialist reopen via finding update
-            # return it to `unreviewed`/`none` — re-queues for verification without
+            # return it to `unreviewed` — re-queues for verification without
             # forcing a verdict. Only on an explicit workflow reopen, and only out
             # of `disputed` (does not touch verified/false_positive verdicts).
-            verification_state = "unreviewed"
-            verification_disposition = "none"
+            verification_status = "unreviewed"
             if transition_action is None:
                 transition_action = "verification_recleared"
 
-    return create_finding(
+        material_change = any(
+            (
+                severity is not None and _normalize_severity(severity) != str(existing["severity"]),
+                defect_family is not None and defect_family != str(existing["defect_family"]),
+                root_cause_key is not None and root_cause_key != str(existing["root_cause_key"]),
+                auth_context is not None and auth_context != str(existing["auth_context"]),
+                canonical_location is not None
+                and canonical_location != str(existing["canonical_location"]),
+                evidence_ref is not None and evidence_ref != str(existing["evidence_ref"]),
+                details is not None
+                and any(
+                    key in details
+                    for key in {
+                        "cwe",
+                        "cvss_score",
+                        "cvss_vector",
+                        "evidence",
+                        "exploitability",
+                        "impact",
+                        "proof",
+                    }
+                ),
+            )
+        )
+        verification_invalidated = (
+            material_change and existing_verification != "unreviewed"
+        )
+        if verification_invalidated:
+            verification_status = "unreviewed"
+            transition_action = "verification_invalidated"
+            transition_metadata = {
+                **(transition_metadata or {}),
+                "material_change": True,
+            }
+    else:
+        verification_invalidated = False
+
+    result = create_finding(
         engagement.id,
         slug=slug,
         title=title if title is not None else str(existing["title"]),
         severity=severity if severity is not None else str(existing["severity"]),
         workflow_status=workflow_status if workflow_status is not None else _row_workflow_status(existing),
-        verification_state=verification_state if verification_state is not None else _row_verification_state(existing),
-        verification_disposition=verification_disposition if verification_disposition is not None else _row_verification_disposition(existing),
+        verification_status=verification_status if verification_status is not None else _row_verification_status(existing),
         defect_family=defect_family or "",
         root_cause_key=root_cause_key or "",
         auth_context=auth_context or "",
@@ -2062,8 +2298,7 @@ def patch_finding(
         links=None,
         explicit_workflow_override=workflow_status is not None,
         explicit_submission_override=submission_status is not None,
-        explicit_verification_state_override=verification_state is not None,
-        explicit_verification_disposition_override=verification_disposition is not None,
+        explicit_verification_override=verification_status is not None,
         explicit_severity_override=severity is not None,
         allow_existing_noncanonical_slug=True,
         transition_action=transition_action,
@@ -2080,7 +2315,13 @@ def patch_finding(
         code_snapshot_write_mode=(
             "verify" if allow_verification_mutation else "patch"
         ),
+        verification_proof_receipt_ids=verification_proof_receipt_ids,
+        verification_counter_check=verification_counter_check,
+        verification_severity_variance=verification_severity_variance,
+        verification_normal_severity_band=verification_normal_severity_band,
     )
+    result["finding"]["verification_invalidated"] = verification_invalidated
+    return result
 
 # Documented (not hard-enforced) vocabulary for what a blocked finding is
 # waiting on. hunting.md: unblock_requirements.kind names the class of the
@@ -2111,11 +2352,6 @@ def _validate_unblock_requirements(value: Any) -> None:
         )
 
 
-# Phrases that say the experiment NEVER RAN. A kill whose own text admits it could
-# not be tested is not a false positive — it is an unrun experiment, and
-# ``blocked`` (which requires a ``block_reason`` and keeps the finding visible)
-# already carries those semantics. Deliberately NOT a new disposition: adding a
-# sixth would duplicate a vocabulary every consumer already handles.
 _UNTESTABILITY_MARKERS: tuple[str, ...] = (
     "could not",
     "couldn't",
@@ -2136,23 +2372,16 @@ def _validate_kill_names_a_settling_test(
     incoming_details: dict[str, Any],
     existing_details: dict[str, Any],
 ) -> None:
-    """A kill citing an absent capability must name the test that would settle it.
-
-    Satisfiable by simply naming the settling test — NEVER by rewording the kill,
-    which is why the refusal points at ``required_followup`` and at ``blocked``
-    rather than at the prose. ``required_followup`` was a free-form array nothing
-    read; the readiness advisory now surfaces it, so recording one is no longer a
-    write into a void.
-    """
+    """Keep unrun experiments out of the false-positive terminal state."""
 
     kill_reason = incoming_details.get("kill_reason")
     if not (isinstance(kill_reason, str) and kill_reason.strip()):
         kill_reason = existing_details.get("kill_reason")
-    if not isinstance(kill_reason, str):
+    if not isinstance(kill_reason, str) or not any(
+        marker in kill_reason.lower() for marker in _UNTESTABILITY_MARKERS
+    ):
         return
-    lowered = kill_reason.lower()
-    if not any(marker in lowered for marker in _UNTESTABILITY_MARKERS):
-        return
+
     followup = incoming_details.get("required_followup")
     if followup is None:
         followup = existing_details.get("required_followup")
@@ -2160,12 +2389,13 @@ def _validate_kill_names_a_settling_test(
         isinstance(item, str) and item.strip() for item in followup
     ):
         return
+
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
         detail=(
             "this kill_reason says the experiment could not be run, which is "
             "`blocked`, not `false_positive`. Either re-verify with "
-            "`--disposition blocked --details-inline '{\"block_reason\": \"...\"}'`, "
+            "`--status blocked --details-inline '{\"block_reason\": \"...\"}'`, "
             "or name the test that would settle it in "
             "details.required_followup (a non-empty list of strings)."
         ),
@@ -2271,7 +2501,7 @@ def verify_finding(
     engagement_id: int,
     *,
     slug: str,
-    disposition: str,
+    verification_status: str,
     reason_code: str,
     reason_text: str,
     source_name: str,
@@ -2281,15 +2511,18 @@ def verify_finding(
     provenance: dict[str, Any] | None,
     artifact_ref: str,
     new_severity: str | None = None,
+    proof_receipt_ids: list[int] | None = None,
+    counter_check: dict[str, Any] | None = None,
+    severity_variance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
-    if disposition == "disputed":
-        normalized_disposition = "none"
-    else:
-        normalized_disposition = _normalize_verification_disposition(disposition)
-    if normalized_disposition == "none" and disposition != "disputed":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="verification disposition cannot be none")
-    if new_severity and normalized_disposition != "downgraded":
+    normalized_verification_status = _normalize_verification_status(verification_status)
+    if normalized_verification_status == "unreviewed":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="verification endpoint cannot set status to unreviewed",
+        )
+    if new_severity and normalized_verification_status != "downgraded":
         # ``new_severity`` is only ever consumed by the downgraded branch. Any
         # other disposition silently dropped it, so a verifier who believed they
         # had re-banded the finding got a 200 and the OLD severity. Verification
@@ -2297,8 +2530,8 @@ def verify_finding(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                f"new_severity applies only to disposition='downgraded' (got "
-                f"'{disposition}'); change the band with "
+                f"new_severity applies only to verification_status='downgraded' (got "
+                f"'{verification_status}'); change the band with "
                 f"`vigil assess finding update {slug} --severity {new_severity}`"
             ),
         )
@@ -2324,13 +2557,12 @@ def verify_finding(
     if existing_workflow == "merged":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="merged findings cannot be re-verified")
     target_workflow = existing_workflow if existing_workflow not in {"false_positive", "merged"} else "active"
-    target_verification_state = "verified"
     target_severity = str(existing["severity"])
     transition_action = "verified_confirmed"
     transition_metadata: dict[str, Any] = {}
     details_payload = dict(details or {})
 
-    if normalized_disposition == "downgraded":
+    if normalized_verification_status == "downgraded":
         if not new_severity:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="downgraded verification requires new_severity")
         normalized_new_severity = _normalize_severity(new_severity)
@@ -2369,52 +2601,75 @@ def verify_finding(
         )
         if normalized_new_severity == current_severity:
             transition_metadata["prelowered"] = True
-    elif normalized_disposition == "false_positive":
-        if not details_payload.get("kill_reason") or details_payload.get("kill_check") is None:
+    elif normalized_verification_status == "false_positive":
+        existing_details = _json_object(existing["details_json"])
+        kill_reason = details_payload.get(
+            "kill_reason", existing_details.get("kill_reason")
+        )
+        kill_check = details_payload.get(
+            "kill_check", existing_details.get("kill_check")
+        )
+        if not kill_reason or kill_check is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="false_positive verification requires details.kill_reason and details.kill_check",
+                detail=(
+                    "false_positive verification requires "
+                    "details.kill_reason and details.kill_check"
+                ),
             )
         _validate_kill_names_a_settling_test(
             incoming_details=details_payload,
-            existing_details=_json_object(existing["details_json"]),
+            existing_details=existing_details,
         )
         target_workflow = "false_positive"
         transition_action = "verified_false_positive"
-    elif normalized_disposition == "blocked":
+    elif normalized_verification_status == "blocked":
         # Blocked-for-provisioning (hunting.md): the attempt could not even start
         # (missing account/line/device/credential/access). Requires a
         # block_reason (present in this verify OR already on the finding). Marked
-        # verified so it leaves the unreviewed DoD queue, but report-readiness /
-        # the report projection exclude it on disposition ('blocked' is neither
+        # reviewed so it leaves the unreviewed DoD queue, but report-readiness /
+        # the report projection exclude it ('blocked' is neither
         # confirmed nor downgraded), keeping it OUT of the report until unblocked.
         _validate_blocked_verification_details(
             incoming_details=details_payload,
             existing_details=_json_object(existing["details_json"]),
         )
-        target_verification_state = "verified"
         transition_action = "verified_blocked"
-    elif normalized_disposition == "confirmed":
+    elif normalized_verification_status == "confirmed":
         transition_action = "verified_confirmed"
-    elif normalized_disposition == "pending_runtime_proof":
+    elif normalized_verification_status == "pending_runtime_proof":
         # Analyst accepted the static/code evidence; only runtime proof is
         # outstanding. Mark verified so it leaves the unreviewed DoD queue while
         # report-readiness still excludes it on disposition (pending != confirmed
         # /downgraded), keeping it in the holding area until proven.
-        target_verification_state = "verified"
         transition_action = "verified_pending_runtime_proof"
     else:
-        target_verification_state = "disputed"
-        normalized_disposition = "none"
         transition_action = "verification_disputed"
+
+    effective_details = _json_object(
+        _resolved_details(existing["details_json"], details_payload, "merge")
+    )
+    cvss_score = effective_details.get("cvss_score")
+    normal_severity_band = None
+    if isinstance(cvss_score, int | float) and not isinstance(cvss_score, bool):
+        score_value = float(cvss_score)
+        if score_value == 0:
+            normal_severity_band = "info"
+        elif score_value < 4:
+            normal_severity_band = "low"
+        elif score_value < 7:
+            normal_severity_band = "medium"
+        elif score_value < 9:
+            normal_severity_band = "high"
+        else:
+            normal_severity_band = "critical"
 
     result = patch_finding(
         engagement.id,
         slug=slug,
         severity=target_severity,
         workflow_status=target_workflow,
-        verification_state=target_verification_state,
-        verification_disposition=normalized_disposition,
+        verification_status=normalized_verification_status,
         evidence_ref=evidence_ref or None,
         notes=notes,
         source_name=source_name or None,
@@ -2427,6 +2682,10 @@ def verify_finding(
         transition_metadata=transition_metadata or None,
         allow_verification_mutation=True,
         expected_row_version=expected_row_version,
+        verification_proof_receipt_ids=list(proof_receipt_ids or []),
+        verification_counter_check=counter_check,
+        verification_severity_variance=severity_variance,
+        verification_normal_severity_band=normal_severity_band,
     )
     if artifact_ref:
         _common._register_artifact_reference(
@@ -2479,7 +2738,9 @@ def relocate_finding(
         ).fetchone()
         if int(existing["row_version"]) != expected_row_version:
             _raise_stale_finding_conflict()
-        incoming_provenance = dict(provenance or {})
+        incoming_provenance = _provenance_update_preserving_author(
+            existing["provenance_json"], provenance, reject_rebind=True
+        )
         merged_provenance = _json_object(existing["provenance_json"])
         stored_binding = _code_snapshot_binding(merged_provenance, strict=False)
         from_location = str(existing["canonical_location"] or "")
@@ -2762,12 +3023,10 @@ def merge_findings(
         source_stronger = source_confidence > target_confidence
         source_workflow = _row_workflow_status(source)
         target_workflow = _row_workflow_status(target)
-        source_verification_state = _row_verification_state(source)
-        target_verification_state = _row_verification_state(target)
-        source_verification_disposition = _row_verification_disposition(source)
-        target_verification_disposition = _row_verification_disposition(target)
         source_before = _finding_state_snapshot(source)
         target_before = _finding_state_snapshot(target)
+        source_before_content = _finding_content_snapshot(source)
+        target_before_content = _finding_content_snapshot(target)
         merged_notes = _common._append_notes(
             _common._append_notes(target["notes"], f"Merged {source_slug}: {reason}"),
             source["notes"],
@@ -2825,7 +3084,13 @@ def merge_findings(
             )
         merged_details = _json_text(merged_details_obj)
         merged_provenance_payload = _json_object(target["provenance_json"])
-        merged_provenance_payload.update(_json_object(source["provenance_json"]))
+        merged_provenance_payload.update(
+            _provenance_update_preserving_author(
+                target["provenance_json"],
+                _json_object(source["provenance_json"]),
+                reject_rebind=False,
+            )
+        )
         merged_provenance_payload["merge"] = {
             "source_slug": source_slug,
             "target_slug": target_slug,
@@ -2861,8 +3126,7 @@ def merge_findings(
             UPDATE assessment_findings
             SET severity = ?,
                 status = ?,
-                verification_state = ?,
-                verification_disposition = ?,
+                verification_status = 'unreviewed',
                 source_name = CASE
                     WHEN ? = '' THEN source_name
                     WHEN ? = 1 THEN ?
@@ -2892,20 +3156,6 @@ def merge_findings(
                     target_workflow
                     if source_workflow == "false_positive" and target_workflow != "false_positive"
                     else _coalesce_workflow_status(target_workflow, source_workflow)
-                ),
-                (
-                    target_verification_state
-                    if source_workflow == "false_positive" and target_workflow != "false_positive"
-                    else _coalesce_verification_state(target_verification_state, source_verification_state)
-                ),
-                (
-                    target_verification_disposition
-                    if source_verification_disposition == "false_positive"
-                    and target_verification_disposition != "false_positive"
-                    else _coalesce_verification_disposition(
-                        target_verification_disposition,
-                        source_verification_disposition,
-                    )
                 ),
                 source["source_name"],
                 1 if source_stronger else 0,
@@ -2966,13 +3216,18 @@ def merge_findings(
         assert source_row is not None and target_row is not None
         source_after = _finding_state_snapshot(source_row)
         target_after = _finding_state_snapshot(target_row)
+        source_after_content = _finding_content_snapshot(source_row)
+        target_after_content = _finding_content_snapshot(target_row)
         source_record = _serialize_finding_with_code_snapshot_status(
             connection, engagement.id, source_row
         )
         target_record = _serialize_finding_with_code_snapshot_status(
             connection, engagement.id, target_row
         )
-        if _finding_state_changed(source_before, source_after):
+        if (
+            _finding_state_changed(source_before, source_after)
+            or source_before_content != source_after_content
+        ):
             _record_finding_transition(
                 connection,
                 engagement_id=engagement.id,
@@ -2985,8 +3240,13 @@ def merge_findings(
                 reason_text=reason,
                 artifact_ref="",
                 metadata={"target_slug": target_slug},
+                before_content=source_before_content,
+                after_content=source_after_content,
             )
-        if _finding_state_changed(target_before, target_after):
+        if (
+            _finding_state_changed(target_before, target_after)
+            or target_before_content != target_after_content
+        ):
             _record_finding_transition(
                 connection,
                 engagement_id=engagement.id,
@@ -2999,6 +3259,8 @@ def merge_findings(
                 reason_text=f"Merged {source_slug} into {target_slug}: {reason}",
                 artifact_ref="",
                 metadata={"source_slug": source_slug},
+                before_content=target_before_content,
+                after_content=target_after_content,
             )
     return {
         "source": source_record,
@@ -3014,8 +3276,7 @@ def list_findings(
     *,
     severity: str | None = None,
     workflow_status: str | None = None,
-    verification_state: str | None = None,
-    verification_disposition: str | None = None,
+    verification_status: str | None = None,
     auth_context: str | None = None,
     source_name: str | None = None,
     slug: str | None = None,
@@ -3033,12 +3294,9 @@ def list_findings(
     if workflow_status:
         where.append("LOWER(findings.status) = LOWER(?)")
         params.append(workflow_status)
-    if verification_state:
-        where.append("LOWER(findings.verification_state) = LOWER(?)")
-        params.append(verification_state)
-    if verification_disposition:
-        where.append("LOWER(findings.verification_disposition) = LOWER(?)")
-        params.append(verification_disposition)
+    if verification_status:
+        where.append("LOWER(findings.verification_status) = LOWER(?)")
+        params.append(verification_status)
     if auth_context:
         # Server-side drill-down for the coverage ledger: an operator pivots
         # from a host's verdict into "the authenticated findings on this host"
@@ -3068,7 +3326,7 @@ def list_findings(
         where.append(
             "("
             "LOWER(findings.evidence_type) = 'theoretical' OR "
-            "LOWER(findings.verification_disposition) = 'pending_runtime_proof'"
+            "LOWER(findings.verification_status) IN ('pending_runtime_proof', 'blocked')"
             ")"
         )
     limit_sql = ""
@@ -3093,10 +3351,13 @@ def list_findings(
                     WHEN 'merged' THEN 6
                     ELSE 7
                 END,
-                CASE findings.verification_state
-                    WHEN 'verified' THEN 0
-                    WHEN 'disputed' THEN 1
-                    ELSE 2
+                CASE findings.verification_status
+                    WHEN 'confirmed' THEN 0
+                    WHEN 'downgraded' THEN 1
+                    WHEN 'disputed' THEN 2
+                    WHEN 'pending_runtime_proof' THEN 3
+                    WHEN 'blocked' THEN 4
+                    ELSE 5
                 END,
                 findings.updated_at DESC,
                 findings.id DESC
@@ -3131,9 +3392,13 @@ def get_finding(engagement_id: int, slug: str) -> dict[str, Any]:
         ).fetchone()
         if row is None:
             raise _finding_not_found(connection, engagement.id, slug)
-        return _serialize_finding_with_code_snapshot_status(
+        record = _serialize_finding_with_code_snapshot_status(
             connection, engagement.id, row
         )
+        record["verification_audit"] = verification_audit_for_finding(
+            connection, engagement.id, int(row["id"])
+        )
+        return record
 
 def list_exploit_candidates(engagement_id: int) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
@@ -3160,9 +3425,7 @@ def list_exploit_candidates(engagement_id: int) -> list[dict[str, Any]]:
         workflow_status = record.get("workflow_status", "draft")
         if workflow_status in {"merged", "false_positive", "reported", "exploited"}:
             continue
-        if record.get("verification_state") != "verified":
-            continue
-        if record.get("verification_disposition") not in {"confirmed", "downgraded"}:
+        if record.get("verification_status") not in {"confirmed", "downgraded"}:
             continue
         details = _json_object(record.get("details"))
         severity = _normalize_severity(str(record.get("severity", "info")))
@@ -3190,7 +3453,13 @@ def list_exploit_candidates(engagement_id: int) -> list[dict[str, Any]]:
         ),
     )
 
-def list_finding_transitions(engagement_id: int, *, slug: str) -> list[dict[str, Any]]:
+def list_finding_transitions(
+    engagement_id: int,
+    *,
+    slug: str,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
     slug = canonical_finding_alias(slug) or slug
     with _common.get_connection() as connection:
@@ -3200,13 +3469,41 @@ def list_finding_transitions(engagement_id: int, *, slug: str) -> list[dict[str,
         ).fetchone()
         if finding is None:
             raise _finding_not_found(connection, engagement.id, slug)
-        rows = connection.execute(
-            """
+        sql = """
             SELECT *
             FROM assessment_finding_transitions
             WHERE engagement_id = ? AND finding_id = ?
             ORDER BY created_at DESC, id DESC
-            """,
-            (engagement.id, int(finding["id"])),
-        ).fetchall()
-    return [dict(row) for row in rows]
+            """
+        params: list[Any] = [engagement.id, int(finding["id"])]
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            params.extend((int(limit), int(offset)))
+        rows = connection.execute(sql, tuple(params)).fetchall()
+        audit_by_transition = verification_audit_by_transition(
+            connection,
+            engagement.id,
+            int(finding["id"]),
+            [int(row["id"]) for row in rows],
+        )
+    records: list[dict[str, Any]] = []
+    for row in rows:
+        record = dict(row)
+        metadata = _json_object(record.get("metadata_json"))
+        notes_history_status = metadata.get(_NOTES_HISTORY_STATUS_KEY)
+        if notes_history_status not in _NOTES_HISTORY_STATUSES:
+            # Content columns were added after the transition ledger already
+            # contained rows. A populated side proves that transition captured
+            # note history; two NULLs on an unmarked row mean the old writer did
+            # not say whether notes changed. Expose that gap instead of
+            # reinterpreting missing history as "unchanged".
+            notes_history_status = (
+                "recorded"
+                if record.get("notes_before_json") is not None
+                or record.get("notes_after_json") is not None
+                else "historical_gap"
+            )
+        record[_NOTES_HISTORY_STATUS_KEY] = notes_history_status
+        record["verification_audit"] = audit_by_transition[int(row["id"])]
+        records.append(record)
+    return records

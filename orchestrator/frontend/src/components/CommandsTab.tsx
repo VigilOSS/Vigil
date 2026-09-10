@@ -9,6 +9,7 @@ import {
 } from "../lib/api";
 import { useBodyScrollLock } from "../lib/modalScrollLock";
 import { Skeleton, TableSkeleton } from "./Skeletons";
+import { UntrustedDataNotice } from "./drawer/DrawerKit";
 
 // ag-grid is heavy (~470 kB). Lazy-load the grid so it lands in a
 // code-split chunk and never bloats the main entry bundle. The Suspense
@@ -39,6 +40,12 @@ export const STATUS_COLORS: Record<string, string> = {
 };
 const STATUS_ORDER = ["success", "failed", "timed_out", "suppressed", "artifact", "untrusted"] as const;
 type StatusBucket = (typeof STATUS_ORDER)[number];
+const INCOMPLETE_OUTPUT_RETENTION = new Set([
+  "measurement_conflict",
+  "partially_measured",
+  "preview_only",
+  "unmeasured",
+]);
 
 // Tool color map. Keep the bin name keyed so it also works for short-tail
 // tools the operator might pipe through. Anything missing falls back to
@@ -248,7 +255,11 @@ function statusBucket(row: AssessmentCommandRun): StatusBucket {
   if (integrity === "pending" || integrity === "warning") return "untrusted";
   if (retention === "suppressed" || retention.startsWith("suppression_")) return "suppressed";
   if (retention === "artifact") return "artifact";
-  if (retention === "untrusted" || retention === "integrity_failure") return "untrusted";
+  if (
+    retention === "untrusted"
+    || retention === "integrity_failure"
+    || INCOMPLETE_OUTPUT_RETENTION.has(retention)
+  ) return "untrusted";
   if (row.timed_out) return "timed_out";
   if (row.success) return "success";
   return "failed";
@@ -1493,6 +1504,7 @@ function Drawer({
         ))}
       </div>
       <div className="drawer-body">
+        <UntrustedDataNotice />
         {tab === "overview" && <OverviewPane d={d} />}
         {tab === "stdout" && (
           <StreamPane
@@ -1793,17 +1805,31 @@ function StreamPane({
     );
   }
 
-  if (retention === "untrusted" || retention === "integrity_failure") {
+  if (
+    retention === "untrusted"
+    || retention === "integrity_failure"
+    || INCOMPLETE_OUTPUT_RETENTION.has(retention)
+  ) {
+    const incompleteMeasurement = INCOMPLETE_OUTPUT_RETENTION.has(retention);
     return (
       <div className="section">
         <div className="callout" style={{ borderLeft: "4px solid var(--chip-red)" }}>
-          <p className="section-title">Output is not trustworthy</p>
-          <p>{row.output_integrity_warning || "Vigil could not prove that this output stayed stable."}</p>
+          <p className="section-title">{incompleteMeasurement ? "Output measurement is incomplete" : "Output is not trustworthy"}</p>
+          <p>{row.output_integrity_warning || (incompleteMeasurement
+            ? "Vigil could not establish complete byte totals for this output; do not treat zero-valued storage defaults as proof of no output."
+            : "Vigil could not prove that this output stayed stable.")}</p>
         </div>
         <div className="kv-grid">
           <KV k="Retention" v={retention} />
           <KV k="Integrity" v={row.output_integrity_status || "warning"} />
         </div>
+        {preview ? (
+          <pre className="pre" style={{ marginTop: 10 }}>{preview}</pre>
+        ) : previewChars > 0 ? (
+          <p className="empty" style={{ marginTop: 10, textAlign: "left" }}>
+            A preview is recorded but has not loaded yet.
+          </p>
+        ) : null}
       </div>
     );
   }

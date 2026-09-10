@@ -44,7 +44,6 @@ from assess.lib.kali_jobs import (
     start_job,
 )
 from assess.lib.kali_tool_naming import _derive_tool_name
-from assess.lib.rate_leases import aggregate_rate_reservation
 
 _DEFAULT_JOB_TIMEOUT_SECONDS = 24 * 60 * 60  # 24h hard cap parity with `kali exec` budgets
 
@@ -98,12 +97,6 @@ def register(subparsers) -> None:
         ),
     )
     start.add_argument("--destructive", action="store_true")
-    start.add_argument(
-        "--rate-override-reason",
-        dest="rate_override_reason",
-        default="",
-        help="Recorded justification when this job exceeds the engagement aggregate rate ceiling.",
-    )
     start.add_argument("--agent-name", dest="agent_name", required=False, default=None)
     start.add_argument(
         "--identity",
@@ -304,17 +297,6 @@ def _run_start(args) -> None:
         "auth_context": auth_context,
         **execution_policy,
     }
-    reservation = aggregate_rate_reservation(
-        str(engagement_dir),
-        command,
-        derived_tool_name,
-        execution_policy,
-    )
-    if reservation is not None:
-        audit_meta["effective_rate_rps"] = reservation
-        audit_meta["rate_override_reason"] = str(
-            getattr(args, "rate_override_reason", "") or ""
-        ).strip()
     record = start_job(
         command,
         audit_meta=audit_meta,

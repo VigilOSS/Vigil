@@ -12,7 +12,7 @@ Inputs to consult:
 
 - `vigil assess finding list --status active --verification-state verified --json` — confirmed-finding set
 - `vigil assess finding list --root-cause <slug> --json` — the root-cause grouping for a candidate root slug
-- For each finding: read `details_json` for `poc_request` / `poc_response` / `chain_required` / `evidence_type`
+- For each finding: read parsed `details` for `poc_request` / `poc_response` / `chain_required` / `evidence_type`
 
 Review checklist (emit one line per gap, naming the finding slug + the missing element):
 

@@ -12,7 +12,7 @@ import sys
 import tempfile
 from pathlib import Path, PurePosixPath
 
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessmentClient, AssessError, require_write_result
 from assess.lib.code_languages import detect_language
 from assess.lib.code_snapshot import (
     RootedSourceTree,
@@ -70,7 +70,6 @@ POLICY_PRESETS = ('application', 'package')
 _PACKAGE_PRESET_ADMITTED_DIRS = frozenset({'dist', 'build', '.next', '.nuxt'})
 
 DEFAULT_MAX_INCLUDED_SKIPPED_BYTES = 2_000_000
-DEFAULT_MAX_SOURCE_FILE_BYTES = 5_000_000
 
 # A collapsed admitted/total ratio is warned about, never refused: a
 # legitimately doc-heavy monorepo hits the same ratio, and a hard refusal on
@@ -87,6 +86,69 @@ _GIT_REV_LIST_TIMEOUT_SECONDS = 30
 _GIT_LARGE_HISTORY_COMMIT_THRESHOLD = 50_000
 _GIT_SECURITY_LOOKBACK = '3years'
 _GIT_CHURN_LOOKBACK = '1year'
+_SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def _refresh_receipt_error(operation: str, fields: str) -> AssessError:
+    return AssessError(
+        f"{operation}: backend response did not identify the durable result "
+        f"({fields}); the write may have committed, so inspect the canonical "
+        "code repository state and do not retry automatically"
+    )
+
+
+def _require_refresh_start_receipt(response: object) -> tuple[int, str]:
+    if not isinstance(response, dict):
+        raise _refresh_receipt_error(
+            "start code repository refresh", "response object"
+        )
+    repo_id = response.get("repo_id")
+    refresh_token = response.get("refresh_token")
+    invalid: list[str] = []
+    if not isinstance(repo_id, int) or isinstance(repo_id, bool) or repo_id < 1:
+        invalid.append("repo_id")
+    if not isinstance(refresh_token, str) or not refresh_token.strip():
+        invalid.append("refresh_token")
+    if invalid:
+        raise _refresh_receipt_error(
+            "start code repository refresh", ", ".join(invalid)
+        )
+    return repo_id, refresh_token
+
+
+def _require_refresh_commit_receipt(
+    response: object, *, requested_repo_id: int
+) -> tuple[int, str]:
+    if not isinstance(response, dict):
+        raise _refresh_receipt_error(
+            "commit code repository refresh", "response object"
+        )
+    returned_repo_id = response.get("repo_id")
+    repo_generation = response.get("repo_generation")
+    source_manifest_digest = response.get("source_manifest_digest")
+    invalid: list[str] = []
+    if (
+        not isinstance(returned_repo_id, int)
+        or isinstance(returned_repo_id, bool)
+        or returned_repo_id != requested_repo_id
+    ):
+        invalid.append("repo_id")
+    if (
+        not isinstance(repo_generation, int)
+        or isinstance(repo_generation, bool)
+        or repo_generation < 1
+    ):
+        invalid.append("repo_generation")
+    if (
+        not isinstance(source_manifest_digest, str)
+        or _SHA256_PATTERN.fullmatch(source_manifest_digest) is None
+    ):
+        invalid.append("source_manifest_digest")
+    if invalid:
+        raise _refresh_receipt_error(
+            "commit code repository refresh", ", ".join(invalid)
+        )
+    return repo_generation, source_manifest_digest
 
 
 def _which(binary: str, *, source_root: str | os.PathLike[str] | None = None) -> str | None:
@@ -267,16 +329,6 @@ def register(subparsers) -> None:
         help=f"Maximum size for an explicitly included skipped artifact (default {DEFAULT_MAX_INCLUDED_SKIPPED_BYTES}).",
     )
     p.add_argument(
-        "--max-source-file-bytes",
-        type=int,
-        default=DEFAULT_MAX_SOURCE_FILE_BYTES,
-        help=(
-            f"Maximum size for an ordinarily-admitted source file (default "
-            f"{DEFAULT_MAX_SOURCE_FILE_BYTES}). Larger files are recorded in the exclusion "
-            "manifest as oversize_source:<bytes> instead of entering the LOC denominator."
-        ),
-    )
-    p.add_argument(
         "--skipped-manifest",
         default=None,
         help=(
@@ -296,10 +348,6 @@ def _max_included_skipped_bytes(args) -> int:
     return int(
         getattr(args, "max_included_skipped_bytes", DEFAULT_MAX_INCLUDED_SKIPPED_BYTES)
     )
-
-
-def _max_source_file_bytes(args) -> int:
-    return int(getattr(args, "max_source_file_bytes", DEFAULT_MAX_SOURCE_FILE_BYTES))
 
 
 def _effective_skip_dirs(args) -> frozenset[str]:
@@ -567,7 +615,6 @@ def _admitted_source_paths(
     `_verify_source_inventory` raises on every run.
     """
     skip_dirs = _effective_skip_dirs(args)
-    max_source_bytes = _max_source_file_bytes(args)
     repo_root = source_tree.root.resolve()
     snapshots_resolved = snapshots_root.resolve(strict=False)
     try:
@@ -599,17 +646,15 @@ def _admitted_source_paths(
             include_reason = _include_reason(rel_path, skip_reason, args)
             if skip_reason and not include_reason:
                 continue
-            try:
-                size = source_tree.regular_file_size(rel_path)
-            except (OSError, ValueError) as exc:
-                raise SourceSnapshotRaceError(
-                    f"{rel_path} changed while verifying the sealed source"
-                ) from exc
             if skip_reason and include_reason:
+                try:
+                    size = source_tree.regular_file_size(rel_path)
+                except (OSError, ValueError) as exc:
+                    raise SourceSnapshotRaceError(
+                        f"{rel_path} changed while verifying the sealed source"
+                    ) from exc
                 if size > _max_included_skipped_bytes(args):
                     continue
-            elif size > max_source_bytes:
-                continue
             yield rel_path
 
 
@@ -770,8 +815,6 @@ def _collect_excluded_records(
     run by `_verify_source_inventory`.
     """
     skip_dirs = _effective_skip_dirs(args)
-    max_source_bytes = _max_source_file_bytes(args)
-
     records: list[dict[str, object]] = []
     repo_root = source_tree.root.resolve()
     snapshots_resolved = snapshots_root.resolve(strict=False)
@@ -837,18 +880,6 @@ def _collect_excluded_records(
             skip_reason = _skip_file_reason(rel_path, filename, skip_dirs)
             include_reason = _include_reason(rel_path, skip_reason, args)
             if not skip_reason:
-                # An admitted file is still excluded when it is too large to be
-                # reviewable source at all; the record keeps that auditable.
-                if source_tree.regular_file_size(rel_path) <= max_source_bytes:
-                    continue
-                captured = source_tree.capture(rel_path, retain_spool=False)
-                records.append(
-                    _captured_skipped_record(
-                        rel_path,
-                        f"oversize_source:{captured.size}",
-                        captured,
-                    )
-                )
                 continue
             captured = source_tree.capture(rel_path, retain_spool=False)
             if not include_reason:
@@ -935,7 +966,6 @@ def _write_skipped_manifest(
             "include_skipped": bool(getattr(args, "include_skipped", False)),
             "include_path": list(getattr(args, "include_path", []) or []),
             "max_included_skipped_bytes": _max_included_skipped_bytes(args),
-            "max_source_file_bytes": _max_source_file_bytes(args),
         },
         "excluded_entries": records,
     }
@@ -1454,11 +1484,7 @@ def run(args) -> None:
             'git_churn': {'churn_scores': dict(sorted(churn_scores.items(), key=lambda x: -x[1])[:30])} if churn_scores else {},
         }
         refresh = client.post('code/repos/refresh/start', repo_payload)
-        repo_id = refresh.get('repo_id')
-        refresh_token = refresh.get('refresh_token')
-        if not repo_id or not refresh_token:
-            print("Backend did not return a repo refresh claim", file=sys.stderr)
-            sys.exit(1)
+        repo_id, refresh_token = _require_refresh_start_receipt(refresh)
 
         # Bulk-create files in batches
         batch_size = 200
@@ -1470,19 +1496,21 @@ def run(args) -> None:
                 'files': batch,
             }
             resp = client.post(f'code/repos/{repo_id}/refresh/files', files_payload)
-            created_count += resp.get('staged', len(batch))
+            require_write_result(
+                resp,
+                operation="stage code repository files",
+                expected={"staged": len(batch)},
+                nonnegative_counts=("staged",),
+            )
+            created_count += resp["staged"]
         commit = client.post(
             f'code/repos/{repo_id}/refresh/commit',
             {'refresh_token': refresh_token, 'manifest_complete': True},
         )
-        repo_generation = commit.get("repo_generation")
-        committed_digest = str(commit.get("source_manifest_digest") or "")
-        if not isinstance(repo_generation, int) or repo_generation < 1:
-            print("Backend commit did not return a repository generation", file=sys.stderr)
-            sys.exit(1)
-        if len(committed_digest) != 64:
-            print("Backend commit did not return a valid source manifest digest", file=sys.stderr)
-            sys.exit(1)
+        repo_generation, committed_digest = _require_refresh_commit_receipt(
+            commit,
+            requested_repo_id=repo_id,
+        )
 
         ctags_output = (
             engagement_dir
@@ -1515,13 +1543,24 @@ def run(args) -> None:
                 "repo_generation": repo_generation,
                 "source_manifest_digest": committed_digest,
             }
-        client.post(
+        published_lsp = client.post(
             f"code/repos/{repo_id}/lsp-config",
             {
                 "repo_generation": repo_generation,
                 "source_manifest_digest": committed_digest,
                 "lsp_config": {"ctags": lsp_ctags},
             },
+        )
+        require_write_result(
+            published_lsp,
+            operation="publish code repository LSP config",
+            expected={
+                "id": repo_id,
+                "active_generation": repo_generation,
+                "source_manifest_digest": committed_digest,
+                "lsp_config": {"ctags": lsp_ctags},
+            },
+            positive_ids=("id",),
         )
 
     try:

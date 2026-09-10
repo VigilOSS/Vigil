@@ -299,12 +299,9 @@ quality checks — no LLM, no network, no real backend. Cases live under `tests/
      --definition tests/eval/definitions/<name>.yaml
    ```
 
-3. Run the harness from the repo root (the backend venv supplies `assess.lib.*`; running from inside
-   `orchestrator/backend` silently collects zero tests — see `tests/eval/README.md`):
-
-   ```bash
-   uv run --directory orchestrator/backend pytest ../../tests/eval
-   ```
+3. Run the deterministic eval command in the [verification matrix](#tests--verification)
+   from the repo root. It uses the backend venv with `--extra dev` and an absolute
+   suite path, so `uv --directory` cannot change which tests the path selects.
 
    Commit the fixture and definition together so replay stays zero-token. Use
    `python agent/scripts/assess/commands/eval_capture.py ... --check` after a re-run to diff a fresh
@@ -329,7 +326,7 @@ Do not churn it for:
 # Operator prompt regeneration
 
 `agent/operator-core.md` is the source for the rendered red operator prompts.
-`agent/operator-core-blue.md` is the source for blue per-engagement operator prompts. When you change
+`agent/operator-core-blue.md` is the source for the canonical blue operator prompt. When you change
 `agent/operator-core.md`, `agent/operator-core-blue.md`, `agent/agents/*.md`, or
 `agent/scripts/render-operator-prompts.sh`, rerender the affected tracked artifacts before handing off:
 
@@ -374,7 +371,7 @@ so edits land in the right place and do not create drift.
 - `agent/operator-core-blue.md` is the source-of-truth operator loop for blue-team incident
   engagements. It defines intake/triage/investigate/verify/respond/report flow, tenant-reference
   injection, and containment proposal/approval/recording boundaries.
-- `agent/AGENTS.md` and `agent/CLAUDE.md` are generated operator wrappers. They are committed outputs,
+- `agent/AGENTS.md`, `agent/AGENTS-blue.md`, and `agent/CLAUDE.md` are generated operator wrappers. They are committed outputs,
   not authoring surfaces. If they need semantic changes, edit the source prompt and rerender.
 - `agent/agents/*.md` are role prompts. They define agent identity, responsibilities, handoffs,
   and examples for a specific specialist. They should not become an independent source of backend
@@ -452,16 +449,16 @@ edit through that ruleset in addition to the **Prompt edit checklist** above.
 
 # Tests & verification
 
-The verification surface is **not one command**: 4 pytest scopes + a render-check + a schema-check + lint/types + the bench rungs, each with a different venv, prereqs, and cost. CI (`.github/workflows/ci.yml`) is authoritative for the blocking gates — backend pytest, the markdown-vs-CLI sync-lint, the deterministic eval, the root `tests/` suite, the assess CLI suite, the frontend build, ruff, and mypy.
+The verification surface is **not one command**: 4 pytest scopes + a render-check + a schema-check + lint/types + the bench rungs. All four pytest scopes use the backend venv; the other gates have their own prerequisites and costs. CI (`.github/workflows/ci.yml`) is authoritative for the blocking gates — backend pytest, the markdown-vs-CLI sync-lint, the deterministic eval, the root `tests/` suite, the assess CLI suite, the frontend build, ruff, and mypy.
 
 > **Never run a bare `pytest` from the repo root, and always go through the backend venv.** Scope every run to one suite — duplicate `test_vigil_cli.py` basenames in `tests/` and `agent/scripts/assess/tests/` collide under a single collection. The backend venv (`uv run --directory orchestrator/backend --extra dev …`) is the one interpreter that can collect every suite; the root `.venv` hard-errors on `tests/eval` (unconditional `import yaml`), and `uv run` *without* `--extra dev` fails to spawn pytest in a clean env.
 
 | Suite / gate | Command | Cost |
 |---|---|---|
 | Backend (incl. sync-lint) | `uv run --directory orchestrator/backend --extra dev pytest` | free |
-| Root CLI / bench harness | `uv run --directory orchestrator/backend --extra dev pytest "$(git rev-parse --show-toplevel)/tests"` | free |
-| Assess CLI | `uv run --directory orchestrator/backend --extra dev pytest "$(git rev-parse --show-toplevel)/agent/scripts/assess/tests"` | free |
-| Deterministic eval (absolute path is load-bearing) | `uv run --directory orchestrator/backend --extra dev pytest "$(git rev-parse --show-toplevel)/tests/eval"` | free |
+| Root CLI / bench harness (excluding eval) | `uv run --directory orchestrator/backend --extra dev pytest "$(jj root)/tests" --ignore="$(jj root)/tests/eval"` | free |
+| Assess CLI | `uv run --directory orchestrator/backend --extra dev pytest "$(jj root)/agent/scripts/assess/tests"` | free |
+| Deterministic eval | `uv run --directory orchestrator/backend --extra dev pytest "$(jj root)/tests/eval"` | free |
 | Prompt render-check | `cd agent && ./scripts/render-operator-prompts.sh check` | free |
 | Schema `--check` | `uv run --directory orchestrator/backend python scripts/generate_agent_schemas.py --check` | free |
 | Lint / types | `uvx ruff check .`  ·  `uvx --with-editable . mypy src/vigil_cli` | free |
@@ -471,7 +468,7 @@ The verification surface is **not one command**: 4 pytest scopes + a render-chec
 
 - **Integration tests are deselected by default** (`-m 'not integration'` in both pyprojects); opt in with `pytest -m integration` only after rebuilding the runtime image (`test_oob_correlate.py`, backend `test_runtime_tooling_contract.py`, `test_kali_cli.py`).
 - **Pre-push: mirror the blocking CI gates locally.** Before pushing a branch, run the gates CI blocks on — all four pytest rows above (backend, root `tests/`, assess CLI, deterministic eval; the sync-lint rides inside backend pytest), `uvx ruff check .`, and `uvx --with-editable . mypy src/vigil_cli`. CI runs on a clean checkout, so it catches drift a warm local venv hides.
-- **CI covers all four pytest scopes.** Every suite in the table above is a blocking PR gate: `backend-tests`, `eval`, `root-tests` (root `tests/`, less `tests/eval`), and `assess-tests` (`agent/scripts/assess/tests`). Until 0.2.0 the last two were unguarded and had to be run by hand; four red `vigil email` tests survived an entire hardening effort in that gap, which is why they are gates now rather than a note. Each of the three path-scoped jobs passes an **absolute** path: a relative one resolves against `--directory orchestrator/backend`'s cwd, collects zero tests, and exits 0 — a green job that ran nothing. Run them locally anyway before pushing, per the pre-push bullet; CI is the backstop, not the first look.
+- **CI covers all four pytest scopes.** Every suite in the table above is a blocking PR gate: `backend-tests`, `eval`, `root-tests` (root `tests/`, less `tests/eval`), and `assess-tests` (`agent/scripts/assess/tests`). Until 0.2.0 the last two were unguarded and had to be run by hand; four red `vigil email` tests survived an entire hardening effort in that gap, which is why they are gates now rather than a note. Each of the three path-scoped jobs passes an **absolute** path to avoid working-directory ambiguity. Relative paths resolve against `--directory orchestrator/backend`'s cwd: `../../tests/eval` selects the root eval suite, while `tests/eval` names a nonexistent backend directory and exits with an error. Check the collected test count and pytest's own exit status; zero collected tests are not evidence of a passing suite. Run them locally anyway before pushing, per the pre-push bullet; CI is the backstop, not the first look.
 - **The `**/data/` ignore trap.** Shipped data a test or feature depends on — resolver lists, fixtures, golden files — often lives under a `data/` dir, which `.gitignore`'s broad `**/data/` rule silently drops: it passes locally (file on disk) but fails in CI (clean checkout never received it). When you add *required* shipped data, add a targeted `!` negation in `.gitignore` (re-include each path level down to the files, since git won't descend into an ignored dir) **and** `git add -f` it, then confirm `git ls-files <path>` tracks it. This is exactly what bit `test_shipped_resolver_lists_exist_and_are_within_cap`.
 - **`skeleton/` sidecars vs mypy.** Bench `skeleton/` `.py` files are container-runtime sidecars that import runtime-only siblings (e.g. `oracle_checkpoint`) mypy can't resolve. They are excluded from mypy via `[tool.mypy] exclude` in `pyproject.toml` (or keep sidecars as `.tmpl`, which mypy ignores). Do **not** "fix" such an `import-not-found` by adding the runtime module to the type path.
 

@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from assess.lib import kali_audit
+from assess.lib.client import AssessError
 
 
 class _RecordingClient:
@@ -26,12 +27,19 @@ class _RecordingClient:
 
     def patch(self, endpoint: str, payload: dict, accept_409: bool = False) -> dict:
         self.patches.append((endpoint, payload))
-        return {"id": 1, **payload}
+        return {"id": 7, "run_uuid": "run-expected", **payload}
+
+
+class _MalformedFinalizeClient(_RecordingClient):
+    def patch(self, endpoint: str, payload: dict, accept_409: bool = False) -> dict:
+        self.patches.append((endpoint, payload))
+        return {"message": "accepted"}
 
 
 def _finalize(client, **overrides) -> dict:
     kwargs: dict = {
         "run_id": 7,
+        "run_uuid": "run-expected",
         "status": "completed",
         "return_code": 0,
         "ended_at_iso": "2026-08-25T09:00:05Z",
@@ -90,6 +98,42 @@ def test_finalize_without_paths_is_unchanged(tmp_path) -> None:
 
     assert "stdout_bytes" not in payload
     assert "stderr_bytes" not in payload
+
+
+def test_finalize_rejects_arbitrary_success_object() -> None:
+    with pytest.raises(AssessError, match="finalize command run") as exc:
+        _finalize(_MalformedFinalizeClient())
+
+    assert "do not retry automatically" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    ("row_id", "run_uuid"),
+    [(8, "run-expected"), (7, "run-other")],
+    ids=["wrong-id", "wrong-uuid"],
+)
+def test_host_finalize_validation_binds_id_and_run_uuid(row_id, run_uuid) -> None:
+    from assess.commands import host_exec
+
+    attempted = {
+        "id": 7,
+        "run_uuid": "run-expected",
+        "status": "completed",
+        "return_code": 0,
+        "timed_out": False,
+        "duration_ms": 5000,
+        "partial_results": False,
+        "ended_at": "2026-08-25T09:00:05Z",
+    }
+    finalized = {
+        **attempted,
+        "id": row_id,
+        "run_uuid": run_uuid,
+        "completed_at": attempted["ended_at"],
+    }
+
+    with pytest.raises(AssessError, match="finalize command run"):
+        host_exec._validate_terminal_finalize_response(finalized, attempted)
 
 
 # --------------------------------------------------------------------------- #
@@ -340,3 +384,21 @@ def test_async_job_finalize_records_byte_truth(tmp_path) -> None:
     assert payload["stdout_sha256"] == hashlib.sha256(body).hexdigest()
     assert payload["stderr_bytes"] == 0
     assert payload["stderr_sha256"] == ""
+
+
+def test_async_job_finalize_warns_when_run_uuid_cannot_be_resolved(capsys) -> None:
+    from assess.lib import kali_jobs
+
+    client = _RecordingClient()
+    kali_jobs.finalize_parent_command_run(
+        client,
+        {"parent_command_run_id": 11},
+        status_value="failed",
+        return_code=1,
+    )
+
+    assert client.patches == []
+    assert capsys.readouterr().err == (
+        "warning: could not finalize parent command run id=11: "
+        "job record has neither run_uuid nor stdout_path\n"
+    )

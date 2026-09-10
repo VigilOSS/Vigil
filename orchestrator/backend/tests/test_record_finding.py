@@ -21,6 +21,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import pytest
+
 # The assess CLI package lives under agent/scripts; put it on the path so the
 # CLI-boundary half of the dual enforcement is testable from the backend suite
 # (mirrors test_kali_cli.py).
@@ -56,8 +58,7 @@ def _finding(
     slug,
     *,
     workflow_status="active",
-    verification_state="unreviewed",
-    verification_disposition="none",
+    verification_status="unreviewed",
     defect_family="access-control",
     root_cause_key="missing-object-authz",
     auth_context="anonymous",
@@ -69,8 +70,7 @@ def _finding(
         "title": title,
         "severity": "high",
         "workflow_status": workflow_status,
-        "verification_state": verification_state,
-        "verification_disposition": verification_disposition,
+        "verification_status": verification_status,
         "defect_family": defect_family,
         "root_cause_key": root_cause_key,
         "auth_context": auth_context,
@@ -253,8 +253,7 @@ def test_false_positive_rerecord_is_not_clobber_guarded(client, isolate_settings
         json=_finding(
             "VA-001",
             workflow_status="false_positive",
-            verification_state="verified",
-            verification_disposition="false_positive",
+            verification_status="unreviewed",
         ),
     ).status_code == 201
 
@@ -278,8 +277,7 @@ def _killed_ssrf(slug, **over) -> dict:
     return _finding(
         slug,
         workflow_status="false_positive",
-        verification_state="verified",
-        verification_disposition="false_positive",
+        verification_status="unreviewed",
         defect_family="ssrf",
         root_cause_key="unvalidated-fetch",
         canonical_location="https://app.example/api/fetch?url=http://169.254.169.254",
@@ -431,6 +429,58 @@ def test_d4_reset_finding_reopens_killed(client, isolate_settings):
 
 def _record_finding():
     return importlib.import_module("assess.commands.record_finding")
+
+
+def test_finding_record_schema_accepts_atomic_run_candidate_promotion() -> None:
+    from assess.lib.schema_validation import collect_validation_errors
+
+    rf = _record_finding()
+    payload = _finding("VA-099")
+    payload["run_candidate"] = {
+        "run_id": 17,
+        "candidate_id": 61,
+        "reason": "promoted after exact source verification",
+        "proof_receipt_ids": [71],
+    }
+    normalized = rf._normalize_payload(
+        payload, agent_name="code-vuln-hunter", candidate_slug="VA-099"
+    )
+    assert collect_validation_errors(normalized, rf._FINDING_SCHEMA) == []
+
+
+def test_finding_record_validates_atomic_candidate_provenance_response() -> None:
+    from assess.lib.client import AssessError
+
+    rf = _record_finding()
+    request = {
+        "run_id": 17,
+        "candidate_id": 61,
+        "reason": "promoted after exact source verification",
+        "proof_receipt_ids": [71],
+    }
+    response = {
+        "finding": {"slug": "VA-099"},
+        "run_candidate": {
+            "id": 61,
+            "run_id": 17,
+            "target_key": "service-a",
+            "source_id": 31,
+            "source_anchor": "src/main.py:7",
+            "originating_result_id": 81,
+            "originating_signal_id": None,
+            "state": "promoted",
+            "finding_slug": "VA-099",
+            "proof_receipt_ids": [71],
+        },
+    }
+    assert rf._require_atomic_candidate_response(response, request) == response
+    with pytest.raises(AssessError, match="candidate provenance"):
+        missing_source = dict(response["run_candidate"])
+        missing_source.pop("source_id")
+        rf._require_atomic_candidate_response(
+            {**response, "run_candidate": missing_source},
+            request,
+        )
 
 
 def _existing(slug, **over) -> dict:

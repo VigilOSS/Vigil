@@ -28,9 +28,10 @@ def _copy_agent_fixture(agent_root: Path, sandbox_root: Path, *, client: str) ->
     shutil.copytree(agent_root / "rules", sandbox_root / "rules")
     shutil.copytree(agent_root / "skills", sandbox_root / "skills")
     shutil.copytree(agent_root / "references", sandbox_root / "references")
+    shutil.copy2(agent_root / "AGENTS.md", sandbox_root / "AGENTS.md")
+    shutil.copy2(agent_root / "AGENTS-blue.md", sandbox_root / "AGENTS-blue.md")
     if client in {"codex", "both"}:
         shutil.copytree(agent_root / ".codex", sandbox_root / ".codex")
-        shutil.copy2(agent_root / "AGENTS.md", sandbox_root / "AGENTS.md")
     if client in {"claude", "both"}:
         shutil.copytree(agent_root / ".claude", sandbox_root / ".claude")
         shutil.copy2(agent_root / "CLAUDE.md", sandbox_root / "CLAUDE.md")
@@ -394,6 +395,13 @@ def test_aith_engagement_create_writes_engagement_brief_stub(
 
     # ENGAGEMENT-NEUTRAL: no host/program specifics are seeded at creation time.
     assert "app.example.com" not in text
+
+    # Keep the mandatory startup read limited to rules of engagement. Product
+    # setup advice and discovery credentials belong in product documentation,
+    # not in every engagement's authoritative ROE surface.
+    assert "Passive-DNS / Recon Coverage Keys" not in text
+    assert "SUBFINDER_CHAOS_API_KEY" not in text
+    assert "SUBFINDER_GITHUB_TOKEN" not in text
 
 
 def test_repair_refreshes_stale_claude_hook_settings(tmp_path: Path) -> None:

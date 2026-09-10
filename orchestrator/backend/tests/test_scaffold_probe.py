@@ -248,7 +248,7 @@ def test_scaffold_probe_registration_failure_is_non_fatal(
 
     class _BoomClient(_FakeClient):
         def post(self, endpoint: str, payload: dict) -> dict:
-            raise AssessError("backend unreachable")
+            raise AssessError("HTTP 422: artifact payload rejected before commit")
 
     monkeypatch.setattr(module, "AssessmentClient", _BoomClient)
 
@@ -258,6 +258,34 @@ def test_scaffold_probe_registration_failure_is_non_fatal(
     err = capsys.readouterr().err
     assert "artifact registration failed" in err
     assert "artifact register scripts/resilient.py" in err
+
+
+def test_scaffold_probe_malformed_registration_receipt_is_non_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _load_scaffold_probe()
+    eng = _make_engagement(tmp_path)
+    _patch_config_and_client(monkeypatch, module, eng)
+
+    class _MalformedClient(_FakeClient):
+        def post(self, endpoint: str, payload: dict) -> dict:
+            type(self).posts.append((endpoint, payload))
+            return {"message": "accepted"}
+
+    monkeypatch.setattr(module, "AssessmentClient", _MalformedClient)
+
+    module.run(_args(eng, "uncertain", as_json=True))
+
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert (eng / "scripts" / "uncertain.py").is_file()
+    assert result["registered"] is False
+    assert result["artifact"] is None
+    error = captured.err
+    assert "canonical artifact" in error
+    assert "do not retry automatically" in error
+    assert "reconcile" in error.lower()
+    assert "vigil assess artifact register" not in error
 
 
 def test_reference_probe_examples_are_valid_python() -> None:

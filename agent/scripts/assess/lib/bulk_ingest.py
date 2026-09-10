@@ -9,6 +9,91 @@ from assess.lib.client import AssessError
 DEFAULT_BULK_WRITE_SIZE = 500
 
 
+def _positive_id(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _uncertain_receipt(operation: str, detail: str) -> AssessError:
+    return AssessError(
+        f"{operation}: backend response did not identify the canonical {detail}; "
+        "the write may have committed, so inspect durable assessment state and "
+        "do not retry automatically"
+    )
+
+
+def _require_observation_receipt(
+    response: object,
+    *,
+    observation: dict[str, Any],
+    operation: str,
+) -> dict[str, Any]:
+    if not isinstance(response, dict):
+        raise _uncertain_receipt(operation, "request observation")
+    variant = response.get("request_variant")
+    receipt = response.get("request_observation")
+    service = response.get("service")
+    if variant is None and receipt is None:
+        if isinstance(service, dict) and _positive_id(service.get("id")):
+            return response
+        raise _uncertain_receipt(operation, "request observation")
+    if not isinstance(variant, dict) or not isinstance(receipt, dict):
+        raise _uncertain_receipt(operation, "request observation")
+    variant_id = variant.get("id")
+    receipt_id = receipt.get("id")
+    expected_method = str(observation.get("method") or "GET").upper()
+    if (
+        not _positive_id(variant_id)
+        or not _positive_id(receipt_id)
+        or receipt.get("request_variant_id") != variant_id
+        or receipt.get("observed_url") != observation.get("url")
+        or variant.get("method") != expected_method
+    ):
+        raise _uncertain_receipt(operation, "request observation")
+    return response
+
+
+def _require_bulk_receipt(
+    response: object,
+    *,
+    expected_count: int,
+    operation: str,
+    detail: str,
+) -> list[object]:
+    if not isinstance(response, dict):
+        raise _uncertain_receipt(operation, detail)
+    count = response.get("count")
+    records = response.get("records")
+    if (
+        not isinstance(count, int)
+        or isinstance(count, bool)
+        or count != expected_count
+        or not isinstance(records, list)
+        or len(records) != expected_count
+    ):
+        raise _uncertain_receipt(operation, detail)
+    return records
+
+
+def _require_coverage_receipt(
+    response: object,
+    *,
+    item: dict[str, Any],
+    operation: str,
+) -> dict[str, Any]:
+    if not isinstance(response, dict):
+        raise _uncertain_receipt(operation, "coverage item")
+    if (
+        not _positive_id(response.get("id"))
+        or response.get("request_variant_id") != item.get("request_variant_id")
+        or response.get("service_id") != item.get("service_id")
+        or response.get("auth_context") != item.get("auth_context", "anonymous")
+        or response.get("input_slot") != item.get("input_slot", "endpoint")
+        or response.get("attack_family") != item.get("attack_family")
+    ):
+        raise _uncertain_receipt(operation, "coverage item")
+    return response
+
+
 def _bulk_endpoint_missing(exc: AssessError) -> bool:
     message = str(exc)
     return message.startswith("HTTP 404") or message.startswith("HTTP 405")
@@ -52,21 +137,33 @@ def post_request_observations_bulk(
         records: list[dict[str, Any] | Exception] = []
         for observation in observations:
             try:
-                records.append(client.post("request-observations", observation))
+                response = client.post("request-observations", observation)
+                records.append(
+                    _require_observation_receipt(
+                        response,
+                        observation=observation,
+                        operation="record request observation",
+                    )
+                )
             except Exception as row_exc:  # noqa: BLE001 - caller decides row policy
                 if not fallback_individual:
                     raise
                 records.append(row_exc)
         return records
-    records = response.get("records") if isinstance(response, dict) else None
-    if not isinstance(records, list):
-        raise RuntimeError("backend bulk response missing records list")
-    if len(records) != len(observations):
-        raise RuntimeError(
-            f"backend bulk response returned {len(records)} record(s) for "
-            f"{len(observations)} observation(s)"
+    records = _require_bulk_receipt(
+        response,
+        expected_count=len(observations),
+        operation="record request observations",
+        detail="request observations",
+    )
+    return [
+        _require_observation_receipt(
+            record,
+            observation=observation,
+            operation="record request observation",
         )
-    return records
+        for observation, record in zip(observations, records, strict=True)
+    ]
 
 
 def post_coverage_items_bulk(client, items: list[dict[str, Any]], *, warn_prefix: str) -> None:
@@ -74,8 +171,7 @@ def post_coverage_items_bulk(client, items: list[dict[str, Any]], *, warn_prefix
         return
     for chunk in _chunks(items, DEFAULT_BULK_WRITE_SIZE):
         try:
-            client.post("coverage-items/bulk", {"items": chunk})
-            continue
+            response = client.post("coverage-items/bulk", {"items": chunk})
         except AssessError as exc:
             if not (_bulk_endpoint_missing(exc) or _bulk_payload_error(exc)):
                 print(
@@ -89,12 +185,32 @@ def post_coverage_items_bulk(client, items: list[dict[str, Any]], *, warn_prefix
                 f"{len(chunk)} item(s): {exc}; retrying individually.",
                 file=sys.stderr,
             )
+        else:
+            records = _require_bulk_receipt(
+                response,
+                expected_count=len(chunk),
+                operation="record coverage items",
+                detail="coverage items",
+            )
+            for item, record in zip(chunk, records, strict=True):
+                _require_coverage_receipt(
+                    record,
+                    item=item,
+                    operation="record coverage item",
+                )
+            continue
         for item in chunk:
             try:
-                client.post("coverage-items", item)
+                response = client.post("coverage-items", item)
             except Exception as exc:  # noqa: BLE001 - best-effort coverage bridge
                 print(
                     f"WARN {warn_prefix}: coverage-item POST failed for "
                     f"{item.get('attack_family', 'unknown')}: {exc}; continuing.",
                     file=sys.stderr,
                 )
+                continue
+            _require_coverage_receipt(
+                response,
+                item=item,
+                operation="record coverage item",
+            )

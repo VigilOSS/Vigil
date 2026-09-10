@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 from contextlib import contextmanager
+from itertools import count
 from pathlib import Path
 
 import pytest
@@ -11,10 +12,139 @@ import pytest
 from app import db as db_module
 from app.services import engagements as engagement_service
 from app.services import events as events_service
+from tests.proof_fixtures import post_artifact_backed_source_observation
 
 
 def legacy_finding_slug(suffix: str = "VA-001") -> str:
     return f"{'FINDING'}-{suffix}"
+
+
+_proof_run_counter = count(1)
+
+
+def _author_provenance(
+    client, slug: str, *, key: str = "2026-03-30-120000-example"
+) -> dict[str, str]:
+    agent_id = f"FIXTURE-AUTHOR-{slug}"
+    base = f"/engagements/{key}/assessment/dispatches"
+    existing = client.get(f"{base}/{agent_id}")
+    if existing.status_code == 404:
+        response = client.post(
+            base,
+            json={
+                "agent_id": agent_id,
+                "agent_role": "fixture-finding-author",
+                "task": f"Record {slug} for the API fixture.",
+            },
+        )
+        assert response.status_code == 201, response.text
+    else:
+        assert existing.status_code == 200, existing.text
+    return {"agent_id": agent_id}
+
+
+def _proof_receipt(client, slug: str, *, key: str = "2026-03-30-120000-example") -> int:
+    sequence = next(_proof_run_counter)
+    agent_id = f"FIXTURE-VERIFY-{slug}-{sequence}"
+    base = f"/engagements/{key}/assessment"
+    dispatch = client.post(
+        f"{base}/dispatches",
+        json={
+            "agent_id": agent_id,
+            "agent_role": "fixture-independent-verifier",
+            "task": f"Independently verify {slug} for the API fixture.",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
+    run = client.post(
+        f"{base}/assessment-runs",
+        json={
+            "run_uuid": f"engagements-api-{slug}-{sequence}",
+            "run_kind": "shared",
+            "producer_dispatch_agent_id": agent_id,
+        },
+    )
+    assert run.status_code == 201, run.text
+    receipt = post_artifact_backed_source_observation(
+        client,
+        f"{base}/proof-receipts",
+        json={
+            "run_id": run.json()["id"],
+            "evidence_kind": "source_observation",
+            "expected_result": "the finding claim survives an independent counter-check",
+            "observed_result": "the independent review reproduced the recorded result",
+        },
+    )
+    assert receipt.status_code == 201, receipt.text
+    completed = client.patch(
+        f"{base}/assessment-runs/{run.json()['id']}",
+        json={"status": "completed"},
+    )
+    assert completed.status_code == 200, completed.text
+    return int(receipt.json()["id"])
+
+
+def _verify_with_fixture_proof(
+    client,
+    slug: str,
+    payload: dict,
+    *,
+    key: str = "2026-03-30-120000-example",
+):
+    receipt_id = _proof_receipt(client, slug, key=key)
+    request = {**payload, "proof_receipt_ids": [receipt_id]}
+    if request["verification_status"] == "false_positive":
+        request["counter_check"] = {
+            "method": "independent source-path counter-check",
+            "expected_result": "the claimed vulnerable path remains reachable",
+            "observed_result": "the counter-check falsified the recorded claim",
+            "falsified_claim": "the recorded vulnerable path is reachable",
+            "completed": True,
+            "proof_receipt_ids": [receipt_id],
+        }
+    return client.post(
+        f"/engagements/{key}/assessment/findings/{slug}/verify",
+        json=request,
+    )
+
+
+def _record_terminal_finding(client, payload: dict):
+    slug = str(payload["slug"])
+    terminal_status = str(payload["verification_status"])
+    author_agent_id = f"FIXTURE-AUTHOR-{slug}-{next(_proof_run_counter)}"
+    author = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/dispatches",
+        json={
+            "agent_id": author_agent_id,
+            "agent_role": "fixture-finding-author",
+            "task": f"Record {slug} for the API fixture.",
+        },
+    )
+    assert author.status_code == 201, author.text
+    create_payload = {
+        **payload,
+        "workflow_status": "active",
+        "verification_status": "unreviewed",
+        "provenance": {
+            **dict(payload.get("provenance") or {}),
+            "agent_id": author_agent_id,
+        },
+    }
+    created = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/findings",
+        json=create_payload,
+    )
+    assert created.status_code == 201, created.text
+    return _verify_with_fixture_proof(
+        client,
+        slug,
+        {
+            "verification_status": terminal_status,
+            "reason_code": "fixture-independent-review",
+            "reason_text": "Independent fixture review completed.",
+            "source_name": "fixture-independent-verifier",
+        },
+    )
 
 
 def write_engagement(engagements_dir: Path, key: str = "2026-03-30-120000-example") -> Path:
@@ -807,15 +937,14 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
     )
     assert invalid_surface.status_code == 422
 
-    create_finding = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
+    create_finding = _record_terminal_finding(
+        client,
+        {
             "slug": "VA-001",
             "title": "IDOR in orders",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "verified",
-            "verification_disposition": "confirmed",
+            "verification_status": "confirmed",
             "defect_family": "idor",
             "root_cause_key": "orders-idor",
             "auth_context": "anonymous",
@@ -843,7 +972,7 @@ def test_engagement_event_and_assessment_routes_use_engagement_key(client, isola
             "links": [],
         },
     )
-    assert create_finding.status_code == 201
+    assert create_finding.status_code == 200
     assert create_finding.json()["finding"]["slug"] == "VA-001"
 
     findings = client.get("/engagements/2026-03-30-120000-example/assessment/findings")
@@ -1138,8 +1267,7 @@ def test_findings_endpoint_filters_and_paginates_server_side(client, isolate_set
             "title": "OIDC static state replay",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "verified",
-            "verification_disposition": "confirmed",
+            "verification_status": "confirmed",
             "canonical_location": "https://example.com/login",
             "summary": "OIDC state can be replayed",
             "source_name": "vulnerability-analyst",
@@ -1149,7 +1277,7 @@ def test_findings_endpoint_filters_and_paginates_server_side(client, isolate_set
             "title": "Low severity cookie issue",
             "severity": "low",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
+            "verification_status": "unreviewed",
             "canonical_location": "https://example.com/cookie",
             "summary": "Cookie issue",
             "source_name": "recon-specialist",
@@ -1159,27 +1287,29 @@ def test_findings_endpoint_filters_and_paginates_server_side(client, isolate_set
             "title": "Another active OIDC issue",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "verified",
-            "verification_disposition": "confirmed",
+            "verification_status": "confirmed",
             "canonical_location": "https://example.com/callback",
             "summary": "OIDC callback issue",
             "source_name": "vulnerability-analyst",
         },
     ]
     for payload in payloads:
-        response = client.post(
-            "/engagements/2026-03-30-120000-example/assessment/findings",
-            json=payload,
-        )
-        assert response.status_code == 201, response.text
+        if payload["verification_status"] == "confirmed":
+            response = _record_terminal_finding(client, payload)
+            assert response.status_code == 200, response.text
+        else:
+            response = client.post(
+                "/engagements/2026-03-30-120000-example/assessment/findings",
+                json=payload,
+            )
+            assert response.status_code == 201, response.text
 
     filtered = client.get(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         params={
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "verified",
-            "verification_disposition": "confirmed",
+            "verification_status": "confirmed",
             "source_name": "vulnerability-analyst",
             "search": "OIDC",
             "limit": 1,
@@ -1192,7 +1322,6 @@ def test_findings_endpoint_filters_and_paginates_server_side(client, isolate_set
     assert rows[0]["slug"] in {"VA-101", "VA-103"}
     assert rows[0]["severity"] == "high"
     assert rows[0]["workflow_status"] == "active"
-    assert rows[0]["verification_state"] == "verified"
 
 
 def test_finding_create_rejects_malformed_slug_and_lookup_accepts_alias(client, isolate_settings):
@@ -1205,8 +1334,7 @@ def test_finding_create_rejects_malformed_slug_and_lookup_accepts_alias(client, 
             "title": "Malformed slug",
             "severity": "medium",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "canonical_location": "https://example.com/malformed",
             "summary": "Malformed slug should be rejected at write time.",
             "evidence_ref": "findings.md",
@@ -1223,8 +1351,7 @@ def test_finding_create_rejects_malformed_slug_and_lookup_accepts_alias(client, 
             "title": "Canonical slug",
             "severity": "medium",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "canonical_location": "https://example.com/canonical",
             "summary": "Canonical slug should be stored.",
             "evidence_ref": "findings.md",
@@ -1248,8 +1375,7 @@ def test_finding_auto_slug_counts_canonical_ids_beyond_999(client, isolate_setti
             "title": "Existing high-volume canonical slug",
             "severity": "medium",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "canonical_location": "https://example.com/high-volume/1000",
             "summary": "Existing finding beyond the first 999 IDs.",
             "evidence_ref": "findings.md",
@@ -1264,8 +1390,7 @@ def test_finding_auto_slug_counts_canonical_ids_beyond_999(client, isolate_setti
             "title": "Next high-volume canonical slug",
             "severity": "medium",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "canonical_location": "https://example.com/high-volume/1001",
             "summary": "Auto-allocation should not collide with VA-1000.",
             "evidence_ref": "findings.md",
@@ -1285,8 +1410,7 @@ def test_finding_auto_slug_falls_back_for_unknown_source_name(client, isolate_se
             "title": "Unknown source finding",
             "severity": "medium",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "canonical_location": "https://example.com/unknown",
             "summary": "Clients that omit source_name still get a backend slug.",
             "evidence_ref": "findings.md",
@@ -1310,10 +1434,10 @@ def test_patch_finding_accepts_existing_database_legacy_slug(client, isolate_set
             """
             INSERT INTO assessment_findings (
                 engagement_id, slug, title, severity, status,
-                verification_state, verification_disposition, canonical_location,
+                verification_status, canonical_location,
                 source_name, summary, evidence_ref
             ) VALUES (?, 'legacy-title-slug', 'Legacy row', 'medium', 'active',
-                'unreviewed', 'none', 'https://example.com/legacy',
+                'unreviewed', 'https://example.com/legacy',
                 'vulnerability-analyst', 'Before update', 'findings.md')
             """,
             (engagement_id,),
@@ -1431,8 +1555,7 @@ def test_final_report_mode_returns_conflict_when_readiness_fails(client, isolate
             "title": "Unreviewed IDOR in orders",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "idor",
             "root_cause_key": "orders-idor-unreviewed",
             "auth_context": "anonymous",
@@ -1445,7 +1568,9 @@ def test_final_report_mode_returns_conflict_when_readiness_fails(client, isolate
                 "evidence": "GET /orders/9 returns order for user B when authenticated as user A",
                 "impact": "cross-tenant access",
             },
-            "provenance": {"agent_name": "vulnerability-analyst"},
+            "provenance": {
+                "agent_name": "vulnerability-analyst",
+            },
             "links": [],
         },
     )
@@ -1455,7 +1580,7 @@ def test_final_report_mode_returns_conflict_when_readiness_fails(client, isolate
     assert report_readiness.status_code == 200
     assert report_readiness.json()["ready"] is False
     assert any(
-        blocker["kind"] == "finding_verification_state" for blocker in report_readiness.json()["blockers"]
+        blocker["kind"] == "finding_verification_status" for blocker in report_readiness.json()["blockers"]
     )
 
     final_report = client.get(
@@ -1464,7 +1589,7 @@ def test_final_report_mode_returns_conflict_when_readiness_fails(client, isolate
     assert final_report.status_code == 409
     assert final_report.json()["detail"]["ready"] is False
     assert any(
-        blocker["kind"] == "finding_verification_state"
+        blocker["kind"] == "finding_verification_status"
         for blocker in final_report.json()["detail"]["blockers"]
     )
 
@@ -1495,15 +1620,14 @@ def test_final_report_includes_verified_contained_blue_finding(client, isolate_s
     )
     assert create_surface.status_code == 201
 
-    create_finding = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
+    create_finding = _record_terminal_finding(
+        client,
+        {
             "slug": "IR-001",
             "title": "Compromised mailbox session contained",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "verified",
-            "verification_disposition": "confirmed",
+            "verification_status": "confirmed",
             "defect_family": "account-compromise",
             "root_cause_key": "gws-compromised-session",
             "auth_context": "tenant",
@@ -1521,7 +1645,7 @@ def test_final_report_includes_verified_contained_blue_finding(client, isolate_s
             "links": [],
         },
     )
-    assert create_finding.status_code == 201
+    assert create_finding.status_code == 200
 
     evidence_path = engagement_dir / "ir" / "evidence" / "session.md"
     evidence_path.parent.mkdir(parents=True)
@@ -1785,8 +1909,7 @@ def test_findings_verify_updates_existing_finding_and_records_transition(client,
             "title": "IDOR in orders",
             "severity": "medium",
             "workflow_status": "draft",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "idor",
             "root_cause_key": "orders-idor",
             "auth_context": "anonymous",
@@ -1799,16 +1922,20 @@ def test_findings_verify_updates_existing_finding_and_records_transition(client,
                 "evidence": "Initial request/response pair",
                 "impact": "Potential cross-tenant access",
             },
-            "provenance": {"agent_name": "vulnerability-analyst"},
+            "provenance": {
+                **_author_provenance(client, "VA-001"),
+                "agent_name": "vulnerability-analyst",
+            },
             "links": [],
         },
     )
     assert created.status_code == 201
 
-    verified = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings/VA-001/verify",
-        json={
-            "disposition": "confirmed",
+    verified = _verify_with_fixture_proof(
+        client,
+        "VA-001",
+        {
+            "verification_status": "confirmed",
             "reason_code": "reproduced",
             "reason_text": "Adjacent object identifiers reliably return cross-tenant orders.",
             "notes": "Verified with adjacent object identifiers.",
@@ -1823,8 +1950,7 @@ def test_findings_verify_updates_existing_finding_and_records_transition(client,
     payload = verified.json()
     assert payload["finding"]["slug"] == "VA-001"
     assert payload["finding"]["workflow_status"] == "draft"
-    assert payload["finding"]["verification_state"] == "verified"
-    assert payload["finding"]["verification_disposition"] == "confirmed"
+    assert payload["finding"]["verification_status"] == "confirmed"
     assert payload["finding"]["severity"] == "medium"
     assert payload["transition"]["action"] == "verified_confirmed"
 
@@ -1839,8 +1965,7 @@ def test_findings_verify_updates_existing_finding_and_records_transition(client,
     finding = next(item for item in findings.json() if item["slug"] == "VA-001")
     assert "Verified with adjacent object identifiers." in finding["notes"]
     assert finding["workflow_status"] == "draft"
-    assert finding["verification_state"] == "verified"
-    assert finding["verification_disposition"] == "confirmed"
+    assert finding["verification_status"] == "confirmed"
     assert finding["details"]["impact"] == "Confirmed cross-tenant order read"
     assert finding["provenance"]["verified_by"] == "code-vuln-verifier"
 
@@ -1855,8 +1980,7 @@ def test_findings_verify_pending_runtime_proof_roundtrips_and_holds(client, isol
             "title": "Static state replay (runtime proof pending)",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "auth-bypass",
             "root_cause_key": "static-state-replay",
             "auth_context": "anonymous",
@@ -1870,7 +1994,9 @@ def test_findings_verify_pending_runtime_proof_roundtrips_and_holds(client, isol
                 "impact": "Potential account takeover pending runtime confirmation",
                 "chain_required": True,
             },
-            "provenance": {"agent_name": "vulnerability-analyst"},
+            "provenance": {
+                "agent_name": "vulnerability-analyst",
+            },
             "links": [],
         },
     )
@@ -1879,7 +2005,7 @@ def test_findings_verify_pending_runtime_proof_roundtrips_and_holds(client, isol
     verified = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings/VA-050/verify",
         json={
-            "disposition": "pending_runtime_proof",
+            "verification_status": "pending_runtime_proof",
             "reason_code": "static-accepted",
             "reason_text": "Static/code evidence accepted; runtime PoC still outstanding.",
             "notes": "Held pending exploit-developer runtime proof.",
@@ -1895,8 +2021,7 @@ def test_findings_verify_pending_runtime_proof_roundtrips_and_holds(client, isol
     assert payload["finding"]["slug"] == "VA-050"
     # The disposition must round-trip exactly (NOT silently degrade to none/disputed)
     # and the finding must be marked verified so it leaves the unreviewed queue.
-    assert payload["finding"]["verification_disposition"] == "pending_runtime_proof"
-    assert payload["finding"]["verification_state"] == "verified"
+    assert payload["finding"]["verification_status"] == "pending_runtime_proof"
     assert payload["finding"]["workflow_status"] == "active"
     assert payload["finding"]["severity"] == "high"
     assert payload["transition"]["action"] == "verified_pending_runtime_proof"
@@ -1914,8 +2039,7 @@ def test_findings_verify_pending_runtime_proof_roundtrips_and_holds(client, isol
     findings = client.get("/engagements/2026-03-30-120000-example/assessment/findings")
     assert findings.status_code == 200
     finding = next(item for item in findings.json() if item["slug"] == "VA-050")
-    assert finding["verification_disposition"] == "pending_runtime_proof"
-    assert finding["verification_state"] == "verified"
+    assert finding["verification_status"] == "pending_runtime_proof"
 
 
 def test_pending_runtime_proof_is_sticky_against_bare_none_rerecord(client, isolate_settings):
@@ -1938,21 +2062,21 @@ def test_pending_runtime_proof_is_sticky_against_bare_none_rerecord(client, isol
     }
     created = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={**base_payload, "workflow_status": "active", "verification_state": "unreviewed", "verification_disposition": "none"},
+        json={**base_payload, "workflow_status": "active", "verification_status": "unreviewed"},
     )
     assert created.status_code == 201
 
     verified = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings/VA-051/verify",
         json={
-            "disposition": "pending_runtime_proof",
+            "verification_status": "pending_runtime_proof",
             "reason_code": "static-accepted",
             "reason_text": "Static evidence accepted; runtime proof outstanding.",
             "source_name": "vulnerability-analyst",
         },
     )
     assert verified.status_code == 200
-    assert verified.json()["finding"]["verification_disposition"] == "pending_runtime_proof"
+    assert verified.json()["finding"]["verification_status"] == "pending_runtime_proof"
 
     # A later record-finding pass that re-asserts the same semantic finding with a
     # bare none disposition must NOT clobber the held pending_runtime_proof.
@@ -1962,13 +2086,11 @@ def test_pending_runtime_proof_is_sticky_against_bare_none_rerecord(client, isol
             **base_payload,
             "summary": "Rediscovered by a later pass with no verification.",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
         },
     )
     assert rerecorded.status_code == 201
-    assert rerecorded.json()["finding"]["verification_disposition"] == "pending_runtime_proof"
-    assert rerecorded.json()["finding"]["verification_state"] == "verified"
+    assert rerecorded.json()["finding"]["verification_status"] == "pending_runtime_proof"
 
 
 def test_pending_runtime_proof_yields_to_confirmed(client, isolate_settings):
@@ -1981,8 +2103,7 @@ def test_pending_runtime_proof_yields_to_confirmed(client, isolate_settings):
             "title": "Pending then confirmed",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "auth-bypass",
             "root_cause_key": "pending-then-confirmed",
             "auth_context": "anonymous",
@@ -1991,7 +2112,10 @@ def test_pending_runtime_proof_yields_to_confirmed(client, isolate_settings):
             "evidence_ref": "findings.md",
             "source_name": "vulnerability-analyst",
             "details": {"evidence": "code review", "impact": "pending runtime"},
-            "provenance": {"agent_name": "vulnerability-analyst"},
+            "provenance": {
+                **_author_provenance(client, "VA-052"),
+                "agent_name": "vulnerability-analyst",
+            },
             "links": [],
         },
     )
@@ -2000,27 +2124,27 @@ def test_pending_runtime_proof_yields_to_confirmed(client, isolate_settings):
     pending = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings/VA-052/verify",
         json={
-            "disposition": "pending_runtime_proof",
+            "verification_status": "pending_runtime_proof",
             "reason_code": "static-accepted",
             "reason_text": "Static evidence accepted; runtime proof outstanding.",
             "source_name": "vulnerability-analyst",
         },
     )
     assert pending.status_code == 200
-    assert pending.json()["finding"]["verification_disposition"] == "pending_runtime_proof"
+    assert pending.json()["finding"]["verification_status"] == "pending_runtime_proof"
 
-    confirmed = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings/VA-052/verify",
-        json={
-            "disposition": "confirmed",
+    confirmed = _verify_with_fixture_proof(
+        client,
+        "VA-052",
+        {
+            "verification_status": "confirmed",
             "reason_code": "reproduced",
             "reason_text": "Runtime PoC reproduced the account takeover.",
             "source_name": "exploit-developer",
         },
     )
     assert confirmed.status_code == 200
-    assert confirmed.json()["finding"]["verification_disposition"] == "confirmed"
-    assert confirmed.json()["finding"]["verification_state"] == "verified"
+    assert confirmed.json()["finding"]["verification_status"] == "confirmed"
     assert confirmed.json()["transition"]["action"] == "verified_confirmed"
 
 
@@ -2034,8 +2158,7 @@ def test_pending_runtime_proof_blocks_report_readiness_and_exploit_candidates(cl
             "title": "Held finding stays out of report and exploit queue",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "auth-bypass",
             "root_cause_key": "held-excluded",
             "auth_context": "anonymous",
@@ -2053,14 +2176,14 @@ def test_pending_runtime_proof_blocks_report_readiness_and_exploit_candidates(cl
     verified = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings/VA-053/verify",
         json={
-            "disposition": "pending_runtime_proof",
+            "verification_status": "pending_runtime_proof",
             "reason_code": "static-accepted",
             "reason_text": "Static evidence accepted; runtime proof outstanding.",
             "source_name": "vulnerability-analyst",
         },
     )
     assert verified.status_code == 200
-    assert verified.json()["finding"]["verification_disposition"] == "pending_runtime_proof"
+    assert verified.json()["finding"]["verification_status"] == "pending_runtime_proof"
 
     # Excluded from exploit candidates (disposition not in {confirmed, downgraded}).
     exploit_candidates = client.get(
@@ -2080,7 +2203,7 @@ def test_pending_runtime_proof_blocks_report_readiness_and_exploit_candidates(cl
     disposition_blockers = [
         blocker
         for blocker in body["blockers"]
-        if blocker.get("kind") == "finding_verification_disposition" and blocker.get("slug") == "VA-053"
+        if blocker.get("kind") == "finding_verification_status" and blocker.get("slug") == "VA-053"
     ]
     assert len(disposition_blockers) == 1, body["blockers"]
     assert "pending_runtime_proof" in disposition_blockers[0]["detail"]
@@ -2096,8 +2219,7 @@ def test_verification_narrative_artifact_registers_and_is_searchable(client, iso
             "title": "Finding with a persisted debate narrative",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "auth-bypass",
             "root_cause_key": "narrative-finding",
             "auth_context": "anonymous",
@@ -2167,15 +2289,14 @@ def test_legacy_finding_status_field_is_rejected(client, isolate_settings):
 def test_findings_patch_can_revive_false_positive_and_lower_severity(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
-    created = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
+    created = _record_terminal_finding(
+        client,
+        {
             "slug": "CH-009",
             "title": "Parser length overflow",
             "severity": "high",
             "workflow_status": "false_positive",
-            "verification_state": "verified",
-            "verification_disposition": "false_positive",
+            "verification_status": "false_positive",
             "defect_family": "integer-overflow",
             "root_cause_key": "parser-length-overflow",
             "auth_context": "anonymous",
@@ -2194,7 +2315,7 @@ def test_findings_patch_can_revive_false_positive_and_lower_severity(client, iso
             "links": [],
         },
     )
-    assert created.status_code == 201
+    assert created.status_code == 200, created.text
 
     revived = client.patch(
         "/engagements/2026-03-30-120000-example/assessment/findings/CH-009",
@@ -2209,10 +2330,9 @@ def test_findings_patch_can_revive_false_positive_and_lower_severity(client, iso
     )
     assert revived.status_code == 200
     assert revived.json()["finding"]["workflow_status"] == "active"
-    assert revived.json()["finding"]["verification_state"] == "unreviewed"
-    assert revived.json()["finding"]["verification_disposition"] == "none"
+    assert revived.json()["finding"]["verification_status"] == "unreviewed"
     assert revived.json()["finding"]["severity"] == "low"
-    assert revived.json()["transition"]["action"] == "operator_override"
+    assert revived.json()["transition"]["action"] == "verification_invalidated"
 
 
 def test_findings_patch_rejects_direct_verification_bypass(client, isolate_settings):
@@ -2225,8 +2345,7 @@ def test_findings_patch_rejects_direct_verification_bypass(client, isolate_setti
             "title": "Direct patch bypass",
             "severity": "medium",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "idor",
             "root_cause_key": "direct-patch-bypass",
             "auth_context": "anonymous",
@@ -2266,8 +2385,7 @@ def test_findings_patch_allows_explicit_workflow_rollback(client, isolate_settin
             "title": "Workflow rollback candidate",
             "severity": "medium",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "idor",
             "root_cause_key": "workflow-rollback-candidate",
             "auth_context": "anonymous",
@@ -2298,15 +2416,14 @@ def test_findings_patch_allows_explicit_workflow_rollback(client, isolate_settin
 def test_findings_patch_rejects_records_merged_after_validation(client, isolate_settings, monkeypatch):
     write_engagement(isolate_settings["engagements_dir"])
 
-    created = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
+    created = _record_terminal_finding(
+        client,
+        {
             "slug": "CH-012",
             "title": "Patch/merge race candidate",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "verified",
-            "verification_disposition": "confirmed",
+            "verification_status": "confirmed",
             "defect_family": "idor",
             "root_cause_key": "patch-merge-race",
             "auth_context": "anonymous",
@@ -2320,7 +2437,7 @@ def test_findings_patch_rejects_records_merged_after_validation(client, isolate_
             "links": [],
         },
     )
-    assert created.status_code == 201
+    assert created.status_code == 200
 
     from app.services import state_manager
 
@@ -2356,15 +2473,14 @@ def test_findings_patch_rejects_records_merged_after_validation(client, isolate_
 def test_false_positive_findings_are_suppressed_but_semantically_sticky(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
-    created = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
+    created = _record_terminal_finding(
+        client,
+        {
             "slug": "CH-001",
             "title": "Header length overflow in parser",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "verified",
-            "verification_disposition": "confirmed",
+            "verification_status": "confirmed",
             "defect_family": "integer-overflow",
             "root_cause_key": "header-length-overflow",
             "auth_context": "anonymous",
@@ -2381,12 +2497,13 @@ def test_false_positive_findings_are_suppressed_but_semantically_sticky(client, 
             "links": [],
         },
     )
-    assert created.status_code == 201
+    assert created.status_code == 200
 
-    killed = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings/CH-001/verify",
-        json={
-            "disposition": "false_positive",
+    killed = _verify_with_fixture_proof(
+        client,
+        "CH-001",
+        {
+            "verification_status": "false_positive",
             "reason_code": "check-2-guard",
             "reason_text": "validate_header_length() bounds header length to 8192 bytes on all paths.",
             "artifact_ref": "tools/analysis-state/verifier.json",
@@ -2402,15 +2519,14 @@ def test_false_positive_findings_are_suppressed_but_semantically_sticky(client, 
     )
     assert killed.status_code == 200
     assert killed.json()["finding"]["workflow_status"] == "false_positive"
-    assert killed.json()["finding"]["verification_state"] == "verified"
-    assert killed.json()["finding"]["verification_disposition"] == "false_positive"
+    assert killed.json()["finding"]["verification_status"] == "false_positive"
     assert killed.json()["transition"]["action"] == "verified_false_positive"
 
     summary = client.get("/engagements/2026-03-30-120000-example/assessment/summary")
     assert summary.status_code == 200
     assert summary.json()["finding_count"] == 0
     assert summary.json()["finding_workflow_statuses"]["false_positive"] == 1
-    assert summary.json()["finding_verification_dispositions"]["false_positive"] == 1
+    assert summary.json()["finding_verification_statuses"]["false_positive"] == 1
     # The false_positive CH-001 (high) is excluded from the severity rollup
     # exactly like finding_count, so the donut total stays at 0 (empty rollup)
     # rather than counting the suppressed high finding.
@@ -2429,8 +2545,7 @@ def test_false_positive_findings_are_suppressed_but_semantically_sticky(client, 
             "title": "Header length overflow in parser",
             "severity": "critical",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "integer-overflow",
             "root_cause_key": "header-length-overflow",
             "auth_context": "anonymous",
@@ -2449,7 +2564,7 @@ def test_false_positive_findings_are_suppressed_but_semantically_sticky(client, 
     assert rediscovered.status_code == 201
     assert rediscovered.json()["finding"]["slug"] == "CH-001"
     assert rediscovered.json()["finding"]["workflow_status"] == "false_positive"
-    assert rediscovered.json()["finding"]["verification_disposition"] == "false_positive"
+    assert rediscovered.json()["finding"]["verification_status"] == "false_positive"
 
     findings = client.get("/engagements/2026-03-30-120000-example/assessment/findings")
     assert findings.status_code == 200
@@ -2464,15 +2579,14 @@ def test_false_positive_findings_are_suppressed_but_semantically_sticky(client, 
 def test_false_positive_title_fallback_does_not_suppress_distinct_finding(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
-    original = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
+    original = _record_terminal_finding(
+        client,
+        {
             "slug": "CH-020",
             "title": "Shared parser bug title",
             "severity": "medium",
             "workflow_status": "false_positive",
-            "verification_state": "verified",
-            "verification_disposition": "false_positive",
+            "verification_status": "false_positive",
             "defect_family": "integer-overflow",
             "root_cause_key": "overflow-a",
             "auth_context": "anonymous",
@@ -2491,7 +2605,7 @@ def test_false_positive_title_fallback_does_not_suppress_distinct_finding(client
             "links": [],
         },
     )
-    assert original.status_code == 201
+    assert original.status_code == 200
 
     distinct = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
@@ -2499,8 +2613,7 @@ def test_false_positive_title_fallback_does_not_suppress_distinct_finding(client
             "title": "Shared parser bug title",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "verified",
-            "verification_disposition": "confirmed",
+            "verification_status": "unreviewed",
             "defect_family": "buffer-overflow",
             "root_cause_key": "overflow-b",
             "auth_context": "anonymous",
@@ -2513,14 +2626,28 @@ def test_false_positive_title_fallback_does_not_suppress_distinct_finding(client
                 "evidence": "memcpy() uses unchecked attacker length.",
                 "impact": "Heap corruption",
             },
-            "provenance": {"agent_name": "code-vuln-hunter"},
+            "provenance": {
+                **_author_provenance(client, "CH-020-DISTINCT"),
+                "agent_name": "code-vuln-hunter",
+            },
             "links": [],
         },
     )
     assert distinct.status_code == 201
+    distinct_slug = distinct.json()["finding"]["slug"]
+    distinct = _verify_with_fixture_proof(
+        client,
+        distinct_slug,
+        {
+            "verification_status": "confirmed",
+            "reason_text": "Independent fixture review completed.",
+            "source_name": "fixture-independent-verifier",
+        },
+    )
+    assert distinct.status_code == 200, distinct.text
     assert distinct.json()["finding"]["slug"] != "CH-020"
     assert distinct.json()["finding"]["workflow_status"] == "active"
-    assert distinct.json()["finding"]["verification_disposition"] == "confirmed"
+    assert distinct.json()["finding"]["verification_status"] == "confirmed"
 
     findings = client.get("/engagements/2026-03-30-120000-example/assessment/findings")
     assert findings.status_code == 200
@@ -2532,15 +2659,14 @@ def test_false_positive_title_fallback_does_not_suppress_distinct_finding(client
 def test_root_cause_free_false_positive_findings_stay_semantically_sticky(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
-    original = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
+    original = _record_terminal_finding(
+        client,
+        {
             "slug": "CH-025",
             "title": "Shared parser size bug",
             "severity": "medium",
             "workflow_status": "false_positive",
-            "verification_state": "verified",
-            "verification_disposition": "false_positive",
+            "verification_status": "false_positive",
             "defect_family": "integer-overflow",
             "root_cause_key": "",
             "auth_context": "anonymous",
@@ -2558,7 +2684,7 @@ def test_root_cause_free_false_positive_findings_stay_semantically_sticky(client
             "links": [],
         },
     )
-    assert original.status_code == 201
+    assert original.status_code == 200
 
     rediscovered = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
@@ -2566,8 +2692,7 @@ def test_root_cause_free_false_positive_findings_stay_semantically_sticky(client
             "title": "Shared parser size bug",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "integer-overflow",
             "root_cause_key": "",
             "auth_context": "anonymous",
@@ -2584,7 +2709,7 @@ def test_root_cause_free_false_positive_findings_stay_semantically_sticky(client
     assert rediscovered.status_code == 201
     assert rediscovered.json()["finding"]["slug"] == "CH-025"
     assert rediscovered.json()["finding"]["workflow_status"] == "false_positive"
-    assert rediscovered.json()["finding"]["verification_disposition"] == "false_positive"
+    assert rediscovered.json()["finding"]["verification_status"] == "false_positive"
 
 
 def test_coverage_items_expression_unique_index_blocks_nullable_duplicates(client, isolate_settings):
@@ -2632,15 +2757,14 @@ def test_coverage_items_expression_unique_index_blocks_nullable_duplicates(clien
 def test_merge_into_false_positive_target_is_rejected(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
-    source = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
+    source = _record_terminal_finding(
+        client,
+        {
             "slug": "CH-030",
             "title": "Live parser issue",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "verified",
-            "verification_disposition": "confirmed",
+            "verification_status": "confirmed",
             "defect_family": "buffer-overflow",
             "root_cause_key": "live-parser-issue",
             "auth_context": "anonymous",
@@ -2654,17 +2778,16 @@ def test_merge_into_false_positive_target_is_rejected(client, isolate_settings):
             "links": [],
         },
     )
-    assert source.status_code == 201
+    assert source.status_code == 200
 
-    target = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
+    target = _record_terminal_finding(
+        client,
+        {
             "slug": "CH-031",
             "title": "Suppressed parser issue",
             "severity": "medium",
             "workflow_status": "false_positive",
-            "verification_state": "verified",
-            "verification_disposition": "false_positive",
+            "verification_status": "false_positive",
             "defect_family": "integer-overflow",
             "root_cause_key": "suppressed-parser-issue",
             "auth_context": "anonymous",
@@ -2683,7 +2806,7 @@ def test_merge_into_false_positive_target_is_rejected(client, isolate_settings):
             "links": [],
         },
     )
-    assert target.status_code == 201
+    assert target.status_code == 200
 
     merge = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings/merge",
@@ -2701,15 +2824,14 @@ def test_merge_into_false_positive_target_is_rejected(client, isolate_settings):
 def test_merge_false_positive_source_preserves_live_target(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
-    source = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
+    source = _record_terminal_finding(
+        client,
+        {
             "slug": "CH-032",
             "title": "Suppressed parser duplicate",
             "severity": "medium",
             "workflow_status": "false_positive",
-            "verification_state": "verified",
-            "verification_disposition": "false_positive",
+            "verification_status": "false_positive",
             "defect_family": "integer-overflow",
             "root_cause_key": "suppressed-parser-duplicate",
             "auth_context": "anonymous",
@@ -2728,17 +2850,16 @@ def test_merge_false_positive_source_preserves_live_target(client, isolate_setti
             "links": [],
         },
     )
-    assert source.status_code == 201
+    assert source.status_code == 200
 
-    target = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
+    target = _record_terminal_finding(
+        client,
+        {
             "slug": "CH-033",
             "title": "Live parser issue",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "verified",
-            "verification_disposition": "confirmed",
+            "verification_status": "confirmed",
             "defect_family": "buffer-overflow",
             "root_cause_key": "live-parser-target",
             "auth_context": "anonymous",
@@ -2752,7 +2873,7 @@ def test_merge_false_positive_source_preserves_live_target(client, isolate_setti
             "links": [],
         },
     )
-    assert target.status_code == 201
+    assert target.status_code == 200
 
     merge = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings/merge",
@@ -2766,21 +2887,17 @@ def test_merge_false_positive_source_preserves_live_target(client, isolate_setti
     assert merge.status_code == 200
     merge_payload = merge.json()
     assert merge_payload["target"]["workflow_status"] == "active"
-    assert merge_payload["target"]["verification_state"] == "verified"
-    assert merge_payload["target"]["verification_disposition"] == "confirmed"
+    assert merge_payload["target"]["verification_status"] == "unreviewed"
     assert merge_payload["source"]["workflow_status"] == "merged"
-    assert merge_payload["source"]["verification_state"] == "verified"
-    assert merge_payload["source"]["verification_disposition"] == "false_positive"
+    assert merge_payload["source"]["verification_status"] == "false_positive"
 
     findings = client.get("/engagements/2026-03-30-120000-example/assessment/findings")
     assert findings.status_code == 200
     by_slug = {item["slug"]: item for item in findings.json()}
     assert by_slug["CH-033"]["workflow_status"] == "active"
-    assert by_slug["CH-033"]["verification_state"] == "verified"
-    assert by_slug["CH-033"]["verification_disposition"] == "confirmed"
+    assert by_slug["CH-033"]["verification_status"] == "unreviewed"
     assert by_slug["CH-032"]["workflow_status"] == "merged"
-    assert by_slug["CH-032"]["verification_state"] == "verified"
-    assert by_slug["CH-032"]["verification_disposition"] == "false_positive"
+    assert by_slug["CH-032"]["verification_status"] == "false_positive"
 
 
 def test_findings_verify_downgrade_records_previous_severity_transition(client, isolate_settings):
@@ -2793,8 +2910,7 @@ def test_findings_verify_downgrade_records_previous_severity_transition(client, 
             "title": "Privilege escalation via export endpoint",
             "severity": "critical",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "access-control",
             "root_cause_key": "export-privesc",
             "auth_context": "user",
@@ -2807,16 +2923,20 @@ def test_findings_verify_downgrade_records_previous_severity_transition(client, 
                 "evidence": "Role claim appears attacker-controlled.",
                 "impact": "Potential admin export access.",
             },
-            "provenance": {"agent_name": "vulnerability-analyst"},
+            "provenance": {
+                **_author_provenance(client, "CH-040"),
+                "agent_name": "vulnerability-analyst",
+            },
             "links": [],
         },
     )
     assert created.status_code == 201
 
-    verified = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings/CH-040/verify",
-        json={
-            "disposition": "downgraded",
+    verified = _verify_with_fixture_proof(
+        client,
+        "CH-040",
+        {
+            "verification_status": "downgraded",
             "new_severity": "high",
             "reason_code": "limited-scope",
             "reason_text": "The export bug is real but constrained to project-scoped data.",
@@ -2835,8 +2955,7 @@ def test_findings_verify_downgrade_records_previous_severity_transition(client, 
     payload = verified.json()
     assert payload["finding"]["severity"] == "high"
     assert payload["finding"]["workflow_status"] == "active"
-    assert payload["finding"]["verification_state"] == "verified"
-    assert payload["finding"]["verification_disposition"] == "downgraded"
+    assert payload["finding"]["verification_status"] == "downgraded"
     assert payload["transition"]["action"] == "verified_downgraded"
 
     transitions = client.get(
@@ -2861,13 +2980,13 @@ def test_verify_downgrade_can_audit_an_already_lowered_severity(
             "title": "Pre-lowered finding",
             "severity": "critical",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "access-control",
             "auth_context": "user",
             "canonical_location": "https://example.com/api/prelowered",
-            "summary": "Needs a recorded downgrade verdict.",
-            "source_name": "vulnerability-analyst",
+                "summary": "Needs a recorded downgrade verdict.",
+                "source_name": "vulnerability-analyst",
+                "provenance": _author_provenance(client, "CH-140"),
         },
     )
     assert created.status_code == 201, created.text
@@ -2877,10 +2996,11 @@ def test_verify_downgrade_can_audit_an_already_lowered_severity(
     )
     assert lowered.status_code == 200, lowered.text
 
-    verified = client.post(
-        f"{base}/CH-140/verify",
-        json={
-            "disposition": "downgraded",
+    verified = _verify_with_fixture_proof(
+        client,
+        "CH-140",
+        {
+            "verification_status": "downgraded",
             "new_severity": "high",
             "reason_text": "Record the already-applied downgrade.",
             "source_name": "code-vuln-verifier",
@@ -2889,7 +3009,7 @@ def test_verify_downgrade_can_audit_an_already_lowered_severity(
 
     assert verified.status_code == 200, verified.text
     payload = verified.json()
-    assert payload["finding"]["verification_disposition"] == "downgraded"
+    assert payload["finding"]["verification_status"] == "downgraded"
     assert payload["finding"]["severity"] == "high"
     assert json.loads(payload["transition"]["metadata_json"])["prelowered"] is True
 
@@ -2906,8 +3026,7 @@ def test_verify_downgrade_rejects_equal_severity_without_prior_lowering(
             "title": "Never lowered",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "access-control",
             "auth_context": "user",
             "canonical_location": "https://example.com/api/not-lowered",
@@ -2917,10 +3036,11 @@ def test_verify_downgrade_rejects_equal_severity_without_prior_lowering(
     )
     assert created.status_code == 201, created.text
 
-    verified = client.post(
-        f"{base}/CH-142/verify",
-        json={
-            "disposition": "downgraded",
+    verified = _verify_with_fixture_proof(
+        client,
+        "CH-142",
+        {
+            "verification_status": "downgraded",
             "new_severity": "high",
             "reason_text": "This must not manufacture a downgrade.",
             "source_name": "code-vuln-verifier",
@@ -2943,8 +3063,7 @@ def test_finding_update_source_name_is_actor_not_discovery_attribution(
             "title": "Attribution stays stable",
             "severity": "low",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "metadata",
             "auth_context": "anonymous",
             "canonical_location": "https://example.com/source",
@@ -2977,8 +3096,7 @@ def test_findings_verify_disputed_keeps_finding_live(client, isolate_settings):
             "title": "Ambiguous parser state confusion",
             "severity": "medium",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "state-confusion",
             "root_cause_key": "parser-state-confusion",
             "auth_context": "anonymous",
@@ -3000,7 +3118,7 @@ def test_findings_verify_disputed_keeps_finding_live(client, isolate_settings):
     disputed = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings/CH-041/verify",
         json={
-            "disposition": "disputed",
+            "verification_status": "disputed",
             "reason_code": "conflicting-evidence",
             "reason_text": "Reachability differs between the static trace and runtime evidence.",
             "artifact_ref": "tools/analysis-state/code-verification/CH-041.json",
@@ -3016,8 +3134,7 @@ def test_findings_verify_disputed_keeps_finding_live(client, isolate_settings):
     assert disputed.status_code == 200
     payload = disputed.json()
     assert payload["finding"]["workflow_status"] == "active"
-    assert payload["finding"]["verification_state"] == "disputed"
-    assert payload["finding"]["verification_disposition"] == "none"
+    assert payload["finding"]["verification_status"] == "disputed"
     assert payload["transition"]["action"] == "verification_disputed"
 
     report_findings = client.get("/engagements/2026-03-30-120000-example/assessment/report-findings")
@@ -3035,8 +3152,7 @@ def test_findings_verify_rejects_records_merged_after_validation(client, isolate
             "title": "Verify/merge race candidate",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "auth-bypass",
             "root_cause_key": "verify-merge-race",
             "auth_context": "user",
@@ -3074,10 +3190,11 @@ def test_findings_verify_rejects_records_merged_after_validation(client, isolate
 
     monkeypatch.setattr(state_manager.findings, "patch_finding", race)
 
-    verify = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings/CH-042/verify",
-        json={
-            "disposition": "confirmed",
+    verify = _verify_with_fixture_proof(
+        client,
+        "CH-042",
+        {
+            "verification_status": "confirmed",
             "reason_code": "validated",
             "reason_text": "Late verify should not overwrite a merged finding.",
             "artifact_ref": "tools/analysis-state/code-verification/CH-042.json",
@@ -3099,15 +3216,14 @@ def test_findings_verify_rejects_records_merged_after_validation(client, isolate
 def test_findings_verify_rejects_merged_records(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
-    source = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
+    source = _record_terminal_finding(
+        client,
+        {
             "slug": "CH-050",
             "title": "Merged source",
             "severity": "medium",
             "workflow_status": "active",
-            "verification_state": "verified",
-            "verification_disposition": "confirmed",
+            "verification_status": "confirmed",
             "defect_family": "idor",
             "root_cause_key": "merged-source",
             "auth_context": "anonymous",
@@ -3121,17 +3237,16 @@ def test_findings_verify_rejects_merged_records(client, isolate_settings):
             "links": [],
         },
     )
-    assert source.status_code == 201
+    assert source.status_code == 200
 
-    target = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
+    target = _record_terminal_finding(
+        client,
+        {
             "slug": "CH-051",
             "title": "Merge target",
             "severity": "medium",
             "workflow_status": "active",
-            "verification_state": "verified",
-            "verification_disposition": "confirmed",
+            "verification_status": "confirmed",
             "defect_family": "idor",
             "root_cause_key": "merge-target",
             "auth_context": "anonymous",
@@ -3145,7 +3260,7 @@ def test_findings_verify_rejects_merged_records(client, isolate_settings):
             "links": [],
         },
     )
-    assert target.status_code == 201
+    assert target.status_code == 200
 
     merge = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings/merge",
@@ -3160,10 +3275,11 @@ def test_findings_verify_rejects_merged_records(client, isolate_settings):
     )
     assert merge.status_code == 200
 
-    verify = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings/CH-050/verify",
-        json={
-            "disposition": "confirmed",
+    verify = _verify_with_fixture_proof(
+        client,
+        "CH-050",
+        {
+            "verification_status": "confirmed",
             "reason_text": "Should not revive merged finding.",
             "source_name": "code-vuln-verifier",
             "details": {"evidence": "n/a", "impact": "n/a"},
@@ -3176,15 +3292,14 @@ def test_findings_verify_rejects_merged_records(client, isolate_settings):
 def test_merge_findings_rejects_target_changed_after_snapshot(client, isolate_settings, monkeypatch):
     write_engagement(isolate_settings["engagements_dir"])
 
-    source = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
+    source = _record_terminal_finding(
+        client,
+        {
             "slug": "CH-052",
             "title": "First duplicate",
             "severity": "medium",
             "workflow_status": "active",
-            "verification_state": "verified",
-            "verification_disposition": "confirmed",
+            "verification_status": "confirmed",
             "defect_family": "idor",
             "root_cause_key": "merge-race-source",
             "auth_context": "anonymous",
@@ -3198,17 +3313,16 @@ def test_merge_findings_rejects_target_changed_after_snapshot(client, isolate_se
             "links": [],
         },
     )
-    assert source.status_code == 201
+    assert source.status_code == 200
 
-    target = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
+    target = _record_terminal_finding(
+        client,
+        {
             "slug": "CH-053",
             "title": "Second duplicate",
             "severity": "medium",
             "workflow_status": "active",
-            "verification_state": "verified",
-            "verification_disposition": "confirmed",
+            "verification_status": "confirmed",
             "defect_family": "idor",
             "root_cause_key": "merge-race-target",
             "auth_context": "anonymous",
@@ -3222,7 +3336,7 @@ def test_merge_findings_rejects_target_changed_after_snapshot(client, isolate_se
             "links": [],
         },
     )
-    assert target.status_code == 201
+    assert target.status_code == 200
 
     from app.services import state_manager
 
@@ -3396,8 +3510,8 @@ def _all_report_finding_slugs(report_body: dict) -> set[str]:
 def test_pending_runtime_proof_absent_from_draft_report_findings(client, isolate_settings):
     # Regression: the draft report projection (mode=draft, the default, which feeds
     # `vigil engagement export --format markdown-tree`) used to filter only
-    # `verification_state == "disputed"`. A pending_runtime_proof finding is
-    # verification_state="verified", so it leaked into draft reports despite being a
+    # `verification_status == "disputed"`. A pending_runtime_proof finding likewise
+    # leaked into draft reports despite being a
     # non-durable HOLDING finding. Draft must now exclude it exactly like `final` does.
     write_engagement(isolate_settings["engagements_dir"])
 
@@ -3409,8 +3523,7 @@ def test_pending_runtime_proof_absent_from_draft_report_findings(client, isolate
             "title": "Confirmed durable finding",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "auth-bypass",
             "root_cause_key": "confirmed-durable",
             "auth_context": "anonymous",
@@ -3419,15 +3532,19 @@ def test_pending_runtime_proof_absent_from_draft_report_findings(client, isolate
             "evidence_ref": "findings.md",
             "source_name": "vulnerability-analyst",
             "details": {"evidence": "code review", "impact": "account takeover"},
-            "provenance": {"agent_name": "vulnerability-analyst"},
+            "provenance": {
+                **_author_provenance(client, "VA-070"),
+                "agent_name": "vulnerability-analyst",
+            },
             "links": [],
         },
     )
     assert confirmed.status_code == 201
-    confirmed_verify = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings/VA-070/verify",
-        json={
-            "disposition": "confirmed",
+    confirmed_verify = _verify_with_fixture_proof(
+        client,
+        "VA-070",
+        {
+            "verification_status": "confirmed",
             "reason_code": "runtime-proven",
             "reason_text": "Runtime PoC reproduced.",
             "source_name": "vulnerability-analyst",
@@ -3444,8 +3561,7 @@ def test_pending_runtime_proof_absent_from_draft_report_findings(client, isolate
             "title": "Held finding pending runtime proof",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "auth-bypass",
             "root_cause_key": "held-pending-runtime",
             "auth_context": "anonymous",
@@ -3462,7 +3578,7 @@ def test_pending_runtime_proof_absent_from_draft_report_findings(client, isolate
     held_verify = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings/VA-071/verify",
         json={
-            "disposition": "pending_runtime_proof",
+            "verification_status": "pending_runtime_proof",
             "reason_code": "static-accepted",
             "reason_text": "Static evidence accepted; runtime proof outstanding.",
             "source_name": "vulnerability-analyst",
@@ -3470,8 +3586,7 @@ def test_pending_runtime_proof_absent_from_draft_report_findings(client, isolate
         },
     )
     assert held_verify.status_code == 200
-    assert held_verify.json()["finding"]["verification_disposition"] == "pending_runtime_proof"
-    assert held_verify.json()["finding"]["verification_state"] == "verified"
+    assert held_verify.json()["finding"]["verification_status"] == "pending_runtime_proof"
 
     # Default mode is draft (the markdown-tree source).
     draft = client.get(
@@ -3507,8 +3622,7 @@ def test_markdown_tree_draft_projection_excludes_pending_runtime_proof(client, i
             "title": "Held finding for markdown-tree projection",
             "severity": "critical",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "auth-bypass",
             "root_cause_key": "held-markdown-tree",
             "auth_context": "anonymous",
@@ -3525,7 +3639,7 @@ def test_markdown_tree_draft_projection_excludes_pending_runtime_proof(client, i
     held_verify = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings/VA-072/verify",
         json={
-            "disposition": "pending_runtime_proof",
+            "verification_status": "pending_runtime_proof",
             "reason_code": "static-accepted",
             "reason_text": "Static evidence accepted; runtime proof outstanding.",
             "source_name": "vulnerability-analyst",
@@ -3554,14 +3668,20 @@ def test_markdown_tree_draft_projection_excludes_pending_runtime_proof(client, i
 # ──────────────────────────────────────────────────────────────
 
 
-def _record_va_finding(client, *, location: str, summary: str, details: dict | None = None):
+def _record_va_finding(
+    client,
+    *,
+    location: str,
+    summary: str,
+    details: dict | None = None,
+    author_key: str | None = None,
+):
     """POST an auto-slugged VA finding (no explicit slug -> backend allocates)."""
     body = {
         "title": f"Auto-slug finding {location}",
         "severity": "medium",
         "workflow_status": "active",
-        "verification_state": "unreviewed",
-        "verification_disposition": "none",
+        "verification_status": "unreviewed",
         # Distinct canonical_location per call so _semantic_finding_match does
         # NOT dedup them onto one row — each must mint its own slug.
         "canonical_location": location,
@@ -3571,6 +3691,8 @@ def _record_va_finding(client, *, location: str, summary: str, details: dict | N
     }
     if details is not None:
         body["details"] = details
+    if author_key is not None:
+        body["provenance"] = _author_provenance(client, author_key)
     return client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json=body,
@@ -3682,20 +3804,25 @@ def test_patch_finding_details_replace_without_details_rejected(client, isolate_
 
 
 def _make_disputed(client, *, location: str, summary: str) -> str:
-    created = _record_va_finding(client, location=location, summary=summary)
+    created = _record_va_finding(
+        client,
+        location=location,
+        summary=summary,
+        author_key="DISPUTED",
+    )
     assert created.status_code == 201, created.text
     slug = created.json()["finding"]["slug"]
     disputed = client.post(
         f"/engagements/2026-03-30-120000-example/assessment/findings/{slug}/verify",
         json={
-            "disposition": "disputed",
+            "verification_status": "disputed",
             "reason_code": "contested",
             "reason_text": "Two lanes disagree on whether this reproduces.",
             "source_name": "code-vuln-verifier",
         },
     )
     assert disputed.status_code == 200, disputed.text
-    assert disputed.json()["finding"]["verification_state"] == "disputed"
+    assert disputed.json()["finding"]["verification_status"] == "disputed"
     return slug
 
 
@@ -3709,10 +3836,11 @@ def test_verify_finding_confirmed_clears_disputed(client, isolate_settings):
         summary="Disputed then confirmed.",
     )
 
-    confirmed = client.post(
-        f"/engagements/2026-03-30-120000-example/assessment/findings/{slug}/verify",
-        json={
-            "disposition": "confirmed",
+    confirmed = _verify_with_fixture_proof(
+        client,
+        slug,
+        {
+            "verification_status": "confirmed",
             "reason_code": "reproduced",
             "reason_text": "Re-ran the PoC; it reproduces deterministically.",
             "source_name": "code-vuln-verifier",
@@ -3720,8 +3848,7 @@ def test_verify_finding_confirmed_clears_disputed(client, isolate_settings):
     )
     assert confirmed.status_code == 200, confirmed.text
     finding = confirmed.json()["finding"]
-    assert finding["verification_state"] == "verified"
-    assert finding["verification_disposition"] == "confirmed"
+    assert finding["verification_status"] == "confirmed"
 
 
 def test_reset_finding_clears_disputed_to_unreviewed(client, isolate_settings):
@@ -3746,8 +3873,7 @@ def test_reset_finding_clears_disputed_to_unreviewed(client, isolate_settings):
     )
     assert reset.status_code == 200, reset.text
     finding = reset.json()["finding"]
-    assert finding["verification_state"] == "unreviewed", finding
-    assert finding["verification_disposition"] == "none", finding
+    assert finding["verification_status"] == "unreviewed", finding
 
     transitions = client.get(
         f"/engagements/2026-03-30-120000-example/assessment/findings/{slug}/transitions"
@@ -3765,8 +3891,7 @@ def test_finding_row_version_increments_on_each_same_second_patch(client, isolat
             "title": "Versioned finding",
             "severity": "medium",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "canonical_location": "https://example.com/versioned",
             "summary": "initial",
             "evidence_ref": "findings.md",

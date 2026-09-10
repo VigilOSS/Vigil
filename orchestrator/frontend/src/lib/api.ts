@@ -1,3 +1,6 @@
+import type { AuditBlocker, AuditPage, RunAuditSection, RunComparison } from "./runAudit";
+export type { AuditBlocker, AuditPage, RunAuditSection, RunComparison } from "./runAudit";
+
 export type Engagement = {
   id: number;
   key: string;
@@ -81,8 +84,7 @@ export type AssessmentFinding = {
   // One of: none (default) | submitted | accepted | needs_info | rejected |
   // duplicate. Typed as string to match workflow_status above.
   submission_status: string;
-  verification_state: string;
-  verification_disposition: string;
+  verification_status: string;
   canonical_location: string;
   summary: string;
   source_name: string;
@@ -177,6 +179,169 @@ export type AssessmentFindingDetail = AssessmentFinding & {
   submission_ref?: string;
   submission_url?: string;
   merged_into_slug?: string | null;
+  verification_audit?: AssessmentVerificationAudit;
+};
+
+export type SubmissionFindingSummary = {
+  id: number;
+  slug: string;
+  title: string;
+  severity: string;
+  workflow_status: string;
+  verification_status: string;
+  submission_status: string;
+  submission_platform: string;
+  submission_ref: string;
+  submission_url: string;
+  row_version: number;
+  version_count: number;
+  latest_version_number: number | null;
+  staging_version_count: number;
+  failed_version_count: number;
+};
+
+export type SubmissionVersion = {
+  id: number;
+  finding_id: number;
+  version_number: number;
+  status: "complete";
+  platform: "bugcrowd" | "hackerone" | "direct";
+  package_format: "markdown" | "zip";
+  actor_surface: "vigil-assess" | "web-ui";
+  relative_path: string;
+  media_type: string;
+  size_bytes: number;
+  sha256: string;
+  submission_sha256: string;
+  source_finding_row_version: number;
+  source_finding_updated_at: string;
+  attachment_ids: number[];
+  attachment_count: number;
+  artifact_id: number | null;
+  created_at: string;
+  completed_at: string | null;
+  stale: boolean;
+  idempotent_replay: boolean;
+};
+
+export type SubmissionAttachment = {
+  id: number;
+  relative_path: string;
+  kind: string;
+  media_type: string;
+  size_bytes: number;
+  sha256: string;
+  present: boolean;
+  sensitive: boolean;
+};
+
+export type SubmissionAttachmentPage = {
+  offset: number;
+  limit: number;
+  returned: number;
+  total: number;
+  has_more: boolean;
+  next_offset: number | null;
+};
+
+export type SubmissionOrphanPage = {
+  limit: number;
+  returned: number;
+  has_more: boolean;
+  next_after: string | null;
+};
+
+export type SubmissionWorkspace = {
+  present: boolean;
+  submission_path: string;
+  context_path: string;
+  markdown: string;
+  submission_sha256: string;
+  context: Record<string, unknown>;
+  final_ready: boolean;
+  blockers: string[];
+};
+
+export type SubmissionPendingVersion = {
+  id: number;
+  finding_slug: string;
+  version_number: number;
+  status: "staging" | "failed";
+  failure_reason: string;
+  staging_relative_path: string;
+  relative_path: string;
+};
+
+export type SubmissionDetail = {
+  finding: AssessmentFindingDetail;
+  workspace: SubmissionWorkspace;
+  eligible_attachments: SubmissionAttachment[];
+  eligible_attachments_page: SubmissionAttachmentPage;
+  versions: SubmissionVersion[];
+  versions_page: SubmissionAttachmentPage;
+  pending_version_count: number;
+  pending_versions: SubmissionPendingVersion[];
+  pending_versions_page: SubmissionAttachmentPage;
+};
+
+export type SubmissionListing = {
+  findings: SubmissionFindingSummary[];
+  findings_page: SubmissionAttachmentPage;
+  staging_count: number;
+  failed_count: number;
+};
+
+export type SubmissionExportInput = {
+  platform: "bugcrowd" | "hackerone" | "direct";
+  submission_path: string;
+  context_path: string;
+  attachment_ids: number[];
+  actor_surface: "vigil-assess" | "web-ui";
+};
+
+export type SubmissionRecoveryResult = {
+  actor_surface: "vigil-assess" | "web-ui";
+  recovered_version_ids: number[];
+  failed_version_ids: number[];
+  failed_versions: SubmissionPendingVersion[];
+  failed_versions_page: SubmissionAttachmentPage;
+  orphaned_staging_paths: string[];
+  orphaned_staging_page: SubmissionOrphanPage;
+};
+
+export type AssessmentFindingCounterCheck = {
+  id: number;
+  transition_id: number;
+  verifier_dispatch_id: number;
+  method: string;
+  expected_result: string;
+  observed_result: string;
+  falsified_claim: string;
+  completed: boolean;
+  proof_receipt_ids: number[];
+  created_at: string;
+};
+
+export type AssessmentFindingSeverityVariance = {
+  id: number;
+  transition_id: number;
+  normal_band: string;
+  chosen_severity: string;
+  actor: string;
+  reason: string;
+  proof_receipt_id: number;
+  created_at: string;
+};
+
+export type AssessmentVerificationAudit = {
+  proof_receipt_ids: number[];
+  proof_receipt_total: number;
+  counter_checks: AssessmentFindingCounterCheck[];
+  counter_check_total: number;
+  severity_variances: AssessmentFindingSeverityVariance[];
+  severity_variance_total: number;
+  record_limit: number;
+  truncated: boolean;
 };
 
 export type AssessmentFindingTransition = {
@@ -185,10 +350,9 @@ export type AssessmentFindingTransition = {
   action: string;
   from_workflow_status: string | null;
   to_workflow_status: string;
-  from_verification_state: string | null;
-  to_verification_state: string;
-  from_verification_disposition: string | null;
-  to_verification_disposition: string;
+  from_verification_status: string | null;
+  to_verification_status: string;
+  verification_event_version: number;
   from_severity: string | null;
   to_severity: string;
   from_canonical_location?: string | null;
@@ -202,6 +366,7 @@ export type AssessmentFindingTransition = {
   artifact_ref: string;
   metadata_json: string;
   created_at: string;
+  verification_audit: AssessmentVerificationAudit;
 };
 
 export type AssessmentFindingLink = {
@@ -368,8 +533,7 @@ export type AssessmentSummary = {
   report_blocker_count: number;
   coverage_statuses: Record<string, number>;
   finding_workflow_statuses: Record<string, number>;
-  finding_verification_states: Record<string, number>;
-  finding_verification_dispositions: Record<string, number>;
+  finding_verification_statuses: Record<string, number>;
   top_surfaces: AssessmentSurface[];
   top_findings: AssessmentFinding[];
   recent_probes: AssessmentProbe[];
@@ -379,6 +543,69 @@ export type AssessmentSummary = {
   phase_workers: AssessmentPhaseWorker[];
   vendor_saas_hosts_pending_decision?: VendorSaasPendingDecision[];
   egress_status?: EgressStatus;
+};
+
+export type AssessmentRunLifecycleEvent = {
+  id?: number;
+  from_status?: string | null;
+  to_status: string;
+  actor?: string;
+  reason?: string;
+  created_at?: string;
+  [key: string]: unknown;
+};
+
+export type AssessmentRunSeal = {
+  requested_status?: string;
+  effective_status?: string;
+  counts?: Record<string, number>;
+  blockers?: AuditBlocker[];
+  [key: string]: unknown;
+};
+
+export type AssessmentRun = {
+  id: number;
+  run_uuid: string;
+  run_kind: "code" | "web" | "blue" | "shared";
+  run_purpose?: string;
+  status: string;
+  target_identity?: Record<string, unknown>;
+  source_generations?: Record<string, unknown>[];
+  exclusions?: Record<string, unknown>[];
+  created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  updated_at?: string;
+  producer_dispatch_id?: number;
+  producer_dispatch_agent_id?: string;
+  producer_dispatch_agent_role?: string;
+  requested_model?: string;
+  actual_model?: string;
+  requested_reasoning?: string;
+  actual_reasoning?: string;
+  client_name?: string;
+  source_revision?: string;
+  operator_instruction_path?: string;
+  operator_instruction_sha256?: string;
+  specialist_instruction_path?: string;
+  specialist_instruction_sha256?: string;
+  instruction_identity_status?: string;
+  instructions_stale?: boolean | null;
+  counts?: Record<string, number>;
+  proof_health?: Record<string, number | string | boolean | null>;
+  lifecycle_history?: AssessmentRunLifecycleEvent[];
+  seal?: AssessmentRunSeal | null;
+  blockers?: AuditBlocker[];
+  seal_sha256?: string | null;
+  observed_cost?: number | null;
+  finding_slugs?: string[];
+  warnings?: string[];
+  resumed_from_run_id?: number | null;
+};
+
+export type AssessmentRunChild = {
+  id?: number | string;
+  [key: string]: unknown;
 };
 
 export type Artifact = {
@@ -580,6 +807,53 @@ export function getAssessmentSummary(engagementKey: string) {
   return request<AssessmentSummary>(`/engagements/${engagementKey}/assessment/summary`);
 }
 
+function assessmentRunsPath(engagementKey: string): string {
+  return `/engagements/${encodeURIComponent(engagementKey)}/assessment/assessment-runs`;
+}
+
+export function listAssessmentRuns(
+  engagementKey: string,
+  params: { limit?: number; offset?: number } = {},
+) {
+  const query = new URLSearchParams();
+  if (params.limit != null) query.set("limit", String(params.limit));
+  if (params.offset != null) query.set("offset", String(params.offset));
+  const suffix = query.size ? `?${query.toString()}` : "";
+  return request<AssessmentRun[]>(`${assessmentRunsPath(engagementKey)}${suffix}`);
+}
+
+export function getAssessmentRun(engagementKey: string, runId: number) {
+  return request<AssessmentRun>(`${assessmentRunsPath(engagementKey)}/${runId}`);
+}
+
+export function listAssessmentRunChildren(
+  engagementKey: string,
+  runId: number,
+  section: RunAuditSection,
+  params: { limit?: number; offset?: number } = {},
+) {
+  const query = new URLSearchParams();
+  if (params.limit != null) query.set("limit", String(params.limit));
+  if (params.offset != null) query.set("offset", String(params.offset));
+  const suffix = query.size ? `?${query.toString()}` : "";
+  return request<AuditPage<AssessmentRunChild>>(
+    `${assessmentRunsPath(engagementKey)}/${runId}/${section}${suffix}`,
+  );
+}
+
+export function getAssessmentRunComparison(
+  engagementKey: string,
+  runId: number,
+  baselineRunId?: number,
+) {
+  const query = new URLSearchParams();
+  if (baselineRunId != null) query.set("baseline_run_id", String(baselineRunId));
+  const suffix = query.size ? `?${query.toString()}` : "";
+  return request<RunComparison>(
+    `${assessmentRunsPath(engagementKey)}/${runId}/comparison${suffix}`,
+  );
+}
+
 export function getReportReadiness(engagementKey: string) {
   return request<ReportReadiness>(`/engagements/${engagementKey}/assessment/report-readiness`);
 }
@@ -601,10 +875,122 @@ export function listAssessmentFindings(engagementKey: string) {
   return request<AssessmentFindingDetail[]>(`/engagements/${engagementKey}/assessment/findings`);
 }
 
-export function listAssessmentFindingTransitions(engagementKey: string, findingSlug: string) {
-  return request<AssessmentFindingTransition[]>(
-    `/engagements/${engagementKey}/assessment/findings/${encodeURIComponent(findingSlug)}/transitions`,
+export function listSubmissions(
+  engagementKey: string,
+  params: { findingOffset?: number; findingLimit?: number } = {},
+) {
+  const query = new URLSearchParams();
+  if (params.findingOffset != null) query.set("finding_offset", String(params.findingOffset));
+  if (params.findingLimit != null) query.set("finding_limit", String(params.findingLimit));
+  const qs = query.toString();
+  return request<SubmissionListing>(
+    `/engagements/${encodeURIComponent(engagementKey)}/assessment/submissions${qs ? `?${qs}` : ""}`,
   );
+}
+
+export function getSubmissionDetail(
+  engagementKey: string,
+  findingSlug: string,
+  params: {
+    attachmentOffset?: number;
+    attachmentLimit?: number;
+    versionOffset?: number;
+    versionLimit?: number;
+    pendingVersionOffset?: number;
+    pendingVersionLimit?: number;
+  } = {},
+) {
+  const query = new URLSearchParams();
+  if (params.attachmentOffset != null) {
+    query.set("attachment_offset", String(params.attachmentOffset));
+  }
+  if (params.attachmentLimit != null) {
+    query.set("attachment_limit", String(params.attachmentLimit));
+  }
+  if (params.versionOffset != null) query.set("version_offset", String(params.versionOffset));
+  if (params.versionLimit != null) query.set("version_limit", String(params.versionLimit));
+  if (params.pendingVersionOffset != null) {
+    query.set("pending_version_offset", String(params.pendingVersionOffset));
+  }
+  if (params.pendingVersionLimit != null) {
+    query.set("pending_version_limit", String(params.pendingVersionLimit));
+  }
+  const qs = query.toString();
+  return request<SubmissionDetail>(
+    `/engagements/${encodeURIComponent(engagementKey)}/assessment/submissions/` +
+      `${encodeURIComponent(findingSlug)}${qs ? `?${qs}` : ""}`,
+  );
+}
+
+export function exportSubmissionVersion(
+  engagementKey: string,
+  findingSlug: string,
+  input: SubmissionExportInput,
+) {
+  return request<SubmissionVersion>(
+    `/engagements/${encodeURIComponent(engagementKey)}/assessment/submissions/` +
+      `${encodeURIComponent(findingSlug)}/exports`,
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export function recoverSubmissionExports(
+  engagementKey: string,
+  actorSurface: "vigil-assess" | "web-ui",
+  params: {
+    failedVersionOffset?: number;
+    failedVersionLimit?: number;
+    orphanAfter?: string;
+    orphanLimit?: number;
+  } = {},
+) {
+  return request<SubmissionRecoveryResult>(
+    `/engagements/${encodeURIComponent(engagementKey)}/assessment/submissions/recover`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        actor_surface: actorSurface,
+        ...(params.failedVersionOffset != null
+          ? { failed_version_offset: params.failedVersionOffset }
+          : {}),
+        ...(params.failedVersionLimit != null
+          ? { failed_version_limit: params.failedVersionLimit }
+          : {}),
+        ...(params.orphanAfter != null ? { orphan_after: params.orphanAfter } : {}),
+        ...(params.orphanLimit != null ? { orphan_limit: params.orphanLimit } : {}),
+      }),
+    },
+  );
+}
+
+export function submissionVersionDownloadUrl(
+  engagementKey: string,
+  findingSlug: string,
+  versionNumber: number,
+) {
+  return resolveAppUrl(
+    `/engagements/${encodeURIComponent(engagementKey)}/assessment/submissions/` +
+      `${encodeURIComponent(findingSlug)}/versions/${versionNumber}/download`,
+  );
+}
+
+const FINDING_HISTORY_PAGE_SIZE = 500;
+
+export async function listAssessmentFindingTransitions(
+  engagementKey: string,
+  findingSlug: string,
+) {
+  const transitions: AssessmentFindingTransition[] = [];
+  let offset = 0;
+  while (true) {
+    const page = await request<AssessmentFindingTransition[]>(
+      `/engagements/${engagementKey}/assessment/findings/${encodeURIComponent(findingSlug)}` +
+        `/transitions?limit=${FINDING_HISTORY_PAGE_SIZE}&offset=${offset}`,
+    );
+    transitions.push(...page);
+    if (page.length < FINDING_HISTORY_PAGE_SIZE) return transitions;
+    offset += page.length;
+  }
 }
 
 export function listAssessmentFindingLinks(engagementKey: string) {
@@ -777,7 +1163,7 @@ export type AssessmentCommandRun = {
   // Listings: always "" with preview_chars populated. Detail: full text.
   stdout_preview_chars?: number;
   stderr_preview_chars?: number;
-  output_retention_status: string; // retained | artifact | suppressed | suppression_pending | suppression_deferred | untrusted | integrity_failure | empty
+  output_retention_status: string; // retained | artifact | suppressed | suppression_pending | suppression_deferred | preview_only | partially_measured | measurement_conflict | unmeasured | untrusted | integrity_failure | empty
   output_cleanup_status: string;
   output_cleanup_warning: string;
   output_integrity_status: string;
@@ -1020,6 +1406,10 @@ export type HttpFlow = {
   response_body_bytes: number;
   request_body_truncated: boolean;
   response_body_truncated: boolean;
+  request_body_capture_status: string;
+  response_body_capture_status: string;
+  request_body_capture_error: string;
+  response_body_capture_error: string;
   request_body_artifact_path: string | null;
   response_body_artifact_path: string | null;
   request_headers: Record<string, string>;
@@ -1060,12 +1450,16 @@ export type CapturePolicy = {
   max_body_bytes: number;
   content_type_allow: string[];
   content_type_deny: string[];
-  redaction_profile: string;
+  redaction_profile: "none";
+  redaction_warning: string;
+  retention: "until_engagement_deletion";
 };
 
 // PUT /capture-policy takes an all-optional partial (extra=forbid server-side),
 // so keep the update payload strictly to known keys.
-export type CapturePolicyUpdate = Partial<CapturePolicy>;
+export type CapturePolicyUpdate = Partial<
+  Omit<CapturePolicy, "retention" | "redaction_warning">
+>;
 
 function httpFlowParams(filters: HttpFlowFilters): URLSearchParams {
   const query = new URLSearchParams();
@@ -1315,8 +1709,7 @@ export type CodeAnalysisResult = {
   slot_type: string;
   notes: string;
   finding_workflow_status?: string | null;
-  finding_verification_state?: string | null;
-  finding_verification_disposition?: string | null;
+  finding_verification_status?: string | null;
   audit_metadata: Record<string, unknown>;
   created_at: string;
 };
@@ -1465,6 +1858,9 @@ export type IntelBreachRecord = IntelRowBase & {
 export type IntelOrgFact = IntelRowBase & {
   fact_key: string;
   fact_value: string;
+  authored_by: string;
+  scope: string;
+  validity_context: string;
 };
 
 export type IntelNote = IntelRowBase & {
@@ -1472,6 +1868,9 @@ export type IntelNote = IntelRowBase & {
   body_markdown: string;
   source_agent: string;
   tags: string[];
+  authored_by: string;
+  scope: string;
+  validity_context: string;
 };
 
 export type IntelEntityType =
@@ -1557,27 +1956,46 @@ export function getIntelSummary(engagementKey: string) {
   return request<IntelSummary>(`/engagements/${engagementKey}/intel/summary`);
 }
 
-export function listIntel(
+const INTEL_LIST_PAGE_SIZE = 500;
+
+async function listAllIntelPages<T>(
+  path: string,
+  baseQuery: URLSearchParams = new URLSearchParams(),
+): Promise<T[]> {
+  const items: T[] = [];
+  let offset = 0;
+
+  while (true) {
+    const query = new URLSearchParams(baseQuery);
+    query.set("limit", String(INTEL_LIST_PAGE_SIZE));
+    query.set("offset", String(offset));
+    const page = await request<unknown>(`${path}?${query.toString()}`);
+    if (!Array.isArray(page)) {
+      throw new Error(`Expected ${path} to return a JSON array`);
+    }
+    items.push(...(page as T[]));
+    if (page.length < INTEL_LIST_PAGE_SIZE) return items;
+    offset += page.length;
+  }
+}
+
+export async function listIntel(
   engagementKey: string,
   entityType: IntelEntityType,
 ): Promise<ListIntelResponse> {
   const path = intelEntityPath(entityType);
-  // Reader endpoints currently return a bare list (see api/intel.py); the
-  // typed `ListIntelResponse` shape is what A1 froze, so normalise here.
-  return request<IntelRecord[] | ListIntelResponse>(
+  // Reader endpoints return bounded bare lists (see api/intel.py). Traverse
+  // every page before publishing an exact total to the Intel cache.
+  const items = await listAllIntelPages<IntelRecord>(
     `/engagements/${engagementKey}/intel/${path}`,
-  ).then((payload) => {
-    if (Array.isArray(payload)) {
-      return { entity_type: entityType, total: payload.length, items: payload };
-    }
-    return payload;
-  });
+  );
+  return { entity_type: entityType, total: items.length, items };
 }
 
 export function listIntelCredentials(engagementKey: string) {
   // Credentials are a thin alias over assessment_credentials; shape is
   // "list of dict" at the contract layer — keep it loose.
-  return request<Record<string, unknown>[]>(
+  return listAllIntelPages<Record<string, unknown>>(
     `/engagements/${engagementKey}/intel/credentials`,
   );
 }
@@ -1592,8 +2010,12 @@ export function searchIntel(
   if (params.limit != null) query.set("limit", String(params.limit));
   if (params.offset != null) query.set("offset", String(params.offset));
   const qs = query.toString();
+  const path = `/engagements/${engagementKey}/intel/search`;
+  if (params.limit == null && params.offset == null) {
+    return listAllIntelPages<IntelSearchHit>(path, query);
+  }
   return request<IntelSearchHit[]>(
-    `/engagements/${engagementKey}/intel/search${qs ? `?${qs}` : ""}`,
+    `${path}${qs ? `?${qs}` : ""}`,
   );
 }
 

@@ -22,6 +22,7 @@ from .api.engagements import router as engagements_router
 from .api.events import router as events_router
 from .api.intel import router as intel_router
 from .api.report_export import router as report_export_router
+from .api.submissions import router as submissions_router
 from .config import settings
 from .db import database_readiness_flags, get_connection, init_db
 from .services.backup import start_scheduler as start_backup_scheduler, stop_scheduler as stop_backup_scheduler
@@ -120,6 +121,7 @@ app.include_router(engagements_router)
 app.include_router(credentials_router)
 app.include_router(events_router)
 app.include_router(artifacts_router)
+app.include_router(submissions_router)
 app.include_router(assessment_router)
 app.include_router(report_export_router)
 app.include_router(code_analysis_router)

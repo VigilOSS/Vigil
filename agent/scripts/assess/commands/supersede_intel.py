@@ -158,11 +158,11 @@ def run(args) -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
-        body = json.dumps(
-            {"to_existing_id": int(to_existing_id), "rationale": args.rationale},
-            ensure_ascii=True,
-        ).encode("utf-8")
-        record = _send_supersede(args, endpoint_segment, body)
+        request = {
+            "to_existing_id": int(to_existing_id),
+            "rationale": args.rationale,
+        }
+        record = _send_supersede(args, endpoint_segment, request)
         print(json.dumps(record, indent=2, ensure_ascii=False))
         return
 
@@ -214,37 +214,62 @@ def run(args) -> None:
             print(f"  - {error}", file=sys.stderr)
         sys.exit(1)
 
-    body = json.dumps(
-        {"payload": new_payload, "rationale": args.rationale},
-        ensure_ascii=True,
-    ).encode("utf-8")
-    record = _send_supersede(args, endpoint_segment, body)
+    request = {"payload": new_payload, "rationale": args.rationale}
+    record = _send_supersede(args, endpoint_segment, request)
 
     print(json.dumps(record, indent=2, ensure_ascii=False))
 
 
-def _send_supersede(args, endpoint_segment: str, body: bytes) -> dict:
-    """POST a supersede request body and decode the JSON response.
+def _send_supersede(args, endpoint_segment: str, payload: dict) -> dict:
+    """POST a supersede request and require its canonical row identities.
 
     Shared by the payload path and the ``--to-existing`` path so both hit the
-    same endpoint, 409 explainer, and decode fallback.
+    same endpoint, 409 explainer, and strict receipt validation.
     """
     from urllib.parse import quote
 
     cfg = load_config(args.engagement_dir)
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        path = (
-            f"{client._engagement_prefix}/intel/{quote(endpoint_segment)}/{int(args.intel_id)}/supersede"
-        )
+        endpoint = f"intel/{quote(endpoint_segment)}/{int(args.intel_id)}/supersede"
         try:
-            _, resp_body = client._request("POST", path, body=body)
+            result = client.post_engagement(endpoint, payload)
         except AssessError as exc:
             _maybe_explain_409(exc)
             raise
-    try:
-        return json.loads(resp_body)
-    except json.JSONDecodeError:
-        return {"raw": resp_body}
+    superseded = result.get("superseded")
+    current = result.get("current")
+    superseded_id = superseded.get("id") if isinstance(superseded, dict) else None
+    superseded_by_id = (
+        superseded.get("superseded_by_id") if isinstance(superseded, dict) else None
+    )
+    current_id = current.get("id") if isinstance(current, dict) else None
+    valid_current_id = (
+        isinstance(current_id, int)
+        and not isinstance(current_id, bool)
+        and current_id > 0
+    )
+    valid = (
+        isinstance(superseded, dict)
+        and type(superseded_id) is int
+        and superseded_id == int(args.intel_id)
+        and valid_current_id
+        and type(superseded_by_id) is int
+        and superseded_by_id == current_id
+    )
+    to_existing_id = payload.get("to_existing_id")
+    if to_existing_id is not None:
+        valid = valid and current_id == to_existing_id
+    replacement = payload.get("payload")
+    if isinstance(replacement, dict) and isinstance(current, dict):
+        natural_key = _INTEL_NATURAL_KEY_FIELDS.get(args.intel_type, ())
+        valid = valid and all(current.get(key) == replacement.get(key) for key in natural_key)
+    if not valid:
+        raise AssessError(
+            "supersede intel: backend response did not identify the canonical "
+            "superseded/current rows; the write may have committed, so inspect "
+            "durable intel state and do not retry automatically"
+        )
+    return result
 
 
 def _maybe_explain_409(exc: AssessError) -> None:

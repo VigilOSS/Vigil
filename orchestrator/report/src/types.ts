@@ -31,8 +31,7 @@ export interface ReportSummary {
   finding_count?: number;
   finding_severities?: Record<string, number>;
   finding_workflow_statuses?: Record<string, number>;
-  finding_verification_states?: Record<string, number>;
-  finding_verification_dispositions?: Record<string, number>;
+  finding_verification_statuses?: Record<string, number>;
   attack_chain_count?: number;
   open_surface_count?: number;
   credential_count?: number;
@@ -55,8 +54,7 @@ export interface ReportFinding {
   title?: string;
   severity?: string;
   workflow_status?: string;
-  verification_state?: string;
-  verification_disposition?: string;
+  verification_status?: string;
   canonical_location?: string;
   summary?: string;
   impact?: string;

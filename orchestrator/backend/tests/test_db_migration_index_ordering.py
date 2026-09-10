@@ -66,7 +66,9 @@ def test_init_db_succeeds_against_a_pre_migration_findings_table(isolate_setting
 
     columns = _columns(db_path, "assessment_findings")
     assert {"submission_ref", "submission_platform", "submission_url"} <= columns
-    assert {"verification_state", "verification_disposition"} <= columns
+    assert "verification_status" in columns
+    assert "verification_state" not in columns
+    assert "verification_disposition" not in columns
 
 
 def test_every_findings_index_exists_after_migrating_a_legacy_database(isolate_settings):

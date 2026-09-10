@@ -66,18 +66,11 @@ class SubmissionStatus(enum.StrEnum):
     WITHDRAWN = "withdrawn"
 
 
-class VerificationState(enum.StrEnum):
-    """Finding verification review state."""
+class VerificationStatus(enum.StrEnum):
+    """One-axis finding verification lifecycle, separate from workflow status."""
 
     UNREVIEWED = "unreviewed"
-    VERIFIED = "verified"
     DISPUTED = "disputed"
-
-
-class VerificationDisposition(enum.StrEnum):
-    """Finding verification disposition outcome."""
-
-    NONE = "none"
     PENDING_RUNTIME_PROOF = "pending_runtime_proof"
     BLOCKED = "blocked"
     CONFIRMED = "confirmed"
@@ -113,37 +106,19 @@ WORKFLOW_STATUS_RANK = {
     WorkflowStatus.MERGED: -1,
 }
 
-VERIFICATION_STATES = frozenset(VerificationState)
+VERIFICATION_STATUSES = frozenset(VerificationStatus)
 
-VERIFICATION_STATE_RANK = {
-    VerificationState.UNREVIEWED: 0,
-    VerificationState.DISPUTED: 1,
-    VerificationState.VERIFIED: 2,
-}
-
-VERIFICATION_DISPOSITIONS = frozenset(VerificationDisposition)
-
-VERIFICATION_DISPOSITION_RANK = {
-    VerificationDisposition.NONE: 0,
-    # "Strong but not yet runtime-proven": sticky vs none (0 >= 1 is False so a
-    # later bare none cannot clobber it) but yields to downgraded/confirmed,
-    # which rank higher. false_positive is handled by explicit early-returns in
-    # _coalesce_verification_disposition, so its -1 only matters for confidence
-    # ordering in _finding_confidence_tuple.
-    VerificationDisposition.PENDING_RUNTIME_PROOF: 1,
-    # "Blocked-for-provisioning" (hunting.md): the exploit attempt could not even
-    # start because a precondition is missing (no test account / line / device /
-    # credential / access). Sticky vs 'none' (rank 1 >= 0, so a later bare none in
-    # _coalesce_verification_disposition cannot clobber it), but yields to
-    # downgraded (2) / confirmed (3) so a later real proof supersedes the block,
-    # and false_positive is handled by the explicit early-returns in the coalesce.
-    # Shares rank 1 with pending_runtime_proof: both are non-report holding states
-    # that a real verdict outranks; the tie only affects confidence ordering in
-    # _finding_confidence_tuple, where they are equivalently weak-but-reviewed.
-    VerificationDisposition.BLOCKED: 1,
-    VerificationDisposition.DOWNGRADED: 2,
-    VerificationDisposition.CONFIRMED: 3,
-    VerificationDisposition.FALSE_POSITIVE: -1,
+# Read-side confidence ordering only. Verification writes never compare this
+# table: lifecycle changes are explicit, so a rediscovery cannot promote or
+# regress a verifier's decision merely because one label sorts above another.
+VERIFICATION_STATUS_CONFIDENCE_RANK = {
+    VerificationStatus.FALSE_POSITIVE: -1,
+    VerificationStatus.UNREVIEWED: 0,
+    VerificationStatus.DISPUTED: 1,
+    VerificationStatus.PENDING_RUNTIME_PROOF: 1,
+    VerificationStatus.BLOCKED: 1,
+    VerificationStatus.DOWNGRADED: 2,
+    VerificationStatus.CONFIRMED: 3,
 }
 
 class DispatchStatus(enum.StrEnum):
@@ -362,54 +337,30 @@ def _normalize_submission_status(value: str | None) -> SubmissionStatus:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"invalid submission status: {value}")
     return SubmissionStatus(submission_value)
 
-def _normalize_verification_state(value: str) -> VerificationState:
-    state_value = (value or "unreviewed").strip().lower()
-    if state_value not in VERIFICATION_STATES:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"invalid verification state: {value}")
-    return VerificationState(state_value)
-
-def _normalize_verification_disposition(value: str) -> VerificationDisposition:
-    disposition_value = (value or "none").strip().lower()
-    if disposition_value not in VERIFICATION_DISPOSITIONS:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"invalid verification disposition: {value}")
-    return VerificationDisposition(disposition_value)
-
-def _legacy_verification_defaults(workflow_status: str) -> tuple[VerificationState, VerificationDisposition]:
-    normalized_workflow = _normalize_workflow_status(workflow_status)
-    if normalized_workflow == "false_positive":
-        return (VerificationState.VERIFIED, VerificationDisposition.FALSE_POSITIVE)
-    if normalized_workflow in {"blocked", "exploited", "reported"}:
-        return (VerificationState.VERIFIED, VerificationDisposition.CONFIRMED)
-    if normalized_workflow == "active":
-        return (VerificationState.UNREVIEWED, VerificationDisposition.NONE)
-    return (VerificationState.UNREVIEWED, VerificationDisposition.NONE)
+def _normalize_verification_status(value: str) -> VerificationStatus:
+    status_value = (value or "unreviewed").strip().lower()
+    if status_value not in VERIFICATION_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid verification status: {value}",
+        )
+    return VerificationStatus(status_value)
 
 def _row_workflow_status(row: dict[str, Any] | Any) -> WorkflowStatus:
     if isinstance(row, dict):
         return _normalize_workflow_status(str(row.get("status", "draft")))
     return _normalize_workflow_status(str(row["status"]))
 
-def _row_verification_state(row: dict[str, Any] | Any) -> VerificationState:
+def _row_verification_status(row: dict[str, Any] | Any) -> VerificationStatus:
     if isinstance(row, dict):
-        value = str(row.get("verification_state", "") or "")
-        if value:
-            return _normalize_verification_state(value)
-        return _legacy_verification_defaults(_row_workflow_status(row))[0]
-    value = str(row["verification_state"]) if "verification_state" in row.keys() else ""
-    if value:
-        return _normalize_verification_state(value)
-    return _legacy_verification_defaults(_row_workflow_status(row))[0]
-
-def _row_verification_disposition(row: dict[str, Any] | Any) -> VerificationDisposition:
-    if isinstance(row, dict):
-        value = str(row.get("verification_disposition", "") or "")
-        if value:
-            return _normalize_verification_disposition(value)
-        return _legacy_verification_defaults(_row_workflow_status(row))[1]
-    value = str(row["verification_disposition"]) if "verification_disposition" in row.keys() else ""
-    if value:
-        return _normalize_verification_disposition(value)
-    return _legacy_verification_defaults(_row_workflow_status(row))[1]
+        value = str(row.get("verification_status", "unreviewed") or "unreviewed")
+    else:
+        value = (
+            str(row["verification_status"])
+            if "verification_status" in row.keys()
+            else "unreviewed"
+        )
+    return _normalize_verification_status(value)
 
 def _is_suppressed_workflow_status(workflow_status: str) -> bool:
     return _normalize_workflow_status(workflow_status) in {"merged", "false_positive"}
@@ -424,13 +375,11 @@ def _serialize_finding_record(row: dict[str, Any] | Any) -> dict[str, Any]:
     except HTTPException:
         record["workflow_status"] = str(record.get("status", "draft")).strip().lower()
     try:
-        record["verification_state"] = _row_verification_state(record)
+        record["verification_status"] = _row_verification_status(record)
     except HTTPException:
-        record["verification_state"] = str(record.get("verification_state", "unreviewed") or "unreviewed").strip().lower()
-    try:
-        record["verification_disposition"] = _row_verification_disposition(record)
-    except HTTPException:
-        record["verification_disposition"] = str(record.get("verification_disposition", "none") or "none").strip().lower()
+        record["verification_status"] = str(
+            record.get("verification_status", "unreviewed") or "unreviewed"
+        ).strip().lower()
     # submission_status is a separate axis from workflow_status; surface it on
     # every read projection, defaulting to 'none' when absent (legacy rows /
     # synthetic dicts). Read path must not crash on an invalid DB value.
@@ -448,7 +397,7 @@ def _serialize_finding_record(row: dict[str, Any] | Any) -> dict[str, Any]:
     record.pop("status", None)
     return record
 
-def _finding_confidence_tuple(row: dict[str, Any] | Any) -> tuple[int, int, int, int, int]:
+def _finding_confidence_tuple(row: dict[str, Any] | Any) -> tuple[int, int, int, int]:
     if isinstance(row, dict):
         severity_value = row.get("severity", "info")
         evidence_ref = row.get("evidence_ref", "")
@@ -457,8 +406,7 @@ def _finding_confidence_tuple(row: dict[str, Any] | Any) -> tuple[int, int, int,
         evidence_ref = row["evidence_ref"]
     return (
         WORKFLOW_STATUS_RANK[_row_workflow_status(row)],
-        VERIFICATION_STATE_RANK[_row_verification_state(row)],
-        VERIFICATION_DISPOSITION_RANK[_row_verification_disposition(row)],
+        VERIFICATION_STATUS_CONFIDENCE_RANK[_row_verification_status(row)],
         SEVERITY_RANK[_normalize_severity(str(severity_value))],
         1 if evidence_ref else 0,
     )

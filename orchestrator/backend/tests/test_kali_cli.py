@@ -990,14 +990,21 @@ class _FakeClient:
         self.engagement_key = engagement_key
         self.posts: list[tuple[str, dict]] = []
         self.patches: list[tuple[str, dict]] = []
+        self.run_uuid: str | None = None
 
     def post(self, endpoint, payload):
         self.posts.append((endpoint, payload))
+        if endpoint == "command-runs":
+            self.run_uuid = payload.get("run_uuid")
         return {"id": 7, "superseded_by_id": None}
 
     def patch(self, endpoint, payload, *, accept_409: bool = False):
         self.patches.append((endpoint, payload))
-        return {"id": 7, "status": payload.get("status")}
+        return {
+            "id": 7,
+            "run_uuid": self.run_uuid,
+            "status": payload.get("status"),
+        }
 
     def close(self):
         return None
@@ -1166,11 +1173,9 @@ def test_kali_exec_refuses_a_denied_tool_before_container_and_audits_refusal(
     assert fake_client.patches[0][1]["return_code"] is None
 
 
-def test_kali_exec_acquires_aggregate_rate_lease_after_audit_before_process(
+def test_kali_exec_emits_nonblocking_recency_advisory_after_audit_before_process(
     monkeypatch, fake_engagement
 ):
-    from contextlib import contextmanager
-
     kali = _setup_fake_config(monkeypatch, fake_engagement)
     (fake_engagement / "scope.json").write_text(
         json.dumps(
@@ -1192,15 +1197,11 @@ def test_kali_exec_acquires_aggregate_rate_lease_after_audit_before_process(
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
     monkeypatch.setattr(kali, "_check_container_running", lambda _name: None)
 
-    @contextmanager
-    def fake_lease(**kwargs):
-        events.append("lease-enter")
-        assert kwargs["effective_rate_rps"] == 8
-        assert kwargs["command_run_id"] == 7
-        yield {"lease_token": "lease-1"}
-        events.append("lease-exit")
-
-    monkeypatch.setattr(kali, "target_rate_lease", fake_lease)
+    monkeypatch.setattr(
+        kali,
+        "emit_foreign_lane_recency",
+        lambda *_args, **_kwargs: events.append("advisory"),
+    )
 
     def fake_popen(*_args, **_kwargs):
         events.append("process")
@@ -1219,10 +1220,9 @@ def test_kali_exec_acquires_aggregate_rate_lease_after_audit_before_process(
         tool_name="nmap",
     )
 
-    assert events.index("audit") < events.index("lease-enter") < max(
+    assert events.index("audit") < events.index("advisory") < max(
         index for index, event in enumerate(events) if event == "process"
     )
-    assert events[-1] == "lease-exit"
 
 
 def test_kali_exec_denied_tool_is_rejected_before_execution(monkeypatch, fake_engagement):
@@ -3108,7 +3108,6 @@ def test_kali_job_start_uses_shared_identity_header_and_oob_preparation(
         parent_command_run_id=None,
         identity="member",
         identity_scope="billing",
-        rate_override_reason="",
     )
 
     mod._run_start(args)
@@ -3199,7 +3198,9 @@ def test_kali_job_start_rejects_caller_owned_parent_command_run(
         mod._run_start(args)
 
 
-def test_kali_job_start_declares_effective_aggregate_rate(monkeypatch, fake_engagement):
+def test_kali_job_start_does_not_enforce_legacy_aggregate_rate(
+    monkeypatch, fake_engagement
+):
     mod = _import("assess.commands.kali_job")
     (fake_engagement / "scope.json").write_text(
         json.dumps(
@@ -3236,13 +3237,12 @@ def test_kali_job_start_declares_effective_aggregate_rate(monkeypatch, fake_enga
         command=["httpx", "-u", "https://allowed.example", "-rate-limit", "7"],
         container_name="vigil",
         parent_command_run_id=None,
-        rate_override_reason="Approved burst",
     )
 
     mod._run_start(args)
 
-    assert captured["audit_meta"]["effective_rate_rps"] == 7
-    assert captured["audit_meta"]["rate_override_reason"] == "Approved burst"
+    assert "effective_rate_rps" not in captured["audit_meta"]
+    assert "rate_override_reason" not in captured["audit_meta"]
 
 
 def test_kali_job_start_derives_inner_shell_tool_for_policy(monkeypatch, fake_engagement):
@@ -3333,7 +3333,6 @@ def test_kali_job_start_prepares_and_records_launcher_wrapped_nuclei(
         container_name="vigil",
         parent_command_run_id=None,
         identity=None,
-        rate_override_reason="",
     )
 
     mod._run_start(args)
@@ -3380,7 +3379,6 @@ def test_kali_job_start_denies_inner_tool_behind_launcher(
         container_name="vigil",
         parent_command_run_id=None,
         identity=None,
-        rate_override_reason="",
     )
 
     with pytest.raises(mod.AssessError, match="tool 'nuclei'.*denied"):
@@ -3719,7 +3717,15 @@ def test_finalize_409_swallowed_as_success(monkeypatch, fake_engagement):
         # the backend says 409, return the canonical row from `existing`.
         assert accept_409 is True
         fake_client.patches.append((endpoint, payload))
-        return {**canonical_row, "finalize_409": True}
+        command_post = next(
+            body for posted_endpoint, body in fake_client.posts
+            if posted_endpoint == "command-runs"
+        )
+        return {
+            **canonical_row,
+            "run_uuid": command_post["run_uuid"],
+            "finalize_409": True,
+        }
 
     fake_client.patch = fake_patch  # type: ignore[assignment]
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
@@ -3755,7 +3761,10 @@ def test_assessment_client_patch_accept_409_returns_canonical_row(monkeypatch):
         return 409, json.dumps(
             {
                 "detail": {
-                    "message": "already finalized",
+                    "message": (
+                        "command run id=99 already finalized with "
+                        "status='completed'; refusing to overwrite"
+                    ),
                     "existing": {
                         "id": 99,
                         "status": "completed",
@@ -3768,11 +3777,139 @@ def test_assessment_client_patch_accept_409_returns_canonical_row(monkeypatch):
 
     monkeypatch.setattr(client_mod.AssessmentClient, "_request", fake_request)
     c = client_mod.AssessmentClient("http://127.0.0.1:18000", "engagement-key")
-    row = c.patch("command-runs/99/finalize", {"status": "completed"}, accept_409=True)
+    row = c.patch("command-runs/99", {"status": "completed"}, accept_409=True)
     assert row["id"] == 99
     assert row["status"] == "completed"
     assert row.get("finalize_409") is True
     assert captured[0][2]["accept_409"] is True
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"detail": {"message": "already finalized"}},
+        {
+            "detail": {
+                "message": "verified command output changed after metadata commit",
+                "existing": {"id": 99, "status": "completed"},
+            }
+        },
+    ],
+    ids=["missing-existing", "non-race-conflict"],
+)
+def test_assessment_client_patch_rejects_noncanonical_finalize_409(
+    monkeypatch, response
+):
+    from assess.lib import client as client_mod
+
+    monkeypatch.setattr(
+        client_mod.AssessmentClient,
+        "_request",
+        lambda *_args, **_kwargs: (409, json.dumps(response)),
+    )
+    client = client_mod.AssessmentClient("http://127.0.0.1:18000", "engagement-key")
+
+    with pytest.raises(client_mod.AssessError, match="documented already-finalized"):
+        client.patch("command-runs/99", {"status": "completed"}, accept_409=True)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"id": 8, "status": "completed"},
+        {"id": 7},
+        {"id": 7, "status": "running"},
+    ],
+    ids=["wrong-id", "missing-status", "wrong-status"],
+)
+def test_assessment_client_patch_rejects_unbound_job_success_receipt(
+    monkeypatch, response
+):
+    from assess.lib import client as client_mod
+
+    monkeypatch.setattr(
+        client_mod.AssessmentClient,
+        "_request",
+        lambda *_args, **_kwargs: (200, json.dumps(response)),
+    )
+    client = client_mod.AssessmentClient("http://127.0.0.1:18000", "engagement-key")
+
+    with pytest.raises(client_mod.AssessError, match="exact job id/status"):
+        client.patch("jobs/7", {"status": "completed"})
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        {"message": "job already terminal", "existing": {"id": 8, "status": "completed"}},
+        {"message": "job already terminal", "existing": {"id": 7, "status": "running"}},
+        {"message": "some other conflict", "existing": {"id": 7, "status": "completed"}},
+    ],
+    ids=["wrong-id", "nonterminal-existing", "wrong-conflict"],
+)
+def test_assessment_client_patch_rejects_unbound_job_finalize_409(
+    monkeypatch, detail
+):
+    from assess.lib import client as client_mod
+
+    monkeypatch.setattr(
+        client_mod.AssessmentClient,
+        "_request",
+        lambda *_args, **_kwargs: (409, json.dumps({"detail": detail})),
+    )
+    client = client_mod.AssessmentClient("http://127.0.0.1:18000", "engagement-key")
+
+    with pytest.raises(client_mod.AssessError, match="documented terminal job row"):
+        client.patch("jobs/7", {"status": "failed"}, accept_409=True)
+
+
+def test_assessment_client_patch_accepts_bound_job_finalize_409(monkeypatch):
+    from assess.lib import client as client_mod
+
+    monkeypatch.setattr(
+        client_mod.AssessmentClient,
+        "_request",
+        lambda *_args, **_kwargs: (
+            409,
+            json.dumps(
+                {
+                    "detail": {
+                        "message": "job already terminal",
+                        "existing": {"id": 7, "status": "completed"},
+                    }
+                }
+            ),
+        ),
+    )
+    client = client_mod.AssessmentClient("http://127.0.0.1:18000", "engagement-key")
+
+    row = client.patch("jobs/7", {"status": "failed"}, accept_409=True)
+
+    assert row == {"id": 7, "status": "completed", "finalize_409": True}
+
+
+def test_assessment_client_patch_rejects_409_on_unrecognized_endpoint(monkeypatch):
+    from assess.lib import client as client_mod
+
+    monkeypatch.setattr(
+        client_mod.AssessmentClient,
+        "_request",
+        lambda *_args, **_kwargs: (
+            409,
+            json.dumps(
+                {
+                    "detail": {
+                        "message": "job already terminal",
+                        "existing": {"id": 7, "status": "completed"},
+                    }
+                }
+            ),
+        ),
+    )
+    client = client_mod.AssessmentClient("http://127.0.0.1:18000", "engagement-key")
+
+    with pytest.raises(client_mod.AssessError, match="not a recognized finalize endpoint"):
+        client.patch("jobs/7/extra", {"status": "failed"}, accept_409=True)
 
 
 def test_assessment_client_connection_failure_suggests_orchestrator(monkeypatch):
@@ -4698,8 +4835,12 @@ class _FakeSweepClient:
 
     def patch(self, endpoint, payload, *, accept_409: bool = False):
         self.patches.append((endpoint, payload))
+        row_id = int(endpoint.split("/")[-1])
+        row = next(row for row in self._rows if row["id"] == row_id)
+        run_uuid = Path(row["stdout_path"]).stem
         return {
-            "id": int(endpoint.split("/")[-1]),
+            "id": row_id,
+            "run_uuid": run_uuid,
             "status": payload.get("status"),
             "recovered_pending_output": True,
             "output_cleanup_status": "not_required",
@@ -5174,8 +5315,18 @@ def test_sweep_orphans_rejects_unproven_pending_recovery(
     assert summary["skipped_unverifiable"] == 1
 
 
+@pytest.mark.parametrize(
+    "retention_status",
+    [
+        "measurement_conflict",
+        "partially_measured",
+        "preview_only",
+        "suppression_deferred",
+        "unmeasured",
+    ],
+)
 def test_sweep_orphans_tracks_degraded_pending_recovery(
-    monkeypatch, fake_engagement, capsys
+    retention_status, monkeypatch, fake_engagement, capsys
 ):
     base_row = _orphan_row(
         row_id=95,
@@ -5196,11 +5347,12 @@ def test_sweep_orphans_tracks_degraded_pending_recovery(
         fake_client.patches.append((endpoint, payload))
         return {
             "id": 95,
+            "run_uuid": "pending-degraded-0095",
             "status": "completed",
             "recovered_pending_output": True,
             "output_cleanup_status": "deferred",
             "output_integrity_status": "not_applicable",
-            "output_retention_status": "suppression_deferred",
+            "output_retention_status": retention_status,
         }
 
     fake_client.patch = fake_patch
@@ -5251,6 +5403,7 @@ def test_sweep_orphans_bounds_degraded_recovery_ids(
         row_id = int(endpoint.rsplit("/", 1)[-1])
         return {
             "id": row_id,
+            "run_uuid": f"pending-degraded-{row_id}",
             "status": "completed",
             "recovered_pending_output": True,
             "output_cleanup_status": "deferred",
@@ -6338,7 +6491,7 @@ def test_timeout_above_the_caller_ceiling_is_refused(monkeypatch, fake_engagemen
         technique="RECON", intent="x", probe_kind="fingerprint", phase="recon",
         timeout=1800, destructive=False, force=False, container_name=None,
         identity=None, identity_scope="", identity_target="",
-        rate_override_reason="", engagement_dir=None,
+        engagement_dir=None,
         kali_agent_name="recon-specialist", kali_agent_id=None,
     )
     with pytest.raises(kali_cli.AssessError) as excinfo:

@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from app import db as db_module
+from tests.proof_fixtures import post_artifact_backed_source_observation
 
 
 ENGAGEMENT_KEY = "2026-05-05-170700-root-cause"
@@ -35,8 +36,7 @@ def _finding(slug: str, title: str, *, root_key: str, severity: str = "high") ->
         "title": title,
         "severity": severity,
         "workflow_status": "exploited",
-        "verification_state": "verified",
-        "verification_disposition": "confirmed",
+        "verification_status": "unreviewed",
         "defect_family": "auth-bypass",
         "root_cause_key": root_key,
         "canonical_location": f"https://app.example/{slug.lower()}",
@@ -54,6 +54,103 @@ def _finding(slug: str, title: str, *, root_key: str, severity: str = "high") ->
     }
 
 
+def _create(client, payload: dict) -> None:
+    slug = str(payload["slug"])
+    author_id = f"AUTHOR-{slug}"
+    base = f"/engagements/{ENGAGEMENT_KEY}/assessment"
+    dispatch = client.post(
+        f"{base}/dispatches",
+        json={
+            "agent_id": author_id,
+            "agent_role": "vulnerability-analyst",
+            "task": f"Record {slug}",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
+    response = client.post(
+        f"{base}/findings",
+        json={**payload, "provenance": {"agent_id": author_id}},
+    )
+    assert response.status_code in {200, 201}, response.text
+
+
+def _confirm(client, slug: str, *, attempt: str = "") -> int:
+    suffix = f"-{attempt}" if attempt else ""
+    agent_id = f"VERIFY-{slug}{suffix}"
+    base = f"/engagements/{ENGAGEMENT_KEY}/assessment"
+    dispatch = client.post(
+        f"{base}/dispatches",
+        json={
+            "agent_id": agent_id,
+            "agent_role": "root-cause-fixture-verifier",
+            "task": f"Independently verify {slug}",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
+    run = client.post(
+        f"{base}/assessment-runs",
+        json={
+            "run_uuid": f"root-cause-fixture-{slug}{suffix}",
+            "run_kind": "shared",
+            "producer_dispatch_agent_id": agent_id,
+        },
+    )
+    assert run.status_code == 201, run.text
+    receipt = post_artifact_backed_source_observation(
+        client,
+        f"{base}/proof-receipts",
+        json={
+            "run_id": run.json()["id"],
+            "evidence_kind": "source_observation",
+            "expected_result": "the finding survives independent root-cause review",
+            "observed_result": "the independent review reproduced the finding",
+        },
+    )
+    assert receipt.status_code == 201, receipt.text
+    completed = client.patch(
+        f"{base}/assessment-runs/{run.json()['id']}",
+        json={"status": "completed"},
+    )
+    assert completed.status_code == 200, completed.text
+    verified = client.post(
+        f"{base}/findings/{slug}/verify",
+        json={
+            "verification_status": "confirmed",
+            "reason_text": "independent root-cause fixture proof",
+            "proof_receipt_ids": [receipt.json()["id"]],
+        },
+    )
+    assert verified.status_code == 200, verified.text
+    return int(receipt.json()["id"])
+
+
+def _assert_relationship_invalidation(
+    client,
+    *,
+    slug: str,
+    receipt_id: int,
+) -> dict:
+    base = f"/engagements/{ENGAGEMENT_KEY}/assessment"
+    finding = client.get(f"{base}/findings/{slug}")
+    assert finding.status_code == 200, finding.text
+    assert finding.json()["verification_status"] == "unreviewed"
+    transitions = client.get(f"{base}/findings/{slug}/transitions")
+    assert transitions.status_code == 200, transitions.text
+    latest = transitions.json()[0]
+    assert latest["action"] == "verification_invalidated"
+    assert latest["from_verification_status"] == "confirmed"
+    assert latest["to_verification_status"] == "unreviewed"
+    assert latest["reason_code"] == "relationship_changed"
+    metadata = json.loads(latest["metadata_json"])
+    assert metadata["material_change"] is True
+    receipts = client.get(
+        f"{base}/proof-receipts", params={"finding_slug": slug}
+    )
+    assert receipts.status_code == 200, receipts.text
+    assert receipt_id in {int(row["id"]) for row in receipts.json()}
+    return metadata["relationship_change"]
+
+
 def test_root_cause_link_groups_findings_and_clears_duplicate_blocker(client, isolate_settings):
     _seed(client, isolate_settings)
     for payload in (
@@ -61,8 +158,8 @@ def test_root_cause_link_groups_findings_and_clears_duplicate_blocker(client, is
         _finding("RC-002", "Admin export reachable through bypass", root_key="shared-auth-guard"),
         _finding("RC-003", "XXE reachable after takeover", root_key="shared-auth-guard", severity="medium"),
     ):
-        response = client.post(f"/engagements/{ENGAGEMENT_KEY}/assessment/findings", json=payload)
-        assert response.status_code in {200, 201}, response.text
+        _create(client, payload)
+        _confirm(client, payload["slug"])
 
     before = client.get(f"/engagements/{ENGAGEMENT_KEY}/assessment/report-readiness").json()
     assert any(blocker["kind"] == "duplicate_root_cause" for blocker in before["blockers"])
@@ -95,6 +192,8 @@ def test_root_cause_link_groups_findings_and_clears_duplicate_blocker(client, is
 
     readiness = client.get(f"/engagements/{ENGAGEMENT_KEY}/assessment/report-readiness").json()
     assert not any(blocker["kind"] == "duplicate_root_cause" for blocker in readiness["blockers"])
+    _confirm(client, "RC-002", attempt="linked-root-cause")
+    _confirm(client, "RC-003", attempt="linked-root-cause")
 
     report_groups = client.get(f"/engagements/{ENGAGEMENT_KEY}/assessment/report-findings?mode=final")
     assert report_groups.status_code == 200, report_groups.text
@@ -110,8 +209,7 @@ def test_root_cause_link_rejects_nested_groups_and_merge_of_group_root(client, i
         _finding("RC-011", "Sibling guard outcome", root_key="guard-a"),
         _finding("RC-012", "Another root", root_key="guard-b"),
     ):
-        response = client.post(f"/engagements/{ENGAGEMENT_KEY}/assessment/findings", json=payload)
-        assert response.status_code in {200, 201}, response.text
+        _create(client, payload)
 
     response = client.put(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/findings/RC-011/root-cause",
@@ -327,6 +425,245 @@ def test_generic_link_retarget_normalizes_selector_shape(client, isolate_setting
     assert kind_only.status_code == 422, kind_only.text
 
 
+def test_root_cause_relationship_changes_invalidate_terminal_verification(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    for slug in ("RC-080", "RC-081", "RC-082"):
+        _create(client, _finding(slug, slug, root_key=slug))
+    base = f"/engagements/{ENGAGEMENT_KEY}/assessment/findings/RC-080/root-cause"
+
+    receipt_id = _confirm(client, "RC-080", attempt="create")
+    created = client.put(
+        base,
+        json={
+            "root_cause_slug": "RC-081",
+            "sibling_order": 4,
+            "root_cause_effect": "eliminates_finding",
+            "note": "Original root-cause evidence.",
+            "provenance": {"reviewed_by": "analyst-a"},
+        },
+    )
+    assert created.status_code == 200, created.text
+    change = _assert_relationship_invalidation(
+        client, slug="RC-080", receipt_id=receipt_id
+    )
+    assert change["before"] is None
+    assert change["after"]["target_ref"] == "RC-081"
+    assert change["after"]["provenance"]["reviewed_by"] == "analyst-a"
+
+    receipt_id = _confirm(client, "RC-080", attempt="replace")
+    replaced = client.put(
+        base,
+        json={
+            "root_cause_slug": "RC-082",
+            "root_cause_effect": "eliminates_finding",
+            "provenance": {"corrected_by": "operator"},
+        },
+    )
+    assert replaced.status_code == 200, replaced.text
+    change = _assert_relationship_invalidation(
+        client, slug="RC-080", receipt_id=receipt_id
+    )
+    assert change["before"]["target_ref"] == "RC-081"
+    assert change["before"]["notes"] == "Original root-cause evidence."
+    assert change["before"]["provenance"]["reviewed_by"] == "analyst-a"
+    assert change["after"]["target_ref"] == "RC-082"
+    assert change["after"]["provenance"]["corrected_by"] == "operator"
+
+    receipt_id = _confirm(client, "RC-080", attempt="effect")
+    effect = client.put(
+        base,
+        json={
+            "root_cause_slug": "RC-082",
+            "root_cause_effect": "eliminates_attack_path",
+        },
+    )
+    assert effect.status_code == 200, effect.text
+    change = _assert_relationship_invalidation(
+        client, slug="RC-080", receipt_id=receipt_id
+    )
+    assert change["before"]["root_cause_effect"] == "eliminates_finding"
+    assert change["after"]["root_cause_effect"] == "eliminates_attack_path"
+
+    _confirm(client, "RC-080", attempt="nonmaterial")
+    unchanged = client.put(
+        base,
+        json={
+            "root_cause_slug": "RC-082",
+            "sibling_order": 9,
+            "root_cause_effect": "eliminates_attack_path",
+            "note": "Additional wording only.",
+            "provenance": {"review_note": "ordering correction"},
+        },
+    )
+    assert unchanged.status_code == 200, unchanged.text
+    assert client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/findings/RC-080"
+    ).json()["verification_status"] == "confirmed"
+
+    receipt_id = _confirm(client, "RC-080", attempt="clear")
+    cleared = client.delete(base)
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["cleared"] == 1
+    change = _assert_relationship_invalidation(
+        client, slug="RC-080", receipt_id=receipt_id
+    )
+    assert change["before"][0]["retired_at"] is None
+    assert change["after"][0]["retired_at"] is not None
+
+
+def test_generic_and_duplicate_relationship_lifecycle_invalidates_only_material_changes(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    for slug in ("RC-090", "RC-091", "RC-092", "RC-093"):
+        _create(client, _finding(slug, slug, root_key=slug))
+    base = f"/engagements/{ENGAGEMENT_KEY}/assessment/findings"
+
+    for index, link_kind in enumerate(("related", "duplicate_of"), start=1):
+        source = f"RC-09{index - 1}"
+        target = "RC-092"
+        alternate = "RC-093"
+        endpoint = f"{base}/{source}/links"
+
+        receipt_id = _confirm(client, source, attempt=f"{link_kind}-create")
+        created = client.post(
+            endpoint,
+            json={
+                "link_kind": link_kind,
+                "target_kind": "finding",
+                "target_ref": target,
+                "notes": "Original relation evidence.",
+                "provenance": {"observed_by": "analyst"},
+            },
+        )
+        assert created.status_code == 200, created.text
+        link = created.json()
+        change = _assert_relationship_invalidation(
+            client, slug=source, receipt_id=receipt_id
+        )
+        assert change["before"] is None
+        assert change["after"]["link_kind"] == link_kind
+
+        _confirm(client, source, attempt=f"{link_kind}-unchanged")
+        unchanged = client.post(
+            endpoint,
+            json={
+                "link_kind": link_kind,
+                "target_kind": "finding",
+                "target_ref": target,
+                "notes": "Additional wording only.",
+                "provenance": {"reviewed_by": "operator"},
+            },
+        )
+        assert unchanged.status_code == 200, unchanged.text
+        assert client.get(f"{base}/{source}").json()["verification_status"] == "confirmed"
+
+        receipt_id = _confirm(client, source, attempt=f"{link_kind}-retarget")
+        retargeted = client.patch(
+            f"{endpoint}/{link['id']}",
+            json={"target_ref": alternate},
+        )
+        assert retargeted.status_code == 200, retargeted.text
+        change = _assert_relationship_invalidation(
+            client, slug=source, receipt_id=receipt_id
+        )
+        assert change["before"]["target_ref"] == target
+        assert change["after"]["target_ref"] == alternate
+
+        receipt_id = _confirm(client, source, attempt=f"{link_kind}-retire")
+        retired = client.patch(
+            f"{endpoint}/{link['id']}",
+            json={"retired": True},
+        )
+        assert retired.status_code == 200, retired.text
+        change = _assert_relationship_invalidation(
+            client, slug=source, receipt_id=receipt_id
+        )
+        assert change["before"]["retired_at"] is None
+        assert change["after"]["retired_at"] is not None
+
+        _confirm(client, source, attempt=f"{link_kind}-retired-noop")
+        retired_again = client.patch(
+            f"{endpoint}/{link['id']}",
+            json={"retired": True, "notes": "Retained audit clarification."},
+        )
+        assert retired_again.status_code == 200, retired_again.text
+        assert client.get(f"{base}/{source}").json()["verification_status"] == "confirmed"
+
+        receipt_id = _confirm(client, source, attempt=f"{link_kind}-reactivate")
+        reactivated = client.patch(
+            f"{endpoint}/{link['id']}",
+            json={"retired": False},
+        )
+        assert reactivated.status_code == 200, reactivated.text
+        change = _assert_relationship_invalidation(
+            client, slug=source, receipt_id=receipt_id
+        )
+        assert change["before"]["retired_at"] is not None
+        assert change["after"]["retired_at"] is None
+
+
+def test_relationship_changes_do_not_invent_invalidation_for_unreviewed_finding(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    for slug in ("RC-095", "RC-096"):
+        _create(client, _finding(slug, slug, root_key=slug))
+
+    linked = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/findings/RC-095/links",
+        json={
+            "link_kind": "related",
+            "target_kind": "finding",
+            "target_ref": "RC-096",
+        },
+    )
+
+    assert linked.status_code == 200, linked.text
+    finding = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/findings/RC-095"
+    ).json()
+    assert finding["verification_status"] == "unreviewed"
+    transitions = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/findings/RC-095/transitions"
+    ).json()
+    assert not any(row["action"] == "verification_invalidated" for row in transitions)
+
+
+def test_embedded_general_link_on_rerecord_invalidates_terminal_verification(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    source = _finding("RC-097", "Source", root_key="source")
+    target = _finding("RC-098", "Target", root_key="target")
+    _create(client, source)
+    _create(client, target)
+    receipt_id = _confirm(client, "RC-097", attempt="embedded")
+
+    rerecorded = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/findings",
+        json={
+            **source,
+            "provenance": {"agent_id": "AUTHOR-RC-097"},
+            "links": [
+                {
+                    "link_kind": "related",
+                    "target_kind": "finding",
+                    "target_ref": "RC-098",
+                    "notes": "New relationship from a record checkpoint.",
+                }
+            ],
+        },
+    )
+
+    assert rerecorded.status_code in {200, 201}, rerecorded.text
+    _assert_relationship_invalidation(
+        client, slug="RC-097", receipt_id=receipt_id
+    )
+
+
 def test_record_rejects_a_cvss_score_that_contradicts_its_vector(
     client, isolate_settings
 ):
@@ -373,7 +710,11 @@ def test_report_readiness_recomputes_cvss_vector_score(
         )
         stored["cvss_score"] = 3.1
         connection.execute(
-            "UPDATE assessment_findings SET details_json = ? WHERE slug = ?",
+            """
+            UPDATE assessment_findings
+            SET details_json = ?, verification_status = 'confirmed'
+            WHERE slug = ?
+            """,
             (json.dumps(stored), "RC-070"),
         )
 
@@ -477,10 +818,8 @@ def test_report_findings_draft_mode_excludes_draft_workflow_status(client, isola
     draft_payload["workflow_status"] = "draft"
 
     for payload in (active_payload, draft_payload):
-        response = client.post(
-            f"/engagements/{ENGAGEMENT_KEY}/assessment/findings", json=payload
-        )
-        assert response.status_code in {200, 201}, response.text
+        _create(client, payload)
+        _confirm(client, payload["slug"])
 
     draft_report = client.get(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/report-findings?mode=draft"

@@ -551,7 +551,7 @@ audit feeds — full details in
 
 Cite the MITRE source: <https://attack.mitre.org/techniques/T1566/>.
 
-The finding's `details_json.mitre_techniques` array carries every
+The finding's `details.mitre_techniques` array carries every
 applicable technique from this table. Empty is forbidden by
 `triage.md` rule 11; the L1 fallback is `T1566` (parent) only if no
 sub-technique applies.
@@ -592,7 +592,7 @@ based on the six steps; the verifier confirms or overturns.
 | Step 1 evidence missing (only screenshot, not raw `.eml`) | (do not dispose; return `blocked`) | Chain of custody cannot be established; the verifier rejects on intake |
 | Step 3 verdict misalignment (header says pass, live DNS says fail — or vice versa) | `escalated` | Possible header replay or sender-side DNS compromise; needs verifier judgment |
 
-Record the recommendation in `details_json.disposition_recommendation`
+Record the recommendation in `details.disposition_recommendation`
 on the finding; the verifier reads it but is not bound by it.
 
 ## Activity Log Convention
@@ -741,8 +741,7 @@ Run these four steps in order before returning the handoff JSON:
   normalization this skill assumes is in `alert_normalized`.
 - **Writing a final disposition.** This skill emits a
   `disposition_recommendation`; final disposition is L3
-  `alert-fp-verification`'s. Calling `finding verify` (including
-  a `--disposition false_positive` kill) from this skill is out of role.
+  `alert-fp-verification`'s. Calling `finding verify` from this skill is out of role.
 - **Skipping IOC enrichment for "obvious" cases.** Record IOCs via
   `intel record` and `finding link` even when the verdict is
   unambiguous — the tenant intel repo is the cross-engagement signal.

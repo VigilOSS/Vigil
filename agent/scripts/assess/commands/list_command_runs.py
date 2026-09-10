@@ -7,12 +7,25 @@ keyword (FTS5).
 """
 from __future__ import annotations
 
+import argparse
 import json
+import shlex
 from urllib.parse import quote, urlencode
 
 from assess.lib.audit_enums import PROBE_KIND_ENUM, TECHNIQUE_ENUM
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessmentClient, AssessError
 from assess.lib.config import load_config
+from assess.lib.finding_render import warn_untrusted_data
+from assess.lib.list_output import (
+    ListPage,
+    RemovedOptionAction,
+    lookahead_limit,
+    page_from_backend,
+    report_page,
+)
+
+
+_MAX_BACKEND_LIMIT = 1000
 
 
 def register(subparsers) -> None:
@@ -31,6 +44,16 @@ def register(subparsers) -> None:
     p.add_argument("--exact", action="store_true", help="Disable fuzzy finding-alias expansion for --q")
     p.add_argument(
         "--all",
+        action=RemovedOptionAction,
+        nargs=0,
+        const=(
+            "command-run list --all was removed because it was ambiguous; use "
+            "--match-all to require every query term or --paginate to fetch every result page"
+        ),
+        help=argparse.SUPPRESS,
+    )
+    p.add_argument(
+        "--match-all",
         dest="require_all",
         action="store_true",
         help=(
@@ -125,6 +148,11 @@ def register(subparsers) -> None:
     p.add_argument("--limit", type=int, default=50)
     p.add_argument("--offset", type=int, default=0)
     p.add_argument(
+        "--paginate",
+        action="store_true",
+        help="Fetch every result page from --offset through the final matching command run",
+    )
+    p.add_argument(
         "--include-output",
         dest="include_output",
         action="store_true",
@@ -140,7 +168,12 @@ def register(subparsers) -> None:
     p.set_defaults(func=run)
 
 
-def _build_query(args) -> str:
+def _build_query(
+    args,
+    *,
+    limit: int | None = None,
+    offset: int | None = None,
+) -> str:
     params: list[tuple[str, str]] = []
     if args.q:
         params.append(("q", args.q))
@@ -188,9 +221,46 @@ def _build_query(args) -> str:
         params.append(("output_attention", "true"))
     if args.include_output:
         params.append(("include_output", "true"))
-    params.append(("limit", str(args.limit)))
-    params.append(("offset", str(args.offset)))
+    params.append(("limit", str(args.limit if limit is None else limit)))
+    params.append(("offset", str(args.offset if offset is None else offset)))
     return "command-runs?" + urlencode(params, quote_via=quote)
+
+
+def _continuation_command(args, offset: int) -> str:
+    parts = ["vigil", "assess", "command-run", "list"]
+    for attr, flag in (
+        ("q", "--q"),
+        ("sort", "--sort"),
+        ("agent_name", "--agent-name"),
+        ("phase", "--phase"),
+        ("tool_name", "--tool-name"),
+        ("tool_bin", "--tool-bin"),
+        ("target_host", "--target-host"),
+        ("audit_source", "--audit-source"),
+        ("route", "--route"),
+        ("technique", "--technique"),
+        ("probe_kind", "--probe-kind"),
+        ("intent_q", "--intent-q"),
+    ):
+        value = getattr(args, attr, "")
+        if value:
+            parts.extend((flag, shlex.quote(str(value))))
+    for attr, flag in (
+        ("show_matches", "--show-matches"),
+        ("exact", "--exact"),
+        ("require_all", "--match-all"),
+        ("success", "--success"),
+        ("failed", "--failed"),
+        ("destructive", "--destructive"),
+        ("not_destructive", "--not-destructive"),
+        ("timed_out", "--timed-out"),
+        ("output_attention", "--output-attention"),
+        ("include_output", "--include-output"),
+    ):
+        if getattr(args, attr, False):
+            parts.append(flag)
+    parts.extend(("--limit", str(int(args.limit)), "--offset", str(offset)))
+    return " ".join(parts)
 
 
 def _preview_chars(row: dict, stream: str) -> int:
@@ -284,13 +354,58 @@ def _render_table(rows: list[dict]) -> str:
 
 
 def run(args) -> None:
+    limit = int(args.limit)
+    offset = int(args.offset)
     cfg = load_config(args.engagement_dir)
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        rows = client.get(_build_query(args))
+        if getattr(args, "paginate", False):
+            rows = []
+            next_offset = offset
+            while True:
+                result = client.get(_build_query(args, offset=next_offset))
+                if not isinstance(result, list):
+                    rows = result
+                    break
+                rows.extend(result)
+                if len(result) < limit:
+                    break
+                next_offset += len(result)
+        else:
+            request_limit, used_lookahead = lookahead_limit(
+                limit, maximum=_MAX_BACKEND_LIMIT
+            )
+            rows = client.get(_build_query(args, limit=request_limit))
 
     if not isinstance(rows, list):
-        print(json.dumps(rows, indent=2, ensure_ascii=False))
-        return
+        raise AssessError("command-run list: expected a JSON array from the backend")
+
+    if getattr(args, "paginate", False):
+        exact_total = offset + len(rows) if rows or offset == 0 else None
+        page = ListPage(
+            rows=rows,
+            offset=offset,
+            total=exact_total,
+            total_at_least=exact_total,
+            has_more=False,
+        )
+    else:
+        page = page_from_backend(
+            rows,
+            limit=limit,
+            offset=offset,
+            used_lookahead=used_lookahead,
+        )
+    rows = page.rows
+    report_page(
+        page,
+        noun="command runs",
+        continuation_command=_continuation_command(
+            args, page.offset + len(page.rows)
+        ),
+        point_read_hint="`vigil assess command-run get <id>`",
+    )
+    if rows and args.include_output:
+        warn_untrusted_data()
 
     if args.as_json:
         print(json.dumps(rows, indent=2, ensure_ascii=False))

@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from assess.lib.code_audit import write_json_snapshot
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessmentClient, require_write_result
 from assess.lib.config import load_config
 
 
@@ -135,6 +135,20 @@ def run(args) -> None:
         created = 0
         for result in results:
             resp = client.post("code/analysis-results", result)
+            expected = {
+                "queue_item_id": int(result["queue_item_id"]),
+                "agent_name": result["agent_name"],
+                "lease_token": result["lease_token"],
+                "disposition": result["disposition"],
+            }
+            if result.get("file_id") is not None:
+                expected["file_id"] = int(result["file_id"])
+            require_write_result(
+                resp,
+                operation="record code analysis result",
+                expected=expected,
+                positive_ids=("id",),
+            )
             responses.append(resp)
             created += 1
             disp = result.get("disposition", "?")

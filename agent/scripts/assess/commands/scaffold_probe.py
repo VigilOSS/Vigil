@@ -22,7 +22,11 @@ import re
 import sys
 from pathlib import Path
 
-from assess.lib.client import AssessError, AssessmentClient
+from assess.lib.client import (
+    AssessError,
+    AssessmentClient,
+    require_artifact_write_response,
+)
 from assess.lib.config import load_config
 
 
@@ -34,6 +38,22 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 # The kind we tag scaffolded probes with so they are filterable in the artifact
 # index (``vigil assess artifact search --kind probe-script``).
 _PROBE_KIND = "probe-script"
+
+_DEFINITE_ARTIFACT_REJECTION_PREFIXES = (
+    "HTTP 400",
+    "HTTP 401",
+    "HTTP 403",
+    "HTTP 404",
+    "HTTP 405",
+    "HTTP 409",
+    "HTTP 413",
+    "HTTP 422",
+    "HTTP 429",
+)
+
+
+def _artifact_failure_is_definite(exc: AssessError) -> bool:
+    return str(exc).lstrip().startswith(_DEFINITE_ARTIFACT_REJECTION_PREFIXES)
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -130,12 +150,21 @@ def run(args: argparse.Namespace) -> None:
         except AssessError as exc:
             # Non-fatal: the file is written and runnable regardless. Surface the
             # failure so the agent can register manually with `artifact register`.
-            print(
-                f"warning: artifact registration failed: {exc}; "
-                f"the script is written. Register it with "
-                f"`vigil assess artifact register {relative_path} --kind {_PROBE_KIND}`.",
-                file=sys.stderr,
-            )
+            if _artifact_failure_is_definite(exc):
+                print(
+                    f"warning: artifact registration failed: {exc}; "
+                    f"the script is written. Register it with "
+                    f"`vigil assess artifact register {relative_path} --kind {_PROBE_KIND}`.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"warning: artifact registration outcome is uncertain: {exc}; "
+                    f"the script is preserved at {relative_path}. Reconcile the artifact "
+                    "with `vigil assess artifact search --json`; do not re-register or "
+                    "retry automatically.",
+                    file=sys.stderr,
+                )
 
     if args.as_json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -168,7 +197,11 @@ def _register_artifact(cfg, relative_path: str, finding_slug: str | None) -> dic
             "kind": _PROBE_KIND,
             "related_finding_slug": finding_slug,
         }
-        return client.post("artifacts", payload)
+        return require_artifact_write_response(
+            client.post("artifacts", payload),
+            artifact_path=relative_path,
+            operation="register scaffolded probe artifact",
+        )
 
 
 def _render_template(*, name: str, purpose: str) -> str:

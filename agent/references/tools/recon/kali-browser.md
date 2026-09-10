@@ -26,7 +26,9 @@ the WAF's challenge page (Cloudflare *"Just a moment"*, Akamai *"Access Denied"*
 *"Pardon Our Interruption"*, or a generic JS-only challenge shell behind a CDN/edge), the
 run surfaces `KaliResult.status='waf_challenge'`. That body is the WAF's, **not** the
 origin app's — so its status/content **must not** be read as a target verdict
-(404 / patched / gated). The loud stderr line tells you to re-render here.
+(404 / patched / gated). Use this browser recovery only when the recorded shape
+is a JS/bot interstitial. A hard signature or edge block usually survives the
+same browser egress and instead needs a route, request-shape, or egress correction.
 
 A headless browser executes the challenge JS, which clears most JS-based bot-challenges, so
 the rendered DOM + the captured origin status reflect the **real** application.

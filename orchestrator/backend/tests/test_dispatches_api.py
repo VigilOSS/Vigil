@@ -51,8 +51,7 @@ def _seed(client, isolate_settings) -> int:
                 "title": f"Seed finding {slug}",
                 "severity": "medium",
                 "workflow_status": "active",
-                "verification_state": "unreviewed",
-                "verification_disposition": "none",
+                "verification_status": "unreviewed",
                 "canonical_location": f"https://example.com/seed/{slug}",
                 "summary": "Seed finding for dispatch references",
                 "evidence_ref": "findings.md",
@@ -83,8 +82,8 @@ def test_dispatch_post_get_list_patch(client, isolate_settings) -> None:
         "agent_id": "AG-001",
         "agent_role": "vulnerability-analyst",
         "task": "Validate IDOR on /api/users/{id}",
-        "model": "gpt-5.4",
-        "reasoning": "high",
+        "requested_model": "gpt-5.4",
+        "requested_reasoning": "high",
         "dispatch_mode": "item-iterating",
         "finding_slugs": [],
         "skills": "auth-bypass,business-logic-testing",
@@ -313,20 +312,18 @@ def test_dispatch_requested_actual_fields_post_get_list(client, isolate_settings
             "agent_role": "vulnerability-analyst",
             "skills": "auth-bypass",
             "requested_model": "gpt-test-a",
-            "actual_model": "gpt-test-b",
             "requested_reasoning": "high",
-            "actual_reasoning": "medium",
             "dispatch_mode": "hypothesis-driven",
         },
     )
     assert resp.status_code == 201, resp.text
     posted = resp.json()
     assert posted["requested_model"] == "gpt-test-a"
-    assert posted["actual_model"] == "gpt-test-b"
+    assert posted["actual_model"] == "unknown"
     assert posted["requested_reasoning"] == "high"
-    assert posted["actual_reasoning"] == "medium"
-    assert posted["model"] == "gpt-test-a"
-    assert posted["reasoning"] == "high"
+    assert posted["actual_reasoning"] == "unknown"
+    assert "model" not in posted
+    assert "reasoning" not in posted
 
     fetched = client.get(f"{BASE}/dispatches/RQ-ACT-1").json()
     for key in (

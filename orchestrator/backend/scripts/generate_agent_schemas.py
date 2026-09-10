@@ -35,7 +35,7 @@ from app.api.code_analysis import (  # noqa: E402 - import path is bootstrapped 
 )
 from app.services.state_manager._common import (  # noqa: E402 - import path is bootstrapped above
     SubmissionStatus,
-    VerificationDisposition,
+    VerificationStatus,
 )
 # The finding ``details`` vocabulary is owned by the backend, which ENFORCES it on
 # every write; this generator renders the same dict into the agent-side schema so
@@ -50,7 +50,7 @@ from assess.lib.contracts import get_contract  # noqa: E402 - import path is boo
 # drift from the values the backend actually persists + serializes on GET
 # /findings (e.g. ``pending_runtime_proof``). Enum iteration order is stable, so
 # this keeps the generated schema deterministic.
-_VERIFICATION_DISPOSITION_VALUES = [member.value for member in VerificationDisposition]
+_VERIFICATION_STATUS_VALUES = [member.value for member in VerificationStatus]
 # Likewise sourced from the canonical SubmissionStatus StrEnum.
 _SUBMISSION_STATUS_VALUES = [member.value for member in SubmissionStatus]
 
@@ -74,8 +74,7 @@ def _finding_record_examples() -> list[dict[str, Any]]:
         normalized = copy.deepcopy(example)
         normalized.setdefault("severity", "medium")
         normalized.setdefault("workflow_status", "active")
-        normalized.setdefault("verification_state", "unreviewed")
-        normalized.setdefault("verification_disposition", "none")
+        normalized.setdefault("verification_status", "unreviewed")
         normalized.setdefault("defect_family", normalized.get("title", "finding"))
         normalized.setdefault("root_cause_key", "")
         normalized.setdefault("auth_context", "anonymous")
@@ -421,8 +420,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                     "title",
                     "severity",
                     "workflow_status",
-                    "verification_state",
-                    "verification_disposition",
+                    "verification_status",
                     "defect_family",
                     "root_cause_key",
                     "auth_context",
@@ -451,13 +449,9 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "description": "Lifecycle state settable at record time. New findings: 'active'. Post-exploitation confirmed: 'exploited'. WAF/control stopped testing: 'blocked'. Duplicate absorbed into another record: 'merged'. Delivered to client: 'reported'. NOTE: the blue-team/IR states (contained, eradicated, recovered) are intentionally NOT recordable here — they are applied only via `vigil assess finding update`, so this finding record enum is deliberately narrower than the full WorkflowStatus vocabulary.",
                         "enum": ["draft", "active", "exploited", "blocked", "false_positive", "merged", "reported"],
                     },
-                    "verification_state": {
-                        "description": "Human review state. Leave 'unreviewed' when first recording; set 'verified' after confirming exploitability; 'disputed' when contested.",
-                        "enum": ["unreviewed", "verified", "disputed"],
-                    },
-                    "verification_disposition": {
-                        "description": "Verifier outcome (stored field). 'none': not yet checked. 'pending_runtime_proof': needs live PoC. 'blocked': the attempt could not even start (missing provisioning); requires details.block_reason and is held OUT of the report. 'confirmed': exploitability proven. 'downgraded': real but severity reduced. 'false_positive': not exploitable. NOTE: `vigil assess finding verify --disposition` additionally accepts 'disputed', which is a verify ACTION that sets verification_state='disputed' and leaves this field at 'none' — 'disputed' is never persisted as a disposition, so it is intentionally absent from this stored enum.",
-                        "enum": list(_VERIFICATION_DISPOSITION_VALUES),
+                    "verification_status": {
+                        "description": "Shared verification state on a stored finding record. New API writes still start at 'unreviewed'; `vigil assess finding verify` owns transitions to disputed, pending_runtime_proof, blocked, confirmed, downgraded, or false_positive and enforces their evidence gates.",
+                        "enum": list(_VERIFICATION_STATUS_VALUES),
                     },
                     "defect_family": {
                         "maxLength": 128,
@@ -1020,7 +1014,14 @@ def build_schema_bundle() -> dict[str, dict[str, Any]]:
             "title": spec.title,
             **({"description": spec.description} if spec.description else {}),
         }
-        bundle[spec.filename] = deep_merge(generated, spec.overlay)
+        schema = deep_merge(generated, spec.overlay)
+        if spec.filename == "finding-record.schema.json":
+            # This schema also validates stored/captured finding records, whose
+            # verification status may have advanced through the verify endpoint.
+            # The request model's Literal['unreviewed'] remains authoritative for
+            # new API writes, but its generated `const` cannot constrain records.
+            schema["properties"]["verification_status"].pop("const", None)
+        bundle[spec.filename] = schema
     return bundle
 
 

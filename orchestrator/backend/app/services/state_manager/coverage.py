@@ -19,7 +19,7 @@ from ._common import (
     _json_text,
     _normalize_severity,
     _normalize_workflow_status,
-    _normalize_verification_state,
+    _normalize_verification_status,
     _parse_url,
     _scalar_row,
 )
@@ -2505,7 +2505,7 @@ def _empty_finding_verdict() -> dict[str, Any]:
         "strongest_status": None,
         "max_severity": None,
         "auth_contexts": [],
-        "verification_states": [],
+        "verification_statuses": [],
         "slugs": [],
     }
 
@@ -2541,15 +2541,17 @@ def _build_finding_verdicts_by_host(
         verdict["finding_count"] += 1
 
         try:
-            verification_state = str(
-                _normalize_verification_state(str(row.get("verification_state") or "unreviewed"))
+            verification_status = str(
+                _normalize_verification_status(
+                    str(row.get("verification_status") or "unreviewed")
+                )
             )
         except HTTPException:
-            verification_state = "unreviewed"
-        if verification_state == "verified":
+            verification_status = "unreviewed"
+        if verification_status not in {"unreviewed", "disputed"}:
             verdict["verified_count"] += 1
-        if verification_state not in verdict["verification_states"]:
-            verdict["verification_states"].append(verification_state)
+        if verification_status not in verdict["verification_statuses"]:
+            verdict["verification_statuses"].append(verification_status)
 
         severity = _normalize_severity(str(row.get("severity") or "info"))
         if verdict["max_severity"] is None or (
@@ -2573,7 +2575,7 @@ def _build_finding_verdicts_by_host(
 
     for verdict in by_host.values():
         verdict["auth_contexts"].sort()
-        verdict["verification_states"].sort()
+        verdict["verification_statuses"].sort()
         verdict["slugs"].sort()
     return by_host
 
@@ -2653,8 +2655,8 @@ def per_host_coverage(engagement_id: int) -> dict[str, Any]:
         )
         finding_rows = _fetch_all(
             connection,
-            "SELECT slug, canonical_location, status, verification_state, "
-            "verification_disposition, severity, auth_context, merged_into_finding_id "
+            "SELECT slug, canonical_location, status, verification_status, "
+            "severity, auth_context, merged_into_finding_id "
             "FROM assessment_findings WHERE engagement_id = ?",
             (eng_id,),
         )
@@ -3049,8 +3051,8 @@ def web_uncovered_high_route_hosts(
         )
         finding_rows = _fetch_all(
             connection,
-            "SELECT slug, canonical_location, status, verification_state, "
-            "verification_disposition, severity, auth_context, merged_into_finding_id "
+            "SELECT slug, canonical_location, status, verification_status, "
+            "severity, auth_context, merged_into_finding_id "
             "FROM assessment_findings WHERE engagement_id = ?",
             (engagement.id,),
         )

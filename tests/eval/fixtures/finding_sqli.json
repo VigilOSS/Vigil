@@ -36,8 +36,7 @@
     "discovered_by": "vulnerability-analyst"
   },
   "workflow_status": "active",
-  "verification_state": "unreviewed",
-  "verification_disposition": "none",
+  "verification_status": "unreviewed",
   "root_cause_key": "",
   "auth_context": "anonymous",
   "source_name": "vulnerability-analyst",

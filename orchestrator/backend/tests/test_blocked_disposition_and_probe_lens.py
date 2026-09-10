@@ -1,12 +1,11 @@
-"""Phase-2 backend: the ``blocked`` verification disposition, its report
+"""Phase-2 backend: the ``blocked`` verification status, its report
 exclusion, the ``assessment_command_runs.finding_id`` / ``assessment_probe_runs``
 ``lens`` + ``finding_id`` schema additions, and the record-attempt writer that
 emits the non-covering probe result_status vocabulary.
 
 Covers:
-- BLOCKED disposition rank + coalesce behavior (sticky vs none, superseded by
-  downgraded/confirmed, false_positive early-return still wins).
-- verify-finding requires ``details.block_reason`` when disposition='blocked'
+- The shared seven-value verification-status vocabulary includes ``blocked``.
+- verify-finding requires ``details.block_reason`` when status='blocked'
   (400 without / on the finding, ok with — from the verify OR the finding).
 - report-projection exclusion of blocked findings (draft AND final) and the
   report-readiness gate (a blocked finding neither reports nor blocks).
@@ -26,14 +25,10 @@ import sqlite3
 
 from app import db as db_module
 from app.services import state_manager
-from app.services.state_manager._common import (
-    VERIFICATION_DISPOSITION_RANK,
-    VERIFICATION_DISPOSITIONS,
-    VerificationDisposition,
-)
+from app.services.state_manager._common import VERIFICATION_STATUSES, VerificationStatus
 from app.services.state_manager.coverage import _probe_key
-from app.services.state_manager.findings import _coalesce_verification_disposition
 
+from tests.proof_fixtures import post_artifact_backed_source_observation
 from tests.test_engagements_api import write_engagement
 
 
@@ -44,22 +39,30 @@ BASE = f"/engagements/{ENGAGEMENT_KEY}/assessment"
 def _seed(client, isolate_settings) -> None:
     write_engagement(isolate_settings["engagements_dir"], key=ENGAGEMENT_KEY)
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    author = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": "BLOCKED-AUTHOR",
+            "agent_role": "vulnerability-analyst",
+            "task": "record fixture findings",
+        },
+    )
+    assert author.status_code == 201, author.text
 
 
-def _finding_payload(slug, *, workflow_status="active", verification_state="unreviewed",
-                     verification_disposition="none", details=None, **overrides) -> dict:
+def _finding_payload(slug, *, workflow_status="active", details=None, **overrides) -> dict:
     payload = {
         "slug": slug,
         "title": f"{slug} finding",
         "severity": "high",
         "workflow_status": workflow_status,
-        "verification_state": verification_state,
-        "verification_disposition": verification_disposition,
+        "verification_status": "unreviewed",
         "defect_family": "access-control",
         "root_cause_key": f"rc-{slug}",
         "auth_context": "anonymous",
         "canonical_location": f"https://example.com/{slug}",
         "source_name": "vulnerability-analyst",
+        "provenance": {"agent_id": "BLOCKED-AUTHOR"},
         "summary": "fixture finding",
         "evidence_ref": "findings.md",
         "details": details if details is not None else {"evidence": "e", "impact": "i"},
@@ -74,41 +77,73 @@ def _create_finding(client, slug, **kwargs) -> dict:
     return resp.json()["finding"]
 
 
-# ---------------------------------------------------------------------------
-# 1) BLOCKED disposition: enum membership, rank, coalesce
-# ---------------------------------------------------------------------------
-
-
-def test_blocked_disposition_is_a_member_with_holding_rank():
-    assert "blocked" in VERIFICATION_DISPOSITIONS
-    assert VerificationDisposition.BLOCKED in VERIFICATION_DISPOSITIONS
-    # Sticky vs none (rank 1 > 0) but yields to downgraded (2) / confirmed (3).
-    assert VERIFICATION_DISPOSITION_RANK[VerificationDisposition.BLOCKED] == 1
-    assert (
-        VERIFICATION_DISPOSITION_RANK[VerificationDisposition.BLOCKED]
-        > VERIFICATION_DISPOSITION_RANK[VerificationDisposition.NONE]
+def _confirm_finding(client, slug: str) -> dict:
+    dispatch = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": f"VERIFY-{slug}",
+            "agent_role": "code-vuln-verifier",
+            "task": f"independently verify {slug}",
+        },
     )
-    assert (
-        VERIFICATION_DISPOSITION_RANK[VerificationDisposition.BLOCKED]
-        < VERIFICATION_DISPOSITION_RANK[VerificationDisposition.DOWNGRADED]
-        < VERIFICATION_DISPOSITION_RANK[VerificationDisposition.CONFIRMED]
+    assert dispatch.status_code == 201, dispatch.text
+    run = client.post(
+        f"{BASE}/assessment-runs",
+        json={
+            "run_uuid": f"verify-{slug}",
+            "run_kind": "code",
+            "producer_dispatch_agent_id": f"VERIFY-{slug}",
+        },
     )
-
-
-def test_blocked_coalesce_is_sticky_but_superseded_by_real_proof():
-    # blocked beats a bare none; a later bare none cannot clobber blocked.
-    assert _coalesce_verification_disposition("none", "blocked") == "blocked"
-    assert _coalesce_verification_disposition("blocked", "none") == "blocked"
-    # A real verdict supersedes the block.
-    assert _coalesce_verification_disposition("blocked", "confirmed") == "confirmed"
-    assert _coalesce_verification_disposition("blocked", "downgraded") == "downgraded"
-    # false_positive early-return still wins over blocked.
-    assert _coalesce_verification_disposition("blocked", "false_positive") == "false_positive"
-    assert _coalesce_verification_disposition("false_positive", "blocked") == "false_positive"
+    assert run.status_code == 201, run.text
+    receipt = post_artifact_backed_source_observation(
+        client,
+        f"{BASE}/proof-receipts",
+        json={
+            "run_id": run.json()["id"],
+            "evidence_kind": "source_observation",
+            "expected_result": "the finding survives independent review",
+            "observed_result": "the finding was independently reproduced",
+        },
+    )
+    assert receipt.status_code == 201, receipt.text
+    completed = client.patch(
+        f"{BASE}/assessment-runs/{run.json()['id']}",
+        json={"status": "completed"},
+    )
+    assert completed.status_code == 200, completed.text
+    verified = client.post(
+        f"{BASE}/findings/{slug}/verify",
+        json={
+            "verification_status": "confirmed",
+            "reason_text": "independently reproduced",
+            "proof_receipt_ids": [receipt.json()["id"]],
+        },
+    )
+    assert verified.status_code == 200, verified.text
+    return verified.json()["finding"]
 
 
 # ---------------------------------------------------------------------------
-# 2) verify-finding requires block_reason when disposition='blocked'
+# 1) Shared verification-status vocabulary
+# ---------------------------------------------------------------------------
+
+
+def test_blocked_is_a_member_of_the_complete_verification_status_axis():
+    assert VERIFICATION_STATUSES == frozenset(VerificationStatus)
+    assert {status.value for status in VERIFICATION_STATUSES} == {
+        "unreviewed",
+        "confirmed",
+        "downgraded",
+        "pending_runtime_proof",
+        "blocked",
+        "false_positive",
+        "disputed",
+    }
+
+
+# ---------------------------------------------------------------------------
+# 2) verify-finding requires block_reason when status='blocked'
 # ---------------------------------------------------------------------------
 
 
@@ -117,7 +152,7 @@ def test_verify_blocked_requires_block_reason(client, isolate_settings):
     _create_finding(client, "VA-001")
     resp = client.post(
         f"{BASE}/findings/VA-001/verify",
-        json={"disposition": "blocked", "reason_text": "attempt could not start"},
+        json={"verification_status": "blocked", "reason_text": "attempt could not start"},
     )
     assert resp.status_code == 400, resp.text
     assert "block_reason" in resp.json()["detail"]
@@ -129,7 +164,7 @@ def test_verify_blocked_with_block_reason_in_request_succeeds(client, isolate_se
     resp = client.post(
         f"{BASE}/findings/VA-001/verify",
         json={
-            "disposition": "blocked",
+            "verification_status": "blocked",
             "reason_text": "no test account in the required group",
             "details": {
                 "block_reason": "no test account provisioned",
@@ -143,8 +178,7 @@ def test_verify_blocked_with_block_reason_in_request_succeeds(client, isolate_se
     )
     assert resp.status_code == 200, resp.text
     finding = resp.json()["finding"]
-    assert finding["verification_disposition"] == "blocked"
-    assert finding["verification_state"] == "verified"
+    assert finding["verification_status"] == "blocked"
 
 
 def test_verify_blocked_accepts_block_reason_already_on_finding(client, isolate_settings):
@@ -156,10 +190,10 @@ def test_verify_blocked_accepts_block_reason_already_on_finding(client, isolate_
     )
     resp = client.post(
         f"{BASE}/findings/VA-001/verify",
-        json={"disposition": "blocked", "reason_text": "blocked for provisioning"},
+        json={"verification_status": "blocked", "reason_text": "blocked for provisioning"},
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["finding"]["verification_disposition"] == "blocked"
+    assert resp.json()["finding"]["verification_status"] == "blocked"
 
 
 def test_verify_blocked_rejects_oversized_block_reason(client, isolate_settings):
@@ -168,7 +202,7 @@ def test_verify_blocked_rejects_oversized_block_reason(client, isolate_settings)
     resp = client.post(
         f"{BASE}/findings/VA-001/verify",
         json={
-            "disposition": "blocked",
+            "verification_status": "blocked",
             "reason_text": "x",
             "details": {"block_reason": "z" * 501},
         },
@@ -177,40 +211,34 @@ def test_verify_blocked_rejects_oversized_block_reason(client, isolate_settings)
     assert "500" in resp.json()["detail"]
 
 
-def test_create_finding_blocked_without_block_reason_is_rejected(client, isolate_settings):
-    # The block_reason invariant must hold on the CREATE/record path too, not only
-    # via /verify — otherwise POST /findings with disposition='blocked' and no
-    # block_reason would 201 and then be silently excluded from the report,
-    # producing a reasonless, invisible finding.
+def test_create_finding_cannot_bypass_blocked_verification_gate(client, isolate_settings):
     _seed(client, isolate_settings)
     resp = client.post(
         f"{BASE}/findings",
         json=_finding_payload(
             "VA-010",
-            verification_state="verified",
-            verification_disposition="blocked",
+            verification_status="blocked",
             details={"evidence": "e", "impact": "i"},  # no block_reason
         ),
     )
-    assert resp.status_code == 400, resp.text
-    assert "block_reason" in resp.json()["detail"]
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"][0]["loc"] == ["body", "verification_status"]
 
 
-def test_create_finding_blocked_with_block_reason_succeeds_and_is_unreported(client, isolate_settings):
+def test_verified_blocked_finding_with_reason_is_unreported(client, isolate_settings):
     _seed(client, isolate_settings)
     engagement_id = client.get(f"/engagements/{ENGAGEMENT_KEY}").json()["id"]
+    _create_finding(client, "VA-011")
     resp = client.post(
-        f"{BASE}/findings",
-        json=_finding_payload(
-            "VA-011",
-            verification_state="verified",
-            verification_disposition="blocked",
-            details={"evidence": "e", "impact": "i",
-                     "block_reason": "no test account provisioned"},
-        ),
+        f"{BASE}/findings/VA-011/verify",
+        json={
+            "verification_status": "blocked",
+            "reason_text": "no test account in the required group",
+            "details": {"block_reason": "no test account provisioned"},
+        },
     )
-    assert resp.status_code == 201, resp.text
-    assert resp.json()["finding"]["verification_disposition"] == "blocked"
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["finding"]["verification_status"] == "blocked"
     draft = {r["slug"] for r in state_manager.list_report_findings(engagement_id, mode="draft")}
     assert "VA-011" not in draft
 
@@ -228,16 +256,16 @@ def test_blocked_finding_absent_from_both_report_modes(client, isolate_settings)
     # A confirmed finding that DOES report.
     _create_finding(
         client, "VA-001",
-        verification_state="verified", verification_disposition="confirmed",
         details={"evidence": "e", "impact": "i", "cvss_score": 7.5,
                  "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
                      "steps_to_reproduce": ["a"], "remediation": "fix"},
     )
-    # A blocked finding (active + verified + blocked) that must NOT report.
+    _confirm_finding(client, "VA-001")
+    # A blocked finding that must NOT report.
     _create_finding(client, "VA-002")
     assert client.post(
         f"{BASE}/findings/VA-002/verify",
-        json={"disposition": "blocked", "reason_text": "blocked",
+        json={"verification_status": "blocked", "reason_text": "blocked",
               "details": {"block_reason": "missing credential"}},
     ).status_code == 200
 
@@ -248,7 +276,7 @@ def test_blocked_finding_absent_from_both_report_modes(client, isolate_settings)
     assert "VA-001" in draft
     assert "VA-001" in final
 
-    # A blocked finding must not raise a report-readiness disposition blocker.
+    # A blocked finding must not raise a report-readiness verification blocker.
     readiness = state_manager.report_readiness(engagement_id)
     blocker_slugs = {b.get("slug") for b in readiness["blockers"]}
     assert "VA-002" not in blocker_slugs
@@ -264,7 +292,7 @@ def test_resume_brief_finding_summary_projects_block_reason(client, isolate_sett
     assert client.post(
         f"{BASE}/findings/VA-030/verify",
         json={
-            "disposition": "blocked",
+            "verification_status": "blocked",
             "reason_text": "blocked for provisioning",
             "details": {"block_reason": "no finance-admin account provisioned"},
         },

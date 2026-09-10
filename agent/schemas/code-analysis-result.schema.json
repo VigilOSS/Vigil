@@ -202,6 +202,24 @@
       "type": "array",
       "default": [],
       "description": "Files reachable via call graph whose analysis should be (re)triggered based on findings in this file. Only emit when a taint flow actually crosses the file boundary."
+    },
+    "assessment_run_id": {
+      "exclusiveMinimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ],
+      "default": null,
+      "title": "Assessment Run Id"
+    },
+    "assessment_source_id": {
+      "exclusiveMinimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ],
+      "default": null,
+      "title": "Assessment Source Id"
     }
   },
   "required": [

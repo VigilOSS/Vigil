@@ -27,6 +27,7 @@ from .findings import (
     load_code_repo_snapshot_states,
 )
 from .links import _root_cause_link_metadata
+from .proofs import proof_evidence_health_issues_for_finding
 
 _MARKDOWN_PATH_REFERENCE_RE = re.compile(
     r"(?<![A-Za-z0-9_:/.-])"
@@ -74,18 +75,18 @@ def _report_candidate_records(engagement_id: int) -> list[dict[str, Any]]:
             """,
             (engagement.id,),
         ).fetchall()
-    # A ``blocked`` verification disposition (blocked-for-provisioning, hunting.md)
+    # A ``blocked`` verification status (blocked-for-provisioning, hunting.md)
     # is NOT a report candidate: the primitive was never reached, so it is neither
     # gradeable at impact-if-true nor report-durable — it "stays OUT of the report".
     # Excluding it here removes it from BOTH report projections
     # (``_report_finding_records`` draft AND final) and from every report_readiness
     # gate (this is the shared source), so a blocked finding never appears in the
     # report AND never blocks finalizing it. A later real proof supersedes the
-    # block (rank: blocked < downgraded/confirmed) and re-admits the finding.
+    # block and explicitly re-admits the finding.
     return [
         record
         for record in (_serialize_finding_record(row) for row in rows)
-        if record.get("verification_disposition") != "blocked"
+        if record.get("verification_status") != "blocked"
     ]
 
 
@@ -406,8 +407,9 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                     f"the report or export. Disposition it: promote to active with "
                     f"`vigil assess finding update {slug} --status active` so it reports, "
                     f"or verify it false positive with `vigil assess finding verify {slug} "
-                    f"--disposition false_positive --reason \"...\" --kill-reason \"...\" "
-                    f"--kill-check <index>` after documenting the failed check."
+                    f"--status false_positive --reason \"...\" --proof-receipt-id <id> "
+                    f"--counter-check-file <path>` after completing the structured "
+                    f"independent counter-check."
                     + (
                         " The code finding is not bound to the current verified source; "
                         "re-review and rebind it before promotion."
@@ -431,37 +433,80 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
             """,
             (engagement_id, ROOT_CAUSE_LINK_KIND),
         ).fetchall()
+        severity_variance_rows = connection.execute(
+            """
+            SELECT variances.finding_id, variances.normal_band,
+                   variances.chosen_severity, variances.actor,
+                   variances.reason, variances.proof_receipt_id
+            FROM assessment_finding_severity_variances AS variances
+            JOIN assessment_findings AS findings
+              ON findings.id = variances.finding_id
+            WHERE variances.engagement_id = ?
+              AND variances.transition_id = (
+                  SELECT MAX(proof_links.transition_id)
+                  FROM assessment_finding_proof_receipts AS proof_links
+                  JOIN assessment_finding_transitions AS transitions
+                    ON transitions.id = proof_links.transition_id
+                  WHERE proof_links.engagement_id = variances.engagement_id
+                    AND proof_links.finding_id = variances.finding_id
+                    AND transitions.to_verification_status =
+                        findings.verification_status
+              )
+            """,
+            (engagement_id,),
+        ).fetchall()
     root_link_by_slug = {
         str(row["finding_slug"]): str(row["target_ref"])
         for row in root_link_rows
         if str(row["finding_slug"]) in candidate_slugs
     }
+    current_severity_variance_by_finding = {
+        int(row["finding_id"]): dict(row) for row in severity_variance_rows
+    }
 
     for row in candidates:
-        if row.get("verification_state") != "verified":
+        if row.get("verification_status") not in {"confirmed", "downgraded"}:
             blockers.append(
                 {
-                    "kind": "finding_verification_state",
+                    "kind": "finding_verification_status",
                     "slug": row.get("slug", ""),
                     "title": row.get("title", ""),
-                    "detail": f"verification_state={row.get('verification_state', 'unknown')}",
-                }
-            )
-            continue
-        if row.get("verification_disposition") not in {"confirmed", "downgraded"}:
-            blockers.append(
-                {
-                    "kind": "finding_verification_disposition",
-                    "slug": row.get("slug", ""),
-                    "title": row.get("title", ""),
-                    "detail": f"verification_disposition={row.get('verification_disposition', 'unknown')}",
+                    "detail": f"verification_status={row.get('verification_status', 'unknown')}",
                 }
             )
 
+    with _common.get_connection() as connection:
+        for row in candidates:
+            if row.get("verification_status") not in {"confirmed", "downgraded"}:
+                continue
+            for issue in proof_evidence_health_issues_for_finding(
+                connection, engagement.id, int(row["id"])
+            ):
+                evidence_health = str(issue["evidence_health"])
+                dependent_raw_id = issue.get("dependent_raw_receipt_id")
+                blockers.append(
+                    {
+                        "kind": f"finding_proof_evidence_{evidence_health}",
+                        "slug": row.get("slug", ""),
+                        "title": row.get("title", ""),
+                        **issue,
+                        "detail": (
+                            f"finding depends on proof receipt "
+                            f"{issue['proof_receipt_id']} whose "
+                            + (
+                                f"raw receipt {dependent_raw_id} evidence"
+                                if dependent_raw_id is not None
+                                else "evidence"
+                            )
+                            + f" is {evidence_health}; capture fresh evidence and "
+                            "record a new verification decision without rewriting "
+                            "the historical receipt"
+                        ),
+                    }
+                )
+
     for row in candidates:
-        if row.get("verification_state") != "verified":
-            continue
-        if row.get("verification_disposition") not in {"confirmed", "downgraded"}:
+        if row.get("verification_status") not in {"confirmed", "downgraded"}:
             continue
         slug = row.get("slug", "")
         title = row.get("title", "")
@@ -563,24 +608,29 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 else "info"
             )
             if score >= 0 and severity != expected:
-                # The band and the CVSS score are two INDEPENDENT scales, and they
-                # can legitimately disagree (business context a vector cannot
-                # express). An authored ``severity_band_rationale`` is the channel
-                # for saying so, and it demotes THIS check only: the two
-                # CVSS-arithmetic blockers above are internal errors, not scale
-                # disagreements, and no rationale excuses them.
-                band_rationale = details.get("severity_band_rationale")
-                declared = isinstance(band_rationale, str) and band_rationale.strip()
+                # The band and CVSS score are independent scales, but old prose
+                # cannot stand in for an approval. Only the attributed variance
+                # attached to the current verification transition settles this
+                # disagreement; arithmetic errors above remain blockers.
+                variance = current_severity_variance_by_finding.get(int(row["id"]))
+                approved = bool(
+                    variance
+                    and str(variance["normal_band"]) == expected
+                    and str(variance["chosen_severity"]) == severity
+                )
                 detail = (
                     f"severity={severity} but cvss_score={score} expects {expected}"
                 )
-                if declared:
+                if approved:
                     advisories.append(
                         {
                             "kind": "severity_cvss_band_divergence",
                             "slug": slug,
                             "title": title,
-                            "detail": f"{detail}; declared: {band_rationale.strip()}",
+                            "detail": (
+                                f"{detail}; structured variance approved by "
+                                f"{variance['actor']}: {variance['reason']}"
+                            ),
                         }
                     )
                 else:
@@ -590,10 +640,10 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                             "slug": slug,
                             "title": title,
                             "detail": (
-                                f"{detail}. Correct whichever is wrong, or declare the "
-                                "divergence with `vigil assess finding update "
-                                f"{slug} --details-inline "
-                                "'{\"severity_band_rationale\": \"...\"}'`."
+                                f"{detail}. Correct whichever is wrong, or record an "
+                                "attributed variance on a fresh verification with "
+                                f"`vigil assess finding verify {slug} ... "
+                                "--severity-variance-file <path>`."
                             ),
                         }
                     )
@@ -935,8 +985,8 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
             )
 
         # (2) unreviewed_findings — any critical/high/medium finding still
-        # verification_state='unreviewed' (ANY auth_context), status not in
-        # (merged, false_positive). The existing finding_verification_state
+        # verification_status='unreviewed' (ANY auth_context), status not in
+        # (merged, false_positive). The existing finding_verification_status
         # blocker only catches reportable-status candidates; this also catches
         # draft / non-reportable findings that have never been graded.
         with _common.get_connection() as connection:
@@ -946,7 +996,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 FROM assessment_findings
                 WHERE engagement_id = ?
                   AND lower(severity) IN ('critical', 'high', 'medium')
-                  AND verification_state = 'unreviewed'
+                  AND verification_status = 'unreviewed'
                   AND status NOT IN ('merged', 'false_positive')
                   AND merged_into_finding_id IS NULL
                 ORDER BY id DESC
@@ -963,9 +1013,9 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                     "severity": str(row["severity"] or ""),
                     "auth_context": str(row["auth_context"] or ""),
                     "detail": (
-                        f"finding {slug} (severity={row['severity']}) is verification_state="
+                        f"finding {slug} (severity={row['severity']}) is verification_status="
                         f"'unreviewed' and must be graded before the final report. Grade it with "
-                        f"`vigil assess finding verify {slug} --disposition confirmed|downgraded|disputed "
+                        f"`vigil assess finding verify {slug} --status confirmed|downgraded|disputed "
                         f"--reason-text ...` (records a verification verdict)."
                     ),
                 }
@@ -982,7 +1032,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
         submission_rows = connection.execute(
             """
             SELECT slug, title, status, submission_status, submission_ref,
-                   verification_disposition, details_json, notes
+                   verification_status, details_json, notes
             FROM assessment_findings
             WHERE engagement_id = ?
               AND merged_into_finding_id IS NULL
@@ -1041,7 +1091,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
         # ``false_positive`` findings are dropped from every report projection, so
         # without this it vanishes entirely. ADVISORY, never a blocker: the kill
         # itself is legitimate; what is missing is the follow-up.
-        if str(row["verification_disposition"] or "") == "false_positive":
+        if str(row["verification_status"] or "") == "false_positive":
             followup = row_details.get("required_followup")
             if isinstance(followup, list) and any(
                 isinstance(item, str) and item.strip() for item in followup
@@ -1059,7 +1109,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                         "detail": (
                             f"killed finding {slug} names a settling test that was never "
                             f"run: {blocked_items}. If the experiment could not start, "
-                            "`--disposition blocked` keeps it visible instead."
+                            "`--status blocked` keeps it visible instead."
                         ),
                     }
                 )
@@ -1134,20 +1184,16 @@ def _report_record(record: dict[str, Any], report_id: str) -> dict[str, Any]:
 def _report_finding_records(engagement_id: int, *, mode: str = "draft") -> list[dict[str, Any]]:
     rows = _report_candidate_records(engagement_id)
     if mode == "draft":
-        # Exclude disputed findings, and exclude the sticky holding disposition
-        # ``pending_runtime_proof`` (strong-but-unproven). The latter carries
-        # ``verification_state == "verified"`` so the disputed filter alone would
-        # leak it into draft reports; mirror how ``final`` mode keeps only
-        # {confirmed, downgraded} dispositions. There is no chain_required bypass
-        # in ``final`` — a held finding is never report-durable. Also drop
+        # Both report projections contain only verification-reportable statuses.
+        # There is no chain_required bypass — a held finding is never
+        # report-durable. Also drop
         # ``workflow_status == "draft"`` findings: readiness blocks them until
         # triage closes, while both report projections intentionally omit unresolved
         # work so a renderer cannot mistake it for report-durable content.
         rows = [
             row
             for row in rows
-            if row.get("verification_state") != "disputed"
-            and row.get("verification_disposition") != "pending_runtime_proof"
+            if row.get("verification_status") in {"confirmed", "downgraded"}
             and row.get("workflow_status") != "draft"
         ]
     elif mode == "final":
@@ -1155,8 +1201,7 @@ def _report_finding_records(engagement_id: int, *, mode: str = "draft") -> list[
             row
             for row in rows
             if row.get("workflow_status") in {"active", "blocked", "exploited", "contained", "eradicated", "recovered", "reported"}
-            and row.get("verification_state") == "verified"
-            and row.get("verification_disposition") in {"confirmed", "downgraded"}
+            and row.get("verification_status") in {"confirmed", "downgraded"}
         ]
     else:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"unsupported report mode: {mode}")

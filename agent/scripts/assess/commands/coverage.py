@@ -20,13 +20,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
 from urllib.parse import quote, urlencode
 
 from assess.lib import coverage_checks as cc
 from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.finding_render import warn_untrusted_data
+from assess.lib.list_output import ListPage, lookahead_limit, page_from_backend, report_page
 from assess.lib.scope import load_scope
+
+
+_MAX_ATTEMPTS_LIMIT = 5000
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -131,6 +137,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--limit", type=int, default=50, help="(--attempts) Max rows (default 50).")
     p.add_argument("--offset", type=int, default=0, help="(--attempts) Row offset.")
     p.add_argument(
+        "--paginate",
+        action="store_true",
+        help="(--attempts) Fetch every matching attempt page from --offset.",
+    )
+    p.add_argument(
         "--json",
         dest="as_json",
         action="store_true",
@@ -205,7 +216,12 @@ def _run_by_family(args: argparse.Namespace, cfg) -> None:
 
 
 # ── --attempts: the read side of the probe ledger (folded in from list-attempts)
-def _attempts_query(args: argparse.Namespace) -> str:
+def _attempts_query(
+    args: argparse.Namespace,
+    *,
+    limit_override: int | None = None,
+    offset_override: int | None = None,
+) -> str:
     params: list[tuple[str, str]] = []
     if getattr(args, "finding", ""):
         params.append(("finding", args.finding))
@@ -219,8 +235,10 @@ def _attempts_query(args: argparse.Namespace) -> str:
         params.append(("result_status", args.result_status))
     if getattr(args, "lens", ""):
         params.append(("lens", args.lens))
-    params.append(("limit", str(args.limit)))
-    params.append(("offset", str(args.offset)))
+    limit = args.limit if limit_override is None else limit_override
+    offset = args.offset if offset_override is None else offset_override
+    params.append(("limit", str(limit)))
+    params.append(("offset", str(offset)))
     return "attempts?" + urlencode(params, quote_via=quote)
 
 
@@ -280,24 +298,111 @@ def _render_attempts_table(rows: list[dict]) -> str:
     return "\n".join(out).rstrip("\n")
 
 
+def _require_attempts_payload(payload) -> list[dict]:
+    malformed = not isinstance(payload, dict)
+    rows = payload.get("attempts") if isinstance(payload, dict) else None
+    count = payload.get("count") if isinstance(payload, dict) else None
+    malformed = malformed or not isinstance(rows, list)
+    malformed = malformed or not isinstance(count, int) or isinstance(count, bool)
+    malformed = malformed or (isinstance(rows, list) and count != len(rows))
+    malformed = malformed or (
+        isinstance(rows, list)
+        and any(
+            not isinstance(row, dict)
+            or not isinstance(row.get("id"), int)
+            or isinstance(row.get("id"), bool)
+            or row["id"] < 1
+            or not isinstance(row.get("target_host"), str)
+            or not isinstance(row.get("target_path"), str)
+            or not isinstance(row.get("result_status"), str)
+            for row in rows
+        )
+    )
+    if malformed:
+        raise AssessError("coverage --attempts: malformed backend response")
+    return rows
+
+
+def _attempts_continuation(args: argparse.Namespace, *, offset: int) -> str:
+    parts = ["vigil", "assess", "coverage", "--attempts"]
+    for flag, value in (
+        ("--finding", args.finding),
+        ("--surface", args.surface),
+        ("--host", args.host),
+        ("--attack-family", args.attack_family),
+        ("--result-status", args.result_status),
+        ("--lens", args.lens),
+    ):
+        if value:
+            parts.extend((flag, str(value)))
+    parts.extend(("--limit", str(args.limit), "--offset", str(offset)))
+    return shlex.join(parts)
+
+
 def _run_attempts(args: argparse.Namespace, cfg) -> None:
+    limit = int(args.limit)
+    offset = int(args.offset)
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        payload = client.get(_attempts_query(args))
+        if getattr(args, "paginate", False):
+            rows: list[dict] = []
+            next_offset = offset
+            while True:
+                page_rows = _require_attempts_payload(
+                    client.get(
+                        _attempts_query(
+                            args,
+                            limit_override=limit,
+                            offset_override=next_offset,
+                        )
+                    )
+                )
+                rows.extend(page_rows)
+                if len(page_rows) < limit:
+                    break
+                next_offset += len(page_rows)
+        else:
+            request_limit, used_lookahead = lookahead_limit(
+                limit, maximum=_MAX_ATTEMPTS_LIMIT
+            )
+            rows = _require_attempts_payload(
+                client.get(
+                    _attempts_query(
+                        args,
+                        limit_override=request_limit,
+                        offset_override=offset,
+                    )
+                )
+            )
 
-    if getattr(args, "as_json", False):
-        print(json.dumps(payload, indent=2, ensure_ascii=False))
-        return
-
-    # Pinned shape: {"attempts": [...], "count": N}. Tolerate a bare list too.
-    if isinstance(payload, dict):
-        rows = payload.get("attempts") or []
-    elif isinstance(payload, list):
-        rows = payload
+    if getattr(args, "paginate", False):
+        exact_total = offset + len(rows) if rows or offset == 0 else None
+        page = ListPage(
+            rows=rows,
+            offset=offset,
+            total=exact_total,
+            total_at_least=exact_total,
+            has_more=False,
+        )
     else:
-        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        page = page_from_backend(
+            rows,
+            limit=limit,
+            offset=offset,
+            used_lookahead=used_lookahead,
+        )
+    report_page(
+        page,
+        noun="probe attempts",
+        continuation_command=_attempts_continuation(
+            args, offset=page.offset + len(page.rows)
+        ),
+    )
+    rows = page.rows
+    if rows:
+        warn_untrusted_data()
+    if getattr(args, "as_json", False):
+        print(json.dumps({"attempts": rows, "count": len(rows)}, indent=2, ensure_ascii=False))
         return
-
-    rows = [r for r in rows if isinstance(r, dict)]
     print(_render_attempts_table(rows))
 
 

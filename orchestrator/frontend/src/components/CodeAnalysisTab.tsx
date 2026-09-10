@@ -100,8 +100,7 @@ function buildCorpus(r: CodeAnalysisResult): string {
     r.disposition,
     r.confidence,
     r.finding_workflow_status ?? "",
-    r.finding_verification_state ?? "",
-    r.finding_verification_disposition ?? "",
+    r.finding_verification_status ?? "",
   ]
     .filter(Boolean)
     .join(" \n ")
@@ -820,11 +819,8 @@ export function CodeAnalysisTab({
                         {r.finding_workflow_status && (
                           <span className={`badge status-${r.finding_workflow_status}`}>{r.finding_workflow_status}</span>
                         )}
-                        {r.finding_verification_disposition && r.finding_verification_disposition !== "none" && (
-                          <span className={`badge status-${r.finding_verification_disposition}`}>{r.finding_verification_disposition}</span>
-                        )}
-                        {r.finding_verification_state === "disputed" && (
-                          <span className="badge status-disputed">disputed</span>
+                        {r.finding_verification_status && (
+                          <span className={`badge status-${r.finding_verification_status}`}>{r.finding_verification_status}</span>
                         )}
                       </div>
                     )}

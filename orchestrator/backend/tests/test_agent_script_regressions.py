@@ -31,6 +31,33 @@ def _load_script_module(name: str, relative_path: str):
     return module
 
 
+def _lsp_publish_response(
+    repo_id: int, payload: dict[str, object]
+) -> dict[str, object]:
+    return {
+        "id": repo_id,
+        "active_generation": payload["repo_generation"],
+        "source_manifest_digest": payload["source_manifest_digest"],
+        "lsp_config": payload["lsp_config"],
+    }
+
+
+def _request_observation_receipt(
+    observation: dict[str, object], row_id: int
+) -> dict[str, object]:
+    return {
+        "request_variant": {
+            "id": row_id,
+            "method": str(observation.get("method") or "GET").upper(),
+        },
+        "request_observation": {
+            "id": row_id,
+            "request_variant_id": row_id,
+            "observed_url": observation.get("url"),
+        },
+    }
+
+
 def _load_proxy_addon_module():
     mitmproxy_module = ModuleType("mitmproxy")
     mitmproxy_module.http = SimpleNamespace(HTTPFlow=object)
@@ -70,24 +97,22 @@ def test_agent_action_help_is_action_specific(capsys) -> None:
 
     assert exc.value.code == 0
     captured = capsys.readouterr()
-    assert "Usage: vigil assess agent list" in captured.out
+    assert "usage: vigil assess agent list" in captured.out
     assert "--filter-role" in captured.out
     assert "start-swarm" not in captured.out
 
 
-def test_agent_list_accepts_json_flag(monkeypatch, capsys) -> None:
-    """JSON-producing list verbs accept --json consistently."""
+def test_agent_list_rejects_retired_noop_json_flag(capsys) -> None:
+    """Agent list is already JSONL; its agent-only no-op flag stays retired."""
     root = str(_scripts_root())
     if root not in sys.path:
         sys.path.insert(0, root)
     import assess.cli as cli
-    from assess.commands import dispatch
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["agent", "list", "--limit", "5", "--json"])
 
-    monkeypatch.setattr(dispatch, "_list_dispatches", lambda args: print("{}"))
-
-    cli.main(["agent", "list", "--limit", "5", "--json"])
-
-    assert capsys.readouterr().out.strip() == "{}"
+    assert exc.value.code == 2
+    assert "unrecognized arguments: --json" in capsys.readouterr().err
 
 
 def test_get_command_run_accepts_json_flag(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -236,7 +261,7 @@ def test_get_command_run_live_refuses_paths_outside_engagement(
     assert "must not leak" not in json.dumps(payload)
 
 
-def test_fetch_auto_pages_bounded_assessment_lists(capsys) -> None:
+def test_fetch_defaults_to_one_bounded_assessment_page(capsys) -> None:
     module = _load_script_module(
         "test_fetch_module_auto_pages",
         "agent/scripts/assess/commands/fetch.py",
@@ -244,19 +269,20 @@ def test_fetch_auto_pages_bounded_assessment_lists(capsys) -> None:
     calls: list[str] = []
 
     class FakeClient:
-        def get_all_pages(self, endpoint: str, *, page_size: int = 5000):
+        def get(self, endpoint: str):
             calls.append(endpoint)
-            assert page_size == 5000
-            return [{"id": i} for i in range(5001)]
+            return [{"id": i} for i in range(100)]
+
+        def get_all_pages(self, *_args, **_kwargs):
+            raise AssertionError("default fetch must not traverse every page")
 
     rows = module._fetch_assessment_endpoint(FakeClient(), "surfaces")
 
-    assert len(rows) == 5001
-    assert calls == ["surfaces"]
+    assert len(rows) == 100
+    assert calls == ["surfaces?limit=100&offset=0"]
     err = capsys.readouterr().err
-    assert "auto-paging surfaces with page_size=5000" in err
-    assert "stdout will be one combined JSON array" in err
-    assert "fetched 5001 surfaces row(s) across all pages" in err
+    assert "bounded page" in err
+    assert "--paginate" in err
 
 
 def test_fetch_auto_pages_variant_receipts_at_backend_max(capsys) -> None:
@@ -280,6 +306,7 @@ def test_fetch_auto_pages_variant_receipts_at_backend_max(capsys) -> None:
     rows = module._fetch_assessment_endpoint(
         FakeClient(),
         "code/variant-checks?repo_id=7",
+        paginate=True,
     )
 
     assert len(rows) == 501
@@ -452,8 +479,7 @@ def test_list_findings_pushes_filters_and_limit_to_backend(monkeypatch, tmp_path
                     "slug": "VA-123",
                     "severity": "high",
                     "workflow_status": "active",
-                    "verification_state": "verified",
-                    "verification_disposition": "confirmed",
+                    "verification_status": "confirmed",
                     "source_name": "vulnerability-analyst",
                     "canonical_location": "https://example.test/oidc",
                     "summary": "OIDC state result",
@@ -473,8 +499,7 @@ def test_list_findings_pushes_filters_and_limit_to_backend(monkeypatch, tmp_path
             engagement_dir=tmp_path,
             severity="high",
             workflow_status="active",
-            verification_state="verified",
-            verification_disposition="confirmed",
+            verification_status="confirmed",
             source_name="vulnerability-analyst",
             slug="",
             root_cause_slug="",
@@ -488,11 +513,78 @@ def test_list_findings_pushes_filters_and_limit_to_backend(monkeypatch, tmp_path
     )
 
     assert captured == [
-        "findings?severity=high&workflow_status=active&verification_state=verified&"
-        "verification_disposition=confirmed&source_name=vulnerability-analyst&search=OIDC%20state&"
-        "limit=25&offset=50"
+        "findings?severity=high&workflow_status=active&verification_status=confirmed&"
+        "source_name=vulnerability-analyst&search=OIDC%20state&"
+        "limit=26&offset=50"
     ]
-    assert "VA-123 | high | active | verified/confirmed" in capsys.readouterr().out
+    assert "VA-123 | high | active | confirmed" in capsys.readouterr().out
+
+
+def test_list_findings_does_not_repeat_backend_search_filter(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    module = _load_script_module(
+        "test_list_findings_no_duplicate_filter_module",
+        "agent/scripts/assess/commands/list_findings.py",
+    )
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+
+    class FakeClient:
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            pass
+
+        def get(self, endpoint: str):
+            assert endpoint == "findings?search=parser&limit=11&offset=0"
+            return [
+                {
+                    "slug": "VA-124",
+                    "severity": "high",
+                    "workflow_status": "active",
+                    "verification_status": "confirmed",
+                    "title": "Backend-selected result",
+                }
+            ]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    def fail_if_refiltered(_finding: dict, _search: str) -> bool:
+        raise AssertionError("ordinary finding lists must not repeat backend filters")
+
+    monkeypatch.setattr(module, "_matches_search", fail_if_refiltered)
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir=tmp_path,
+            severity=None,
+            workflow_status=None,
+            verification_status=None,
+            source_name=None,
+            slug=None,
+            root_cause_slug="",
+            search="parser",
+            holding=False,
+            limit=10,
+            offset=0,
+            all=False,
+            json=False,
+        )
+    )
+
+    assert "VA-124" in capsys.readouterr().out
 
 
 def test_kali_runtime_dockerfiles_do_not_bake_audit_enums() -> None:
@@ -780,10 +872,10 @@ def test_ingest_candidates_preserve_metadata_and_route(
                 records = []
                 for item in payload.get("items", []):
                     posts.append(("request-observations", item))
-                    records.append({"request_variant": {"id": 701}})
+                    records.append(_request_observation_receipt(item, 701))
                 return {"count": len(records), "records": records}
             posts.append((endpoint, payload))
-            return {"request_variant": {"id": 701}}
+            return _request_observation_receipt(payload, 701)
 
         def close(self) -> None:
             return None
@@ -913,10 +1005,10 @@ def test_ingest_candidates_route_real_bia_candidate_shapes(
                 for item in payload.get("items", []):
                     posts.append(item)
                     self.next_id += 1
-                    records.append({"request_variant": {"id": self.next_id}})
+                    records.append(_request_observation_receipt(item, self.next_id))
                 return {"count": len(records), "records": records}
             self.next_id += 1
-            return {"request_variant": {"id": self.next_id}}
+            return _request_observation_receipt(payload, self.next_id)
 
         def close(self) -> None:
             return None
@@ -1019,6 +1111,7 @@ def test_code_ingest_posts_backend_contract_fields(monkeypatch, tmp_path: Path) 
                 return {"staged": len(payload["files"])}
             if endpoint == "code/repos/41/refresh/commit":
                 return {
+                    "repo_id": 41,
                     "inserted": 1,
                     "changed": 0,
                     "renamed": 0,
@@ -1031,7 +1124,7 @@ def test_code_ingest_posts_backend_contract_fields(monkeypatch, tmp_path: Path) 
                 assert payload["source_manifest_digest"] == "d" * 64
                 assert payload["lsp_config"]["ctags"]["repo_generation"] == 1
                 assert payload["lsp_config"]["ctags"]["source_manifest_digest"] == "d" * 64
-                return {"id": 41}
+                return _lsp_publish_response(41, payload)
             raise AssertionError(f"unexpected endpoint: {endpoint}")
 
         def close(self) -> None:
@@ -1106,6 +1199,7 @@ def test_code_ingest_records_skipped_minified_manifest(monkeypatch, tmp_path: Pa
                 return {"staged": len(payload["files"])}
             if endpoint == "code/repos/41/refresh/commit":
                 return {
+                    "repo_id": 41,
                     "inserted": 1,
                     "changed": 0,
                     "renamed": 0,
@@ -1118,7 +1212,7 @@ def test_code_ingest_records_skipped_minified_manifest(monkeypatch, tmp_path: Pa
                 assert payload["source_manifest_digest"] == "d" * 64
                 assert payload["lsp_config"]["ctags"]["repo_generation"] == 1
                 assert payload["lsp_config"]["ctags"]["source_manifest_digest"] == "d" * 64
-                return {"id": 41}
+                return _lsp_publish_response(41, payload)
             raise AssertionError(f"unexpected endpoint: {endpoint}")
 
         def close(self) -> None:
@@ -1206,6 +1300,7 @@ def test_code_ingest_include_path_can_queue_security_relevant_build_artifact(mon
                 return {"staged": len(payload["files"])}
             if endpoint == "code/repos/42/refresh/commit":
                 return {
+                    "repo_id": 42,
                     "inserted": 2,
                     "changed": 0,
                     "renamed": 0,
@@ -1218,7 +1313,7 @@ def test_code_ingest_include_path_can_queue_security_relevant_build_artifact(mon
                 assert payload["source_manifest_digest"] == "d" * 64
                 assert payload["lsp_config"]["ctags"]["repo_generation"] == 1
                 assert payload["lsp_config"]["ctags"]["source_manifest_digest"] == "d" * 64
-                return {"id": 42}
+                return _lsp_publish_response(42, payload)
             raise AssertionError(f"unexpected endpoint: {endpoint}")
 
         def close(self) -> None:
@@ -1285,30 +1380,26 @@ def test_export_findings_uses_canonical_findings_and_renders_details(monkeypatch
                     "title": "False positive finding",
                     "severity": "low",
                     "workflow_status": "false_positive",
-                    "verification_state": "verified",
-                    "verification_disposition": "false_positive",
+                    "verification_status": "false_positive",
                     "summary": "Should still be exported",
-                    "details_json": json.dumps({}),
+                    "details": {},
                 },
                 {
                     "slug": "finding-001",
                     "title": "Parser issue",
                     "severity": "high",
                     "workflow_status": "merged",
-                    "verification_state": "disputed",
-                    "verification_disposition": "downgraded",
+                    "verification_status": "downgraded",
                     "summary": "Summary text",
                     "merged_into_slug": "finding-010",
-                    "details_json": json.dumps(
-                        {
-                            "request_method": "POST",
-                            "cwe_id": "CWE-79",
-                            "references": ["https://example.test/advisory", {"id": 7}, 42],
-                            "entry_point": "parse_input",
-                            "sink": "render_output",
-                            "steps_to_reproduce": ["send payload", 2],
-                        }
-                    ),
+                    "details": {
+                        "request_method": "POST",
+                        "cwe_id": "CWE-79",
+                        "references": ["https://example.test/advisory", {"id": 7}, 42],
+                        "entry_point": "parse_input",
+                        "sink": "render_output",
+                        "steps_to_reproduce": ["send payload", 2],
+                    },
                 },
             ]
 
@@ -1380,14 +1471,14 @@ def test_export_findings_separates_sections_with_blank_line(monkeypatch, tmp_pat
                     "title": "First",
                     "severity": "high",
                     "summary": "first summary",
-                    "details_json": json.dumps({}),
+                    "details": {},
                 },
                 {
                     "slug": "finding-bbb",
                     "title": "Second",
                     "severity": "high",
                     "summary": "second summary",
-                    "details_json": json.dumps({}),
+                    "details": {},
                 },
             ]
 
@@ -1488,20 +1579,18 @@ def test_export_findings_preserves_legacy_non_mapping_poc_headers() -> None:
         {
             "slug": "finding-001",
             "title": "Legacy headers",
-            "details_json": json.dumps(
-                {
-                    "poc_request": {
-                        "method": "GET",
-                        "url": "https://example.test",
-                        "headers": "Accept: text/html",
-                    },
-                    "poc_response": {
-                        "status": 200,
-                        "headers": ["Content-Type: text/plain"],
-                        "body_excerpt": "ok",
-                    },
-                }
-            ),
+            "details": {
+                "poc_request": {
+                    "method": "GET",
+                    "url": "https://example.test",
+                    "headers": "Accept: text/html",
+                },
+                "poc_response": {
+                    "status": 200,
+                    "headers": ["Content-Type: text/plain"],
+                    "body_excerpt": "ok",
+                },
+            },
         }
     )
 
@@ -1530,15 +1619,13 @@ def test_render_finding_accepts_poc_response_body_as_well_as_body_excerpt() -> N
         {
             "slug": "finding-001",
             "title": "Plain body key",
-            "details_json": json.dumps(
-                {
-                    "poc_response": {
-                        "status": 200,
-                        "headers": {"Content-Type": "application/json"},
-                        "body": '{"owner":"someone-else"}',
-                    },
-                }
-            ),
+            "details": {
+                "poc_response": {
+                    "status": 200,
+                    "headers": {"Content-Type": "application/json"},
+                    "body": '{"owner":"someone-else"}',
+                },
+            },
         }
     )
 
@@ -1562,7 +1649,7 @@ def test_render_finding_widens_fence_when_poc_code_contains_backtick_run() -> No
         {
             "slug": "finding-001",
             "title": "Fence escaping",
-            "details_json": json.dumps({"poc_code": poc_code}),
+            "details": {"poc_code": poc_code},
         }
     )
 
@@ -1866,7 +1953,16 @@ def test_code_index_sync_repo_id_scopes_aggregate_to_matching_manifest(
 
         def post(self, endpoint: str, payload: dict[str, object]):
             self.posts.append((endpoint, payload))
-            return {"updated": 1, "skipped": 0}
+            return {
+                key: payload[key]
+                for key in (
+                    "repo_id",
+                    "repo_generation",
+                    "source_manifest_digest",
+                    "structural_input_digest",
+                    "structural_index_schema",
+                )
+            } | {"updated": len(payload["updates"])}
 
         def close(self) -> None:
             return None
@@ -1997,7 +2093,16 @@ def test_code_index_sync_rejects_late_repo_debt_shape_before_any_post(
 
         def post(self, endpoint: str, payload: dict[str, object]):
             self.posts.append((endpoint, payload))
-            return {"updated": 1, "skipped": 0}
+            return {
+                key: payload[key]
+                for key in (
+                    "repo_id",
+                    "repo_generation",
+                    "source_manifest_digest",
+                    "structural_input_digest",
+                    "structural_index_schema",
+                )
+            } | {"updated": len(payload["updates"])}
 
         def __enter__(self):
             return self
@@ -2277,8 +2382,8 @@ def test_code_record_modules_accepts_meaningful_labels(
             posted["endpoint"] = endpoint
             posted["payload"] = payload
             return [
-                {"id": 1, "module_key": "auth_login", "name": "Authentication and login flow"},
-                {"id": 2, "module_key": "payment_settlement", "name": "Payment settlement"},
+                {"id": 1, "repo_id": 5, "module_key": "auth_login", "name": "Authentication and login flow"},
+                {"id": 2, "repo_id": 5, "module_key": "payment_settlement", "name": "Payment settlement"},
             ]
 
         def close(self) -> None:
@@ -2458,8 +2563,7 @@ def test_review_exploits_lists_backend_candidates(monkeypatch, tmp_path: Path, c
                 "slug": "ACTIVE-001",
                 "severity": "high",
                 "workflow_status": "active",
-                "verification_state": "verified",
-                "verification_disposition": "confirmed",
+                "verification_status": "confirmed",
                 "candidate_reason": "verified_high",
                 "title": "Live issue",
                 "canonical_location": "file:src/parser.py:10",
@@ -2468,8 +2572,7 @@ def test_review_exploits_lists_backend_candidates(monkeypatch, tmp_path: Path, c
                 "slug": "CHAIN-001",
                 "severity": "info",
                 "workflow_status": "active",
-                "verification_state": "verified",
-                "verification_disposition": "downgraded",
+                "verification_status": "downgraded",
                 "candidate_reason": "verified_chain_required",
                 "title": "Chain-only primitive",
                 "canonical_location": "https://example.test/export",
@@ -2610,7 +2713,7 @@ def test_check_report_readiness_prints_advisories_alongside_blockers(monkeypatch
         {
             "ready": False,
             "blockers": [
-                {"kind": "finding_verification_state", "slug": "VA-001", "detail": "unreviewed"},
+                {"kind": "finding_verification_status", "slug": "VA-001", "detail": "unreviewed"},
             ],
             "advisories": [
                 {
@@ -2627,7 +2730,7 @@ def test_check_report_readiness_prints_advisories_alongside_blockers(monkeypatch
     assert excinfo.value.code == 1
     out = capsys.readouterr().out
     assert "Final report blockers remain:" in out
-    assert "finding_verification_state | VA-001: unreviewed" in out
+    assert "finding_verification_status | VA-001: unreviewed" in out
     assert "Advisories (not blocking" in out
     assert "stale_dispatch_ready_handoff: stale ready handoff" in out
 
@@ -2791,6 +2894,9 @@ def test_start_swarm_records_N_rows_with_worker_encoded_task(
     assert len(recorded) == 3
     assert all(r["agent_role"] == "code-vuln-hunter" for r in recorded)
     assert all(r["dispatch_mode"] == "swarm" for r in recorded)
+    assert all("source_revision" in r for r in recorded)
+    assert all("instruction_identity_status" in r for r in recorded)
+    assert all(r["actual_model"] == "unknown" for r in recorded)
     # Each task encodes worker index and contiguous item range.
     assert "[swarm 1/3 items 1-5 from items.txt]" in recorded[0]["task"]
     assert "[swarm 2/3 items 6-10 from items.txt]" in recorded[1]["task"]
@@ -3168,7 +3274,7 @@ def test_list_report_findings_409_is_concise(monkeypatch, tmp_path: Path, capsys
             "blocker_count": 2,
             "blockers": [
                 {"kind": "coverage", "detail": "Coverage blockers remain", "blocker_count": 7},
-                {"kind": "finding_verification_state", "slug": "VA-001", "detail": "unreviewed"},
+                {"kind": "finding_verification_status", "slug": "VA-001", "detail": "unreviewed"},
             ],
         }
     }
@@ -3281,7 +3387,7 @@ def test_resume_brief_findings_always_show_medium_plus(monkeypatch, tmp_path, ca
             "slug": slug,
             "severity": severity,
             "workflow_status": "active",
-            "verification_state": "unreviewed",
+            "verification_status": "unreviewed",
             "title": f"{slug} title",
         }
 
@@ -3543,12 +3649,14 @@ def _run_ingest_spec(monkeypatch, tmp_path: Path, spec: dict, scope: dict):
                 for observation in payload.get("items", []):
                     posts.append(observation)
                     self._next_id += 1
-                    records.append({"request_variant": {"id": self._next_id}})
+                    records.append(
+                        _request_observation_receipt(observation, self._next_id)
+                    )
                 return {"count": len(records), "records": records}
             # Individual-fallback path (bulk endpoint missing / payload error).
             posts.append(payload)
             self._next_id += 1
-            return {"request_variant": {"id": self._next_id}}
+            return _request_observation_receipt(payload, self._next_id)
 
         def close(self) -> None:
             return None

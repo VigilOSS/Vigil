@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessmentClient, AssessError, require_write_result
 from assess.lib.code_snapshot import (
     MAX_JSON_ARTIFACT_BYTES,
     RootedSourceTree,
@@ -577,11 +577,26 @@ def run(args) -> None:
         total_skipped = 0
         for payload in prepared:
             result = client.post("code/files/bulk-structural-metadata", payload)
-            if not isinstance(result, dict):
-                print("Structural metadata backend response is invalid", file=sys.stderr)
-                sys.exit(1)
-            updated = int(result.get("updated", 0))
-            skipped = int(result.get("skipped", 0))
+            result = require_write_result(
+                result,
+                operation="sync structural metadata",
+                expected={
+                    "repo_id": payload["repo_id"],
+                    "repo_generation": payload["repo_generation"],
+                    "source_manifest_digest": payload["source_manifest_digest"],
+                    "structural_input_digest": payload["structural_input_digest"],
+                    "structural_index_schema": payload["structural_index_schema"],
+                },
+                nonnegative_counts=("updated",),
+            )
+            updated = result["updated"]
+            if updated != len(payload["updates"]):
+                raise AssessError(
+                    "sync structural metadata: backend response count does not match "
+                    "the submitted snapshot; the write may have committed, so inspect "
+                    "durable state and do not retry automatically"
+                )
+            skipped = 0
             total_updated += updated
             total_skipped += skipped
             print(

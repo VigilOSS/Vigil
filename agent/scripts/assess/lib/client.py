@@ -4,6 +4,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import re
 import socket
 import sys
 import time
@@ -28,6 +29,149 @@ def default_runtime_container() -> str:
 class AssessError(Exception):
     """Raised on non-recoverable API errors."""
     pass
+
+
+def require_finding_write_response(
+    response: dict[str, Any], *, finding_slug: str, operation: str
+) -> dict[str, Any]:
+    """Validate the finding-write envelope at its command-owned boundary.
+
+    Finding create/update/verify responses carry ``finding.slug``. A syntactically
+    valid object without that identity cannot prove which row was written; the
+    mutation may nevertheless be durable, so the diagnostic forbids automatic
+    retry and points at the point-read used to reconcile the outcome.
+    """
+    finding = response.get("finding")
+    returned_slug = finding.get("slug") if isinstance(finding, dict) else None
+    if returned_slug != finding_slug:
+        raise AssessError(
+            f"{operation}: backend did not return canonical finding {finding_slug}; "
+            "the write may have committed, so inspect "
+            f"`vigil assess finding get {finding_slug}` and do not retry automatically"
+        )
+    return response
+
+
+def require_artifact_write_response(
+    response: dict[str, Any], *, artifact_path: str | None, operation: str
+) -> dict[str, Any]:
+    """Require the canonical identity of an artifact registration response."""
+
+    artifact_id = response.get("id")
+    returned_path = response.get("relative_path")
+    valid_id = isinstance(artifact_id, int) and not isinstance(artifact_id, bool)
+    valid_path = isinstance(returned_path, str) and bool(returned_path.strip())
+    if artifact_path is not None:
+        valid_path = valid_path and returned_path == artifact_path
+    if not valid_id or artifact_id < 1 or not valid_path:
+        raise AssessError(
+            f"{operation}: backend did not return canonical artifact "
+            f"id/path for {artifact_path or 'the submitted file'!r}; the write may have committed, so "
+            "inspect `vigil assess artifact search --json` and do not retry "
+            "automatically"
+        )
+    return response
+
+
+def require_write_result(
+    response: dict[str, Any],
+    *,
+    operation: str,
+    expected: dict[str, Any] | None = None,
+    positive_ids: tuple[str, ...] = (),
+    nonnegative_counts: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Validate endpoint-owned identity/count fields after a durable write."""
+
+    invalid: list[str] = []
+    for field, value in (expected or {}).items():
+        returned = response.get(field)
+        if field not in response or type(returned) is not type(value) or returned != value:
+            invalid.append(field)
+    for field in positive_ids:
+        value = response.get(field)
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 1
+        ):
+            invalid.append(field)
+    for field in nonnegative_counts:
+        value = response.get(field)
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+        ):
+            invalid.append(field)
+    if invalid:
+        fields = ", ".join(sorted(set(invalid)))
+        raise AssessError(
+            f"{operation}: backend response did not identify the durable result "
+            f"({fields}); the write may have committed, so inspect durable state "
+            "and do not retry automatically"
+        )
+    return response
+
+
+def _require_read_shape(response: Any, *, endpoint: str, expected: type) -> Any:
+    if not isinstance(response, expected):
+        raise AssessError(
+            f"GET {endpoint} returned malformed JSON: expected "
+            f"{expected.__name__}, got {type(response).__name__}"
+        )
+    return response
+
+
+_COMMAND_RUN_TERMINAL_STATUSES = frozenset(
+    {"completed", "failed", "timed_out", "killed", "lost"}
+)
+_COMMAND_RUN_FINALIZE_CONFLICT = re.compile(
+    r"^command run id=(?P<id>[1-9][0-9]*) already finalized with "
+    r"status='(?P<status>[a-z_]+)'; refusing to overwrite$"
+)
+_COMMAND_RUN_ENDPOINT = re.compile(r"^command-runs/(?P<id>[1-9][0-9]*)$")
+_JOB_ENDPOINT = re.compile(r"^jobs/(?P<id>[1-9][0-9]*)$")
+_JOB_STATUSES = frozenset(
+    {"queued", "running", "completed", "failed", "killed", "lost", "stop_failed"}
+)
+_JOB_TERMINAL_STATUSES = frozenset({"completed", "failed", "killed", "lost"})
+
+
+def require_command_run_finalize_response(
+    response: object,
+    *,
+    run_id: int,
+    run_uuid: str,
+    requested_status: str,
+) -> dict[str, Any]:
+    """Require a terminal command-run receipt bound to the attempted row."""
+
+    valid_id = (
+        isinstance(response, dict)
+        and isinstance(response.get("id"), int)
+        and not isinstance(response.get("id"), bool)
+        and response.get("id") == run_id
+    )
+    returned_status = response.get("status") if isinstance(response, dict) else None
+    raced = response.get("finalize_409") is True if isinstance(response, dict) else False
+    valid_status = (
+        isinstance(returned_status, str)
+        and returned_status in _COMMAND_RUN_TERMINAL_STATUSES
+        and (raced or returned_status == requested_status)
+    )
+    valid_uuid = (
+        bool(run_uuid)
+        and isinstance(response, dict)
+        and response.get("run_uuid") == run_uuid
+    )
+    if not valid_id or not valid_status or not valid_uuid:
+        raise AssessError(
+            "finalize command run: backend response did not identify the exact "
+            "terminal run id/uuid/status; the write may have committed, so inspect "
+            f"`vigil assess command-run get {run_id}` and do not retry automatically"
+        )
+    return response
 
 
 def _is_handoff_duplicate_conflict(exc: AssessError) -> bool:
@@ -191,28 +335,85 @@ class AssessmentClient:
             f"`vigil orchestrator start`, and verify ORCHESTRATOR_BASE_URL={self.base_url!r}."
         )
 
-    def get(self, endpoint: str) -> Any:
-        """GET /assessment/{endpoint}."""
-        path = f"{self._assessment_prefix}/{endpoint}"
-        _, body = self._request("GET", path)
+    def _get_json(self, path: str) -> Any:
+        status, body = self._request("GET", path)
         try:
             return json.loads(body)
-        except json.JSONDecodeError:
-            return body
+        except json.JSONDecodeError as exc:
+            raise AssessError(
+                f"GET {path} returned HTTP {status} with invalid JSON. "
+                "Expected an orchestrator API response; check the API URL and route "
+                "(a frontend page may have been returned).\n"
+                f"{self._orchestrator_hint()}"
+            ) from exc
 
-    def post(self, endpoint: str, payload: dict) -> dict:
+    def _decode_write_json(self, method: str, path: str, status: int, body: str) -> Any:
+        """Decode a mutation response without pretending the mutation failed.
+
+        A successful HTTP status proves only that the server accepted the request. If
+        its response cannot be read, the mutation may already be durable, so callers
+        must inspect state instead of retrying and potentially duplicating it.
+        """
+        try:
+            parsed = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise AssessError(
+                f"{method} {path} returned HTTP {status} with invalid JSON; "
+                "the write may have committed, so its outcome is uncertain. "
+                "Inspect durable state and do not retry automatically.\n"
+                f"{self._orchestrator_hint()}"
+            ) from exc
+        return parsed
+
+    def _write_json_object(self, method: str, path: str, status: int, body: str) -> dict:
+        parsed = self._decode_write_json(method, path, status, body)
+        if not isinstance(parsed, dict):
+            raise AssessError(
+                f"{method} {path} returned HTTP {status}, but expected a JSON object; "
+                "the write may have committed, so its outcome is uncertain. "
+                "Inspect durable state and do not retry automatically."
+            )
+        if not parsed:
+            raise AssessError(
+                f"{method} {path} returned HTTP {status} with an empty JSON object, "
+                "which does not identify a mutation result; the write may have committed, "
+                "so its outcome is uncertain. Inspect durable state and do not retry "
+                "automatically."
+            )
+        return parsed
+
+    def _write_json_array(self, method: str, path: str, status: int, body: str) -> list:
+        parsed = self._decode_write_json(method, path, status, body)
+        if not isinstance(parsed, list):
+            raise AssessError(
+                f"{method} {path} returned HTTP {status}, but expected a JSON array; "
+                "the write may have committed, so its outcome is uncertain. "
+                "Inspect durable state and do not retry automatically."
+            )
+        return parsed
+
+    def get(self, endpoint: str) -> Any:
+        """GET /assessment/{endpoint}."""
+        return self._get_json(f"{self._assessment_prefix}/{endpoint}")
+
+    def post(self, endpoint: str, payload: dict) -> Any:
         """POST /assessment/{endpoint}."""
         path = f"{self._assessment_prefix}/{endpoint}"
         body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
-        _, resp_body = self._request("POST", path, body=body)
-        return json.loads(resp_body)
+        status, resp_body = self._request("POST", path, body=body, max_retries=1)
+        # This is the sole assessment mutation whose documented response is a
+        # top-level array. Keep the exception exact instead of weakening every
+        # write to accept arbitrary JSON values.
+        if endpoint.strip("/") == "code/modules":
+            return self._write_json_array("POST", path, status, resp_body)
+        return self._write_json_object("POST", path, status, resp_body)
 
     def put(self, endpoint: str, payload: dict) -> dict:
         """PUT /assessment/{endpoint}."""
         path = f"{self._assessment_prefix}/{endpoint}"
         body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
-        _, resp_body = self._request("PUT", path, body=body)
-        return json.loads(resp_body)
+        status, resp_body = self._request("PUT", path, body=body, max_retries=1)
+        return self._write_json_object("PUT", path, status, resp_body)
 
     def patch(self, endpoint: str, payload: dict, *, accept_409: bool = False) -> dict:
         """PATCH /assessment/{endpoint}.
@@ -225,67 +426,147 @@ class AssessmentClient:
         """
         path = f"{self._assessment_prefix}/{endpoint}"
         body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
-        status_code, resp_body = self._request("PATCH", path, body=body, accept_409=accept_409)
-        parsed = json.loads(resp_body)
-        if accept_409 and status_code == 409 and isinstance(parsed, dict):
+        status_code, resp_body = self._request(
+            "PATCH", path, body=body, max_retries=1, accept_409=accept_409
+        )
+        parsed = self._write_json_object("PATCH", path, status_code, resp_body)
+        endpoint_name = endpoint.strip("/")
+        command_run_match = _COMMAND_RUN_ENDPOINT.fullmatch(endpoint_name)
+        job_match = _JOB_ENDPOINT.fullmatch(endpoint_name)
+        if accept_409 and status_code == 409:
             # Backend shape: {"detail": {"message": ..., "existing": <row>}}
             detail = parsed.get("detail")
-            if isinstance(detail, dict) and isinstance(detail.get("existing"), dict):
-                row = dict(detail["existing"])
+            existing = detail.get("existing") if isinstance(detail, dict) else None
+            message = detail.get("message") if isinstance(detail, dict) else None
+            match = (
+                _COMMAND_RUN_FINALIZE_CONFLICT.fullmatch(message)
+                if isinstance(message, str)
+                else None
+            )
+            if command_run_match:
+                requested_id = int(command_run_match.group("id"))
+                valid_existing = (
+                    match is not None
+                    and isinstance(existing, dict)
+                    and existing.get("noop") is True
+                    and isinstance(existing.get("id"), int)
+                    and not isinstance(existing.get("id"), bool)
+                    and existing.get("id") == requested_id
+                    and int(match.group("id")) == requested_id
+                    and existing.get("status") == match.group("status")
+                    and existing.get("status") in _COMMAND_RUN_TERMINAL_STATUSES
+                )
+                if not valid_existing:
+                    raise AssessError(
+                        f"PATCH {path} returned HTTP 409 without the documented "
+                        "already-finalized canonical row; inspect durable state and "
+                        "do not retry automatically"
+                    )
+            elif job_match:
+                requested_id = int(job_match.group("id"))
+                requested_status = payload.get("status")
+                valid_existing = (
+                    message == "job already terminal"
+                    and isinstance(existing, dict)
+                    and isinstance(existing.get("id"), int)
+                    and not isinstance(existing.get("id"), bool)
+                    and existing.get("id") == requested_id
+                    and isinstance(requested_status, str)
+                    and requested_status in _JOB_TERMINAL_STATUSES
+                    and existing.get("status") in _JOB_TERMINAL_STATUSES
+                )
+                if not valid_existing:
+                    raise AssessError(
+                        f"PATCH {path} returned HTTP 409 without the documented "
+                        "terminal job row; inspect durable state and do not retry "
+                        "automatically"
+                    )
+            else:
+                raise AssessError(
+                    f"PATCH {path} returned HTTP 409, but this is not a recognized "
+                    "finalize endpoint; inspect durable state and do not retry automatically"
+                )
+            if isinstance(existing, dict):
+                row = dict(existing)
                 row["finalize_409"] = True
                 return row
+        if job_match:
+            requested_id = int(job_match.group("id"))
+            returned_id = parsed.get("id")
+            returned_status = parsed.get("status")
+            requested_status = payload.get("status")
+            valid_status = (
+                isinstance(returned_status, str)
+                and returned_status in _JOB_STATUSES
+                and (requested_status is None or returned_status == requested_status)
+            )
+            if (
+                not isinstance(returned_id, int)
+                or isinstance(returned_id, bool)
+                or returned_id != requested_id
+                or not valid_status
+            ):
+                raise AssessError(
+                    f"PATCH {path} did not return the exact job id/status; the write "
+                    "may have committed, so inspect durable state and do not retry "
+                    "automatically"
+                )
         return parsed
 
     def delete(self, endpoint: str) -> dict:
         """DELETE /assessment/{endpoint}."""
         path = f"{self._assessment_prefix}/{endpoint}"
-        _, resp_body = self._request("DELETE", path)
-        try:
-            return json.loads(resp_body)
-        except json.JSONDecodeError:
-            return {"raw": resp_body}
+        status, resp_body = self._request("DELETE", path, max_retries=1)
+        return self._write_json_object("DELETE", path, status, resp_body)
 
     def get_engagement(self, endpoint: str, query: str = "") -> Any:
         """GET /engagements/{key}/{endpoint} — non-assessment scoped (intel, activity)."""
         path = f"{self._engagement_prefix}/{endpoint}"
         if query:
             path = f"{path}?{query}"
-        _, body = self._request("GET", path)
-        try:
-            return json.loads(body)
-        except json.JSONDecodeError:
-            return body
+        return self._get_json(path)
 
     def post_engagement(self, endpoint: str, payload: dict) -> dict:
         """POST /engagements/{key}/{endpoint} — non-assessment scoped (intel, activity)."""
         path = f"{self._engagement_prefix}/{endpoint}"
         body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
-        _, resp_body = self._request("POST", path, body=body)
-        try:
-            return json.loads(resp_body)
-        except json.JSONDecodeError:
-            return {"raw": resp_body}
+        status, resp_body = self._request("POST", path, body=body, max_retries=1)
+        return self._write_json_object("POST", path, status, resp_body)
+
+    def patch_engagement(self, endpoint: str, payload: dict) -> dict:
+        """PATCH /engagements/{key}/{endpoint} with uncertain-write handling."""
+        path = f"{self._engagement_prefix}/{endpoint}"
+        body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+        status, resp_body = self._request("PATCH", path, body=body, max_retries=1)
+        return self._write_json_object("PATCH", path, status, resp_body)
 
     def put_engagement(self, endpoint: str, payload: dict) -> dict:
         """PUT /engagements/{key}/{endpoint} — non-assessment scoped (credentials)."""
         path = f"{self._engagement_prefix}/{endpoint}"
         body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
-        _, resp_body = self._request("PUT", path, body=body)
-        try:
-            return json.loads(resp_body)
-        except json.JSONDecodeError:
-            return {"raw": resp_body}
+        status, resp_body = self._request("PUT", path, body=body, max_retries=1)
+        return self._write_json_object("PUT", path, status, resp_body)
 
     def delete_engagement(self, endpoint: str) -> None:
         """DELETE /engagements/{key}/{endpoint} — non-assessment scoped (credentials)."""
         path = f"{self._engagement_prefix}/{endpoint}"
-        self._request("DELETE", path)
+        self._request("DELETE", path, max_retries=1)
 
     def record_dispatch(self, payload: dict) -> dict:
-        return self.post("dispatches", payload)
+        return require_write_result(
+            self.post("dispatches", payload),
+            operation="record dispatch",
+            expected={"agent_id": payload.get("agent_id")},
+            positive_ids=("id",),
+        )
 
     def update_dispatch(self, agent_id: str, patch: dict) -> dict:
-        return self.patch(f"dispatches/{agent_id}", patch)
+        return require_write_result(
+            self.patch(f"dispatches/{agent_id}", patch),
+            operation="update dispatch",
+            expected={"agent_id": agent_id},
+            positive_ids=("id",),
+        )
 
     def get_dispatch(self, agent_id: str) -> dict | None:
         try:
@@ -294,13 +575,15 @@ class AssessmentClient:
             if "HTTP 404" in str(exc):
                 return None
             raise
-        return row if isinstance(row, dict) else None
+        return _require_read_shape(
+            row, endpoint=f"dispatches/{agent_id}", expected=dict
+        )
 
     def list_dispatches(self, **filters: Any) -> list[dict]:
         query = _build_query(filters)
         endpoint = "dispatches" if not query else f"dispatches?{query}"
         rows = self.get(endpoint)
-        return rows if isinstance(rows, list) else []
+        return _require_read_shape(rows, endpoint=endpoint, expected=list)
 
     # HandoffUpdate (the PATCH body) forbids `agent_id` (it's in the URL) and
     # `agent_role` (immutable once the row exists). Everything else round-trips.
@@ -329,9 +612,19 @@ class AssessmentClient:
         repeatedly without bookkeeping. Latest write wins.
         """
         if not upsert:
-            return self.post("dispatch-handoffs", payload)
+            return require_write_result(
+                self.post("dispatch-handoffs", payload),
+                operation="record handoff",
+                expected={"agent_id": payload.get("agent_id")},
+                positive_ids=("id",),
+            )
         try:
-            return self.post("dispatch-handoffs", payload)
+            return require_write_result(
+                self.post("dispatch-handoffs", payload),
+                operation="record handoff",
+                expected={"agent_id": payload.get("agent_id")},
+                positive_ids=("id",),
+            )
         except AssessError as exc:
             if not _is_handoff_duplicate_conflict(exc):
                 raise
@@ -350,7 +643,12 @@ class AssessmentClient:
             return self.update_handoff(str(agent_id), patch)
 
     def update_handoff(self, agent_id: str, patch: dict) -> dict:
-        return self.patch(f"dispatch-handoffs/{agent_id}", patch)
+        return require_write_result(
+            self.patch(f"dispatch-handoffs/{agent_id}", patch),
+            operation="update handoff",
+            expected={"agent_id": agent_id},
+            positive_ids=("id",),
+        )
 
     def get_handoff(self, agent_id: str) -> dict | None:
         try:
@@ -359,25 +657,43 @@ class AssessmentClient:
             if "HTTP 404" in str(exc):
                 return None
             raise
-        return row if isinstance(row, dict) else None
+        return _require_read_shape(
+            row, endpoint=f"dispatch-handoffs/{agent_id}", expected=dict
+        )
 
     def list_handoffs(self, **filters: Any) -> list[dict]:
         query = _build_query(filters)
         endpoint = "dispatch-handoffs" if not query else f"dispatch-handoffs?{query}"
         rows = self.get(endpoint)
-        return rows if isinstance(rows, list) else []
+        return _require_read_shape(rows, endpoint=endpoint, expected=list)
 
     def record_decision(self, payload: dict) -> dict:
-        return self.post("dispatch-decisions", payload)
+        result = require_write_result(
+            self.post("dispatch-decisions", payload),
+            operation="record dispatch decision",
+            expected={"kind": payload.get("kind")},
+            positive_ids=("id",),
+        )
+        if "payload" in result and result["payload"] != payload.get("payload", {}):
+            raise AssessError(
+                "record dispatch decision: backend response did not identify the "
+                "requested decision payload; the write may have committed, so inspect "
+                "durable state and do not retry automatically"
+            )
+        return result
 
     def update_decision(self, decision_id: int, patch: dict) -> dict:
-        return self.patch(f"dispatch-decisions/{int(decision_id)}", patch)
+        return require_write_result(
+            self.patch(f"dispatch-decisions/{int(decision_id)}", patch),
+            operation="update dispatch decision",
+            expected={"id": int(decision_id)},
+        )
 
     def list_decisions(self, **filters: Any) -> list[dict]:
         query = _build_query(filters)
         endpoint = "dispatch-decisions" if not query else f"dispatch-decisions?{query}"
         rows = self.get(endpoint)
-        return rows if isinstance(rows, list) else []
+        return _require_read_shape(rows, endpoint=endpoint, expected=list)
 
     def list_all_decisions(self, **filters: Any) -> list[dict]:
         """Paginate ``/dispatch-decisions`` to return EVERY row matching the

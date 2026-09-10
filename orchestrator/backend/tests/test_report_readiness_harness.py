@@ -20,6 +20,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from app import db as db_module
+from tests.proof_fixtures import post_artifact_backed_source_observation
+
 
 ENGAGEMENT_KEY = "2026-05-20-090000-harness"
 BASE = f"/engagements/{ENGAGEMENT_KEY}/assessment"
@@ -53,21 +56,29 @@ def _write_engagement(engagements_dir: Path) -> Path:
     return eng
 
 
-def _reportable_finding(client, eng: Path, slug: str = "HR-001", **overrides) -> None:
+def _reportable_finding(
+    client,
+    eng: Path,
+    slug: str = "HR-001",
+    *,
+    normal_severity_band: str | None = None,
+    **overrides,
+) -> None:
     """Seed a fully-reportable finding (verified/confirmed, evidence linked)."""
     (eng / "notes").mkdir(parents=True, exist_ok=True)
     (eng / "notes" / f"{slug}-note.md").write_text(f"{slug} evidence", encoding="utf-8")
+    verification_status = overrides.pop("verification_status", "confirmed")
     payload = {
         "slug": slug,
         "title": "Reportable finding",
         "severity": "high",
         "workflow_status": "active",
-        "verification_state": "verified",
-        "verification_disposition": "confirmed",
+        "verification_status": "unreviewed",
         "canonical_location": f"https://example.com/{slug}",
         "summary": "A fully reportable finding.",
         "evidence_ref": f"notes/{slug}-note.md",
         "source_name": "vulnerability-analyst",
+        "provenance": {"agent_id": "HUNT-1"},
         "details": {
             "cvss_score": 8.1,
             "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
@@ -80,6 +91,58 @@ def _reportable_finding(client, eng: Path, slug: str = "HR-001", **overrides) ->
     payload.update(overrides)
     response = client.post(f"{BASE}/findings", json=payload)
     assert response.status_code == 201, response.text
+    if verification_status == "unreviewed":
+        return
+
+    for agent_id, role in (
+        ("HUNT-1", "vulnerability-analyst"),
+        ("VERIFY-1", "code-vuln-verifier"),
+    ):
+        dispatch = client.post(
+            f"{BASE}/dispatches",
+            json={"agent_id": agent_id, "agent_role": role, "task": role},
+        )
+        assert dispatch.status_code == 201, dispatch.text
+    run = client.post(
+        f"{BASE}/assessment-runs",
+        json={
+            "run_uuid": f"report-readiness-{slug}",
+            "run_kind": "code",
+            "producer_dispatch_agent_id": "VERIFY-1",
+        },
+    )
+    assert run.status_code == 201, run.text
+    receipt = post_artifact_backed_source_observation(
+        client,
+        f"{BASE}/proof-receipts",
+        json={
+            "run_id": run.json()["id"],
+            "evidence_kind": "source_observation",
+            "expected_result": "the reported claim survives an independent check",
+            "observed_result": "the independent check reproduced the reported claim",
+        },
+    )
+    assert receipt.status_code == 201, receipt.text
+    completed = client.patch(
+        f"{BASE}/assessment-runs/{run.json()['id']}",
+        json={"status": "completed"},
+    )
+    assert completed.status_code == 200, completed.text
+    verify_payload = {
+        "verification_status": verification_status,
+        "reason_text": "independently verified for report readiness",
+        "proof_receipt_ids": [receipt.json()["id"]],
+    }
+    if normal_severity_band is not None:
+        verify_payload["severity_variance"] = {
+            "normal_band": normal_severity_band,
+            "chosen_severity": payload["severity"],
+            "actor": "VERIFY-1",
+            "reason": "Reviewed business impact warrants the chosen severity band.",
+            "proof_receipt_id": receipt.json()["id"],
+        }
+    verify = client.post(f"{BASE}/findings/{slug}/verify", json=verify_payload)
+    assert verify.status_code == 200, verify.text
 
 
 def _readiness(client) -> dict:
@@ -167,7 +230,9 @@ def test_s21_web_draft_finding_is_advisory_with_slug(client, isolate_settings) -
         if row["kind"] == "draft_finding_needs_disposition" and row["slug"] == "HR-002"
     )
     assert "finding update HR-002 --status active" in advisory["detail"]
-    assert "finding verify HR-002 --disposition false_positive" in advisory["detail"]
+    assert "finding verify HR-002 --status false_positive" in advisory["detail"]
+    assert "--counter-check-file" in advisory["detail"]
+    assert "--proof-receipt-id" in advisory["detail"]
     assert not any(
         row["kind"] == "draft_finding_needs_disposition" and row["slug"] == "HR-002"
         for row in body["blockers"]
@@ -182,16 +247,184 @@ def test_over_soften_guard_unverified_high_finding_still_blocks(client, isolate_
         client,
         eng,
         slug="HR-003",
-        verification_state="unreviewed",
-        verification_disposition="none",
+        verification_status="unreviewed",
     )
 
     body = _readiness(client)
     assert body["ready"] is False, body
     assert any(
-        b["kind"] == "finding_verification_state" and b["slug"] == "HR-003"
+        b["kind"] == "finding_verification_status" and b["slug"] == "HR-003"
         for b in body["blockers"]
     ), body
+
+
+def test_legacy_severity_rationale_does_not_fabricate_variance_approval(
+    client, isolate_settings
+) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _reportable_finding(
+        client,
+        eng,
+        slug="HR-004",
+        verification_status="unreviewed",
+        details={
+            "cvss_score": 5.3,
+            "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+            "severity_band_rationale": "legacy prose is history, not approval",
+            "steps_to_reproduce": ["step one", "step two"],
+            "remediation": "Fix it",
+            "impact": "High contractual impact",
+            "evidence": "Captured request in linked artifact",
+        },
+    )
+    # Model an already-confirmed legacy row: the current write path correctly
+    # rejects this transition without a structured severity-variance event.
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_findings SET verification_status = 'confirmed' "
+            "WHERE slug = ?",
+            ("HR-004",),
+        )
+
+    body = _readiness(client)
+
+    blocker = next(
+        row for row in body["blockers"]
+        if row["kind"] == "severity_cvss_mismatch" and row["slug"] == "HR-004"
+    )
+    assert "--severity-variance-file" in blocker["detail"]
+    assert not any(
+        row["kind"] == "severity_cvss_band_divergence" and row["slug"] == "HR-004"
+        for row in body["advisories"]
+    )
+
+
+def test_attributed_severity_variance_allows_report_readiness(
+    client, isolate_settings
+) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _reportable_finding(
+        client,
+        eng,
+        slug="HR-005",
+        normal_severity_band="medium",
+        details={
+            "cvss_score": 5.3,
+            "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+            "severity_band_rationale": "legacy prose remains descriptive only",
+            "steps_to_reproduce": ["step one", "step two"],
+            "remediation": "Fix it",
+            "impact": "High contractual impact",
+            "evidence": "Captured request in linked artifact",
+        },
+    )
+
+    body = _readiness(client)
+
+    assert not any(
+        row["kind"] == "severity_cvss_mismatch" and row["slug"] == "HR-005"
+        for row in body["blockers"]
+    )
+    advisory = next(
+        row for row in body["advisories"]
+        if row["kind"] == "severity_cvss_band_divergence" and row["slug"] == "HR-005"
+    )
+    assert "structured variance" in advisory["detail"]
+
+
+def test_same_status_reverification_repairs_legacy_severity_variance(
+    client, isolate_settings
+) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _reportable_finding(
+        client,
+        eng,
+        slug="HR-006",
+        verification_status="unreviewed",
+        details={
+            "cvss_score": 5.3,
+            "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+            "steps_to_reproduce": ["step one", "step two"],
+            "remediation": "Fix it",
+            "impact": "High contractual impact",
+            "evidence": "Captured request in linked artifact",
+        },
+    )
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_findings SET verification_status = 'confirmed' "
+            "WHERE slug = ?",
+            ("HR-006",),
+        )
+    assert any(
+        row["kind"] == "severity_cvss_mismatch"
+        for row in _readiness(client)["blockers"]
+    )
+
+    for agent_id, role in (
+        ("HUNT-1", "vulnerability-analyst"),
+        ("VERIFY-1", "code-vuln-verifier"),
+    ):
+        dispatch = client.post(
+            f"{BASE}/dispatches",
+            json={"agent_id": agent_id, "agent_role": role, "task": role},
+        )
+        assert dispatch.status_code == 201, dispatch.text
+    run = client.post(
+        f"{BASE}/assessment-runs",
+        json={
+            "run_uuid": "report-readiness-HR-006-repair",
+            "run_kind": "code",
+            "producer_dispatch_agent_id": "VERIFY-1",
+        },
+    )
+    assert run.status_code == 201, run.text
+    receipt = post_artifact_backed_source_observation(
+        client,
+        f"{BASE}/proof-receipts",
+        json={
+            "run_id": run.json()["id"],
+            "evidence_kind": "source_observation",
+            "expected_result": "medium is the normal CVSS band",
+            "observed_result": "contractual impact justifies high severity",
+        },
+    )
+    assert receipt.status_code == 201, receipt.text
+    completed = client.patch(
+        f"{BASE}/assessment-runs/{run.json()['id']}",
+        json={"status": "completed"},
+    )
+    assert completed.status_code == 200, completed.text
+    verified = client.post(
+        f"{BASE}/findings/HR-006/verify",
+        json={
+            "verification_status": "confirmed",
+            "reason_text": "fresh independent review confirms the legacy finding",
+            "proof_receipt_ids": [receipt.json()["id"]],
+            "severity_variance": {
+                "normal_band": "medium",
+                "chosen_severity": "high",
+                "actor": "VERIFY-1",
+                "reason": "Contractual exposure justifies the chosen band.",
+                "proof_receipt_id": receipt.json()["id"],
+            },
+        },
+    )
+    assert verified.status_code == 200, verified.text
+
+    body = _readiness(client)
+    assert not any(
+        row["kind"] == "severity_cvss_mismatch" and row["slug"] == "HR-006"
+        for row in body["blockers"]
+    )
+    assert any(
+        row["kind"] == "severity_cvss_band_divergence"
+        and row["slug"] == "HR-006"
+        for row in body["advisories"]
+    )
 
 
 def test_chain_non_step_links_do_not_block_readiness(client, isolate_settings) -> None:

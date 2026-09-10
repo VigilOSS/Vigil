@@ -17,6 +17,7 @@ import json
 import pytest
 
 from app import db as db_module
+from tests.proof_fixtures import post_artifact_backed_source_observation
 
 ENGAGEMENT_KEY = "2026-08-25-090000-cvss-gates"
 BASE = f"/engagements/{ENGAGEMENT_KEY}/assessment"
@@ -35,6 +36,15 @@ def _seed(client, isolate_settings) -> None:
         encoding="utf-8",
     )
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    author = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": "CVSS-AUTHOR",
+            "agent_role": "vulnerability-analyst",
+            "task": "Record CVSS fixture findings.",
+        },
+    )
+    assert author.status_code == 201, author.text
 
 
 def _record(client, slug: str, **overrides):
@@ -43,13 +53,13 @@ def _record(client, slug: str, **overrides):
         "title": f"Finding {slug}",
         "severity": "high",
         "workflow_status": "active",
-        "verification_state": "unreviewed",
-        "verification_disposition": "none",
+        "verification_status": "unreviewed",
         "defect_family": "access-control",
         "canonical_location": f"https://app.example/{slug.lower()}",
         "summary": "Summary",
         "evidence_ref": "findings.md",
         "source_name": "test",
+        "provenance": {"agent_id": "CVSS-AUTHOR"},
         "details": {
             "evidence": "proof",
             "impact": "impact",
@@ -63,11 +73,56 @@ def _record(client, slug: str, **overrides):
 
 def _verify(client, slug: str, **overrides):
     payload = {
-        "disposition": "confirmed",
+        "verification_status": "confirmed",
         "reason_text": "reproduced end to end",
         "source_name": "verifier",
     }
     payload.update(overrides)
+    if payload["verification_status"] == "downgraded":
+        agent_id = f"VERIFY-{slug}"
+        dispatch = client.post(
+            f"{BASE}/dispatches",
+            json={
+                "agent_id": agent_id,
+                "agent_role": "fixture-verifier",
+                "task": f"Independently verify {slug}",
+            },
+        )
+        assert dispatch.status_code == 201, dispatch.text
+        run = client.post(
+            f"{BASE}/assessment-runs",
+            json={
+                "run_uuid": f"cvss-gate-{slug}",
+                "run_kind": "shared",
+                "producer_dispatch_agent_id": agent_id,
+            },
+        )
+        assert run.status_code == 201, run.text
+        receipt = post_artifact_backed_source_observation(
+            client,
+            f"{BASE}/proof-receipts",
+            json={
+                "run_id": run.json()["id"],
+                "evidence_kind": "source_observation",
+                "expected_result": "the finding severity survives independent review",
+                "observed_result": "the independent review supports a lower severity",
+            },
+        )
+        assert receipt.status_code == 201, receipt.text
+        completed = client.patch(
+            f"{BASE}/assessment-runs/{run.json()['id']}",
+            json={"status": "completed"},
+        )
+        assert completed.status_code == 200, completed.text
+        receipt_id = receipt.json()["id"]
+        payload["proof_receipt_ids"] = [receipt_id]
+        payload["severity_variance"] = {
+            "normal_band": "high",
+            "chosen_severity": payload["new_severity"],
+            "actor": "fixture-verifier",
+            "reason": "The fixture exercises an attributed downgrade from the CVSS band.",
+            "proof_receipt_id": receipt_id,
+        }
     return client.post(f"{BASE}/findings/{slug}/verify", json=payload)
 
 
@@ -89,7 +144,7 @@ def test_verify_rejects_new_severity_outside_downgraded(
     response = _verify(
         client,
         "VA-001",
-        disposition=disposition,
+        verification_status=disposition,
         new_severity="low",
         details={"kill_reason": "not exploitable", "kill_check": 3, "block_reason": "no account"},
     )
@@ -108,7 +163,12 @@ def test_verify_downgraded_still_consumes_new_severity(client, isolate_settings)
     _seed(client, isolate_settings)
     assert _record(client, "VA-002").status_code == 201
 
-    response = _verify(client, "VA-002", disposition="downgraded", new_severity="medium")
+    response = _verify(
+        client,
+        "VA-002",
+        verification_status="downgraded",
+        new_severity="medium",
+    )
 
     assert response.status_code == 200, response.text
     assert client.get(f"{BASE}/findings/VA-002").json()["severity"] == "medium"
@@ -261,8 +321,7 @@ def test_an_info_finding_is_representable_end_to_end(client, isolate_settings):
         client,
         "VA-014",
         severity="info",
-        verification_state="verified",
-        verification_disposition="confirmed",
+        verification_status="unreviewed",
         details={
             "evidence": "e",
             "impact": "i",

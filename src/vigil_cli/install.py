@@ -3,18 +3,23 @@ from __future__ import annotations
 import platform
 import os
 import shutil
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import docker
 from . import config as config_module
-from .client_rosters import repair_engagement_client_rosters
+from .client_rosters import ClientRosterRepairResult, repair_engagement_client_rosters
 from .image_freshness import is_excluded_input
 from .oob import DEFAULT_OOB_DOMAIN
 from .oob_tenants import initialize_tenant_route
 from .runtime import build_runtime
 from .status import INSTALL_META_FILENAME, write_install_meta
+
+if TYPE_CHECKING:
+    from .engagements import ClientEntrypointRepairResult
 
 
 def _rmtree(path: Path) -> None:
@@ -61,6 +66,14 @@ PRIOR_INSTALL_MARKERS = (
 
 LEGACY_INSTALLER_NAME = "install" ".sh"
 
+_ROOT_OPERATOR_POINTER = """# Vigil Operator Entry Point
+
+The canonical operator instructions live at `agent/AGENTS.md` in this working root.
+Read that file in bounded parts, following its Map of This File, and continue until
+you have reached the end of the file. Do not treat a tool's partial-read notice as
+completion.
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class InstallOptions:
@@ -69,6 +82,8 @@ class InstallOptions:
     dry_run: bool = False
     force_image: bool = False
     verify_docker_image: bool = True
+    repair_ambiguous_client_permissions_as_skip: bool = False
+    refresh_physical_client_rosters: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +91,8 @@ class InstallResult:
     install_root: Path
     is_upgrade: bool
     image_built: bool
+    client_roster_repair: ClientRosterRepairResult | None = None
+    client_entrypoint_repair: ClientEntrypointRepairResult | None = None
 
 
 def _is_excluded(path: Path) -> bool:
@@ -203,7 +220,86 @@ def install_from_source(options: InstallOptions, *, runner: docker.Runner = dock
         _copy_client_entrypoints(source_root, install_root)
         _ensure_install_dirs(install_root)
 
-    repair_engagement_client_rosters(install_root)
+    client_roster_repair = repair_engagement_client_rosters(
+        install_root,
+        refresh_physical_client_rosters=options.refresh_physical_client_rosters,
+    )
+    if client_roster_repair.physical_roster_paths:
+        print(
+            "[vigil] client-roster repair: "
+            f"scanned={client_roster_repair.scanned_engagement_count} "
+            f"physical={len(client_roster_repair.physical_roster_paths)} "
+            f"refreshed={len(client_roster_repair.refreshed_physical_roster_paths)} "
+            f"files_added={client_roster_repair.files_added} "
+            f"files_updated={client_roster_repair.files_updated} "
+            f"files_unchanged={client_roster_repair.files_unchanged} "
+            f"extras_preserved={client_roster_repair.extra_files_preserved}",
+            file=sys.stderr,
+        )
+        refreshed_paths = set(client_roster_repair.refreshed_physical_roster_paths)
+        for path in client_roster_repair.physical_roster_paths[:20]:
+            if path in refreshed_paths:
+                print(f"[vigil] client-roster refreshed path={path}", file=sys.stderr)
+            else:
+                print(
+                    "[vigil] warning: preserved physical client roster "
+                    f"path={path}; rerun with --refresh-physical-client-rosters "
+                    "to add or refresh canonical generated files in place",
+                    file=sys.stderr,
+                )
+        hidden_physical_count = len(client_roster_repair.physical_roster_paths) - 20
+        if hidden_physical_count > 0:
+            print(
+                "[vigil] warning: client-roster repair has "
+                f"{hidden_physical_count} additional physical paths",
+                file=sys.stderr,
+            )
+    # Import lazily: engagements consumes the roster helpers above, while the
+    # installer owns when existing workdirs are reconciled after their generated
+    # sources have been refreshed.
+    from .engagements import repair_engagement_client_entrypoints
+
+    client_entrypoint_repair = repair_engagement_client_entrypoints(
+        install_root,
+        ambiguous_permissions_as_skip=options.repair_ambiguous_client_permissions_as_skip,
+    )
+    if client_entrypoint_repair.scanned_count:
+        print(
+            "[vigil] client-entrypoint repair: "
+            f"scanned={client_entrypoint_repair.scanned_count} "
+            f"reconciled={client_entrypoint_repair.reconciled_count} "
+            f"skipped={client_entrypoint_repair.skipped_count} "
+            f"permission_overrides={len(client_entrypoint_repair.permission_overrides)}",
+            file=sys.stderr,
+        )
+        for engagement_key in client_entrypoint_repair.permission_overrides[:20]:
+            print(
+                "[vigil] warning: client-entrypoint repair applied explicit "
+                "permission_mode=skip override "
+                f"engagement={engagement_key}",
+                file=sys.stderr,
+            )
+        hidden_override_count = len(client_entrypoint_repair.permission_overrides) - 20
+        if hidden_override_count > 0:
+            print(
+                "[vigil] warning: client-entrypoint repair applied explicit "
+                f"permission override to {hidden_override_count} additional engagements",
+                file=sys.stderr,
+            )
+        for skip in client_entrypoint_repair.skipped[:20]:
+            evidence = f" evidence={','.join(skip.evidence)}" if skip.evidence else ""
+            print(
+                "[vigil] warning: client-entrypoint repair skipped "
+                f"engagement={skip.engagement_key} reason={skip.reason}{evidence}",
+                file=sys.stderr,
+            )
+        hidden_skip_count = client_entrypoint_repair.skipped_count - 20
+        if hidden_skip_count > 0:
+            print(
+                "[vigil] warning: client-entrypoint repair skipped "
+                f"{hidden_skip_count} additional engagements",
+                file=sys.stderr,
+            )
     initialize_tenant_route(
         install_root,
         is_upgrade=is_upgrade,
@@ -234,7 +330,13 @@ def install_from_source(options: InstallOptions, *, runner: docker.Runner = dock
             # unable to give the stale/current verdict until a manual rebuild.
             build_runtime(install_root, runner=runner)
             image_built = True
-    return InstallResult(install_root=install_root, is_upgrade=is_upgrade, image_built=image_built)
+    return InstallResult(
+        install_root=install_root,
+        is_upgrade=is_upgrade,
+        image_built=image_built,
+        client_roster_repair=client_roster_repair,
+        client_entrypoint_repair=client_entrypoint_repair,
+    )
 
 
 def _ensure_install_dirs(install_root: Path) -> None:
@@ -245,10 +347,15 @@ def _ensure_install_dirs(install_root: Path) -> None:
 
 
 def _copy_client_entrypoints(source_root: Path, install_root: Path) -> None:
-    for filename in ("AGENTS.md", "CLAUDE.md"):
-        src = source_root / "agent" / filename
-        if src.exists():
-            shutil.copy2(src, install_root / filename)
+    agent_entrypoint = source_root / "agent" / "AGENTS.md"
+    if agent_entrypoint.exists():
+        (install_root / "AGENTS.md").write_text(
+            _ROOT_OPERATOR_POINTER,
+            encoding="utf-8",
+        )
+    claude_entrypoint = source_root / "agent" / "CLAUDE.md"
+    if claude_entrypoint.exists():
+        shutil.copy2(claude_entrypoint, install_root / "CLAUDE.md")
     for dirname in (".codex", ".claude"):
         src = source_root / "agent" / dirname
         dest = install_root / dirname

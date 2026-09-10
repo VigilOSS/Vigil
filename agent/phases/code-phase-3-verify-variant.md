@@ -119,7 +119,8 @@ vigil assess agent start --agent-id <agent-id> --role code-variant-hunter \
   --code-repo-id <repo-id> \
   --task "Scan assigned files for variants of the frozen Phase 2 parent set" \
   --dispatch-mode hypothesis-driven --skills code-variant-analysis \
-  --finding-slugs CH-001,CH-004
+  --finding-slugs CH-001,CH-004 --no-target-traffic \
+  --prompt-context-json dispatch-context.json --emit-prompt
 ```
 
 The specialist's dispatch context must include both values exactly as registered:
@@ -167,7 +168,7 @@ threat-model envelope, and the sealed source paths. The third agent evaluates bo
 against the code and produces a reasoned disposition. Evidence strength determines the outcome:
 a complete source-to-sink trace, falsifiable guard analysis, or controlled runtime proof outweighs
 unsupported confidence or two correlated opinions. If the conflict remains unresolved, record
-`finding verify --disposition disputed` and retain both arguments; never convert uncertainty into
+`finding verify --status disputed` and retain both arguments; never convert uncertainty into
 a false-positive kill by reviewer count.
 
 This should be rare -- the verifier evaluates existing findings while the variant hunter
@@ -185,16 +186,15 @@ If the verifier's clean-file spot-check discovers a missed vulnerability:
 
 ```bash
 # Record verification results (updates existing findings)
-vigil assess finding verify <slug> --disposition <verdict> --reason "<rationale>"
+vigil assess finding verify <slug> --status <verdict> --reason "<rationale>"
 # Rebind a stale/unbound finding only after independently reviewing the current sealed bytes.
 # Substitute the current Code Source Identity values in this exact provenance shape.
-vigil assess finding verify <slug> --disposition confirmed --reason "Re-reviewed current sealed source" \
+vigil assess finding verify <slug> --status confirmed --reason "Re-reviewed current sealed source" \
+  --proof-receipt-id <proof-receipt-id> \
   --source-name code-vuln-verifier \
   --provenance-inline '{"code_snapshot":{"repo_id":7,"repo_generation":3,"source_manifest_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}'
-# Or pass the dedicated false-positive disposition when you already have the kill rationale
-vigil assess finding verify <slug> --disposition false_positive --reason "<kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
-# Batch-kill several FPs that share one root rationale (same payload/flags applied to every slug)
-vigil assess finding verify <slug1> <slug2> <slug3> --disposition false_positive --reason "<shared kill rationale>" --kill-reason "<specific guard or proof>" --kill-check <1-5>
+# Or pass the dedicated false-positive status with a completed counter-check
+vigil assess finding verify <slug> --status false_positive --reason "<kill rationale>" --counter-check-file <counter-check.json>
 # Reopen a previously verified or false-positive finding when new evidence requires re-triage
 vigil assess finding update <slug> --reason "<why the prior verdict no longer holds>" --status draft
 # Verification deliberately preserves draft workflow state. After review, every retained draft
@@ -214,7 +214,7 @@ including `provenance.code_snapshot` copied from the current Code Source Identit
 
 Reopening is not a terminal disposition. For every finding whose workflow status is `draft` after
 verification, either promote the retained finding with `finding update --status active`, merge it
-into its canonical target, or kill it through `finding verify --disposition false_positive`.
+into its canonical target, or kill it through `finding verify --status false_positive` with a completed counter-check.
 Fuzz/complete readiness rejects both unverified drafts and confirmed-but-draft records so an
 ambiguous lifecycle state cannot disappear from the report queue.
 
@@ -260,6 +260,12 @@ the new exact set and repeat the file receipts. Killed, non-reportable, stale, a
 not create current debt. When the parent set was empty, do not create receipts; readiness treats
 variant review as not applicable until a current Phase 2 root finding exists.
 
+For each applicable variant obligation, link the returned owning receipt through `vigil assess
+run-audit code-receipt record <run-id> <link-json>`. The link names the exact target, obligation,
+variant receipt, retained candidates, and shared proof. It resolves debt only when the receipt's
+repository generation, source manifest, file path/hash, and obligation object all agree; receipt
+prose is never copied into a second truth store.
+
 Fuzz entry also requires every current Phase 2 root to leave unreviewed/disputed triage. A verified
 `pending_runtime_proof` disposition may enter Phase 4 when the receipt and fuzz-decision gates pass;
 it remains outside report-durable completion until runtime proof resolves it.
@@ -274,6 +280,7 @@ absent decision is not a skip.
 ```bash
 vigil assess contract code-record fuzz-decision
 vigil assess code-record fuzz-decision <decision-json-file>
+vigil assess run-audit code-receipt record <run-id> <fuzz-decision-link-json>
 
 vigil assess code-coverage --require-transition-ready fuzz
 vigil assess transition-phase fuzz

@@ -1,9 +1,9 @@
 """Contract tests for the ``eval_capture.py`` maintainer tool (blueprint §7).
 
 Deterministic, NO live LLM. Seeds an engagement + findings via the TestClient
-(mirroring test_dispatch_handoffs_api.py:17-58), fetches the RAW serialized rows
-through ``GET /findings`` (so ``details_json``/``provenance_json`` arrive as JSON
-STRINGS plus the extra DB columns, exactly as in production), then drives the
+(mirroring test_dispatch_handoffs_api.py:17-58), fetches the public API rows
+through ``GET /findings`` (parsed ``details``/``provenance`` objects plus
+backend metadata, exactly as in production), then drives the
 capture module's pure functions. Asserts:
 
   (a) every emitted record validates against finding-record.schema.json,
@@ -135,8 +135,7 @@ def _default_args(**overrides) -> SimpleNamespace:
     args = {
         "severity": None,
         "workflow_status": None,
-        "verification_state": None,
-        "verification_disposition": None,
+        "verification_status": None,
         "source_name": None,
         "slug": None,
         "search": None,
@@ -158,17 +157,13 @@ def seeded_rows(client, isolate_settings) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def test_raw_rows_carry_json_strings_and_db_columns(seeded_rows: list[dict]) -> None:
-    """Precondition: the RAW serialized rows are NOT fixture-shaped.
-
-    Guards against the test silently passing because the backend changed to
-    pre-parse details. If this fails, the transform is no longer being
-    exercised against the documented #1-risk shape.
-    """
+def test_api_rows_carry_parsed_objects_and_backend_metadata(seeded_rows: list[dict]) -> None:
+    """Capture consumes the public read contract, not storage columns."""
     assert len(seeded_rows) == len(_schema_example_bodies())
     row = seeded_rows[0]
-    assert isinstance(row.get("details_json"), str), "details_json must be a JSON string on the raw row"
-    assert isinstance(row.get("provenance_json"), str)
+    assert isinstance(row["details"], dict)
+    assert isinstance(row["provenance"], dict)
+    assert "details_json" not in row and "provenance_json" not in row
     assert "id" in row and "engagement_id" in row and "created_at" in row
 
 
@@ -201,16 +196,50 @@ def test_every_emitted_record_validates_and_is_clean(seeded_rows: list[dict]) ->
     eval_capture._validate_or_die(records)
 
 
-def test_pending_runtime_proof_disposition_captures_and_validates(
+def test_capture_preserves_api_details_and_provenance(seeded_rows: list[dict]) -> None:
+    for row in seeded_rows:
+        record = eval_capture._to_fixture_record(row)
+        assert record["details"] == row["details"]
+        authored_provenance = dict(row["provenance"])
+        authored_provenance.pop("code_snapshot_attestation", None)
+        assert record["provenance"] == authored_provenance
+
+
+def test_capture_excludes_server_attestation_without_mutating_source() -> None:
+    row = _schema_example_bodies()[0]
+    row["provenance"] = {
+        "source_name": "author",
+        "code_snapshot_attestation": {"dispatch_id": 42},
+    }
+    original = json.loads(json.dumps(row))
+
+    record = eval_capture._to_fixture_record(row)
+
+    assert record["provenance"] == {"source_name": "author"}
+    assert row == original
+
+
+@pytest.mark.parametrize("field", ["details", "provenance"])
+@pytest.mark.parametrize("value", [None, [], "{}", 0, False])
+def test_capture_rejects_malformed_objects(field, value) -> None:
+    row = {**_schema_example_bodies()[0], field: value}
+    record = eval_capture._to_fixture_record(row)
+    assert record[field] is value
+
+    with pytest.raises(SystemExit, match=field):
+        eval_capture._validate_or_die([record])
+
+
+def test_pending_runtime_proof_status_captures_and_validates(
     client, isolate_settings
 ) -> None:
     """Regression (Codex P2): a finding verified to ``pending_runtime_proof``
     must survive the capture transform + validate-before-write guard.
 
     Phase 3 added ``pending_runtime_proof`` to the backend
-    (FindingVerifyRequest + VerificationDisposition StrEnum + the DB column), so
+    (FindingVerifyRequest + VerificationStatus StrEnum + the DB column), so
     GET /findings now serializes that value on findings in the holding state. If
-    finding-record.schema.json's ``verification_disposition`` enum omits it, the
+    finding-record.schema.json's ``verification_status`` enum omits it, the
     unconditional ``_validate_or_die`` guard rejects the captured row. This test
     drives the exact scenario: seed -> verify(pending_runtime_proof) -> GET ->
     capture -> validate, asserting the record carries the disposition, VALIDATES,
@@ -223,14 +252,14 @@ def test_pending_runtime_proof_disposition_captures_and_validates(
         snapshot
         for row in rows
         if (
-            snapshot := json.loads(row["provenance_json"]).get("code_snapshot")
+            snapshot := row["provenance"].get("code_snapshot")
         )
     )
 
     verified = client.post(
         f"{BASE}/findings/{slug}/verify",
         json={
-            "disposition": "pending_runtime_proof",
+            "verification_status": "pending_runtime_proof",
             "reason_text": "Static taint path confirmed; runtime proof outstanding.",
             "source_name": "verifier",
             "provenance": {"code_snapshot": code_snapshot},
@@ -239,18 +268,17 @@ def test_pending_runtime_proof_disposition_captures_and_validates(
     assert verified.status_code == 200, verified.text
 
     # GET /findings is the exact production source eval-capture consumes. The
-    # holding-state row must serialize the new disposition (state -> verified,
-    # disposition sticks) — this is the value that previously failed validation.
+    # holding-state row must serialize the new status — this is the value that
+    # previously failed validation.
     refreshed = client.get(f"{BASE}/findings")
     assert refreshed.status_code == 200, refreshed.text
     raw_rows = refreshed.json()
     holding = next(r for r in raw_rows if r["slug"] == slug)
-    assert holding["verification_disposition"] == "pending_runtime_proof"
-    assert holding["verification_state"] == "verified"
+    assert holding["verification_status"] == "pending_runtime_proof"
 
     records = eval_capture._capture_records(raw_rows, _default_args())
     captured = next(
-        r for r in records if r["verification_disposition"] == "pending_runtime_proof"
+        r for r in records if r["verification_status"] == "pending_runtime_proof"
     )
 
     schema = load_schema("finding-record.schema.json")
@@ -274,8 +302,7 @@ def test_validate_or_die_hard_fails_on_schema_violation() -> None:
         "evidence_ref": "",
         "notes": "",
         "workflow_status": "active",
-        "verification_state": "unreviewed",
-        "verification_disposition": "none",
+        "verification_status": "unreviewed",
         "root_cause_key": "",
         "auth_context": "anonymous",
         "details": {"impact": "x"},  # missing evidence/remediation/steps/cvss_*

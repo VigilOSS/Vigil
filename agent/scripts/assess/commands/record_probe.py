@@ -32,7 +32,7 @@ import json
 import sys
 
 from assess.lib import probe_args
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessmentClient, require_write_result
 from assess.lib.config import load_config
 from assess.lib.contracts import add_contract_subparser, render_contract_epilog
 
@@ -100,5 +100,10 @@ def run(args) -> None:
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         if (args.finding or "").strip():
             payload["finding_id"] = probe_args.resolve_finding_id(client, args.finding, "record-probe")
-        result = client.post("probe-runs", payload)
+        result = require_write_result(
+            client.post("probe-runs", payload),
+            operation="record probe",
+            expected={"result_status": effective_status},
+            positive_ids=("id",),
+        )
     print(json.dumps(result, indent=2, ensure_ascii=False))

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from assess.lib.bulk_ingest import (
     DEFAULT_BULK_WRITE_SIZE,
     post_coverage_items_bulk,
@@ -8,13 +10,31 @@ from assess.lib.bulk_ingest import (
 from assess.lib.client import AssessError
 
 
+def _observation_receipt(row_id: int = 1) -> dict:
+    return {
+        "request_variant": {"id": row_id},
+        "request_observation": {"id": row_id},
+    }
+
+
 def test_coverage_items_bulk_chunks_at_backend_cap() -> None:
     calls: list[tuple[str, int]] = []
 
     class Client:
         def post(self, endpoint: str, payload: dict) -> dict:
             calls.append((endpoint, len(payload["items"])))
-            return {"count": len(payload["items"]), "records": []}
+            records = [
+                {
+                    "id": index,
+                    "request_variant_id": item.get("request_variant_id"),
+                    "service_id": item.get("service_id"),
+                    "auth_context": item.get("auth_context", "anonymous"),
+                    "input_slot": item.get("input_slot", "endpoint"),
+                    "attack_family": item["attack_family"],
+                }
+                for index, item in enumerate(payload["items"], start=1)
+            ]
+            return {"count": len(records), "records": records}
 
     items = [{"attack_family": "idor"} for _ in range(DEFAULT_BULK_WRITE_SIZE + 1)]
 
@@ -35,7 +55,14 @@ def test_coverage_items_bulk_validation_error_falls_back_per_row() -> None:
                 calls.append((endpoint, len(payload["items"])))
                 raise AssessError("HTTP 422 validation error:\nbad coverage")
             calls.append((endpoint, str(payload["attack_family"])))
-            return {"id": len(calls), **payload}
+            return {
+                "id": len(calls),
+                "request_variant_id": payload.get("request_variant_id"),
+                "service_id": payload.get("service_id"),
+                "auth_context": payload.get("auth_context", "anonymous"),
+                "input_slot": payload.get("input_slot", "endpoint"),
+                **payload,
+            }
 
     post_coverage_items_bulk(
         Client(),
@@ -62,7 +89,15 @@ def test_request_observations_bulk_validation_error_returns_per_row_outcomes() -
             calls.append((endpoint, url))
             if "bad" in url:
                 raise AssessError("HTTP 422 validation error:\nurl too long")
-            return {"request_variant": {"id": len(calls)}}
+            row_id = len(calls)
+            return {
+                "request_variant": {"id": row_id, "method": "GET"},
+                "request_observation": {
+                    "id": row_id,
+                    "request_variant_id": row_id,
+                    "observed_url": url,
+                },
+            }
 
     results = post_request_observations_bulk(
         Client(),
@@ -84,3 +119,33 @@ def test_request_observations_bulk_validation_error_returns_per_row_outcomes() -
     assert isinstance(results[0], dict)
     assert isinstance(results[1], AssessError)
     assert isinstance(results[2], dict)
+
+
+def test_request_observations_bulk_rejects_receipt_without_matching_count() -> None:
+    class Client:
+        def post(self, _endpoint: str, _payload: dict) -> dict:
+            return {"records": [_observation_receipt()]}
+
+    with pytest.raises(AssessError, match="request observations.*may have committed") as exc:
+        post_request_observations_bulk(
+            Client(),
+            [{"method": "GET", "url": "https://target.example/one"}],
+            warn_prefix="test",
+        )
+
+    assert "do not retry automatically" in str(exc.value)
+
+
+def test_coverage_items_bulk_rejects_malformed_success_receipt() -> None:
+    class Client:
+        def post(self, _endpoint: str, _payload: dict) -> dict:
+            return {"message": "accepted"}
+
+    with pytest.raises(AssessError, match="coverage items.*may have committed") as exc:
+        post_coverage_items_bulk(
+            Client(),
+            [{"attack_family": "idor"}],
+            warn_prefix="test",
+        )
+
+    assert "do not retry automatically" in str(exc.value)

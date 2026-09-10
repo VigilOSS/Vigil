@@ -15,7 +15,7 @@ import { Copy } from "lucide-react";
 import { useBodyScrollLock } from "../lib/modalScrollLock";
 import { useToast } from "../contexts/ToastContext";
 import { RelTime } from "./formatting";
-import { KV, ProseSection, SectionHead } from "./drawer/DrawerKit";
+import { KV, ProseSection, SectionHead, UntrustedDataNotice } from "./drawer/DrawerKit";
 import { TableSkeleton } from "./Skeletons";
 
 const SURFACE_RETRY_FETCH_LIMIT = 5000;
@@ -662,6 +662,7 @@ function SurfaceDrawer({
           </div>
         </div>
         <div className="drawer-body">
+          <UntrustedDataNotice />
           <div className="section">
             <p className="section-title">Metadata</p>
             <div className="kv-grid">

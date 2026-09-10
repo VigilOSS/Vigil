@@ -481,7 +481,10 @@ vigil assess agent render-handoff <agent-id>
 
 The output is a markdown blob, hard-capped at `--max-lines` (default 40), with
 findings collapsed to "... and N more" before runtime_issues / working_artifacts.
-Summary, coverage_gaps, and next_steps are never trimmed. Paste it verbatim into
+Findings, runtime issues, and artifacts collapse first. When multiline summary,
+coverage-gaps, or next-step prose alone exceeds the requested hard cap, the
+renderer emits an explicit truncation marker; rerun with a larger `--max-lines`
+before relying on omitted content. Paste the bounded output verbatim into
 the next dispatch's prompt.
 
 ## Checkpointing — call `vigil assess agent handoff` as you work

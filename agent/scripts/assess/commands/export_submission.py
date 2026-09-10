@@ -103,8 +103,12 @@ expensive. It never blocks, and an unreachable backend degrades to a stderr WARN
 with no advisory (see ``_repro_rehearsal_decisions``).
 
 The generated ``submission.md`` is registered as a finding-linked artifact
-(``kind="submission"``); the finding's ``submission_status`` is never written
-(omitting the field preserves it).
+(``kind="submission"``); final mode then asks the backend to stage, verify and
+publish an immutable numbered version. ``--attachment-id`` selects registered,
+hash-valid artifacts for a deterministic ZIP; the default is no attachments and
+the numbered version is exactly the Markdown bytes. ``--recover`` reconciles
+interrupted local exports without rendering a new workspace. The finding's
+``submission_status`` is never written (omitting the field preserves it).
 
 The generator is FAITHFUL: it preserves authored content while normalizing a
 valid evidence pointer to engagement-relative form. A target-application UUID or
@@ -116,12 +120,18 @@ until the source content is clean.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
 
-from assess.lib.client import AssessError, AssessmentClient
+from assess.lib.client import (
+    AssessError,
+    AssessmentClient,
+    require_artifact_write_response,
+    require_write_result,
+)
 from assess.lib.config import load_config
 # ``_fence_for`` is the same PoC-formatting primitive the shared finding renderer
 # uses (finding_render.py); reusing it keeps submission PoC blocks byte-identical
@@ -172,12 +182,18 @@ def register(subparsers) -> None:
             "verified lifecycle, readiness, and hygiene."
         ),
     )
-    p.add_argument("slug", help="Finding slug to render (e.g. VA-047)")
+    p.add_argument(
+        "slug",
+        nargs="?",
+        help="Finding slug to render (e.g. VA-047); omit only with --recover.",
+    )
     p.add_argument(
         "--platform",
-        required=True,
         choices=_PLATFORMS,
-        help="Submission target: bugcrowd (VRT) | hackerone (weakness) | direct (company-facing)",
+        help=(
+            "Submission target: bugcrowd (VRT) | hackerone (weakness) | "
+            "direct (company-facing); required unless --recover is used."
+        ),
     )
     p.add_argument(
         "--draft",
@@ -192,6 +208,22 @@ def register(subparsers) -> None:
     )
     p.add_argument("--overwrite", action="store_true", help="Overwrite an existing submission.md.")
     p.add_argument("--json", dest="as_json", action="store_true", help="Emit a machine-readable summary to stdout.")
+    p.add_argument(
+        "--recover",
+        action="store_true",
+        help="Verify and reconcile interrupted immutable exports; render no new workspace.",
+    )
+    p.add_argument(
+        "--attachment-id",
+        dest="attachment_ids",
+        action="append",
+        type=int,
+        default=[],
+        help=(
+            "Include one already-registered artifact in the immutable final ZIP. "
+            "Repeat for multiple attachments; the default is none."
+        ),
+    )
     p.add_argument(
         "--vrt-category",
         dest="vrt_category",
@@ -465,16 +497,13 @@ def _evaluate(
         missing.append("indexed, present evidence artifact")
 
     workflow_status = _nonempty(finding.get("workflow_status")).lower()
-    verification_state = _nonempty(finding.get("verification_state")).lower()
-    verification_disposition = _nonempty(finding.get("verification_disposition")).lower()
+    verification_status = _nonempty(finding.get("verification_status")).lower()
     if workflow_status not in _REPORTABLE_STATUSES:
         missing.append(f"workflow_status report candidate (got {workflow_status or 'unset'!r})")
-    if verification_state != "verified":
-        missing.append(f"verification_state=verified (got {verification_state or 'unset'!r})")
-    if verification_disposition not in {"confirmed", "downgraded"}:
+    if verification_status not in {"confirmed", "downgraded"}:
         missing.append(
-            "verification_disposition=confirmed|downgraded "
-            f"(got {verification_disposition or 'unset'!r})"
+            "verification_status=confirmed|downgraded "
+            f"(got {verification_status or 'unset'!r})"
         )
 
     return {
@@ -767,7 +796,7 @@ def _finding_record_lines(finding: dict) -> list[str]:
 
     # Verification provenance.
     ver: list[str] = []
-    for label, key in (("Verification state", "verification_state"), ("Verification disposition", "verification_disposition")):
+    for label, key in (("Verification status", "verification_status"),):
         value = _nonempty(finding.get(key))
         if value:
             ver.append(f"- {label}: {value}")
@@ -776,6 +805,90 @@ def _finding_record_lines(finding: dict) -> list[str]:
         ver.append(f"- Discovered by: {discovered}")
     if ver:
         out += ["**Verification:**", "", *ver, ""]
+
+    audit = finding.get("verification_audit")
+    if isinstance(audit, dict):
+        counter_checks = audit.get("counter_checks")
+        severity_variances = audit.get("severity_variances")
+        audit_lines: list[str] = []
+        decision_receipt_ids = audit.get("proof_receipt_ids")
+        if isinstance(decision_receipt_ids, list) and decision_receipt_ids:
+            audit_lines.append(
+                "- Decision proof receipts: "
+                + ", ".join(
+                    str(receipt_id) for receipt_id in decision_receipt_ids
+                )
+            )
+        if isinstance(counter_checks, list):
+            for record in counter_checks:
+                if not isinstance(record, dict):
+                    continue
+                completed = "yes" if record.get("completed") is True else "no"
+                audit_lines += [
+                    (
+                        f"- Counter-check #{record.get('id', '?')} "
+                        f"(transition {record.get('transition_id', '?')}; "
+                        f"verifier dispatch {record.get('verifier_dispatch_id', '?')}; "
+                        f"completed: {completed})"
+                    ),
+                    f"  - Method: {_nonempty(record.get('method'))}",
+                    f"  - Expected result: {_nonempty(record.get('expected_result'))}",
+                    f"  - Observed result: {_nonempty(record.get('observed_result'))}",
+                    f"  - Falsified claim: {_nonempty(record.get('falsified_claim'))}",
+                ]
+                receipt_ids = record.get("proof_receipt_ids")
+                if isinstance(receipt_ids, list):
+                    audit_lines.append(
+                        "  - Proof receipts: "
+                        + ", ".join(str(receipt_id) for receipt_id in receipt_ids)
+                    )
+        if isinstance(severity_variances, list):
+            for record in severity_variances:
+                if not isinstance(record, dict):
+                    continue
+                audit_lines += [
+                    (
+                        f"- Severity variance #{record.get('id', '?')} "
+                        f"(transition {record.get('transition_id', '?')}; "
+                        f"actor: {_nonempty(record.get('actor'))})"
+                    ),
+                    (
+                        f"  - Band: {_nonempty(record.get('normal_band'))} → "
+                        f"{_nonempty(record.get('chosen_severity'))}"
+                    ),
+                    f"  - Reason: {_nonempty(record.get('reason'))}",
+                    f"  - Proof receipt: {record.get('proof_receipt_id', '?')}",
+                ]
+        if audit_lines:
+            if audit.get("truncated") is True:
+                audit_lines.append(
+                    "- Audit summary truncated; use `vigil assess finding history "
+                    "<slug> --paginate` for the complete transition-bound record."
+                )
+            out += [
+                "**Structured verification audit** (internal decision evidence — never paste):",
+                "",
+                *audit_lines,
+                "",
+            ]
+
+    corrections = d.get("correction_history")
+    if isinstance(corrections, str):
+        correction_lines = [corrections] if corrections.strip() else []
+    elif isinstance(corrections, list):
+        correction_lines = [
+            item if isinstance(item, str) else json.dumps(item, ensure_ascii=False)
+            for item in corrections
+        ]
+    else:
+        correction_lines = []
+    if correction_lines:
+        out += [
+            "**Correction history** (internal audit trail — never paste):",
+            "",
+            *(f"- {item}" for item in correction_lines),
+            "",
+        ]
 
     return out
 
@@ -1056,12 +1169,23 @@ def _build_context(
     readiness_blockers: list[dict],
     readiness_error: str,
     advisories: list[str],
+    verification_audit: dict[str, object],
+    finding: dict[str, object],
+    submission_sha256: str,
 ) -> dict:
     return {
         "slug": slug,
         "platform": platform,
         "mode": "draft" if draft else "final",
         "submission_path": submission_rel,
+        "submission_sha256": submission_sha256,
+        "source_finding": {
+            "id": finding.get("id"),
+            "row_version": finding.get("row_version"),
+            "updated_at": finding.get("updated_at"),
+            "workflow_status": finding.get("workflow_status"),
+            "verification_status": finding.get("verification_status"),
+        },
         "missing": resolved["missing"],
         "proof": {
             "poc_request_and_response": resolved["poc_pair"],
@@ -1097,6 +1221,7 @@ def _build_context(
         "advisories": advisories,
         "readiness_blockers": readiness_blockers,
         "readiness_error": readiness_error,
+        "verification_audit": verification_audit,
     }
 
 
@@ -1126,10 +1251,209 @@ def _rollback_message(errors: list[str]) -> str:
     return "output files were restored"
 
 
+_DEFINITE_ARTIFACT_REJECTION_PREFIXES = (
+    "HTTP 400",
+    "HTTP 401",
+    "HTTP 403",
+    "HTTP 404",
+    "HTTP 405",
+    "HTTP 409",
+    "HTTP 413",
+    "HTTP 422",
+    "HTTP 429",
+)
+
+
+def _artifact_failure_is_definite(exc: AssessError) -> bool:
+    """True only when the server explicitly refused the artifact before commit."""
+
+    return str(exc).lstrip().startswith(_DEFINITE_ARTIFACT_REJECTION_PREFIXES)
+
+
 def run(args) -> None:
     slug = args.slug
     platform = args.platform
     draft = bool(args.draft)
+    attachment_ids = list(args.attachment_ids)
+    if args.recover:
+        incompatible = bool(
+            slug
+            or platform
+            or draft
+            or args.output_dir
+            or args.overwrite
+            or attachment_ids
+            or args.vrt_category
+            or args.weakness
+        )
+        if incompatible:
+            raise AssessError(
+                "export submission: --recover is a standalone mode; do not pass a "
+                "slug, platform, render, or attachment option"
+            )
+        cfg = load_config(args.engagement_dir)
+        with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+            recovery = client.post(
+                "submissions/recover", {"actor_surface": "vigil-assess"}
+            )
+            if not isinstance(recovery, dict):
+                raise AssessError(
+                    "recover submission exports: backend returned an invalid recovery "
+                    "receipt; inspect the Submissions tab before retrying"
+                )
+            recovered_ids = list(recovery.get("recovered_version_ids", []))
+            failed_versions = list(recovery.get("failed_versions", []))
+            orphaned_paths = list(recovery.get("orphaned_staging_paths", []))
+            page = recovery
+            seen_cursors: set[tuple[int, str]] = set()
+            fetched_pages = 1
+            while True:
+                failed_page = page.get("failed_versions_page")
+                orphan_page = page.get("orphaned_staging_page")
+                if failed_page is None and orphan_page is None:
+                    break
+                if not isinstance(failed_page, dict) or not isinstance(orphan_page, dict):
+                    raise AssessError(
+                        "recover submission exports: backend returned invalid recovery "
+                        "page metadata; inspect the Submissions tab before retrying"
+                    )
+                failed_has_more = failed_page.get("has_more") is True
+                orphan_has_more = orphan_page.get("has_more") is True
+                if not failed_has_more and not orphan_has_more:
+                    break
+                failed_offset = (
+                    failed_page.get("next_offset")
+                    if failed_has_more
+                    else int(failed_page.get("offset", 0))
+                    + int(failed_page.get("returned", 0))
+                )
+                current_orphans = page.get("orphaned_staging_paths", [])
+                orphan_after = (
+                    orphan_page.get("next_after")
+                    if orphan_has_more
+                    else (current_orphans[-1] if current_orphans else "")
+                )
+                if not isinstance(failed_offset, int) or failed_offset < 0:
+                    raise AssessError(
+                        "recover submission exports: backend returned an invalid failed-version cursor"
+                    )
+                if not isinstance(orphan_after, str):
+                    raise AssessError(
+                        "recover submission exports: backend returned an invalid orphan cursor"
+                    )
+                cursor = (failed_offset, orphan_after)
+                if cursor in seen_cursors:
+                    raise AssessError(
+                        "recover submission exports: backend recovery pagination made no progress"
+                    )
+                seen_cursors.add(cursor)
+                page = client.post(
+                    "submissions/recover",
+                    {
+                        "actor_surface": "vigil-assess",
+                        "failed_version_offset": failed_offset,
+                        "orphan_after": orphan_after,
+                    },
+                )
+                if not isinstance(page, dict):
+                    raise AssessError(
+                        "recover submission exports: backend returned an invalid recovery "
+                        "receipt; inspect the Submissions tab before retrying"
+                    )
+                recovered_ids.extend(page.get("recovered_version_ids", []))
+                failed_versions.extend(page.get("failed_versions", []))
+                orphaned_paths.extend(page.get("orphaned_staging_paths", []))
+                fetched_pages += 1
+            if fetched_pages > 1:
+                failed_page = dict(recovery["failed_versions_page"])
+                failed_page.update(
+                    offset=0,
+                    returned=len(failed_versions),
+                    has_more=False,
+                    next_offset=None,
+                )
+                orphan_page = dict(recovery["orphaned_staging_page"])
+                orphan_page.update(
+                    returned=len(dict.fromkeys(orphaned_paths)),
+                    has_more=False,
+                    next_after=None,
+                )
+                recovery = {
+                    **recovery,
+                    "recovered_version_ids": list(dict.fromkeys(recovered_ids)),
+                    "failed_version_ids": [
+                        item.get("id")
+                        for item in failed_versions
+                        if isinstance(item, dict)
+                    ],
+                    "failed_versions": failed_versions,
+                    "failed_versions_page": failed_page,
+                    "orphaned_staging_paths": list(dict.fromkeys(orphaned_paths)),
+                    "orphaned_staging_page": orphan_page,
+                    "diagnostic_pages_fetched": fetched_pages,
+                }
+        if not isinstance(recovery, dict) or any(
+            not isinstance(recovery.get(key), list)
+            for key in (
+                "recovered_version_ids",
+                "failed_version_ids",
+                "failed_versions",
+                "orphaned_staging_paths",
+            )
+        ):
+            raise AssessError(
+                "recover submission exports: backend returned an invalid recovery "
+                "receipt; inspect the Submissions tab before retrying"
+            )
+        failed_versions = recovery["failed_versions"]
+        if any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("id"), int)
+            or not isinstance(item.get("finding_slug"), str)
+            or not isinstance(item.get("version_number"), int)
+            or not isinstance(item.get("failure_reason"), str)
+            or not isinstance(item.get("staging_relative_path"), str)
+            or not isinstance(item.get("relative_path"), str)
+            for item in failed_versions
+        ) or sorted(recovery["failed_version_ids"]) != sorted(
+            item["id"] for item in failed_versions
+        ):
+            raise AssessError(
+                "recover submission exports: backend omitted actionable failure "
+                "details; inspect the Submissions tab before retrying"
+            )
+        if args.as_json:
+            print(json.dumps(recovery, indent=2, ensure_ascii=False))
+        else:
+            print(
+                "Submission export recovery: "
+                f"{len(recovery['recovered_version_ids'])} recovered, "
+                f"{len(recovery['failed_version_ids'])} failed, "
+                f"{len(recovery['orphaned_staging_paths'])} orphaned staging files"
+            )
+            for failure in failed_versions:
+                print(
+                    f"  FAILED {failure['finding_slug']} "
+                    f"version {failure['version_number']} "
+                    f"(id={failure['id']}): {failure['failure_reason']}"
+                )
+                print(f"    staging: {failure['staging_relative_path']}")
+                print(f"    destination: {failure['relative_path']}")
+            for orphaned_path in recovery["orphaned_staging_paths"]:
+                print(f"  ORPHAN staging: {orphaned_path}")
+        return
+    if not slug or not platform:
+        raise AssessError(
+            "export submission: slug and --platform are required unless --recover is used"
+        )
+    if draft and attachment_ids:
+        raise AssessError(
+            "export submission: --attachment-id applies only to immutable final exports"
+        )
+    if any(artifact_id < 1 for artifact_id in attachment_ids):
+        raise AssessError("export submission: --attachment-id values must be positive integers")
+    if len(attachment_ids) != len(set(attachment_ids)):
+        raise AssessError("export submission: --attachment-id values must be unique")
 
     cfg = load_config(args.engagement_dir)
     engagement_dir = cfg.engagement_dir
@@ -1148,6 +1472,7 @@ def run(args) -> None:
     submission_md = out_dir / "submission.md"
     context_json = out_dir / "submission-context.json"
     submission_rel = _engagement_relative(submission_md.resolve(strict=False), engagement_dir)
+    context_rel = _engagement_relative(context_json.resolve(strict=False), engagement_dir)
     if not draft and submission_rel is None:
         raise AssessError(
             "export submission: final output must be inside the engagement directory "
@@ -1306,6 +1631,7 @@ def run(args) -> None:
             required_headers,
             advisories,
         )
+        submission_sha256 = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
         context = _build_context(
             slug,
             platform,
@@ -1319,6 +1645,13 @@ def run(args) -> None:
             readiness_blockers,
             readiness_error,
             advisories,
+            (
+                finding["verification_audit"]
+                if isinstance(finding.get("verification_audit"), dict)
+                else {}
+            ),
+            finding,
+            submission_sha256,
         )
         context_text = json.dumps(context, indent=2, ensure_ascii=False)
 
@@ -1345,24 +1678,37 @@ def run(args) -> None:
         # submission_status: create lands 'none', and omitting the field on any
         # later upsert preserves whatever the operator set by hand.
         artifact_registered = False
+        version: dict | None = None
         if submission_rel is not None:
             try:
-                client.post(
-                    "artifacts",
-                    {
-                        "path": submission_rel,
-                        "kind": "submission",
-                        "media_type": "text/markdown",
-                        "sensitive": False,
-                        "producer_agent_id": None,
-                        "producer_agent_role": None,
-                        "producer_command_run_id": None,
-                        "related_finding_slug": slug,
-                    },
+                require_artifact_write_response(
+                    client.post(
+                        "artifacts",
+                        {
+                            "path": submission_rel,
+                            "kind": "submission",
+                            "media_type": "text/markdown",
+                            "sensitive": False,
+                            "producer_agent_id": None,
+                            "producer_agent_role": None,
+                            "producer_command_run_id": None,
+                            "related_finding_slug": slug,
+                        },
+                    ),
+                    artifact_path=submission_rel,
+                    operation="register submission artifact",
                 )
                 artifact_registered = True
             except AssessError as exc:
                 if not draft:
+                    if not _artifact_failure_is_definite(exc):
+                        raise AssessError(
+                            "export submission: final artifact registration failed with an "
+                            "uncertain outcome; the rendered final files were preserved exactly "
+                            f"at {submission_md} and {context_json} for reconciliation. Inspect "
+                            "`vigil assess artifact search --json` and do not retry automatically: "
+                            f"{exc}"
+                        ) from exc
                     rollback_errors = _restore_outputs(prior_outputs)
                     raise AssessError(
                         "export submission: final artifact registration failed; "
@@ -1375,6 +1721,39 @@ def run(args) -> None:
                 "skipping artifact registration.",
                 file=sys.stderr,
             )
+
+        if not draft:
+            if not artifact_registered or context_rel is None:
+                raise AssessError(
+                    "export submission: final workspace was not durably registered; "
+                    "no immutable version was created"
+                )
+            version = require_write_result(
+                client.post(
+                    f"submissions/{slug}/exports",
+                    {
+                        "platform": platform,
+                        "submission_path": submission_rel,
+                        "context_path": context_rel,
+                        "attachment_ids": attachment_ids,
+                        "actor_surface": "vigil-assess",
+                    },
+                ),
+                operation="export immutable submission version",
+                expected={"status": "complete"},
+                positive_ids=("id", "version_number"),
+            )
+            if (
+                not isinstance(version.get("relative_path"), str)
+                or not str(version["relative_path"]).strip()
+                or not isinstance(version.get("sha256"), str)
+                or len(str(version["sha256"])) != 64
+            ):
+                raise AssessError(
+                    "export immutable submission version: backend did not return "
+                    "the package path and digest; the write may have committed, so "
+                    "inspect the Submissions tab and do not retry automatically"
+                )
 
     # Drafts surface unresolved hygiene/readiness work; finals have already
     # failed closed above and therefore reach this point clean.
@@ -1411,10 +1790,16 @@ def run(args) -> None:
             "advisories": advisories,
             "readiness_blockers": readiness_blockers,
             "readiness_error": readiness_error,
+            "version": version,
         }
         print(json.dumps(summary, indent=2, ensure_ascii=False))
     else:
         mode = "draft" if draft else "final"
         print(f"Wrote {mode} {platform} submission for {slug} to {display_path}")
+        if version is not None:
+            print(
+                f"  Immutable version {version['version_number']}: "
+                f"{version['relative_path']} ({version['sha256']})"
+            )
         if resolved["missing"]:
             print("  NEEDS: " + ", ".join(resolved["missing"]))

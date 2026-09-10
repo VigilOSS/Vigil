@@ -11,8 +11,7 @@ import type { ReportData } from "./types";
 function f(partial: Partial<ReportData["finding_groups"]["standalone"][number]>) {
   return {
     workflow_status: "active",
-    verification_state: "verified",
-    verification_disposition: "confirmed",
+    verification_status: "confirmed",
     references: [],
     steps_to_reproduce: [],
     ...partial,
@@ -115,7 +114,7 @@ const standalone = [
     slug: "VA-006",
     title: "Directory listing enabled on /static/",
     severity: "info",
-    verification_state: "unreviewed",
+    verification_status: "unreviewed",
     canonical_location: "https://acme.example/static/",
     summary: "Autoindex is enabled, exposing the static asset tree.",
     impact: "Low — discloses asset filenames; no sensitive files observed.",
@@ -141,8 +140,7 @@ export const devData: ReportData = {
     finding_count: 6,
     finding_severities: { critical: 1, high: 2, medium: 1, low: 1, info: 1 },
     finding_workflow_statuses: { exploited: 2, active: 4 },
-    finding_verification_states: { verified: 5, unreviewed: 1 },
-    finding_verification_dispositions: { confirmed: 5, none: 1 },
+    finding_verification_statuses: { confirmed: 5, unreviewed: 1 },
     attack_chain_count: 2,
     open_surface_count: 11,
     credential_count: 3,

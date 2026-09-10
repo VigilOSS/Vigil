@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessmentClient, require_write_result
 from assess.lib.code_record_input import (
     bounded_string,
     canonical_string_list,
@@ -64,4 +64,17 @@ def run(args) -> None:
         result = client.post("code/fuzz/decision", payload)
     if not isinstance(result, dict):
         fail(_LABEL, "backend response must be a JSON object")
+    require_write_result(
+        result,
+        operation="record code fuzz decision",
+        expected={
+            "repo_id": payload["repo_id"],
+            "repo_generation": payload["repo_generation"],
+            "source_manifest_digest": payload["source_manifest_digest"],
+            "decision": payload["decision"],
+            "target_ids": payload["target_ids"],
+            "current": True,
+        },
+        positive_ids=("id",),
+    )
     print(json.dumps(result, indent=2, sort_keys=True))

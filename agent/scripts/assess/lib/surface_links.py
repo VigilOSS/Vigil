@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from assess.lib.client import require_write_result
+
 
 def create_surface_request_variant_link(
     client,
@@ -20,12 +22,24 @@ def create_surface_request_variant_link(
     relation: str = "",
     evidence_ref: str = "",
 ) -> dict[str, Any]:
-    return client.post(
+    surface_id = int(surface_id)
+    request_variant_id = int(request_variant_id)
+    response = client.post(
         "surface-request-variant-links",
         {
-            "surface_id": int(surface_id),
-            "request_variant_id": int(request_variant_id),
+            "surface_id": surface_id,
+            "request_variant_id": request_variant_id,
             "relation": relation,
             "evidence_ref": evidence_ref,
         },
+    )
+    return require_write_result(
+        response,
+        operation=f"link surface {surface_id} to request variant {request_variant_id}",
+        expected={
+            "surface_id": surface_id,
+            "request_variant_id": request_variant_id,
+            "relation": relation,
+        },
+        positive_ids=("id",),
     )

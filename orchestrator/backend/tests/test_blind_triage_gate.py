@@ -132,7 +132,7 @@ def _args(engagement, target_phase, **overrides):
 _MEDIUM_ACTIVE = {
     "slug": "idor-7",
     "severity": "medium",
-    "verification_state": "verified",
+    "verification_status": "confirmed",
     "workflow_status": "active",
 }
 
@@ -307,3 +307,28 @@ def test_blind_triage_verdict_round_trips_to_dispatch_decisions(client, isolate_
     other = client.get(f"{_RT_BASE}/dispatch-decisions?kind=scope_decision")
     assert other.status_code == 200, other.text
     assert other.json() == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"finding_slug": "idor-7"},
+        {"verdict": "Accept@P3"},
+        {"finding_slug": "idor-7", "verdict": "Looks-Good"},
+    ],
+)
+def test_blind_triage_verdict_rejects_missing_keys_and_unknown_verdicts(
+    client, isolate_settings, payload
+):
+    _seed_engagement(client, isolate_settings)
+
+    response = client.post(
+        f"{_RT_BASE}/dispatch-decisions",
+        json={"kind": "blind_triage_verdict", "payload": payload},
+    )
+
+    assert response.status_code == 422, response.text
+    listed = client.get(f"{_RT_BASE}/dispatch-decisions?kind=blind_triage_verdict")
+    assert listed.status_code == 200
+    assert listed.json() == []

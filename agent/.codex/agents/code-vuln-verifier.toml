@@ -105,9 +105,10 @@ report-ready `details` must already be on the finding when it fires.
 ## FP Persistence
 
 When a finding is killed, persist that decision durably through the finding verification
-lifecycle. Use `finding verify --disposition false_positive` for direct false-positive decisions
-and `finding verify --disposition <confirmed|downgraded|disputed>` for confirm, downgrade, or
-dispute outcomes. The goal is suppression by identity: later rediscovery of the same
+lifecycle. Use `finding verify --status false_positive --counter-check-file <json>` for direct
+false-positive decisions and `finding verify --status <confirmed|downgraded|disputed>` for confirm,
+downgrade, or dispute outcomes. Terminal outcomes cite proof receipts from this independent verifier
+dispatch. The goal is suppression by identity: later rediscovery of the same
 `(defect_family, root_cause_key, canonical_location, auth_context)` should merge back into that
 false-positive record instead of reappearing as a live finding. If later evidence disproves a
 kill or verified verdict, reopen the finding with `finding update --status draft` so the backend
@@ -127,7 +128,7 @@ the rare net-new spot-check bug. The closing sequence below owns ordering.
 
 Before your dispatch returns, run in this order:
 
-1. `vigil assess finding verify <slug> --disposition <verdict> --reason "<rationale>"` for each confirm/downgrade/dispute decision (use `--disposition false_positive` for a kill)
+1. `vigil assess finding verify <slug> --status <verdict> --reason "<rationale>"` for each decision; terminal decisions add `--proof-receipt-id`, and false-positive decisions add `--counter-check-file`
 2. For each retained finding still in workflow status `draft`, run `vigil assess finding update <slug> --status active --reason "Verification retained this finding"`; otherwise merge or kill it before returning
 3. `vigil assess record-chain code-vuln-verifier <chain-json>` for any composed chains
 4. `vigil assess finding record code-vuln-verifier <new-finding-json>` for net-new spot-check bugs (rare)

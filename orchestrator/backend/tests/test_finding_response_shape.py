@@ -39,8 +39,7 @@ def _payload(slug: str, **over) -> dict:
         "title": f"IDOR in /api/users/{{id}} allows anon read of any user PII ({slug})",
         "severity": "medium",
         "workflow_status": "active",
-        "verification_state": "verified",
-        "verification_disposition": "confirmed",
+        "verification_status": "unreviewed",
         "defect_family": "access-control",
         "root_cause_key": f"missing-object-authz-{slug}",
         "canonical_location": f"https://app.example/api/users/{slug}",
@@ -97,7 +96,7 @@ def test_every_finding_bearing_response_returns_parsed_details_and_provenance(
     verified = client.post(
         f"{_base()}/findings/VA-001/verify",
         json={
-            "disposition": "confirmed",
+            "verification_status": "pending_runtime_proof",
             "reason_text": "Reproduced against the live service.",
             "source_name": "vulnerability-analyst",
         },

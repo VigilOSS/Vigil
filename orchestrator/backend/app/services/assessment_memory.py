@@ -42,8 +42,7 @@ def _finding_summary(row: Any) -> dict[str, Any]:
         "title": row["title"],
         "severity": row["severity"],
         "workflow_status": row["status"],
-        "verification_state": row["verification_state"] or "unreviewed",
-        "verification_disposition": row["verification_disposition"] or "none",
+        "verification_status": row["verification_status"] or "unreviewed",
         "source_name": row["source_name"] or "",
         "evidence_ref": row["evidence_ref"] or "",
         "chain_required": bool(details.get("chain_required")),
@@ -76,8 +75,8 @@ def _limited_findings(
         extra_params = (since,)
     rows = connection.execute(
         f"""
-        SELECT slug, title, severity, status, verification_state,
-               verification_disposition, source_name, evidence_ref,
+        SELECT slug, title, severity, status, verification_status,
+               source_name, evidence_ref,
                details_json, updated_at
         FROM assessment_findings
         WHERE engagement_id = ? AND {where_sql}{extra_where}
@@ -151,6 +150,7 @@ _STALE_THRESHOLD_BY_ROLE: dict[str, float] = {
     "code-fuzz-engineer": 72.0,
 }
 _DEFAULT_STALE_THRESHOLD_HOURS = 24.0
+_KNOWLEDGE_DRIFT_LIMIT = 10
 
 
 def _stale_threshold_for(role: str | None, *, override: float | None) -> float:
@@ -319,21 +319,19 @@ def _parse_iso(value: Any) -> dt.datetime | None:
 def _counts(connection, engagement_id: int) -> dict[str, dict[str, int]]:
     rows = connection.execute(
         """
-        SELECT status, verification_state, verification_disposition, severity, source_name
+        SELECT status, verification_status, severity, source_name
         FROM assessment_findings
         WHERE engagement_id = ?
         """,
         (engagement_id,),
     ).fetchall()
     workflow = Counter(str(row["status"] or "draft") for row in rows)
-    verification = Counter(str(row["verification_state"] or "unreviewed") for row in rows)
-    disposition = Counter(str(row["verification_disposition"] or "none") for row in rows)
+    verification = Counter(str(row["verification_status"] or "unreviewed") for row in rows)
     severity = Counter(str(row["severity"] or "info") for row in rows)
     source = Counter(str(row["source_name"] or "unknown") for row in rows)
     return {
         "workflow": dict(workflow),
-        "verification_state": dict(verification),
-        "verification_disposition": dict(disposition),
+        "verification_status": dict(verification),
         "severity": dict(severity),
         "source": dict(source),
     }
@@ -493,6 +491,49 @@ def _resume_note_pointers(engagement_id: int, *, since: str) -> list[dict[str, A
             }
         )
     return _since_filter(matches, since=since, field="updated_at")[:_RESUME_NOTE_LIMIT]
+
+
+def _knowledge_drift_section(engagement_id: int) -> dict[str, Any]:
+    """Project the existing unlinked-markdown detector into session start.
+
+    Report readiness remains the detector owner. Resume carries a bounded,
+    advisory-only view so accumulated prose is visible without becoming a new
+    readiness gate. A detector failure is also explicit rather than falsely
+    presenting an empty drift set.
+    """
+    try:
+        readiness = state_manager.report_readiness(engagement_id)
+    except Exception as exc:  # noqa: BLE001 - resume degrades for advisory data.
+        return {
+            "classification": "advisory",
+            "detector_status": "unavailable",
+            "detector_detail": str(exc)[:500],
+            "unlinked_markdown_note_count": None,
+            "unlinked_markdown_notes": [],
+            "truncated": False,
+        }
+    advisories = readiness.get("advisories")
+    rows = (
+        [
+            {
+                "kind": "unlinked_markdown_note",
+                "artifact_id": row.get("artifact_id"),
+                "path": str(row.get("path") or "")[:500],
+                "detail": str(row.get("detail") or "")[:1000],
+            }
+            for row in advisories
+            if isinstance(row, dict) and row.get("kind") == "unlinked_markdown_note"
+        ]
+        if isinstance(advisories, list)
+        else []
+    )
+    return {
+        "classification": "advisory",
+        "detector_status": "complete",
+        "unlinked_markdown_note_count": len(rows),
+        "unlinked_markdown_notes": rows[:_KNOWLEDGE_DRIFT_LIMIT],
+        "truncated": len(rows) > _KNOWLEDGE_DRIFT_LIMIT,
+    }
 
 
 def _attempts_section(connection, engagement_id: int, *, since: str) -> dict[str, Any]:
@@ -735,8 +776,8 @@ def build_resume_brief(
         if canonical_finding:
             row = connection.execute(
                 """
-                SELECT slug, title, severity, status, verification_state,
-                       verification_disposition, source_name, evidence_ref,
+                SELECT slug, title, severity, status, verification_status,
+                       source_name, evidence_ref,
                        details_json, updated_at
                 FROM assessment_findings
                 WHERE engagement_id = ? AND slug = ?
@@ -749,11 +790,16 @@ def build_resume_brief(
             "unreviewed": _limited_findings(
                 connection,
                 engagement_id,
-                "verification_state = 'unreviewed' "
+                "verification_status = 'unreviewed' "
                 "AND status NOT IN ('merged', 'false_positive')",
                 since=since,
             ),
-            "verified": _limited_findings(connection, engagement_id, "verification_state = 'verified'", since=since),
+            "verified": _limited_findings(
+                connection,
+                engagement_id,
+                "verification_status NOT IN ('unreviewed', 'disputed')",
+                since=since,
+            ),
             "killed": _limited_findings(connection, engagement_id, "status = 'false_positive'", since=since),
             "merged": _limited_findings(connection, engagement_id, "status = 'merged'", since=since),
             "chain_required": _limited_findings(
@@ -818,6 +864,7 @@ def build_resume_brief(
         "read_first_notes": _resume_note_pointers(engagement_id, since=since),
     }
     dispatch_picture = _recent_dispatch_picture(engagement_id, max_age_hours=max_age_hours)
+    knowledge_drift = _knowledge_drift_section(engagement_id)
     if agent_id:
         dispatch_picture["selected_dispatch"] = state_manager.get_dispatch(engagement_id, agent_id)
         try:
@@ -847,6 +894,7 @@ def build_resume_brief(
         "command_runs": command_matches,
         "artifacts": artifacts,
         "intel": intel_section,
+        "knowledge_drift": knowledge_drift,
         "recommended_next_actions": _recommended_actions(
             finding=canonical_finding or finding,
             agent_id=agent_id,

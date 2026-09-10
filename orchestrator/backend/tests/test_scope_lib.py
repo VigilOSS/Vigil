@@ -278,10 +278,3 @@ def test_denied_tools_reads_canonical_nested_tool_policy():
 
     with pytest.raises(SystemExit, match="tool_policy.*object"):
         scope.denied_tools({"tool_policy": ["nuclei"]})
-
-
-def test_aggregate_rate_limit_parses_positive_number_and_rejects_invalid_values():
-    assert scope.aggregate_rate_limit({"rate_limit_aggregate_rps": 12.5}) == 12.5
-    assert scope.aggregate_rate_limit({}) is None
-    assert scope.aggregate_rate_limit({"rate_limit_aggregate_rps": 0}) is None
-    assert scope.aggregate_rate_limit({"rate_limit_aggregate_rps": "fast"}) is None

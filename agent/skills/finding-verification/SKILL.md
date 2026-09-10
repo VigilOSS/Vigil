@@ -109,10 +109,10 @@ For each finding under review:
 Write exactly one per reviewed finding (these are the operator-facing verbs, kept in
 operator-core Phase 5 — listed here so the reviewer self-serves them):
 
-- **Confirmed** — reproduced, severity accurate → `vigil assess finding verify <slug> --disposition confirmed --reason "..."`
-- **Upgraded** — real, severity understated → `vigil assess finding update <slug> --severity <higher> --reason "..."` then `finding verify ... --disposition confirmed`
-- **Downgraded** — real, severity overstated → `vigil assess finding verify <slug> --disposition downgraded --reason "..." --new-severity <lower>`
-- **Killed** — false positive / unreproducible / stacked self-induced preconditions → `vigil assess finding verify <slug> --disposition false_positive --reason "..." --kill-reason "..." --kill-check <1-6>`
+- **Confirmed** — reproduced, severity accurate → `vigil assess finding verify <slug> --status confirmed --reason "..." --proof-receipt-id <id>`
+- **Upgraded** — real, severity understated → `vigil assess finding update <slug> --severity <higher> --reason "..."` then `finding verify ... --status confirmed --proof-receipt-id <id>`
+- **Downgraded** — real, severity overstated → `vigil assess finding verify <slug> --status downgraded --reason "..." --new-severity <lower> --proof-receipt-id <id>`
+- **Killed** — a completed counter-check falsifies the claim → `vigil assess finding verify <slug> --status false_positive --reason "..." --counter-check-file <counter-check.json>`
 
 **Dedup:** merge findings with overlapping `canonical_location` + similar `defect_family` across
 agent prefixes — `vigil assess finding merge <source-slug> <target-slug> "<reason>"`.

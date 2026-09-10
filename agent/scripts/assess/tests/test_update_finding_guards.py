@@ -40,7 +40,12 @@ class _FakeClient:
 
     def patch(self, path: str, payload: dict) -> dict:
         self.patches.append((path, payload))
-        return {"slug": path.split("/", 1)[-1], "row_version": 4}
+        return {
+            "finding": {
+                "slug": path.split("/", 1)[-1],
+                "row_version": 4,
+            }
+        }
 
     def __enter__(self) -> "_FakeClient":
         return self

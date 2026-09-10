@@ -14,6 +14,7 @@ import pytest
 from app import db as db_module
 from app.services import code_analysis, code_fuzz_completion
 from fastapi import HTTPException
+from tests.proof_fixtures import post_artifact_backed_source_observation
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS_ROOT = REPO_ROOT / "agent" / "scripts"
@@ -238,7 +239,28 @@ def _finding_code_snapshot(client, engagement_key: str, repo_id: int) -> dict[st
     }
 
 
+def _ensure_finding_author_dispatch(
+    client, engagement_key: str, agent_id: str
+) -> None:
+    base = f"/engagements/{engagement_key}/assessment/dispatches"
+    existing = client.get(f"{base}/{agent_id}")
+    if existing.status_code == 200:
+        return
+    assert existing.status_code == 404, existing.text
+    response = client.post(
+        base,
+        json={
+            "agent_id": agent_id,
+            "agent_role": "code-vuln-hunter",
+            "task": "Record the fixture finding from the sealed source snapshot.",
+        },
+    )
+    assert response.status_code == 201, response.text
+
+
 def _create_root_finding(client, engagement_key: str, slug: str, *, source_name: str = "code-vuln-hunter") -> None:
+    author_agent_id = f"AUTHOR-{slug}"
+    _ensure_finding_author_dispatch(client, engagement_key, author_agent_id)
     response = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
@@ -246,8 +268,7 @@ def _create_root_finding(client, engagement_key: str, slug: str, *, source_name:
             "title": f"Root finding {slug}",
             "severity": "medium",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "root-cause",
             "root_cause_key": slug.lower(),
             "auth_context": "anonymous",
@@ -257,7 +278,10 @@ def _create_root_finding(client, engagement_key: str, slug: str, *, source_name:
             "notes": "",
             "source_name": source_name,
             "details": {"evidence": "root"},
-            "provenance": {"agent_name": source_name},
+            "provenance": {
+                "agent_id": author_agent_id,
+                "agent_name": source_name,
+            },
             "links": [],
         },
     )
@@ -413,6 +437,8 @@ def _create_code_parent_finding(
     allow_remint: bool = False,
     links: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
+    author_agent_id = f"AUTHOR-{slug}"
+    _ensure_finding_author_dispatch(client, engagement_key, author_agent_id)
     response = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
@@ -420,8 +446,7 @@ def _create_code_parent_finding(
             "title": f"Parent pattern {slug}",
             "severity": severity,
             "workflow_status": workflow_status,
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "parser-memory-safety",
             "root_cause_key": f"parser-memory-safety-{slug.lower()}",
             "auth_context": "anonymous",
@@ -432,6 +457,7 @@ def _create_code_parent_finding(
             "source_name": source_name,
             "details": {"evidence": "Attacker-controlled parser path."},
             "provenance": {
+                "agent_id": author_agent_id,
                 "agent_name": source_name,
                 "code_snapshot": _finding_code_snapshot(
                     client,
@@ -454,19 +480,89 @@ def _verify_code_finding(
     slug: str,
     *,
     disposition: str = "confirmed",
+    reason_code: str = "source-proof",
+    reason_text: str = "Verified against the current sealed source snapshot.",
+    artifact_ref: str | None = None,
+    details: dict[str, object] | None = None,
+    new_severity: str | None = None,
 ) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "verification_status": disposition,
+        "reason_code": reason_code,
+        "reason_text": reason_text,
+        "source_name": "code-vuln-verifier",
+        "provenance": {
+            "agent_name": "code-vuln-verifier",
+            "code_snapshot": _finding_code_snapshot(client, engagement_key, repo_id),
+        },
+    }
+    if artifact_ref is not None:
+        payload["artifact_ref"] = artifact_ref
+    if details is not None:
+        payload["details"] = details
+
+    if disposition in {"confirmed", "downgraded", "false_positive"}:
+        verifier_id = f"VERIFY-{slug}-{disposition}"
+        dispatch = client.post(
+            f"/engagements/{engagement_key}/assessment/dispatches",
+            json={
+                "agent_id": verifier_id,
+                "agent_role": "code-vuln-verifier",
+                "task": f"Independently verify {slug} against the sealed source snapshot.",
+                "skills": "code-finding-verification",
+            },
+        )
+        assert dispatch.status_code == 201, dispatch.text
+        run = client.post(
+            f"/engagements/{engagement_key}/assessment/assessment-runs",
+            json={
+                "run_uuid": f"verify-{slug.lower()}-{disposition}",
+                "run_kind": "code",
+                "producer_dispatch_agent_id": verifier_id,
+            },
+        )
+        assert run.status_code == 201, run.text
+        receipt = post_artifact_backed_source_observation(
+            client,
+            f"/engagements/{engagement_key}/assessment/proof-receipts",
+            json={
+                "run_id": run.json()["id"],
+                "evidence_kind": "source_observation",
+                "expected_result": "the suspected source path survives an independent counter-check",
+                "observed_result": reason_text,
+            },
+        )
+        assert receipt.status_code == 201, receipt.text
+        completed = client.patch(
+            f"/engagements/{engagement_key}/assessment/assessment-runs/{run.json()['id']}",
+            json={"status": "completed"},
+        )
+        assert completed.status_code == 200, completed.text
+        receipt_id = receipt.json()["id"]
+        payload["proof_receipt_ids"] = [receipt_id]
+        if disposition == "false_positive":
+            payload["counter_check"] = {
+                "method": "sealed-source reachability review",
+                "expected_result": "an attacker-controlled path reaches the suspected sink",
+                "observed_result": reason_text,
+                "falsified_claim": "the suspected path is attacker reachable",
+                "completed": True,
+                "proof_receipt_ids": [receipt_id],
+            }
+        elif disposition == "downgraded":
+            chosen_severity = new_severity or "medium"
+            payload["new_severity"] = chosen_severity
+            payload["severity_variance"] = {
+                "normal_band": "high",
+                "chosen_severity": chosen_severity,
+                "actor": verifier_id,
+                "reason": "Independent source review supports a lower impact band.",
+                "proof_receipt_id": receipt_id,
+            }
+
     response = client.post(
         f"/engagements/{engagement_key}/assessment/findings/{slug}/verify",
-        json={
-            "disposition": disposition,
-            "reason_code": "source-proof",
-            "reason_text": "Verified against the current sealed source snapshot.",
-            "source_name": "code-vuln-verifier",
-            "provenance": {
-                "agent_name": "code-vuln-verifier",
-                "code_snapshot": _finding_code_snapshot(client, engagement_key, repo_id),
-            },
-        },
+        json=payload,
     )
     assert response.status_code == 200, response.text
     return response.json()
@@ -3538,6 +3634,415 @@ def test_analysis_result_retry_is_idempotent_within_lease(client, isolate_settin
     assert second.json()["id"] == first.json()["id"]
 
 
+def test_suspicious_result_atomically_materializes_its_run_candidate(
+    client, isolate_settings
+) -> None:
+    engagement_key = "2026-09-10-suspicious-run-candidate"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="candidate-repo")
+    parser_file = next(
+        row for row in _create_files(client, engagement_key, int(repo["id"]))
+        if row["file_path"] == "src/parser.py"
+    )
+    repo = client.get(
+        f"/engagements/{engagement_key}/assessment/code/repos/{repo['id']}"
+    ).json()
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
+    claim = _claim_file_for_analysis(
+        client, engagement_key, int(parser_file["id"]), agent_name="result-agent"
+    )
+    assessment_base = f"/engagements/{engagement_key}/assessment"
+    dispatch = client.post(
+        f"{assessment_base}/dispatches",
+        json={
+            "agent_id": "result-agent",
+            "agent_role": "code-vuln-hunter",
+            "task": "review candidate source",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
+    run = client.post(
+        f"{assessment_base}/assessment-runs",
+        json={
+            "run_uuid": "suspicious-candidate-run",
+            "run_kind": "code",
+            "run_purpose": "scan",
+            "producer_dispatch_agent_id": "result-agent",
+            "target_identity": {"repositories": ["candidate-repo"]},
+            "source_generations": [
+                {
+                    "target_key": "candidate-repo",
+                    "generation": repo["active_generation"],
+                    "manifest_digest": repo["source_manifest_digest"],
+                }
+            ],
+        },
+    ).json()
+    assert client.patch(
+        f"{assessment_base}/assessment-runs/{run['id']}", json={"status": "running"}
+    ).status_code == 200
+    sources = client.post(
+        f"{assessment_base}/assessment-runs/{run['id']}/sources",
+        json={
+            "sources": [
+                {
+                    "target_key": "candidate-repo",
+                    "declared_root": ".",
+                    "path": "src/parser.py",
+                    "content_sha256": parser_file["file_hash"],
+                    "byte_size": 1,
+                    "line_count": parser_file["loc"],
+                    "encoding": "utf-8",
+                    "inventory_status": "included",
+                    "exclusion_reason": "",
+                    "parser_status": "parsed",
+                    "parser_error": "",
+                },
+                {
+                    "target_key": "candidate-repo",
+                    "declared_root": ".",
+                    "path": "src/helpers.py",
+                    "content_sha256": "f" * 64,
+                    "byte_size": 1,
+                    "line_count": 1,
+                    "encoding": "utf-8",
+                    "inventory_status": "included",
+                    "exclusion_reason": "",
+                    "parser_status": "parsed",
+                    "parser_error": "",
+                },
+            ]
+        },
+    ).json()
+    source = next(row for row in sources if row["path"] == "src/parser.py")
+    wrong_source = next(row for row in sources if row["path"] == "src/helpers.py")
+    payload = {
+        "queue_item_id": claim["id"],
+        "file_id": parser_file["id"],
+        "agent_name": "result-agent",
+        "lease_token": claim["lease_token"],
+        "function_name": "parse",
+        "hypothesis": "attacker length reaches allocation",
+        "evidence": "src/parser.py:1",
+        "disposition": "suspicious",
+        "confidence": "high",
+        "assessment_run_id": run["id"],
+        "assessment_source_id": source["id"],
+    }
+    missing_run_identity = client.post(
+        f"{assessment_base}/code/analysis-results",
+        json={
+            key: value
+            for key, value in payload.items()
+            if key not in {"assessment_run_id", "assessment_source_id"}
+        },
+    )
+    assert missing_run_identity.status_code == 409, missing_run_identity.text
+    mismatched = client.post(
+        f"{assessment_base}/code/analysis-results",
+        json={**payload, "assessment_source_id": wrong_source["id"]},
+    )
+    assert mismatched.status_code == 409, mismatched.text
+    unbound_finding = client.post(
+        f"{assessment_base}/findings",
+        json={
+            "slug": "CH-990",
+            "title": "Current code finding without candidate promotion",
+            "severity": "medium",
+            "workflow_status": "active",
+            "canonical_location": "file:src/parser.py:1",
+            "summary": "A current finding exists, but it did not enter the run candidate lifecycle.",
+            "source_name": "result-agent",
+            "provenance": {
+                "code_snapshot": {
+                    "repo_id": repo["id"],
+                    "repo_generation": repo["active_generation"],
+                    "source_manifest_digest": repo["source_manifest_digest"],
+                }
+            },
+        },
+    )
+    assert unbound_finding.status_code == 201, unbound_finding.text
+    bypassed_finding_result = client.post(
+        f"{assessment_base}/code/analysis-results",
+        json={
+            **{
+                key: value
+                for key, value in payload.items()
+                if key not in {"assessment_run_id", "assessment_source_id"}
+            },
+            "disposition": "finding",
+            "finding_slug": "CH-990",
+        },
+    )
+    assert bypassed_finding_result.status_code == 409, bypassed_finding_result.text
+    first = client.post(
+        f"{assessment_base}/code/analysis-results", json=payload
+    )
+    retry = client.post(
+        f"{assessment_base}/code/analysis-results", json=payload
+    )
+    assert first.status_code == 201, first.text
+    assert retry.status_code == 201, retry.text
+    assert first.json()["run_candidate"]["originating_result_id"] == first.json()["id"]
+    assert retry.json()["run_candidate"]["id"] == first.json()["run_candidate"]["id"]
+    candidates = client.get(
+        f"{assessment_base}/assessment-runs/{run['id']}/candidates?limit=10&offset=0"
+    ).json()
+    assert candidates["total"] == 1
+    assert candidates["items"][0]["identity_key"].startswith("candidate:v1:")
+    generic_mismatch = client.post(
+        f"{assessment_base}/assessment-runs/{run['id']}/candidates",
+        json={
+            "identity_key": "candidate:generic-mismatched-result",
+            "target_key": "candidate-repo",
+            "source_id": wrong_source["id"],
+            "source_anchor": "src/parser.py:parse",
+            "vulnerability_family": "unclassified",
+            "hypothesis": "attacker length reaches allocation",
+            "originating_result_id": first.json()["id"],
+            "dispatch_agent_id": "result-agent",
+        },
+    )
+    assert generic_mismatch.status_code == 409, generic_mismatch.text
+    command = client.post(
+        f"{assessment_base}/command-runs",
+        json={
+            "run_uuid": "candidate-promotion-proof",
+            "agent_name": "result-agent",
+            "command": "verify exact parser source",
+            "tool_name": "review",
+            "phase": "code-verify",
+            "status": "completed",
+            "return_code": 0,
+            "started_at": "2026-09-10T12:00:00Z",
+            "completed_at": "2026-09-10T12:00:01Z",
+        },
+    )
+    assert command.status_code == 201, command.text
+    proof = client.post(
+        f"{assessment_base}/proof-receipts",
+        json={
+            "run_id": run["id"],
+            "evidence_kind": "command",
+            "command_run_id": command.json()["id"],
+            "observed_result": "exact parser source supports candidate promotion",
+        },
+    )
+    assert proof.status_code == 201, proof.text
+    promoted_finding = client.post(
+        f"{assessment_base}/findings",
+        json={
+            "slug": "CH-991",
+            "title": "Current code finding with atomic candidate promotion",
+            "severity": "medium",
+            "workflow_status": "active",
+            "canonical_location": "file:src/parser.py:1",
+            "summary": "The exact analysis candidate was promoted with this finding.",
+            "source_name": "result-agent",
+            "provenance": {
+                "code_snapshot": {
+                    "repo_id": repo["id"],
+                    "repo_generation": repo["active_generation"],
+                    "source_manifest_digest": repo["source_manifest_digest"],
+                }
+            },
+            "run_candidate": {
+                "run_id": run["id"],
+                "candidate_id": first.json()["run_candidate"]["id"],
+                "reason": "promoted after exact source verification",
+                "proof_receipt_ids": [proof.json()["id"]],
+            },
+        },
+    )
+    assert promoted_finding.status_code == 201, promoted_finding.text
+    linked_finding_result = client.post(
+        f"{assessment_base}/code/analysis-results",
+        json={
+            **{
+                key: value
+                for key, value in payload.items()
+                if key not in {"assessment_run_id", "assessment_source_id"}
+            },
+            "disposition": "finding",
+            "finding_slug": "CH-991",
+        },
+    )
+    assert linked_finding_result.status_code == 201, linked_finding_result.text
+    assert linked_finding_result.json()["run_candidate"]["id"] == first.json()[
+        "run_candidate"
+    ]["id"]
+    assert linked_finding_result.json()["run_candidate"]["state"] == "promoted"
+
+
+def test_automatic_analysis_candidate_identity_persists_across_equivalent_scans(
+    client, isolate_settings
+) -> None:
+    engagement_key = "2026-09-10-stable-analysis-candidate"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="stable-candidate-repo")
+    parser_file = next(
+        row
+        for row in _create_files(client, engagement_key, int(repo["id"]))
+        if row["file_path"] == "src/parser.py"
+    )
+    repo = client.get(
+        f"/engagements/{engagement_key}/assessment/code/repos/{repo['id']}"
+    ).json()
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
+    assessment_base = f"/engagements/{engagement_key}/assessment"
+    dispatch = client.post(
+        f"{assessment_base}/dispatches",
+        json={
+            "agent_id": "stable-result-agent",
+            "agent_role": "code-vuln-hunter",
+            "task": "review stable candidate source",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
+
+    def create_run(run_uuid: str) -> tuple[dict, dict]:
+        run_response = client.post(
+            f"{assessment_base}/assessment-runs",
+            json={
+                "run_uuid": run_uuid,
+                "run_kind": "code",
+                "run_purpose": "scan",
+                "producer_dispatch_agent_id": "stable-result-agent",
+                "target_identity": {"repositories": ["stable-candidate-repo"]},
+                "source_generations": [
+                    {
+                        "target_key": "stable-candidate-repo",
+                        "generation": repo["active_generation"],
+                        "manifest_digest": repo["source_manifest_digest"],
+                    }
+                ],
+            },
+        )
+        assert run_response.status_code == 201, run_response.text
+        run = run_response.json()
+        assert client.patch(
+            f"{assessment_base}/assessment-runs/{run['id']}",
+            json={"status": "running"},
+        ).status_code == 200
+        source_response = client.post(
+            f"{assessment_base}/assessment-runs/{run['id']}/sources",
+            json={
+                "sources": [
+                    {
+                        "target_key": "stable-candidate-repo",
+                        "declared_root": ".",
+                        "path": "src/parser.py",
+                        "content_sha256": parser_file["file_hash"],
+                        "byte_size": 1,
+                        "line_count": parser_file["loc"],
+                        "encoding": "utf-8",
+                        "inventory_status": "included",
+                        "exclusion_reason": "",
+                        "parser_status": "parsed",
+                        "parser_error": "",
+                    }
+                ]
+            },
+        )
+        assert source_response.status_code == 201, source_response.text
+        return run, source_response.json()[0]
+
+    def record_result(claim: dict, run: dict, source: dict) -> dict:
+        response = client.post(
+            f"{assessment_base}/code/analysis-results",
+            json={
+                "queue_item_id": claim["id"],
+                "file_id": parser_file["id"],
+                "agent_name": "stable-result-agent",
+                "lease_token": claim["lease_token"],
+                "function_name": "parse",
+                "hypothesis": "attacker length reaches allocation",
+                "evidence": "src/parser.py:1",
+                "disposition": "suspicious",
+                "confidence": "high",
+                "assessment_run_id": run["id"],
+                "assessment_source_id": source["id"],
+            },
+        )
+        assert response.status_code == 201, response.text
+        return response.json()
+
+    baseline_run, baseline_source = create_run("stable-analysis-baseline")
+    baseline_claim = _claim_file_for_analysis(
+        client,
+        engagement_key,
+        int(parser_file["id"]),
+        agent_name="stable-result-agent",
+    )
+    baseline_result = record_result(baseline_claim, baseline_run, baseline_source)
+    baseline_identity = baseline_result["run_candidate"]["identity_key"]
+    closeout = client.post(
+        f"{assessment_base}/code/analysis-queue/done",
+        json=_owned(
+            baseline_claim,
+            item_ids=[baseline_claim["id"]],
+            disposition="suspicious",
+            notes="stable suspicious result recorded",
+            cwe_coverage=_network_input_coverage(default_effort=80),
+        ),
+    )
+    assert closeout.status_code == 200, closeout.text
+
+    current_run, current_source = create_run("stable-analysis-current")
+    current_claim = _claim_file_for_reanalysis(
+        client,
+        engagement_key,
+        int(parser_file["id"]),
+        reason="compare an equivalent independent scan",
+        agent_name="stable-result-agent",
+    )
+    current_result = record_result(current_claim, current_run, current_source)
+    current_identity = current_result["run_candidate"]["identity_key"]
+
+    assert current_identity == baseline_identity
+    comparison = client.get(
+        f"{assessment_base}/assessment-runs/{current_run['id']}/comparison",
+        params={"baseline_run_id": baseline_run["id"]},
+    )
+    assert comparison.status_code == 200, comparison.text
+    assert comparison.json()["classifications"] == {
+        "new": [],
+        "persisting": [current_identity],
+        "resolved": [],
+        "unknown": [],
+    }
+    current_closeout = client.post(
+        f"{assessment_base}/code/analysis-queue/done",
+        json=_owned(
+            current_claim,
+            item_ids=[current_claim["id"]],
+            disposition="suspicious",
+            notes="current suspicious result recorded",
+            cwe_coverage=_network_input_coverage(default_effort=80),
+        ),
+    )
+    assert current_closeout.status_code == 200, current_closeout.text
+    repeated_claim = _claim_file_for_reanalysis(
+        client,
+        engagement_key,
+        int(parser_file["id"]),
+        reason="repeat equivalent analysis inside the current scan",
+        agent_name="stable-result-agent",
+    )
+    repeated_result = record_result(repeated_claim, current_run, current_source)
+    repeated_retry = record_result(repeated_claim, current_run, current_source)
+    assert repeated_result["run_candidate"]["id"] == current_result["run_candidate"]["id"]
+    assert repeated_retry["id"] == repeated_result["id"]
+    assert repeated_retry["run_candidate"]["id"] == current_result["run_candidate"]["id"]
+    candidates = client.get(
+        f"{assessment_base}/assessment-runs/{current_run['id']}/candidates",
+        params={"limit": 10, "offset": 0},
+    )
+    assert candidates.status_code == 200, candidates.text
+    assert candidates.json()["total"] == 1
+
+
 def test_filtered_queue_claim_applies_every_lane_inside_atomic_selection(
     client, isolate_settings
 ):
@@ -6072,8 +6577,7 @@ def test_coverage_summary_scopes_findings_to_repo_and_rejects_unknown_repo(clien
             "title": "Parser trust boundary bypass",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "trust-boundary-bypass",
             "root_cause_key": "scope-repo-a-parser",
             "auth_context": "anonymous",
@@ -6107,8 +6611,7 @@ def test_coverage_summary_scopes_findings_to_repo_and_rejects_unknown_repo(clien
             "title": "Helper sink exposure",
             "severity": "critical",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "sink-exposure",
             "root_cause_key": "scope-repo-b-helper",
             "auth_context": "anonymous",
@@ -6210,6 +6713,8 @@ def test_coverage_summary_excludes_false_positive_variants(client, isolate_setti
     _create_files(client, engagement_key, int(repo["id"]))
 
     _create_root_finding(client, engagement_key, "CH-090")
+    author_agent_id = "AUTHOR-CH-001"
+    _ensure_finding_author_dispatch(client, engagement_key, author_agent_id)
     finding = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
@@ -6217,8 +6722,7 @@ def test_coverage_summary_excludes_false_positive_variants(client, isolate_setti
             "title": "Parser variant",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "trust-boundary-bypass",
             "root_cause_key": "variant-filter-parser",
             "auth_context": "anonymous",
@@ -6227,9 +6731,10 @@ def test_coverage_summary_excludes_false_positive_variants(client, isolate_setti
             "evidence_ref": "findings.md",
             "notes": "",
             "source_name": "code-vuln-hunter",
-            "details": {"evidence": "A"},
-            "provenance": {
-                "agent_name": "code-vuln-hunter",
+                "details": {"evidence": "A"},
+                "provenance": {
+                    "agent_id": author_agent_id,
+                    "agent_name": "code-vuln-hunter",
                 "code_snapshot": _finding_code_snapshot(
                     client, engagement_key, int(repo["id"])
                 ),
@@ -6249,29 +6754,23 @@ def test_coverage_summary_excludes_false_positive_variants(client, isolate_setti
     assert baseline.status_code == 200
     assert baseline.json()["findings_summary"]["variant_count"] == 1
 
-    verify = client.post(
-        f"/engagements/{engagement_key}/assessment/findings/CH-001/verify",
-        json={
-            "disposition": "false_positive",
-            "reason_code": "guarded-path",
-            "reason_text": "Guard closes the variant in production.",
-            "artifact_ref": "tools/analysis-state/code-verification/CH-001.json",
-            "source_name": "code-vuln-verifier",
-            "details": {
-                "kill_check": 4,
-                "kill_reason": "Guard closes the path in production.",
-                "evidence": "Validation rejects the attacker-controlled branch.",
-                "impact": "No reachable issue remains.",
-            },
-            "provenance": {
-                "verified_by": "code-vuln-verifier",
-                "code_snapshot": _finding_code_snapshot(
-                    client, engagement_key, int(repo["id"])
-                ),
-            },
+    verify = _verify_code_finding(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        "CH-001",
+        disposition="false_positive",
+        reason_code="guarded-path",
+        reason_text="Guard closes the variant in production.",
+        artifact_ref="tools/analysis-state/code-verification/CH-001.json",
+        details={
+            "kill_check": 4,
+            "kill_reason": "Guard closes the path in production.",
+            "evidence": "Validation rejects the attacker-controlled branch.",
+            "impact": "No reachable issue remains.",
         },
     )
-    assert verify.status_code == 200
+    assert verify["finding"]["verification_status"] == "false_positive"
 
     suppressed = client.get(f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}")
     assert suppressed.status_code == 200
@@ -6294,8 +6793,7 @@ def test_coverage_summary_excludes_non_code_variants(client, isolate_settings):
             "title": "HTTP variant",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "authz-bypass",
             "root_cause_key": "http-variant",
             "auth_context": "anonymous",
@@ -6371,8 +6869,7 @@ def test_repo_scoped_coverage_excludes_ambiguous_shared_file_paths(client, isola
             "title": "Shared path finding",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "trust-boundary-bypass",
             "root_cause_key": "shared-path-finding",
             "auth_context": "anonymous",
@@ -8178,22 +8675,14 @@ def test_draft_code_finding_blocks_fuzz_and_complete_until_promoted(
         workflow_status="draft",
     )
     if verified:
-        response = client.post(
-            f"/engagements/{engagement_key}/assessment/findings/{slug}/verify",
-            json={
-                "disposition": "confirmed",
-                "reason_code": "source-proof",
-                "reason_text": "Confirmed against the current sealed source snapshot.",
-                "source_name": "code-vuln-verifier",
-                "provenance": {
-                    "agent_name": "code-vuln-verifier",
-                    "code_snapshot": _finding_code_snapshot(
-                        client, engagement_key, int(repo["id"])
-                    ),
-                },
-            },
+        response = _verify_code_finding(
+            client,
+            engagement_key,
+            int(repo["id"]),
+            slug,
+            reason_text="Confirmed against the current sealed source snapshot.",
         )
-        assert response.status_code == 200, response.text
+        assert response["finding"]["verification_status"] == "confirmed"
 
     verify_entry = client.get(
         f"{base}/readiness?target_phase=verify-variant"
@@ -8336,23 +8825,17 @@ def test_code_readiness_blocks_current_stale_and_unbound_drafts_but_not_terminal
         workflow_status="draft",
         line=30,
     )
-    killed = client.post(
-        f"/engagements/{engagement_key}/assessment/findings/DK-001/verify",
-        json={
-            "disposition": "false_positive",
-            "reason_code": "guard-proven",
-            "reason_text": "Current sealed source proves a complete containment guard.",
-            "source_name": "code-vuln-verifier",
-            "details": {"kill_check": 2, "kill_reason": "Containment is enforced."},
-            "provenance": {
-                "agent_name": "code-vuln-verifier",
-                "code_snapshot": _finding_code_snapshot(
-                    client, engagement_key, int(repo["id"])
-                ),
-            },
-        },
+    killed = _verify_code_finding(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        "DK-001",
+        disposition="false_positive",
+        reason_code="guard-proven",
+        reason_text="Current sealed source proves a complete containment guard.",
+        details={"kill_check": 2, "kill_reason": "Containment is enforced."},
     )
-    assert killed.status_code == 200, killed.text
+    assert killed["finding"]["verification_status"] == "false_positive"
 
     _create_code_parent_finding(
         client,
@@ -8378,13 +8861,17 @@ def test_code_readiness_blocks_current_stale_and_unbound_drafts_but_not_terminal
         line=50,
         allow_remint=True,
     )
-    with db_module.get_connection() as connection:
-        connection.execute(
-            "UPDATE assessment_findings SET verification_disposition = 'blocked' "
-            "WHERE slug = ?",
-            ("DB-001",),
-        )
-        connection.commit()
+    blocked = _verify_code_finding(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        "DB-001",
+        disposition="blocked",
+        reason_code="verification-prerequisite-unavailable",
+        reason_text="The independent verification prerequisite is unavailable.",
+        details={"block_reason": "The required test environment is unavailable."},
+    )
+    assert blocked["finding"]["verification_status"] == "blocked"
 
     readiness = client.get(f"{base}/readiness?target_phase=complete")
     assert readiness.status_code == 200, readiness.text
@@ -8744,18 +9231,20 @@ def test_variant_receipt_scope_survives_kill_excludes_children_and_detects_new_p
         parent_finding_slugs=["CH-801"],
     )
     base = f"/engagements/{engagement_key}/assessment/code"
-    with db_module.get_connection() as connection:
-        connection.execute(
-            """
-            UPDATE assessment_findings
-            SET status = 'false_positive', verification_state = 'verified',
-                verification_disposition = 'false_positive', row_version = row_version + 1
-            WHERE engagement_id = (
-                SELECT id FROM engagements WHERE key = ?
-            ) AND slug = 'CH-801'
-            """,
-            (engagement_key,),
-        )
+    killed = _verify_code_finding(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        "CH-801",
+        disposition="false_positive",
+        reason_code="not-current-parent",
+        reason_text="Independent source review proved the original root unreachable.",
+        details={
+            "kill_check": 4,
+            "kill_reason": "The original root is unreachable in the sealed source snapshot.",
+        },
+    )
+    assert killed["finding"]["workflow_status"] == "false_positive"
     recorded = client.post(f"{base}/variant-checks", json=payload)
     assert recorded.status_code == 201, recorded.text
     assert recorded.json()["current"] is True
@@ -8928,22 +9417,14 @@ def test_variant_readiness_query_count_is_independent_of_admitted_file_count(
             int(repo["id"]),
             slug=slug,
         )
-        verified = client.post(
-            f"/engagements/{engagement_key}/assessment/findings/{slug}/verify",
-            json={
-                "disposition": "confirmed",
-                "reason_code": "source-proof",
-                "reason_text": "Current sealed source proves the report-durable root pattern.",
-                "source_name": "code-vuln-verifier",
-                "provenance": {
-                    "agent_name": "code-vuln-verifier",
-                    "code_snapshot": _finding_code_snapshot(
-                        client, engagement_key, int(repo["id"])
-                    ),
-                },
-            },
+        verified = _verify_code_finding(
+            client,
+            engagement_key,
+            int(repo["id"]),
+            slug,
+            reason_text="Current sealed source proves the report-durable root pattern.",
         )
-        assert verified.status_code == 200, verified.text
+        assert verified["finding"]["verification_status"] == "confirmed"
         dispatch = _register_variant_dispatch(
             client,
             engagement_key,
@@ -9179,11 +9660,11 @@ def test_variant_projection_bounds_historical_receipts_scopes_and_removed_files(
     assert "SCAN candidate" not in plan_text
 
 
-@pytest.mark.parametrize("verification_disposition", ["confirmed", "downgraded"])
+@pytest.mark.parametrize("verification_status", ["confirmed", "downgraded"])
 def test_report_readiness_requires_current_variant_receipts_for_report_durable_code_findings(
-    client, isolate_settings, verification_disposition
+    client, isolate_settings, verification_status
 ):
-    engagement_key = f"2026-08-06-report-variant-receipt-{verification_disposition}"
+    engagement_key = f"2026-08-06-report-variant-receipt-{verification_status}"
     engagement_dir = write_engagement(
         isolate_settings["engagements_dir"], engagement_key
     )
@@ -9196,7 +9677,7 @@ def test_report_readiness_requires_current_variant_receipts_for_report_durable_c
     repo = _create_repo(
         client,
         engagement_key,
-        repo_key=f"report-variant-receipt-{verification_disposition}",
+        repo_key=f"report-variant-receipt-{verification_status}",
     )
     _create_files(client, engagement_key, int(repo["id"]))
     files = _append_repo_files(
@@ -9259,6 +9740,8 @@ def test_report_readiness_requires_current_variant_receipts_for_report_durable_c
     evidence_path = engagement_dir / "notes" / "VF-001.md"
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
     evidence_path.write_text("VF-001 current sealed-source proof", encoding="utf-8")
+    author_agent_id = "AUTHOR-VF-001"
+    _ensure_finding_author_dispatch(client, engagement_key, author_agent_id)
     finding = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
@@ -9266,15 +9749,14 @@ def test_report_readiness_requires_current_variant_receipts_for_report_durable_c
             "title": "Report-durable parser trust-boundary bypass",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "verified",
-            "verification_disposition": verification_disposition,
+            "verification_status": "unreviewed",
             "defect_family": "parser-memory-safety",
             "root_cause_key": "parser-memory-safety-vf-001",
             "auth_context": "anonymous",
             "canonical_location": "file:src/parser.py:10",
             "summary": "A current report-durable code finding requires its variant pass.",
             "evidence_ref": "notes/VF-001.md",
-            "source_name": "code-vuln-verifier",
+            "source_name": "code-vuln-hunter",
             "details": {
                 "cvss_score": 8.1,
                 "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
@@ -9282,9 +9764,10 @@ def test_report_readiness_requires_current_variant_receipts_for_report_durable_c
                 "remediation": "Validate the trust-boundary input before parsing.",
                 "impact": "An attacker can cross the parser trust boundary.",
                 "evidence": "The current sealed source preserves the reachable path.",
-            },
-            "provenance": {
-                "agent_name": "code-vuln-verifier",
+                },
+                "provenance": {
+                    "agent_id": author_agent_id,
+                    "agent_name": "code-vuln-hunter",
                 "code_snapshot": _finding_code_snapshot(
                     client, engagement_key, int(repo["id"])
                 ),
@@ -9293,6 +9776,15 @@ def test_report_readiness_requires_current_variant_receipts_for_report_durable_c
         },
     )
     assert finding.status_code == 201, finding.text
+    verified = _verify_code_finding(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        "VF-001",
+        disposition=verification_status,
+        reason_text="Independent review preserved the report-durable source finding.",
+    )
+    assert verified["finding"]["verification_status"] == verification_status
     artifact = client.post(
         f"/engagements/{engagement_key}/assessment/artifacts",
         json={
@@ -9808,7 +10300,7 @@ def test_fuzz_entry_requires_phase2_root_triage_but_allows_pending_runtime_proof
         "PR-001",
         disposition="disputed",
     )
-    assert disputed["finding"]["verification_state"] == "disputed"
+    assert disputed["finding"]["verification_status"] == "disputed"
     disputed_readiness = client.get(
         f"{base}/readiness?target_phase=fuzz"
     ).json()
@@ -9823,11 +10315,7 @@ def test_fuzz_entry_requires_phase2_root_triage_but_allows_pending_runtime_proof
         "PR-001",
         disposition="pending_runtime_proof",
     )
-    assert pending["finding"]["verification_state"] == "verified"
-    assert (
-        pending["finding"]["verification_disposition"]
-        == "pending_runtime_proof"
-    )
+    assert pending["finding"]["verification_status"] == "pending_runtime_proof"
     ready = client.get(f"{base}/readiness?target_phase=fuzz").json()
     assert ready["transition_ready"] is True
     assert ready["blockers"] == []
@@ -9879,8 +10367,7 @@ def test_complete_readiness_requires_snapshot_current_verification_and_blind_tri
             "title": "Informational code finding needing triage",
             "severity": "info",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "hardening",
             "root_cause_key": "info-triage",
             "auth_context": "anonymous",
@@ -10717,8 +11204,7 @@ def test_analysis_results_include_linked_finding_lifecycle(client, isolate_setti
             "title": "Parser finding",
             "severity": "medium",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "integer-overflow",
             "root_cause_key": "suppressed-parser-finding",
             "auth_context": "anonymous",
@@ -10728,8 +11214,6 @@ def test_analysis_results_include_linked_finding_lifecycle(client, isolate_setti
             "notes": "Awaiting verifier review.",
             "source_name": "code-vuln-hunter",
             "details": {
-                "kill_check": 2,
-                "kill_reason": "Upper-bound guard is complete.",
                 "evidence": "validate_length() blocks the arithmetic path.",
                 "impact": "No live issue.",
             },
@@ -10765,15 +11249,15 @@ def test_analysis_results_include_linked_finding_lifecycle(client, isolate_setti
     )
     assert result_response.status_code == 201
     assert result_response.json()["finding_workflow_status"] == "active"
-    assert result_response.json()["finding_verification_state"] == "unreviewed"
-    assert result_response.json()["finding_verification_disposition"] == "none"
+    assert result_response.json()["finding_verification_status"] == "unreviewed"
+    assert "finding_verification_state" not in result_response.json()
+    assert "finding_verification_disposition" not in result_response.json()
 
     with db_module.get_connection() as connection:
         connection.execute(
             """
             UPDATE assessment_findings
-            SET status = 'false_positive', verification_state = 'verified',
-                verification_disposition = 'false_positive'
+            SET status = 'false_positive', verification_status = 'false_positive'
             WHERE engagement_id = (
                 SELECT id FROM engagements WHERE key = ?
             ) AND slug = 'CH-777'
@@ -10787,8 +11271,9 @@ def test_analysis_results_include_linked_finding_lifecycle(client, isolate_setti
     assert results_list.status_code == 200
     assert len(results_list.json()) == 1
     assert results_list.json()[0]["finding_workflow_status"] == "false_positive"
-    assert results_list.json()[0]["finding_verification_state"] == "verified"
-    assert results_list.json()[0]["finding_verification_disposition"] == "false_positive"
+    assert results_list.json()[0]["finding_verification_status"] == "false_positive"
+    assert "finding_verification_state" not in results_list.json()[0]
+    assert "finding_verification_disposition" not in results_list.json()[0]
 
 
 def test_coverage_detail_cwe(client, isolate_settings):
@@ -14056,10 +14541,11 @@ def _record_current_confirmed_memory_finding(
     slug: str = "VF-003",
     defect_family: str = "use-after-free",
     workflow_status: str = "active",
-    verification_state: str = "verified",
-    verification_disposition: str = "confirmed",
+    verification_status: str = "confirmed",
     expected_status: int = 201,
 ):
+    author_agent_id = f"AUTHOR-{slug}"
+    _ensure_finding_author_dispatch(client, engagement_key, author_agent_id)
     response = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
@@ -14067,8 +14553,7 @@ def _record_current_confirmed_memory_finding(
             "title": "Confirmed use-after-free in parser reset",
             "severity": "high",
             "workflow_status": workflow_status,
-            "verification_state": verification_state,
-            "verification_disposition": verification_disposition,
+            "verification_status": "unreviewed",
             "defect_family": defect_family,
             "root_cause_key": f"uaf-{slug.lower()}",
             "auth_context": "anonymous",
@@ -14076,13 +14561,14 @@ def _record_current_confirmed_memory_finding(
             "summary": "A state sequence frees and then reuses the parser buffer.",
             "evidence_ref": f"notes/{slug}.md",
             "notes": "Confirmed against the sealed source generation.",
-            "source_name": "code-vuln-verifier",
+            "source_name": "code-vuln-hunter",
             "details": {
                 "evidence": "reset() frees state retained by continue_parse().",
                 "impact": "Attacker-controlled sequencing can corrupt memory.",
             },
             "provenance": {
-                "agent_name": "code-vuln-verifier",
+                "agent_id": author_agent_id,
+                "agent_name": "code-vuln-hunter",
                 "code_snapshot": _finding_code_snapshot(
                     client, engagement_key, repo_id
                 ),
@@ -14091,6 +14577,15 @@ def _record_current_confirmed_memory_finding(
         },
     )
     assert response.status_code == expected_status, response.text
+    if expected_status == 201 and verification_status != "unreviewed":
+        verified = _verify_code_finding(
+            client,
+            engagement_key,
+            repo_id,
+            slug,
+            disposition=verification_status,
+        )
+        assert verified["finding"]["verification_status"] == verification_status
     return response
 
 
@@ -14439,8 +14934,9 @@ def test_fuzz_forcing_covers_all_native_memory_families_and_draft_reopens(
             slug=slug,
             defect_family=family,
             workflow_status="active" if family == "use-after-free" else "draft",
-            verification_state="unreviewed" if family == "null-dereference" else "verified",
-            verification_disposition="none" if family == "null-dereference" else "confirmed",
+            verification_status=(
+                "unreviewed" if family == "null-dereference" else "confirmed"
+            ),
         )
 
     reopened = client.patch(
@@ -14475,26 +14971,20 @@ def test_fuzz_forcing_covers_all_native_memory_families_and_draft_reopens(
     ).json()
     assert still_forced["required_finding_slugs"] == sorted(slugs)
 
-    killed = client.post(
-        f"/engagements/{engagement_key}/assessment/findings/{slugs[1]}/verify",
-        json={
-            "disposition": "false_positive",
-            "reason_code": "not-reachable",
-            "reason_text": "Verifier proved the suspected format path unreachable.",
-            "source_name": "code-vuln-verifier",
-            "details": {
-                "kill_check": 4,
-                "kill_reason": "No attacker-controlled format string reaches the sink.",
-            },
-            "provenance": {
-                "agent_name": "code-vuln-verifier",
-                "code_snapshot": _finding_code_snapshot(
-                    client, engagement_key, int(repo["id"])
-                ),
-            },
+    killed = _verify_code_finding(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        slugs[1],
+        disposition="false_positive",
+        reason_code="not-reachable",
+        reason_text="Verifier proved the suspected format path unreachable.",
+        details={
+            "kill_check": 4,
+            "kill_reason": "No attacker-controlled format string reaches the sink.",
         },
     )
-    assert killed.status_code == 200, killed.text
+    assert killed["finding"]["verification_status"] == "false_positive"
     after_kill = client.get(
         f"/engagements/{engagement_key}/assessment/code/fuzz/state?repo_id={repo['id']}"
     ).json()

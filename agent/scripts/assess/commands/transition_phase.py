@@ -2,7 +2,9 @@
 
 Validates preconditions before writing the new phase to scope.json.
 Exits non-zero and prints blockers when preconditions fail.
-Pass --force to override ordinary blockers; source-identity integrity blockers remain hard.
+Pass --force to override ordinary intermediate-phase blockers. Code completion
+never overrides unresolved durable debt; source-identity integrity blockers
+remain hard on every edge.
 """
 from __future__ import annotations
 
@@ -11,7 +13,7 @@ import os
 import re
 import sys
 
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import Config, load_config
 from assess.lib.scope import mutate_scope
 
@@ -190,6 +192,19 @@ def run(args) -> None:
         )
         for b in nonoverrideable:
             print(f"  - [{b['kind']}] {b['detail']}", file=sys.stderr)
+        sys.exit(1)
+
+    if hard and track == "code" and target_phase == "complete":
+        print(
+            "transition-phase: code cannot be forced to complete while durable "
+            f"debt remains ({len(hard)} blocker(s)):",
+            file=sys.stderr,
+        )
+        for blocker in hard:
+            print(
+                f"  - [{blocker['kind']}] {blocker['detail']}",
+                file=sys.stderr,
+            )
         sys.exit(1)
 
     if hard and not args.force:
@@ -424,7 +439,7 @@ def _check_web_preconditions(
                 unverified_high = [
                     f for f in findings
                     if f.get("severity") in ("critical", "high")
-                    and f.get("verification_state") != "verified"
+                    and f.get("verification_status") not in {"confirmed", "downgraded"}
                     and f.get("workflow_status") == "active"
                 ]
                 if unverified_high:
@@ -443,7 +458,7 @@ def _check_web_preconditions(
                 confirmed_high = [
                     f for f in findings
                     if f.get("severity") in ("critical", "high")
-                    and f.get("verification_state") == "verified"
+                    and f.get("verification_status") in {"confirmed", "downgraded"}
                     and f.get("workflow_status") == "active"
                 ]
                 if confirmed_high:
@@ -568,7 +583,7 @@ def _chain_construction_blockers(client: AssessmentClient) -> list[dict[str, str
     confirmed_high = [
         f for f in findings
         if f.get("severity") in ("critical", "high")
-        and f.get("verification_state") == "verified"
+        and f.get("verification_status") in {"confirmed", "downgraded"}
         and f.get("workflow_status") == "active"
     ]
     # The chain pass runs ACROSS the confirmed set: nothing to chain with fewer
@@ -1018,28 +1033,30 @@ def _blue_active_findings(findings: list[dict]) -> list[dict]:
 
 
 def _blue_finding_is_false_positive(finding: dict) -> bool:
+    return str(finding.get("verification_status") or "") == "false_positive"
+
+
+def _blue_finding_has_completed_counter_check(finding: dict) -> bool:
+    counter_check = finding.get("counter_check")
+    if not isinstance(counter_check, dict) or counter_check.get("completed") is not True:
+        return False
+    if not all(
+        str(counter_check.get(key) or "").strip()
+        for key in ("method", "expected_result", "observed_result", "falsified_claim")
+    ):
+        return False
+    receipt_ids = counter_check.get("proof_receipt_ids")
     return (
-        str(finding.get("workflow_status") or "") == "false_positive"
-        or str(finding.get("verification_disposition") or "") == "false_positive"
+        isinstance(receipt_ids, list)
+        and bool(receipt_ids)
+        and all(isinstance(receipt_id, int) and receipt_id > 0 for receipt_id in receipt_ids)
     )
 
 
-def _blue_finding_has_kill_reason(finding: dict) -> bool:
-    details = finding.get("details_json")
-    if isinstance(details, str):
-        try:
-            details = json.loads(details)
-        except (TypeError, ValueError):
-            details = {}
-    if not isinstance(details, dict):
-        return False
-    return bool(str(details.get("kill_reason") or "").strip())
-
-
-def _blue_all_findings_auto_closed(findings: list[dict]) -> bool:
+def _blue_all_findings_independently_closed(findings: list[dict]) -> bool:
     return bool(findings) and all(
         _blue_finding_is_false_positive(finding)
-        and _blue_finding_has_kill_reason(finding)
+        and _blue_finding_has_completed_counter_check(finding)
         for finding in findings
     )
 
@@ -1087,8 +1104,16 @@ def _blue_list_artifacts(client: AssessmentClient, *, finding: str = "") -> list
             f"artifacts/search?{finding_query}limit={page_size}&offset={offset}"
         )
         if not isinstance(page, list):
-            return rows
-        rows.extend(row for row in page if isinstance(row, dict))
+            raise AssessError(
+                "blue phase artifact audit returned a malformed page; phase "
+                "evidence is incomplete"
+            )
+        if any(not isinstance(row, dict) for row in page):
+            raise AssessError(
+                "blue phase artifact audit returned a malformed row; phase "
+                "evidence is incomplete"
+            )
+        rows.extend(page)
         if len(page) < page_size:
             return rows
         offset += page_size
@@ -1194,12 +1219,9 @@ def _blue_check_triage_to_investigate(
         })
         return blockers
 
-    # Auto-close-only path: every finding is FP with a kill_reason. The
-    # blue verify command stores kill_reason inside details_json; the
-    # workflow_status flips to 'false_positive'. Accept either signal.
-    if _blue_all_findings_auto_closed(findings):
-        # Auto-close-only path — skip the rest of the gate, operator can
-        # transition straight to report.
+    # A terminal false-positive decision may skip later investigation work only
+    # when the backend exposes its completed structured independent counter-check.
+    if _blue_all_findings_independently_closed(findings):
         return blockers
 
     drafts = [f for f in findings if str(f.get("workflow_status") or "") == "draft"]
@@ -1222,7 +1244,9 @@ def _blue_check_triage_to_investigate(
             "detail": (
                 "no completed L1 dispatch (alert-triage-specialist) found — "
                 "L1 work was not done. Dispatch via "
-                "`vigil blue dispatch --role alert-triage-specialist --tier L1`."
+                "`vigil assess agent start --role alert-triage-specialist --tier L1 "
+                "--rate-budget '<authored tenant query budget>' --prompt-context-json "
+                "dispatch-context.json --emit-prompt`."
             ),
         })
 
@@ -1242,7 +1266,7 @@ def _blue_check_investigate_to_verify(
 
     active = _blue_active_findings(findings)
 
-    if _blue_all_findings_auto_closed(findings):
+    if _blue_all_findings_independently_closed(findings):
         return blockers
 
     skeleton_drafts = [
@@ -1266,12 +1290,7 @@ def _blue_check_investigate_to_verify(
     missing_artifacts: list[str] = []
     for finding in active:
         slug = str(finding.get("slug") or "?")
-        details = finding.get("details_json")
-        if isinstance(details, str):
-            try:
-                details = json.loads(details)
-            except (TypeError, ValueError):
-                details = {}
+        details = finding.get("details")
         if not isinstance(details, dict):
             details = {}
         mitre = details.get("mitre_techniques")
@@ -1293,7 +1312,7 @@ def _blue_check_investigate_to_verify(
             "severity": "advisory",
             "detail": (
                 f"{len(missing_mitre)} active finding(s) missing "
-                f"details_json.mitre_techniques: {sample}"
+                f"details.mitre_techniques: {sample}"
                 + (" ..." if len(missing_mitre) > 5 else "")
                 + " — triage.md rule 11 asks for MITRE tagging; add it before "
                 "report for a complete ATT&CK mapping."
@@ -1325,7 +1344,9 @@ def _blue_check_investigate_to_verify(
             "detail": (
                 "no completed L2 dispatch (investigator) found — L2 work was "
                 "not done. Dispatch via "
-                "`vigil blue dispatch --role investigator --tier L2`."
+                "`vigil assess agent start --role investigator --tier L2 "
+                "--rate-budget '<authored tenant query budget>' --prompt-context-json "
+                "dispatch-context.json --emit-prompt`."
             ),
         })
 
@@ -1345,18 +1366,18 @@ def _blue_check_verify_to_respond(
 
     unreviewed = [
         f for f in _blue_active_findings(findings)
-        if str(f.get("verification_state") or "unreviewed") == "unreviewed"
+        if str(f.get("verification_status") or "unreviewed") == "unreviewed"
     ]
     if unreviewed:
         slugs = [str(f.get("slug") or "?") for f in unreviewed[:5]]
         blockers.append({
             "kind": "unreviewed_findings",
             "detail": (
-                f"{len(unreviewed)} active finding(s) still verification_state="
+                f"{len(unreviewed)} active finding(s) still verification_status="
                 f"'unreviewed': {', '.join(slugs)}"
                 + (" ..." if len(unreviewed) > 5 else "")
                 + " — verifier must disposition each via "
-                "`vigil blue verify <slug> --disposition ...`."
+                "`vigil blue verify <slug> --status ...`."
             ),
         })
 
@@ -1372,7 +1393,9 @@ def _blue_check_verify_to_respond(
             "detail": (
                 "no completed L3 dispatch (incident-verifier) found — verifier "
                 "did not run. Dispatch via "
-                "`vigil blue dispatch --role incident-verifier --tier L3`."
+                "`vigil assess agent start --role incident-verifier --tier L3 "
+                "--rate-budget '<authored tenant query budget>' --prompt-context-json "
+                "dispatch-context.json --emit-prompt`."
             ),
         })
 
@@ -1396,8 +1419,7 @@ def _blue_check_respond_to_report(
     # not closure; `vigil blue contain` records the action after host-exec.
     confirmed_high = [
         f for f in findings
-        if str(f.get("verification_state") or "") == "verified"
-        and str(f.get("verification_disposition") or "") == "confirmed"
+        if str(f.get("verification_status") or "") == "confirmed"
         and str(f.get("severity") or "") in ("high", "critical")
         and str(f.get("workflow_status") or "") not in (
             "false_positive", "merged", "reported",

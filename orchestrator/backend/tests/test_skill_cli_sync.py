@@ -32,7 +32,7 @@ Assertions:
     current (acknowledged) doc debt.
 
 (c) Flag coverage for the highest-drift-risk verbs. The load-bearing
-    operator-facing flags on ``verify-finding`` / ``eval-capture`` /
+    operator-facing flags on ``finding verify`` / ``eval-capture`` /
     ``scaffold-probe`` / ``check-phase-readiness`` must (1) still be real
     registered flags on that verb and (2) appear somewhere in the corpus.
     Together those two directions catch a rename on either the CLI side or the
@@ -203,6 +203,7 @@ def _doc_files() -> list[Path]:
     for candidate in (
         _REPO_ROOT / "agent" / "SKILL.md",
         _REPO_ROOT / "agent" / "AGENTS.md",
+        _REPO_ROOT / "agent" / "shared-specialist-core.md",
         _REPO_ROOT / "README.md",
         _REPO_ROOT / "CODE-MAP.md",
         _REPO_ROOT / "AGENTS.md",
@@ -573,19 +574,22 @@ def test_known_undocumented_allowlist_has_no_stale_entries(assess_registries, oo
 #   record-finding       — surface is positional (title/severity/...); its only
 #                           flag is the internal --allow-unindexed-evidence, so
 #                           there is no operator-facing flag to assert here.
-#   verify-finding       — omits --reason-code/--artifact-ref/--details-inline
+#   finding verify       — omits --reason-code/--artifact-ref/--details-inline
 #                           (advanced provenance knobs, undocumented by design).
 #   scaffold-probe       — omits --purpose/--no-register (advanced).
 _EXPECTED_FLAGS = {
-    # `verify-finding` is now the `verify` action under the `finding`
-    # subcommand group; the flag set is unchanged (pure re-parent).
+    # `verify` is the lifecycle action under the `finding` subcommand group.
+    # Verification is one status transition: terminal positive
+    # outcomes cite a proof receipt, while false positives cite a completed
+    # structured counter-check.
     "finding verify": {
-        "--disposition",
+        "--status",
         "--reason",
         "--narrative",
         "--evidence-ref",
         "--new-severity",
-        "--kill-check",
+        "--proof-receipt-id",
+        "--counter-check-file",
         "--payload-file",
     },
     "scaffold-probe": {

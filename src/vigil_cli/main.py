@@ -10,8 +10,10 @@ import sys
 import tarfile
 import time
 import webbrowser
+from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any, NoReturn
 
 from . import auth as auth_module
 from . import backup as backup_module
@@ -33,7 +35,6 @@ from .engagements import (
     plan_engagement,
     print_shell_cd_init,
     remove_out_of_scope,
-    resolve_aggregate_rate_limit,
     resolve_current_engagement,
     resolve_engagement_path,
     resolve_out_of_scope,
@@ -144,6 +145,28 @@ def _oob_poll_record_limit(raw: str) -> int:
     return value
 
 
+class _SiblingHintParser(argparse.ArgumentParser):
+    """Subcommand parser that can name a sibling namespace on an unknown verb.
+
+    Some verb families are deliberately split across `vigil <x>` (operator-side,
+    engagement-key positional, install-root resolution) and `vigil assess <x>`
+    (agent-side, `--engagement-dir`/CWD resolution). A verb that exists on only
+    one side then fails with argparse's terminal "invalid choice", which never
+    mentions the other half. `sibling_hint` appends that route. It is a POINTER,
+    not a duplicate verb: two listings that resolve the engagement differently
+    would be worse than one missing verb.
+    """
+
+    def __init__(self, *args: Any, sibling_hint: str = "", **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.sibling_hint = sibling_hint
+
+    def error(self, message: str) -> NoReturn:
+        if self.sibling_hint and "invalid choice" in message:
+            message = f"{message}\n{self.sibling_hint}"
+        super().error(message)
+
+
 def main(argv: list[str] | None = None) -> None:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     command_idx = _top_level_command_index(raw_argv)
@@ -153,18 +176,52 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="vigil", description="Vigil operator CLI")
     parser.add_argument("--root", help="Install root (default: $VIGIL_INSTALL_DIR or ~/vigil)")
     parser.add_argument("--source", help="Source checkout root for install/upgrade")
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(
+        dest="command", required=True, parser_class=_SiblingHintParser
+    )
 
     install_p = sub.add_parser("install", help="Install or update the working root from source")
     install_p.add_argument("install_dir", nargs="?")
     install_p.add_argument("--dry-run", action="store_true")
     install_p.add_argument("--force-image", action="store_true")
     install_p.add_argument("--skip-image-check", action="store_true")
+    install_p.add_argument(
+        "--repair-ambiguous-client-permissions-as-skip",
+        action="store_true",
+        help=(
+            "Explicitly regenerate configured legacy client entrypoints whose permission "
+            "mode is otherwise ambiguous using skip/dangerous permissions"
+        ),
+    )
+    install_p.add_argument(
+        "--refresh-physical-client-rosters",
+        action="store_true",
+        help=(
+            "Explicitly add or refresh canonical generated client-roster files "
+            "inside legacy physical roster directories without deleting extra files"
+        ),
+    )
     update_p = sub.add_parser("update", help="Alias for install")
     update_p.add_argument("install_dir", nargs="?")
     update_p.add_argument("--dry-run", action="store_true")
     update_p.add_argument("--force-image", action="store_true")
     update_p.add_argument("--skip-image-check", action="store_true")
+    update_p.add_argument(
+        "--repair-ambiguous-client-permissions-as-skip",
+        action="store_true",
+        help=(
+            "Explicitly regenerate configured legacy client entrypoints whose permission "
+            "mode is otherwise ambiguous using skip/dangerous permissions"
+        ),
+    )
+    update_p.add_argument(
+        "--refresh-physical-client-rosters",
+        action="store_true",
+        help=(
+            "Explicitly add or refresh canonical generated client-roster files "
+            "inside legacy physical roster directories without deleting extra files"
+        ),
+    )
 
     quickstart_p = sub.add_parser(
         "quickstart",
@@ -371,15 +428,6 @@ def main(argv: list[str] | None = None) -> None:
              "e.g. --rate-limit 5",
     )
     create_p.add_argument(
-        "--aggregate-rate-limit",
-        dest="aggregate_rate_limit",
-        type=float,
-        default=None,
-        metavar="REQ_PER_SEC",
-        help="Engagement-wide ceiling across concurrent target-facing commands. "
-             "Excess requires each command to record --rate-override-reason.",
-    )
-    create_p.add_argument(
         "--no-prompt",
         action="store_true",
         help="Never prompt interactively; fail when required fields are missing",
@@ -574,9 +622,10 @@ def main(argv: list[str] | None = None) -> None:
     )
     email_p.add_argument(
         "--within",
-        type=int,
+        type=email_module.duration_minutes,
         default=3,
-        help="only messages received in the last N minutes (default: 3)",
+        metavar="MINUTES",
+        help="only messages received in the last N minutes (accepts 30, 30m, 2h, 90s; default: 3)",
     )
     email_p.add_argument(
         "--match",
@@ -602,21 +651,30 @@ def main(argv: list[str] | None = None) -> None:
     )
     email_p.add_argument(
         "--timeout-seconds",
-        type=float,
-        default=30.0,
-        help="timeout for the Mail.app read (default: 30)",
+        type=email_module.duration_seconds,
+        default=email_module.DEFAULT_READ_TIMEOUT_SECONDS,
+        metavar="SECONDS",
+        help=(
+            "timeout for the Mail.app read (accepts 90, 90s, 2m; default: "
+            f"{email_module.DEFAULT_READ_TIMEOUT_SECONDS:g})"
+        ),
     )
     email_p.add_argument(
         "--wait-seconds",
-        type=float,
+        type=email_module.duration_seconds_or_zero,
         default=0.0,
-        help="poll for a delayed matching message for up to N seconds (default: 0)",
+        metavar="SECONDS",
+        help=(
+            "poll for a delayed matching message for up to N seconds, 0 to not "
+            "wait (accepts 60, 60s, 2m; default: 0)"
+        ),
     )
     email_p.add_argument(
         "--poll-seconds",
-        type=float,
+        type=email_module.duration_seconds,
         default=2.0,
-        help="seconds between reads while --wait-seconds is active (default: 2)",
+        metavar="SECONDS",
+        help="seconds between reads while --wait-seconds is active (accepts 2, 2s; default: 2)",
     )
     email_p.add_argument(
         "--links",
@@ -629,7 +687,14 @@ def main(argv: list[str] | None = None) -> None:
         help="emit results as JSON for programmatic parsing",
     )
 
-    auth_p = sub.add_parser("auth")
+    auth_p = sub.add_parser(
+        "auth",
+        sibling_hint=(
+            "note: identity ENUMERATION is an agent-side verb — run "
+            "`vigil assess auth list` (it resolves the engagement from "
+            "--engagement-dir/CWD, not the install root)."
+        ),
+    )
     auth_sub = auth_p.add_subparsers(dest="auth_command", required=True)
     for auth_name in ("status", "show", "edit", "clear", "export", "quarantine"):
         auth_cmd = auth_sub.add_parser(auth_name)
@@ -1011,6 +1076,10 @@ def main(argv: list[str] | None = None) -> None:
                 dry_run=args.dry_run,
                 force_image=args.force_image,
                 verify_docker_image=not args.skip_image_check,
+                repair_ambiguous_client_permissions_as_skip=(
+                    args.repair_ambiguous_client_permissions_as_skip
+                ),
+                refresh_physical_client_rosters=args.refresh_physical_client_rosters,
             )
         )
         if not args.dry_run:
@@ -1452,7 +1521,6 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
     required_headers = resolve_required_headers(args.program, args.researcher, args.header)
     out_of_scope = resolve_out_of_scope(args.out_of_scope)
     rate_limit = resolve_rate_limit(args.rate_limit)
-    aggregate_rate_limit = resolve_aggregate_rate_limit(args.aggregate_rate_limit)
 
     # Dry runs skip the summary + confirmation: nothing will be created either
     # way, and the dry-run path prints its own plan summary.
@@ -1468,7 +1536,6 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
             required_headers=required_headers,
             out_of_scope=out_of_scope,
             rate_limit=rate_limit,
-            aggregate_rate_limit=aggregate_rate_limit,
         )
         if not _confirm("Create engagement? [Y/n]"):
             raise SystemExit("aborted: engagement not created")
@@ -1487,7 +1554,6 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
         required_headers=required_headers,
         out_of_scope=out_of_scope,
         rate_limit=rate_limit,
-        rate_limit_aggregate_rps=aggregate_rate_limit,
     )
 
     if args.dry_run:
@@ -1637,7 +1703,6 @@ def _print_create_summary(
     required_headers: dict[str, str] | None = None,
     out_of_scope: list[str] | None = None,
     rate_limit: float | None = None,
-    aggregate_rate_limit: float | None = None,
 ) -> None:
     print("[vigil] engagement summary:", file=sys.stderr)
     print(f"[vigil]   type:      {engagement_type}", file=sys.stderr)
@@ -1662,11 +1727,6 @@ def _print_create_summary(
         print(
             f"[vigil]   rate-limit: {rate_limit:g} req/s "
             "(global per-invocation; bounds per-host as a side effect)",
-            file=sys.stderr,
-        )
-    if aggregate_rate_limit is not None:
-        print(
-            f"[vigil]   aggregate-rate-limit: {aggregate_rate_limit:g} req/s",
             file=sys.stderr,
         )
 
@@ -1841,9 +1901,33 @@ def _email_json_payload(
     poll_attempts: int,
     coverage: email_module.EmailScanCoverage | None,
     error: str | None = None,
+    error_kind: str = "",
+    aliases: Sequence[str] = (),
 ) -> dict[str, object]:
-    """Build the one `vigil email --json` payload shape, match or no match."""
+    """Build the one `vigil email --json` payload shape, match or no match.
+
+    `status` is the discriminator a `count: 0` needs, and it is emitted on every
+    path so a consumer never has to infer failure from an absent key:
+
+    - ``ok``        the scan completed and its answer is authoritative
+    - ``timeout``   the osascript read never returned; nothing was measured
+    - ``truncated`` the candidate window closed before the folders did
+    - ``error``     any other read failure
+
+    ``scan_coverage`` is likewise always present (``null`` when the failure left
+    no coverage to report, e.g. a timeout) so its absence can never read as
+    "the scan was complete".
+    """
+    if error is not None and error_kind == "timeout":
+        status = "timeout"
+    elif coverage is not None and not coverage.complete:
+        status = "truncated"
+    elif error is not None:
+        status = "error"
+    else:
+        status = "ok"
     payload: dict[str, object] = {
+        "status": status,
         "mailbox": args.mailbox,
         "from": args.from_filter,
         "subject": args.subject_filter,
@@ -1852,9 +1936,9 @@ def _email_json_payload(
         "count": len(messages),
         "poll_attempts": poll_attempts,
         "messages": messages,
+        "scan_coverage": asdict(coverage) if coverage is not None else None,
+        "subaddress_aliases": list(aliases),
     }
-    if coverage is not None:
-        payload["scan_coverage"] = asdict(coverage)
     if error is not None:
         payload["error"] = error
     return payload
@@ -1888,7 +1972,10 @@ def _email_coverage_line(coverage: email_module.EmailScanCoverage | None) -> str
 def _email(args: argparse.Namespace) -> None:
     """Read recent Mail.app messages for a mailbox and optionally extract a code."""
     if args.within <= 0:
-        raise SystemExit("--within must be a positive number of minutes")
+        raise SystemExit(
+            "--within must be a positive number of minutes (e.g. 30) or a "
+            "duration (90s, 30m, 2h)"
+        )
     if args.limit <= 0:
         raise SystemExit("--limit must be a positive integer")
     if args.timeout_seconds <= 0:
@@ -1902,6 +1989,7 @@ def _email(args: argparse.Namespace) -> None:
     deadline = time.monotonic() + args.wait_seconds
     poll_attempts = 0
     last_error: email_module.EmailReadError | None = None
+    last_scan: Sequence[email_module.EmailMessage] | None = None
     matched: list[email_module.EmailMessage] = []
     while True:
         poll_attempts += 1
@@ -1914,6 +2002,7 @@ def _email(args: argparse.Namespace) -> None:
             if args.links:
                 read_kwargs["include_source"] = True
             messages = email_module.read_messages(**read_kwargs)
+            last_scan = messages
             matched = email_module.filter_messages(
                 messages,
                 mailbox_address=args.mailbox,
@@ -1928,6 +2017,19 @@ def _email(args: argparse.Namespace) -> None:
         if matched or remaining <= 0:
             break
         time.sleep(min(args.poll_seconds, remaining))
+
+    # A zero against a plus-addressed mailbox is otherwise indistinguishable from
+    # "no mail arrived": name the sibling aliases the scan actually saw. Only
+    # reachable for a tagged query — an untagged one matches its own aliases.
+    aliases: list[str] = []
+    if not matched and last_scan is not None:
+        aliases = email_module.subaddress_aliases(last_scan, args.mailbox)
+        if aliases:
+            print(
+                f"note: nothing addressed to {args.mailbox}, but the scan saw "
+                f"{len(aliases)} alias(es) of the same mailbox: {', '.join(aliases)}",
+                file=sys.stderr,
+            )
 
     if not matched and last_error is not None:
         if not args.json:
@@ -1944,6 +2046,8 @@ def _email(args: argparse.Namespace) -> None:
                     poll_attempts=poll_attempts,
                     coverage=getattr(last_error, "coverage", None),
                     error=str(last_error),
+                    error_kind=getattr(last_error, "kind", ""),
+                    aliases=aliases,
                 ),
                 indent=2,
             )
@@ -1983,6 +2087,7 @@ def _email(args: argparse.Namespace) -> None:
             ],
             poll_attempts=poll_attempts,
             coverage=scan_coverage,
+            aliases=aliases,
         )
         print(json.dumps(payload, indent=2))
         return

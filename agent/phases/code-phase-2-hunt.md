@@ -55,6 +55,7 @@ vigil assess agent start-swarm --role code-variant-hunter --code-repo-id <repo-i
   --workers "$worker_count" --batch-size 2 \
   --items-file "$DIR/tools/analysis-state/cve-bug-shapes.jsonl" \
   --skills code-variant-analysis \
+  --no-target-traffic \
   --task "Verify each assigned historical fix and hunt semantic siblings"
 ```
 
@@ -196,6 +197,16 @@ vigil assess finding record code-vuln-hunter <finding-json>
 vigil assess code-dispatch requeue-triggers <triggers-json>   # if analysis returned cross_file_triggers
 vigil assess code-dispatch reset-stale 10   # before fetching the next batch
 ```
+
+For a run-accounted hunt, every `suspicious` analysis JSON also names its active
+`assessment_run_id` and the exact inventoried `assessment_source_id`. The backend records the
+analysis result and its deterministic open candidate atomically; a file/path/hash/repository-
+generation mismatch rejects the whole write. After each bounded discovery pass, record the
+attributed frontier/candidate set through `vigil assess run-audit discovery-pass record`; its
+server-computed delta measures workflow progress, while neither the digest nor a
+`frontier_exhausted` label independently proves comprehension. A pass stopped by an explicit cap
+is retained as unresolved work; only evidence-backed `frontier_exhausted` or
+`no_new_candidates` permits genuine code-scan completion.
 
 Use `code-dispatch done` with `clean`, `finding`, `suspicious`, or an explicit `skipped` plus
 `--skip-reason` -- the queue history is only useful if every admitted file receives a terminal,
@@ -383,7 +394,7 @@ current Code Source Identity and matching structural index, the complete current
 envelope (trust boundaries + trusted inputs), the cross-module call graph, and the module map.
 At Git/libcurl scale, fan out with `vigil assess agent start-swarm --role code-vuln-hunter
 --items-file tools/analysis-state/seams.txt --batch-size 1-3 --skills code-vulnerability-analysis
---task "system-level synthesis: <objective>"`, one specialist per worker row. Keep batch-size small
+--no-target-traffic --task "system-level synthesis: <objective>"`, one specialist per worker row. Keep batch-size small
 (1-3 seams) so each agent reasons deeply about coherent crossings instead of skimming dozens; each
 worker reads its seam slice from `seams/<id>.json`.
 

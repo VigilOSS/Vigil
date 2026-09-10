@@ -30,7 +30,7 @@ class _FakeClient:
 
     def patch(self, endpoint: str, payload: dict) -> dict:
         self.patches.append((endpoint, payload))
-        return {"id": len(self.patches), "status": payload.get("status")}
+        return {"id": int(endpoint.rsplit("/", 1)[-1]), "status": payload.get("status")}
 
     def __enter__(self) -> "_FakeClient":
         return self
@@ -75,6 +75,24 @@ def test_resolve_surface_covered_roundtrip(tmp_path, monkeypatch, capsys):
     endpoint, payload = fake.patches[0]
     assert endpoint == "surfaces/42"
     assert payload == {"status": "covered", "rationale": "analyst confirmed"}
+
+
+def test_resolve_rejects_response_for_a_different_row(
+    tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient()
+    fake.patch = lambda _endpoint, payload: {"id": 999, "status": payload["status"]}
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        ["resolve", "surface", "42", "--status", "covered", "--rationale", "confirmed"],
+        str(tmp_path),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        resolve.run(args)
+
+    assert exc.value.code == 1
+    assert "do not retry automatically" in capsys.readouterr().err
 
 
 def test_resolve_surface_partially_covered_requires_followup(tmp_path, monkeypatch, capsys):

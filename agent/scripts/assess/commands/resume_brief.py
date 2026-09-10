@@ -11,12 +11,16 @@ from urllib.parse import quote, urlencode
 from assess.commands import kali_sweep_orphans
 from assess.lib.client import AssessError, AssessmentClient, default_runtime_container
 from assess.lib.config import load_config
-from assess.lib.finding_render import blocked_reason_summary
+from assess.lib.finding_render import UNTRUSTED_DATA_NOTICE, blocked_reason_summary
 
 _COVERING_STATUSES = {"tested", "signal"}
 _DEGRADED_OUTPUT_RETENTION = {
     "integrity_failure",
+    "measurement_conflict",
+    "partially_measured",
+    "preview_only",
     "suppression_deferred",
+    "unmeasured",
     "untrusted",
 }
 
@@ -231,6 +235,8 @@ def _render_markdown(brief: dict) -> str:
     lines = [
         f"# Resume Brief: {engagement.get('key', '')}",
         "",
+        UNTRUSTED_DATA_NOTICE,
+        "",
         f"- phase: {engagement.get('current_phase', 'unknown')}",
         f"- scope_status: {engagement.get('scope_status', 'unknown')}",
         f"- hosts: {engagement.get('host_count', 0)}",
@@ -242,7 +248,7 @@ def _render_markdown(brief: dict) -> str:
         )
     lines.extend(["", "## Finding Counts"])
     counts = brief.get("finding_counts") or {}
-    for key in ("workflow", "verification_state", "verification_disposition", "severity", "source"):
+    for key in ("workflow", "verification_status", "severity", "source"):
         values = counts.get(key) or {}
         compact = ", ".join(f"{name}={count}" for name, count in sorted(values.items())) or "-"
         lines.append(f"- {key}: {compact}")
@@ -338,6 +344,7 @@ def _render_markdown(brief: dict) -> str:
         lines.append(f"- #{row.get('id')} {row.get('kind')} present={row.get('present')} {row.get('relative_path')}")
     if not brief.get("artifacts"):
         lines.append("- none")
+    _render_knowledge_drift(lines, brief.get("knowledge_drift") or {})
     intel = brief.get("intel") or {}
     if intel:
         lines.extend(["", "## Intel"])
@@ -377,6 +384,36 @@ def _render_markdown(brief: dict) -> str:
             entity = f" [{row.get('entity_kind')} {row.get('entity_id')}]"
         lines.append(f"- {row.get('reason')}{entity}: `{row.get('command')}`")
     return "\n".join(lines)
+
+
+def _render_knowledge_drift(lines: list, drift: dict) -> None:
+    """Render session-start drift as an advisory, never a readiness verdict."""
+    if not drift:
+        return
+    lines.extend(["", "## Knowledge Drift (advisory)"])
+    if drift.get("detector_status") != "complete":
+        detail = _trim(drift.get("detector_detail") or "unknown detector error", 300)
+        lines.append(
+            "- unlinked-markdown detector unavailable; do not infer that no "
+            f"unlinked prose exists: {detail}"
+        )
+        return
+    rows = drift.get("unlinked_markdown_notes") or []
+    total = drift.get("unlinked_markdown_note_count")
+    if not isinstance(total, int):
+        total = len(rows)
+    lines.append(f"- unlinked markdown notes ({total}):")
+    if not rows:
+        lines.append("  - none")
+        return
+    for row in rows:
+        path = _trim(row.get("path") or "", 160) or "-"
+        detail = _trim(row.get("detail") or "", 300)
+        artifact_id = row.get("artifact_id")
+        prefix = f"#{artifact_id} " if artifact_id is not None else ""
+        lines.append(f"  - {prefix}{path}" + (f" :: {detail}" if detail else ""))
+    if drift.get("truncated") or len(rows) < total:
+        lines.append(f"  - … showing {len(rows)} of {total}")
 
 
 def _command_output_truth(row: dict) -> str:
@@ -598,12 +635,11 @@ def _select_findings(rows: list) -> list:
 def _finding_line(row: dict) -> str:
     line = (
         f"{row.get('slug')} {row.get('severity')} "
-        f"{row.get('workflow_status')}/{row.get('verification_state')} "
+        f"{row.get('workflow_status')}/{row.get('verification_status')} "
         f"{_trim(row.get('title') or '', 100)}"
     )
-    # A blocked-for-provisioning finding (verification_disposition='blocked')
-    # shows only workflow_status/verification_state above — usually active/verified
-    # — so nothing here says it is blocked or why. Append the reason so a resume
+    # A blocked-for-provisioning finding shows its status above, but not why.
+    # Append the reason so a resume
     # reads it without opening the finding. No-op for non-blocked findings.
     blocked = blocked_reason_summary(row)
     if blocked:

@@ -11,7 +11,7 @@ from assess.lib.auth import auth_active_context
 from assess.lib.bulk_ingest import DEFAULT_BULK_WRITE_SIZE, post_request_observations_bulk
 from assess.lib.classify import classify_type
 from assess.lib.classify_buckets import CLASSIFIER_VERSION, INERT_TYPES, classify_from_fields
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import load_config
 from assess.lib.params import extract_url_path, generate_params_sig
 from assess.lib.scope import host_admitted, ingest_scope_filter
@@ -27,6 +27,26 @@ def register(subparsers) -> None:
 
 def _warn(message: str) -> None:
     print(f"ingest-spec: {message}", file=sys.stderr)
+
+
+def _require_observation_result(response: dict, *, method: str, url: str) -> dict:
+    invalid: list[str] = []
+    for field in ("request_variant", "request_observation"):
+        row = response.get(field)
+        row_id = row.get("id") if isinstance(row, dict) else None
+        if (
+            not isinstance(row_id, int)
+            or isinstance(row_id, bool)
+            or row_id < 1
+        ):
+            invalid.append(field)
+    if invalid:
+        raise AssessError(
+            f"ingest {method} {url}: backend response did not identify the durable "
+            f"{', '.join(invalid)} row(s); the write may have committed, so inspect "
+            "durable state and do not retry automatically"
+        )
+    return response
 
 
 
@@ -355,6 +375,11 @@ def run(args) -> None:
             # work_item block (ADR 0013); a non-error response means the
             # variant/coverage/work-item were created in one transaction.
             nonlocal count
+            _require_observation_result(
+                response,
+                method=str(row["method"]),
+                url=str(row["url"]),
+            )
             count += 1
             return True
 
@@ -367,34 +392,30 @@ def run(args) -> None:
             pending_rows.clear()
             pending_observations.clear()
 
-            try:
-                responses = post_request_observations_bulk(
-                    client,
-                    observations,
-                    warn_prefix="ingest-spec",
-                    fallback_individual=True,
-                )
-            except Exception as exc:  # noqa: BLE001 - preserve per-operation resilience
-                _warn(
-                    f"bulk backend ingest rejected {len(observations)} operation(s): "
-                    f"{exc}; retrying individually"
-                )
-                for row, observation in zip(rows, observations, strict=True):
-                    try:
-                        response = client.post("request-observations", observation)
-                    except Exception as row_exc:  # noqa: BLE001 - one bad op must not drop the spec
-                        skipped += 1
-                        _warn(f"backend rejected {row['method']} {row['url']}: {row_exc}; skipping this operation")
-                        continue
-                    _record_response(row, response)
-                return
+            # The shared helper alone owns fallback eligibility. It retries only
+            # explicit missing bulk routes or allowed pre-commit payload
+            # rejections; a malformed success receipt is an uncertain committed
+            # write and must propagate without a second individual POST.
+            responses = post_request_observations_bulk(
+                client,
+                observations,
+                warn_prefix="ingest-spec",
+                fallback_individual=True,
+            )
 
             for row, response in zip(rows, responses, strict=True):
                 if isinstance(response, Exception):
                     skipped += 1
                     _warn(f"backend rejected {row['method']} {row['url']}: {response}; skipping this operation")
                     continue
-                _record_response(row, response)
+                try:
+                    _record_response(row, response)
+                except Exception as row_exc:  # noqa: BLE001 - preserve per-operation resilience
+                    skipped += 1
+                    _warn(
+                        f"backend returned an invalid result for {row['method']} "
+                        f"{row['url']}: {row_exc}; skipping this operation"
+                    )
 
         for path_key, path_item in paths.items():
             if not isinstance(path_item, dict):

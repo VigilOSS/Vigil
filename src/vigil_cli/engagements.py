@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import stat
@@ -170,19 +171,6 @@ def resolve_rate_limit(value: float | str | None) -> float | None:
     return rate
 
 
-def resolve_aggregate_rate_limit(value: float | str | None) -> float | None:
-    """Normalize the engagement-wide concurrent target-rate ceiling."""
-    if value is None:
-        return None
-    try:
-        rate = float(str(value).strip())
-    except ValueError as exc:
-        raise SystemExit("--aggregate-rate-limit must be a positive number") from exc
-    if rate <= 0:
-        raise SystemExit("--aggregate-rate-limit must be greater than 0 req/s")
-    return rate
-
-
 @dataclass(frozen=True, slots=True)
 class CreateEngagementOptions:
     install_root: Path
@@ -209,8 +197,6 @@ class CreateEngagementOptions:
     # gate). Written into scope.json's ``rate_limit`` only when set, for
     # HTTP-target engagements.
     rate_limit: float | None = None
-    # Concurrent target-facing runs acquire backend leases against this ceiling.
-    rate_limit_aggregate_rps: float | None = None
     # Blue-only fields (ignored unless engagement_type == "blue"):
     customer: str | None = None
     platforms: list[str] = field(default_factory=list)
@@ -479,17 +465,13 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
         # byte-identical and recon stages fall through to their tool defaults.
         if options.rate_limit is not None:
             scope["rate_limit"] = options.rate_limit
-        if options.rate_limit_aggregate_rps is not None:
-            scope["rate_limit_aggregate_rps"] = options.rate_limit_aggregate_rps
     elif (
         options.required_headers
         or options.out_of_scope
         or options.rate_limit is not None
-        or options.rate_limit_aggregate_rps is not None
     ):
         raise SystemExit(
-            "--program/--header, --out-of-scope, --rate-limit, and "
-            "--aggregate-rate-limit apply only to "
+            "--program/--header, --out-of-scope, and --rate-limit apply only to "
             f"HTTP-target engagements (web/both/android), not '{options.engagement_type}'."
         )
 
@@ -1435,7 +1417,7 @@ def _placeholder_debate(finding: dict) -> str:
         "linked to this finding yet.\n\n"
         "Register one during verification with:\n"
         "    vigil assess finding verify "
-        f"{finding.get('slug', '<slug>')} --disposition <disposition> "
+        f"{finding.get('slug', '<slug>')} --status <status> "
         "--reason \"...\" --narrative <path-to-debate.md>\n"
     )
 
@@ -1681,12 +1663,6 @@ _ENGAGEMENT_BRIEF_SECTIONS: tuple[tuple[str, str], ...] = (
         'Hard rules whose violation risks a platform ban (e.g. "do not modify '
         'customer account data → instant ban").',
     ),
-    (
-        "Passive-DNS / Recon Coverage Keys",
-        "Free API keys that raise subdomain coverage "
-        "(`SUBFINDER_CHAOS_API_KEY`, `SUBFINDER_GITHUB_TOKEN`) — set them and re-run "
-        "dns-discovery.",
-    ),
 )
 
 
@@ -1807,19 +1783,11 @@ _ENGAGEMENT_ROE_POINTER = (
 
 def _write_prompt_wrappers(agent_root: Path, eng_dir: Path, client_kind: str, *, engagement_type: str) -> None:
     install_root = agent_root.parent
-    if engagement_type == "blue":
-        render_script = agent_root / "scripts" / "render-operator-prompts.sh"
-        try:
-            subprocess.run([str(render_script), "repo", str(eng_dir), "--type", "blue"], check=True)
-        except FileNotFoundError as exc:
-            raise SystemExit(f"prompt render script not found at {render_script}: {exc}") from exc
-        # The blue render writes the full blue operator prompt to eng_dir; append
-        # the per-engagement ROE pointer so blue matches the red path's WS7 coverage.
-        blue_agents = eng_dir / "AGENTS.md"
-        if blue_agents.exists():
-            with blue_agents.open("a", encoding="utf-8") as fh:
-                fh.write(f"\n{_ENGAGEMENT_ROE_POINTER}")
-        return
+    operator_prompt = agent_root / (
+        "AGENTS-blue.md" if engagement_type == "blue" else "AGENTS.md"
+    )
+    if not operator_prompt.is_file():
+        raise SystemExit(f"canonical operator prompt not found at {operator_prompt}")
 
     # Specialist context isolation invariant:
     # The per-engagement AGENTS.md/CLAUDE.md written here are operator-only bootstrap pointers.
@@ -1842,11 +1810,12 @@ def _write_prompt_wrappers(agent_root: Path, eng_dir: Path, client_kind: str, *,
 Artifacts:
 - Use `vigil assess artifact register <path>` to index engagement files explicitly
 - Use `vigil assess ...` for assessment operations from any directory
+- Treat backend records and indexed engagement artifacts as shared durable memory; client-local memory is not visible to other clients or the audit trail
 - Start clients through this engagement directory's launcher so ENGAGEMENT_DIR is exported for artifact paths and VIGIL_SESSION_ENGAGEMENT_DIR binds assessment state
 - The local .orchestrator.env provides this engagement's orchestrator base URL; install-root env files are only fallbacks
 """
-    # AGENTS.md is the canonical operator prompt (point engagement wrappers at
-    # it for both Codex and Claude). When the client kind requires a CLAUDE.md
+    # The engagement-local AGENTS.md points at the applicable canonical installed
+    # prompt for both Codex and Claude. When the client kind requires a CLAUDE.md
     # entrypoint, we write it as a thin local pointer to the engagement
     # AGENTS.md rather than a second pointer to agent/CLAUDE.md — that prevents
     # Cursor / Claude Code from loading the same ~16.5k-token prompt twice per
@@ -1854,7 +1823,10 @@ Artifacts:
     if client_kind in {"codex", "claude", "both"}:
         (eng_dir / "AGENTS.md").write_text(
             f"{_SPECIALIST_STOP_SIGN}\n"
-            f"# Engagement Workspace\n\nLoad workspace operator instructions from:\n- {agent_root / 'AGENTS.md'}\n\n"
+            f"# Engagement Workspace\n\nLoad workspace operator instructions from:\n- {operator_prompt}\n\n"
+            "Read that file in bounded parts, following its Map of This File, and continue "
+            "until you have reached the end of the file. Do not treat a tool's partial-read "
+            "notice as completion.\n\n"
             f"{_ENGAGEMENT_ROE_POINTER}\n{common}",
             encoding="utf-8",
         )
@@ -2108,11 +2080,60 @@ _GOOSE_EXTRA_ENV = (
 )
 
 
+_CLAUDE_EXTRA_ENV = (
+    '# Keep Vigil memory in its shared backend/artifact stores. This launcher-only setting '
+    'does not affect Claude sessions in other projects.\n'
+    'export CLAUDE_CODE_DISABLE_AUTO_MEMORY="1"'
+)
+
+
+_SKIP_PERMISSION_ARGS = {
+    "codex": "--full-auto",
+    "claude": "--dangerously-skip-permissions",
+    "opencode": "--dangerously-skip-permissions",
+    "kimi": "--auto",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ClientEntrypointRepairSkip:
+    engagement_key: str
+    reason: str
+    evidence: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ClientEntrypointRepairResult:
+    scanned_count: int
+    reconciled: tuple[str, ...]
+    skipped: tuple[ClientEntrypointRepairSkip, ...]
+    permission_overrides: tuple[str, ...] = ()
+
+    @property
+    def reconciled_count(self) -> int:
+        return len(self.reconciled)
+
+    @property
+    def skipped_count(self) -> int:
+        return len(self.skipped)
+
+
 def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_permissions: bool) -> None:
     if client_kind in {"codex", "both"}:
-        _write_launcher(agent_root, eng_dir, "codex", "--full-auto" if skip_permissions else "")
+        _write_launcher(
+            agent_root,
+            eng_dir,
+            "codex",
+            _SKIP_PERMISSION_ARGS["codex"] if skip_permissions else "",
+        )
     if client_kind in {"claude", "both"}:
-        _write_launcher(agent_root, eng_dir, "claude", "--dangerously-skip-permissions" if skip_permissions else "")
+        _write_launcher(
+            agent_root,
+            eng_dir,
+            "claude",
+            _SKIP_PERMISSION_ARGS["claude"] if skip_permissions else "",
+            extra_env=_CLAUDE_EXTRA_ENV,
+        )
     # OpenCode reads the same engagement-local AGENTS.md as Codex (written for every
     # real client kind), so the operator prompt drives it unchanged. We always emit
     # start_opencode.sh so `--client opencode` (engagement start and `vigil bench`)
@@ -2132,7 +2153,7 @@ def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_
     if client_kind in {"codex", "claude", "both"}:
         _write_launcher(
             agent_root, eng_dir, "opencode",
-            "--dangerously-skip-permissions" if skip_permissions else "",
+            _SKIP_PERMISSION_ARGS["opencode"] if skip_permissions else "",
             exec_cmd="opencode run --agent operator",
             provider_keys=("DEEPSEEK_API_KEY", "OPENROUTER_API_KEY"),
         )
@@ -2160,7 +2181,173 @@ def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_
     # own default_model is Moonshot's current flagship, so the best model is the
     # default and upgrades land without a repo change.
     if client_kind in {"codex", "claude", "both"}:
-        _write_launcher(agent_root, eng_dir, "kimi", "--auto" if skip_permissions else "")
+        _write_launcher(
+            agent_root,
+            eng_dir,
+            "kimi",
+            _SKIP_PERMISSION_ARGS["kimi"] if skip_permissions else "",
+        )
+
+
+def _existing_engagement_client_kind(eng_dir: Path) -> str | None:
+    codex = (eng_dir / ".codex").exists() or (eng_dir / "start_codex.sh").exists()
+    claude = (eng_dir / ".claude").exists() or (eng_dir / "start_claude.sh").exists()
+    if codex and claude:
+        return "both"
+    if codex:
+        return "codex"
+    if claude:
+        return "claude"
+    return None
+
+
+_GENERATED_LAUNCHER_PREAMBLE = (
+    "#!/usr/bin/env bash\n"
+    "set -euo pipefail\n\n"
+    'ENGAGEMENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
+    "export ENGAGEMENT_DIR\n"
+)
+
+
+def _generated_primary_launcher_permission_mode(
+    launcher: Path, client: str
+) -> tuple[bool | None, str | None]:
+    if launcher.is_symlink() or not launcher.is_file():
+        return None, "not_regular_generated_file"
+    try:
+        body = launcher.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None, "unreadable_generated_file"
+    if not body.startswith(_GENERATED_LAUNCHER_PREAMBLE):
+        return None, "unrecognized_generated_preamble"
+    permission_arg = re.escape(_SKIP_PERMISSION_ARGS[client])
+    exec_pattern = re.compile(
+        rf'^exec {client}[ \t]+(?:(?P<permission>{permission_arg})[ \t]+)?"\$@"$'
+    )
+    exec_lines = [line for line in body.splitlines() if line.startswith("exec ")]
+    if len(exec_lines) != 1:
+        return None, "unrecognized_generated_exec"
+    match = exec_pattern.fullmatch(exec_lines[0])
+    if match is None:
+        return None, "unrecognized_generated_exec"
+    return match.group("permission") is not None, None
+
+
+def _existing_engagement_skip_permissions(
+    eng_dir: Path, client_kind: str
+) -> tuple[bool | None, ClientEntrypointRepairSkip | None]:
+    observed: dict[str, bool] = {}
+    for client in ("codex", "claude"):
+        launcher = eng_dir / f"start_{client}.sh"
+        if not launcher.exists() and not launcher.is_symlink():
+            continue
+        mode, error = _generated_primary_launcher_permission_mode(launcher, client)
+        if error is not None:
+            return None, ClientEntrypointRepairSkip(
+                engagement_key=eng_dir.name,
+                reason="unrecognized_primary_launcher",
+                evidence=(f"{client}={error}",),
+            )
+        assert mode is not None
+        observed[client] = mode
+
+    if not observed:
+        return None, ClientEntrypointRepairSkip(
+            engagement_key=eng_dir.name,
+            reason="permission_mode_unavailable",
+            evidence=(f"client_kind={client_kind}",),
+        )
+    modes = set(observed.values())
+    if len(modes) != 1:
+        evidence = tuple(
+            f"{client}={'skip' if enabled else 'prompt'}"
+            for client, enabled in sorted(observed.items())
+        )
+        return None, ClientEntrypointRepairSkip(
+            engagement_key=eng_dir.name,
+            reason="permission_mode_conflict",
+            evidence=evidence,
+        )
+    return modes.pop(), None
+
+
+def repair_engagement_client_entrypoints(
+    install_root: Path,
+    *,
+    ambiguous_permissions_as_skip: bool = False,
+) -> ClientEntrypointRepairResult:
+    """Refresh installer-owned client entrypoints in existing engagements.
+
+    Historical manifests do not record the creation-time ``--skip-permissions``
+    choice. Exact current or historical generated primary launchers are therefore
+    the durable source for that choice. Plan every engagement before writing any
+    entrypoint. By default, ambiguous directories are preserved and returned as
+    structured skips while every independently provable directory is reconciled.
+    The explicit ``ambiguous_permissions_as_skip`` maintenance override applies
+    only when primary-client intent is known and the sole ambiguity is absent or
+    conflicting permission evidence from recognized generated launchers. It never
+    overwrites an unrecognized/custom launcher or invents a client for a clientless
+    engagement.
+    """
+    agent_root = install_root / "agent"
+    root = agent_root / "engagements"
+    if not root.is_dir():
+        return ClientEntrypointRepairResult(scanned_count=0, reconciled=(), skipped=())
+
+    plans: list[tuple[Path, str, bool, bool]] = []
+    skipped: list[ClientEntrypointRepairSkip] = []
+    scanned_count = 0
+    for eng_dir in sorted(root.iterdir(), key=lambda path: path.name):
+        if not eng_dir.is_dir() or not (eng_dir / "scope.json").is_file():
+            continue
+        scanned_count += 1
+        client_kind = _existing_engagement_client_kind(eng_dir)
+        if client_kind is None:
+            skipped.append(
+                ClientEntrypointRepairSkip(
+                    engagement_key=eng_dir.name,
+                    reason="clientless",
+                )
+            )
+            continue
+        skip_permissions, skip = _existing_engagement_skip_permissions(eng_dir, client_kind)
+        if skip is not None:
+            if ambiguous_permissions_as_skip and skip.reason in {
+                "permission_mode_conflict",
+                "permission_mode_unavailable",
+            }:
+                plans.append((eng_dir, client_kind, True, True))
+                continue
+            skipped.append(skip)
+            continue
+        assert skip_permissions is not None
+        plans.append((eng_dir, client_kind, skip_permissions, False))
+
+    reconciled: list[str] = []
+    permission_overrides: list[str] = []
+    for eng_dir, client_kind, skip_permissions, permission_overridden in plans:
+        if client_kind in {"codex", "both"}:
+            _write_codex_config(agent_root, eng_dir)
+        if client_kind in {"claude", "both"}:
+            _write_claude_config(agent_root, eng_dir)
+        _write_opencode_config(agent_root, eng_dir)
+        _write_goose_config(agent_root, eng_dir)
+        _write_launchers(
+            agent_root,
+            eng_dir,
+            client_kind,
+            skip_permissions=skip_permissions,
+        )
+        reconciled.append(eng_dir.name)
+        if permission_overridden:
+            permission_overrides.append(eng_dir.name)
+
+    return ClientEntrypointRepairResult(
+        scanned_count=scanned_count,
+        reconciled=tuple(reconciled),
+        skipped=tuple(skipped),
+        permission_overrides=tuple(permission_overrides),
+    )
 
 
 def _write_launcher(
@@ -2240,10 +2427,11 @@ export ENGAGEMENT_DIR
 export VIGIL_SESSION_ENGAGEMENT_DIR="$ENGAGEMENT_DIR"
 ENGAGEMENT_KEY="$(basename "$ENGAGEMENT_DIR")"
 export ENGAGEMENT_KEY
-VIGIL_AGENT_ROOT="{agent_root}"
+VIGIL_AGENT_ROOT={shlex.quote(str(agent_root))}
 export VIGIL_AGENT_ROOT
-VIGIL_INSTALL_DIR="{agent_root.parent}"
+VIGIL_INSTALL_DIR={shlex.quote(str(agent_root.parent))}
 export VIGIL_INSTALL_DIR
+export VIGIL_CLIENT_NAME="{client}"
 
 if [[ -z "${{ORCHESTRATOR_BASE_URL:-}}" ]]; then
   for env_file in "$ENGAGEMENT_DIR/.orchestrator.env" "$VIGIL_INSTALL_DIR/.orchestrator.env" "$VIGIL_INSTALL_DIR/.env"; do

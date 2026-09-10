@@ -60,7 +60,9 @@ import { IntelTab } from "../components/IntelTab";
 import { LogTab } from "../components/LogTab";
 import { OastTab } from "../components/OastTab";
 import { OverviewTab } from "../components/OverviewTab";
+import { RunsTab } from "../components/RunsTab";
 import { SurfacesTab } from "../components/SurfacesTab";
+import { SubmissionsTab } from "../components/SubmissionsTab";
 import { TabBar, TABS } from "../components/TabBar";
 import type { TabKey } from "../components/TabBar";
 import { ThemeToggle } from "../components/ThemeToggle";
@@ -81,6 +83,9 @@ type EngagementPageProps = {
   initialFindingSlug?: string;
   // Drawer-tab (poc/code/links/history/intel) for a deep-linked finding.
   initialDrawerTab?: string;
+  initialRunId?: number;
+  initialRunSection?: string;
+  initialRunObject?: string;
 };
 
 const ASSESSMENT_WIDE_FETCH_LIMIT = 5000;
@@ -110,7 +115,16 @@ function writeEngagementHash(engagementKey: string, tab: TabKey) {
   }
 }
 
-export function EngagementPage({ engagementKey, onBack, initialTab, initialFindingSlug, initialDrawerTab }: EngagementPageProps) {
+export function EngagementPage({
+  engagementKey,
+  onBack,
+  initialTab,
+  initialFindingSlug,
+  initialDrawerTab,
+  initialRunId,
+  initialRunSection,
+  initialRunObject,
+}: EngagementPageProps) {
   const { toast } = useToast();
   const [engagement, setEngagement] = useState<Engagement | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -336,6 +350,13 @@ export function EngagementPage({ engagementKey, onBack, initialTab, initialFindi
         case "intel":
           // IntelTab owns its own per-entity fetches; only the summary is
           // needed at the page level (already fetched above for tab counts).
+          break;
+        case "runs":
+          // RunsTab owns bounded run/detail/drill-down and comparison reads.
+          break;
+        case "submissions":
+          // SubmissionsTab owns finding selection, workspace reads, attachment
+          // choices, immutable export, recovery, and version history.
           break;
         case "commands":
           // CommandsTab owns its own fetch (list + lazy detail); the page
@@ -701,6 +722,23 @@ export function EngagementPage({ engagementKey, onBack, initialTab, initialFindi
               assessmentRefreshVersion={assessmentRefreshVersion}
               initialFindingSlug={pendingFindingSlug}
               initialDrawerTab={pendingDrawerTab}
+            />
+          )}
+
+          {activeTab === "runs" && (
+            <RunsTab
+              engagementKey={engagementKey}
+              refreshVersion={assessmentRefreshVersion}
+              initialRunId={initialRunId}
+              initialSection={initialRunSection}
+              initialObject={initialRunObject}
+            />
+          )}
+
+          {activeTab === "submissions" && (
+            <SubmissionsTab
+              engagementKey={engagementKey}
+              refreshVersion={assessmentRefreshVersion}
             />
           )}
 

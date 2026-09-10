@@ -6,7 +6,7 @@ import json
 import sys
 from pathlib import Path
 
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessmentClient, require_finding_write_response
 from assess.lib.config import load_config
 from assess.lib.contracts import SUBMISSION_STATUSES, render_contract_epilog
 from assess.lib.evidence_ref import warn_evidence_ref
@@ -57,6 +57,18 @@ def register(subparsers) -> None:
             "--workflow-status (report-inclusion): setting one never changes the "
             "other. Allowed: " + ", ".join(SUBMISSION_STATUSES) + " (default 'none')."
         ),
+    )
+    p.add_argument(
+        "--submission-platform",
+        help="External program/platform name stored with the submission lifecycle.",
+    )
+    p.add_argument(
+        "--submission-ref",
+        help="External program report/reference identifier.",
+    )
+    p.add_argument(
+        "--submission-url",
+        help="External program report URL.",
     )
     p.add_argument("--defect-family")
     p.add_argument("--root-cause-key")
@@ -132,6 +144,9 @@ _CONTENT_FLAGS = (
     ("severity", "--severity"),
     ("workflow_status", "--workflow-status"),
     ("submission_status", "--submission-status"),
+    ("submission_platform", "--submission-platform"),
+    ("submission_ref", "--submission-ref"),
+    ("submission_url", "--submission-url"),
     ("defect_family", "--defect-family"),
     ("root_cause_key", "--root-cause-key"),
     ("auth_context", "--auth-context"),
@@ -336,6 +351,9 @@ def run(args) -> None:
             # getattr fallback so callers that build args via SimpleNamespace
             # (test fixtures) don't AttributeError, mirroring evidence_type.
             "submission_status": getattr(args, "submission_status", None),
+            "submission_platform": getattr(args, "submission_platform", None),
+            "submission_ref": getattr(args, "submission_ref", None),
+            "submission_url": getattr(args, "submission_url", None),
             "defect_family": args.defect_family,
             "root_cause_key": args.root_cause_key,
             "auth_context": args.auth_context,
@@ -496,7 +514,11 @@ def run(args) -> None:
                         )
                     patch_payload["expected_row_version"] = row_version
                 results.append(
-                    client.patch(f"findings/{slug}", patch_payload)
+                    require_finding_write_response(
+                        client.patch(f"findings/{slug}", patch_payload),
+                        finding_slug=slug,
+                        operation="finding update",
+                    )
                 )
             except Exception as exc:  # noqa: BLE001 - one bad slug must not drop the rest
                 failed += 1

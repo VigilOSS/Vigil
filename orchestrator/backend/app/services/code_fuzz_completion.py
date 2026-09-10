@@ -183,7 +183,7 @@ def _current_memory_finding_slugs(
         FROM assessment_findings
         WHERE engagement_id = ?
           AND status NOT IN ('false_positive', 'merged')
-          AND verification_disposition != 'false_positive'
+          AND verification_status != 'false_positive'
           AND merged_into_finding_id IS NULL
           AND LOWER(TRIM(defect_family)) IN ({family_placeholders})
           AND CASE WHEN json_valid(provenance_json) THEN CAST(json_extract(

@@ -110,7 +110,7 @@ export function StatisticsTab({ data }: Props) {
         </div>
         <div className="rpt-panel">
           <BreakdownBars title="Workflow status" counts={summary.finding_workflow_statuses ?? {}} />
-          <BreakdownBars title="Verification state" counts={summary.finding_verification_states ?? {}} />
+          <BreakdownBars title="Verification status" counts={summary.finding_verification_statuses ?? {}} />
         </div>
       </section>
 

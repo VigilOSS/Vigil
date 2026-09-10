@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -16,6 +17,13 @@ from assess.lib.config import load_config
 # the event emit would 422 and silently drop the activity-feed event — so we
 # truncate the chain_key used in the event CLI-side (I-18).
 EVENT_TASK_NAME_MAX = 128
+_CHAIN_KEY_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _canonical_chain_key(title: str) -> str:
+    """Mirror the backend-owned deterministic key used when none is supplied."""
+    normalized = _CHAIN_KEY_RE.sub("-", title.strip().lower()).strip("-")
+    return normalized or "finding"
 
 
 def register(subparsers) -> None:
@@ -54,8 +62,23 @@ def run(args) -> None:
     except (KeyError, TypeError):
         pass
 
-    if not chain_key:
-        print("record-chain: backend did not return a valid chain", file=sys.stderr)
+    submitted_key = chain.get("chain_key")
+    expected_key = (
+        submitted_key
+        if isinstance(submitted_key, str) and submitted_key
+        else _canonical_chain_key(str(chain["title"]))
+    )
+    if (
+        not isinstance(chain_key, str)
+        or not chain_key.strip()
+        or chain_key != expected_key
+    ):
+        print(
+            "record-chain: backend did not return the canonical chain key for this write; "
+            "the write may have committed, so inspect `vigil assess fetch attack-chains --json` "
+            "and do not retry automatically",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     # Emit event. Truncate the chain_key used in the event to the backend

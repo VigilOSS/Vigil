@@ -30,6 +30,7 @@ records every GET and POST. Pins the behaviour the plan locks down:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -38,6 +39,7 @@ import pytest
 
 from assess.commands import export_submission
 from assess.lib.client import AssessError
+from assess.lib.finding_render import UNTRUSTED_DATA_NOTICE
 
 # An INTERNAL agent UUID (known from a command-run row) that must be FLAGGED (not
 # rewritten) when it leaks into the output.
@@ -68,6 +70,7 @@ class _FakeClient:
         decisions=None,
         decisions_error: str = "",
         post_error: str = "",
+        post_response: dict | None = None,
     ) -> None:
         self._finding = finding
         self._links = links or []
@@ -81,6 +84,7 @@ class _FakeClient:
         self._decisions = decisions if decisions is not None else []
         self._decisions_error = decisions_error
         self._post_error = post_error
+        self._post_response = post_response
         self.engagement_dir = ""
         self.gets: list[str] = []
         self.posts: list[tuple[str, dict]] = []
@@ -151,7 +155,29 @@ class _FakeClient:
         if self._post_error:
             raise AssessError(self._post_error)
         self.posts.append((endpoint, payload))
-        return {"id": len(self.posts), **payload}
+        if self._post_response is not None:
+            return self._post_response
+        if endpoint == "submissions/recover":
+            return {
+                "recovered_version_ids": [77],
+                "failed_version_ids": [],
+                "failed_versions": [],
+                "orphaned_staging_paths": [],
+            }
+        if endpoint.startswith("submissions/") and endpoint.endswith("/exports"):
+            return {
+                "id": 77,
+                "version_number": 1,
+                "status": "complete",
+                "relative_path": "submissions/VA-047/versions/0001/submission.md",
+                "sha256": "a" * 64,
+                "idempotent_replay": False,
+            }
+        return {
+            "id": len(self.posts),
+            **payload,
+            "relative_path": payload.get("path", ""),
+        }
 
     def __enter__(self) -> "_FakeClient":
         return self
@@ -189,7 +215,7 @@ def _finding(
     evidence_ref: str = "scans/idor-orders.txt",
     details: dict | None = None,
 ) -> dict:
-    """A finding as returned by GET /findings/{slug}: details_json is a RAW STRING."""
+    """A finding as returned by GET /findings/{slug}, with parsed details."""
     return {
         "id": 91,
         "slug": slug,
@@ -200,9 +226,10 @@ def _finding(
         "canonical_location": "/orders/1001",
         "evidence_ref": evidence_ref,
         "workflow_status": "active",
-        "verification_state": "verified",
-        "verification_disposition": "confirmed",
-        "details_json": json.dumps(details or {}),
+        "verification_status": "confirmed",
+        "row_version": 9,
+        "updated_at": "2026-09-09T12:00:00Z",
+        "details": dict(details or {}),
     }
 
 
@@ -344,6 +371,241 @@ def test_final_passes_with_complete_finding(tmp_path, monkeypatch, capsys):
     assert ctx["linked_command_runs"] == []
 
 
+def test_final_snapshots_context_and_calls_shared_version_api(
+    tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient(_finding(details=_complete_details()))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        [
+            "submission",
+            "VA-047",
+            "--platform",
+            "bugcrowd",
+            "--attachment-id",
+            "42",
+            "--attachment-id",
+            "17",
+            "--json",
+        ],
+        str(tmp_path),
+    )
+
+    export_submission.run(args)
+
+    output = json.loads(capsys.readouterr().out)
+    context_path = tmp_path / "submissions" / "VA-047" / "submission-context.json"
+    context = json.loads(context_path.read_text(encoding="utf-8"))
+    markdown = _submission_path(tmp_path).read_bytes()
+    assert context["submission_sha256"] == hashlib.sha256(markdown).hexdigest()
+    assert context["source_finding"] == {
+        "id": 91,
+        "row_version": 9,
+        "updated_at": "2026-09-09T12:00:00Z",
+        "workflow_status": "active",
+        "verification_status": "confirmed",
+    }
+    version_posts = [
+        (endpoint, payload)
+        for endpoint, payload in fake.posts
+        if endpoint == "submissions/VA-047/exports"
+    ]
+    assert version_posts == [
+        (
+            "submissions/VA-047/exports",
+            {
+                "platform": "bugcrowd",
+                "submission_path": "submissions/VA-047/submission.md",
+                "context_path": "submissions/VA-047/submission-context.json",
+                "attachment_ids": [42, 17],
+                "actor_surface": "vigil-assess",
+            },
+        )
+    ]
+    assert output["version"] == {
+        "id": 77,
+        "version_number": 1,
+        "status": "complete",
+        "relative_path": "submissions/VA-047/versions/0001/submission.md",
+        "sha256": "a" * 64,
+        "idempotent_replay": False,
+    }
+
+
+def test_draft_does_not_create_an_immutable_version(tmp_path, monkeypatch, capsys):
+    fake = _FakeClient(_finding(details=_complete_details()))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        ["submission", "VA-047", "--platform", "bugcrowd", "--draft"],
+        str(tmp_path),
+    )
+
+    export_submission.run(args)
+    capsys.readouterr()
+
+    assert not any(endpoint.startswith("submissions/") for endpoint, _ in fake.posts)
+
+
+def test_recover_mode_uses_the_shared_recovery_api_without_rendering(
+    tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient(_finding(details=_complete_details()))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["submission", "--recover", "--json"], str(tmp_path))
+
+    export_submission.run(args)
+
+    assert json.loads(capsys.readouterr().out) == {
+        "recovered_version_ids": [77],
+        "failed_version_ids": [],
+        "failed_versions": [],
+        "orphaned_staging_paths": [],
+    }
+    assert fake.posts == [
+        ("submissions/recover", {"actor_surface": "vigil-assess"})
+    ]
+    assert not _submission_path(tmp_path).exists()
+
+
+def test_recover_human_output_prints_failure_reasons_and_orphan_paths(
+    tmp_path, monkeypatch, capsys
+):
+    recovery = {
+        "recovered_version_ids": [],
+        "failed_version_ids": [12],
+        "failed_versions": [
+            {
+                "id": 12,
+                "finding_slug": "VA-047",
+                "version_number": 3,
+                "status": "failed",
+                "failure_reason": "staged package is missing",
+                "staging_relative_path": "submissions/VA-047/versions/.staging/0003.tmp",
+                "relative_path": "submissions/VA-047/versions/0003/submission.md",
+            }
+        ],
+        "orphaned_staging_paths": [
+            "submissions/VA-099/versions/.staging/orphan.tmp"
+        ],
+    }
+    fake = _FakeClient(
+        _finding(details=_complete_details()), post_response=recovery
+    )
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["submission", "--recover"], str(tmp_path))
+
+    export_submission.run(args)
+
+    output = capsys.readouterr().out
+    assert "VA-047 version 3 (id=12): staged package is missing" in output
+    assert "submissions/VA-047/versions/.staging/0003.tmp" in output
+    assert "submissions/VA-047/versions/0003/submission.md" in output
+    assert "submissions/VA-099/versions/.staging/orphan.tmp" in output
+
+
+def test_recover_mode_consumes_every_bounded_diagnostic_page(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    failed_one = {
+        "id": 12,
+        "finding_slug": "VA-047",
+        "version_number": 3,
+        "status": "failed",
+        "failure_reason": "first failed stage",
+        "staging_relative_path": "submissions/VA-047/versions/.staging/0003.tmp",
+        "relative_path": "submissions/VA-047/versions/0003/submission.md",
+    }
+    failed_two = {
+        **failed_one,
+        "id": 13,
+        "version_number": 4,
+        "failure_reason": "second failed stage",
+        "staging_relative_path": "submissions/VA-047/versions/.staging/0004.tmp",
+        "relative_path": "submissions/VA-047/versions/0004/submission.md",
+    }
+    orphan_one = "submissions/VA-098/versions/.staging/a.tmp"
+    orphan_two = "submissions/VA-099/versions/.staging/b.tmp"
+    responses = [
+        {
+            "actor_surface": "vigil-assess",
+            "recovered_version_ids": [77],
+            "failed_version_ids": [12],
+            "failed_versions": [failed_one],
+            "failed_versions_page": {
+                "offset": 0,
+                "limit": 1,
+                "returned": 1,
+                "total": 2,
+                "has_more": True,
+                "next_offset": 1,
+            },
+            "orphaned_staging_paths": [orphan_one],
+            "orphaned_staging_page": {
+                "limit": 1,
+                "returned": 1,
+                "has_more": True,
+                "next_after": orphan_one,
+            },
+        },
+        {
+            "actor_surface": "vigil-assess",
+            "recovered_version_ids": [],
+            "failed_version_ids": [13],
+            "failed_versions": [failed_two],
+            "failed_versions_page": {
+                "offset": 1,
+                "limit": 1,
+                "returned": 1,
+                "total": 2,
+                "has_more": False,
+                "next_offset": None,
+            },
+            "orphaned_staging_paths": [orphan_two],
+            "orphaned_staging_page": {
+                "limit": 1,
+                "returned": 1,
+                "has_more": False,
+                "next_after": None,
+            },
+        },
+    ]
+
+    class PagedRecoveryClient(_FakeClient):
+        def post(self, endpoint: str, payload: dict) -> dict:
+            self.posts.append((endpoint, payload))
+            assert endpoint == "submissions/recover"
+            return responses.pop(0)
+
+    fake = PagedRecoveryClient(_finding(details=_complete_details()))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["submission", "--recover", "--json"], str(tmp_path))
+
+    export_submission.run(args)
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["recovered_version_ids"] == [77]
+    assert result["failed_version_ids"] == [12, 13]
+    assert result["failed_versions"] == [failed_one, failed_two]
+    assert result["orphaned_staging_paths"] == [orphan_one, orphan_two]
+    assert result["failed_versions_page"]["returned"] == 2
+    assert result["failed_versions_page"]["has_more"] is False
+    assert result["failed_versions_page"]["next_offset"] is None
+    assert result["orphaned_staging_page"]["returned"] == 2
+    assert result["orphaned_staging_page"]["has_more"] is False
+    assert result["orphaned_staging_page"]["next_after"] is None
+    assert fake.posts == [
+        ("submissions/recover", {"actor_surface": "vigil-assess"}),
+        (
+            "submissions/recover",
+            {
+                "actor_surface": "vigil-assess",
+                "failed_version_offset": 1,
+                "orphan_after": orphan_one,
+            },
+        ),
+    ]
+
+
 def test_operator_details_surfaces_full_record(tmp_path, monkeypatch, capsys):
     """Everything else on the record is surfaced below the paste line so the LLM
     edits with the full picture — dedup/merge, root cause, chain, verification, notes."""
@@ -356,7 +618,7 @@ def test_operator_details_surfaces_full_record(tmp_path, monkeypatch, capsys):
     finding["merged_into_slug"] = "EX-003"
     finding["root_cause_key"] = "missing-flauthz:tame-writes"
     finding["defect_family"] = "broken-function-level-authorization"
-    finding["verification_state"] = "verified"
+    finding["verification_status"] = "confirmed"
     finding["notes"] = "MECHANISM: no E00207 caller-authz on qtame writes. REACHABILITY: prod accepted."
     fake = _FakeClient(finding)
     _install(monkeypatch, tmp_path, fake)
@@ -371,11 +633,76 @@ def test_operator_details_surfaces_full_record(tmp_path, monkeypatch, capsys):
     assert "broken-function-level-authorization" in details
     assert "Chain rationale" in details and "VA-002 oracle" in details
     assert "Propagation verdict" in details
-    assert "Verification state: verified" in details
+    assert "Verification status: confirmed" in details
     assert "Discovered by: exploit-developer" in details
     assert "Investigation notes" in details and "no E00207" in details
     # notes never leak above the paste line
     assert "no E00207" not in body[: body.index("## OPERATOR DETAILS")]
+
+
+def test_operator_details_and_context_preserve_structured_verification_audit(
+    tmp_path, monkeypatch, capsys
+):
+    finding = _finding(details=_complete_details())
+    finding["verification_audit"] = {
+        "proof_receipt_ids": [46, 44, 45],
+        "proof_receipt_total": 3,
+        "counter_checks": [
+            {
+                "id": 12,
+                "transition_id": 31,
+                "verifier_dispatch_id": 8,
+                "method": "cross-tenant negative control",
+                "expected_result": "another tenant's record is returned",
+                "observed_result": "every request was denied before the read",
+                "falsified_claim": "tenant isolation can be bypassed",
+                "completed": True,
+                "proof_receipt_ids": [44, 45],
+                "created_at": "2026-09-09 12:00:00",
+            }
+        ],
+        "counter_check_total": 1,
+        "severity_variances": [
+            {
+                "id": 13,
+                "transition_id": 32,
+                "normal_band": "medium",
+                "chosen_severity": "high",
+                "actor": "code-vuln-verifier",
+                "reason": "Contractual breach notification applies.",
+                "proof_receipt_id": 46,
+                "created_at": "2026-09-09 12:01:00",
+            }
+        ],
+        "severity_variance_total": 1,
+        "record_limit": 100,
+        "truncated": False,
+    }
+    fake = _FakeClient(finding)
+    _install(monkeypatch, tmp_path, fake)
+
+    args = _parse(
+        ["submission", "VA-047", "--platform", "bugcrowd", "--draft"],
+        str(tmp_path),
+    )
+    export_submission.run(args)
+    capsys.readouterr()
+
+    body = _submission_path(tmp_path).read_text()
+    operator_details = body[body.index("## OPERATOR DETAILS") :]
+    assert "Structured verification audit" in operator_details
+    assert "cross-tenant negative control" in operator_details
+    assert "every request was denied before the read" in operator_details
+    assert "tenant isolation can be bypassed" in operator_details
+    assert "Contractual breach notification applies." in operator_details
+    assert "Proof receipts: 44, 45" in operator_details
+    assert "Proof receipt: 46" in operator_details
+    assert "Decision proof receipts: 46, 44, 45" in operator_details
+
+    context = json.loads(
+        (tmp_path / "submissions" / "VA-047" / "submission-context.json").read_text()
+    )
+    assert context["verification_audit"] == finding["verification_audit"]
 
 
 def test_location_method_not_doubled(tmp_path, monkeypatch, capsys):
@@ -476,10 +803,10 @@ def test_final_requires_every_outward_facing_body_section(
     elif field == "remediation":
         details[field] = ""
         finding["remediation"] = ""
-        finding["details_json"] = json.dumps(details)
+        finding["details"] = dict(details)
     else:
         details[field] = [] if field == "steps_to_reproduce" else ""
-        finding["details_json"] = json.dumps(details)
+        finding["details"] = dict(details)
 
     fake = _FakeClient(finding)
     _install(monkeypatch, tmp_path, fake)
@@ -717,8 +1044,8 @@ def test_hackerone_weakness_falls_back_to_cwe_id(tmp_path, monkeypatch, capsys):
         ("workflow_status", "draft"),
         ("workflow_status", "merged"),
         ("workflow_status", "false_positive"),
-        ("verification_state", "unreviewed"),
-        ("verification_disposition", "pending_runtime_proof"),
+        ("verification_status", "unreviewed"),
+        ("verification_status", "pending_runtime_proof"),
     ],
 )
 def test_final_requires_verified_report_candidate(tmp_path, monkeypatch, field, value):
@@ -1131,6 +1458,69 @@ def test_submission_outputs_render_proof_verbatim(tmp_path, monkeypatch, capsys)
     assert "<YOUR_SESSION_COOKIE>" not in markdown
     assert "<REDACTED_CREDENTIAL>" not in markdown
     assert "<YOUR_SESSION_COOKIE>" not in context
+    # The trust label belongs to internal/prompt-bound renderings. It must never
+    # become authored platform submission prose.
+    assert UNTRUSTED_DATA_NOTICE not in markdown
+
+
+@pytest.mark.parametrize("draft", [True, False])
+def test_submission_credential_store_shape_is_flagged_or_refused_without_redaction(
+    tmp_path, monkeypatch, capsys, draft
+):
+    stored_credential = {
+        "credential_key": "member-cookie",
+        "kind": "cookie",
+        "principal": "member@example.test",
+        "secret": "session=preserve-authored-bytes",
+    }
+    details = _complete_details(
+        evidence=(
+            "An internal credential-store row was pasted here by mistake: "
+            + json.dumps(stored_credential, sort_keys=True)
+        )
+    )
+    fake = _FakeClient(_finding(details=details))
+    _install(monkeypatch, tmp_path, fake)
+    argv = ["submission", "VA-047", "--platform", "bugcrowd"]
+    if draft:
+        argv.append("--draft")
+    args = _parse(argv, str(tmp_path))
+
+    if draft:
+        export_submission.run(args)
+        body = _submission_path(tmp_path).read_text()
+        assert stored_credential["secret"] in body
+        warnings = "\n".join(_context(tmp_path)["hygiene_warnings"])
+        assert "credential-store object" in warnings
+        assert stored_credential["secret"] not in warnings
+        assert "WARN export submission" in capsys.readouterr().err
+    else:
+        with pytest.raises(AssessError, match="credential-store object"):
+            export_submission.run(args)
+        assert not _submission_path(tmp_path).exists()
+        assert fake.posts == []
+
+
+def test_correction_history_is_preserved_only_below_submission_boundary(
+    tmp_path, monkeypatch, capsys
+):
+    correction = "Retracts VA-001: the original response belonged to the test account."
+    fake = _FakeClient(
+        _finding(details=_complete_details(correction_history=[correction]))
+    )
+    _install(monkeypatch, tmp_path, fake)
+
+    export_submission.run(
+        _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
+    )
+    capsys.readouterr()
+
+    markdown = _submission_path(tmp_path).read_text()
+    pasteable, operator = markdown.split(
+        "## OPERATOR DETAILS — NOT FOR SUBMISSION", 1
+    )
+    assert correction not in pasteable
+    assert correction in operator
 
 
 def test_operator_details_consolidates_all_reference(tmp_path, monkeypatch, capsys):
@@ -1496,7 +1886,10 @@ def test_final_output_must_be_inside_engagement(tmp_path, monkeypatch):
 
 
 def test_final_fails_when_submission_artifact_registration_fails(tmp_path, monkeypatch, capsys):
-    fake = _FakeClient(_finding(details=_complete_details()), post_error="backend unavailable")
+    fake = _FakeClient(
+        _finding(details=_complete_details()),
+        post_error="HTTP 422: artifact payload rejected before commit",
+    )
     _install(monkeypatch, tmp_path, fake)
     args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
     with pytest.raises(AssessError) as exc:
@@ -1508,13 +1901,57 @@ def test_final_fails_when_submission_artifact_registration_fails(tmp_path, monke
     assert not (_submission_path(tmp_path).parent / "submission-context.json").exists()
 
 
+def test_final_rejects_malformed_submission_artifact_receipt(
+    tmp_path, monkeypatch, capsys
+):
+    submission = _submission_path(tmp_path)
+    context = submission.parent / "submission-context.json"
+    submission.parent.mkdir(parents=True)
+    submission.write_text("previous submission\n", encoding="utf-8")
+    context.write_text('{"previous": true}\n', encoding="utf-8")
+    fake = _FakeClient(
+        _finding(details=_complete_details()),
+        post_response={"message": "accepted"},
+    )
+    _install(monkeypatch, tmp_path, fake)
+    written_before_receipt: dict[str, bytes] = {}
+    original_post = fake.post
+
+    def capture_written_files(endpoint: str, payload: dict) -> dict:
+        if endpoint == "artifacts":
+            written_before_receipt["submission"] = submission.read_bytes()
+            written_before_receipt["context"] = context.read_bytes()
+        return original_post(endpoint, payload)
+
+    fake.post = capture_written_files
+    args = _parse(
+        ["submission", "VA-047", "--platform", "bugcrowd", "--overwrite"],
+        str(tmp_path),
+    )
+
+    with pytest.raises(AssessError, match="artifact registration failed") as exc:
+        export_submission.run(args)
+
+    captured = capsys.readouterr()
+    assert "do not retry automatically" in str(exc.value)
+    assert "reconcil" in str(exc.value)
+    assert "Wrote final" not in captured.out
+    assert submission.read_bytes() == written_before_receipt["submission"]
+    assert context.read_bytes() == written_before_receipt["context"]
+    assert submission.read_bytes() != b"previous submission\n"
+    assert context.read_bytes() != b'{"previous": true}\n'
+
+
 def test_failed_final_registration_restores_overwritten_outputs(tmp_path, monkeypatch):
     submission = _submission_path(tmp_path)
     context = submission.parent / "submission-context.json"
     submission.parent.mkdir(parents=True)
     submission.write_text("previous submission\n", encoding="utf-8")
     context.write_text('{"previous": true}\n', encoding="utf-8")
-    fake = _FakeClient(_finding(details=_complete_details()), post_error="backend unavailable")
+    fake = _FakeClient(
+        _finding(details=_complete_details()),
+        post_error="HTTP 422: artifact payload rejected before commit",
+    )
     _install(monkeypatch, tmp_path, fake)
     args = _parse(
         ["submission", "VA-047", "--platform", "bugcrowd", "--overwrite"],
@@ -1706,12 +2143,12 @@ def test_final_render_keeps_every_details_section(tmp_path, monkeypatch, capsys)
         assert expected in body, f"missing from final submission: {expected}"
 
 
-def test_unparseable_details_json_warns_instead_of_blanking_silently(
+def test_malformed_details_warn_instead_of_blanking_silently(
     tmp_path, monkeypatch, capsys
 ):
     """Corrupt details must announce themselves, not render as an unauthored finding."""
     finding = _finding(details=_complete_details())
-    finding["details_json"] = '{"evidence": "truncated'  # invalid JSON
+    finding["details"] = '{"evidence": "truncated'  # an object is required
     _install(monkeypatch, tmp_path, _FakeClient(finding))
     args = _parse(
         ["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path)
@@ -1720,7 +2157,8 @@ def test_unparseable_details_json_warns_instead_of_blanking_silently(
     export_submission.run(args)
     captured = capsys.readouterr()
 
-    assert "unparseable details_json" in captured.err
+    assert "details" in captured.err
+    assert "not an object" in captured.err
     assert "VA-047" in captured.err
 
 

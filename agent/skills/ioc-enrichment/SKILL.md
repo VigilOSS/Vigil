@@ -106,7 +106,7 @@ These touch no external services and do not need the audit envelope:
 
 ### Step 1 — Collect IOCs from the finding
 
-Pull the IOC list from the finding's `details_json.indicators[]` —
+Pull the IOC list from the finding's `details.indicators[]` —
 each entry is `{"kind": "ip|domain|url|hash|email|asn", "value": "..."}`
 with an optional `algorithm` field on hashes.
 
@@ -251,7 +251,7 @@ ns_records, mx_records, category). For `asn` reputation, drop into
 country in `details` — there is no dedicated ASN table.
 
 The schema slots above (`details.*`) are the conventional extension
-points — the orchestrator stores them in `details_json` columns on
+points — the public finding contract carries them in parsed `details` on
 each `intel_*` table. Stick to the schema files in `agent/schemas/`
 for required-field validation; the extensions live in `details`.
 

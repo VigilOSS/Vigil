@@ -26,7 +26,11 @@ from .audit_enums import (
     normalize_probe_kind,
     normalize_technique,
 )
-from .client import AssessError, AssessmentClient
+from .client import (
+    AssessError,
+    AssessmentClient,
+    require_command_run_finalize_response,
+)
 from .scope import execution_policy_notes
 from .config import Config
 from .kali_output import (
@@ -663,6 +667,7 @@ def _patch_finalize(
     client: AssessmentClient,
     *,
     run_id: int,
+    run_uuid: str,
     status: str,
     return_code: int | None,
     ended_at_iso: str,
@@ -705,7 +710,15 @@ def _patch_finalize(
         payload["cpu_system_seconds"] = float(cpu_system_seconds)
     # 409 from the finalize endpoint means a concurrent finalize already
     # wrote the canonical row — accept it and return that row, do not raise.
-    return client.patch(f"command-runs/{int(run_id)}", payload, accept_409=True)
+    response = client.patch(
+        f"command-runs/{int(run_id)}", payload, accept_409=True
+    )
+    return require_command_run_finalize_response(
+        response,
+        run_id=run_id,
+        run_uuid=run_uuid,
+        requested_status=status,
+    )
 
 
 def _write_failed_audit_marker(engagement_dir: Path, *, run_uuid: str, error: str) -> None:

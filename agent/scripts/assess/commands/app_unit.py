@@ -23,8 +23,28 @@ import argparse
 import json
 import sys
 
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessError, AssessmentClient, require_write_result
 from assess.lib.config import load_config
+
+
+def _require_score_result(result: dict) -> dict:
+    units = result.get("units")
+    warnings = result.get("warnings")
+    skipped = result.get("skipped")
+    valid_units = isinstance(units, list) and all(
+        isinstance(row, dict)
+        and isinstance(row.get("id"), int)
+        and not isinstance(row.get("id"), bool)
+        and row["id"] > 0
+        for row in units
+    )
+    if not isinstance(skipped, bool) or not valid_units or not isinstance(warnings, list):
+        raise AssessError(
+            "score application units: backend response did not identify the scored "
+            "unit set; the write may have committed, so inspect durable state and "
+            "do not retry automatically"
+        )
+    return result
 
 
 def register(subparsers) -> None:
@@ -63,7 +83,9 @@ def run(args) -> None:
             print(json.dumps(rows, indent=2, ensure_ascii=False))
             return
         if args.action == "score":
-            result = client.post("application-units/score", {})
+            result = _require_score_result(
+                client.post("application-units/score", {})
+            )
             print(json.dumps(result, indent=2, ensure_ascii=False))
             return
         if args.action == "depth-ledger":
@@ -81,5 +103,9 @@ def run(args) -> None:
         payload: dict = {"override": override_map[args.action]}
         if args.reason.strip():
             payload["reason"] = args.reason.strip()
-        record = client.patch(f"application-units/{args.unit_id}", payload)
+        record = require_write_result(
+            client.patch(f"application-units/{args.unit_id}", payload),
+            operation="update application unit",
+            expected={"id": args.unit_id, "override": payload["override"]},
+        )
         print(json.dumps(record, indent=2, ensure_ascii=False))

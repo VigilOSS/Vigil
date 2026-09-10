@@ -48,6 +48,94 @@ def _ingest_args(repo: Path, engagement: Path, *, dry_run: bool = False) -> Simp
     )
 
 
+def _lsp_publish_response(payload: dict[str, object]) -> dict[str, object]:
+    return {
+        "id": 7,
+        "active_generation": payload["repo_generation"],
+        "source_manifest_digest": payload["source_manifest_digest"],
+        "lsp_config": payload["lsp_config"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("start_response", "commit_response"),
+    [
+        (
+            {"repo_id": True, "refresh_token": "refresh-7"},
+            None,
+        ),
+        (
+            {"repo_id": 7, "refresh_token": "refresh-7"},
+            {"repo_id": 8, "repo_generation": 1, "source_manifest_digest": "d" * 64},
+        ),
+        (
+            {"repo_id": 7, "refresh_token": "refresh-7"},
+            {"repo_id": 7, "repo_generation": True, "source_manifest_digest": "d" * 64},
+        ),
+        (
+            {"repo_id": 7, "refresh_token": "refresh-7"},
+            {"repo_id": 7, "repo_generation": 1, "source_manifest_digest": "z" * 64},
+        ),
+    ],
+    ids=["bool-start-id", "wrong-commit-repo", "bool-generation", "nonhex-digest"],
+)
+def test_code_ingest_rejects_noncanonical_refresh_receipts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    start_response: dict[str, object],
+    commit_response: dict[str, object] | None,
+) -> None:
+    from assess.lib.client import AssessError
+
+    module = _load_command("code_ingest.py", "test_code_ingest_refresh_receipts")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "main.py").write_text("print('safe')\n", encoding="utf-8")
+    engagement = tmp_path / "engagement"
+    engagement.mkdir()
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement),
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "_setup_ctags",
+        lambda *_args, **kwargs: {"available": False, **kwargs},
+    )
+
+    class FakeClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def post(self, endpoint: str, payload: dict):
+            if endpoint == "code/repos/refresh/start":
+                return start_response
+            if endpoint == "code/repos/7/refresh/files":
+                return {"staged": len(payload["files"])}
+            if endpoint == "code/repos/7/refresh/commit":
+                assert commit_response is not None
+                return commit_response
+            pytest.fail(f"invalid receipt was accepted before {endpoint}")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    with pytest.raises(AssessError, match="code repository refresh.*may have committed") as exc:
+        module.run(_ingest_args(repo, engagement))
+
+    assert "do not retry automatically" in str(exc.value)
+
+
 def _sealed_snapshot(
     tmp_path: Path,
     files: dict[str, bytes],
@@ -341,6 +429,18 @@ def test_ingest_language_detection_matches_structural_index(
     assert language_for_file(filename) == expected
 
 
+@pytest.mark.parametrize("filename", ["Inspect.ps1", "Module.PSM1", "Data.psd1"])
+def test_ingest_classifies_powershell_extensions(filename: str) -> None:
+    module = _load_command("code_ingest.py", f"test_ingest_language_{filename}")
+    from assess.lib.code_languages import canonical_backend_language, detect_language
+    from assess.lib.treesitter_index import language_for_file
+
+    assert module._detect_language(filename) == "powershell"
+    assert detect_language(filename) == "powershell"
+    assert canonical_backend_language("powershell") == "powershell"
+    assert language_for_file(filename) is None
+
+
 def test_git_provenance_uses_safe_flags_and_strips_case_insensitive_git_environment(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -586,7 +686,7 @@ def test_code_ingest_plain_directory_uses_canonical_directory_provenance(
                 assert payload["repo_generation"] == 1
                 assert payload["source_manifest_digest"] == "d" * 64
                 assert payload["lsp_config"]["ctags"]["repo_generation"] == 1
-                return {"id": 7}
+                return _lsp_publish_response(payload)
             raise AssertionError(endpoint)
 
         def __enter__(self):
@@ -655,7 +755,7 @@ def test_code_ingest_authenticates_complete_exclusion_accounting(
                     "source_manifest_digest": "d" * 64,
                 }
             if endpoint == "code/repos/7/lsp-config":
-                return {"id": 7}
+                return _lsp_publish_response(payload)
             raise AssertionError(endpoint)
 
         def patch(self, endpoint: str, _payload: dict):
@@ -790,7 +890,7 @@ def test_code_ingest_accepts_git_file_and_publishes_read_only_content_addressed_
             if endpoint == "code/repos/7/lsp-config":
                 assert payload["repo_generation"] == 4
                 assert payload["source_manifest_digest"] == "e" * 64
-                return {"id": 7}
+                return _lsp_publish_response(payload)
             raise AssertionError(endpoint)
 
         def __enter__(self):
@@ -3235,7 +3335,16 @@ def test_code_index_sync_validates_all_files_before_bound_cas_post(
 
         def post(self, endpoint: str, payload: dict):
             posted.append((endpoint, payload))
-            return {"updated": 1, "skipped": 0}
+            return {
+                key: payload[key]
+                for key in (
+                    "repo_id",
+                    "repo_generation",
+                    "source_manifest_digest",
+                    "structural_input_digest",
+                    "structural_index_schema",
+                )
+            } | {"updated": len(payload["updates"])}
 
         def __enter__(self):
             return self
@@ -3493,7 +3602,16 @@ def test_code_index_sync_ancestor_swap_fails_before_any_post(
 
         def post(self, endpoint: str, payload: dict):
             posted.append((endpoint, payload))
-            return {"updated": 1, "skipped": 0}
+            return {
+                key: payload[key]
+                for key in (
+                    "repo_id",
+                    "repo_generation",
+                    "source_manifest_digest",
+                    "structural_input_digest",
+                    "structural_index_schema",
+                )
+            } | {"updated": len(payload["updates"])}
 
         def __enter__(self):
             return self
@@ -3903,7 +4021,13 @@ def test_code_record_threat_model_requires_and_posts_snapshot_binding(
         def post(self, endpoint: str, payload: dict):
             captured["endpoint"] = endpoint
             captured["payload"] = payload
-            return {"id": 9}
+            return {
+                "id": 7,
+                "active_generation": 4,
+                "threat_model_generation": 4,
+                "source_manifest_digest": "d" * 64,
+                "threat_model": {"targets": ["parser"]},
+            }
 
         def __enter__(self):
             return self
@@ -4067,6 +4191,31 @@ def test_streamed_capture_preserves_splitlines_and_header_across_chunk_boundarie
         assert captured.loc == len(raw.splitlines())
         assert captured.header == raw.decode("utf-8")
         assert captured.read_bounded(1024) == raw
+    finally:
+        captured.close()
+
+
+@pytest.mark.parametrize(
+    ("bom", "encoding"),
+    [(b"\xff\xfe", "utf-16-le"), (b"\xfe\xff", "utf-16-be")],
+)
+def test_streamed_capture_recognizes_utf16_header_and_line_count(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    bom: bytes,
+    encoding: str,
+) -> None:
+    import assess.lib.code_snapshot as module
+
+    text = "Write-Output 'one'\r\nWrite-Output 'two'\nlast"
+    origin = tmp_path / "Inspect.ps1"
+    origin.write_bytes(bom + text.encode(encoding))
+    monkeypatch.setattr(module, "_READ_CHUNK_SIZE", 3)
+
+    captured = module.capture_regular_file(origin)
+    try:
+        assert captured.header == text
+        assert captured.loc == 3
     finally:
         captured.close()
 

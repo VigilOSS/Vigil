@@ -45,6 +45,16 @@ VALID_STATUSES = frozenset({
     "administratively-closed",
 })
 
+# POST /surfaces seeds a row. ``partially-covered`` and
+# ``administratively-closed`` are rationale-bearing transitions available only
+# through PATCH/``resolve surface`` and therefore are not creatable values.
+CREATABLE_STATUSES = frozenset({
+    "discovered",
+    "covered",
+    "not_applicable",
+    "deferred",
+})
+
 
 def validate_surface_type(surface_type: str) -> None:
     if surface_type not in VALID_SURFACE_TYPES:
@@ -61,6 +71,16 @@ def validate_surface_status(status: str) -> None:
         raise SystemExit(
             f"invalid surface status: {status}. "
             f"Valid statuses: {valid}"
+        )
+
+
+def validate_surface_create_status(status: str) -> None:
+    if status not in CREATABLE_STATUSES:
+        valid = ", ".join(sorted(CREATABLE_STATUSES))
+        raise SystemExit(
+            f"invalid surface create status: {status}. "
+            f"Valid create statuses: {valid}; use `vigil assess resolve surface` "
+            "for transition-only statuses"
         )
 
 

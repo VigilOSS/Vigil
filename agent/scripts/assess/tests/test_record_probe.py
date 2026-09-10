@@ -16,6 +16,7 @@ import argparse
 import pytest
 
 from assess.commands import record_probe
+from assess.lib.client import AssessError
 
 
 class _Cfg:
@@ -106,6 +107,30 @@ def test_record_probe_covering_roundtrip_with_links(tmp_path, monkeypatch, capsy
     assert payload["request_variant_id"] == 42
     assert payload["service_id"] == 7
     assert payload["coverage_item_id"] == 77
+
+
+def test_record_probe_rejects_response_without_canonical_probe_id(
+    tmp_path, monkeypatch
+):
+    fake = _FakeClient()
+    fake.post = lambda _endpoint, payload: {"result_status": payload["result_status"]}
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        [
+            "record-probe",
+            "--result-status", "attempted",
+            "--attack-family", "ssrf",
+            "--target-host", "app.example.com",
+            "--input-slot", "query:url",
+            "--auth-context", "anonymous",
+        ],
+        str(tmp_path),
+    )
+
+    with pytest.raises(AssessError, match="record probe") as exc:
+        record_probe.run(args)
+
+    assert "do not retry automatically" in str(exc.value)
 
 
 def test_record_probe_covering_requires_evidence(tmp_path, monkeypatch, capsys):

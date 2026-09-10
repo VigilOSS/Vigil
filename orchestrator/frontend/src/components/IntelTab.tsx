@@ -23,6 +23,7 @@ import {
   ProseModeToggle,
   ProseSection,
   SectionHead,
+  UntrustedDataNotice,
 } from "./drawer/DrawerKit";
 import type { ProseMode, ToastFn } from "./drawer/DrawerKit";
 import { useToast } from "../contexts/ToastContext";
@@ -624,6 +625,7 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
   const [fts, setFts] = useState<IntelSearchHit[] | null>(null);
   const [ftsError, setFtsError] = useState<string | null>(null);
   const [ftsLoading, setFtsLoading] = useState(false);
+  const [ftsVisibleCount, setFtsVisibleCount] = useState(PAGE_SIZE);
 
   const [urlQuery, setUrlQuery] = useState("");
   const [urlResults, setUrlResults] = useState<IntelByUrlResponse | null>(null);
@@ -982,10 +984,12 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
     if (!q) {
       setFts(null);
       setFtsError(null);
+      setFtsVisibleCount(PAGE_SIZE);
       return;
     }
     setFtsLoading(true);
     setFtsError(null);
+    setFtsVisibleCount(PAGE_SIZE);
     searchIntel(engagementKey, { q })
       .then((rows) => setFts(rows))
       .catch((err: unknown) => {
@@ -1196,6 +1200,7 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
         <div className="panel findings-toolbar-panel" style={{ padding: 14, display: "grid", gap: 14 }}>
           {fts !== null && (
             <div>
+              <UntrustedDataNotice />
               <p className="section-title">
                 FTS results <span className="count">{fts.length}</span>
               </p>
@@ -1203,7 +1208,7 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
               {fts.length === 0 && !ftsError && <p className="empty" style={{ padding: 8 }}>No hits.</p>}
               {fts.length > 0 && (
                 <div style={{ display: "grid", gap: 4 }}>
-                  {fts.slice(0, 40).map((hit, i) => (
+                  {fts.slice(0, ftsVisibleCount).map((hit, i) => (
                     <button
                       key={`${hit.entity_type}:${hit.source_id}:${i}`}
                       type="button"
@@ -1229,6 +1234,20 @@ export function IntelTab({ engagementKey, summary }: IntelTabProps) {
                       <span className="link-go">›</span>
                     </button>
                   ))}
+                  {ftsVisibleCount < fts.length && (
+                    <div className="list-footer" style={{ marginTop: 6 }}>
+                      <span>
+                        Showing {ftsVisibleCount} of {fts.length} results
+                      </span>
+                      <button
+                        type="button"
+                        className="pager-btn"
+                        onClick={() => setFtsVisibleCount((count) => Math.min(count + PAGE_SIZE, fts.length))}
+                      >
+                        Show next {Math.min(PAGE_SIZE, fts.length - ftsVisibleCount)}
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -1626,6 +1645,7 @@ function Drawer({ d, titleId }: DrawerProps) {
         {showProseToggle && <ProseModeToggle mode={proseMode} onChange={setProseMode} />}
       </div>
       <div className="drawer-body">
+        <UntrustedDataNotice />
         {tab === "overview" && <OverviewPane d={d} proseMode={proseMode} toast={toast} />}
         {tab === "references" && <ReferencesPane d={d} toast={toast} />}
         {tab === "provenance" && <ProvenancePane d={d} />}
@@ -1810,21 +1830,35 @@ function OverviewPane({
       );
       break;
     case "org_fact":
-      ["fact_key", "fact_value"].forEach(add);
+      ["fact_key", "fact_value", "authored_by", "scope", "validity_context"].forEach(add);
       specific = (
         <div className="kv-grid">
           <KV k="Key" v={raw.fact_key} mono toast={toast} />
           <KV k="Value" v={raw.fact_value} />
+          <KV k="Authored by" v={raw.authored_by} mono toast={toast} />
+          <KV k="Scope" v={raw.scope} />
+          <KV k="Validity" v={raw.validity_context} />
         </div>
       );
       break;
     case "note":
-      ["title", "body_markdown", "source_agent", "tags"].forEach(add);
+      [
+        "title",
+        "body_markdown",
+        "source_agent",
+        "tags",
+        "authored_by",
+        "scope",
+        "validity_context",
+      ].forEach(add);
       specific = (
         <div className="kv-grid">
           <KV k="Title" v={raw.title} />
           <KV k="Source agent" v={raw.source_agent} mono toast={toast} />
           <KV k="Tags" v={Array.isArray(raw.tags) ? (raw.tags as string[]).join(", ") : ""} />
+          <KV k="Authored by" v={raw.authored_by} mono toast={toast} />
+          <KV k="Scope" v={raw.scope} />
+          <KV k="Validity" v={raw.validity_context} />
         </div>
       );
       break;

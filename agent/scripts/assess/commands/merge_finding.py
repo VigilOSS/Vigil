@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import sys
 
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessmentClient, require_write_result
 from assess.lib.config import load_config
 
 
@@ -31,7 +31,11 @@ def run(args) -> None:
     payload = {key: value for key, value in payload.items() if value is not None}
 
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        result = client.post("findings/merge", payload)
+        result = require_write_result(
+            client.post("findings/merge", payload),
+            operation="merge findings",
+            expected={"slug": args.target_slug},
+        )
 
     # Emit event
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:

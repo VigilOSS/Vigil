@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
@@ -8,6 +9,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,13 +21,15 @@ repo_root = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(repo_root))
 sys.path.insert(0, str(repo_root / "src"))
 
+from tests.proof_fixtures import post_artifact_backed_source_observation  # noqa: E402
+
 
 def _copy_agent_fixture(agent_root: Path, install_root: Path) -> Path:
     target_agent = install_root / "agent"
     target_agent.mkdir(parents=True)
     for name in ("scripts", ".codex", ".claude"):
         shutil.copytree(agent_root / name, target_agent / name)
-    for name in ("AGENTS.md", "CLAUDE.md", "SKILL.md"):
+    for name in ("AGENTS.md", "AGENTS-blue.md", "CLAUDE.md", "SKILL.md"):
         shutil.copy2(agent_root / name, target_agent / name)
     (target_agent / "engagements").mkdir()
     return target_agent
@@ -100,16 +104,25 @@ def test_engagement_create_web_writes_scope_launchers_and_list_entry(
     # ``assessment_work_items`` table — see tests/test_work_buffer_backend.py.
     assert (created.path / "start_codex.sh").exists()
     assert (created.path / "start_claude.sh").exists()
-    assert "codex --full-auto" in (created.path / "start_codex.sh").read_text(encoding="utf-8")
+    codex_launcher = (created.path / "start_codex.sh").read_text(encoding="utf-8")
+    claude_launcher = (created.path / "start_claude.sh").read_text(encoding="utf-8")
+    assert 'export VIGIL_CLIENT_NAME="codex"' in codex_launcher
+    assert 'export VIGIL_CLIENT_NAME="claude"' in claude_launcher
+    assert 'export CLAUDE_CODE_DISABLE_AUTO_MEMORY="1"' in claude_launcher
+    assert "CLAUDE_CODE_DISABLE_AUTO_MEMORY" not in codex_launcher
+    assert "codex --full-auto" in codex_launcher
     assert (created.path / "start_kimi.sh").exists()
     assert "kimi --auto" in (created.path / "start_kimi.sh").read_text(encoding="utf-8")
+    engagement_pointer = (created.path / "AGENTS.md").read_text(encoding="utf-8")
+    assert "bounded parts" in engagement_pointer
+    assert "end of the file" in engagement_pointer
 
     rows = list_engagements(install_root)
     assert [row.key for row in rows] == [created.key]
     assert rows[0].target == "https://app.example.com"
 
 
-def test_engagement_create_blue_renders_blue_operator_prompt(
+def test_engagement_create_blue_points_to_canonical_blue_operator_prompt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from vigil_cli import engagements as engagements_module
@@ -117,31 +130,20 @@ def test_engagement_create_blue_renders_blue_operator_prompt(
 
     install_root = tmp_path / "install"
     _copy_agent_fixture(repo_root / "agent", install_root)
+    (install_root / "agent" / "AGENTS-blue.md").write_text(
+        "canonical blue operator prompt\n", encoding="utf-8"
+    )
     _isolate_orchestrator_url(monkeypatch)
     monkeypatch.setattr(engagements_module, "_verify_backend_install_root", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(engagements_module, "_emit_post_create_footer", lambda *_args, **_kwargs: None)
 
-    render_calls: list[list[str]] = []
-
-    def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
-        render_calls.append([str(piece) for piece in argv])
-        assert kwargs.get("check") is True
-        output_dir = Path(argv[2])
-        (output_dir / "AGENTS.md").write_text("blue operator prompt\n", encoding="utf-8")
-        (output_dir / "CLAUDE.md").write_text("blue claude pointer\n", encoding="utf-8")
-        (output_dir / ".codex" / "agents").mkdir(parents=True)
-        (output_dir / ".codex" / "agents" / "ir-lead.toml").write_text(
-            'name = "ir-lead"\n',
-            encoding="utf-8",
-        )
-        (output_dir / ".claude" / "agents").mkdir(parents=True)
-        (output_dir / ".claude" / "agents" / "ir-lead.md").write_text(
-            "# ir-lead\n",
-            encoding="utf-8",
-        )
-        return SimpleNamespace(returncode=0)
-
-    monkeypatch.setattr(engagements_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        engagements_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("blue engagement creation must not render a private prompt copy")
+        ),
+    )
 
     created = create_engagement(
         CreateEngagementOptions(
@@ -154,15 +156,15 @@ def test_engagement_create_blue_renders_blue_operator_prompt(
         )
     )
 
-    render_script = install_root / "agent" / "scripts" / "render-operator-prompts.sh"
-    assert render_calls == [[str(render_script), "repo", str(created.path), "--type", "blue"]]
-    # Blue engagements render the full blue operator prompt, then the per-engagement
-    # bootstrap appends the ENGAGEMENT.md ROE pointer (WS7 symmetry with the red path).
+    # Blue and red both use a small engagement-local bootstrap; the full blue
+    # doctrine has one generated owner under the installed agent tree.
     blue_agents = (created.path / "AGENTS.md").read_text(encoding="utf-8")
-    assert blue_agents.startswith("blue operator prompt\n")
+    assert "agent/AGENTS-blue.md" in blue_agents
+    assert "canonical blue operator prompt" not in blue_agents
+    assert "bounded parts" in blue_agents
+    assert "end of the file" in blue_agents
     assert "Read `ENGAGEMENT.md` in this directory if present" in blue_agents
-    assert (created.path / ".codex" / "agents").is_dir()
-    assert not (created.path / ".codex" / "agents").is_symlink()
+    assert (created.path / ".codex" / "agents").is_symlink()
 
 
 def test_engagement_create_does_not_accept_exploit_policy_or_auth_mode_flags(
@@ -796,8 +798,8 @@ def test_engagement_create_persists_header_and_rate_limit(
     assert scope["rate_limit"] == 5.0
 
 
-def test_engagement_create_persists_aggregate_rate_limit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_engagement_create_rejects_retired_aggregate_rate_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from vigil_cli import main as main_module
 
@@ -805,24 +807,23 @@ def test_engagement_create_persists_aggregate_rate_limit(
     install_root = tmp_path / "install"
     _copy_agent_fixture(repo_root / "agent", install_root)
 
-    main_module.main(
-        [
-            "--root",
-            str(install_root),
-            "engagement",
-            "create",
-            "https://app.example.com",
-            "--hosts",
-            "app.example.com",
-            "--no-prompt",
-            "--aggregate-rate-limit",
-            "12.5",
-        ]
-    )
+    with pytest.raises(SystemExit) as exc:
+        main_module.main(
+            [
+                "--root",
+                str(install_root),
+                "engagement",
+                "create",
+                "https://app.example.com",
+                "--hosts",
+                "app.example.com",
+                "--no-prompt",
+                "--aggregate-rate-limit",
+                "12.5",
+            ]
+        )
 
-    created_path = _created_path_from_stdout(capsys.readouterr().out)
-    scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
-    assert scope["rate_limit_aggregate_rps"] == 12.5
+    assert exc.value.code == 2
 
 
 def test_engagement_create_omits_rate_limit_when_unset(
@@ -1267,7 +1268,11 @@ def test_install_preserves_local_state_and_replaces_managed_files(tmp_path: Path
     )
 
     assert (install_root / "README.md").read_text(encoding="utf-8") == "new readme\n"
-    assert (install_root / "AGENTS.md").read_text(encoding="utf-8") == "managed agent\n"
+    root_agents = (install_root / "AGENTS.md").read_text(encoding="utf-8")
+    assert root_agents != "managed agent\n"
+    assert "agent/AGENTS.md" in root_agents
+    assert "bounded parts" in root_agents
+    assert "end of the file" in root_agents
     assert (install_root / "agent" / "AGENTS.md").read_text(encoding="utf-8") == "managed agent\n"
     assert marker.exists()
     codex_agents = marker.parent / ".codex" / "agents"
@@ -5892,7 +5897,7 @@ def test_transition_phase_exploit_variant_gate_requests_full_dispatch_page(
     confirmed_finding = {
         "slug": "ssrf-host-header",
         "severity": "high",
-        "verification_state": "verified",
+        "verification_status": "confirmed",
         "workflow_status": "active",
     }
     older_variant_dispatch = {
@@ -6045,7 +6050,7 @@ def _transition_args(engagement, target_phase, **overrides):
 _CONFIRMED_HIGH = {
     "slug": "ssrf-1",
     "severity": "high",
-    "verification_state": "verified",
+    "verification_status": "confirmed",
     "workflow_status": "active",
 }
 
@@ -6350,7 +6355,7 @@ def test_transition_recon_to_report_jump_walks_depth_backstop(monkeypatch, tmp_p
         scope={"engagement_type": "web", "current_phase": "recon"},
         services=[{"endpoint": "h:443"}],
         findings=[{"slug": "f-1", "workflow_status": "active",
-                   "severity": "low", "verification_state": "verified"}],
+                   "severity": "low", "verification_status": "confirmed"}],
         report_readiness={"ready": True, "blockers": []},
         terminal_block=_terminal_block_payload(blocking=[_BLOCKING_UNIT]),
     )
@@ -6410,7 +6415,7 @@ def test_transition_code_complete_unaffected_by_depth_backstop(monkeypatch, tmp_
 _CONFIRMED_HIGH_2 = {
     "slug": "redirect-2",
     "severity": "high",
-    "verification_state": "verified",
+    "verification_status": "confirmed",
     "workflow_status": "active",
 }
 
@@ -6733,7 +6738,7 @@ def test_assess_log_accepts_structured_metadata_inline(monkeypatch: pytest.Monke
 
         def post_engagement(self, endpoint: str, payload: dict) -> dict:
             posts.append((endpoint, payload))
-            return {"id": 1}
+            return {"id": 1, **payload}
 
         def post_event(self, payload: dict) -> dict:
             events.append(payload)
@@ -6800,7 +6805,7 @@ def test_assess_log_accepts_structured_metadata_file(
 
         def post_engagement(self, endpoint: str, payload: dict) -> dict:
             posts.append((endpoint, payload))
-            return {"id": 1}
+            return {"id": 1, **payload}
 
         def post_event(self, _payload: dict) -> dict:
             return {"id": 2}
@@ -6951,7 +6956,7 @@ def test_blue_verify_force_bypasses_missing_verifier_dispatch(
         tmp_path,
     )
 
-    assert calls[0][:5] == ["finding", "verify", "FIND-001", "--disposition", "confirmed"]
+    assert calls[0][:5] == ["finding", "verify", "FIND-001", "--status", "confirmed"]
 
 
 def test_blue_verify_false_positive_uses_canonical_finding_verify(
@@ -6991,7 +6996,7 @@ def test_blue_verify_false_positive_uses_canonical_finding_verify(
         "finding",
         "verify",
         "FIND-001",
-        "--disposition",
+        "--status",
         "false_positive",
         "--reason",
         "tenant evidence proves the alert benign",
@@ -7000,55 +7005,18 @@ def test_blue_verify_false_positive_uses_canonical_finding_verify(
     assert calls[0][calls[0].index("--kill-check") + 1] == "5"
 
 
-@pytest.mark.parametrize(
-    "skill",
-    [
-        "m365-signin-investigation",
-        "aws-cloudtrail-investigation",
-        "okta-investigation",
-        "edr-alert-triage",
-        "network-threat-hunt",
-        "phishing-triage",
-    ],
-)
-def test_blue_dispatch_recognizes_dispatchable_investigator_skills(
-    skill: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_blue_parser_retires_broken_dispatch_wrapper(capsys) -> None:
     from vigil_cli import blue as blue_module
 
-    eng_dir = tmp_path / "engagement"
-    _write_blue_scope(eng_dir)
-    calls: list[list[str]] = []
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    blue_module.register_blue_parser(subparsers)
 
-    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
-    monkeypatch.setattr(
-        blue_module,
-        "_run_assess",
-        lambda _install_root, _eng_dir, assess_args, **_kwargs: calls.append(assess_args) or 0,
-    )
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["blue", "dispatch"])
 
-    blue_module._cmd_dispatch(
-        SimpleNamespace(
-            role="investigator",
-            skills=skill,
-            tier="L2",
-            task="investigate",
-            dispatch_mode=None,
-            agent_id="investigator-test",
-            scope_host=None,
-            engagement_key=None,
-            select=False,
-        ),
-        tmp_path,
-    )
-
-    err = capsys.readouterr().err
-    assert "do not include a known platform skill" not in err
-    assert calls[0][:2] == ["agent", "start"]
-    assert calls[0][calls[0].index("--skills") + 1] == skill
+    assert exc.value.code == 2
+    assert "invalid choice: 'dispatch'" in capsys.readouterr().err
 
 
 def test_blue_contain_logs_structured_activity_metadata(
@@ -7562,43 +7530,21 @@ def test_blue_contain_rejects_proposal_for_different_finding(
     assert calls == []
 
 
-def test_blue_dispatch_passes_model_reasoning_and_default_mode(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_blue_help_documents_generic_dispatch_emitter(capsys) -> None:
     from vigil_cli import blue as blue_module
 
-    eng_dir = tmp_path / "engagement"
-    _write_blue_scope(eng_dir)
-    calls: list[list[str]] = []
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    blue_module.register_blue_parser(subparsers)
 
-    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
-    monkeypatch.setattr(
-        blue_module,
-        "_run_assess",
-        lambda _install_root, _eng_dir, assess_args, **_kwargs: calls.append(assess_args) or 0,
-    )
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["blue", "--help"])
 
-    blue_module._cmd_dispatch(
-        SimpleNamespace(
-            role="alert-triage-specialist",
-            skills="alert-triage",
-            tier="L1",
-            task="triage",
-            dispatch_mode=None,
-            dispatch_model="gpt-test",
-            reasoning="high",
-            agent_id="triage-test",
-            scope_host=None,
-            engagement_key=None,
-            select=False,
-        ),
-        tmp_path,
-    )
-
-    call = calls[0]
-    assert call[call.index("--model") + 1] == "gpt-test"
-    assert call[call.index("--reasoning") + 1] == "high"
-    assert call[call.index("--dispatch-mode") + 1] == "item-iterating"
+    assert exc.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "vigil assess agent start" in help_text
+    assert "--prompt-context-json" in help_text
+    assert "--emit-prompt" in help_text
 
 
 def test_blue_initial_report_scaffold_uses_customer_and_platform(
@@ -8026,7 +7972,10 @@ def test_blue_alert_record_body_file_updates_scope_and_registers_artifact(
     assert raw_path.read_text(encoding="utf-8") == body_path.read_text(encoding="utf-8")
     assert ["artifact", "register", str(raw_path), "--kind", "alert_intake", "--sensitive"] in calls
     assert any(call[:5] == ["log", "operator", "alert intake", "alert_intake", "alert recorded"] for call in calls)
-    assert "vigil blue dispatch --role alert-triage-specialist" in capsys.readouterr().err
+    next_step = capsys.readouterr().err
+    assert "vigil assess agent start --role alert-triage-specialist" in next_step
+    assert "--rate-budget '<authored tenant query budget>'" in next_step
+    assert "--prompt-context-json dispatch-context.json --emit-prompt" in next_step
 
 
 def test_blue_alert_record_rejects_second_intake_without_replace(
@@ -8139,6 +8088,26 @@ def test_blue_closeout_dispatches_report_writer_for_closure_summary(
     assert dispatch[dispatch.index("--role") + 1] == "report-writer"
     assert "closeout.md" in dispatch[dispatch.index("--task") + 1]
     assert "false positive" in dispatch[dispatch.index("--task") + 1]
+    assert "--no-target-traffic" in dispatch
+    prompt_context = json.loads(
+        dispatch[dispatch.index("--prompt-context-json") + 1]
+    )
+    assert set(prompt_context) == {
+        "authorized_phase",
+        "target",
+        "hunt_scope",
+        "mindset_lens",
+        "depth_expectation",
+        "oob",
+        "auth_context",
+        "credential_id",
+        "prior_state",
+        "coverage",
+        "cleanup",
+        "human_reach_decision",
+        "role_specific_additions",
+    }
+    assert prompt_context["authorized_phase"] == "report"
     assert "[vigil blue] dispatched with agent-id=closeout-writer-" in capsys.readouterr().err
 
 
@@ -8190,12 +8159,12 @@ def test_blue_closeout_aborts_when_final_readiness_preflight_fails(
     assert calls == [["finding", "report", "--mode", "final"]]
 
 
-def test_link_finding_intel_preserves_details_json_related_intel_ids(
+def test_link_finding_intel_preserves_details_related_intel_ids(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     module = _load_assess_module(
-        "link_finding_command_module_details_json",
+        "link_finding_command_module_details",
         "agent/scripts/assess/commands/link_finding.py",
     )
     patches: list[tuple[str, dict]] = []
@@ -8206,11 +8175,16 @@ def test_link_finding_intel_preserves_details_json_related_intel_ids(
 
         def get(self, endpoint: str) -> dict:
             assert endpoint == "findings/FIND-001"
-            return {"slug": "FIND-001", "details_json": {"related_intel_ids": [1]}}
+            return {"slug": "FIND-001", "details": {"related_intel_ids": [1]}}
 
         def patch(self, endpoint: str, payload: dict) -> dict:
             patches.append((endpoint, payload))
-            return {"ok": True}
+            return {
+                "finding": {
+                    "slug": "FIND-001",
+                    "details": payload["details"],
+                }
+            }
 
         def close(self) -> None:
             return None
@@ -8248,7 +8222,12 @@ def test_link_finding_intel_preserves_details_json_related_intel_ids(
             {"details": {"related_intel_ids": [1, 2]}, "reason_text": "link intel"},
         )
     ]
-    assert json.loads(capsys.readouterr().out) == {"ok": True}
+    assert json.loads(capsys.readouterr().out) == {
+        "finding": {
+            "slug": "FIND-001",
+            "details": {"related_intel_ids": [1, 2]},
+        }
+    }
 
 
 def _host_finalize_response(payload: dict, **fields: object) -> dict:
@@ -8260,6 +8239,27 @@ def _host_finalize_response(payload: dict, **fields: object) -> dict:
     response["completed_at"] = completed_at.replace("Z", "+00:00")
     response.update(fields)
     return response
+
+
+class _HostAuditReceiptMixin:
+    """Return receipts with the identity captured by the pre-exec write."""
+
+    _run_uuid: str | None = None
+
+    def _pre_exec_response(self, payload: dict, **fields: object) -> dict:
+        run_uuid = payload.get("run_uuid")
+        assert isinstance(run_uuid, str) and run_uuid
+        self._run_uuid = run_uuid
+        return {"id": 42, **fields}
+
+    def _finalize_response(self, payload: dict, **fields: object) -> dict:
+        assert self._run_uuid is not None
+        return _host_finalize_response(
+            payload,
+            id=42,
+            run_uuid=self._run_uuid,
+            **fields,
+        )
 
 
 def _patch_test_host_ownership(
@@ -8295,18 +8295,18 @@ def test_host_exec_uses_agent_name_env_for_audit_payload(
     posts: list[tuple[str, dict]] = []
     events: list[str] = []
 
-    class _Client:
+    class _Client(_HostAuditReceiptMixin):
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
         def post(self, endpoint: str, payload: dict) -> dict:
             events.append("audit")
             posts.append((endpoint, payload))
-            return {"id": 42}
+            return self._pre_exec_response(payload)
 
         def patch(self, endpoint: str, payload: dict, **_kwargs: object) -> dict:
             events.append("finalize")
-            return _host_finalize_response(payload, id=42)
+            return self._finalize_response(payload)
 
         def close(self) -> None:
             return None
@@ -8393,21 +8393,22 @@ def test_host_exec_replays_pre_exec_post_after_lost_response_before_execution(
     posts: list[tuple[str, dict]] = []
     events: list[str] = []
 
-    class _Client:
+    class _Client(_HostAuditReceiptMixin):
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
         def post(self, endpoint: str, payload: dict) -> dict:
             events.append("audit")
             posts.append((endpoint, dict(payload)))
+            response = self._pre_exec_response(payload, idempotent_replay=True)
             if len(posts) == 1:
                 raise module.AssessError("response lost after the backend committed")
-            return {"id": 42, "idempotent_replay": True}
+            return response
 
         def patch(self, endpoint: str, payload: dict, **_kwargs: object) -> dict:
             events.append("finalize")
             assert endpoint == "command-runs/42"
-            return _host_finalize_response(payload, id=42)
+            return self._finalize_response(payload)
 
         def close(self) -> None:
             return None
@@ -8473,7 +8474,7 @@ def test_host_exec_explicit_finding_resolution_failure_stops_before_process(
     )
     events: list[str] = []
 
-    class _Client:
+    class _Client(_HostAuditReceiptMixin):
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
@@ -8483,11 +8484,11 @@ def test_host_exec_explicit_finding_resolution_failure_stops_before_process(
 
         def post(self, _endpoint: str, _payload: dict) -> dict:
             events.append("post")
-            return {"id": 42}
+            return self._pre_exec_response(_payload)
 
         def patch(self, _endpoint: str, payload: dict, **_kwargs: object) -> dict:
             events.append("finalize")
-            return _host_finalize_response(payload, id=42)
+            return self._finalize_response(payload)
 
         def close(self) -> None:
             pass
@@ -8550,7 +8551,7 @@ def test_host_exec_backend_rejection_with_finding_never_retries_unlinked(
     posts: list[dict] = []
     events: list[str] = []
 
-    class _Client:
+    class _Client(_HostAuditReceiptMixin):
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
@@ -8563,11 +8564,11 @@ def test_host_exec_backend_rejection_with_finding_never_retries_unlinked(
             posts.append(dict(payload))
             if payload.get("finding_id") == 7:
                 raise module.AssessError("HTTP 404: finding id=7 not found")
-            return {"id": 42}
+            return self._pre_exec_response(payload)
 
         def patch(self, _endpoint: str, payload: dict, **_kwargs: object) -> dict:
             events.append("finalize")
-            return _host_finalize_response(payload, id=42)
+            return self._finalize_response(payload)
 
         def close(self) -> None:
             pass
@@ -9005,11 +9006,11 @@ def test_host_exec_precreated_descriptors_survive_parent_directory_symlink_swap(
     )
     posted_paths: dict[str, Path] = {}
     patches: list[dict] = []
-    moved_output_dir = tmp_path / "moved-host-exec"
+    moved_output_dir = tmp_path / f"moved-host-exec-{uuid.uuid4().hex}"
     attacker_output_dir = tmp_path / "attacker-host-exec"
     attacker_output_dir.mkdir()
 
-    class _Client:
+    class _Client(_HostAuditReceiptMixin):
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
@@ -9019,13 +9020,12 @@ def test_host_exec_precreated_descriptors_survive_parent_directory_symlink_swap(
             output_dir = posted_paths["stdout"].parent
             output_dir.replace(moved_output_dir)
             output_dir.symlink_to(attacker_output_dir, target_is_directory=True)
-            return {"id": 42}
+            return self._pre_exec_response(payload)
 
         def patch(self, _endpoint: str, payload: dict, **_kwargs: object) -> dict:
             patches.append(payload)
-            return _host_finalize_response(
+            return self._finalize_response(
                 payload,
-                id=42,
                 output_cleanup_status="complete",
             )
 
@@ -9057,7 +9057,6 @@ def test_host_exec_precreated_descriptors_survive_parent_directory_symlink_swap(
     )
     monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "anonymous")
     monkeypatch.setattr(module.scope_lib, "enforce_execution_policy", lambda *_a, **_k: {})
-    monkeypatch.setattr(module, "aggregate_rate_reservation", lambda *_a, **_k: None)
     monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **k: _Proc(**k))
     _patch_test_host_ownership(module, monkeypatch)
     monkeypatch.setattr(module.host_processes, "register_owned_process", lambda *a, **k: None)
@@ -9102,7 +9101,7 @@ def test_host_exec_spill_identity_claims_reject_leaf_swap_before_post(
     moved_metadata: dict[str, os.stat_result] = {}
     posted: list[dict] = []
 
-    class _Client:
+    class _Client(_HostAuditReceiptMixin):
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             output_dir = tmp_path / "scans" / "host-exec"
             for path in output_dir.iterdir():
@@ -9697,16 +9696,16 @@ def test_host_exec_records_lost_when_group_cannot_be_quiesced(
     )
     patches: list[dict] = []
 
-    class _Client:
+    class _Client(_HostAuditReceiptMixin):
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
         def post(self, _endpoint: str, _payload: dict) -> dict:
-            return {"id": 42}
+            return self._pre_exec_response(_payload)
 
         def patch(self, _endpoint: str, payload: dict, **_kwargs: object) -> dict:
             patches.append(payload)
-            return _host_finalize_response(payload, id=42)
+            return self._finalize_response(payload)
 
         def close(self) -> None:
             pass
@@ -9730,7 +9729,6 @@ def test_host_exec_records_lost_when_group_cannot_be_quiesced(
     )
     monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "anonymous")
     monkeypatch.setattr(module.scope_lib, "enforce_execution_policy", lambda *_a, **_k: {})
-    monkeypatch.setattr(module, "aggregate_rate_reservation", lambda *_a, **_k: None)
     monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **k: _Proc())
     _patch_test_host_ownership(module, monkeypatch, quiescent=False)
     monkeypatch.setattr(module.host_processes, "register_owned_process", lambda *a, **k: None)
@@ -9773,7 +9771,7 @@ def test_host_exec_process_failure_finalizes_pre_exec_audit(
     patches: list[tuple[str, dict]] = []
     spill_paths: dict[str, Path] = {}
 
-    class _Client:
+    class _Client(_HostAuditReceiptMixin):
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
@@ -9784,11 +9782,11 @@ def test_host_exec_process_failure_finalizes_pre_exec_audit(
             assert spill_paths["stderr"].is_file()
             assert spill_paths["stdout"].stat().st_mode & 0o777 == 0o600
             assert spill_paths["stderr"].stat().st_mode & 0o777 == 0o600
-            return {"id": 42}
+            return self._pre_exec_response(payload)
 
         def patch(self, endpoint: str, payload: dict, **_kwargs: object) -> dict:
             patches.append((endpoint, payload))
-            return _host_finalize_response(payload)
+            return self._finalize_response(payload)
 
         def close(self) -> None:
             pass
@@ -9848,16 +9846,16 @@ def test_host_exec_process_setup_append_failure_still_finalizes_audit(
     )
     patches: list[tuple[str, dict]] = []
 
-    class _Client:
+    class _Client(_HostAuditReceiptMixin):
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
         def post(self, _endpoint: str, _payload: dict) -> dict:
-            return {"id": 42}
+            return self._pre_exec_response(_payload)
 
         def patch(self, endpoint: str, payload: dict, **_kwargs: object) -> dict:
             patches.append((endpoint, payload))
-            return _host_finalize_response(payload)
+            return self._finalize_response(payload)
 
         def close(self) -> None:
             pass
@@ -9924,12 +9922,12 @@ def test_host_exec_accepts_exact_terminal_row_after_committed_response_loss(
     )
     patches: list[tuple[dict, bool]] = []
 
-    class _Client:
+    class _Client(_HostAuditReceiptMixin):
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
         def post(self, _endpoint: str, _payload: dict) -> dict:
-            return {"id": 42}
+            return self._pre_exec_response(_payload)
 
         def patch(
             self,
@@ -9945,6 +9943,7 @@ def test_host_exec_accepts_exact_terminal_row_after_committed_response_loss(
                 )
             return {
                 "id": 42,
+                "run_uuid": self._run_uuid,
                 "finalize_409": True,
                 "status": payload["status"],
                 "return_code": payload["return_code"],
@@ -10013,12 +10012,12 @@ def test_host_exec_rejects_conflicting_terminal_row_after_finalize_retry(
     )
     patches: list[tuple[dict, bool]] = []
 
-    class _Client:
+    class _Client(_HostAuditReceiptMixin):
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
         def post(self, _endpoint: str, _payload: dict) -> dict:
-            return {"id": 42}
+            return self._pre_exec_response(_payload)
 
         def patch(
             self,
@@ -10030,6 +10029,7 @@ def test_host_exec_rejects_conflicting_terminal_row_after_finalize_retry(
             patches.append((dict(payload), accept_409))
             return {
                 "id": 42,
+                "run_uuid": self._run_uuid,
                 "finalize_409": True,
                 "status": payload["status"],
                 "return_code": payload["return_code"],
@@ -10173,37 +10173,29 @@ def test_host_exec_policy_refusal_uses_terminal_inline_audit_without_spills(
     assert payload["stderr_path"] is None
 
 
-def test_host_exec_acquires_aggregate_rate_lease_after_pre_exec_audit(
+def test_host_exec_emits_nonblocking_recency_advisory_after_pre_exec_audit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     module = _load_assess_module(
-        "host_exec_command_module_rate_lease",
+        "host_exec_command_module_recency_advisory",
         "agent/scripts/assess/commands/host_exec.py",
     )
     events: list[str] = []
 
-    class _Client:
+    class _Client(_HostAuditReceiptMixin):
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
         def post(self, _endpoint: str, _payload: dict) -> dict:
             events.append("audit")
-            return {"id": 42}
+            return self._pre_exec_response(_payload)
 
         def patch(self, _endpoint: str, payload: dict, **_kwargs: object) -> dict:
             events.append("finalize")
-            return _host_finalize_response(payload)
+            return self._finalize_response(payload)
 
         def close(self) -> None:
             pass
-
-    class _Lease:
-        def __enter__(self):
-            events.append("lease-acquire")
-            return {"lease_token": "lease-1"}
-
-        def __exit__(self, *_exc):
-            events.append("lease-release")
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
     monkeypatch.setattr(
@@ -10217,13 +10209,8 @@ def test_host_exec_acquires_aggregate_rate_lease_after_pre_exec_audit(
     )
     monkeypatch.setattr(
         module,
-        "aggregate_rate_reservation",
-        lambda *_args, **_kwargs: 7.0,
-    )
-    monkeypatch.setattr(
-        module,
-        "target_rate_lease",
-        lambda **_kwargs: _Lease(),
+        "emit_foreign_lane_recency",
+        lambda *_args, **_kwargs: events.append("advisory"),
     )
     monkeypatch.setattr(
         module,
@@ -10253,16 +10240,14 @@ def test_host_exec_acquires_aggregate_rate_lease_after_pre_exec_audit(
                 audit_source="argv",
                 allow_destructive=False,
                 require_audit=True,
-                rate_override_reason="",
             )
         )
 
     assert exc_info.value.code == 0
     assert events == [
         "audit",
-        "lease-acquire",
+        "advisory",
         "process",
-        "lease-release",
         "finalize",
     ]
 
@@ -10355,17 +10340,16 @@ def test_host_exec_require_audit_rejects_untrustworthy_output_status(
         "agent/scripts/assess/commands/host_exec.py",
     )
 
-    class _Client:
+    class _Client(_HostAuditReceiptMixin):
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
         def post(self, _endpoint: str, _payload: dict) -> dict:
-            return {"id": 42}
+            return self._pre_exec_response(_payload)
 
         def patch(self, _endpoint: str, payload: dict, **_kwargs: object) -> dict:
-            response = _host_finalize_response(
+            response = self._finalize_response(
                 payload,
-                id=42,
                 output_cleanup_status="complete",
                 output_integrity_status="verified",
                 output_cleanup_warning="retained spill could not be removed",
@@ -10389,7 +10373,6 @@ def test_host_exec_require_audit_rejects_untrustworthy_output_status(
     )
     monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "anonymous")
     monkeypatch.setattr(module.scope_lib, "enforce_execution_policy", lambda *_a, **_k: {})
-    monkeypatch.setattr(module, "aggregate_rate_reservation", lambda *_a, **_k: None)
     monkeypatch.setattr(
         module,
         "_run_host_process",
@@ -10432,17 +10415,16 @@ def test_host_exec_require_audit_rejects_deferred_physical_cleanup(
         "agent/scripts/assess/commands/host_exec.py",
     )
 
-    class _Client:
+    class _Client(_HostAuditReceiptMixin):
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
         def post(self, _endpoint: str, _payload: dict) -> dict:
-            return {"id": 42}
+            return self._pre_exec_response(_payload)
 
         def patch(self, _endpoint: str, payload: dict, **_kwargs: object) -> dict:
-            return _host_finalize_response(
+            return self._finalize_response(
                 payload,
-                id=42,
                 output_cleanup_status="deferred",
                 output_cleanup_warning="physical erasure deferred by policy",
                 output_integrity_status="not_applicable",
@@ -10463,7 +10445,6 @@ def test_host_exec_require_audit_rejects_deferred_physical_cleanup(
     )
     monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "anonymous")
     monkeypatch.setattr(module.scope_lib, "enforce_execution_policy", lambda *_a, **_k: {})
-    monkeypatch.setattr(module, "aggregate_rate_reservation", lambda *_a, **_k: None)
     monkeypatch.setattr(
         module,
         "_run_host_process",
@@ -10506,18 +10487,17 @@ def test_host_exec_console_write_failure_cannot_strand_a_quiesced_audit_row(
     patches: list[dict] = []
     warnings: list[str] = []
 
-    class _Client:
+    class _Client(_HostAuditReceiptMixin):
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
         def post(self, _endpoint: str, _payload: dict) -> dict:
-            return {"id": 42}
+            return self._pre_exec_response(_payload)
 
         def patch(self, _endpoint: str, payload: dict, **_kwargs: object) -> dict:
             patches.append(payload)
-            return _host_finalize_response(
+            return self._finalize_response(
                 payload,
-                id=42,
                 output_cleanup_status="not_required",
                 output_integrity_status="verified",
             )
@@ -10551,7 +10531,6 @@ def test_host_exec_console_write_failure_cannot_strand_a_quiesced_audit_row(
     )
     monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "anonymous")
     monkeypatch.setattr(module.scope_lib, "enforce_execution_policy", lambda *_a, **_k: {})
-    monkeypatch.setattr(module, "aggregate_rate_reservation", lambda *_a, **_k: None)
     monkeypatch.setattr(
         module,
         "_run_host_process",
@@ -10607,17 +10586,16 @@ def test_host_exec_client_close_failure_still_closes_both_retained_spill_fds(
         retained_descriptors.extend(descriptors)
         return descriptors
 
-    class _Client:
+    class _Client(_HostAuditReceiptMixin):
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
         def post(self, _endpoint: str, _payload: dict) -> dict:
-            return {"id": 42}
+            return self._pre_exec_response(_payload)
 
         def patch(self, _endpoint: str, payload: dict, **_kwargs: object) -> dict:
-            return _host_finalize_response(
+            return self._finalize_response(
                 payload,
-                id=42,
                 output_cleanup_status="not_required",
                 output_integrity_status="verified",
             )
@@ -10638,7 +10616,6 @@ def test_host_exec_client_close_failure_still_closes_both_retained_spill_fds(
     )
     monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "anonymous")
     monkeypatch.setattr(module.scope_lib, "enforce_execution_policy", lambda *_a, **_k: {})
-    monkeypatch.setattr(module, "aggregate_rate_reservation", lambda *_a, **_k: None)
     monkeypatch.setattr(
         module,
         "_run_host_process",
@@ -10843,7 +10820,7 @@ def test_blue_phase_gate_pages_completed_dispatches() -> None:
     ]
 
 
-def test_blue_investigate_gate_skips_l2_dispatch_for_auto_closed_findings() -> None:
+def test_blue_investigate_gate_rejects_legacy_free_text_auto_close() -> None:
     module = _load_assess_module(
         "transition_phase_command_module_blue_autoclosed_investigate_gate",
         "agent/scripts/assess/commands/transition_phase.py",
@@ -10858,8 +10835,8 @@ def test_blue_investigate_gate_skips_l2_dispatch_for_auto_closed_findings() -> N
                     {
                         "slug": "FIND-001",
                         "workflow_status": "false_positive",
-                        "verification_disposition": "false_positive",
-                        "details_json": {"kill_reason": "Benign admin activity"},
+                        "verification_status": "false_positive",
+                        "details": {"kill_reason": "Benign admin activity"},
                     }
                 ]
             return []
@@ -10867,6 +10844,50 @@ def test_blue_investigate_gate_skips_l2_dispatch_for_auto_closed_findings() -> N
             pass
         def __enter__(self):
             return self
+        def __exit__(self, *exc):
+            self.close()
+            return False
+
+    blockers = module._blue_check_investigate_to_verify(_Client())
+
+    assert [row["kind"] for row in blockers] == ["no_completed_l2_dispatch"]
+    assert calls == ["findings", "dispatches?status=completed&limit=1000&offset=0"]
+
+
+def test_blue_investigate_gate_accepts_independent_structured_false_positive() -> None:
+    module = _load_assess_module(
+        "transition_phase_command_module_blue_structured_false_positive_gate",
+        "agent/scripts/assess/commands/transition_phase.py",
+    )
+    calls: list[str] = []
+
+    class _Client:
+        def get(self, endpoint: str):
+            calls.append(endpoint)
+            if endpoint == "findings":
+                return [
+                    {
+                        "slug": "FIND-001",
+                        "workflow_status": "false_positive",
+                        "verification_status": "false_positive",
+                        "counter_check": {
+                            "method": "trace access path",
+                            "expected_result": "unauthorized access succeeds",
+                            "observed_result": "every access is denied",
+                            "falsified_claim": "unauthorized access succeeds",
+                            "completed": True,
+                            "proof_receipt_ids": [17],
+                        },
+                    }
+                ]
+            return []
+
+        def close(self) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
         def __exit__(self, *exc):
             self.close()
             return False
@@ -10890,8 +10911,7 @@ def test_blue_respond_gate_does_not_treat_approval_as_containment() -> None:
                     {
                         "slug": "FIND-001",
                         "workflow_status": "active",
-                        "verification_state": "verified",
-                        "verification_disposition": "confirmed",
+                        "verification_status": "confirmed",
                         "severity": "high",
                     }
                 ]
@@ -11019,8 +11039,8 @@ def test_blue_investigate_gate_missing_mitre_is_advisory_not_block() -> None:
                     {
                         "slug": "FIND-001",
                         "workflow_status": "active",
-                        "verification_state": "verified",
-                        "details_json": {},
+                        "verification_status": "confirmed",
+                        "details": {},
                     }
                 ]
             if endpoint == "dispatches?status=completed&limit=1000&offset=0":
@@ -11066,8 +11086,7 @@ def test_blue_respond_gate_single_finding_no_containment_closes() -> None:
                     {
                         "slug": "FIND-001",
                         "workflow_status": "active",
-                        "verification_state": "verified",
-                        "verification_disposition": "confirmed",
+                        "verification_status": "confirmed",
                         "severity": "critical",
                     }
                 ]
@@ -11699,11 +11718,14 @@ def test_supersede_intel_to_existing_sends_fk_body(
         def __init__(self, *_: object, **__: object) -> None:
             pass
 
-        def _request(self, method: str, path: str, body: bytes | None = None):
-            captured["method"] = method
-            captured["path"] = path
-            captured["body"] = body
-            return 201, json.dumps({"superseded": {"id": 5}, "current": {"id": 7}})
+        def post_engagement(self, endpoint: str, payload: dict):
+            captured["method"] = "POST"
+            captured["path"] = f"{self._engagement_prefix}/{endpoint}"
+            captured["body"] = json.dumps(payload).encode()
+            return {
+                "superseded": {"id": 5, "superseded_by_id": 7},
+                "current": {"id": 7},
+            }
 
         def close(self) -> None:
             return None
@@ -12822,7 +12844,7 @@ def test_list_command_runs_cli_sends_fuzzy_search_flags(
     )
 
     assert calls == [
-        "command-runs?q=VA047&tool_bin=curl&target_host=example.com&sort=distant&show_matches=true&output_attention=true&limit=10&offset=0"
+        "command-runs?q=VA047&tool_bin=curl&target_host=example.com&sort=distant&show_matches=true&output_attention=true&limit=11&offset=0"
     ]
     assert "(no command runs matched)" in capsys.readouterr().out
 
@@ -12986,6 +13008,76 @@ def test_agent_reconcile_stale_includes_completed_and_honors_reconciliation_deci
     assert "AG-FAILED-ADJUDICATED" not in rows
 
 
+def test_agent_reconcile_stale_pages_handoffs_before_classifying_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_assess_module(
+        "agent_command_module_reconcile_paged_handoffs",
+        "agent/scripts/assess/commands/agent.py",
+    )
+
+    class _PagedClient(_CapturingClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.handoff_page_offsets: list[int] = []
+
+        def list_dispatches(self, **filters):
+            status = filters.get("status")
+            offset = int(filters.get("offset", 0))
+            if status == "in-progress" and offset == 0:
+                return [
+                    {
+                        "agent_id": "AG-PAGED",
+                        "agent_role": "recon-specialist",
+                        "status": "in-progress",
+                        "dispatched_at": "2026-05-17T12:00:00Z",
+                    },
+                    *[
+                        {
+                            "agent_id": f"RECENT-{index}",
+                            "agent_role": "recon-specialist",
+                            "status": "in-progress",
+                            "dispatched_at": "2999-01-01T00:00:00Z",
+                        }
+                        for index in range(999)
+                    ],
+                ]
+            return []
+
+        def list_handoffs(self, **filters):
+            offset = int(filters.get("offset", 0))
+            self.handoff_page_offsets.append(offset)
+            if offset == 0:
+                return [
+                    {"agent_id": f"OTHER-{index}", "handoff_status": "ready"}
+                    for index in range(1000)
+                ]
+            if offset == 1000:
+                return [{"agent_id": "AG-PAGED", "handoff_status": "ready"}]
+            return []
+
+        def list_decisions(self, **filters):
+            return []
+
+    fake = _PagedClient()
+    monkeypatch.setattr(module.dispatch, "_client_for", lambda _args: (fake, SimpleNamespace()))
+
+    module.run(
+        SimpleNamespace(
+            action="reconcile-stale",
+            extra=[],
+            agent_id=None,
+            dry_run=True,
+            max_age_hours=1,
+        )
+    )
+
+    rows = {row["agent_id"]: row for row in json.loads(capsys.readouterr().out)}
+    assert rows["AG-PAGED"]["category"] == "ready_handoff"
+    assert fake.handoff_page_offsets == [0, 1000]
+
+
 def _invoke_backend_lifecycle(module, action: str, args) -> None:
     """Route an OLD dispatch backend-action name to the internal
     ``assess.commands.dispatch.agent`` helper it now lives in.
@@ -13137,36 +13229,31 @@ def _dispatch_args(action: str, *, db_path: str | None = None, extra=None, **fla
 # is nothing left to guard against. See tests/test_work_buffer_backend.py.
 
 
-def test_dispatch_record_handoff_from_json_rejects_agent_id_mismatch(
+def test_dispatch_record_handoff_from_json_requires_agent_id_before_client(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     module = _load_dispatch_module()
     payload_path = tmp_path / "handoff.json"
     payload_path.write_text(
         json.dumps(
-            {
-                "agent_id": "stale-local-name",
-                "agent_role": "recon-specialist",
-                "summary": "checkpoint from a local artifact",
-            }
+                {"agent_role": "recon-specialist", "summary": "checkpoint"}
         ),
         encoding="utf-8",
     )
 
-    # The agent_id-mismatch guard lives in _build_handoff_payload / _record_handoff
-    # and fires before any client call.
+    # JSON is now the only handoff input surface, so its durable lookup key is
+    # validated before resolving an engagement or constructing a client.
     with pytest.raises(SystemExit) as exc_info:
         module.agent._record_handoff(
-            _dispatch_args(
-                "record-handoff",
-                from_json=str(payload_path),
-                agent_id="actual-agent-id",
-            )
+                _dispatch_args(
+                    "record-handoff",
+                    from_json=str(payload_path),
+                )
         )
 
     assert exc_info.value.code == 1
     err = capsys.readouterr().err
-    assert "does not match explicit --agent-id 'actual-agent-id'" in err
+    assert "agent_id is required" in err
 
 
 def test_dispatch_register_writes_payload(
@@ -13299,11 +13386,10 @@ def test_dispatch_register_normalizes_role_to_agent_role(
     assert "role" not in recorded
 
 
-def test_dispatch_register_overlap_check_is_opt_in(
+def test_dispatch_register_overlap_check_is_default_on(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """L2-8: without --check-overlap the default `agent start` path performs no
-    list_dispatches query, so an overlapping in-progress row produces no warning."""
+    """Every start checks structured overlap unless explicitly suppressed."""
     module = _load_dispatch_module()
     fake = _CapturingClient()
     fake.dispatches_by_id["AG-OLD"] = {
@@ -13349,8 +13435,8 @@ def test_dispatch_register_overlap_check_is_opt_in(
     )
 
     err = capsys.readouterr().err
-    assert "active dispatch rows appear to overlap" not in err
-    assert list_calls == []
+    assert "dispatch rows appear to overlap" in err
+    assert {call["status"] for call in list_calls} == {"in-progress", "completed"}
     assert fake.recorded[0]["agent_id"] == "AG-NEW"
 
 
@@ -13390,7 +13476,6 @@ def test_dispatch_register_warns_on_structured_overlap(
             finding_slugs="VA-001",
             dispatch_mode_arg="item-iterating",
             skills="idor-testing",
-            check_overlap=True,
         ),
     )
 
@@ -13398,6 +13483,122 @@ def test_dispatch_register_warns_on_structured_overlap(
     assert "WARN agent start" in err
     assert "same finding_slugs: VA-001" in err
     assert fake.recorded[0]["agent_id"] == "AG-NEW"
+
+
+def test_dispatch_overlap_pages_ranks_counts_and_includes_completed(capsys) -> None:
+    module = _load_dispatch_module()
+
+    class _PagedOverlapClient:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def list_dispatches(self, **filters):
+            self.calls.append(filters)
+            status = filters["status"]
+            offset = int(filters.get("offset", 0))
+            if status == "in-progress" and offset == 0:
+                return [
+                    {
+                        "agent_id": f"filler-{index}",
+                        "agent_role": "vulnerability-analyst",
+                        "status": status,
+                        "task": f"unrelated {index}",
+                    }
+                    for index in range(1000)
+                ]
+            if status == "in-progress" and offset == 1000:
+                return [
+                    {
+                        "agent_id": "active-one",
+                        "agent_role": "vulnerability-analyst",
+                        "status": status,
+                        "finding_slugs": ["VA-001"],
+                        "completed_at": None,
+                    }
+                ]
+            if status == "completed" and offset == 0:
+                return [
+                    {
+                        "agent_id": "completed-two",
+                        "agent_role": "vulnerability-analyst",
+                        "status": status,
+                        "finding_slugs": ["VA-001", "VA-002"],
+                        "completed_at": "2026-09-09T12:00:00Z",
+                    },
+                    {
+                        "agent_id": "completed-exact-with-findings",
+                        "agent_role": "vulnerability-analyst",
+                        "status": status,
+                        "finding_slugs": ["VA-100", "VA-101", "VA-102"],
+                        "task": "new task",
+                        "completed_at": "2026-09-09T10:00:00Z",
+                    },
+                    {
+                        "agent_id": "completed-exact-no-findings",
+                        "agent_role": "vulnerability-analyst",
+                        "status": status,
+                        "finding_slugs": [],
+                        "task": "new task",
+                        "completed_at": "2026-09-09T11:00:00Z",
+                    },
+                ]
+            return []
+
+    client = _PagedOverlapClient()
+    module.agent._warn_on_overlapping_dispatch(
+        client,
+        {
+            "agent_id": "new",
+            "agent_role": "vulnerability-analyst",
+            "finding_slugs": ["VA-001", "VA-002"],
+            "task": "new task",
+        },
+    )
+
+    err = capsys.readouterr().err
+    assert err.index("completed-two") < err.index("active-one")
+    assert err.index("completed-exact-with-findings") < err.index(
+        "completed-exact-no-findings"
+    )
+    assert "completed-two (vulnerability-analyst, completed)" in err
+    assert "4 of 4 overlapping dispatches shown" in err
+    assert {call["status"] for call in client.calls} == {"in-progress", "completed"}
+    assert any(call.get("offset") == 1000 for call in client.calls)
+
+
+def test_dispatch_overlap_reports_incomplete_scan_with_zero_matches(capsys) -> None:
+    module = _load_dispatch_module()
+    module.agent._OVERLAP_PAGE_SIZE = 2
+    module.agent._OVERLAP_MAX_PAGES = 2
+
+    class _RepeatingPageClient:
+        def list_dispatches(self, **filters):
+            status = filters["status"]
+            return [
+                {
+                    "id": index,
+                    "agent_id": f"{status}-{index}",
+                    "agent_role": "vulnerability-analyst",
+                    "status": status,
+                    "task": f"unrelated {index}",
+                }
+                for index in range(2)
+            ]
+
+    module.agent._warn_on_overlapping_dispatch(
+        _RepeatingPageClient(),
+        {
+            "agent_id": "new",
+            "agent_role": "vulnerability-analyst",
+            "task": "new task",
+        },
+    )
+
+    err = capsys.readouterr().err
+    assert "duplicate-overlap history scan incomplete" in err
+    assert "4 dispatch rows inspected" in err
+    assert "no overlap found in the inspected rows" in err
+    assert "backend history was not exhausted" in err
 
 
 def test_dispatch_register_does_not_warn_for_shared_unit_mode_only(
@@ -13637,19 +13838,32 @@ def test_dispatch_record_decision_includes_reason_flag(
     assert body["payload"]["reason"] == "missing massdns binary in runtime image"
 
 
-def test_dispatch_record_handoff_flag_based(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_dispatch_record_handoff_from_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
+    payload_path = tmp_path / "handoff.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "agent_id": "HF-CLI-1",
+                "agent_role": "vulnerability-analyst",
+                "summary": "Validated IDOR write primitive.",
+                "next_steps": [{"action": "promote to exploit-developer"}],
+                "coverage_gaps": [
+                    {"area": "auth boundary", "reason": "anonymous untested"}
+                ],
+                "recommended_next_agent": "exploit-developer",
+                "finding_slugs": ["VA-001"],
+            }
+        ),
+        encoding="utf-8",
+    )
     fake = _run_dispatch_verb(
         monkeypatch,
         "record-handoff",
-        agent_id="HF-CLI-1",
-        agent_role="vulnerability-analyst",
-        hf_summary="Validated IDOR write primitive.",
-        hf_next_steps=["promote to exploit-developer"],
-        hf_coverage_gaps=["auth boundary: anonymous untested"],
-        hf_recommended_next_agent="exploit-developer",
-        finding_slugs="VA-001",
+        from_json=str(payload_path),
     )
     payload = fake.handoff_response
     assert payload["agent_id"] == "HF-CLI-1"
@@ -13663,7 +13877,9 @@ def test_dispatch_record_handoff_flag_based(
 
 
 def test_dispatch_handoff_can_patch_status_without_replacing_summary(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     module = _load_dispatch_module()
     fake = _CapturingClient()
@@ -13676,25 +13892,12 @@ def test_dispatch_handoff_can_patch_status_without_replacing_summary(
     }
     monkeypatch.setattr(module.agent, "_client_for", lambda _args: (fake, SimpleNamespace()))
 
-    module.agent._record_handoff(
-        SimpleNamespace(
-            from_json=None,
-            agent_id="HF-PROMOTE",
-            agent_role=None,
-            hf_summary=None,
-            hf_confidence=None,
-            finding_slugs=None,
-            hf_next_steps=None,
-            hf_coverage_gaps=None,
-            hf_runtime_issues=None,
-            hf_working_artifacts=None,
-            hf_open_questions=None,
-            hf_recommended_next_agent=None,
-            hf_handoff_status="ready",
-            hf_closed_dispatch_status=None,
-            hf_extras_json=None,
-        )
+    payload_path = tmp_path / "handoff-update.json"
+    payload_path.write_text(
+        '{"agent_id":"HF-PROMOTE","handoff_status":"ready"}\n',
+        encoding="utf-8",
     )
+    module.agent._record_handoff(SimpleNamespace(from_json=str(payload_path)))
 
     row = fake.handoffs_by_id["HF-PROMOTE"]
     assert row["handoff_status"] == "ready"
@@ -15008,6 +15211,54 @@ class _TestClientGetAdapter:
         return response.json()
 
 
+def _confirm_export_finding(client, slug: str) -> None:
+    verifier_id = f"export-verifier-{slug.lower()}"
+    dispatch = client.post(
+        f"{_EXPORT_BASE}/dispatches",
+        json={
+            "agent_id": verifier_id,
+            "agent_role": "report-verifier",
+            "task": f"Independently verify {slug} for export.",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
+    run = client.post(
+        f"{_EXPORT_BASE}/assessment-runs",
+        json={
+            "run_uuid": f"export-proof-{slug.lower()}",
+            "run_kind": "shared",
+            "producer_dispatch_agent_id": verifier_id,
+        },
+    )
+    assert run.status_code == 201, run.text
+    receipt = post_artifact_backed_source_observation(
+        client,
+        f"{_EXPORT_BASE}/proof-receipts",
+        json={
+            "run_id": run.json()["id"],
+            "evidence_kind": "source_observation",
+            "expected_result": "The finding is not reproducible as recorded.",
+            "observed_result": "Independent review reproduced the finding as recorded.",
+        },
+    )
+    assert receipt.status_code == 201, receipt.text
+    finished = client.patch(
+        f"{_EXPORT_BASE}/assessment-runs/{run.json()['id']}",
+        json={"status": "completed"},
+    )
+    assert finished.status_code == 200, finished.text
+    verified = client.post(
+        f"{_EXPORT_BASE}/findings/{slug}/verify",
+        json={
+            "verification_status": "confirmed",
+            "reason_text": "Independent review reproduced the finding.",
+            "source_name": "report-verifier",
+            "proof_receipt_ids": [receipt.json()["id"]],
+        },
+    )
+    assert verified.status_code == 200, verified.text
+
+
 def _seed_export_engagement(client, isolate_settings) -> Path:
     engagements_dir = isolate_settings["engagements_dir"]
     eng = engagements_dir / _EXPORT_ENGAGEMENT_KEY
@@ -15040,6 +15291,16 @@ def _seed_export_engagement(client, isolate_settings) -> Path:
     # Force the backend to pick up the on-disk engagement.
     assert client.get(f"/engagements/{_EXPORT_ENGAGEMENT_KEY}").status_code == 200
 
+    author = client.post(
+        f"{_EXPORT_BASE}/dispatches",
+        json={
+            "agent_id": "export-fixture-author",
+            "agent_role": "vulnerability-analyst",
+            "task": "Record export fixture findings.",
+        },
+    )
+    assert author.status_code == 201, author.text
+
     # Finding A: high severity, with structured details + a linked debate doc.
     created = client.post(
         f"{_EXPORT_BASE}/findings",
@@ -15048,13 +15309,13 @@ def _seed_export_engagement(client, isolate_settings) -> Path:
             "title": "SQL injection in login",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "verified",
-            "verification_disposition": "confirmed",
+            "verification_status": "unreviewed",
             "defect_family": "sqli",
             "canonical_location": "https://example.com/login",
             "summary": "Auth bypass via UNION-based SQLi",
             "evidence_ref": "findings.md",
             "source_name": "vulnerability-analyst",
+            "provenance": {"agent_id": "export-fixture-author"},
             "details": {
                 "cwe_id": "CWE-89",
                 "owasp_category": "A03:2021",
@@ -15065,6 +15326,7 @@ def _seed_export_engagement(client, isolate_settings) -> Path:
         },
     )
     assert created.status_code == 201, created.text
+    _confirm_export_finding(client, "VA-001")
 
     # Finding B: low severity, NO linked narrative → debate.md placeholder.
     created_b = client.post(
@@ -15074,13 +15336,13 @@ def _seed_export_engagement(client, isolate_settings) -> Path:
             "title": "Verbose error messages",
             "severity": "low",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "defect_family": "info-leak",
             "canonical_location": "https://example.com/debug",
             "summary": "Stack traces leak in 500 responses.",
             "evidence_ref": "findings.md",
             "source_name": "vulnerability-analyst",
+            "provenance": {"agent_id": "export-fixture-author"},
         },
     )
     assert created_b.status_code == 201, created_b.text

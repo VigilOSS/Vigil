@@ -6,7 +6,7 @@ import re
 import sys
 from pathlib import Path
 
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessmentClient, AssessError
 from assess.lib.config import load_config
 
 
@@ -65,6 +65,44 @@ def _check_auto_derived_key_collisions(modules: list[dict], existing_modules: li
             )
             sys.exit(1)
         auto_derived_by_key[module_key] = module_name
+
+
+def _require_modules_receipt(
+    response: object, *, repo_id: int, modules: list[dict]
+) -> list[dict]:
+    valid_rows = isinstance(response, list) and len(response) == len(modules)
+    rows = response if isinstance(response, list) else []
+    returned_keys: list[str] = []
+    if valid_rows:
+        for row in rows:
+            if not isinstance(row, dict):
+                valid_rows = False
+                break
+            row_id = row.get("id")
+            row_repo_id = row.get("repo_id")
+            module_key = row.get("module_key")
+            if (
+                not isinstance(row_id, int)
+                or isinstance(row_id, bool)
+                or row_id < 1
+                or not isinstance(row_repo_id, int)
+                or isinstance(row_repo_id, bool)
+                or row_repo_id != repo_id
+                or not isinstance(module_key, str)
+                or not module_key
+            ):
+                valid_rows = False
+                break
+            returned_keys.append(module_key)
+    expected_keys = [str(module["module_key"]) for module in modules]
+    if not valid_rows or sorted(returned_keys) != sorted(expected_keys):
+        raise AssessError(
+            "record code modules: backend response did not identify the canonical "
+            "module id/repo/key rows for every requested module; the write may have "
+            "committed, so inspect `vigil assess code list-modules` and do not retry "
+            "automatically"
+        )
+    return rows
 
 
 def register(subparsers) -> None:
@@ -136,13 +174,13 @@ def run(args) -> None:
             'repo_id': repo_id,
             'modules': modules,
         }
-        result = client.post('code/modules', payload)
+        result = _require_modules_receipt(
+            client.post('code/modules', payload),
+            repo_id=repo_id,
+            modules=modules,
+        )
 
-    if isinstance(result, list):
-        print("=== Code Modules Summary ===")
-        print(f"Modules created: {len(result)}")
-        for mod in result:
-            print(f"  [{mod.get('id', '?')}] {mod.get('module_key', '?')}: {mod.get('name', '?')}")
-    else:
-        print("=== Code Modules Summary ===")
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+    print("=== Code Modules Summary ===")
+    print(f"Modules created: {len(result)}")
+    for mod in result:
+        print(f"  [{mod['id']}] {mod['module_key']}: {mod.get('name', '?')}")

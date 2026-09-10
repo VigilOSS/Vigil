@@ -30,7 +30,7 @@ import {
 import { useBodyScrollLock } from "../lib/modalScrollLock";
 import { useToast } from "../contexts/ToastContext";
 import { CodeBlock, RelTime } from "./formatting";
-import { KV, ProseSection } from "./drawer/DrawerKit";
+import { KV, ProseSection, UntrustedDataNotice } from "./drawer/DrawerKit";
 import { TableSkeleton } from "./Skeletons";
 
 const HttpGrid = lazy(() => import("./HttpGrid"));
@@ -538,6 +538,7 @@ function HttpDrawer({
         </div>
 
         <div className="drawer-body">
+          <UntrustedDataNotice />
           <div className="section">
             <p className="section-title">Metadata</p>
             <div className="kv-grid">
@@ -1257,7 +1258,21 @@ function CapturePolicyControl({
               Save
             </button>
           </div>
+          <span className="meta-text">
+            Retention: until engagement deletion
+          </span>
+          <span className="meta-text">
+            Content types: allow {policy.content_type_allow.join(", ") || "all"}; deny {policy.content_type_deny.join(", ") || "none"}
+          </span>
+          <span className="meta-text">
+            Redaction: {policy.redaction_profile} (raw evidence preserved)
+          </span>
         </div>
+      )}
+      {policy.redaction_warning && (
+        <p className="empty" style={{ textAlign: "left", paddingTop: 8 }}>
+          {policy.redaction_warning}
+        </p>
       )}
       {error && (
         <p className="empty" style={{ textAlign: "left", paddingTop: 8 }}>
@@ -1361,6 +1376,7 @@ function FlowDrawer({
         </div>
 
         <div className="drawer-body">
+          <UntrustedDataNotice />
           <div className="section">
             <p className="section-title">Metadata</p>
             <div className="kv-grid">
@@ -1416,6 +1432,8 @@ function FlowDrawer({
                 bytes={row.request_body_bytes}
                 sha={row.request_body_sha256}
                 truncated={row.request_body_truncated}
+                captureStatus={row.request_body_capture_status}
+                captureError={row.request_body_capture_error}
                 artifactPath={row.request_body_artifact_path}
                 toast={toast}
               />
@@ -1425,6 +1443,8 @@ function FlowDrawer({
                 bytes={row.response_body_bytes}
                 sha={row.response_body_sha256}
                 truncated={row.response_body_truncated}
+                captureStatus={row.response_body_capture_status}
+                captureError={row.response_body_capture_error}
                 artifactPath={row.response_body_artifact_path}
                 toast={toast}
               />
@@ -1466,6 +1486,8 @@ function FlowBodyMeta({
   bytes,
   sha,
   truncated,
+  captureStatus,
+  captureError,
   artifactPath,
   toast,
 }: {
@@ -1474,6 +1496,8 @@ function FlowBodyMeta({
   bytes: number;
   sha: string;
   truncated: boolean;
+  captureStatus: string;
+  captureError: string;
   artifactPath: string | null;
   toast: ToastFn;
 }) {
@@ -1491,6 +1515,8 @@ function FlowBodyMeta({
       </div>
       <div className="kv-grid" style={{ marginTop: 6 }}>
         <KV k="Content-Type" v={contentType || "—"} />
+        <KV k="Capture status" v={captureStatus || "unknown"} />
+        <KV k="Capture error" v={captureError || "—"} />
         <KV k="Size" v={fmtBytes(bytes)} />
         <div className="kv">
           <p className="k">Truncated</p>

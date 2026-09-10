@@ -51,6 +51,8 @@ _INTEL_TYPE_BY_PLURAL: dict[str, str] = {
 
 
 router = APIRouter(prefix="/engagements/{engagement_key}/intel", tags=["intel"])
+DEFAULT_INTEL_LIST_LIMIT = 100
+MAX_INTEL_LIST_LIMIT = 500
 
 
 async def _broadcast(engagement_key: str, record_type: str, payload: dict[str, Any]) -> None:
@@ -112,20 +114,26 @@ def get_intel_by_url(
 
 
 @router.get("/credentials")
-def list_intel_credentials(engagement_key: str) -> list[dict[str, Any]]:
+def list_intel_credentials(
+    engagement_key: str,
+    limit: int = Query(default=DEFAULT_INTEL_LIST_LIMIT, ge=1, le=MAX_INTEL_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
     """Alias over ``assessment_credentials`` so the intel pane stays uniform."""
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.list_credentials(engagement.id)
+    return state_manager.list_credentials(engagement.id, limit=limit, offset=offset)
 
 
 @router.get("/tech-components")
 def list_tech_components(
     engagement_key: str,
     include_superseded: bool = Query(default=True),
+    limit: int = Query(default=DEFAULT_INTEL_LIST_LIMIT, ge=1, le=MAX_INTEL_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
     return intel_service.list_tech_components(
-        engagement.id, include_superseded=include_superseded
+        engagement.id, include_superseded=include_superseded, limit=limit, offset=offset
     )
 
 
@@ -133,46 +141,64 @@ def list_tech_components(
 def list_people(
     engagement_key: str,
     include_superseded: bool = Query(default=True),
+    limit: int = Query(default=DEFAULT_INTEL_LIST_LIMIT, ge=1, le=MAX_INTEL_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return intel_service.list_people(engagement.id, include_superseded=include_superseded)
+    return intel_service.list_people(
+        engagement.id, include_superseded=include_superseded, limit=limit, offset=offset
+    )
 
 
 @router.get("/emails")
 def list_emails(
     engagement_key: str,
     include_superseded: bool = Query(default=True),
+    limit: int = Query(default=DEFAULT_INTEL_LIST_LIMIT, ge=1, le=MAX_INTEL_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return intel_service.list_emails(engagement.id, include_superseded=include_superseded)
+    return intel_service.list_emails(
+        engagement.id, include_superseded=include_superseded, limit=limit, offset=offset
+    )
 
 
 @router.get("/domains")
 def list_domains(
     engagement_key: str,
     include_superseded: bool = Query(default=True),
+    limit: int = Query(default=DEFAULT_INTEL_LIST_LIMIT, ge=1, le=MAX_INTEL_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return intel_service.list_domains(engagement.id, include_superseded=include_superseded)
+    return intel_service.list_domains(
+        engagement.id, include_superseded=include_superseded, limit=limit, offset=offset
+    )
 
 
 @router.get("/cves")
 def list_cves(
     engagement_key: str,
     include_superseded: bool = Query(default=True),
+    limit: int = Query(default=DEFAULT_INTEL_LIST_LIMIT, ge=1, le=MAX_INTEL_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return intel_service.list_cves(engagement.id, include_superseded=include_superseded)
+    return intel_service.list_cves(
+        engagement.id, include_superseded=include_superseded, limit=limit, offset=offset
+    )
 
 
 @router.get("/dns-records")
 def list_dns_records(
     engagement_key: str,
     include_superseded: bool = Query(default=True),
+    limit: int = Query(default=DEFAULT_INTEL_LIST_LIMIT, ge=1, le=MAX_INTEL_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
     return intel_service.list_dns_records(
-        engagement.id, include_superseded=include_superseded
+        engagement.id, include_superseded=include_superseded, limit=limit, offset=offset
     )
 
 
@@ -180,10 +206,12 @@ def list_dns_records(
 def list_social_profiles(
     engagement_key: str,
     include_superseded: bool = Query(default=True),
+    limit: int = Query(default=DEFAULT_INTEL_LIST_LIMIT, ge=1, le=MAX_INTEL_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
     return intel_service.list_social_profiles(
-        engagement.id, include_superseded=include_superseded
+        engagement.id, include_superseded=include_superseded, limit=limit, offset=offset
     )
 
 
@@ -191,10 +219,12 @@ def list_social_profiles(
 def list_breach_records(
     engagement_key: str,
     include_superseded: bool = Query(default=True),
+    limit: int = Query(default=DEFAULT_INTEL_LIST_LIMIT, ge=1, le=MAX_INTEL_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
     return intel_service.list_breach_records(
-        engagement.id, include_superseded=include_superseded
+        engagement.id, include_superseded=include_superseded, limit=limit, offset=offset
     )
 
 
@@ -202,10 +232,12 @@ def list_breach_records(
 def list_org_facts(
     engagement_key: str,
     include_superseded: bool = Query(default=True),
+    limit: int = Query(default=DEFAULT_INTEL_LIST_LIMIT, ge=1, le=MAX_INTEL_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
     return intel_service.list_org_facts(
-        engagement.id, include_superseded=include_superseded
+        engagement.id, include_superseded=include_superseded, limit=limit, offset=offset
     )
 
 
@@ -213,9 +245,13 @@ def list_org_facts(
 def list_notes(
     engagement_key: str,
     include_superseded: bool = Query(default=True),
+    limit: int = Query(default=DEFAULT_INTEL_LIST_LIMIT, ge=1, le=MAX_INTEL_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return intel_service.list_notes(engagement.id, include_superseded=include_superseded)
+    return intel_service.list_notes(
+        engagement.id, include_superseded=include_superseded, limit=limit, offset=offset
+    )
 
 
 # ── POST endpoints ─────────────────────────────────────────
@@ -407,7 +443,14 @@ async def create_org_fact(engagement_key: str, request: OrgFactRecordRequest) ->
             fact_value=request.fact_value,
             source_name=request.source_name,
             notes=request.notes,
-            provenance=request.provenance,
+            provenance=(
+                request.provenance
+                if "provenance" in request.model_fields_set
+                else None
+            ),
+            authored_by=request.authored_by,
+            scope=request.scope,
+            validity_context=request.validity_context,
         )
     )
     await _broadcast(engagement.key, "org_fact", record)
@@ -421,13 +464,7 @@ async def create_note(engagement_key: str, request: NoteRecordRequest) -> dict[s
         functools.partial(
             intel_service.record_note,
             engagement.id,
-            title=request.title,
-            body_markdown=request.body_markdown,
-            source_agent=request.source_agent,
-            tags=request.tags,
-            source_name=request.source_name,
-            provenance=request.provenance,
-            lead_status=request.lead_status,
+            **request.model_dump(exclude_unset=True),
         )
     )
     await _broadcast(engagement.key, "note", record)

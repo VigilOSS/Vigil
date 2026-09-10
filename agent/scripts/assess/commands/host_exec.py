@@ -23,10 +23,14 @@ from typing import Any
 
 from assess.lib import host_processes
 from assess.lib import scope as scope_lib
-from assess.lib.client import AssessError, AssessmentClient
+from assess.lib.client import (
+    AssessError,
+    AssessmentClient,
+    require_command_run_finalize_response,
+)
 from assess.lib.config import load_config
+from assess.lib.execution_recency import emit_foreign_lane_recency
 from assess.lib.kali import prepare_execution_command
-from assess.lib.rate_leases import aggregate_rate_reservation, target_rate_lease
 
 # Conservative destructive-token list. Operators must pass --allow-destructive
 # to bypass. Tokens are matched as substrings in the joined argv after stripping
@@ -155,11 +159,6 @@ def register(subparsers) -> None:
         ),
     )
     p.add_argument(
-        "--rate-override-reason",
-        default="",
-        help="Reason for an authorized aggregate target-rate override.",
-    )
-    p.add_argument(
         "--finding",
         dest="finding",
         default="",
@@ -244,7 +243,6 @@ def _merge_from_json(args: argparse.Namespace, doc: dict) -> None:
         "audit_source": "audit_source",
         "allow_destructive": "allow_destructive",
         "require_audit": "require_audit",
-        "rate_override_reason": "rate_override_reason",
         "finding": "finding",
         "finding_id": "finding",
         "identity": "identity",
@@ -584,6 +582,12 @@ def _validate_terminal_finalize_response(
     """Accept a replayed terminal row only when its core facts are ours."""
     if not isinstance(finalized, dict):
         raise AssessError("audit finalize returned a non-object response")
+    require_command_run_finalize_response(
+        finalized,
+        run_id=attempted["id"],
+        run_uuid=attempted["run_uuid"],
+        requested_status=attempted["status"],
+    )
     mismatches: list[str] = []
     for field in ("status", "return_code", "timed_out", "duration_ms"):
         if field not in finalized or finalized[field] != attempted[field]:
@@ -1091,47 +1095,21 @@ def run(args) -> None:
         process_quiescent = True
 
         try:
-            reservation = aggregate_rate_reservation(
-                cfg.engagement_dir,
-                argv,
-                args.tool.strip(),
-                execution_policy,
-            )
-            if reservation is None:
-                return_code, stdout_text, stderr_text, timed_out = _run_host_process(
-                    argv,
-                    cwd=cwd,
-                    timeout_seconds=timeout_seconds,
-                    engagement_dir=cfg.engagement_dir,
-                    run_uuid=run_uuid,
-                    stdout_path=stdout_path,
-                    stderr_path=stderr_path,
-                    stdout_descriptor=stdout_descriptor,
-                    stderr_descriptor=stderr_descriptor,
+            if execution_policy.get("target_facing"):
+                emit_foreign_lane_recency(
+                    client, current_agent=str(pre_payload["agent_name"] or "operator")
                 )
-            else:
-                numeric_run_id = int(record_run_id) if str(record_run_id).isdigit() else None
-                with target_rate_lease(
-                    config=cfg,
-                    owner=f"host-exec:{run_uuid}",
-                    effective_rate_rps=reservation,
-                    ttl_seconds=max(timeout_seconds + 60, 60),
-                    override_reason=str(
-                        getattr(args, "rate_override_reason", "") or ""
-                    ).strip(),
-                    command_run_id=numeric_run_id,
-                ):
-                    return_code, stdout_text, stderr_text, timed_out = _run_host_process(
-                        argv,
-                        cwd=cwd,
-                        timeout_seconds=timeout_seconds,
-                        engagement_dir=cfg.engagement_dir,
-                        run_uuid=run_uuid,
-                        stdout_path=stdout_path,
-                        stderr_path=stderr_path,
-                        stdout_descriptor=stdout_descriptor,
-                        stderr_descriptor=stderr_descriptor,
-                    )
+            return_code, stdout_text, stderr_text, timed_out = _run_host_process(
+                argv,
+                cwd=cwd,
+                timeout_seconds=timeout_seconds,
+                engagement_dir=cfg.engagement_dir,
+                run_uuid=run_uuid,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                stdout_descriptor=stdout_descriptor,
+                stderr_descriptor=stderr_descriptor,
+            )
         except HostProcessNotQuiescent as exc:
             return_code = 1
             process_quiescent = False
@@ -1177,7 +1155,11 @@ def run(args) -> None:
                         finalize_payload,
                         accept_409=True,
                     ),
-                    finalize_payload,
+                    {
+                        **finalize_payload,
+                        "id": int(record_run_id),
+                        "run_uuid": run_uuid,
+                    },
                 )
                 if isinstance(finalized, dict):
                     for label in ("cleanup", "integrity"):

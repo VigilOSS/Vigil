@@ -51,28 +51,14 @@
         "reported"
       ]
     },
-    "verification_state": {
+    "verification_status": {
       "default": "unreviewed",
-      "maxLength": 32,
-      "minLength": 1,
-      "title": "Verification State",
+      "title": "Verification Status",
       "type": "string",
-      "description": "Human review state. Leave 'unreviewed' when first recording; set 'verified' after confirming exploitability; 'disputed' when contested.",
+      "description": "Shared verification state on a stored finding record. New API writes still start at 'unreviewed'; `vigil assess finding verify` owns transitions to disputed, pending_runtime_proof, blocked, confirmed, downgraded, or false_positive and enforces their evidence gates.",
       "enum": [
         "unreviewed",
-        "verified",
-        "disputed"
-      ]
-    },
-    "verification_disposition": {
-      "default": "none",
-      "maxLength": 32,
-      "minLength": 1,
-      "title": "Verification Disposition",
-      "type": "string",
-      "description": "Verifier outcome (stored field). 'none': not yet checked. 'pending_runtime_proof': needs live PoC. 'blocked': the attempt could not even start (missing provisioning); requires details.block_reason and is held OUT of the report. 'confirmed': exploitability proven. 'downgraded': real but severity reduced. 'false_positive': not exploitable. NOTE: `vigil assess finding verify --disposition` additionally accepts 'disputed', which is a verify ACTION that sets verification_state='disputed' and leaves this field at 'none' — 'disputed' is never persisted as a disposition, so it is intentionally absent from this stored enum.",
-      "enum": [
-        "none",
+        "disputed",
         "pending_runtime_proof",
         "blocked",
         "confirmed",
@@ -194,7 +180,13 @@
           "description": "Dangerous operation that consumes tainted data (e.g. 'memcpy(buf, scheme, schemelen) at lib/urlapi.c:342', 'sqlite3_exec(db, query)')."
         },
         "taint_path": {
-          "type": "string",
+          "type": [
+            "string",
+            "array"
+          ],
+          "items": {
+            "type": "string"
+          },
           "description": "Arrow-delimited data flow from entry_point to sink (e.g. 'curl_url_set -> parseurl() -> memcpy(buf, scheme, schemelen)')."
         },
         "guards_evaluated": {
@@ -248,45 +240,6 @@
         "poc_code": {
           "type": "string",
           "description": "Minimal exploit code or script that reproduces the finding. Omit if poc_request/poc_response is sufficient."
-        },
-        "poc_request": {
-          "type": "object",
-          "description": "HTTP request that triggers the vulnerability.",
-          "properties": {
-            "method": {
-              "type": "string"
-            },
-            "url": {
-              "type": "string"
-            },
-            "headers": {
-              "type": "object",
-              "additionalProperties": {
-                "type": "string"
-              }
-            },
-            "body": {
-              "type": "string"
-            }
-          }
-        },
-        "poc_response": {
-          "type": "object",
-          "description": "Observed HTTP response that confirms the vulnerability.",
-          "properties": {
-            "status": {
-              "type": "integer"
-            },
-            "headers": {
-              "type": "object",
-              "additionalProperties": {
-                "type": "string"
-              }
-            },
-            "body_excerpt": {
-              "type": "string"
-            }
-          }
         },
         "references": {
           "type": "array",
@@ -429,14 +382,6 @@
           },
           "description": "MITRE ATT&CK technique IDs (e.g. 'T1078') this finding maps to. Required on a blue-engagement finding before report readiness passes."
         },
-        "timeline": {
-          "type": "array",
-          "description": "Ordered incident timeline entries, each a UTC ISO-8601 event citing its `source_file` and `command_run_id` per agent/rules/ir-evidence.md. Appended across investigation rungs, never replaced."
-        },
-        "iocs": {
-          "type": "array",
-          "description": "Indicators of compromise observed for this finding (IP, domain, email, file hash, OAuth client_id, URL). Each one gets an `intel_*` row via `vigil assess intel record`."
-        },
         "confidence": {
           "type": "string",
           "enum": [
@@ -480,6 +425,7 @@
         },
         "unblock_requirements": {
           "type": "object",
+          "additionalProperties": false,
           "description": "What must be provisioned to lift the block so the finding can be driven to proof. When the unblocker is another finding or chain, link it with `vigil assess finding link <slug> --link-kind unblocked_by ...`.",
           "properties": {
             "kind": {
@@ -596,6 +542,137 @@
         "withdrawal_reason": {
           "type": "string",
           "description": "Why the researcher withdrew this submission. REQUIRED when submission_status is set to 'withdrawn' — a retraction is researcher-initiated, so the record must say why rather than assert a program decision."
+        },
+        "poc_request": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "HTTP request that triggers the vulnerability.",
+          "properties": {
+            "method": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "headers": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "body": {
+              "type": "string"
+            }
+          },
+          "x-vigil-extension": "web/v1"
+        },
+        "poc_response": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Observed HTTP response that confirms the vulnerability.",
+          "properties": {
+            "status": {
+              "type": "integer"
+            },
+            "headers": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "body_excerpt": {
+              "type": "string"
+            }
+          },
+          "x-vigil-extension": "web/v1"
+        },
+        "function": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Function or method containing the vulnerable operation.",
+          "x-vigil-extension": "code/v1"
+        },
+        "discovery_stage": {
+          "type": "string",
+          "enum": [
+            "hunt",
+            "variant"
+          ],
+          "description": "Code workflow stage that identified the finding.",
+          "x-vigil-extension": "code/v1"
+        },
+        "source_anchor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Verbatim source expression anchoring the finding in the reviewed snapshot.",
+          "x-vigil-extension": "code/v1"
+        },
+        "proof_complete": {
+          "type": "boolean",
+          "description": "True when the code-verification path established a complete source-to-sink proof.",
+          "x-vigil-extension": "code/v1"
+        },
+        "discovered_credential": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "credential_key",
+            "credential_id",
+            "principal",
+            "kind",
+            "minted_identity",
+            "session_minted"
+          ],
+          "properties": {
+            "credential_key": {
+              "type": "string",
+              "minLength": 1
+            },
+            "credential_id": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "principal": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "minted_identity": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_minted": {
+              "type": "boolean"
+            }
+          },
+          "description": "Credential-store record and optional replay identity created from a discovered secret.",
+          "x-vigil-extension": "credential/v1"
+        },
+        "timeline": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "Ordered incident timeline entries, each a UTC ISO-8601 event citing its `source_file` and `command_run_id` per agent/rules/ir-evidence.md. Appended across investigation rungs, never replaced.",
+          "x-vigil-extension": "blue/v1"
+        },
+        "iocs": {
+          "type": "array",
+          "items": {
+            "type": [
+              "string",
+              "object"
+            ]
+          },
+          "description": "Indicators of compromise observed for this finding (IP, domain, email, file hash, OAuth client_id, URL). Each one gets an `intel_*` row via `vigil assess intel record`.",
+          "x-vigil-extension": "blue/v1"
         }
       }
     },
@@ -798,6 +875,48 @@
       "title": "Links",
       "type": "array"
     },
+    "run_candidate": {
+      "additionalProperties": false,
+      "properties": {
+        "run_id": {
+          "minimum": 1,
+          "title": "Run Id",
+          "type": "integer"
+        },
+        "candidate_id": {
+          "minimum": 1,
+          "title": "Candidate Id",
+          "type": "integer"
+        },
+        "reason": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        },
+        "proof_receipt_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 1000,
+          "minItems": 1,
+          "title": "Proof Receipt Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "run_id",
+        "candidate_id",
+        "reason",
+        "proof_receipt_ids"
+      ],
+      "title": "FindingRunCandidatePromotion",
+      "type": [
+        "object",
+        "null"
+      ],
+      "default": null
+    },
     "allow_remint": {
       "default": false,
       "title": "Allow Remint",
@@ -808,8 +927,7 @@
     "title",
     "severity",
     "workflow_status",
-    "verification_state",
-    "verification_disposition",
+    "verification_status",
     "defect_family",
     "root_cause_key",
     "auth_context",
@@ -901,8 +1019,7 @@
         "discovered_by": "vulnerability-analyst"
       },
       "workflow_status": "active",
-      "verification_state": "unreviewed",
-      "verification_disposition": "none",
+      "verification_status": "unreviewed",
       "root_cause_key": "",
       "auth_context": "anonymous",
       "source_name": "vulnerability-analyst",
@@ -953,8 +1070,7 @@
         "discovered_by": "vulnerability-analyst"
       },
       "workflow_status": "active",
-      "verification_state": "unreviewed",
-      "verification_disposition": "none",
+      "verification_status": "unreviewed",
       "root_cause_key": "",
       "auth_context": "anonymous",
       "evidence_ref": "",
@@ -982,8 +1098,7 @@
         "discovered_by": "vulnerability-analyst"
       },
       "workflow_status": "active",
-      "verification_state": "unreviewed",
-      "verification_disposition": "none",
+      "verification_status": "unreviewed",
       "root_cause_key": "",
       "auth_context": "anonymous",
       "evidence_ref": "",

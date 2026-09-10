@@ -1,7 +1,7 @@
 """CLI tests for batch support + finding mutation input contracts.
 
 The canonical batch convention (Part 2): the entity slug/id positional is
-``nargs="+"`` and shared disposition flags apply to every listed entity via a
+``nargs="+"`` and shared verification flags apply to every listed entity via a
 resilient loop with a per-entity failure tally. verify/kill/update additionally
 migrated structured request documents to ``--payload-file`` (a JSON blob passed
 positionally or through the retired generic ``--inline`` flag is rejected with
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 
 import pytest
 
@@ -50,12 +51,31 @@ class _FakeClient:
     def post(self, endpoint: str, payload: dict) -> dict:
         self._maybe_fail(endpoint)
         self.posts.append((endpoint, payload))
-        return {"endpoint": endpoint, "ok": True}
+        response = {"endpoint": endpoint, "ok": True}
+        if endpoint.startswith("findings/") and endpoint.endswith("/verify"):
+            response["finding"] = {"slug": endpoint.split("/")[1]}
+        elif endpoint == "artifacts":
+            path = Path(payload["path"])
+            response.update(
+                {
+                    "id": len(self.posts),
+                    "relative_path": path.name if path.is_absolute() else path.as_posix(),
+                }
+            )
+        return response
 
     def patch(self, endpoint: str, payload: dict) -> dict:
         self._maybe_fail(endpoint)
         self.patches.append((endpoint, payload))
-        return {"endpoint": endpoint, "id": len(self.patches), **payload}
+        response_id = (
+            int(endpoint.rsplit("/", 1)[-1])
+            if endpoint.startswith(("surfaces/", "coverage-items/"))
+            else len(self.patches)
+        )
+        response = {"endpoint": endpoint, "id": response_id, **payload}
+        if endpoint.startswith("findings/") and "/links/" not in endpoint:
+            response["finding"] = {"slug": endpoint.split("/")[1]}
+        return response
 
     def get(self, endpoint: str) -> dict:
         self._maybe_fail(endpoint)
@@ -64,6 +84,12 @@ class _FakeClient:
     def put(self, endpoint: str, payload: dict) -> dict:
         self._maybe_fail(endpoint)
         self.puts.append((endpoint, payload))
+        if endpoint.startswith("findings/") and endpoint.endswith("/root-cause"):
+            return {
+                "id": len(self.puts),
+                "finding_slug": endpoint.split("/")[1],
+                "root_cause_slug": payload["root_cause_slug"],
+            }
         return {"endpoint": endpoint, **payload}
 
     def delete(self, endpoint: str) -> dict:
@@ -105,7 +131,12 @@ def test_verify_batch_applies_same_payload_to_each(tmp_path, monkeypatch, capsys
     _install(monkeypatch, verify_finding, tmp_path, fake)
     args = _parse(
         verify_finding,
-        ["verify", "VA-1", "VA-2", "VA-3", "--disposition", "confirmed", "--reason", "reproduced"],
+        [
+            "verify", "VA-1", "VA-2", "VA-3",
+            "--status", "confirmed",
+            "--reason", "reproduced",
+            "--proof-receipt-id", "17",
+        ],
         tmp_path,
     )
     verify_finding.run(args)
@@ -116,7 +147,12 @@ def test_verify_batch_applies_same_payload_to_each(tmp_path, monkeypatch, capsys
         "findings/VA-3/verify",
     ]
     # Same payload object applied to each.
-    assert all(p["disposition"] == "confirmed" and p["reason_text"] == "reproduced" for _, p in fake.posts)
+    assert all(
+        p["verification_status"] == "confirmed"
+        and p["reason_text"] == "reproduced"
+        and p["proof_receipt_ids"] == [17]
+        for _, p in fake.posts
+    )
     assert "verified 3 finding(s); 0 failed" in err
 
 
@@ -125,7 +161,12 @@ def test_verify_partial_failure_tally_and_nonzero_exit(tmp_path, monkeypatch, ca
     _install(monkeypatch, verify_finding, tmp_path, fake)
     args = _parse(
         verify_finding,
-        ["verify", "VA-1", "VA-2", "--disposition", "confirmed", "--reason", "r"],
+        [
+            "verify", "VA-1", "VA-2",
+            "--status", "confirmed",
+            "--reason", "r",
+            "--proof-receipt-id", "17",
+        ],
         tmp_path,
     )
     with pytest.raises(SystemExit) as exc:
@@ -143,7 +184,12 @@ def test_verify_single_slug_prints_single_json(tmp_path, monkeypatch, capsys):
     _install(monkeypatch, verify_finding, tmp_path, fake)
     args = _parse(
         verify_finding,
-        ["verify", "VA-1", "--disposition", "confirmed", "--reason", "r"],
+        [
+            "verify", "VA-1",
+            "--status", "confirmed",
+            "--reason", "r",
+            "--proof-receipt-id", "17",
+        ],
         tmp_path,
     )
     verify_finding.run(args)
@@ -154,25 +200,33 @@ def test_verify_single_slug_prints_single_json(tmp_path, monkeypatch, capsys):
 
 
 def test_verify_false_positive_batch(tmp_path, monkeypatch, capsys):
-    # kill-finding folded into `verify-finding --disposition false_positive`
-    # (2026-07 CLI consolidation): the FP kill fields ride the verify verb.
     fake = _FakeClient()
     _install(monkeypatch, verify_finding, tmp_path, fake)
+    counter_check_path = tmp_path / "counter-check.json"
+    counter_check = {
+        "method": "trace guarded path",
+        "expected_result": "attacker input reaches the sink",
+        "observed_result": "every path is rejected before the sink",
+        "falsified_claim": "attacker input reaches the sink",
+        "completed": True,
+        "proof_receipt_ids": [17],
+    }
+    counter_check_path.write_text(json.dumps(counter_check), encoding="utf-8")
     args = _parse(
         verify_finding,
         [
             "verify", "VA-1", "VA-2",
-            "--disposition", "false_positive",
-            "--reason", "r", "--kill-reason", "kr", "--kill-check", "2",
+            "--status", "false_positive",
+            "--reason", "r",
+            "--counter-check-file", str(counter_check_path),
         ],
         tmp_path,
     )
     verify_finding.run(args)
     assert [ep for ep, _ in fake.posts] == ["findings/VA-1/verify", "findings/VA-2/verify"]
     assert all(
-        p["disposition"] == "false_positive"
-        and p["details"]["kill_reason"] == "kr"
-        and p["details"]["kill_check"] == 2
+        p["verification_status"] == "false_positive"
+        and p["counter_check"] == counter_check
         for _, p in fake.posts
     )
     assert "verified 2 finding(s); 0 failed" in capsys.readouterr().err
@@ -261,11 +315,22 @@ def test_verify_payload_file_flag(tmp_path, monkeypatch, capsys):
     fake = _FakeClient()
     _install(monkeypatch, verify_finding, tmp_path, fake)
     payload_path = tmp_path / "verify.json"
-    payload_path.write_text(json.dumps({"disposition": "confirmed", "reason_text": "from file"}), encoding="utf-8")
+    payload_path.write_text(
+        json.dumps(
+            {
+                "verification_status": "confirmed",
+                "reason_text": "from file",
+                "proof_receipt_ids": [17],
+            }
+        ),
+        encoding="utf-8",
+    )
     args = _parse(verify_finding, ["verify", "VA-1", "--payload-file", str(payload_path)], tmp_path)
     verify_finding.run(args)
     _, payload = fake.posts[0]
-    assert payload["disposition"] == "confirmed" and payload["reason_text"] == "from file"
+    assert payload["verification_status"] == "confirmed"
+    assert payload["reason_text"] == "from file"
+    assert payload["proof_receipt_ids"] == [17]
 
 
 def test_verify_inline_tombstone_points_to_supported_inputs(tmp_path, monkeypatch, capsys):
@@ -273,7 +338,7 @@ def test_verify_inline_tombstone_points_to_supported_inputs(tmp_path, monkeypatc
     _install(monkeypatch, verify_finding, tmp_path, fake)
     args = _parse(
         verify_finding,
-        ["verify", "VA-1", "--inline", '{"disposition":"confirmed","reason_text":"inline"}'],
+        ["verify", "VA-1", "--inline", '{"verification_status":"confirmed","reason_text":"inline"}'],
         tmp_path,
     )
     with pytest.raises(SystemExit) as exc:
@@ -281,14 +346,14 @@ def test_verify_inline_tombstone_points_to_supported_inputs(tmp_path, monkeypatc
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "--inline was removed" in err
-    assert "--payload-file" in err and "--disposition" in err
+    assert "--payload-file" in err and "--status" in err
     assert fake.posts == []
 
 
 def test_verify_rejects_positional_json_blob(tmp_path, monkeypatch, capsys):
     fake = _FakeClient()
     _install(monkeypatch, verify_finding, tmp_path, fake)
-    args = _parse(verify_finding, ["verify", "VA-1", '{"disposition":"confirmed"}'], tmp_path)
+    args = _parse(verify_finding, ["verify", "VA-1", '{"verification_status":"confirmed"}'], tmp_path)
     with pytest.raises(SystemExit) as exc:
         verify_finding.run(args)
     assert exc.value.code == 1
@@ -311,7 +376,7 @@ def test_verify_rejects_positional_json_file(tmp_path, monkeypatch, capsys):
     assert fake.posts == []
 
 
-def test_verify_disposition_as_slug_hint(tmp_path, monkeypatch, capsys):
+def test_verify_status_as_slug_hint(tmp_path, monkeypatch, capsys):
     fake = _FakeClient()
     _install(monkeypatch, verify_finding, tmp_path, fake)
     args = _parse(verify_finding, ["verify", "confirmed"], tmp_path)
@@ -319,20 +384,27 @@ def test_verify_disposition_as_slug_hint(tmp_path, monkeypatch, capsys):
         verify_finding.run(args)
     assert exc.value.code == 1
     err = capsys.readouterr().err
-    assert "looks like a disposition" in err and "--disposition confirmed" in err
+    assert "looks like a verification status" in err and "--status confirmed" in err
 
 
 def test_verify_false_positive_payload_file_flag(tmp_path, monkeypatch, capsys):
-    # kill-finding's payload-file flow is now verify-finding's (folded verb).
     fake = _FakeClient()
     _install(monkeypatch, verify_finding, tmp_path, fake)
     payload_path = tmp_path / "kill.json"
+    counter_check = {
+        "method": "trace guarded path",
+        "expected_result": "attacker input reaches the sink",
+        "observed_result": "every path is rejected before the sink",
+        "falsified_claim": "attacker input reaches the sink",
+        "completed": True,
+        "proof_receipt_ids": [17],
+    }
     payload_path.write_text(
         json.dumps(
             {
-                "disposition": "false_positive",
+                "verification_status": "false_positive",
                 "reason_text": "guarded",
-                "details": {"kill_reason": "validate_length caps input", "kill_check": 2},
+                "counter_check": counter_check,
             }
         ),
         encoding="utf-8",
@@ -340,7 +412,7 @@ def test_verify_false_positive_payload_file_flag(tmp_path, monkeypatch, capsys):
     args = _parse(verify_finding, ["verify", "VA-1", "--payload-file", str(payload_path)], tmp_path)
     verify_finding.run(args)
     assert fake.posts[0][0] == "findings/VA-1/verify"
-    assert fake.posts[0][1]["details"]["kill_reason"] == "validate_length caps input"
+    assert fake.posts[0][1]["counter_check"] == counter_check
 
 
 def test_update_inline_tombstone_points_to_supported_inputs(tmp_path, monkeypatch, capsys):
@@ -689,7 +761,11 @@ def test_payload_file_rejects_explicit_empty_content_flags(
         json.dumps(
             {"summary": "file", "expected_row_version": 4}
             if module is update_finding
-            else {"disposition": "confirmed", "reason_text": "final"}
+            else {
+                "verification_status": "confirmed",
+                "reason_text": "final",
+                "proof_receipt_ids": [17],
+            }
         ),
         encoding="utf-8",
     )
@@ -722,10 +798,12 @@ def test_payload_file_rejects_explicit_empty_content_flags(
                 "VA-1",
                 "--payload-file",
                 "",
-                "--disposition",
+                "--status",
                 "confirmed",
                 "--reason",
                 "partial",
+                "--proof-receipt-id",
+                "17",
             ],
         ),
     ],
@@ -752,7 +830,13 @@ def test_verify_payload_file_rejects_content_flags_but_allows_narrative(
     _install(monkeypatch, verify_finding, tmp_path, fake)
     payload_path = tmp_path / "verify.json"
     payload_path.write_text(
-        json.dumps({"disposition": "confirmed", "reason_text": "final"}),
+        json.dumps(
+            {
+                "verification_status": "confirmed",
+                "reason_text": "final",
+                "proof_receipt_ids": [17],
+            }
+        ),
         encoding="utf-8",
     )
     narrative = tmp_path / "debate.md"
@@ -780,19 +864,36 @@ def test_verify_payload_file_rejects_content_flags_but_allows_narrative(
     assert [endpoint for endpoint, _ in fake.posts] == ["findings/VA-1/verify", "artifacts"]
 
 
-def test_verify_payload_file_treats_zero_kill_check_as_a_content_flag(
+def test_verify_rejects_narrative_artifact_receipt_without_canonical_identity(
     tmp_path, monkeypatch, capsys
 ):
     fake = _FakeClient()
+    original_post = fake.post
+
+    def post(endpoint: str, payload: dict) -> dict:
+        if endpoint == "artifacts":
+            fake.posts.append((endpoint, payload))
+            return {"message": "accepted"}
+        return original_post(endpoint, payload)
+
+    fake.post = post
     _install(monkeypatch, verify_finding, tmp_path, fake)
-    payload_path = tmp_path / "verify.json"
-    payload_path.write_text(
-        json.dumps({"disposition": "confirmed", "reason_text": "final"}),
-        encoding="utf-8",
-    )
+    narrative = tmp_path / "debate.md"
+    narrative.write_text("verified narrative", encoding="utf-8")
     args = _parse(
         verify_finding,
-        ["verify", "VA-1", "--payload-file", str(payload_path), "--kill-check", "0"],
+        [
+            "verify",
+            "VA-1",
+            "--status",
+            "confirmed",
+            "--reason",
+            "reproduced",
+            "--proof-receipt-id",
+            "17",
+            "--narrative",
+            str(narrative),
+        ],
         tmp_path,
     )
 
@@ -800,8 +901,113 @@ def test_verify_payload_file_treats_zero_kill_check_as_a_content_flag(
         verify_finding.run(args)
 
     assert exc.value.code == 1
-    assert "--kill-check" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert "canonical artifact" in error
+    assert "do not retry automatically" in error
+
+
+def test_verify_payload_file_treats_proof_receipt_as_a_content_flag(
+    tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient()
+    _install(monkeypatch, verify_finding, tmp_path, fake)
+    payload_path = tmp_path / "verify.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "verification_status": "confirmed",
+                "reason_text": "final",
+                "proof_receipt_ids": [17],
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = _parse(
+        verify_finding,
+        [
+            "verify", "VA-1", "--payload-file", str(payload_path),
+            "--proof-receipt-id", "18",
+        ],
+        tmp_path,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        verify_finding.run(args)
+
+    assert exc.value.code == 1
+    assert "--proof-receipt-id" in capsys.readouterr().err
     assert fake.posts == []
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_error"),
+    [
+        (
+            [
+                "verify",
+                "VA-1",
+                "--status",
+                "confirmed",
+                "--reason",
+                "reproduced",
+                "--proof-receipt-id",
+                "17",
+                "--details-inline",
+                json.dumps({"remediaton": "fix it"}),
+            ],
+            "details.remediaton is not allowed",
+        ),
+    ],
+)
+def test_verify_validates_details_against_the_record_contract(
+    arguments, expected_error, tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient()
+    _install(monkeypatch, verify_finding, tmp_path, fake)
+
+    args = _parse(verify_finding, arguments, tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        verify_finding.run(args)
+
+    assert exc.value.code == 1
+    assert expected_error in capsys.readouterr().err
+    assert fake.posts == []
+
+
+@pytest.mark.parametrize("command", ["verify", "update"])
+def test_finding_mutations_reject_response_without_the_canonical_finding(
+    command, tmp_path, monkeypatch, capsys
+):
+    class EmptyResponseClient(_FakeClient):
+        def post(self, endpoint: str, payload: dict) -> dict:
+            super().post(endpoint, payload)
+            return {}
+
+        def patch(self, endpoint: str, payload: dict) -> dict:
+            super().patch(endpoint, payload)
+            return {}
+
+    fake = EmptyResponseClient()
+    module = verify_finding if command == "verify" else update_finding
+    _install(monkeypatch, module, tmp_path, fake)
+    arguments = (
+        [
+            "verify", "VA-1",
+            "--status", "confirmed",
+            "--reason", "reproduced",
+            "--proof-receipt-id", "17",
+        ]
+        if command == "verify"
+        else ["update", "VA-1", "--summary", "corrected claim"]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        module.run(_parse(module, arguments, tmp_path))
+
+    assert exc.value.code == 1
+    error = capsys.readouterr().err
+    assert "canonical finding VA-1" in error
+    assert "do not retry automatically" in error
 
 
 def test_update_rejects_positional_json_file(tmp_path, monkeypatch, capsys):
@@ -879,7 +1085,7 @@ def test_update_validates_details_against_the_record_contract(
 def test_verify_rejects_new_severity_outside_downgraded_before_the_post(
     tmp_path, monkeypatch, capsys
 ):
-    """``--new-severity`` is consumed ONLY by the downgraded disposition; under
+    """``--new-severity`` is consumed ONLY by the downgraded status; under
     any other one the backend silently dropped it and answered 200. Fail here,
     naming the verb that actually re-bands a finding, so nothing is sent."""
     fake = _FakeClient()
@@ -888,8 +1094,9 @@ def test_verify_rejects_new_severity_outside_downgraded_before_the_post(
         verify_finding,
         [
             "verify", "VA-1",
-            "--disposition", "confirmed",
+            "--status", "confirmed",
             "--reason", "reproduced",
+            "--proof-receipt-id", "17",
             "--new-severity", "low",
         ],
         tmp_path,
@@ -901,7 +1108,7 @@ def test_verify_rejects_new_severity_outside_downgraded_before_the_post(
     assert exc.value.code == 1
     assert fake.posts == []
     err = capsys.readouterr().err
-    assert "new_severity applies only to --disposition downgraded" in err
+    assert "new_severity applies only to --status downgraded" in err
     assert "finding update VA-1 --severity low" in err
 
 
@@ -920,8 +1127,9 @@ def test_verify_new_severity_rejection_names_every_slug_in_the_batch(
         verify_finding,
         [
             "verify", "VA-1", "VA-2", "VA-3",
-            "--disposition", "confirmed",
+            "--status", "confirmed",
             "--reason", "reproduced",
+            "--proof-receipt-id", "17",
             "--new-severity", "low",
         ],
         tmp_path,
@@ -943,8 +1151,9 @@ def test_verify_downgraded_still_forwards_new_severity(tmp_path, monkeypatch, ca
         verify_finding,
         [
             "verify", "VA-1",
-            "--disposition", "downgraded",
+            "--status", "downgraded",
             "--reason", "over-scored",
+            "--proof-receipt-id", "17",
             "--new-severity", "medium",
         ],
         tmp_path,

@@ -19,6 +19,7 @@ from .client import AssessError, AssessmentClient, default_runtime_container
 from .config import Config, load_config
 from .kali_audit import _patch_finalize, _post_pre_exec_row, _resolve_engagement_dir
 from .kali_output import _scope_version
+from .execution_recency import emit_foreign_lane_recency
 from .kali_tool_naming import _derive_tool_name
 from .kali_runtime_exec import (
     _cat_container_pid_file,
@@ -26,7 +27,6 @@ from .kali_runtime_exec import (
     _engagement_env_args,
     _env_args,
 )
-from .rate_leases import acquire_target_rate_lease, release_target_rate_lease
 
 _DEFAULT_DTACH_DIR = "/tmp/vigil-jobs"
 _JOB_PID_DIR = "/tmp/vigil-jobs"
@@ -86,23 +86,6 @@ def _read_exit_marker(record: dict[str, Any]) -> int | None:
         return None
 
 
-def _release_job_rate_lease(
-    client: AssessmentClient, record: dict[str, Any]
-) -> None:
-    metadata = record.get("audit_metadata")
-    if not isinstance(metadata, dict):
-        return
-    token = str(metadata.get("rate_lease_token") or "")
-    if not token:
-        return
-    try:
-        release_target_rate_lease(token, client=client)
-    except AssessError:
-        # Expiry is the crash-safe backstop. Finalization truth must not be
-        # hidden merely because release raced an already-released token.
-        return
-
-
 def _read_job_preview(path_value: Any, *, limit: int = 16_384) -> str:
     if not path_value:
         return ""
@@ -132,6 +115,7 @@ def finalize_parent_command_run(
     status_value: str,
     return_code: int | None,
     ended_at_iso: str | None = None,
+    run_uuid: str | None = None,
 ) -> None:
     """Converge the command-run paired with a terminal async job.
 
@@ -142,6 +126,17 @@ def finalize_parent_command_run(
     parent_id = record.get("parent_command_run_id")
     if parent_id is None or status_value not in _JOB_TERMINAL_STATUSES:
         return
+    resolved_run_uuid = str(run_uuid or "").strip()
+    if not resolved_run_uuid:
+        output_path = str(record.get("stdout_path") or "").strip()
+        resolved_run_uuid = Path(output_path).stem if output_path else ""
+    if not resolved_run_uuid:
+        print(
+            f"warning: could not finalize parent command run id={parent_id}: "
+            "job record has neither run_uuid nor stdout_path",
+            file=sys.stderr,
+        )
+        return
     ended = ended_at_iso or str(record.get("ended_at") or "").strip() or _utcnow_iso()
     stdout_preview = _read_job_preview(record.get("stdout_path"))
     stderr_preview = _read_job_preview(record.get("stderr_path"))
@@ -149,6 +144,7 @@ def finalize_parent_command_run(
         _patch_finalize(
             client,
             run_id=int(parent_id),
+            run_uuid=resolved_run_uuid,
             status=status_value,
             return_code=return_code,
             ended_at_iso=ended,
@@ -212,7 +208,6 @@ def _finalize_if_marker_present(
             return_code=rc,
             ended_at_iso=str(finalized.get("ended_at") or "") or None,
         )
-        _release_job_rate_lease(client, record)
         return finalized
     except AssessError:
         return record
@@ -396,7 +391,6 @@ def start_job(
     client = AssessmentClient(cfg.base_url, eng_key)
     spawned = False
     job_id: int | None = None
-    rate_lease_token = ""
     command_run_id: int | None = None
     try:
         command_row = _post_pre_exec_row(
@@ -423,6 +417,11 @@ def start_job(
             execution_policy=execution_policy,
         )
         command_run_id = int(command_row["id"])
+        if (execution_policy or {}).get("target_facing"):
+            emit_foreign_lane_recency(
+                client,
+                current_agent=str(audit_meta.get("agent_name") or "operator"),
+            )
 
         if not _container_running(container_name):
             raise AssessError(
@@ -462,23 +461,6 @@ def start_job(
                 "stderr_path": str(stderr_path),
             },
         )
-        effective_rate = audit_meta.get("effective_rate_rps")
-        if effective_rate is not None:
-            lease = acquire_target_rate_lease(
-                config=cfg,
-                owner=str(audit_meta.get("agent_name") or "operator"),
-                effective_rate_rps=float(effective_rate),
-                ttl_seconds=int(audit_meta.get("timeout_seconds_requested") or 300)
-                + _JOB_KILL_GRACE_SECONDS,
-                override_reason=str(audit_meta.get("rate_override_reason") or ""),
-                command_run_id=command_run_id,
-                client=client,
-            )
-            rate_lease_token = str(lease.get("lease_token") or "")
-            if not rate_lease_token:
-                raise AssessError("aggregate rate lease response omitted lease_token")
-            audit_meta = {**audit_meta, "rate_lease_token": rate_lease_token}
-            client.patch(f"jobs/{job_id}", {"audit_metadata": audit_meta})
         joined = " ".join(shlex.quote(part) for part in cmd)
         wrapped_shell = _build_job_wrapper(
             joined,
@@ -560,11 +542,6 @@ def start_job(
                 status_value="failed",
                 return_code=None,
             )
-        if rate_lease_token:
-            try:
-                release_target_rate_lease(rate_lease_token, client=client)
-            except Exception:
-                pass
         raise
     finally:
         client.close()
@@ -835,7 +812,6 @@ def job_stop(
                 return_code=final_exit_code,
                 ended_at_iso=str(record_out.get("ended_at") or "") or None,
             )
-            _release_job_rate_lease(client, record)
     finally:
         client.close()
     if final_status == "stop_failed":

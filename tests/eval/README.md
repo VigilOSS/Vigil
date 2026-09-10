@@ -70,7 +70,11 @@ dispatch topology, and assigned-input counts remain blocking across platforms;
 only wall-time and latency become informational when the platform fingerprint
 differs. An absent or mismatched calibration is explicitly unavailable and
 cannot produce a green overall gate; malformed or tampered evidence fails
-validation.
+validation. The backend acceptance test separately compares a validated current
+seven-run median envelope with the committed seven-run medians at the unchanged
+20% same-platform threshold. It still exercises an ordinary single-run load,
+but does not treat sub-millisecond jitter in that one observation as stable
+acceptance evidence.
 
 To refresh the baseline intentionally, call
 `harnesses.code_workflow.runner.calibrate_workflow(...)` with the backend test

@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlencode
 
 from assess.lib.auth_liveness import (
     classify_liveness as _classify_liveness,
@@ -320,8 +321,11 @@ def _last_auth_probe(
         # (/engagements/{key}/assessment/command-runs), so go through
         # `.get()` which carries the /assessment prefix — `.get_engagement()`
         # targets the non-assessment scope and 404s here.
-        limit = 100 if identity_name else 1
-        rows = client.get(f"command-runs?technique=AUTH&limit={limit}")
+        query: list[tuple[str, str]] = [("technique", "AUTH")]
+        if identity_name:
+            query.append(("auth_context", identity_name))
+        query.append(("limit", "1"))
+        rows = client.get(f"command-runs?{urlencode(query)}")
     except Exception:  # noqa: BLE001 — best-effort read
         return None
     items: list[dict] = []

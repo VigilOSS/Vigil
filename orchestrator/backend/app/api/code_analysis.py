@@ -301,6 +301,8 @@ class AnalysisResultRecord(BaseModel):
     audit_metadata: dict[str, Any] = Field(default_factory=dict)
     cwe_coverage: list[dict[str, Any]] = Field(default_factory=list)
     cross_file_triggers: list[dict[str, Any]] = Field(default_factory=list)
+    assessment_run_id: StrictPositiveId | None = None
+    assessment_source_id: StrictPositiveId | None = None
 
 
 class RequeueItemRecord(BaseModel):

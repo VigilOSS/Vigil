@@ -31,7 +31,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
-from assess.lib.client import AssessError, AssessmentClient, default_runtime_container
+from assess.lib.client import (
+    AssessError,
+    AssessmentClient,
+    default_runtime_container,
+    require_command_run_finalize_response,
+)
 from assess.lib.config import load_config
 from assess.lib.kali_audit import _stream_output_truth
 from assess.lib.kali_jobs import _job_pid_file as _job_pid_file_in_container
@@ -40,7 +45,6 @@ from assess.lib.kali_jobs import finalize_parent_command_run
 from assess.lib.kali_output import _read_safely
 from assess.lib.kali_runtime_exec import _cat_container_pid_file, _container_pid_file
 from assess.lib.host_processes import reap_registered_processes
-from assess.lib.rate_leases import release_target_rate_lease
 
 _DEFAULT_MAX_AGE_SECONDS = 3600
 _ATTENTION_ID_LIMIT = 20
@@ -67,7 +71,15 @@ _RECOVERED_INTEGRITY_STATUSES = frozenset(
     {"not_applicable", "verified", "warning"}
 )
 _DEGRADED_RETENTION_STATUSES = frozenset(
-    {"integrity_failure", "suppression_deferred", "untrusted"}
+    {
+        "integrity_failure",
+        "measurement_conflict",
+        "partially_measured",
+        "preview_only",
+        "suppression_deferred",
+        "unmeasured",
+        "untrusted",
+    }
 )
 _RECOVERED_RETENTION_STATUSES = frozenset(
     {
@@ -324,7 +336,15 @@ def _list_command_run_rows(client: AssessmentClient) -> list[dict]:
         endpoint = "command-runs?" + urlencode(params, quote_via=quote)
         page = client.get(endpoint)
         if not isinstance(page, list):
-            break
+            raise AssessError(
+                "command-run recovery list returned a malformed page; no rows "
+                "were reconciled"
+            )
+        if any(not isinstance(row, dict) for row in page):
+            raise AssessError(
+                "command-run recovery list returned a malformed row; no rows "
+                "were reconciled"
+            )
         rows.extend(page)
         if len(page) < limit:
             break
@@ -384,6 +404,7 @@ def _finalize_lost(
     client: AssessmentClient,
     *,
     run_id: int,
+    run_uuid: str,
     now_iso: str,
     recovered: dict | None = None,
 ) -> dict:
@@ -399,7 +420,15 @@ def _finalize_lost(
     # pre-exec placeholder — a dead PID with 10 KiB on disk and a dead PID with
     # nothing are not the same outcome, and the row should say which it was.
     payload.update(recovered or {})
-    return client.patch(f"command-runs/{int(run_id)}", payload, accept_409=True)
+    response = client.patch(
+        f"command-runs/{int(run_id)}", payload, accept_409=True
+    )
+    return require_command_run_finalize_response(
+        response,
+        run_id=run_id,
+        run_uuid=run_uuid,
+        requested_status="lost",
+    )
 
 
 def _warn_mutating_run_terminated_abnormally(row: dict, *, run_id: int, status: str) -> str:
@@ -476,6 +505,7 @@ def _sweep_command_runs(
         if row_id is None:
             continue
         existing_status = str(row.get("status") or "").strip().lower()
+        run_uuid = _resolve_run_uuid(row)
         pending_output = existing_status not in _RUNNING_STATUSES and any(
             str(row.get(field) or "").strip().lower() == "pending"
             for field in ("output_cleanup_status", "output_integrity_status")
@@ -524,6 +554,12 @@ def _sweep_command_runs(
                             "ended_at": row.get("completed_at") or now_iso,
                         },
                         accept_409=True,
+                    )
+                    recovered = require_command_run_finalize_response(
+                        recovered,
+                        run_id=int(row_id),
+                        run_uuid=str(run_uuid or ""),
+                        requested_status=existing_status,
                     )
                 except (AssessError, json.JSONDecodeError) as exc:
                     summary["skipped"] += 1
@@ -579,7 +615,6 @@ def _sweep_command_runs(
                 )
             continue
 
-        run_uuid = _resolve_run_uuid(row)
         pid_read = _PidReadResult(None, "pid-file-unknown")
         if run_uuid:
             pid_read = _read_container_pid_result(args.container_name, run_uuid)
@@ -634,7 +669,11 @@ def _sweep_command_runs(
 
         try:
             _finalize_lost(
-                client, run_id=int(row_id), now_iso=now_iso, recovered=recovered
+                client,
+                run_id=int(row_id),
+                run_uuid=str(run_uuid or ""),
+                now_iso=now_iso,
+                recovered=recovered,
             )
         except AssessError as exc:
             summary["skipped"] += 1
@@ -677,7 +716,15 @@ def _list_running_jobs(client: AssessmentClient) -> list[dict]:
                 f"jobs?status={state}&limit=1000&offset={offset}"
             )
             if not isinstance(page, list):
-                break
+                raise AssessError(
+                    "job recovery list returned a malformed page; no jobs were "
+                    "reconciled"
+                )
+            if any(not isinstance(row, dict) for row in page):
+                raise AssessError(
+                    "job recovery list returned a malformed row; no jobs were "
+                    "reconciled"
+                )
             rows.extend(page)
             if len(page) < 1000:
                 break
@@ -697,19 +744,6 @@ def _finalize_job(
     if exit_code is not None:
         payload["exit_code"] = int(exit_code)
     return client.patch(f"jobs/{int(job_id)}", payload, accept_409=True)
-
-
-def _release_swept_job_rate_lease(client: AssessmentClient, row: dict) -> None:
-    metadata = row.get("audit_metadata")
-    if not isinstance(metadata, dict):
-        return
-    token = str(metadata.get("rate_lease_token") or "")
-    if not token:
-        return
-    try:
-        release_target_rate_lease(token, client=client)
-    except AssessError:
-        return
 
 
 def _sweep_jobs(
@@ -789,7 +823,6 @@ def _sweep_jobs(
                     return_code=rc,
                     ended_at_iso=now_iso,
                 )
-                _release_swept_job_rate_lease(client, row)
             except AssessError as exc:
                 summary["skipped"] += 1
                 summary["skipped_unverifiable"] += 1
@@ -854,7 +887,6 @@ def _sweep_jobs(
                 return_code=None,
                 ended_at_iso=now_iso,
             )
-            _release_swept_job_rate_lease(client, row)
         except AssessError as exc:
             summary["skipped"] += 1
             summary["skipped_unverifiable"] += 1

@@ -9,6 +9,105 @@ from . import _common
 from ._common import DUPLICATE_LINK_KIND, ROOT_CAUSE_EFFECTS, ROOT_CAUSE_LINK_KIND, SEVERITY_RANK, _is_suppressed_workflow_status, _json_object, _json_text, _merge_object_text, _resolve_existing_finding_slug, _row_workflow_status, _serialize_finding_record
 
 
+def _finding_link_audit_snapshot(
+    link: dict[str, Any] | Any | None,
+) -> dict[str, Any] | None:
+    """Return the complete mutable relationship state kept in transition audit."""
+    if link is None:
+        return None
+    snapshot = {
+        "id": int(link["id"]),
+        "link_kind": str(link["link_kind"]),
+        "target_kind": str(link["target_kind"]),
+        "target_id": link["target_id"],
+        "target_ref": str(link["target_ref"] or ""),
+        "notes": str(link["notes"] or ""),
+        "provenance": _json_object(link["provenance_json"]),
+        "retired_at": link["retired_at"],
+    }
+    if _is_root_cause_link(link):
+        snapshot.update(_root_cause_link_metadata(dict(link)))
+    return snapshot
+
+
+def _active_relationship_identity(link: dict[str, Any] | Any | None) -> tuple[Any, ...] | None:
+    """Identity of the active claim a verifier reviewed, excluding prose/order."""
+    if link is None or link["retired_at"] is not None:
+        return None
+    target_ref = str(link["target_ref"] or "")
+    target_selector = (
+        ("ref", target_ref)
+        if target_ref
+        else ("id", link["target_id"])
+    )
+    root_cause_effect = None
+    if _is_root_cause_link(link):
+        root_cause_effect = _root_cause_link_metadata(dict(link))[
+            "root_cause_effect"
+        ]
+    return (
+        str(link["link_kind"]),
+        str(link["target_kind"]),
+        target_selector,
+        root_cause_effect,
+    )
+
+
+def _relationship_change(
+    *,
+    operation: str,
+    before: dict[str, Any] | Any | None,
+    after: dict[str, Any] | Any | None,
+) -> dict[str, Any] | None:
+    if _active_relationship_identity(before) == _active_relationship_identity(after):
+        return None
+    return {
+        "operation": operation,
+        "before": _finding_link_audit_snapshot(before),
+        "after": _finding_link_audit_snapshot(after),
+    }
+
+
+def _relationship_collection_change(
+    *,
+    operation: str,
+    before: list[dict[str, Any] | Any],
+    after: list[dict[str, Any] | Any],
+) -> dict[str, Any] | None:
+    before_identity = [_active_relationship_identity(link) for link in before]
+    after_identity = [_active_relationship_identity(link) for link in after]
+    if before_identity == after_identity:
+        return None
+    return {
+        "operation": operation,
+        "before": [_finding_link_audit_snapshot(link) for link in before],
+        "after": [_finding_link_audit_snapshot(link) for link in after],
+    }
+
+
+def _invalidate_relationship_verification(
+    connection,
+    *,
+    engagement_id: int,
+    finding: dict[str, Any] | Any,
+    actor: str,
+    relationship_change: dict[str, Any] | None,
+    record_transition: bool = True,
+) -> tuple[dict[str, Any], bool]:
+    # ``findings`` owns the transition ledger and imports this module for merge
+    # helpers, so the reverse dependency must resolve only after module loading.
+    from .findings import _invalidate_terminal_verification_for_relationship
+
+    return _invalidate_terminal_verification_for_relationship(
+        connection,
+        engagement_id=engagement_id,
+        finding=finding,
+        actor=actor,
+        relationship_change=relationship_change,
+        record_transition=record_transition,
+    )
+
+
 
 def _root_cause_link_metadata(link: dict[str, Any]) -> dict[str, Any]:
     provenance = _json_object(link.get("provenance_json", "{}"))
@@ -31,6 +130,29 @@ def _root_cause_link_metadata(link: dict[str, Any]) -> dict[str, Any]:
 def _is_root_cause_link(link: dict[str, Any] | Any) -> bool:
     return str(link["link_kind"]) == ROOT_CAUSE_LINK_KIND and str(link["target_kind"]) == "finding"
 
+
+def _active_finding_link(
+    connection,
+    engagement_id: int,
+    *,
+    finding_id: int,
+    link_kind: str,
+    target_kind: str,
+    target_id: int | None,
+    target_ref: str,
+):
+    return connection.execute(
+        """
+        SELECT *
+        FROM assessment_finding_links
+        WHERE engagement_id = ? AND finding_id = ? AND link_kind = ?
+          AND target_kind = ? AND target_id IS ? AND target_ref = ?
+          AND retired_at IS NULL
+        """,
+        (engagement_id, finding_id, link_kind, target_kind, target_id, target_ref),
+    ).fetchone()
+
+
 def _upsert_finding_link(
     connection,
     engagement_id: int,
@@ -50,16 +172,15 @@ def _upsert_finding_link(
             target_ref,
             field="target_ref",
         )
-    row = connection.execute(
-        """
-        SELECT *
-        FROM assessment_finding_links
-        WHERE engagement_id = ? AND finding_id = ? AND link_kind = ?
-          AND target_kind = ? AND target_id IS ? AND target_ref = ?
-          AND retired_at IS NULL
-        """,
-        (engagement_id, finding_id, link_kind, target_kind, target_id, target_ref),
-    ).fetchone()
+    row = _active_finding_link(
+        connection,
+        engagement_id,
+        finding_id=finding_id,
+        link_kind=link_kind,
+        target_kind=target_kind,
+        target_id=target_id,
+        target_ref=target_ref,
+    )
     if row is None:
         cursor = connection.execute(
             """
@@ -135,7 +256,16 @@ def create_finding_link(
         # at the false positive this rediscovery duplicates is the whole point.
         # ``list_finding_groups`` reads root-cause links only, so a duplicate link
         # cannot fold a killed finding back into a report group.
-        return _upsert_finding_link(
+        before_link = _active_finding_link(
+            connection,
+            engagement.id,
+            finding_id=int(finding["id"]),
+            link_kind=link_kind,
+            target_kind=target_kind,
+            target_id=target_id,
+            target_ref=target_ref,
+        )
+        link = _upsert_finding_link(
             connection,
             engagement.id,
             finding_id=int(finding["id"]),
@@ -146,6 +276,18 @@ def create_finding_link(
             notes=notes,
             provenance=provenance,
         )
+        _invalidate_relationship_verification(
+            connection,
+            engagement_id=engagement.id,
+            finding=finding,
+            actor=str((provenance or {}).get("source_name") or "operator"),
+            relationship_change=_relationship_change(
+                operation="created",
+                before=before_link,
+                after=link,
+            ),
+        )
+        return link
 
 def set_root_cause_link(
     engagement_id: int,
@@ -325,6 +467,17 @@ def set_root_cause_link(
             ).fetchone()
             assert updated_link is not None
             link = dict(updated_link)
+        _invalidate_relationship_verification(
+            connection,
+            engagement_id=engagement.id,
+            finding=finding,
+            actor=source_name,
+            relationship_change=_relationship_change(
+                operation="created" if existing_link is None else "updated",
+                before=existing_link,
+                after=link,
+            ),
+        )
     result = dict(link)
     result["finding_slug"] = finding_slug
     result.update(_root_cause_link_metadata(result))
@@ -339,6 +492,15 @@ def clear_root_cause_link(engagement_id: int, *, finding_slug: str) -> dict[str,
             "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
             (engagement.id, finding_slug),
         ).fetchone()
+        before_links = connection.execute(
+            """
+            SELECT * FROM assessment_finding_links
+            WHERE engagement_id = ? AND finding_id = ? AND link_kind = ?
+              AND target_kind = 'finding' AND retired_at IS NULL
+            ORDER BY id
+            """,
+            (engagement.id, int(finding["id"]), ROOT_CAUSE_LINK_KIND),
+        ).fetchall()
         cursor = connection.execute(
             """
             UPDATE assessment_finding_links
@@ -351,6 +513,24 @@ def clear_root_cause_link(engagement_id: int, *, finding_slug: str) -> dict[str,
               AND retired_at IS NULL
             """,
             (engagement.id, int(finding["id"]), ROOT_CAUSE_LINK_KIND),
+        )
+        after_links = [
+            connection.execute(
+                "SELECT * FROM assessment_finding_links WHERE id = ?",
+                (int(link["id"]),),
+            ).fetchone()
+            for link in before_links
+        ]
+        _invalidate_relationship_verification(
+            connection,
+            engagement_id=engagement.id,
+            finding=finding,
+            actor="operator",
+            relationship_change=_relationship_collection_change(
+                operation="cleared",
+                before=list(before_links),
+                after=[link for link in after_links if link is not None],
+            ),
         )
     return {"finding_slug": finding_slug, "cleared": int(cursor.rowcount)}
 
@@ -498,7 +678,18 @@ def update_finding_link(
             "SELECT * FROM assessment_finding_links WHERE id = ?",
             (int(link_id),),
         ).fetchone()
-    assert updated is not None
+        assert updated is not None
+        _invalidate_relationship_verification(
+            connection,
+            engagement_id=engagement.id,
+            finding=finding,
+            actor=str((provenance or {}).get("source_name") or "operator"),
+            relationship_change=_relationship_change(
+                operation="updated",
+                before=link,
+                after=updated,
+            ),
+        )
     result = dict(updated)
     result["finding_slug"] = finding_slug
     return result

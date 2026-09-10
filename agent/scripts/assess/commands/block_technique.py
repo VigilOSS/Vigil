@@ -23,18 +23,23 @@ import hashlib
 import json
 import re
 import sys
+from urllib.parse import urlencode
 
 from assess.lib.audit_enums import TECHNIQUE_ENUM, normalize_technique
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessmentClient, require_write_result
 from assess.lib.config import load_config
 from assess.lib.contracts import render_contract_epilog
 from assess.lib.json_inputs import parse_optional_inline_json
 
 
-# --retry-state is free TEXT on the backend (no CHECK); the CLI does not fail
-# closed on it. The documented, resume-brief-legible values (pending / retryable
-# / no_retry) are described inline in the --retry-state help below. Default is
-# "pending" (matches the SQL column default and the aligned Pydantic default).
+RETRY_STATES: tuple[str, ...] = (
+    "pending",
+    "no_retry",
+    "retryable",
+    "blocked",
+    "blocked_on_dependency",
+    "needs_authorization",
+)
 
 
 def register(subparsers) -> None:
@@ -80,11 +85,10 @@ def register(subparsers) -> None:
         "--retry-state",
         dest="retry_state",
         default="pending",
+        choices=RETRY_STATES,
         help=(
-            "Soft vocab (free text, documented values): "
-            "pending (block may lift once a prerequisite lands) | "
-            "retryable (worth another attempt now, e.g. after rate-limit) | "
-            "no_retry (permanent wall, do not re-attempt). Default: pending."
+            "Reviewed state: pending | no_retry | retryable | blocked | "
+            "blocked_on_dependency | needs_authorization. Default: pending."
         ),
     )
     block.add_argument("--evidence-ref", dest="evidence_ref", default="", help="Optional engagement-relative evidence path.")
@@ -100,6 +104,14 @@ def register(subparsers) -> None:
     )
     block.add_argument("--source-name", dest="source_name", default="operator", help="Recording actor (stored in provenance).")
     block.add_argument("--provenance-inline", dest="provenance_inline", help="Inline JSON object merged into provenance.")
+    block.add_argument(
+        "--revalidation-context-inline",
+        dest="revalidation_context_inline",
+        help=(
+            "JSON object describing this review (for example actor, basis, and "
+            "dependencies checked); appended to retry-state history."
+        ),
+    )
     block.set_defaults(func=run_block)
 
     listing = subparsers.add_parser(
@@ -107,6 +119,24 @@ def register(subparsers) -> None:
         help="List recorded blocked techniques for this engagement.",
     )
     listing.add_argument("--json", dest="as_json", action="store_true", help="Emit raw JSON rows.")
+    listing.add_argument(
+        "--history",
+        action="store_true",
+        help="List append-only retry-state and revalidation history.",
+    )
+    listing.add_argument(
+        "--technique-key",
+        default="",
+        help="With --history, limit audit rows to one stable technique key.",
+    )
+    listing.add_argument(
+        "--limit",
+        type=int,
+        choices=range(1, 501),
+        default=100,
+        metavar="1..500",
+        help="Maximum history rows (default: 100).",
+    )
     listing.set_defaults(func=run_list)
 
 
@@ -186,6 +216,18 @@ def run_block(args) -> None:
         print("provenance JSON must be an object", file=sys.stderr)
         sys.exit(1)
     provenance.setdefault("source_name", args.source_name)
+    try:
+        revalidation_context = parse_optional_inline_json(
+            getattr(args, "revalidation_context_inline", None),
+            default={},
+            description="revalidation context JSON",
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(revalidation_context, dict):
+        print("revalidation context JSON must be an object", file=sys.stderr)
+        sys.exit(1)
 
     payload = {
         "technique_key": technique_key,
@@ -197,18 +239,38 @@ def run_block(args) -> None:
         "evidence_ref": args.evidence_ref or "",
         "notes": args.notes or "",
         "provenance": provenance,
+        "revalidation_context": revalidation_context,
     }
 
     cfg = load_config(args.engagement_dir)
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        result = client.post("blocked-techniques", payload)
+        result = require_write_result(
+            client.post("blocked-techniques", payload),
+            operation="block technique",
+            expected={
+                "technique_key": technique_key,
+                "technique": technique,
+                "target_kind": target_kind,
+                "target_ref": target_ref,
+                "retry_state": payload["retry_state"],
+            },
+            positive_ids=("id",),
+        )
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 def run_list(args) -> None:
     cfg = load_config(args.engagement_dir)
+    history = bool(getattr(args, "history", False))
+    endpoint = "blocked-techniques"
+    if history:
+        params = {"limit": int(getattr(args, "limit", 100))}
+        technique_key = str(getattr(args, "technique_key", "") or "").strip()
+        if technique_key:
+            params["technique_key"] = technique_key
+        endpoint += "/history?" + urlencode(params)
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        rows = client.get("blocked-techniques")
+        rows = client.get(endpoint)
     if not isinstance(rows, list):
         rows = []
     if getattr(args, "as_json", False):
@@ -217,8 +279,19 @@ def run_list(args) -> None:
     if not rows:
         print("# Blocked Techniques\n\n- none")
         return
-    lines = ["# Blocked Techniques", ""]
+    lines = ["# Blocked Technique History" if history else "# Blocked Techniques", ""]
     for row in rows:
+        if history:
+            lines.append(
+                f"- #{row.get('id')} {row.get('technique_key') or '-'} "
+                f"[{row.get('event_kind') or '-'}] "
+                f"{row.get('from_retry_state') or '-'} -> "
+                f"{row.get('to_retry_state') or '-'}"
+            )
+            reason = str(row.get("reason") or "").replace("\n", " ").strip()
+            if reason:
+                lines.append(f"  - reason: {reason[:200]}")
+            continue
         target = f"{row.get('target_kind') or '-'}:{row.get('target_ref') or '-'}"
         lines.append(
             f"- #{row.get('id')} {row.get('technique') or '-'} "

@@ -19,7 +19,10 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from assess.commands import kali_sweep_orphans as kso
+from assess.lib.client import AssessError
 
 
 def _cfg(tmp_path: Path) -> SimpleNamespace:
@@ -40,7 +43,11 @@ class _FakeClient:
 
     def patch(self, endpoint, payload, *, accept_409: bool = False):
         self.patches.append((endpoint, payload))
-        return {"id": 1, "status": payload.get("status")}
+        return {
+            "id": 1,
+            "run_uuid": self._rows[0]["run_uuid"],
+            "status": payload.get("status"),
+        }
 
     def close(self):
         return None
@@ -50,6 +57,16 @@ class _FakeClient:
 
     def __exit__(self, *exc):
         return False
+
+
+class _MalformedLaterPageClient:
+    def __init__(self, prefix: str) -> None:
+        self.prefix = prefix
+
+    def get(self, endpoint: str):
+        if endpoint.startswith(self.prefix) and "offset=0" in endpoint:
+            return [{"id": index + 1} for index in range(1000)]
+        return {"unexpected": "object page"}
 
 
 def _stale_row(tmp_path: Path, *, run_uuid="a1b2c3", destructive=False, output=b""):
@@ -97,6 +114,20 @@ def _sweep(monkeypatch, tmp_path, rows, *, dry_run=False):
         )
     )
     return fake
+
+
+def test_command_run_recovery_rejects_malformed_later_page() -> None:
+    client = _MalformedLaterPageClient("command-runs?")
+
+    with pytest.raises(AssessError, match="command-run recovery list"):
+        kso._list_command_run_rows(client)
+
+
+def test_job_recovery_rejects_malformed_later_page() -> None:
+    client = _MalformedLaterPageClient("jobs?status=")
+
+    with pytest.raises(AssessError, match="job recovery list"):
+        kso._list_running_jobs(client)
 
 
 def test_lost_row_carries_the_real_byte_count_and_digest(monkeypatch, tmp_path, capsys):

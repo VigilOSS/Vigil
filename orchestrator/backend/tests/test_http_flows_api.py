@@ -107,11 +107,22 @@ def test_list_http_flows_server_side_filters(client, isolate_settings):
 def test_get_http_flow_detail_and_404(client, isolate_settings):
     key = "2026-06-01-000003-flows"
     write_engagement(isolate_settings["engagements_dir"], key)
-    client.post(BASE.format(key=key), json=_flow_payload(flow_uid="detail-1"))
+    client.post(
+        BASE.format(key=key),
+        json=_flow_payload(
+            flow_uid="detail-1",
+            request_body_capture_status="write_failed",
+            request_body_capture_error="simulated full disk",
+            response_body_capture_status="not_requested",
+        ),
+    )
     got = client.get(BASE.format(key=key) + "/detail-1")
     assert got.status_code == 200
     assert got.json()["flow_uid"] == "detail-1"
     assert got.json()["request_headers"] == {"Accept": "application/json"}
+    assert got.json()["request_body_capture_status"] == "write_failed"
+    assert got.json()["request_body_capture_error"] == "simulated full disk"
+    assert got.json()["response_body_capture_status"] == "not_requested"
     missing = client.get(BASE.format(key=key) + "/nope")
     assert missing.status_code == 404
 
@@ -390,6 +401,11 @@ def test_capture_policy_default_off_and_put(client, isolate_settings):
     assert body["max_body_bytes"] == 102400
     assert body["content_type_allow"] == []
     assert body["redaction_profile"] == "none"
+    assert body["redaction_warning"] == ""
+    assert body["retention"] == "until_engagement_deletion"
+
+    unsupported = client.put(policy_url, json={"redaction_profile": "default"})
+    assert unsupported.status_code == 422
 
     updated = client.put(
         policy_url,
@@ -412,6 +428,110 @@ def test_capture_policy_default_off_and_put(client, isolate_settings):
     assert mirror["max_body_bytes"] == 4096
 
 
+def test_capture_policy_surfaces_unsupported_legacy_redaction_without_claiming_it(
+    client, isolate_settings
+):
+    from app import db as db_module
+
+    key = "2026-06-01-000007-legacy-redaction"
+    write_engagement(isolate_settings["engagements_dir"], key)
+    policy_url = f"/engagements/{key}/assessment/capture-policy"
+    assert client.put(policy_url, json={"enabled": True}).status_code == 200
+    engagement_id = client.get(f"/engagements/{key}").json()["id"]
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_capture_policy SET redaction_profile = 'legacy-default' "
+            "WHERE engagement_id = ?",
+            (engagement_id,),
+        )
+
+    response = client.get(policy_url)
+
+    assert response.status_code == 200
+    assert response.json()["redaction_profile"] == "none"
+    assert "legacy-default" in response.json()["redaction_warning"]
+
+
+def test_http_flow_capture_status_additive_migration_preserves_legacy_rows(
+    isolate_settings,
+):
+    import sqlite3
+
+    from app import db as db_module
+
+    db_module.init_db()
+    db_module.close_thread_connection()
+    path = db_module.database_path()
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO engagements (id, key, target, status, engagement_root) "
+            "VALUES (1, 'legacy-flow', 'https://example.com', 'active', '/tmp/legacy')"
+        )
+        connection.execute(
+            "INSERT INTO assessment_http_flows "
+            "(engagement_id, flow_uid, method, url, request_body_sha256, "
+            "request_body_bytes, request_body_artifact_path) "
+            "VALUES (1, 'legacy-1', 'POST', 'https://example.com/api', "
+            "'abc123', 7, 'traffic/legacy.bin')"
+        )
+        for column in (
+            "request_body_capture_status",
+            "response_body_capture_status",
+            "request_body_capture_error",
+            "response_body_capture_error",
+        ):
+            connection.execute(f"ALTER TABLE assessment_http_flows DROP COLUMN {column}")
+
+    db_module.init_db()
+
+    with sqlite3.connect(path) as connection:
+        row = connection.execute(
+            "SELECT method, url, request_body_sha256, request_body_bytes, "
+            "request_body_artifact_path, request_body_capture_status, "
+            "response_body_capture_status, request_body_capture_error, "
+            "response_body_capture_error FROM assessment_http_flows "
+            "WHERE flow_uid = 'legacy-1'"
+        ).fetchone()
+    assert row == (
+        "POST",
+        "https://example.com/api",
+        "abc123",
+        7,
+        "traffic/legacy.bin",
+        "unknown",
+        "unknown",
+        "",
+        "",
+    )
+
+
+def test_capture_policy_reports_filesystem_mirror_failure(
+    client, isolate_settings, monkeypatch
+) -> None:
+    key = "2026-06-01-000007-mirror-failure"
+    root = write_engagement(isolate_settings["engagements_dir"], key)
+    policy_url = f"/engagements/{key}/assessment/capture-policy"
+    original_write_text = Path.write_text
+
+    def fail_capture_policy_write(path: Path, *args, **kwargs):
+        if path.name == "capture-policy.json.tmp":
+            raise OSError("simulated read-only engagement root")
+        return original_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_capture_policy_write)
+    response = client.put(policy_url, json={"enabled": True})
+
+    assert response.status_code == 503
+    detail = response.json()["detail"]
+    assert detail["database_updated"] is True
+    assert detail["filesystem_mirror_updated"] is False
+    assert "simulated read-only engagement root" in detail["error"]
+    # The authoritative DB write is retained and honestly reported, so retrying
+    # the idempotent PUT can repair the mirror without losing the requested policy.
+    assert client.get(policy_url).json()["enabled"] is True
+    assert not (root / "capture-policy.json").exists()
+
+
 def test_capture_policy_present_in_engagements_registry(client, isolate_settings):
     key = "2026-06-01-000008-flows"
     write_engagement(isolate_settings["engagements_dir"], key)
@@ -420,6 +540,7 @@ def test_capture_policy_present_in_engagements_registry(client, isolate_settings
     row = next(r for r in rows if r["key"] == key)
     assert "capture_policy" in row
     assert row["capture_policy"]["enabled"] is False
+    assert row["capture_policy"]["retention"] == "until_engagement_deletion"
 
     client.put(
         f"/engagements/{key}/assessment/capture-policy",

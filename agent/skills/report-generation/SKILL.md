@@ -60,11 +60,11 @@ vigil assess fetch summary
 The `finding report --json` helper returns grouped report findings. Root and sibling finding rows include:
 - `report_id` — sequential `001`, `002`, etc. (for the report body)
 - `slug` — the original backend slug, e.g. `VA-003` (for publish-mode lifecycle updates only; do not expose in the report body)
-- `cvss_vector`, `cvss_score` — extracted from `details_json`
-- `remediation`, `steps_to_reproduce`, `cwe_id`, `owasp_category` — extracted from `details_json`
-- `impact`, `evidence_detail` — extracted from `details_json`
+- `cvss_vector`, `cvss_score` — projected from parsed `details`
+- `remediation`, `steps_to_reproduce`, `cwe_id`, `owasp_category` — projected from parsed `details`
+- `impact`, `evidence_detail` — projected from parsed `details`
 
-> **Read vs write asymmetry.** The backend stores finding metadata in a column literally named `details_json` (a JSON string) — that's why the `finding report` projection above references `details_json` as a source. On write, the field name is `details`: a `--payload-file` document nests it as `{"details": {...}, "expected_row_version": <n>}`; `--details-inline` takes the object directly as `{...}`. The asymmetry is intentional: the API decodes/encodes the JSON column behind the field name `details` on writes, leaving `details_json` as the raw storage name on reads. If a prompt or recipe says to pass `details_json` to `finding update`, that's drift — flag it. **`--payload-file` is the default way to write authored prose** — Evidence and Steps to Reproduce routinely carry single quotes, double quotes, newlines, and backtick fences that corrupt `--details-inline`'s shell-single-quoted JSON, and a file has no shell quoting to corrupt. See "Submission-First Closeout" step 3 below for the full write-back procedure and payload shape.
+> **One public field shape.** Finding reads and writes both expose the parsed object as `details`; `details_json` is an internal database column and is never a second API format. A `--payload-file` document nests the object as `{"details": {...}, "expected_row_version": <n>}`; `--details-inline` takes the object directly as `{...}`. If a prompt, fixture, or recipe teaches public `details_json`, flag it as drift. **`--payload-file` is the default way to write authored prose** — Evidence and Steps to Reproduce routinely carry single quotes, double quotes, newlines, and backtick fences that corrupt `--details-inline`'s shell-single-quoted JSON, and a file has no shell quoting to corrupt. See "Submission-First Closeout" step 3 below for the full write-back procedure and payload shape.
 - top-level `groups` and `standalone`; each group has a `root` finding and `siblings`
 
 Sibling rows include
@@ -352,7 +352,7 @@ Before generating the report body, run these checks against the backend data. If
 4. **Missing required fields:** flag findings where `evidence`, `impact`, `steps_to_reproduce`, `remediation`, `cvss_score`, or `cvss_vector` are empty or absent (blue findings instead require a non-empty `mitre_techniques` list).
 5. **Unbacked or unbindable reproduction:** flag any finding whose `steps_to_reproduce` carries no `repro_runs` behind it, or whose steps contain unbound `<PLACEHOLDER>` values (or one placeholder reused across different objects). **Stop and flag — never reconstruct the steps from handoffs, chain narratives, or the finding's prose.** You cannot run probes, so what you would assemble is a plausible narrative, not a transcript; it will read as followable to everyone downstream, including the blind triage, and only the specialist that held the session can supply the real thing. `export submission` names the same gaps as advisories — nothing backing the steps, or a declared run id that does not resolve — plus a `[NEEDS: details.repro_runs]` marker in a draft. None of them block a publish, so this check is where they get acted on.
 6. **Required information per finding:** verify every included finding carries: target/feature/affected asset; bug class and exact endpoint or component; request method or triggering action; attacker context (and victim context for cross-user issues); exact request, sequence, or reproduction steps; exact response or artifact proving impact; data exposed, state changed, or access gained; severity rationale and CVSS factors where the report uses CVSS; recommended fix or control that failed.
-7. **Verification lifecycle:** flag any report-candidate finding whose `verification_state` is not `verified`, or whose `verification_disposition` is not `confirmed` or `downgraded` (a `disputed`, `pending_runtime_proof`, or unset disposition on a verified finding is not report-ready — send it back to the operator or `incident-verifier` rather than including it).
+7. **Verification lifecycle:** flag any report-candidate finding whose `verification_status` is not `confirmed` or `downgraded` (`unreviewed`, `disputed`, `pending_runtime_proof`, `blocked`, and `false_positive` are not report-ready — send it back to the operator or `incident-verifier` rather than including it).
 8. **Merge/root-cause pointer integrity:** flag a finding whose `workflow_status` is `merged` without a `merged_into_finding_id` (or vice versa), whose merge target does not exist or points back to itself, or whose `root_cause_key` groups it with a sibling whose own root finding is not itself in the reportable set. This is a backend pointer-integrity check, distinct from the editorial consolidation call in `agent/rules/reporting.md` Rule 18 — resolve it with `vigil assess finding merge` / `vigil assess finding link`, not by rewriting prose.
 
 Only proceed to report generation after validation passes or the operator resolves flagged issues.
@@ -603,7 +603,7 @@ parallel file the dispatch points at by name, not a fork of this skill.
 Differences from red mode:
 
 - **Disposition vocabulary** — blue uses `verified | false_positive | downgraded | escalated`
-  (the canonical four-value vocab written verbatim to `details_json.disposition`). Findings
+  (the canonical four-value vocab written verbatim to `details.disposition`). Findings
   with `false_positive` are excluded from the report body but appear in Appendix B's audit
   trail; their artifacts remain in the index marked scratch.
 - **Citation vocabulary** — MITRE ATT&CK technique IDs (e.g., `T1078.004`, `T1098.002`)
@@ -645,11 +645,16 @@ vigil blue closeout --engagement-key <key>
 # vigil assess agent start \
 #   --role report-writer \
 #   --skills report-generation \
+#   --no-target-traffic \
+#   --prompt-context-json '<wrapper-derived complete report context>' --emit-prompt \
 #   --task "Render blue incident report from durable backend state. Load
 #           template at agent/skills/report-generation/templates/blue.md.
 #           Pull findings, timeline, artifacts, containment actions per the
 #           template's macros."
 ```
+
+The blue wrapper derives that complete prompt context from the active scope and
+passes it inline; it does not rely on placeholders or an operator-created file.
 
 The macros section at the bottom of `templates/blue.md` lists the exact backend queries
 (`finding report`, `fetch activity-entries`, `artifact search`,

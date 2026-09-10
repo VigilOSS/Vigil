@@ -65,13 +65,15 @@ def _variant_id_for(eng_id, path):
 
 def _probe(eng_id, *, attack_family, result_status="tested", variant_id=None,
            target_host="", target_path="", tool_name="ffuf", payload_value="x",
-           auth_context="anonymous"):
+           auth_context="anonymous", observed_http_status=None,
+           outcome_assertion="", evidence_ref=""):
     state_manager.record_probe_run(
         eng_id, request_variant_id=variant_id, service_id=None, coverage_item_id=None,
         auth_context=auth_context, input_slot="query", attack_family=attack_family,
         payload_family="", payload_value=payload_value, tool_name=tool_name,
         agent_name="vulnerability-analyst", result_status=result_status,
-        observed_http_status=None, signal_type="", evidence_ref="", notes="",
+        observed_http_status=observed_http_status, signal_type="",
+        outcome_assertion=outcome_assertion, evidence_ref=evidence_ref, notes="",
         target_host=target_host, target_path=target_path, target_port=None,
     )
 
@@ -180,6 +182,105 @@ def test_two_identity_idor_probes_cover_access_control(client, isolate_settings)
     assert "access-control" not in _missing_block_families(unit)
     ac = next(e for e in unit["covered"] if e["family"] == "access-control")
     assert ac["via"] == "cross-identity (user_a, user_b)"
+
+
+def test_identity_status_difference_is_observation_not_vulnerability_conclusion(
+    client, isolate_settings
+):
+    eng_id = _seed_giving_unit(
+        client, isolate_settings, "2026-06-09-200001c-identity-outcome"
+    )
+    variant_id = _variant_id_for(eng_id, "/giving/account")
+    _probe(
+        eng_id,
+        attack_family="idor",
+        variant_id=variant_id,
+        auth_context="user_a",
+        payload_value="a",
+        observed_http_status=200,
+        evidence_ref="commands/user-a.txt",
+    )
+    _probe(
+        eng_id,
+        attack_family="idor",
+        variant_id=variant_id,
+        auth_context="user_b",
+        payload_value="b",
+        observed_http_status=403,
+        evidence_ref="commands/user-b.txt",
+    )
+
+    unit = _by_host_prefix(_deep_unit(eng_id), "rock.example.com", "/giving")
+
+    assert unit["identity_outcome_difference_count"] == 1
+    difference = unit["identity_outcome_differences"][0]
+    assert difference["observation"] == {
+        "kind": "identity_http_status_difference",
+        "identity_count": 2,
+        "by_identity": [
+            {
+                "auth_context": "user_a",
+                "observed_http_statuses": [200],
+                "probe_count": 1,
+                "evidence_refs": ["commands/user-a.txt"],
+            },
+            {
+                "auth_context": "user_b",
+                "observed_http_statuses": [403],
+                "probe_count": 1,
+                "evidence_refs": ["commands/user-b.txt"],
+            },
+        ],
+    }
+    assert difference["conclusions"] == {
+        "derived_from_status_difference": False,
+        "recorded_outcome_assertions": [],
+        "linked_finding_ids": [],
+    }
+
+
+def test_identity_status_difference_keeps_authored_assertion_separate(
+    client, isolate_settings
+):
+    eng_id = _seed_giving_unit(
+        client, isolate_settings, "2026-06-09-200001d-identity-conclusion"
+    )
+    variant_id = _variant_id_for(eng_id, "/giving/account")
+    _probe(
+        eng_id,
+        attack_family="idor",
+        variant_id=variant_id,
+        auth_context="user_a",
+        payload_value="a",
+        observed_http_status=200,
+    )
+    _probe(
+        eng_id,
+        attack_family="idor",
+        variant_id=variant_id,
+        auth_context="user_b",
+        payload_value="b",
+        observed_http_status=403,
+        outcome_assertion=(
+            "Reviewed application behavior suggests a role boundary; status alone is insufficient."
+        ),
+        evidence_ref="commands/reviewed-role-boundary.txt",
+    )
+
+    unit = _by_host_prefix(_deep_unit(eng_id), "rock.example.com", "/giving")
+    conclusions = unit["identity_outcome_differences"][0]["conclusions"]
+
+    assert conclusions["derived_from_status_difference"] is False
+    assert conclusions["recorded_outcome_assertions"] == [
+        {
+            "auth_context": "user_b",
+            "assertion": (
+                "Reviewed application behavior suggests a role boundary; "
+                "status alone is insufficient."
+            ),
+            "evidence_ref": "commands/reviewed-role-boundary.txt",
+        }
+    ]
 
 
 def test_failed_probe_does_not_cover(client, isolate_settings):

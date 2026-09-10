@@ -91,16 +91,15 @@ _warned_scope_keys: set[str] = set()
 _SHELL_BINARIES = frozenset({"sh", "bash", "dash", "zsh"})
 
 # Executables that put requests on the wire against whatever they are pointed at.
-# This is a TOOL classifier, NOT a destination filter: its only consumer is
-# aggregate rate governance, which needs to know whether a run will generate
-# target traffic and therefore must reserve rate capacity. It admits nothing and
-# refuses nothing.
+# This is a TOOL classifier, NOT a destination filter. Execution lanes consume
+# it to decide whether to print cross-lane target-traffic context. It admits
+# nothing, refuses nothing, and makes no request-rate claim.
 #
 # ``browser`` is not an executable — it is the tool name ``kali browser``
 # declares. Its argv is ``python3 -c <driver> <json-plan>``, so neither the
 # executable nor the plan's URLs are visible as argv words, and without the
 # declared name a Playwright run would drive a real browser against the target
-# outside the engagement's aggregate rate budget.
+# without the cross-lane target-traffic advisory.
 _TARGET_FACING_TOOLS = frozenset(
     {
         "arjun", "bbot", "browser", "cero", "curl", "dalfox", "dnsx", "ffuf",
@@ -111,7 +110,7 @@ _TARGET_FACING_TOOLS = frozenset(
 
 # Executables that cannot put a request on the wire — they read, write, filter or
 # print text. The request classifier skips their argv so writing or grepping a
-# URL does not consume aggregate target-rate capacity.
+# URL does not get labelled as a target-facing command.
 #
 # Deliberately small and literal. It is a skip-list, not an allowlist, so an
 # unknown or future HTTP tool carrying a URL is still classified as
@@ -503,18 +502,6 @@ def rate_limit(scope: dict[str, Any]) -> float | None:
     if value <= 0:
         return None
     return value
-
-
-def aggregate_rate_limit(scope: dict[str, Any]) -> float | None:
-    """Return the engagement-wide concurrent target-rate ceiling, if valid."""
-    raw = scope.get("rate_limit_aggregate_rps")
-    if raw is None or isinstance(raw, bool):
-        return None
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        return None
-    return value if value > 0 else None
 
 
 def required_headers(scope: dict[str, Any]) -> dict[str, str]:
@@ -1244,7 +1231,7 @@ def _request_urls(cmd: list[str], *, depth: int = 0) -> list[str]:
     cannot request anything (:data:`_NON_REQUESTING_HEADS`).
 
     Nothing here decides whether a destination is authorized. Its only consumer
-    is aggregate rate classification.
+    is target-facing command classification.
     """
     if depth > 8:
         return []
@@ -1332,8 +1319,9 @@ def enforce_execution_policy(
 
     # ``policy_tools`` — not ``observed_tools`` — so a caller that DECLARES a
     # target-facing tool whose argv hides it (``kali browser``, whose argv is
-    # ``python3 -c <driver> <json-plan>``) still reserves aggregate rate. The
-    # declared name is supplied by the caller, not guessed from argv.
+    # ``python3 -c <driver> <json-plan>``) still receives the cross-lane
+    # advisory. The declared name is supplied by the caller, not guessed from
+    # argv.
     return {
         "target_facing": bool(policy_tools & _TARGET_FACING_TOOLS)
         or bool(request_urls),

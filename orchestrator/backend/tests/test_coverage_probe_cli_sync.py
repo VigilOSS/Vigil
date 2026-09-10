@@ -78,6 +78,18 @@ def test_surface_statuses_mirror_backend_enum() -> None:
     )
 
 
+def test_surface_create_statuses_match_the_backend_create_contract() -> None:
+    """record-surface must not advertise update-only lifecycle values."""
+    from assess.lib import surfaces
+
+    assert surfaces.CREATABLE_STATUSES == {
+        "covered",
+        "deferred",
+        "discovered",
+        "not_applicable",
+    }
+
+
 def test_cli_registers_merged_probe_coverage_verbs() -> None:
     imported = _cli_imported_commands()
     registered = _cli_registered_commands()

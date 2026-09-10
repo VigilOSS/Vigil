@@ -57,6 +57,16 @@ def test_commands_by_phase_non_empty_for_every_phase():
             assert phase in contract.phase
 
 
+def test_finding_update_contract_uses_public_details_shape_and_replacement_semantics():
+    contract = contracts.get_contract("finding update")
+    assert contract is not None
+    text = " ".join(contract.notes)
+
+    assert "returns it back as `details`" in text
+    assert "details_json` on read" not in text
+    assert "replaces that stored value" in text
+
+
 def test_json_round_trips_and_carries_contract_pointer(capsys):
     rows = _run_json(capsys, ["list-commands", "--json"])
     assert isinstance(rows, list) and rows

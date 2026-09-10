@@ -47,8 +47,7 @@ def _seed(client, isolate_settings) -> None:
                 "title": f"Seed finding {slug}",
                 "severity": "medium",
                 "workflow_status": "active",
-                "verification_state": "unreviewed",
-                "verification_disposition": "none",
+                "verification_status": "unreviewed",
                 "canonical_location": f"https://example.com/seed/{slug}",
                 "summary": "Seed finding for handoff references",
                 "evidence_ref": "findings.md",
@@ -182,6 +181,41 @@ def test_handoff_list_filters(client, isolate_settings) -> None:
 
     resp = client.get(f"{BASE}/dispatch-handoffs", params={"role": "recon-specialist"})
     assert {r["agent_id"] for r in resp.json()} == {"L1"}
+
+
+def test_handoff_list_supports_stable_offset_pagination(client, isolate_settings) -> None:
+    _seed(client, isolate_settings)
+    for agent_id in ("PAGE-1", "PAGE-2", "PAGE-3"):
+        _register_dispatch(
+            client,
+            agent_id=agent_id,
+            agent_role="recon-specialist",
+        )
+        response = client.post(
+            f"{BASE}/dispatch-handoffs",
+            json=_full_payload(
+                agent_id=agent_id,
+                agent_role="recon-specialist",
+            ),
+        )
+        assert response.status_code == 201, response.text
+
+    first = client.get(
+        f"{BASE}/dispatch-handoffs",
+        params={"limit": 2, "offset": 0},
+    )
+    second = client.get(
+        f"{BASE}/dispatch-handoffs",
+        params={"limit": 2, "offset": 2},
+    )
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert len(first.json()) == 2
+    assert len(second.json()) == 1
+    assert {row["agent_id"] for row in first.json()}.isdisjoint(
+        {row["agent_id"] for row in second.json()}
+    )
 
 
 def test_handoff_404_on_missing(client, isolate_settings) -> None:

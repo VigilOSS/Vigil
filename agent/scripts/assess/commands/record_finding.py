@@ -9,7 +9,11 @@ import os
 import sys
 from pathlib import Path
 
-from assess.lib.client import AssessError, AssessmentClient
+from assess.lib.client import (
+    AssessError,
+    AssessmentClient,
+    require_finding_write_response,
+)
 from assess.lib.config import load_config
 from assess.lib.contracts import common_mistake_hints, render_contract
 from assess.lib.findings import finding_lock_path, next_finding_id
@@ -59,10 +63,48 @@ def register(subparsers) -> None:
              "endpoint + technique; if the prior kill was wrong, run "
              "`finding update <slug> --status draft --reason \"...\"` instead.",
     )
+    p.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress non-error warnings and duplicate advisories; the canonical slug remains on stdout.",
+    )
     p.set_defaults(func=run)
 
 
 _FINDING_SCHEMA = load_schema("finding-record.schema.json")
+
+
+def _require_atomic_candidate_response(
+    response: dict, request: dict
+) -> dict:
+    candidate = response.get("run_candidate")
+    finding = response.get("finding")
+    required_provenance_fields = {
+        "target_key",
+        "source_id",
+        "source_anchor",
+        "originating_result_id",
+        "originating_signal_id",
+    }
+    valid = (
+        isinstance(candidate, dict)
+        and isinstance(finding, dict)
+        and candidate.get("id") == request.get("candidate_id")
+        and candidate.get("run_id") == request.get("run_id")
+        and candidate.get("state") == "promoted"
+        and candidate.get("finding_slug") == finding.get("slug")
+        and candidate.get("proof_receipt_ids") == request.get("proof_receipt_ids")
+        and required_provenance_fields.issubset(candidate)
+        and isinstance(candidate.get("target_key"), str)
+        and bool(candidate["target_key"].strip())
+        and isinstance(candidate.get("source_anchor"), str)
+        and bool(candidate["source_anchor"].strip())
+    )
+    if not valid:
+        raise AssessError(
+            "backend response did not preserve the requested candidate provenance"
+        )
+    return response
 
 
 def _normalize_payload(payload: dict, *, agent_name: str, candidate_slug: str) -> dict:
@@ -71,8 +113,7 @@ def _normalize_payload(payload: dict, *, agent_name: str, candidate_slug: str) -
     normalized.setdefault("source_name", agent_name)
     normalized.setdefault("severity", "medium")
     normalized.setdefault("workflow_status", "active")
-    normalized.setdefault("verification_state", "unreviewed")
-    normalized.setdefault("verification_disposition", "none")
+    normalized.setdefault("verification_status", "unreviewed")
     normalized.setdefault("defect_family", normalized.get("title", candidate_slug))
     normalized.setdefault("root_cause_key", "")
     normalized.setdefault("auth_context", "anonymous")
@@ -325,6 +366,24 @@ def _print_backend_clobber_refusal(exc: AssessError) -> bool:
     return True
 
 
+def _print_duplicate_advisories(response: object, *, quiet: bool) -> None:
+    """Surface advisory-only duplicate matches returned by the backend."""
+    if quiet or not isinstance(response, dict):
+        return
+    advisories = response.get("duplicate_advisories")
+    if not isinstance(advisories, list):
+        return
+    for advisory in advisories:
+        if not isinstance(advisory, dict):
+            continue
+        detail = advisory.get("detail")
+        if not isinstance(detail, str) or not detail.strip():
+            slug = str(advisory.get("slug") or "unknown finding")
+            matched_on = str(advisory.get("matched_on") or "an existing submission")
+            detail = f"{slug} matches {matched_on}."
+        print(f"finding record: duplicate advisory — {detail}", file=sys.stderr)
+
+
 def _report_validation_errors(payload: dict, errors: list[str]) -> None:
     print("finding payload invalid after helper defaults:", file=sys.stderr)
     for error in errors:
@@ -385,7 +444,10 @@ def run(args) -> None:
             payload,
             eng_dir=eng_dir,
             engagement_key=cfg.engagement_key,
-            allow_unindexed=getattr(args, "allow_unindexed_evidence", False),
+            allow_unindexed=(
+                getattr(args, "allow_unindexed_evidence", False)
+                or getattr(args, "quiet", False)
+            ),
         )
 
         if not update_slug:
@@ -412,12 +474,30 @@ def run(args) -> None:
                     sys.exit(1)
                 raise
 
+        try:
+            response = require_finding_write_response(
+                response,
+                finding_slug=candidate_slug,
+                operation="finding record",
+            )
+            if isinstance(payload.get("run_candidate"), dict):
+                response = _require_atomic_candidate_response(
+                    response, payload["run_candidate"]
+                )
+        except AssessError as exc:
+            print(f"finding record: {exc}", file=sys.stderr)
+            sys.exit(1)
+
         finding = response.get("finding", {})
         if not finding.get("slug") or not finding.get("title"):
             print("finding record: orchestrator backend did not return a canonical finding record", file=sys.stderr)
             sys.exit(1)
 
         finding_slug = finding["slug"]
+        _print_duplicate_advisories(
+            response,
+            quiet=getattr(args, "quiet", False),
+        )
 
     # Emit event (outside lock)
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:

@@ -16,7 +16,11 @@ import json
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
+
 from app import db as db_module
+from app.services.state_manager.finding_details import validate_finding_details
+from tests.proof_fixtures import post_artifact_backed_source_observation
 
 ENGAGEMENT_KEY = "2026-08-22-details-schema"
 
@@ -35,6 +39,15 @@ def seeded(client, isolate_settings):
     )
     (engagement_dir / "findings.md").write_text("# Findings\n", encoding="utf-8")
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    for agent_id, role in (
+        ("HUNT-1", "vulnerability-analyst"),
+        ("VERIFY-1", "code-vuln-verifier"),
+    ):
+        response = client.post(
+            f"{_base()}/dispatches",
+            json={"agent_id": agent_id, "agent_role": role, "task": role},
+        )
+        assert response.status_code == 201, response.text
     assert client.post(f"{_base()}/findings", json=_payload()).status_code == 201
     return client
 
@@ -52,7 +65,7 @@ def _payload(slug: str = "VA-001", **over) -> dict:
         "evidence_ref": "findings.md",
         "source_name": "vulnerability-analyst",
         "details": {"evidence": "Replayable request.", "impact": "PII disclosure."},
-        "provenance": {"agent_name": "vulnerability-analyst"},
+        "provenance": {"agent_id": "HUNT-1", "agent_name": "vulnerability-analyst"},
     }
     payload.update(over)
     return payload
@@ -103,7 +116,7 @@ def test_an_unknown_details_key_is_refused_on_every_write_path(seeded, route) ->
         response = seeded.post(
             f"{_base()}/findings/VA-001/verify",
             json={
-                "disposition": "confirmed",
+                "verification_status": "confirmed",
                 "reason_text": "Reproduced.",
                 "details": {"bogus": 1},
             },
@@ -146,7 +159,7 @@ def test_kill_check_is_bounded_at_the_verify_door(seeded) -> None:
     refused = seeded.post(
         f"{_base()}/findings/VA-001/verify",
         json={
-            "disposition": "false_positive",
+            "verification_status": "false_positive",
             "reason_text": "Guard present.",
             "details": {"kill_reason": "Upstream guard bounds the length.", "kill_check": 6},
         },
@@ -202,9 +215,151 @@ def test_a_declared_enum_and_type_are_enforced(seeded) -> None:
     assert "must be of type array" in bad_type.json()["detail"]
 
 
+@pytest.mark.parametrize(
+    "details",
+    [
+        {
+            "function": "read_export",
+            "discovery_stage": "hunt",
+            "source_anchor": "return candidate.read_bytes()",
+            "entry_point": "read_export(filename)",
+            "sink": "Path.read_bytes",
+            "taint_path": ["filename", "candidate", "Path.read_bytes"],
+            "proof_complete": True,
+        },
+        {
+            "discovered_credential": {
+                "credential_key": "leaked-session-cookie",
+                "credential_id": 42,
+                "principal": "victim@target.example",
+                "kind": "session_cookie",
+                "minted_identity": "disc-sessionid-deadbeef",
+                "session_minted": True,
+            }
+        },
+        {
+            "poc_request": {
+                "method": "POST",
+                "url": "https://app.example/api/users",
+                "headers": {"Content-Type": "application/json"},
+                "body": '{"id": 7}',
+            }
+        },
+        {
+            "timeline": [
+                {
+                    "timestamp": "2026-08-22T12:34:56Z",
+                    "event": "Suspicious OAuth grant created.",
+                    "source_file": "ir/reports/oauth-grants.json",
+                    "command_run_id": 73,
+                }
+            ],
+            "iocs": ["203.0.113.9", {"type": "domain", "value": "evil.example"}],
+        },
+    ],
+    ids=["code-v1", "credential-v1", "web-v1", "blue-v1"],
+)
+def test_valid_workflow_extension_shapes_are_accepted(details) -> None:
+    validate_finding_details(details)
+
+
+@pytest.mark.parametrize(
+    ("details", "expected_path"),
+    [
+        (
+            {
+                "discovered_credential": {
+                    "credential_key": "leaked-password",
+                    "credential_id": 42,
+                    "principal": "admin@target.example",
+                    "kind": "password",
+                    "minted_identity": None,
+                    "session_minted": "no",
+                }
+            },
+            "details.discovered_credential.session_minted",
+        ),
+        (
+            {
+                "discovered_credential": {
+                    "credential_key": "leaked-password",
+                    "credential_id": 42,
+                    "principal": "admin@target.example",
+                    "kind": "password",
+                    "minted_identity": None,
+                    "session_minted": False,
+                    "session_mintd": False,
+                }
+            },
+            "details.discovered_credential.session_mintd",
+        ),
+        (
+            {"poc_request": {"headers": {"Authorization": True}}},
+            "details.poc_request.headers.Authorization",
+        ),
+        ({"poc_request": {"methd": "GET"}}, "details.poc_request.methd"),
+        ({"timeline": ["not a timeline row"]}, "details.timeline[0]"),
+        ({"iocs": [7]}, "details.iocs[0]"),
+    ],
+    ids=[
+        "credential-nested-type",
+        "credential-nested-typo",
+        "web-deeply-nested-type",
+        "web-nested-typo",
+        "blue-timeline-item-type",
+        "blue-ioc-item-type",
+    ],
+)
+def test_invalid_nested_workflow_extension_values_are_rejected(
+    details, expected_path
+) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        validate_finding_details(details)
+
+    assert exc_info.value.status_code == 400
+    assert expected_path in str(exc_info.value.detail)
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # A kill that admits the experiment never ran is `blocked`, not `false_positive`
 # ──────────────────────────────────────────────────────────────────────────
+
+
+def _completed_counter_check(seeded) -> dict:
+    run = seeded.post(
+        f"{_base()}/assessment-runs",
+        json={
+            "run_uuid": "run-details-verifier",
+            "run_kind": "code",
+            "producer_dispatch_agent_id": "VERIFY-1",
+        },
+    )
+    assert run.status_code == 201, run.text
+    receipt = post_artifact_backed_source_observation(
+        seeded,
+        f"{_base()}/proof-receipts",
+        json={
+            "run_id": run.json()["id"],
+            "evidence_kind": "source_observation",
+            "expected_result": "an unguarded path reaches the sensitive read",
+            "observed_result": "all paths are dominated by the authorization guard",
+        },
+    )
+    assert receipt.status_code == 201, receipt.text
+    completed = seeded.patch(
+        f"{_base()}/assessment-runs/{run.json()['id']}",
+        json={"status": "completed"},
+    )
+    assert completed.status_code == 200, completed.text
+    receipt_id = receipt.json()["id"]
+    return {
+        "method": "authorization-dominance source proof",
+        "expected_result": "an unguarded path reaches the sensitive read",
+        "observed_result": "all paths are dominated by the authorization guard",
+        "falsified_claim": "a path bypasses the authorization guard",
+        "completed": True,
+        "proof_receipt_ids": [receipt_id],
+    }
 
 
 def _kill(seeded, kill_reason: str, **details):
@@ -213,11 +368,34 @@ def _kill(seeded, kill_reason: str, **details):
     return seeded.post(
         f"{_base()}/findings/VA-001/verify",
         json={
-            "disposition": "false_positive",
+            "verification_status": "false_positive",
             "reason_text": "Verifier disposition.",
             "details": payload,
+            "counter_check": _completed_counter_check(seeded),
         },
     )
+
+
+@pytest.mark.parametrize(
+    "details",
+    [
+        {"kill_check": 2},
+        {"kill_reason": "The authorization guard dominates every path."},
+    ],
+)
+def test_false_positive_requires_kill_reason_and_kill_check(seeded, details) -> None:
+    response = seeded.post(
+        f"{_base()}/findings/VA-001/verify",
+        json={
+            "verification_status": "false_positive",
+            "reason_text": "Verifier disposition.",
+            "details": details,
+            "counter_check": _completed_counter_check(seeded),
+        },
+    )
+
+    assert response.status_code == 400, response.text
+    assert "details.kill_reason and details.kill_check" in response.json()["detail"]
 
 
 def test_a_kill_citing_an_absent_capability_must_name_a_settling_test(seeded) -> None:

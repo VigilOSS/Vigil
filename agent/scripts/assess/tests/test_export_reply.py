@@ -69,6 +69,8 @@ class _FakeClient:
 
     def post(self, endpoint: str, payload: dict) -> dict:
         self.posts.append((endpoint, payload))
+        if endpoint == "artifacts":
+            return {"id": len(self.posts), "relative_path": payload["path"]}
         return {"id": len(self.posts), **payload}
 
     def patch(self, endpoint: str, payload: dict, **kwargs) -> dict:
@@ -111,7 +113,7 @@ def _finding(slug: str = "VA-047", *, evidence_ref: str = "scans/idor.txt", repl
         "canonical_location": "/orders/1001",
         "evidence_ref": evidence_ref,
         "submission_status": "needs_info",
-        "details_json": json.dumps(base_details),
+        "details": base_details,
     }
 
 
@@ -423,6 +425,30 @@ def test_json_summary_shape(tmp_path, monkeypatch, capsys):
     assert out["prior_replies"] == 1
     assert out["artifact_registered"] is True
     assert out["hygiene_warnings"] == []  # clean finding
+
+
+def test_artifact_registration_requires_canonical_artifact_identity(
+    tmp_path, monkeypatch, capsys
+):
+    replies = [_reply(1, body="answer", ask="question")]
+    fake = _FakeClient(_finding(replies=replies))
+
+    def malformed_post(endpoint: str, payload: dict) -> dict:
+        fake.posts.append((endpoint, payload))
+        return {"message": "accepted"}
+
+    fake.post = malformed_post
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        ["reply", "VA-047", "--seq", "1", "--json"],
+        str(tmp_path),
+    )
+
+    export_reply.run(args)
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["artifact_registered"] is False
+    assert "do not retry automatically" in captured.err
 
 
 def test_every_prior_reply_body_is_inlined_and_fenced(tmp_path, monkeypatch, capsys):

@@ -1,7 +1,57 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import stat
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
+
+
+@dataclass(frozen=True, slots=True)
+class ClientRosterRepairResult:
+    """Evidence from reconciling generated client rosters in existing workdirs."""
+
+    scanned_engagement_count: int = 0
+    physical_roster_paths: tuple[str, ...] = ()
+    refreshed_physical_roster_paths: tuple[str, ...] = ()
+    added_file_paths: tuple[str, ...] = ()
+    updated_file_paths: tuple[str, ...] = ()
+    unchanged_file_paths: tuple[str, ...] = ()
+    preserved_extra_paths: tuple[str, ...] = ()
+
+    @property
+    def files_added(self) -> int:
+        return len(self.added_file_paths)
+
+    @property
+    def files_updated(self) -> int:
+        return len(self.updated_file_paths)
+
+    @property
+    def files_unchanged(self) -> int:
+        return len(self.unchanged_file_paths)
+
+    @property
+    def extra_files_preserved(self) -> int:
+        return len(self.preserved_extra_paths)
+
+
+@dataclass(frozen=True, slots=True)
+class _EngagementClientPlan:
+    engagement_dir: Path
+    codex_needed: bool
+    claude_needed: bool
+    opencode_needed: bool
+    goose_needed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _PhysicalRoster:
+    engagement_dir: Path
+    source: Path
+    destination: Path
 
 
 def _ensure_agents_link(
@@ -186,45 +236,302 @@ def ensure_goose_standard_hooks(agent_root: Path, eng_dir: Path) -> None:
     (hooks_dir / "hooks.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 
 
-def repair_engagement_client_rosters(install_root: Path) -> None:
-    """Backfill generated client rosters for existing engagement workdirs."""
+def _unsafe_physical_roster(message: str, path: Path) -> RuntimeError:
+    return RuntimeError(f"unsafe physical client roster {message}: {path}")
+
+
+def _walk_tree(root: Path) -> tuple[Path, ...]:
+    """Return a deterministic tree walk without following directory symlinks."""
+    entries: list[Path] = []
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        children = sorted(current.iterdir(), key=lambda child: child.name, reverse=True)
+        for child in children:
+            entries.append(child)
+            mode = child.lstat().st_mode
+            if stat.S_ISDIR(mode):
+                pending.append(child)
+    return tuple(sorted(entries, key=lambda entry: entry.as_posix()))
+
+
+def _assert_regular_tree(root: Path, *, label: str) -> None:
+    mode = root.lstat().st_mode
+    if not stat.S_ISDIR(mode):
+        raise _unsafe_physical_roster(f"{label} is not a directory", root)
+    for entry in _walk_tree(root):
+        mode = entry.lstat().st_mode
+        if stat.S_ISLNK(mode):
+            raise _unsafe_physical_roster(f"{label} contains a symlink", entry)
+        if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+            raise _unsafe_physical_roster(f"{label} contains a non-regular entry", entry)
+
+
+def _assert_resolves_within(path: Path, root: Path, *, label: str) -> None:
+    try:
+        path.resolve(strict=True).relative_to(root.resolve(strict=True))
+    except (FileNotFoundError, ValueError) as exc:
+        raise _unsafe_physical_roster(f"{label} escapes its owning root", path) from exc
+
+
+def _strict_physical_destination(roster: _PhysicalRoster) -> bool:
+    """Classify one destination, rejecting unsafe parents and stale symlinks."""
+    try:
+        relative = roster.destination.relative_to(roster.engagement_dir)
+    except ValueError as exc:
+        raise _unsafe_physical_roster(
+            "destination is outside its engagement", roster.destination
+        ) from exc
+
+    current = roster.engagement_dir
+    for part in relative.parts:
+        current /= part
+        try:
+            mode = current.lstat().st_mode
+        except FileNotFoundError:
+            return False
+        except NotADirectoryError as exc:
+            raise _unsafe_physical_roster("has a non-directory parent", current) from exc
+        if stat.S_ISLNK(mode):
+            if current == roster.destination:
+                try:
+                    if (
+                        roster.source.is_dir()
+                        and current.resolve(strict=True) == roster.source.resolve(strict=True)
+                    ):
+                        return False
+                except FileNotFoundError:
+                    pass
+            raise _unsafe_physical_roster("has a symlink collision", current)
+        if not stat.S_ISDIR(mode):
+            raise _unsafe_physical_roster("has a type collision", current)
+    return True
+
+
+def _preflight_physical_roster(
+    roster: _PhysicalRoster, *, agent_root: Path, engagements_root: Path
+) -> None:
+    _assert_resolves_within(
+        roster.engagement_dir, engagements_root, label="engagement directory"
+    )
+    _assert_resolves_within(roster.source, agent_root, label="generated source")
+    _assert_resolves_within(
+        roster.destination, roster.engagement_dir, label="destination"
+    )
+    _assert_regular_tree(roster.source, label="generated source")
+    _assert_regular_tree(roster.destination, label="destination")
+
+    for source_entry in _walk_tree(roster.source):
+        target = roster.destination / source_entry.relative_to(roster.source)
+        try:
+            target_mode = target.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        if stat.S_ISDIR(source_entry.lstat().st_mode):
+            if not stat.S_ISDIR(target_mode):
+                raise _unsafe_physical_roster(
+                    "has a canonical directory type collision", target
+                )
+        elif not stat.S_ISREG(target_mode):
+            raise _unsafe_physical_roster("has a canonical file type collision", target)
+
+
+def _display_path(path: Path, install_root: Path) -> str:
+    try:
+        return str(path.relative_to(install_root))
+    except ValueError:
+        return str(path)
+
+
+def _atomic_copy(source: Path, destination: Path) -> None:
+    descriptor, temp_name = tempfile.mkstemp(
+        dir=destination.parent,
+        prefix=f".{destination.name}.vigil-refresh-",
+    )
+    os.close(descriptor)
+    temporary = Path(temp_name)
+    try:
+        shutil.copy2(source, temporary, follow_symlinks=False)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _refresh_physical_roster(
+    roster: _PhysicalRoster, *, install_root: Path
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    canonical_files: set[Path] = set()
+    added: list[str] = []
+    updated: list[str] = []
+    unchanged: list[str] = []
+
+    for source_entry in _walk_tree(roster.source):
+        relative = source_entry.relative_to(roster.source)
+        destination = roster.destination / relative
+        if source_entry.is_dir():
+            destination.mkdir(parents=True, exist_ok=True)
+            continue
+        canonical_files.add(relative)
+        if destination.exists() and destination.read_bytes() == source_entry.read_bytes():
+            unchanged.append(_display_path(destination, install_root))
+            continue
+        existed = destination.exists()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_copy(source_entry, destination)
+        (updated if existed else added).append(_display_path(destination, install_root))
+
+    extras = [
+        _display_path(entry, install_root)
+        for entry in _walk_tree(roster.destination)
+        if stat.S_ISREG(entry.lstat().st_mode)
+        and entry.relative_to(roster.destination) not in canonical_files
+    ]
+    return tuple(added), tuple(updated), tuple(unchanged), tuple(extras)
+
+
+def _client_plan(agent_root: Path, engagement_dir: Path) -> _EngagementClientPlan:
+    return _EngagementClientPlan(
+        engagement_dir=engagement_dir,
+        codex_needed=(engagement_dir / ".codex").exists()
+        or (engagement_dir / "start_codex.sh").exists(),
+        claude_needed=(engagement_dir / ".claude").exists()
+        or (engagement_dir / "start_claude.sh").exists(),
+        opencode_needed=(engagement_dir / ".opencode").exists()
+        or (engagement_dir / "start_opencode.sh").exists(),
+        goose_needed=(engagement_dir / ".goose").exists()
+        or (engagement_dir / "start_goose.sh").exists()
+        or (engagement_dir / ".goosehints").exists(),
+    )
+
+
+def _rosters_for_plan(agent_root: Path, plan: _EngagementClientPlan) -> tuple[_PhysicalRoster, ...]:
+    rosters: list[_PhysicalRoster] = []
+    if plan.codex_needed:
+        rosters.append(
+            _PhysicalRoster(
+                plan.engagement_dir,
+                agent_root / ".codex" / "agents",
+                plan.engagement_dir / ".codex" / "agents",
+            )
+        )
+    if plan.claude_needed:
+        rosters.append(
+            _PhysicalRoster(
+                plan.engagement_dir,
+                agent_root / ".claude" / "agents",
+                plan.engagement_dir / ".claude" / "agents",
+            )
+        )
+    if plan.opencode_needed:
+        for name in ("agent", "agents"):
+            rosters.append(
+                _PhysicalRoster(
+                    plan.engagement_dir,
+                    agent_root / ".opencode" / "agent",
+                    plan.engagement_dir / ".opencode" / name,
+                )
+            )
+    if plan.goose_needed:
+        rosters.append(
+            _PhysicalRoster(
+                plan.engagement_dir,
+                agent_root / ".goose" / "recipes",
+                plan.engagement_dir / ".goose" / "recipes",
+            )
+        )
+    return tuple(rosters)
+
+
+def repair_engagement_client_rosters(
+    install_root: Path, *, refresh_physical_client_rosters: bool = False
+) -> ClientRosterRepairResult:
+    """Backfill generated client rosters for existing engagement workdirs.
+
+    Physical roster directories are reported but preserved by default because they
+    can contain engagement-owned state. The explicit refresh mode preflights every
+    candidate before any writes, then atomically adds or refreshes canonical files
+    in place without deleting unknown entries.
+    """
     agent_root = install_root / "agent"
     engagements_root = agent_root / "engagements"
     if not engagements_root.is_dir():
-        return
+        return ClientRosterRepairResult()
 
-    for eng_dir in engagements_root.iterdir():
-        if not eng_dir.is_dir() or not (eng_dir / "scope.json").is_file():
+    plans: list[_EngagementClientPlan] = []
+    for eng_dir in sorted(engagements_root.iterdir(), key=lambda entry: entry.name):
+        if eng_dir.is_symlink():
+            if refresh_physical_client_rosters and (eng_dir / "scope.json").is_file():
+                raise _unsafe_physical_roster("engagement path is a symlink", eng_dir)
             continue
-        if not ((eng_dir / ".codex").exists() or (eng_dir / "start_codex.sh").exists()):
-            codex_needed = False
-        else:
-            codex_needed = True
-        claude_needed = (eng_dir / ".claude").exists() or (eng_dir / "start_claude.sh").exists()
-        # OpenCode parity: any engagement that got a start_opencode.sh launcher
-        # (codex/claude/both installs all emit it) or already has a .opencode dir
-        # should carry the standard plugin + roster.
-        opencode_needed = (eng_dir / ".opencode").exists() or (eng_dir / "start_opencode.sh").exists()
-        # Goose parity: any engagement with a start_goose.sh launcher (or an existing
-        # .goose / .goosehints) should carry the recipe roster + standard hooks.
-        goose_needed = (
-            (eng_dir / ".goose").exists()
-            or (eng_dir / "start_goose.sh").exists()
-            or (eng_dir / ".goosehints").exists()
-        )
-        if codex_needed:
+        if eng_dir.is_dir() and (eng_dir / "scope.json").is_file():
+            plans.append(_client_plan(agent_root, eng_dir))
+
+    all_rosters = tuple(
+        roster for plan in plans for roster in _rosters_for_plan(agent_root, plan)
+    )
+    physical_rosters: list[_PhysicalRoster] = []
+    if refresh_physical_client_rosters:
+        for roster in all_rosters:
+            if roster.source.exists():
+                _assert_resolves_within(roster.source, agent_root, label="generated source")
+                _assert_regular_tree(roster.source, label="generated source")
+            if _strict_physical_destination(roster):
+                physical_rosters.append(roster)
+        for roster in physical_rosters:
+            _preflight_physical_roster(
+                roster, agent_root=agent_root, engagements_root=engagements_root
+            )
+    else:
+        physical_rosters = [
+            roster
+            for roster in all_rosters
+            if roster.destination.is_dir() and not roster.destination.is_symlink()
+        ]
+
+    for plan in plans:
+        eng_dir = plan.engagement_dir
+        if plan.codex_needed:
             ensure_codex_agents_link(agent_root, eng_dir / ".codex")
-        if claude_needed:
+        if plan.claude_needed:
             claude_dir = eng_dir / ".claude"
             ensure_claude_settings(agent_root, claude_dir)
             ensure_claude_agents_link(agent_root, claude_dir)
-        if opencode_needed:
+        if plan.opencode_needed:
             opencode_dir = eng_dir / ".opencode"
             ensure_opencode_plugin(agent_root, opencode_dir)
             ensure_opencode_agents_link(agent_root, opencode_dir)
-        if goose_needed:
+        if plan.goose_needed:
             ensure_goose_recipes_link(agent_root, eng_dir / ".goose")
             ensure_goose_standard_hooks(agent_root, eng_dir)
+
+    added: list[str] = []
+    updated: list[str] = []
+    unchanged: list[str] = []
+    extras: list[str] = []
+    if refresh_physical_client_rosters:
+        for roster in physical_rosters:
+            roster_added, roster_updated, roster_unchanged, roster_extras = (
+                _refresh_physical_roster(roster, install_root=install_root)
+            )
+            added.extend(roster_added)
+            updated.extend(roster_updated)
+            unchanged.extend(roster_unchanged)
+            extras.extend(roster_extras)
+
+    physical_paths = tuple(
+        sorted(_display_path(roster.destination, install_root) for roster in physical_rosters)
+    )
+    return ClientRosterRepairResult(
+        scanned_engagement_count=len(plans),
+        physical_roster_paths=physical_paths,
+        refreshed_physical_roster_paths=(
+            physical_paths if refresh_physical_client_rosters else ()
+        ),
+        added_file_paths=tuple(sorted(added)),
+        updated_file_paths=tuple(sorted(updated)),
+        unchanged_file_paths=tuple(sorted(unchanged)),
+        preserved_extra_paths=tuple(sorted(extras)),
+    )
 
 
 def repair_engagement_codex_agent_links(install_root: Path) -> None:

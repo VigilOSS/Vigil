@@ -31,8 +31,7 @@ def _finding_payload() -> dict:
         "title": "IDOR in /api/users/{id} allows anon read of any user PII",
         "severity": "high",
         "workflow_status": "exploited",
-        "verification_state": "verified",
-        "verification_disposition": "confirmed",
+        "verification_status": "unreviewed",
         "defect_family": "access-control",
         "root_cause_key": "missing-object-authz",
         "canonical_location": "https://app.example/api/users",
@@ -67,6 +66,26 @@ def test_patch_notes_appends_by_default(client, isolate_settings):
     assert "verify phase disproved run 13691" in notes
 
 
+def test_patch_notes_append_records_full_before_and_after(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    created = client.post(f"{_base()}/findings", json=_finding_payload())
+    assert created.status_code in (200, 201), created.text
+
+    appended = client.patch(
+        f"{_base()}/findings/VA-001",
+        json={"notes": "verify phase disproved run 13691"},
+    )
+    assert appended.status_code == 200, appended.text
+
+    transitions = client.get(f"{_base()}/findings/VA-001/transitions").json()
+    latest = transitions[0]
+    assert latest["notes_before_json"] == "PROVEN by run 13691"
+    assert latest["notes_after_json"] == appended.json()["finding"]["notes"]
+    assert latest["notes_history_status"] == "recorded"
+
+
 def test_patch_notes_replace_overwrites(client, isolate_settings):
     _seed(client, isolate_settings)
     assert client.post(f"{_base()}/findings", json=_finding_payload()).status_code in (200, 201)
@@ -84,6 +103,10 @@ def test_patch_notes_replace_overwrites(client, isolate_settings):
     # The stale line is gone — only the replacement remains.
     assert "PROVEN by run 13691" not in notes
     assert notes.strip() == "Disproven; see VA-001 verify handoff."
+    latest = client.get(f"{_base()}/findings/VA-001/transitions").json()[0]
+    assert latest["notes_before_json"] == "PROVEN by run 13691"
+    assert latest["notes_after_json"] == notes
+    assert latest["notes_history_status"] == "recorded"
 
 
 @pytest.mark.parametrize(
@@ -365,6 +388,115 @@ def test_rotate_banks_the_prior_notes_on_the_transition_ledger(client, isolate_s
     )
 
 
+def test_rotate_preserves_an_oversized_prior_note_without_truncation(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    created = client.post(f"{_base()}/findings", json=_finding_payload())
+    assert created.status_code in (200, 201), created.text
+    original = "large-note:" + ("x" * 70_000) + ":tail"
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_findings SET notes = ? WHERE slug = ?",
+            (original, "VA-001"),
+        )
+
+    rotated = client.patch(
+        f"{_base()}/findings/VA-001",
+        json={
+            "notes": "Rotated after the field exceeded its append bound.",
+            "notes_mode": "rotate",
+            "expected_row_version": _row_version(client),
+        },
+    )
+    assert rotated.status_code == 200, rotated.text
+
+    transitions = client.get(f"{_base()}/findings/VA-001/transitions").json()
+    assert transitions[0]["notes_before_json"] == original
+    assert transitions[0]["notes_after_json"] == rotated.json()["finding"]["notes"]
+
+
+def test_merge_records_full_note_history_for_source_and_target(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    source_payload = {
+        **_finding_payload(),
+        "slug": "VA-002",
+        "title": "Duplicate source finding",
+        "root_cause_key": "duplicate-source",
+        "canonical_location": "https://app.example/api/users/source",
+        "notes": "Source-specific note.",
+    }
+    target_payload = {
+        **_finding_payload(),
+        "slug": "VA-003",
+        "title": "Canonical target finding",
+        "root_cause_key": "canonical-target",
+        "canonical_location": "https://app.example/api/users/target",
+        "notes": "Target-specific note.",
+    }
+    source = client.post(f"{_base()}/findings", json=source_payload)
+    target = client.post(f"{_base()}/findings", json=target_payload)
+    assert source.status_code in (200, 201), source.text
+    assert target.status_code in (200, 201), target.text
+
+    merged = client.post(
+        f"{_base()}/findings/merge",
+        json={
+            "source_slug": "VA-002",
+            "target_slug": "VA-003",
+            "reason": "Same root cause after review.",
+            "source_name": "operator",
+            "expected_source_row_version": source.json()["finding"]["row_version"],
+            "expected_target_row_version": target.json()["finding"]["row_version"],
+        },
+    )
+    assert merged.status_code == 200, merged.text
+
+    source_history = client.get(f"{_base()}/findings/VA-002/transitions").json()[0]
+    target_history = client.get(f"{_base()}/findings/VA-003/transitions").json()[0]
+    assert source_history["notes_before_json"] == source_payload["notes"]
+    assert source_history["notes_after_json"] == merged.json()["source"]["notes"]
+    assert target_history["notes_before_json"] == target_payload["notes"]
+    assert target_history["notes_after_json"] == merged.json()["target"]["notes"]
+
+
+def test_transition_projection_marks_unrecoverable_legacy_note_history(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    created = client.post(f"{_base()}/findings", json=_finding_payload())
+    assert created.status_code in (200, 201), created.text
+    with db_module.get_connection() as connection:
+        finding = connection.execute(
+            "SELECT id, engagement_id FROM assessment_findings WHERE slug = ?",
+            ("VA-001",),
+        ).fetchone()
+        connection.execute(
+            """
+            INSERT INTO assessment_finding_transitions (
+                engagement_id, finding_id, actor, action,
+                to_workflow_status, to_verification_status, to_severity,
+                metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(finding["engagement_id"]),
+                int(finding["id"]),
+                "legacy-writer",
+                "operator_override",
+                "exploited",
+                "confirmed",
+                "high",
+                "{}",
+            ),
+        )
+
+    transitions = client.get(f"{_base()}/findings/VA-001/transitions").json()
+    assert transitions[0]["notes_history_status"] == "historical_gap"
+
+
 def test_an_oversized_row_is_surfaced_as_a_readiness_advisory(client, isolate_settings):
     """Make the condition visible BEFORE it blocks a write."""
     _grow_notes_past_the_cap(client, isolate_settings)
@@ -399,6 +531,27 @@ def test_a_details_clobber_is_recoverable_from_the_transition_ledger(
     assert before["impact"] == "Anonymous attackers read any user's PII."
     after = json.loads(latest["details_after_json"])
     assert after["impact"] == "Rewritten, losing the original wording."
+
+
+def test_finding_transition_history_applies_limit_and_offset(client, isolate_settings):
+    _seed(client, isolate_settings)
+    created = client.post(f"{_base()}/findings", json=_finding_payload())
+    assert created.status_code in (200, 201), created.text
+    for impact in ("First correction.", "Second correction."):
+        patched = client.patch(
+            f"{_base()}/findings/VA-001",
+            json={"details": {"impact": impact}},
+        )
+        assert patched.status_code == 200, patched.text
+
+    complete = client.get(f"{_base()}/findings/VA-001/transitions").json()
+    page = client.get(
+        f"{_base()}/findings/VA-001/transitions",
+        params={"limit": 1, "offset": 1},
+    )
+
+    assert page.status_code == 200, page.text
+    assert page.json() == [complete[1]]
 
 
 def test_details_append_concatenates_lists_and_deep_merges_objects(

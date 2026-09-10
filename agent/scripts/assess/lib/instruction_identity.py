@@ -1,0 +1,151 @@
+"""Exact installed-instruction identity for dispatch audit records."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from pathlib import Path
+from typing import Any
+
+
+_CLIENT_SPECIALIST_PATHS = {
+    "claude": Path("agent/.claude/agents/{role}.md"),
+    "codex": Path("agent/.codex/agents/{role}.toml"),
+    "goose": Path("agent/.goose/recipes/{role}.yaml"),
+    "opencode": Path("agent/.opencode/agent/{role}.md"),
+}
+_KNOWN_CLIENTS = frozenset({*_CLIENT_SPECIALIST_PATHS, "kimi"})
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _load_object(path: Path) -> dict[str, Any]:
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _operator_relative_path(engagement_dir: Path) -> Path:
+    scope = _load_object(engagement_dir / "scope.json")
+    name = "AGENTS-blue.md" if scope.get("engagement_type") == "blue" else "AGENTS.md"
+    return Path("agent") / name
+
+
+def _client_name(explicit: str | None) -> str:
+    value = (
+        explicit
+        or os.environ.get("VIGIL_CLIENT_NAME")
+        or os.environ.get("VIGIL_CLIENT")
+        or ""
+    )
+    normalized = str(value).strip().lower()
+    return normalized if normalized in _KNOWN_CLIENTS else "unknown"
+
+
+def build_dispatch_instruction_identity(
+    *,
+    agent_root: Path,
+    engagement_dir: Path,
+    agent_role: str,
+    client_name: str | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Return exact installed prompt hashes plus advisory health warnings.
+
+    The hashes describe bytes actually present in the working root. Source-tree
+    comparison is advisory: an unavailable checkout yields ``None`` rather than
+    falsely declaring the installed instructions current or stale.
+    """
+    agent_root = agent_root.resolve()
+    install_root = agent_root.parent
+    engagement_dir = engagement_dir.resolve()
+    warnings: list[str] = []
+    client = _client_name(client_name)
+    meta = _load_object(install_root / ".vigil-install-meta.json")
+    raw_revision = meta.get("source_sha")
+    source_revision = (
+        raw_revision.strip()
+        if isinstance(raw_revision, str) and raw_revision.strip()
+        else "unknown"
+    )
+    if source_revision == "unknown":
+        warnings.append("installed Vigil source revision is unavailable")
+
+    operator_relative = _operator_relative_path(engagement_dir)
+    operator_path = install_root / operator_relative
+    operator_digest: str | None = None
+    if operator_path.is_file():
+        operator_digest = _sha256(operator_path)
+    else:
+        warnings.append(f"installed operator instructions are missing: {operator_relative}")
+
+    specialist_relative: Path | None = None
+    specialist_digest: str | None = None
+    template = _CLIENT_SPECIALIST_PATHS.get(client)
+    if template is None:
+        if client == "unknown":
+            warnings.append(
+                "client identity is unavailable; specialist instruction fingerprint is unknown"
+            )
+        else:
+            warnings.append(
+                f"client {client} does not install a specialist wrapper; "
+                "specialist instruction fingerprint is unknown"
+            )
+    else:
+        specialist_relative = Path(str(template).format(role=agent_role))
+        specialist_path = install_root / specialist_relative
+        if specialist_path.is_file():
+            specialist_digest = _sha256(specialist_path)
+        else:
+            warnings.append(
+                f"installed specialist instructions are missing: {specialist_relative}"
+            )
+
+    complete = operator_digest is not None and specialist_digest is not None
+    instructions_stale: bool | None = None
+    raw_source_root = meta.get("source_root")
+    source_root = (
+        Path(raw_source_root).expanduser()
+        if isinstance(raw_source_root, str) and raw_source_root.strip()
+        else None
+    )
+    if complete and source_root is not None:
+        source_operator = source_root / operator_relative
+        assert specialist_relative is not None
+        source_specialist = source_root / specialist_relative
+        if source_operator.is_file() and source_specialist.is_file():
+            instructions_stale = (
+                _sha256(source_operator) != operator_digest
+                or _sha256(source_specialist) != specialist_digest
+            )
+            if instructions_stale:
+                warnings.append(
+                    "installed instructions differ from the current local source tree"
+                )
+        else:
+            warnings.append(
+                "current source instructions are unavailable; staleness is unknown"
+            )
+
+    identity = {
+        "client_name": client,
+        "source_revision": source_revision,
+        "operator_instruction_path": str(operator_relative),
+        "operator_instruction_sha256": operator_digest,
+        "specialist_instruction_path": (
+            str(specialist_relative) if specialist_relative is not None else None
+        ),
+        "specialist_instruction_sha256": specialist_digest,
+        "instruction_identity_status": "verified" if complete else "incomplete",
+        "instructions_stale": instructions_stale,
+    }
+    return identity, warnings

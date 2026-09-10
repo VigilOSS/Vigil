@@ -42,7 +42,12 @@ class _FakeClient:
 
     def post(self, endpoint: str, payload: dict) -> dict:
         self.posts.append((endpoint, payload))
-        return {"engagement_id": 1, "count": len(payload.get("log", {}).get("entries", [])), "flows": []}
+        entries = payload.get("log", {}).get("entries", [])
+        return {
+            "engagement_id": 1,
+            "count": len(entries),
+            "flows": [{"id": index + 1} for index, _entry in enumerate(entries)],
+        }
 
     def put(self, endpoint: str, payload: dict) -> dict:
         self.puts.append((endpoint, payload))
@@ -55,6 +60,7 @@ class _FakeClient:
             "content_type_allow": [],
             "content_type_deny": [],
             "redaction_profile": "none",
+            "retention": "until_engagement_deletion",
         }
         merged.update(payload)
         return merged
@@ -156,17 +162,17 @@ def test_list_maps_filters_to_backend_query_param_names(tmp_path, monkeypatch, c
     assert q["auth_context"] == ["anonymous"]
     assert q["truncated"] == ["true"]
     assert q["q"] == ["login"]
-    assert q["limit"] == ["10"]
+    assert q["limit"] == ["11"]
     assert q["offset"] == ["5"]
     assert fake.closed is True
 
 
-def test_list_no_filters_hits_bare_endpoint(tmp_path, monkeypatch, capsys):
+def test_list_no_filters_requests_bounded_lookahead(tmp_path, monkeypatch, capsys):
     fake = _FakeClient(get_result=[])
     _install(monkeypatch, tmp_path, fake)
     args = _parse(["http", "list"], str(tmp_path))
     args.func(args)
-    assert fake.gets == ["http-flows"]
+    assert fake.gets == ["http-flows?limit=251&offset=0"]
     assert "no flows matched" in capsys.readouterr().out
 
 
@@ -203,19 +209,23 @@ def test_show_renders_metadata_and_json(tmp_path, monkeypatch, capsys):
     _install(monkeypatch, tmp_path, fake)
     args = _parse(["http", "show", "abc123"], str(tmp_path))
     args.func(args)
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
+    out = captured.out
     assert fake.gets == ["http-flows/abc123"]
     assert "flow_uid: abc123" in out
     assert "response body:" in out
     assert "cafef00d" in out  # response body sha256 preview
     assert "response headers:" in out  # header block label present
+    assert "UNTRUSTED DATA" in captured.err
 
     fake2 = _FakeClient(get_result=_FLOW_ROW)
     _install(monkeypatch, tmp_path, fake2)
     args = _parse(["http", "show", "abc123", "--json"], str(tmp_path))
     args.func(args)
-    row = json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    row = json.loads(captured.out)
     assert row["id"] == 7
+    assert "UNTRUSTED DATA" in captured.err
 
 
 def test_export_har_writes_file_and_summary(tmp_path, monkeypatch, capsys):
@@ -262,7 +272,12 @@ def test_import_har_wraps_bare_log_object(tmp_path, monkeypatch, capsys):
 
 
 def test_policy_get_renders(tmp_path, monkeypatch, capsys):
-    policy = {"enabled": False, "capture_request_bodies": False, "max_body_bytes": 102400}
+    policy = {
+        "enabled": False,
+        "capture_request_bodies": False,
+        "max_body_bytes": 102400,
+        "retention": "until_engagement_deletion",
+    }
     fake = _FakeClient(get_result=policy)
     _install(monkeypatch, tmp_path, fake)
     args = _parse(["http", "policy"], str(tmp_path))
@@ -271,6 +286,7 @@ def test_policy_get_renders(tmp_path, monkeypatch, capsys):
     assert fake.gets == ["capture-policy"]
     assert "Capture Policy" in out
     assert "enabled: False" in out
+    assert "retention: until_engagement_deletion" in out
 
 
 def test_policy_set_partial_update_only_sends_provided_fields(tmp_path, monkeypatch, capsys):
@@ -284,7 +300,7 @@ def test_policy_set_partial_update_only_sends_provided_fields(tmp_path, monkeypa
             "--max-body-bytes", "262144",
             "--content-type-allow", "application/json,text/html",
             "--content-type-allow", "application/xml",
-            "--redaction-profile", "default",
+            "--redaction-profile", "none",
         ],
         str(tmp_path),
     )
@@ -297,10 +313,23 @@ def test_policy_set_partial_update_only_sends_provided_fields(tmp_path, monkeypa
     assert payload["capture_request_bodies"] is True
     assert payload["max_body_bytes"] == 262144
     assert payload["content_type_allow"] == ["application/json", "text/html", "application/xml"]
-    assert payload["redaction_profile"] == "default"
+    assert payload["redaction_profile"] == "none"
     # Untouched fields are NOT sent (partial update).
     assert "capture_response_bodies" not in payload
     assert "content_type_deny" not in payload
+
+
+def test_policy_set_rejects_unimplemented_redaction_profile(tmp_path, monkeypatch):
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+
+    with pytest.raises(SystemExit):
+        _parse(
+            ["http", "policy", "set", "--redaction-profile", "default"],
+            str(tmp_path),
+        )
+
+    assert fake.puts == []
 
 
 def test_policy_set_no_enabled_sends_false(tmp_path, monkeypatch, capsys):

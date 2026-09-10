@@ -14,6 +14,7 @@ import json
 import pytest
 
 from assess.commands import block_technique
+from assess.lib.client import AssessError
 
 
 class _Cfg:
@@ -30,6 +31,7 @@ class _FakeClient:
         self.posts: list[tuple[str, dict]] = []
         self._rows_by_key: dict[str, dict] = {}
         self._next_id = 0
+        self.history: list[dict] = []
 
     def post(self, endpoint: str, payload: dict) -> dict:
         self.posts.append((endpoint, payload))
@@ -45,6 +47,8 @@ class _FakeClient:
         return dict(row)
 
     def get(self, endpoint: str):
+        if endpoint.startswith("blocked-techniques/history?"):
+            return list(self.history)
         assert endpoint == "blocked-techniques"
         return list(self._rows_by_key.values())
 
@@ -110,6 +114,81 @@ def test_block_technique_roundtrip_default_retry_state_pending(tmp_path, monkeyp
     assert "SSRF" in out
     assert "[pending]" in out
     assert "ssrf:host:api-example-com" in out
+
+
+@pytest.mark.parametrize(
+    "retry_state",
+    [
+        "pending",
+        "no_retry",
+        "retryable",
+        "blocked",
+        "blocked_on_dependency",
+        "needs_authorization",
+    ],
+)
+def test_block_technique_parser_accepts_reviewed_retry_states(retry_state: str) -> None:
+    args = _parser().parse_args(
+        [
+            "block-technique",
+            "--technique",
+            "SSRF",
+            "--target-kind",
+            "host",
+            "--target-ref",
+            "api.example.com",
+            "--reason",
+            "reviewed block",
+            "--retry-state",
+            retry_state,
+        ]
+    )
+
+    assert args.retry_state == retry_state
+
+
+def test_block_technique_parser_rejects_unreviewed_retry_state() -> None:
+    with pytest.raises(SystemExit) as exc:
+        _parser().parse_args(
+            [
+                "block-technique",
+                "--technique",
+                "SSRF",
+                "--target-kind",
+                "host",
+                "--target-ref",
+                "api.example.com",
+                "--reason",
+                "reviewed block",
+                "--retry-state",
+                "never-again-probably",
+            ]
+        )
+
+    assert exc.value.code == 2
+
+
+def test_block_technique_rejects_response_without_canonical_row_id(
+    tmp_path, monkeypatch
+):
+    fake = _FakeClient()
+    fake.post = lambda _endpoint, payload: dict(payload)
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        [
+            "block-technique",
+            "--technique", "ssrf",
+            "--target-kind", "host",
+            "--target-ref", "api.example.com",
+            "--reason", "egress firewalled",
+        ],
+        str(tmp_path),
+    )
+
+    with pytest.raises(AssessError, match="block technique") as exc:
+        block_technique.run_block(args)
+
+    assert "do not retry automatically" in str(exc.value)
 
 
 def test_block_technique_upsert_updates_same_key(tmp_path, monkeypatch, capsys):
@@ -255,3 +334,68 @@ def test_list_blocked_techniques_json_and_empty(tmp_path, monkeypatch, capsys):
     rows = json.loads(capsys.readouterr().out)
     assert rows[0]["technique"] == "IDOR"
     assert rows[0]["technique_key"] == "idor:finding:va-047"
+
+
+def test_block_technique_posts_structured_revalidation_context(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        [
+            "block-technique",
+            "--technique",
+            "SSRF",
+            "--target-kind",
+            "host",
+            "--target-ref",
+            "api.example.com",
+            "--reason",
+            "rechecked egress wall",
+            "--revalidation-context-inline",
+            '{"actor":"verifier-b","basis":"second identity replay"}',
+        ],
+        str(tmp_path),
+    )
+
+    block_technique.run_block(args)
+    capsys.readouterr()
+
+    assert fake.posts[0][1]["revalidation_context"] == {
+        "actor": "verifier-b",
+        "basis": "second identity replay",
+    }
+
+
+def test_list_blocked_techniques_history_uses_bounded_audit_endpoint(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    fake = _FakeClient()
+    fake.history = [
+        {
+            "id": 2,
+            "technique_key": "ssrf:host:api-example-com",
+            "event_kind": "revalidated",
+            "from_retry_state": "blocked",
+            "to_retry_state": "blocked",
+            "reason": "second identity still blocked",
+            "revalidation_context": {"actor": "verifier-b"},
+        }
+    ]
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        [
+            "list-blocked-techniques",
+            "--history",
+            "--technique-key",
+            "ssrf:host:api-example-com",
+            "--limit",
+            "25",
+            "--json",
+        ],
+        str(tmp_path),
+    )
+
+    block_technique.run_list(args)
+
+    assert json.loads(capsys.readouterr().out) == fake.history

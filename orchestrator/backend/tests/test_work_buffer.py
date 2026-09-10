@@ -48,6 +48,25 @@ def _load_script_module(name: str, relative_path: str):
     return module
 
 
+def _request_observation_receipt(
+    observation: dict, row_id: int, *, service_id: int | None = None
+) -> dict:
+    result = {
+        "request_variant": {
+            "id": row_id,
+            "method": str(observation.get("method") or "GET").upper(),
+        },
+        "request_observation": {
+            "id": row_id,
+            "request_variant_id": row_id,
+            "observed_url": observation.get("url"),
+        },
+    }
+    if service_id is not None:
+        result["service"] = {"id": service_id}
+    return result
+
+
 def _load_classify_module():
     """Return the folded-in reclassify implementation.
 
@@ -600,11 +619,17 @@ def _run_ingest_bridge(monkeypatch, tmp_path, lines, *, variant_id=501):
                 records = []
                 for item in payload.get("items", []):
                     coverage_posts.extend(item.get("coverage_candidates", []))
-                    records.append({"request_variant": {"id": variant_id}, "service": {"id": 9}})
+                    records.append(
+                        _request_observation_receipt(
+                            item, variant_id, service_id=9
+                        )
+                    )
                 return {"count": len(records), "records": records}
             if endpoint == "request-observations":
                 coverage_posts.extend(payload.get("coverage_candidates", []))
-                return {"request_variant": {"id": variant_id}, "service": {"id": 9}}
+                return _request_observation_receipt(
+                    payload, variant_id, service_id=9
+                )
             return {}
 
         def close(self):
@@ -930,10 +955,16 @@ def test_s12_ingest_endpoints_admits_ip_localhost_ipv6_and_skips_malformed(
                 records = []
                 for item in payload.get("items", []):
                     posted_hosts.append(item.get("target_hostname"))
-                    records.append({"request_variant": {"id": 100 + len(posted_hosts)}})
+                    records.append(
+                        _request_observation_receipt(
+                            item, 100 + len(posted_hosts)
+                        )
+                    )
                 return {"count": len(records), "records": records}
             posted_hosts.append(payload.get("target_hostname"))
-            return {"request_variant": {"id": 100 + len(posted_hosts)}}
+            return _request_observation_receipt(
+                payload, 100 + len(posted_hosts)
+            )
 
         def close(self) -> None:
             return None

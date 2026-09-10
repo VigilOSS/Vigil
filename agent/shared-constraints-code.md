@@ -447,10 +447,10 @@ Use the helper contracts as the canonical shape source before authoring durable 
 `vigil assess contract finding verify` before any verification/rebind, and
 `vigil assess contract code-record analysis` for analysis-result payloads; this keeps agent output
 aligned with backend validation instead of relying on copied prompt snippets.
-`finding record` fills the initial lifecycle defaults (`workflow_status=active`, `verification_state=unreviewed`, `verification_disposition=none`) when omitted — use those rather than setting lifecycle fields manually.
+`finding record` fills the initial lifecycle defaults (`workflow_status=active`, `verification_status=unreviewed`) when omitted — use those rather than setting lifecycle fields manually.
 For later finding lifecycle changes, use the dedicated helpers instead of raw `post` or `patch`:
-`finding verify` for confirm/downgrade/dispute decisions (`--disposition false_positive` with kill
-metadata for a false-positive verification), `finding update --status draft` to reopen a
+`finding verify` for confirm/downgrade/dispute decisions (`--status false_positive` with a completed
+structured counter-check for a false-positive verification), `finding update --status draft` to reopen a
 previously verified or false-positive finding, and `finding update` for non-verification metadata
 or workflow updates. Reopening clears prior verification but deliberately leaves workflow status
 `draft`; verification does not promote it. Before fuzz/complete, every retained draft must be

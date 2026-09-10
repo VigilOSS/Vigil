@@ -7,6 +7,7 @@ import type {
   AssessmentFindingGroup,
   AssessmentFindingLink,
   AssessmentFindingTransition,
+  AssessmentVerificationAudit,
   FindingDetails,
   FindingPocRequest,
   FindingPocResponse,
@@ -19,7 +20,7 @@ import { JsonTree } from "./ArtifactViewer";
 import { JsonView } from "./JsonView";
 import { useBodyScrollLock } from "../lib/modalScrollLock";
 import { CodeBlock, NotesBody, isCurlLike } from "./formatting";
-import { KV, Prose, ProseModeToggle, SectionHead } from "./drawer/DrawerKit";
+import { KV, Prose, ProseModeToggle, SectionHead, UntrustedDataNotice } from "./drawer/DrawerKit";
 import type { ProseMode, ToastFn } from "./drawer/DrawerKit";
 import { Skeleton, TableSkeleton } from "./Skeletons";
 
@@ -136,11 +137,7 @@ function parseProvenance(
 }
 
 function verificationKey(finding: FindingLike): string {
-  if (finding.verification_state === "disputed") return "disputed";
-  if (finding.verification_disposition && finding.verification_disposition !== "none") {
-    return finding.verification_disposition;
-  }
-  return finding.verification_state;
+  return finding.verification_status;
 }
 
 // Human-readable labels shared across pill text, filter chip text, and
@@ -329,8 +326,7 @@ export type Derived = {
   severity: string;
   workflow_status: string;
   submission_status: string;
-  verification_state: string;
-  verification_disposition: string;
+  verification_status: string;
   verificationKey: string;
   verificationLabel: string;
   workflowLabel: string;
@@ -829,8 +825,7 @@ export function FindingsTab({
         severity: f.severity,
         workflow_status: f.workflow_status,
         submission_status: f.submission_status,
-        verification_state: f.verification_state,
-        verification_disposition: f.verification_disposition,
+        verification_status: f.verification_status,
         verificationKey: verificationKey(f),
         verificationLabel: verificationLabel(f),
         workflowLabel: workflowLabel(f),
@@ -2116,6 +2111,7 @@ function Drawer({
         )}
       </div>
       <div className="drawer-body">
+        <UntrustedDataNotice />
         {tab === "overview" && <OverviewPane d={d} proseMode={proseMode} toast={toast} />}
         {tab === "poc" && <PocPane d={d} proseMode={proseMode} toast={toast} />}
         {tab === "code" && <CodePane d={d} toast={toast} />}
@@ -2720,8 +2716,8 @@ function HistoryPane({
         const workflowChanged =
           t.from_workflow_status && t.from_workflow_status !== t.to_workflow_status;
         const verifChanged =
-          t.from_verification_state &&
-          t.from_verification_state !== t.to_verification_state;
+          t.from_verification_status &&
+          t.from_verification_status !== t.to_verification_status;
         return (
           <div key={t.id} className={`tl-row action-${t.action}`}>
             <div className="tl-head">
@@ -2767,12 +2763,12 @@ function HistoryPane({
               {verifChanged && (
                 <span className="tl-change">
                   <span className="tl-change-label">Verification</span>
-                  <span className={`pill pill-${t.from_verification_state}`}>
-                    {t.from_verification_state}
+                  <span className={`pill pill-${t.from_verification_status}`}>
+                    {t.from_verification_status}
                   </span>
                   <span className="transition-arrow"> → </span>
-                  <span className={`pill pill-${t.to_verification_state}`}>
-                    {t.to_verification_state}
+                  <span className={`pill pill-${t.to_verification_status}`}>
+                    {t.to_verification_status}
                   </span>
                 </span>
               )}
@@ -2780,9 +2776,53 @@ function HistoryPane({
             {t.reason_text && (
               <p className="tl-reason">&ldquo;{t.reason_text}&rdquo;</p>
             )}
+            <VerificationAudit audit={t.verification_audit} />
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function VerificationAudit({ audit }: { audit: AssessmentVerificationAudit }) {
+  if (
+    !audit.proof_receipt_ids.length &&
+    !audit.counter_checks.length &&
+    !audit.severity_variances.length
+  ) return null;
+  return (
+    <div className="tl-audit">
+      {!!audit.proof_receipt_ids.length && (
+        <div className="tl-audit-record">
+          <div className="tl-audit-title">Decision proof receipts</div>
+          <p>{audit.proof_receipt_ids.join(", ")}</p>
+        </div>
+      )}
+      {audit.counter_checks.map((record) => (
+        <div key={`counter-${record.id}`} className="tl-audit-record">
+          <div className="tl-audit-title">Structured counter-check #{record.id}</div>
+          <dl>
+            <dt>Verifier dispatch</dt><dd>{record.verifier_dispatch_id}</dd>
+            <dt>Completed</dt><dd>{record.completed ? "Yes" : "No"}</dd>
+            <dt>Method</dt><dd>{record.method}</dd>
+            <dt>Expected</dt><dd>{record.expected_result}</dd>
+            <dt>Observed</dt><dd>{record.observed_result}</dd>
+            <dt>Falsified claim</dt><dd>{record.falsified_claim}</dd>
+            <dt>Proof receipts</dt><dd>{record.proof_receipt_ids.join(", ")}</dd>
+          </dl>
+        </div>
+      ))}
+      {audit.severity_variances.map((record) => (
+        <div key={`variance-${record.id}`} className="tl-audit-record">
+          <div className="tl-audit-title">Attributed severity variance #{record.id}</div>
+          <dl>
+            <dt>Band</dt><dd>{record.normal_band} → {record.chosen_severity}</dd>
+            <dt>Actor</dt><dd>{record.actor}</dd>
+            <dt>Reason</dt><dd>{record.reason}</dd>
+            <dt>Proof receipt</dt><dd>{record.proof_receipt_id}</dd>
+          </dl>
+        </div>
+      ))}
     </div>
   );
 }

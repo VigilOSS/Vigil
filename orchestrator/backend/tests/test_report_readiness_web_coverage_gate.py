@@ -10,7 +10,7 @@ Two BLOCK-WITH-OVERRIDE blocker kinds, scoped to WEB engagements
     host). Cleared by recording a verdict OR an active
     ``coverage_completeness_deferral`` naming the host (or engagement-wide).
   * ``unreviewed_findings`` — any finding severity in (critical, high, medium)
-    AND verification_state='unreviewed' AND status not in (merged,
+    AND verification_status='unreviewed' AND status not in (merged,
     false_positive), ANY auth_context. Cleared by grading it (record a
     verification verdict via POST /findings/{slug}/verify).
 
@@ -123,8 +123,7 @@ def _draft_unreviewed_finding(
             "title": "Ungraded candidate",
             "severity": severity,
             "workflow_status": "draft",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "canonical_location": f"https://{host}/x",
             "summary": "needs a grade",
             "source_name": "vulnerability-analyst",
@@ -203,8 +202,7 @@ def test_recording_a_verdict_clears_uncovered_host(client, isolate_settings):
             "title": "Recorded verdict on the host",
             "severity": "low",
             "workflow_status": "active",
-            "verification_state": "verified",
-            "verification_disposition": "confirmed",
+            "verification_status": "unreviewed",
             "canonical_location": "https://app.example.com/alpha",
             "summary": "covered",
             "source_name": "vulnerability-analyst",
@@ -388,7 +386,7 @@ def test_grading_finding_clears_unreviewed_blocker(client, isolate_settings):
 
     verify = client.post(
         f"{base}/findings/VA-202/verify",
-        json={"disposition": "disputed", "reason_text": "graded — not exploitable"},
+        json={"verification_status": "disputed", "reason_text": "graded — not exploitable"},
     )
     assert verify.status_code == 200, verify.text
 
@@ -430,7 +428,7 @@ def test_both_blockers_then_cleared_and_export_gate(client, isolate_settings, fa
     assert d.status_code == 201, d.text
     v = client.post(
         f"{base}/findings/VA-300/verify",
-        json={"disposition": "disputed", "reason_text": "graded"},
+        json={"verification_status": "disputed", "reason_text": "graded"},
     )
     assert v.status_code == 200, v.text
 

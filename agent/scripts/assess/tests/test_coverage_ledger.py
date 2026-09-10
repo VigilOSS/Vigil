@@ -82,7 +82,7 @@ def _empty_verdict() -> dict:
         "strongest_status": None,
         "max_severity": None,
         "auth_contexts": [],
-        "verification_states": [],
+        "verification_statuses": [],
         "slugs": [],
     }
 

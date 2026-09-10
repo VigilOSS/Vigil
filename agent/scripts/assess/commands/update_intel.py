@@ -20,7 +20,7 @@ import argparse
 import json
 import sys
 
-from assess.lib.client import AssessError, AssessmentClient
+from assess.lib.client import AssessError, AssessmentClient, require_write_result
 from assess.lib.config import load_config
 from assess.lib.intel_types import INTEL_TYPES
 from assess.lib.json_inputs import parse_json_argument
@@ -101,19 +101,17 @@ def run(args) -> None:
         # AssessmentClient.patch helper is hardwired to /assessment.
         from urllib.parse import quote
 
-        path = (
-            f"{client._engagement_prefix}/intel/{quote(endpoint_segment)}/{int(args.intel_id)}"
-        )
-        body = json.dumps({"payload": patch_payload}, ensure_ascii=True).encode("utf-8")
+        endpoint = f"intel/{quote(endpoint_segment)}/{int(args.intel_id)}"
         try:
-            _, resp_body = client._request("PATCH", path, body=body)
+            record = client.patch_engagement(endpoint, {"payload": patch_payload})
         except AssessError as exc:
             _maybe_explain_409(exc)
             raise
-        try:
-            record = json.loads(resp_body)
-        except json.JSONDecodeError:
-            record = {"raw": resp_body}
+        require_write_result(
+            record,
+            operation=f"update intel {args.intel_type} {int(args.intel_id)}",
+            expected={"id": int(args.intel_id)},
+        )
 
     print(json.dumps(record, indent=2, ensure_ascii=False))
 

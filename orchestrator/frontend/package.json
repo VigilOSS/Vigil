@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "test": "vitest run src/components/RunsTab.component.test.tsx src/components/SubmissionsTab.component.test.tsx && node --test src/lib/runAudit.test.ts && test_artifact=\"${TMPDIR:-/tmp}/vigil-runs-tab.ssr.test.$$.cjs\" && trap 'rm -f \"$test_artifact\"' EXIT && esbuild src/components/RunsTab.ssr.test.tsx --bundle --platform=node --format=cjs --jsx=automatic --outfile=\"$test_artifact\" && node --test \"$test_artifact\"",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -18,10 +19,13 @@
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
+    "@testing-library/react": "^16.3.2",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^5.0.2",
+    "jsdom": "^26.1.0",
     "typescript": "^5.9.2",
-    "vite": "^7.1.4"
+    "vite": "^7.1.4",
+    "vitest": "^5.0.0"
   }
 }

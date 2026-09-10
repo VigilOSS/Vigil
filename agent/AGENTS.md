@@ -118,6 +118,17 @@ This runtime is shared infrastructure, not per-engagement state. Multiple engage
 
 Path conventions (host vs container) and the listener/OOB callback contract live in `agent/shared-constraints.md` — see "Kali Artifact Paths" and "Listener and OOB Callback Contract". Operator-side: provision reverse-shell listeners per `agent/references/offensive-tactics/shell-handling.md`; OOB readiness, base domain, and per-agent callback URLs are surfaced through `vigil oob ...` commands.
 
+For `vigil assess` writes, put prose and other shell-sensitive values in the command's payload-file
+option when available; otherwise pass each value as one shell-quoted argument, never as an assembled
+shell command string. A bounded read is not absence evidence: if output reports truncation, a partial
+result, `has_more`, or a continuation offset, page/range-read to EOF or use its point-read command
+before concluding that a record or field does not exist.
+
+On a macOS host, stock `timeout(1)` is absent. A host-side `timeout: command not found` therefore
+proves nothing about the tool or target. Prefer a Vigil command's own `--timeout`; for an audited
+host command use `vigil assess host-exec --timeout <seconds>`, and use `gtimeout` only after
+explicitly confirming GNU coreutils is installed.
+
 ## Engagement Program Brief — `ENGAGEMENT.md` (MUST READ when present)
 
 If the engagement directory contains an `ENGAGEMENT.md`, it is a **mandatory read
@@ -144,6 +155,13 @@ the engagement is in progress, the phase is past initialization, backend rows ma
 already exist, or the session state is uncertain. Resume hydration comes before planning because
 backend state is the canonical memory for prior findings, intel, operator decisions, null results,
 dispatch handoffs, and command coverage.
+
+## Shared Run Accounting
+
+When work is assigned a durable proof or scan run, read `vigil assess contract proof-run`,
+`vigil assess contract proof-receipt`, and `vigil assess contract run-audit` before its first write.
+Those executable contracts own lifecycle, evidence bindings, bounded audit reads, and recovery.
+After an uncertain write response, inspect stored state before deciding whether a retry is safe.
 
 ## Phase Index
 
@@ -337,7 +355,7 @@ The runtime dispatch contract is the same shape as the code-analysis contract �
 - **Current phase** and **specific outcome objective** — the surface to hunt and the result wanted ("hunt this API surface for access-control/object-reference weaknesses; prove any attacker outcome you find"), NOT a pre-named vuln/payload. "Test this" is too thin; a named bug is too narrow and anchors the specialist to your guess. Give the surface, scope, and outcome; the specialist forms its own hypotheses.
 - **Which skill(s) to load** — only when steering the specialist to a non-default skill (selected from `vigil assess list-skills` using "Use when:" criteria); otherwise the specialist self-selects on signal (Core Loop step 5) and names what it loaded in its handoff
 - **Depth expectation**: thorough and deep is the default. "Quick" is never implied. If the dispatch context does not constrain scope explicitly, the specialist exhausts the surface — it does not sample it. **Time is not the constraint — confidence is** (`agent/rules/hunting.md` §16): a dispatch that finishes fast but shallow has not done the job, and "no findings" is credible only after a thorough pass.
-- **Rate-limit budget**: the per-call rate flag value the specialist should pass to `vigil assess kali ...` (e.g. `nuclei -rate-limit 4 -c 2` for a 5 req/s program). Operator-owned; do not delegate aggregate-rate decisions to the specialist.
+- **Rate-limit budget**: the exact operator-authored per-call rate/concurrency instruction the specialist should pass to `vigil assess kali ...` (e.g. `nuclei -rate-limit 4 -c 2` for a 5 req/s program), or an explicit declaration that the lane sends no target traffic. Pass the same text through `agent start --rate-budget` (or `--no-target-traffic`); Vigil never invents a numeric default. Before a target-facing command starts, the helper prints bounded, paged context about other lanes' recorded target-facing **commands** and latest timing. That readout is advisory only—not a request count, reservation, cooldown, or enforcement claim.
 - **OOB / listener availability**: `vigil oob status --json` snapshot if the dispatch may need a callback URL (SSRF blind, command injection blind, deserialization callback). When the operator has named OOB as available, the specialist starts a named listener client with `vigil oob client start <name>`, mints a nonce-tagged correlation URL with `vigil oob mint`, and correlates hits with `vigil oob poll --client <name>` instead of reading the listener log by hand. The operator only names OOB availability; mint/poll is the specialist's.
 - **Auth context**: the `auth_context` field of any state the dispatch will operate under (anonymous / authenticated / authenticated-admin / a specific role). For credential-bearing dispatches, also pass the `credential_id` of the captured material so the specialist can reference it without re-extracting.
 - **Cross-agent prior work**: the relevant `resume-brief` slice plus the rendered handoff blob from `vigil assess agent render-handoff <prior-agent-id>` when a prior dispatch touched the same surface or finding (see Cross-Dispatch Continuity).
@@ -376,6 +394,13 @@ If this is a continuation or resumed engagement, include the relevant `vigil ass
 
 Require immediate backend/artifact linkage for durable notes: if a specialist creates a `.md` file under `notes/` that should matter after the current command, they must register it with `vigil assess artifact register <path>` and link it to a finding, chain, dispatch/agent, surface, request variant, or command run before closing. Unlinked markdown notes are scratch and cannot be used as resume or report input.
 
+When the human steers durable engagement state into a prose file that duplicates
+an existing structured home, name the canonical alternative in conversation and
+offer to use it — for example, `vigil assess intel record note` for target
+knowledge or `vigil assess finding update` for finding content. Honor the human's
+choice after surfacing the alternative; this is a correction at the point of
+steering, not a new blocking gate on prose.
+
 ### Specialist Dispatch Contract
 
 Every dispatch declares an explicit contract. The contract is what bounds the specialist's
@@ -389,6 +414,7 @@ Required fields per dispatch:
 | `role` | `recon-specialist` / `source-analyzer` / `surface-collector` / `vulnerability-analyst` / `exploit-developer` / `fuzzer` / `osint-analyst` / `report-writer` / `code-architect` / `code-vuln-hunter` / `code-variant-hunter` / `code-vuln-verifier` / `code-fuzz-engineer` |
 | `dispatch_mode` | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` / `swarm` (see "Iteration-mode (dispatch_mode) Declaration" below) |
 | `skills` | Comma-separated skill names (e.g. `surface-collection,gau-triage`) the specialist must load. Names match the directory under `agent/skills/<name>/` — list-skills prints the canonical names. Required for every specialist role — pass via `--skills` on `vigil assess agent start` so the dispatch row is a truthful audit of which skill context the agent loaded. Operators are exempt because they coordinate phases rather than executing a single skill. |
+| `rate_limit_budget` | Exact operator-authored traffic budget via `--rate-budget "<text>"`, or `no target traffic` via `--no-target-traffic`. Exactly one is required; no implicit numeric default exists. Every `agent start` output includes it, and `--emit-prompt` places it in the filled dispatch context. |
 | `hunt_scope` | `wide` / `deep` — which pass in the "Phased mindset flow" (Depth Doctrine / Per-Domain VA Fan-Out, `agent/phases/phase-4-consume-test.md`) the dispatch belongs to. Required for `vulnerability-analyst`; defaults to `deep` for `exploit-developer` (Pass-3 is always convergent). |
 | `mindset lens` | Path to the injected mindset packet under `agent/rules/mindsets/` plus the one-line reason it fits the observed signal (e.g. `idor-bac.md — numeric object references with two named identities available`). A finer-grained failure-family name (Caching, Race conditions, …) is expressed as a parenthetical qualifier on that same path, never a bare value — see "Lens Vocabulary" in `agent/phases/phase-4-consume-test.md` for the syntax and the name list. **Pass-scoped, not role-scoped:** REQUIRED on every DEEP/VARIANT-pass dispatch of a lens-carrying role (`vulnerability-analyst` Pass-2, `fuzzer`, and their code-track analogs) and on every SYNTHESIS/EXPLOIT-pass dispatch (`exploit-developer`, fixed to `chain-impact.md`); OMITTED on WIDE/SURVEY-pass dispatches (`vulnerability-analyst` Pass-1, `source-analyzer`, and the code-track survey role `code-architect`, which is WIDE-only), where the role self-loads its own baseline default instead (see each role's `## Dispatch Mindset` slot for that default); does not apply at all to roles outside the Phased mindset flow (recon-specialist, surface-collector, osint-analyst, report-writer) or to the code-track non-lens roles (`code-vuln-verifier`, `code-fuzz-engineer`). Filled into the role's own `## Dispatch Mindset` slot, which is MORE SPECIFIC than the role's baseline mindset and governs where the two compete. |
 
@@ -408,10 +434,14 @@ vigil assess agent start \
     --agent-id <id> --role <role> \
     --task "..." \
     --model <name> --reasoning <level> --dispatch-mode <mode> \
-    --skills "<skill-name>[,<skill-name>...]"
+    --skills "<skill-name>[,<skill-name>...]" \
+    --rate-budget "<exact authored rate/concurrency instruction>" \
+    --prompt-context-json dispatch-context.json --emit-prompt
 ```
 
 `agent start` WARN-lints `--task` for a prescriptive "technique cage" (a step-by-step recipe that caps a specialist's depth) — it never blocks; hand the specialist the measured coverage picture instead via `vigil assess coverage --host <h> --for-dispatch` plus an open objective.
+`--emit-prompt` requires the complete prompt-only field object documented in `agent/references/runtime-guides/dispatch-template.md`; missing/empty values fail before the backend write. The emitter derives row-owned fields, validates owned blue tenant-reference paths, and emits the canonical skeleton without placeholders.
+Its overlap advisory is default-on and checks both in-progress and completed work. It streams paged history, displays at most five results ranked by relevant finding overlap and findings produced, and prints `N of M shown`; `--allow-duplicate` suppresses it only when duplication is intentional.
 
 When the dispatch returns, mark it complete with the slugs it produced:
 
@@ -459,6 +489,7 @@ vigil assess agent start-swarm \
     --items-file /engagements/$ENGAGEMENT_KEY/scans/exposed-bucket/files.txt \
     --skills code-vulnerability-analysis \
     --model gpt-5.6 --reasoning low \
+    --no-target-traffic \
     --task "scan batch for hardcoded credentials, API keys, exploitable patterns; record findings as code-vuln-hunter prefix"
 ```
 
@@ -552,7 +583,7 @@ Every dispatch launches a fresh agent — treat each dispatch as a clean-room en
 
 **Specialist closing sequence** — every specialist writes a structured handoff before its dispatch returns: (1) `vigil assess agent handoff --from-json <path>` using the `agent_id` from the Runtime Identity block, with `handoff_status` set to `ready` when the dispatch can be closed or `blocked` when it cannot complete, then (2) `vigil assess agent render-handoff <agent_id>` as a self-check — exit only after the render succeeds (404 → `agent_id` mismatch). The handoff captures summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras. This row is canonical for "what was done, what's missing, what's next" — schema in `agent/references/runtime-guides/handoff-schema.md`.
 
-**Operator continuity** — register each dispatch up front and mark it `done` with its finding slugs (the `vigil assess agent start` / `agent done` shape is in Specialist Dispatch Contract above), then run `vigil assess agent render-handoff <agent-id>` and paste its output into the next dispatch's prompt. The renderer emits a markdown blob hard-capped at `--max-lines` (default 40) — summary, coverage gaps, and next steps are never trimmed; the findings list collapses to "... and N more" first. The blob carries finding slugs (title + severity, `fetch`-able), working-artifact paths with present/missing state, captured credential ids (vuln-analyst / exploit-developer only), and the recorded next-step list. When a handoff is `ready`/`blocked`, close it with `vigil assess agent close <agent-id>`; use `vigil assess agent reconcile-stale --dry-run` during resume/phase transitions to find dispatches with closable or missing handoffs.
+**Operator continuity** — register each dispatch up front and mark it `done` with its finding slugs (the `vigil assess agent start` / `agent done` shape is in Specialist Dispatch Contract above), then run `vigil assess agent render-handoff <agent-id>` and paste its output into the next dispatch's prompt. The renderer emits a markdown blob hard-capped at `--max-lines` (default 40): it collapses findings, runtime issues, and artifacts first; if multiline load-bearing prose alone still exceeds the cap, it emits an explicit truncation marker naming `--max-lines` rather than silently overflowing. The blob carries finding slugs (title + severity, `fetch`-able), working-artifact paths with present/missing state, captured credential ids (vuln-analyst / exploit-developer only), and the recorded next-step list. When a handoff is `ready`/`blocked`, close it with `vigil assess agent close <agent-id>`; use `vigil assess agent reconcile-stale --dry-run` during resume/phase transitions to find dispatches with closable or missing handoffs.
 
 **Pass forward the bounded blob, never transcript pastes** — full transcript pastes crowd out the objective and inflate context linearly across long chains; the blob stays bounded and pulls canonical state from the backend. Durable content (findings, intel, activity, credentials) lives in the backend; the dispatch prompt carries pointers plus the blob.
 
@@ -607,6 +638,11 @@ Auth handling rules:
 - A session with no fresh capture for 8h is flagged `stale` (advisory — re-probe it before trusting it); one with no fresh capture for 5 days is purged. Age alone never marks a session `dead` — only a proven-dead liveness probe does (see Named identities below).
 - If a usable credential is present, surface-collector reads it from the backend, passes auth headers to Katana, and tags ingestion with the authenticated context automatically.
 - If credentials are missing material or marked expired/dead, warn and continue anonymously rather than halting the engagement.
+- That anonymous fallback does not satisfy an authenticated-only objective. If the missing/dead
+  identity makes the named surface or cross-identity lane impossible, record a
+  `dispatch_blocked` decision naming the identity and surface, return a blocked handoff with the
+  exact refresh/provisioning need, and surface it to the human; continue anonymously only on work
+  that genuinely has an anonymous coverage lane.
 - The operator may update credentials with `vigil auth edit`/`vigil auth import`, list every identity stored for a host with `vigil assess auth list --host <host>`, or use mitmproxy-assisted login capture to refresh them.
 - When a discovered credential (`status=discovered`) is recorded via `vigil assess post credentials`, Vigil automatically flags a candidate finding and, for a session-artifact secret, mints and cross-links a usable identity — `agent/shared-constraints.md` §10 has the canonical statement of exactly which secret types mint and which don't. A credential that didn't auto-mint still needs the login-test-then-store flow above (steps 1-2) to become a replayable identity.
 
@@ -688,7 +724,7 @@ interpretation.
 
 Command reference for the RECORD FINDINGS / RECORD SURFACES steps in the Core Loop (steps 8-9) — read alongside those, not instead of them; they own the timing and the recording exceptions, this owns the exact commands and schema pointers.
 
-Use `vigil assess finding record <agent-name> <finding-json-file>` for findings (the prefix table and severity↔CVSS band table are canonical in `agent/shared-specialist-core.md` "Finding IDs and the `finding record` Contract"; the payload schema and dedup rules live in `agent/shared-constraints.md` §4). For the canonical field list and examples, run `vigil assess contract finding record`. Use the lifecycle helpers — `finding verify` for verification outcomes (`--disposition false_positive` for a kill), `finding update --status draft` to reopen a previously verified or false-positive finding, `finding update` for non-verification metadata — instead of raw `post` / `patch`.
+Use `vigil assess finding record <agent-name> <finding-json-file>` for findings (the prefix table and severity↔CVSS band table are canonical in `agent/shared-specialist-core.md` "Finding IDs and the `finding record` Contract"; the payload schema and dedup rules live in `agent/shared-constraints.md` §4). For the canonical field list and examples, run `vigil assess contract finding record`. Use the lifecycle helpers — `finding verify --status <status>` for verification outcomes (terminal outcomes require independent proof receipts; `false_positive` also requires a completed structured counter-check), `finding update --status draft` to reopen a previously confirmed or false-positive finding, and `finding update` for non-verification metadata — instead of raw `post` / `patch`.
 
 Use `vigil assess intel record <type> <json-file>` for `#### Intelligence` rows (intel types and dedup keys in §13). report-writer uses `vigil assess finding report --mode <final|draft> --json`, which returns grouped root-cause findings with sequential `001~N` report IDs.
 

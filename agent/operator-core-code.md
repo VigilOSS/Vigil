@@ -1,6 +1,6 @@
 ## Activation
 
-**Operator-doctrine budget:** 450 lines; this revision is 428 lines.
+**Operator-doctrine budget:** 450 lines; this revision is 450 lines.
 
 This file replaces the web-focused core loop from `operator-core.md` for code-analysis
 engagements (same backend, findings table, and CLI tools).
@@ -10,6 +10,13 @@ mid-engagement when source code is obtained (exposed `.git`, source maps, backup
 code analysis then runs in parallel with ongoing web testing. Create with `vigil engagement create
 --type code <name> --repo <path>`. On entry, use `vigil assess resume-brief` and the guarded
 transition helpers to determine the current phase and resume from there.
+
+## Shared Run Accounting
+
+When work is assigned a durable proof or scan run, read `vigil assess contract proof-run`,
+`vigil assess contract proof-receipt`, and `vigil assess contract run-audit` before its first write.
+Those executable contracts own lifecycle, evidence bindings, bounded audit reads, and recovery.
+After an uncertain write response, inspect stored state before deciding whether a retry is safe.
 
 **`ENGAGEMENT.md`** (see `agent/operator-core.md`, "Engagement Program Brief") is **LIVE-TESTING
 ROE** — mandatory headers, rate caps, no-fire endpoints, deconfliction, exfiltration limits. For a
@@ -55,6 +62,17 @@ source review with no external bug-bounty program. See "Submission closeout" in
 `agent/skills/report-generation/SKILL.md`.
 
 CLI path convention is owned by `agent/shared-constraints-code.md` §9.
+
+For `vigil assess` writes, put prose and other shell-sensitive values in the command's payload-file
+option when available; otherwise pass each value as one shell-quoted argument, never as an assembled
+shell command string. A bounded read is not absence evidence: if output reports truncation, a partial
+result, `has_more`, or a continuation offset, page/range-read to EOF or use its point-read command
+before concluding that a record or field does not exist.
+
+On a macOS host, stock `timeout(1)` is absent. A host-side `timeout: command not found` therefore
+proves nothing about the tool or sealed source. Prefer a Vigil command's own `--timeout`; for an
+audited host command use `vigil assess host-exec --timeout <seconds>`, and use `gtimeout` only after
+explicitly confirming GNU coreutils is installed.
 
 ## Map of This File
 
@@ -112,6 +130,13 @@ returning clean with declining effort scores across successive batches.
 9. **RECORD FINDINGS IMMEDIATELY** -- Code findings use the same `vigil assess finding record` as web findings. Canonical location format: `file:<path>:<line>`.
 10. **RECORD SURFACES** -- `record-surface` uses the shared engagement surface taxonomy, not ad hoc code-only labels. Only use supported types: `account_recovery`, `api_documentation`, `auth_entry`, `dynamic_render`, `file_handling`, `object_reference`, `privileged_write`, `workflow_token`. If none apply, do not invent a new surface type.
 11. **TRACK COVERAGE** -- After each batch, run `vigil assess code-coverage`. During Phase 2B, use `vigil assess code-coverage --cwe-matrix` and `--require-gate-pass` to steer deeper review when self-reported CWE effort is below target. Before entering Phase 3, run `vigil assess code-coverage --require-transition-ready verify-variant`; backend readiness owns source/index currency, durable review receipts for structural-analysis debt, all-admitted-file queue/context/trigger closure, and structural uncovered-file checks. Quality warnings remain visible without impersonating a structural blocker.
+
+When the human steers durable engagement state into a prose file that duplicates
+an existing structured home, name the canonical alternative in conversation and
+offer to use it — for example, `vigil assess intel record note` for target
+knowledge or `vigil assess finding update` for finding content. Honor the human's
+choice after surfacing the alternative; this is a correction at the point of
+steering, not a new blocking gate on prose.
 12. **LOOP** -- Back to step 1.
 
 ## Phased mindset flow (code) -- Dispatch-Mindset doctrine

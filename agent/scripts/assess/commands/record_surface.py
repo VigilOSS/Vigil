@@ -2,17 +2,16 @@
 from __future__ import annotations
 
 import os
-import sys
 
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessmentClient, require_write_result
 from assess.lib.config import load_config
-from assess.lib.surfaces import VALID_STATUSES, VALID_SURFACE_TYPES
+from assess.lib.surfaces import CREATABLE_STATUSES, VALID_SURFACE_TYPES
 
 
 def register(subparsers) -> None:
     p = subparsers.add_parser("record-surface", help="Record a surface candidate")
     valid_types = ", ".join(sorted(VALID_SURFACE_TYPES))
-    valid_statuses = ", ".join(sorted(VALID_STATUSES))
+    valid_statuses = ", ".join(sorted(CREATABLE_STATUSES))
     p.add_argument("type", help=f"Surface type ({valid_types})")
     p.add_argument("target", help="Target descriptor (URL or identifier)")
     p.add_argument("source", help="Source agent or process name")
@@ -23,9 +22,9 @@ def register(subparsers) -> None:
 
 
 def run(args) -> None:
-    from assess.lib.surfaces import validate_surface_type, validate_surface_status
+    from assess.lib.surfaces import validate_surface_create_status, validate_surface_type
     validate_surface_type(args.type)
-    validate_surface_status(args.status)
+    validate_surface_create_status(args.status)
 
     cfg = load_config(args.engagement_dir)
 
@@ -39,11 +38,16 @@ def run(args) -> None:
     }
 
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        response = client.post("surfaces", payload)
-
-    if not response.get("surface_type") or not response.get("target_descriptor"):
-        print("record-surface: orchestrator backend did not return a canonical surface record", file=sys.stderr)
-        sys.exit(1)
+        require_write_result(
+            client.post("surfaces", payload),
+            operation="record surface",
+            expected={
+                "surface_type": args.type,
+                "target_descriptor": args.target,
+                "status": args.status,
+            },
+            positive_ids=("id",),
+        )
 
     # Emit event
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:

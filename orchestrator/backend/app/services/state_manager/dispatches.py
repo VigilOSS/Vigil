@@ -38,8 +38,13 @@ def _serialize_dispatch(row) -> dict[str, Any]:
     data = dict(row)
     # Old engagement databases may retain these retired columns. They are not
     # part of the dispatch contract and must not leak back into current rows.
-    data.pop("scope_host", None)
-    data.pop("scope_path_prefix", None)
+    for retired in (
+        "model",
+        "reasoning",
+        "scope_host",
+        "scope_path_prefix",
+    ):
+        data.pop(retired, None)
     for col in ("finding_slugs_json",):
         raw = data.pop(col, None) or ""
         key = col[: -len("_json")]
@@ -61,12 +66,18 @@ def record_dispatch(
     application_unit_id: int | None = None,
     dispatched_at: str | None = None,
     status_value: str = DispatchStatus.IN_PROGRESS,
-    model: str | None = None,
-    reasoning: str | None = None,
     requested_model: str | None = None,
-    actual_model: str | None = None,
+    actual_model: str = "unknown",
     requested_reasoning: str | None = None,
-    actual_reasoning: str | None = None,
+    actual_reasoning: str = "unknown",
+    client_name: str = "unknown",
+    source_revision: str = "unknown",
+    operator_instruction_path: str | None = None,
+    operator_instruction_sha256: str | None = None,
+    specialist_instruction_path: str | None = None,
+    specialist_instruction_sha256: str | None = None,
+    instruction_identity_status: str = "incomplete",
+    instructions_stale: bool | None = None,
     dispatch_mode: str | None = None,
     finding_slugs: list[str] | None = None,
     skills: str | None = None,
@@ -112,8 +123,6 @@ def record_dispatch(
     tier_value = (tier or "").strip() or None
     vuln_classes_value = (vuln_classes or "").strip() or None
     identity_value = (identity or "").strip() or None
-    requested_model_value = requested_model if requested_model is not None else model
-    requested_reasoning_value = requested_reasoning if requested_reasoning is not None else reasoning
     with _common.get_connection() as connection:
         _ensure_finding_slugs_exist(connection, engagement.id, finding_slugs)
         if variant_parent_slugs is not None:
@@ -154,11 +163,15 @@ def record_dispatch(
             """
             INSERT INTO assessment_dispatches (
                 engagement_id, agent_id, agent_role, task, application_unit_id,
-                dispatched_at, status, model, reasoning,
                 requested_model, actual_model, requested_reasoning, actual_reasoning,
+                client_name, source_revision,
+                operator_instruction_path, operator_instruction_sha256,
+                specialist_instruction_path, specialist_instruction_sha256,
+                instruction_identity_status, instructions_stale,
+                dispatched_at, status,
                 dispatch_mode, finding_slugs_json, skills, tier,
                 vuln_classes, identity
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 engagement.id,
@@ -166,14 +179,20 @@ def record_dispatch(
                 agent_role,
                 task,
                 application_unit_id,
+                requested_model,
+                actual_model,
+                requested_reasoning,
+                actual_reasoning,
+                client_name,
+                source_revision,
+                operator_instruction_path,
+                operator_instruction_sha256,
+                specialist_instruction_path,
+                specialist_instruction_sha256,
+                instruction_identity_status,
+                instructions_stale,
                 dispatched_value,
                 status_value,
-                requested_model_value,
-                requested_reasoning_value,
-                requested_model_value,
-                actual_model,
-                requested_reasoning_value,
-                actual_reasoning,
                 dispatch_mode,
                 findings_json,
                 skills_value,
@@ -211,6 +230,8 @@ def update_dispatch(
     status_value: str | None = None,
     completed_at: str | None = None,
     finding_slugs: list[str] | None = None,
+    actual_model: str | None = None,
+    actual_reasoning: str | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     finding_slugs = _require_canonical_finding_slugs(finding_slugs)
@@ -241,6 +262,12 @@ def update_dispatch(
         if finding_slugs is not None:
             sets.append("finding_slugs_json = ?")
             values.append(json.dumps(list(finding_slugs)))
+        if actual_model is not None:
+            sets.append("actual_model = ?")
+            values.append(actual_model)
+        if actual_reasoning is not None:
+            sets.append("actual_reasoning = ?")
+            values.append(actual_reasoning)
         if not sets:
             return _serialize_dispatch(existing)
         values.extend([engagement.id, agent_id])
@@ -576,6 +603,7 @@ def list_handoffs(
     role: str = "",
     since: str = "",
     limit: int = 100,
+    offset: int = 0,
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
     where = ["engagement_id = ?"]
@@ -587,9 +615,10 @@ def list_handoffs(
         where.append("created_at >= ?")
         params.append(since)
     params.append(int(limit))
+    params.append(max(int(offset), 0))
     query = (
         f"SELECT * FROM assessment_dispatch_handoffs WHERE {' AND '.join(where)} "
-        "ORDER BY created_at DESC, id DESC LIMIT ?"
+        "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
     )
     with _common.get_connection() as connection:
         rows = connection.execute(query, tuple(params)).fetchall()

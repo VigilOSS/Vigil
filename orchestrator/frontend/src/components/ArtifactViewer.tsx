@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { Artifact, ArtifactContent } from "../lib/api";
+import { UntrustedDataNotice } from "./drawer/DrawerKit";
 
 type ArtifactViewerProps = {
   artifacts: Artifact[];
@@ -285,6 +286,7 @@ export function ArtifactViewer({
                 <strong>{selectedArtifact.name}</strong>
                 <span className="meta-text">{selectedArtifact.media_type}</span>
               </div>
+              <UntrustedDataNotice />
               <ArtifactBody artifact={selectedArtifact} />
             </>
           ) : (

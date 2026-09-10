@@ -1734,6 +1734,10 @@ def test_full_flow_capture_writes_sidecars_index_and_posts(tmp_path: Path):
     assert rec["request_body_artifact_path"] == f"traffic/mitmproxy/bodies/{req_sha}.bin"
     assert rec["response_body_artifact_path"] == f"traffic/mitmproxy/bodies/{resp_sha}.bin"
     assert rec["request_body_truncated"] is False
+    assert rec["request_body_capture_status"] == "retained"
+    assert rec["response_body_capture_status"] == "retained"
+    assert rec["request_body_capture_error"] == ""
+    assert rec["response_body_capture_error"] == ""
 
     # Sidecars written engagement-local with the exact bytes.
     assert (entry.root / rec["request_body_artifact_path"]).read_bytes() == b'{"req": 1}'
@@ -1784,11 +1788,58 @@ def test_full_flow_capture_truncates_and_honors_deny(tmp_path: Path):
     # Request body truncated to 4 bytes; truncation flagged honestly.
     assert rec["request_body_bytes"] == 4
     assert rec["request_body_truncated"] is True
+    assert rec["request_body_capture_status"] == "retained_truncated"
     stored = entry.root / rec["request_body_artifact_path"]
     assert stored.read_bytes() == b"0123"
     # Denied response body → no sidecar, no sha.
     assert rec["response_body_artifact_path"] is None
     assert rec["response_body_sha256"] == ""
+    assert rec["response_body_capture_status"] == "excluded_content_type"
+
+
+def test_full_flow_capture_write_failure_is_visible_without_false_retention(
+    tmp_path: Path, monkeypatch
+):
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    _seed_engagement(root, "eng-a", hosts=["a.example.com"])
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+    entry = collector.registry["eng-a"]
+    entry.capture_policy = _enabled_policy(capture_response_bodies=False)
+    original_write_bytes = Path.write_bytes
+
+    def fail_body_write(path: Path, body: bytes):
+        if path.name.endswith(".tmp"):
+            raise OSError("simulated full disk")
+        return original_write_bytes(path, body)
+
+    monkeypatch.setattr(Path, "write_bytes", fail_body_write)
+    request = _FakeRequest(
+        url="https://a.example.com/api",
+        method="POST",
+        headers={"content-type": "application/json"},
+        body=b'{"req": 1}',
+    )
+    response = _FakeHttpResponse(status_code=204, headers={}, body=b"")
+
+    posted = _capture_full_flow(
+        collector,
+        entry,
+        _FakeFlow(request, response),
+        raw_req_body=b'{"req": 1}',
+        resp_body=b"",
+    )
+
+    assert len(posted) == 1
+    assert posted[0]["request_body_capture_status"] == "write_failed"
+    assert "simulated full disk" in posted[0]["request_body_capture_error"]
+    assert posted[0]["request_body_artifact_path"] is None
+    assert posted[0]["request_body_sha256"] == ""
+    assert posted[0]["request_body_bytes"] == 0
+    assert posted[0]["response_body_capture_status"] == "not_requested"
 
 
 def test_full_flow_capture_records_host_mismatch(tmp_path: Path):

@@ -28,7 +28,11 @@ import json
 import sys
 from pathlib import Path
 
-from assess.lib.client import AssessError, AssessmentClient
+from assess.lib.client import (
+    AssessError,
+    AssessmentClient,
+    require_finding_write_response,
+)
 from assess.lib.config import load_config
 from assess.lib.contracts import SUBMISSION_STATUSES
 from assess.lib.finding_render import details_object, nonempty
@@ -266,7 +270,11 @@ def run(args) -> None:
         if args.set_submission_status is not None:
             payload["submission_status"] = args.set_submission_status
 
-        result = client.patch(f"findings/{slug}", payload)
+        result = require_finding_write_response(
+            client.patch(f"findings/{slug}", payload),
+            finding_slug=slug,
+            operation="record reply",
+        )
 
     print(json.dumps(result, indent=2, ensure_ascii=False))
     print(

@@ -256,6 +256,97 @@ def _bound_ingest_commit() -> dict[str, object]:
     }
 
 
+def _bound_lsp_publish(payload: dict[str, object]) -> dict[str, object]:
+    return {
+        "id": 7,
+        "active_generation": 1,
+        "source_manifest_digest": "d" * 64,
+        "lsp_config": payload["lsp_config"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("malformed_endpoint", "operation"),
+    [
+        ("code/repos/7/refresh/files", "stage code repository files"),
+        ("code/repos/7/lsp-config", "publish code repository LSP config"),
+    ],
+    ids=["staged-files", "lsp-config"],
+)
+def test_code_ingest_rejects_unbound_success_acknowledgements(
+    malformed_endpoint, operation, monkeypatch, tmp_path
+):
+    module = _load_code_ingest_module()
+    from assess.lib.client import AssessError
+
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    (repo_path / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    _mock_ingest_git(module, monkeypatch)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda _engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path / "engagement"),
+        ),
+    )
+    lsp_ctags = {
+        "available": False,
+        "tags_path": "",
+        "universal": False,
+        "repo_generation": 1,
+        "source_manifest_digest": "d" * 64,
+    }
+    monkeypatch.setattr(module, "_setup_ctags", lambda *_args, **_kwargs: lsp_ctags)
+
+    class FakeClient:
+        def __init__(self, *_args):
+            pass
+
+        def post(self, endpoint, payload):
+            if endpoint == "code/repos/refresh/start":
+                return {"repo_id": 7, "refresh_token": "refresh-7"}
+            if endpoint == "code/repos/7/refresh/files":
+                if endpoint == malformed_endpoint:
+                    return {"message": "accepted"}
+                return {"staged": len(payload["files"])}
+            if endpoint == "code/repos/7/refresh/commit":
+                return _bound_ingest_commit()
+            if endpoint == "code/repos/7/lsp-config":
+                if endpoint == malformed_endpoint:
+                    return {"id": 7}
+                return {
+                    "id": 7,
+                    "active_generation": 1,
+                    "source_manifest_digest": "d" * 64,
+                    "lsp_config": {"ctags": lsp_ctags},
+                }
+            raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    with pytest.raises(AssessError, match=operation) as exc:
+        module.run(
+            SimpleNamespace(
+                repo_path=str(repo_path),
+                name="demo",
+                language=None,
+                repo_key=None,
+                engagement_dir=tmp_path / "engagement",
+            )
+        )
+
+    assert "do not retry automatically" in str(exc.value)
+
+
 def test_code_coverage_is_informational_by_default(monkeypatch, capsys):
     module = _load_code_coverage_module()
 
@@ -571,7 +662,7 @@ def test_code_ingest_skips_named_pipes(monkeypatch, tmp_path):
                 assert payload["repo_generation"] == 1
                 assert payload["source_manifest_digest"] == "d" * 64
                 assert payload["lsp_config"]["ctags"]["repo_generation"] == 1
-                return {"id": 7}
+                return _bound_lsp_publish(payload)
             raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
         def close(self) -> None:
@@ -674,7 +765,7 @@ def test_code_ingest_commits_complete_empty_manifest(monkeypatch, tmp_path):
             if endpoint == "code/repos/7/lsp-config":
                 assert payload["repo_generation"] == 1
                 assert payload["source_manifest_digest"] == "d" * 64
-                return {"id": 7}
+                return _bound_lsp_publish(payload)
             raise AssertionError(f"Unexpected endpoint: {endpoint}")
         def __enter__(self):
             return self
@@ -954,7 +1045,7 @@ def test_code_ingest_limits_security_scan_for_large_histories(monkeypatch, capsy
             if endpoint == "code/repos/7/lsp-config":
                 assert payload["repo_generation"] == 1
                 assert payload["source_manifest_digest"] == "d" * 64
-                return {"id": 7}
+                return _bound_lsp_publish(payload)
             raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
         def close(self) -> None:
@@ -1020,7 +1111,7 @@ def test_code_classify_resolves_file_path_to_file_id(monkeypatch, tmp_path):
         def post(self, endpoint: str, payload: dict):
             captured["endpoint"] = endpoint
             captured["payload"] = payload
-            return {"updated": 1}
+            return {"updated": 1, "total": 1}
 
         def close(self) -> None:
             return None
@@ -1087,7 +1178,7 @@ def test_code_classify_resolves_file_path_from_later_pages(monkeypatch, tmp_path
         def post(self, endpoint: str, payload: dict):
             captured["endpoint"] = endpoint
             captured["payload"] = payload
-            return {"updated": 1}
+            return {"updated": 1, "total": 1}
 
         def close(self) -> None:
             return None
@@ -1116,10 +1207,18 @@ def test_verify_finding_posts_verification_payload(monkeypatch, tmp_path, capsys
     payload_path.write_text(
         json.dumps(
             {
-                "disposition": "false_positive",
+                "verification_status": "false_positive",
                 "reason_code": "check-2-guard",
                 "reason_text": "Guard proves the path is unreachable.",
                 "artifact_ref": "tools/analysis-state/code-verification/VA-001.json",
+                "counter_check": {
+                    "method": "Trace the guarded source path.",
+                    "expected_result": "The input reaches unsafe arithmetic.",
+                    "observed_result": "The guard rejects it first.",
+                    "falsified_claim": "Attacker input reaches the arithmetic.",
+                    "completed": True,
+                    "proof_receipt_ids": [17],
+                },
                 "details": {
                     "kill_check": 2,
                     "kill_reason": "Guard proves the path is unreachable.",
@@ -1156,8 +1255,7 @@ def test_verify_finding_posts_verification_payload(monkeypatch, tmp_path, capsys
                     "title": "Suppressed parser finding",
                     "severity": "medium",
                     "workflow_status": "false_positive",
-                    "verification_state": "verified",
-                    "verification_disposition": "false_positive",
+                    "verification_status": "false_positive",
                     "notes": "Killed by verifier.",
                 },
                 "transition": {"action": "verified_false_positive"},
@@ -1183,7 +1281,8 @@ def test_verify_finding_posts_verification_payload(monkeypatch, tmp_path, capsys
     )
 
     assert captured["endpoint"] == "findings/VA-001/verify"
-    assert captured["payload"]["disposition"] == "false_positive"
+    assert captured["payload"]["verification_status"] == "false_positive"
+    assert captured["payload"]["counter_check"]["completed"] is True
     assert "\"verified_false_positive\"" in capsys.readouterr().out
 
 
@@ -1219,7 +1318,9 @@ def test_verify_finding_narrative_relative_path_resolves_under_engagement_dir(
 
         def post(self, endpoint: str, payload: dict):
             posts.append(endpoint)
-            return {"slug": "VA-001"}
+            if endpoint == "findings/VA-001/verify":
+                return {"finding": {"slug": "VA-001"}}
+            return {"id": 1, "relative_path": payload.get("path")}
 
         def close(self) -> None:
             return None
@@ -1238,7 +1339,7 @@ def test_verify_finding_narrative_relative_path_resolves_under_engagement_dir(
         finding_slug="VA-001",
         payload=None,
         inline_payload=None,
-        disposition="pending_runtime_proof",
+        verification_status="pending_runtime_proof",
         reason_text="Strong but awaiting runtime proof.",
         reason_code="",
         new_severity=None,
@@ -1249,8 +1350,9 @@ def test_verify_finding_narrative_relative_path_resolves_under_engagement_dir(
         source_name="vulnerability-analyst",
         details_inline=None,
         provenance_inline=None,
-        kill_reason=None,
-        kill_check=None,
+        proof_receipt_ids=None,
+        counter_check_file=None,
+        severity_variance_file=None,
     )
 
     module.run(args)
@@ -2244,7 +2346,7 @@ def test_post_accepts_inline_json_payload(monkeypatch, capsys):
         def post(self, endpoint: str, payload: dict):
             captured["endpoint"] = endpoint
             captured["payload"] = payload
-            return {"ok": True}
+            return {"id": 7, "credential_key": payload["credential_key"]}
 
         def close(self) -> None:
             return None
@@ -2271,7 +2373,78 @@ def test_post_accepts_inline_json_payload(monkeypatch, capsys):
         "kind": "token",
         "principal": "api-user",
     }
-    assert '"ok": true' in capsys.readouterr().out.lower()
+    assert '"credential_key": "demo"' in capsys.readouterr().out.lower()
+
+
+def test_post_rejects_malformed_durable_receipt_without_retrying(monkeypatch, capsys):
+    module = _load_post_module()
+    from assess.lib.client import AssessError
+
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
+    )
+
+    class FakeClient:
+        calls = 0
+
+        def __init__(self, base_url: str, engagement_key: str) -> None:
+            self.base_url = base_url
+            self.engagement_key = engagement_key
+
+        def post(self, endpoint: str, payload: dict):
+            type(self).calls += 1
+            return {"id": 7, "credential_key": "a-different-row"}
+
+        def close(self) -> None:
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    with pytest.raises(AssessError, match="do not retry automatically"):
+        module.run(
+            SimpleNamespace(
+                engagement_dir=Path("/tmp/eng"),
+                endpoint="credentials",
+                payload='{"credential_key":"demo","kind":"token","principal":"api-user"}',
+                inline_payload=None,
+            )
+        )
+
+    assert FakeClient.calls == 1
+    assert capsys.readouterr().out == ""
+
+
+def test_post_rejects_endpoint_without_owned_response_contract(monkeypatch, capsys):
+    module = _load_post_module()
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda _engagement_dir: (_ for _ in ()).throw(
+            AssertionError("unsupported endpoint must be rejected before config resolution")
+        ),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(
+            SimpleNamespace(
+                engagement_dir="/tmp/eng",
+                endpoint="future-untyped-endpoint",
+                payload='{"value":"demo"}',
+                inline_payload=None,
+            )
+        )
+
+    assert excinfo.value.code == 1
+    assert "no durable response contract" in capsys.readouterr().err
 
 
 def test_post_rejects_raw_finding_creation_and_points_to_helper(capsys):
@@ -2301,7 +2474,7 @@ def test_post_rejects_raw_verify_endpoint_and_points_to_helper(capsys):
             SimpleNamespace(
                 engagement_dir=Path("/tmp/eng"),
                 endpoint="findings/VA-001/verify",
-                payload='{"disposition":"confirmed","reason_text":"reproduced"}',
+                payload='{"verification_status":"confirmed","reason_text":"reproduced"}',
                 inline_payload=None,
             )
         )
@@ -2309,7 +2482,7 @@ def test_post_rejects_raw_verify_endpoint_and_points_to_helper(capsys):
     assert excinfo.value.code == 1
     err = capsys.readouterr().err
     assert "finding verify" in err
-    assert "finding verify --disposition false_positive" in err
+    assert "finding verify --status false_positive" in err
     assert "kill-finding" not in err
     assert "vigil assess contract finding verify" in err
 
@@ -2343,8 +2516,7 @@ def test_contract_prints_record_finding_contract(capsys):
     assert "Schema: finding-record.schema.json" in out
     assert "Helper defaults:" in out
     assert "workflow_status = active" in out
-    assert "verification_state = unreviewed" in out
-    assert "verification_disposition = none" in out
+    assert "verification_status = unreviewed" in out
     assert "Examples:" in out
 
 
@@ -2411,7 +2583,7 @@ def test_verify_finding_help_is_rendered_from_contract_registry(capsys):
 
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
-    assert "vigil assess finding verify <slug> --disposition confirmed --reason" in out
+    assert "vigil assess finding verify <slug> --status confirmed --reason" in out
     assert "vigil assess contract finding verify" in out
     assert "Contract:" not in out
 
@@ -2430,9 +2602,22 @@ def test_update_finding_help_drops_patch_finding_alias(capsys):
 
 
 def test_verify_finding_builds_false_positive_payload_from_flags(monkeypatch, tmp_path, capsys):
-    # kill-finding folded into `verify-finding --disposition false_positive`
-    # (2026-07 CLI consolidation): the FP kill fields ride the verify verb.
+    # kill-finding folded into the proof-backed false-positive verification flow.
     module = _load_verify_finding_module()
+    counter_check_path = tmp_path / "counter-check.json"
+    counter_check_path.write_text(
+        json.dumps(
+            {
+                "method": "Trace the guarded source path.",
+                "expected_result": "The input reaches unsafe arithmetic.",
+                "observed_result": "validate_length() rejects it first.",
+                "falsified_claim": "Attacker input reaches the arithmetic.",
+                "completed": True,
+                "proof_receipt_ids": [17],
+            }
+        ),
+        encoding="utf-8",
+    )
 
     monkeypatch.setattr(
         module,
@@ -2472,26 +2657,27 @@ def test_verify_finding_builds_false_positive_payload_from_flags(monkeypatch, tm
             finding_slug="VA-001",
             payload_file=None,
             inline_payload=None,
-            disposition="false_positive",
+            verification_status="false_positive",
             reason_text="Guard blocks the path",
             reason_code="manual-kill",
             new_severity=None,
             narrative="",
-            kill_reason="validate_length() enforces an 8KB cap",
-            kill_check=2,
             evidence_ref="findings.md",
             artifact_ref="audit.json",
             notes="Rechecked manually",
             source_name="operator",
             details_inline=None,
             provenance_inline='{"reviewed_by":"operator"}',
+            proof_receipt_ids=None,
+            counter_check_file=str(counter_check_path),
+            severity_variance_file=None,
         )
     )
 
     assert captured["endpoint"] == "findings/VA-001/verify"
-    assert captured["payload"]["disposition"] == "false_positive"
-    assert captured["payload"]["details"]["kill_reason"] == "validate_length() enforces an 8KB cap"
-    assert captured["payload"]["details"]["kill_check"] == 2
+    assert captured["payload"]["verification_status"] == "false_positive"
+    assert captured["payload"]["counter_check"]["completed"] is True
+    assert captured["payload"]["counter_check"]["proof_receipt_ids"] == [17]
     assert "VA-001" in capsys.readouterr().out
 
 
@@ -2706,7 +2892,7 @@ def test_update_finding_reopens_to_draft(monkeypatch, tmp_path):
     assert captured["payload"]["reason_text"] == "Needs another review pass"
 
 
-def test_list_findings_filters_by_status_and_severity(monkeypatch, capsys):
+def test_list_findings_pushes_status_and_severity_to_backend(monkeypatch, capsys):
     module = _load_list_findings_module()
 
     monkeypatch.setattr(
@@ -2721,26 +2907,14 @@ def test_list_findings_filters_by_status_and_severity(monkeypatch, capsys):
             self.engagement_key = engagement_key
 
         def get(self, endpoint: str):
-            assert endpoint == "findings?severity=high&workflow_status=active&limit=100&offset=0"
+            assert endpoint == "findings?severity=high&workflow_status=active&limit=101&offset=0"
             return [
                 {
                     "slug": "ACTIVE-001",
                     "severity": "high",
                     "workflow_status": "active",
-                    "verification_state": "unreviewed",
-                    "verification_disposition": "none",
+                    "verification_status": "unreviewed",
                     "title": "Live issue",
-                    "summary": "",
-                    "canonical_location": "",
-                    "source_name": "vulnerability-analyst",
-                },
-                {
-                    "slug": "DRAFT-001",
-                    "severity": "high",
-                    "workflow_status": "draft",
-                    "verification_state": "unreviewed",
-                    "verification_disposition": "none",
-                    "title": "Needs work",
                     "summary": "",
                     "canonical_location": "",
                     "source_name": "vulnerability-analyst",
@@ -2762,8 +2936,7 @@ def test_list_findings_filters_by_status_and_severity(monkeypatch, capsys):
             engagement_dir=Path("/tmp/eng"),
             severity="high",
             workflow_status="active",
-            verification_state=None,
-            verification_disposition=None,
+            verification_status=None,
             source_name=None,
             slug=None,
             search=None,

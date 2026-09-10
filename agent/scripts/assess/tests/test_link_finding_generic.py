@@ -12,8 +12,6 @@ import argparse
 import pytest
 
 from assess.commands import link_finding
-
-
 class _Cfg:
     def __init__(self, engagement_dir: str) -> None:
         self.engagement_dir = engagement_dir
@@ -33,11 +31,28 @@ class _FakeClient:
 
     def put(self, endpoint: str, payload: dict) -> dict:
         self.puts.append((endpoint, payload))
-        return {"endpoint": endpoint, **payload}
+        return {
+            "id": len(self.puts),
+            "finding_slug": endpoint.split("/")[1],
+            **payload,
+        }
 
     def patch(self, endpoint: str, payload: dict) -> dict:
         self.patches.append((endpoint, payload))
-        return {"endpoint": endpoint, **payload}
+        slug = endpoint.split("/")[1]
+        if "/links/" not in endpoint:
+            return {"finding": {"slug": slug}}
+        return {
+            "id": int(endpoint.rsplit("/", 1)[-1]),
+            "finding_slug": slug,
+            **payload,
+        }
+
+    def delete(self, endpoint: str) -> dict:
+        return {"finding_slug": endpoint.split("/")[1], "cleared": 1}
+
+    def get(self, endpoint: str) -> dict:
+        return {"slug": endpoint.split("/")[1], "details": {}}
 
     def __enter__(self) -> "_FakeClient":
         return self
@@ -91,6 +106,29 @@ def test_generic_unblocked_by_posts_to_links(tmp_path, monkeypatch, capsys):
     assert payload["target_ref"] == "VA-071"
     assert payload["target_id"] is None
     assert payload["notes"] == "VA-071 yields the admin session"
+
+
+def test_generic_link_rejects_response_without_link_id(
+    tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient()
+    fake.post = lambda _endpoint, payload: dict(payload)
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        [
+            "link", "VA-070",
+            "--link-kind", "related",
+            "--target-kind", "finding",
+            "--target-ref", "VA-071",
+        ],
+        str(tmp_path),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        link_finding.run(args)
+
+    assert exc.value.code == 1
+    assert "do not retry automatically" in capsys.readouterr().err
 
 
 def test_generic_link_uses_reason_as_the_only_relationship_explanation_flag(
@@ -242,6 +280,63 @@ def test_root_cause_mode_still_uses_put(tmp_path, monkeypatch, capsys):
     assert payload["root_cause_slug"] == "VA-001"
 
 
+def test_root_cause_set_rejects_response_without_link_identity(
+    tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient()
+    fake.put = lambda _endpoint, _payload: {
+        "finding_slug": "VA-070",
+        "root_cause_slug": "VA-001",
+    }
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        ["link", "VA-070", "--root-cause", "VA-001"],
+        str(tmp_path),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        link_finding.run(args)
+
+    assert exc.value.code == 1
+    assert "do not retry automatically" in capsys.readouterr().err
+
+
+def test_root_cause_clear_requires_finding_identity(
+    tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient()
+    fake.delete = lambda _endpoint: {"cleared": 1}
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        ["link", "VA-070", "--clear-root-cause"],
+        str(tmp_path),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        link_finding.run(args)
+
+    assert exc.value.code == 1
+    assert "do not retry automatically" in capsys.readouterr().err
+
+
+def test_intel_link_requires_canonical_finding_envelope(
+    tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient()
+    fake.patch = lambda _endpoint, _payload: {"message": "accepted"}
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        ["link", "VA-070", "--intel", "12"],
+        str(tmp_path),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        link_finding.run(args)
+
+    assert exc.value.code == 1
+    assert "do not retry automatically" in capsys.readouterr().err
+
+
 def test_generic_link_can_be_retargeted_by_id(
     tmp_path, monkeypatch, capsys
 ):
@@ -277,6 +372,27 @@ def test_generic_link_can_be_retargeted_by_id(
             },
         )
     ]
+
+
+def test_generic_link_update_requires_addressed_link_identity(
+    tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient()
+    fake.patch = lambda _endpoint, _payload: {
+        "id": 43,
+        "finding_slug": "VA-070",
+    }
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        ["link", "VA-070", "--link-id", "42", "--retire"],
+        str(tmp_path),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        link_finding.run(args)
+
+    assert exc.value.code == 1
+    assert "do not retry automatically" in capsys.readouterr().err
 
 
 def test_generic_link_rejects_ambiguous_target_selectors(

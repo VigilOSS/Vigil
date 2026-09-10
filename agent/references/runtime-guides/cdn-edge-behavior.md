@@ -47,9 +47,11 @@ asset) over the same connection/egress:
 
 - Control returns **200** → the `403` was **per-request** (payload-403 or
   per-path authz). The host is live. Keep testing it; just change the probe.
-- Control also returns **403 / 429 / 000** → you are likely **rate/IP-blocked**
-  (or the egress IP is on a reputation list — cross to `cdn-ip-blocking.md`).
-  Stop hammering; step down to serial.
+- Control also returns **403 / 429 / 000** → the check is **inconclusive**, with a
+  possible rate/IP/egress block. Stop hammering, retain both response shapes, and
+  repeat against an independent known-good control/route before assigning the
+  cause (cross to `cdn-ip-blocking.md`). One control cannot prove an estate-wide,
+  per-host, or per-route reachability claim.
 
 On the Akamai CMS, a request with a literal `..`, `%2e%2e`, `/etc/passwd`, SQLi
 metacharacters, `<script>`/`<img onerror>`, or a command-injection pattern

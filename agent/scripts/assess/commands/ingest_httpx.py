@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 from assess.lib import reachability
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessmentClient, AssessError, require_write_result
 from assess.lib.config import anchor_engagement_relative, load_config
 
 # Stored verdicts the backend accepts. classify_probe may return a per-probe
@@ -171,8 +171,19 @@ def ingest_httpx_results(
     finally:
         if owns_client:
             client.close()
-    upserted = result.get("upserted", 0) if isinstance(result, dict) else 0
-    return {"upserted": int(upserted), "rows": len(rows), "by_class": by_class, "parse_errors": parse_errors}
+    result = require_write_result(
+        result,
+        operation="upsert host liveness",
+        nonnegative_counts=("upserted",),
+    )
+    upserted = result["upserted"]
+    if upserted != len(rows):
+        raise AssessError(
+            "upsert host liveness: backend response count does not match the "
+            "submitted rows; the write may have committed, so inspect durable "
+            "state and do not retry automatically"
+        )
+    return {"upserted": upserted, "rows": len(rows), "by_class": by_class, "parse_errors": parse_errors}
 
 
 def run(args) -> None:

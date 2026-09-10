@@ -68,6 +68,25 @@ def _decode_json(blob: str, default: Any) -> Any:
         return default
 
 
+_UNKNOWN_VALIDITY_CONTEXT = (
+    "unreviewed; revalidate before relying on this interpretation"
+)
+
+
+def _authored_context_value(field: str, value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"authored knowledge {field} must be a non-empty string",
+        )
+    if len(value) > 4096:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"authored knowledge {field} exceeds 4096 characters",
+        )
+    return value
+
+
 def _row_to_dict(row: Any) -> dict[str, Any]:
     data = dict(row)
     if "provenance_json" in data:
@@ -156,14 +175,15 @@ def _generic_upsert(
     """
     columns = ["engagement_id", *values.keys()]
     placeholders = ", ".join(["?"] * len(columns))
-    assignments = ", ".join(
+    assignments = [
         f"{col} = excluded.{col}" for col in values.keys() if col not in conflict_columns
-    )
+    ]
+    assignments.append("updated_at = CURRENT_TIMESTAMP")
     conflict_clause = ", ".join(["engagement_id", *conflict_columns])
     sql = (
         f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders}) "
         f"ON CONFLICT({conflict_clause}) DO UPDATE SET "
-        f"{assignments}, updated_at = CURRENT_TIMESTAMP"
+        f"{', '.join(assignments)}"
     )
     connection.execute(sql, (engagement_id, *values.values()))
     where = " AND ".join(
@@ -561,6 +581,9 @@ def record_org_fact(
     source_name: str = "",
     notes: str = "",
     provenance: dict[str, Any] | None = None,
+    authored_by: str | None = None,
+    scope: str | None = None,
+    validity_context: str | None = None,
     _conn: Any | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
@@ -569,9 +592,34 @@ def record_org_fact(
         "fact_value": fact_value,
         "source_name": source_name,
         "notes": notes,
-        "provenance_json": _json_text(provenance),
     }
+    if provenance is not None:
+        values["provenance_json"] = _json_text(provenance)
     with _use_connection(_conn) as connection:
+        existing = connection.execute(
+            """
+            SELECT id
+            FROM intel_org_facts
+            WHERE engagement_id = ? AND fact_key = ?
+            """,
+            (engagement.id, fact_key),
+        ).fetchone()
+        if existing is None:
+            values["authored_by"] = _authored_context_value(
+                "authored_by", authored_by or source_name or "unknown"
+            )
+            values["scope"] = _authored_context_value("scope", scope or "engagement")
+            values["validity_context"] = _authored_context_value(
+                "validity_context", validity_context or _UNKNOWN_VALIDITY_CONTEXT
+            )
+        else:
+            for field, value in (
+                ("authored_by", authored_by),
+                ("scope", scope),
+                ("validity_context", validity_context),
+            ):
+                if value is not None:
+                    values[field] = _authored_context_value(field, value)
         row = _generic_upsert(
             connection,
             table="intel_org_facts",
@@ -585,7 +633,13 @@ def record_org_fact(
             entity_type="org_fact",
             source_id=int(row["id"]),
             key=fact_key,
-            body=_compose_body(fact_key, fact_value, notes),
+            body=_compose_body(
+                fact_key,
+                fact_value,
+                notes,
+                row["scope"],
+                row["validity_context"],
+            ),
             source_name=source_name,
         )
     return _row_to_dict(row)
@@ -595,30 +649,63 @@ def record_note(
     engagement_id: int,
     *,
     title: str,
-    body_markdown: str = "",
-    source_agent: str = "",
+    body_markdown: str | None = None,
+    source_agent: str | None = None,
     tags: list[str] | None = None,
-    source_name: str = "",
+    source_name: str | None = None,
     provenance: dict[str, Any] | None = None,
     lead_status: str | None = None,
+    authored_by: str | None = None,
+    scope: str | None = None,
+    validity_context: str | None = None,
     _conn: Any | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     _validate_lead_status(lead_status)
-    values: dict[str, Any] = {
-        "title": title,
-        "body_markdown": body_markdown,
-        "source_agent": source_agent,
-        "tags_json": _json_list_text(tags or []),
-        "source_name": source_name,
-        "provenance_json": _json_text(provenance),
-    }
+    values: dict[str, Any] = {"title": title}
+    # Optional fields use None as the service-level omission sentinel. The API
+    # excludes unset request fields, while explicit empty strings/containers
+    # still reach this helper and clear the corresponding stored value.
+    if body_markdown is not None:
+        values["body_markdown"] = body_markdown
+    if source_agent is not None:
+        values["source_agent"] = source_agent
+    if tags is not None:
+        values["tags_json"] = _json_list_text(tags)
+    if source_name is not None:
+        values["source_name"] = source_name
+    if provenance is not None:
+        values["provenance_json"] = _json_text(provenance)
     # Only write lead_status when supplied, so a bare re-record of the same
     # note (UNIQUE on title) preserves an existing disposition instead of
     # clobbering it back to NULL.
     if lead_status is not None:
         values["lead_status"] = lead_status
     with _use_connection(_conn) as connection:
+        existing = connection.execute(
+            """
+            SELECT id
+            FROM intel_notes
+            WHERE engagement_id = ? AND title = ?
+            """,
+            (engagement.id, title),
+        ).fetchone()
+        if existing is None:
+            values["authored_by"] = _authored_context_value(
+                "authored_by", authored_by or source_agent or source_name or "unknown"
+            )
+            values["scope"] = _authored_context_value("scope", scope or "engagement")
+            values["validity_context"] = _authored_context_value(
+                "validity_context", validity_context or _UNKNOWN_VALIDITY_CONTEXT
+            )
+        else:
+            for field, value in (
+                ("authored_by", authored_by),
+                ("scope", scope),
+                ("validity_context", validity_context),
+            ):
+                if value is not None:
+                    values[field] = _authored_context_value(field, value)
         row = _generic_upsert(
             connection,
             table="intel_notes",
@@ -626,16 +713,18 @@ def record_note(
             conflict_columns=["title"],
             values=values,
         )
+        record = _row_to_dict(row)
+        key, body = _intel_search_body("note", record)
         _upsert_search_index(
             connection,
             engagement_id=engagement.id,
             entity_type="note",
             source_id=int(row["id"]),
-            key=title,
-            body=_compose_body(title, body_markdown, source_agent, lead_status, *(tags or [])),
-            source_name=source_name,
+            key=key,
+            body=body,
+            source_name=str(record.get("source_name") or ""),
         )
-    return _row_to_dict(row)
+    return record
 
 
 # ── List helpers ───────────────────────────────────────────
@@ -660,8 +749,10 @@ def _list_rows(
     table: str,
     *,
     include_superseded: bool = True,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> list[dict[str, Any]]:
-    """Return every row in ``table`` for the engagement.
+    """Return a stable page of rows from ``table`` for the engagement.
 
     ``include_superseded=True`` (the default) preserves the existing
     UI/contract: superseded rows still appear so operators can see the
@@ -672,22 +763,22 @@ def _list_rows(
 
     Each row is decorated with ``canonical_id`` (the leaf of the
     ``superseded_by_id`` chain) so the frontend can chase to the live
-    replacement in one hop instead of recursing through the list.
+    replacement in one hop instead of recursing through the list. Internal
+    callers may omit ``limit`` when they explicitly require the complete set;
+    API list routes always supply a bounded limit and offset.
     """
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+        where = "engagement_id = ?"
         if not include_superseded and "superseded_by_id" in columns:
-            rows = connection.execute(
-                f"SELECT * FROM {table} WHERE engagement_id = ? AND superseded_by_id IS NULL "
-                f"ORDER BY updated_at DESC, id DESC",
-                (engagement.id,),
-            ).fetchall()
-        else:
-            rows = connection.execute(
-                f"SELECT * FROM {table} WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC",
-                (engagement.id,),
-            ).fetchall()
+            where += " AND superseded_by_id IS NULL"
+        sql = f"SELECT * FROM {table} WHERE {where} ORDER BY updated_at DESC, id DESC"
+        params: list[Any] = [engagement.id]
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            params.extend((int(limit), int(offset)))
+        rows = connection.execute(sql, tuple(params)).fetchall()
         decorated: list[dict[str, Any]] = []
         has_supersede = "superseded_by_id" in columns
         for row in rows:
@@ -771,10 +862,12 @@ _INTEL_UPDATABLE_FIELDS: dict[str, set[str]] = {
     },
     "org-fact": {
         "fact_key", "fact_value", "source_name", "notes", "provenance",
+        "authored_by", "scope", "validity_context",
     },
     "note": {
         "title", "body_markdown", "source_agent", "tags", "source_name",
-        "provenance", "lead_status",
+        "provenance", "lead_status", "authored_by", "scope",
+        "validity_context",
     },
 }
 
@@ -902,6 +995,8 @@ def _intel_search_body(
             row.get("fact_key"),
             row.get("fact_value"),
             row.get("notes"),
+            row.get("scope"),
+            row.get("validity_context"),
         )
     if intel_type == "note":
         tags = row.get("tags") or []
@@ -910,6 +1005,8 @@ def _intel_search_body(
             row.get("body_markdown"),
             row.get("source_agent"),
             row.get("lead_status"),
+            row.get("scope"),
+            row.get("validity_context"),
             *(tags if isinstance(tags, list) else []),
         )
     return "", ""
@@ -942,6 +1039,8 @@ def _coerce_update_values(
         elif column == "lead_status":
             _validate_lead_status(value)
             column_values[column] = value
+        elif column in {"authored_by", "scope", "validity_context"}:
+            column_values[column] = _authored_context_value(column, value)
         else:
             column_values[column] = value
     return column_values
@@ -1473,35 +1572,35 @@ def supersede_intel(
 
 
 def list_tech_components(
-    engagement_id: int, *, include_superseded: bool = True
+    engagement_id: int, *, include_superseded: bool = True, limit: int | None = None, offset: int = 0
 ) -> list[dict[str, Any]]:
     return _list_rows(
-        engagement_id, "intel_tech_components", include_superseded=include_superseded
+        engagement_id, "intel_tech_components", include_superseded=include_superseded, limit=limit, offset=offset
     )
 
 
 def list_people(
-    engagement_id: int, *, include_superseded: bool = True
+    engagement_id: int, *, include_superseded: bool = True, limit: int | None = None, offset: int = 0
 ) -> list[dict[str, Any]]:
-    return _list_rows(engagement_id, "intel_people", include_superseded=include_superseded)
+    return _list_rows(engagement_id, "intel_people", include_superseded=include_superseded, limit=limit, offset=offset)
 
 
 def list_emails(
-    engagement_id: int, *, include_superseded: bool = True
+    engagement_id: int, *, include_superseded: bool = True, limit: int | None = None, offset: int = 0
 ) -> list[dict[str, Any]]:
-    return _list_rows(engagement_id, "intel_emails", include_superseded=include_superseded)
+    return _list_rows(engagement_id, "intel_emails", include_superseded=include_superseded, limit=limit, offset=offset)
 
 
 def list_domains(
-    engagement_id: int, *, include_superseded: bool = True
+    engagement_id: int, *, include_superseded: bool = True, limit: int | None = None, offset: int = 0
 ) -> list[dict[str, Any]]:
-    return _list_rows(engagement_id, "intel_domains", include_superseded=include_superseded)
+    return _list_rows(engagement_id, "intel_domains", include_superseded=include_superseded, limit=limit, offset=offset)
 
 
 def list_cves(
-    engagement_id: int, *, include_superseded: bool = True
+    engagement_id: int, *, include_superseded: bool = True, limit: int | None = None, offset: int = 0
 ) -> list[dict[str, Any]]:
-    rows = _list_rows(engagement_id, "intel_cves", include_superseded=include_superseded)
+    rows = _list_rows(engagement_id, "intel_cves", include_superseded=include_superseded, limit=limit, offset=offset)
     for row in rows:
         row["poc_available"] = bool(row.get("poc_available"))
     return rows
@@ -1665,41 +1764,41 @@ def intel_readiness(engagement_id: int) -> dict[str, Any]:
 
 
 def list_dns_records(
-    engagement_id: int, *, include_superseded: bool = True
+    engagement_id: int, *, include_superseded: bool = True, limit: int | None = None, offset: int = 0
 ) -> list[dict[str, Any]]:
     return _list_rows(
-        engagement_id, "intel_dns_records", include_superseded=include_superseded
+        engagement_id, "intel_dns_records", include_superseded=include_superseded, limit=limit, offset=offset
     )
 
 
 def list_social_profiles(
-    engagement_id: int, *, include_superseded: bool = True
+    engagement_id: int, *, include_superseded: bool = True, limit: int | None = None, offset: int = 0
 ) -> list[dict[str, Any]]:
     return _list_rows(
-        engagement_id, "intel_social_profiles", include_superseded=include_superseded
+        engagement_id, "intel_social_profiles", include_superseded=include_superseded, limit=limit, offset=offset
     )
 
 
 def list_breach_records(
-    engagement_id: int, *, include_superseded: bool = True
+    engagement_id: int, *, include_superseded: bool = True, limit: int | None = None, offset: int = 0
 ) -> list[dict[str, Any]]:
     return _list_rows(
-        engagement_id, "intel_breach_records", include_superseded=include_superseded
+        engagement_id, "intel_breach_records", include_superseded=include_superseded, limit=limit, offset=offset
     )
 
 
 def list_org_facts(
-    engagement_id: int, *, include_superseded: bool = True
+    engagement_id: int, *, include_superseded: bool = True, limit: int | None = None, offset: int = 0
 ) -> list[dict[str, Any]]:
     return _list_rows(
-        engagement_id, "intel_org_facts", include_superseded=include_superseded
+        engagement_id, "intel_org_facts", include_superseded=include_superseded, limit=limit, offset=offset
     )
 
 
 def list_notes(
-    engagement_id: int, *, include_superseded: bool = True
+    engagement_id: int, *, include_superseded: bool = True, limit: int | None = None, offset: int = 0
 ) -> list[dict[str, Any]]:
-    return _list_rows(engagement_id, "intel_notes", include_superseded=include_superseded)
+    return _list_rows(engagement_id, "intel_notes", include_superseded=include_superseded, limit=limit, offset=offset)
 
 
 # Lead worklist. Kept separate from list_notes (whose contract feeds

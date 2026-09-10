@@ -15,7 +15,6 @@ client, pinning the array-safe write path the plan locks down:
 from __future__ import annotations
 
 import argparse
-import json
 
 import pytest
 
@@ -49,7 +48,12 @@ class _FakeClient:
 
     def patch(self, endpoint: str, payload: dict, **kwargs) -> dict:
         self.patches.append((endpoint, payload))
-        return {"slug": endpoint.split("/", 1)[-1], **payload}
+        return {
+            "finding": {
+                "slug": endpoint.split("/", 1)[-1],
+                **payload,
+            }
+        }
 
     def __enter__(self) -> "_FakeClient":
         return self
@@ -88,7 +92,7 @@ def _finding(slug: str = "VA-047", *, replies=None, submission_status: str = "ne
         "severity": "high",
         "row_version": 7,
         "submission_status": submission_status,
-        "details_json": json.dumps(details),
+        "details": details,
     }
 
 
@@ -141,6 +145,27 @@ def test_append_preserves_prior_replies(tmp_path, monkeypatch, capsys):
     assert replies[2]["created_at"] == _NOW
     assert replies[2]["sent_status"] == "draft" and replies[2]["sent_at"] is None
     assert replies[2]["author"] == "report-writer"
+
+
+def test_record_reply_rejects_response_without_canonical_finding(
+    tmp_path, monkeypatch
+):
+    fake = _FakeClient(_finding(replies=[]))
+    fake.patch = lambda _endpoint, _payload, **_kwargs: {"message": "accepted"}
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        [
+            "record-reply", "VA-047",
+            "--in-response-to", "triager question",
+            "--body", "answer",
+        ],
+        str(tmp_path),
+    )
+
+    with pytest.raises(AssessError, match="record reply") as exc:
+        record_reply.run(args)
+
+    assert "do not retry automatically" in str(exc.value)
 
 
 def test_patch_carries_fetched_row_version(tmp_path, monkeypatch, capsys):

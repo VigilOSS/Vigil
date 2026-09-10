@@ -6,12 +6,26 @@ import json
 from typing import Any
 from fastapi import HTTPException, status
 
+from ...retry_state import RETRY_STATES
 from ..events import _engagement_or_404
 from .. import credentials as _credential_store
 
 from . import _common
 from . import findings as _findings
 from ._common import _fetch_all, _json_text, _merge_object_text, _normalize_severity, _resolve_existing_finding_slug, _slugify
+
+
+def _require_retry_state(value: str) -> str:
+    retry_state = str(value or "").strip()
+    if retry_state not in RETRY_STATES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"invalid retry_state: {value!r}; expected one of "
+                + ", ".join(RETRY_STATES)
+            ),
+        )
+    return retry_state
 
 
 
@@ -451,8 +465,7 @@ def _flag_discovered_credential_finding(
         ),
         severity="info",
         workflow_status="draft",
-        verification_state="unreviewed",
-        verification_disposition="none",
+        verification_status="unreviewed",
         defect_family="exposed-credential",
         root_cause_key=f"discovered-credential:{credential_key}",
         auth_context="unauthenticated",
@@ -555,10 +568,23 @@ def _crosslink_discovered_credential(
         ).fetchone()
     return dict(refreshed) if refreshed is not None else None
 
-def list_credentials(engagement_id: int) -> list[dict[str, Any]]:
+def list_credentials(
+    engagement_id: int,
+    *,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
+    sql = (
+        "SELECT * FROM assessment_credentials WHERE engagement_id = ? "
+        "ORDER BY updated_at DESC, id DESC"
+    )
+    params: list[Any] = [engagement.id]
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        params.extend((int(limit), int(offset)))
     with _common.get_connection() as connection:
-        return _fetch_all(connection, "SELECT * FROM assessment_credentials WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
+        return _fetch_all(connection, sql, tuple(params))
 
 def record_credential_test(
     engagement_id: int,
@@ -719,10 +745,19 @@ def record_blocked_technique(
     evidence_ref: str,
     notes: str,
     provenance: dict[str, Any] | None,
+    revalidation_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+    retry_state = _require_retry_state(retry_state)
     with _common.get_connection() as connection:
-        return _upsert_simple_entity(
+        previous = connection.execute(
+            """
+            SELECT * FROM assessment_blocked_techniques
+            WHERE engagement_id = ? AND technique_key = ?
+            """,
+            (engagement.id, technique_key),
+        ).fetchone()
+        record = _upsert_simple_entity(
             connection,
             table="assessment_blocked_techniques",
             engagement_id=engagement.id,
@@ -739,8 +774,73 @@ def record_blocked_technique(
                 "provenance_json": _json_text(provenance),
             },
         )
+        previous_retry_state = (
+            str(previous["retry_state"]) if previous is not None else None
+        )
+        if previous_retry_state is None:
+            event_kind = "created"
+        elif previous_retry_state == retry_state:
+            event_kind = "revalidated"
+        else:
+            event_kind = "retry_state_changed"
+        connection.execute(
+            """
+            INSERT INTO assessment_blocked_technique_history (
+                engagement_id, blocked_technique_id, technique_key, event_kind,
+                from_retry_state, to_retry_state, reason, evidence_ref, notes,
+                provenance_json, revalidation_context_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                engagement.id,
+                int(record["id"]),
+                technique_key,
+                event_kind,
+                previous_retry_state,
+                retry_state,
+                reason,
+                evidence_ref,
+                notes,
+                _json_text(provenance),
+                _json_text(revalidation_context),
+            ),
+        )
+        return record
 
 def list_blocked_techniques(engagement_id: int) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
         return _fetch_all(connection, "SELECT * FROM assessment_blocked_techniques WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
+
+
+def list_blocked_technique_history(
+    engagement_id: int,
+    *,
+    technique_key: str = "",
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    bounded_limit = max(1, min(int(limit), 500))
+    clauses = ["engagement_id = ?"]
+    params: list[Any] = [engagement.id]
+    if technique_key:
+        clauses.append("technique_key = ?")
+        params.append(technique_key)
+    params.append(bounded_limit)
+    with _common.get_connection() as connection:
+        rows = _fetch_all(
+            connection,
+            "SELECT * FROM assessment_blocked_technique_history WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY id DESC LIMIT ?",
+            tuple(params),
+        )
+    for row in rows:
+        row["provenance"] = _common._json_object(row.pop("provenance_json", "{}"))
+        row["revalidation_context"] = _common._json_object(
+            row.pop("revalidation_context_json", "{}")
+        )
+        row["legacy_payload"] = _common._json_object(
+            row.pop("legacy_payload_json", "{}")
+        )
+    return rows

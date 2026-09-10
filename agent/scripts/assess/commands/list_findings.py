@@ -3,11 +3,44 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 from urllib.parse import quote, urlencode
 
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessmentClient, AssessError
 from assess.lib.config import load_config
-from assess.lib.finding_render import blocked_reason_summary
+from assess.lib.finding_render import blocked_reason_summary, warn_untrusted_data
+from assess.lib.list_output import (
+    RemovedOptionAction,
+    lookahead_limit,
+    page_from_backend,
+    page_from_complete,
+    report_page,
+)
+
+
+_MAX_BACKEND_LIMIT = 1000
+_JSON_LIST_FIELDS = (
+    "id",
+    "slug",
+    "title",
+    "severity",
+    "workflow_status",
+    "verification_status",
+    "defect_family",
+    "root_cause_key",
+    "root_cause_role",
+    "canonical_location",
+    "auth_context",
+    "source_name",
+    "evidence_type",
+    "submission_status",
+    "submission_platform",
+    "submission_ref",
+    "merged_into_slug",
+    "code_snapshot_status",
+    "row_version",
+    "updated_at",
+)
 
 
 def register(subparsers) -> None:
@@ -19,15 +52,14 @@ def register(subparsers) -> None:
             "Examples:\n"
             "  vigil assess finding list --severity high --status active\n"
             "  vigil assess finding list --root-cause auth-bypass-root\n"
-            "  vigil assess finding list --verification-disposition false_positive --json\n"
+            "  vigil assess finding list --verification-status false_positive --json\n"
             "  vigil assess finding list --search parser --source-name vulnerability-analyst\n"
-            "  vigil assess finding list --all --json  # explicit unbounded fetch"
+            "  vigil assess finding list --limit 100 --offset 100"
         ),
     )
     p.add_argument("--severity")
     p.add_argument("--workflow-status", "--status", dest="workflow_status")
-    p.add_argument("--verification-state")
-    p.add_argument("--verification-disposition")
+    p.add_argument("--verification-status")
     p.add_argument("--source-name")
     p.add_argument("--slug")
     p.add_argument("--root-cause", dest="root_cause_slug", help="Show the root finding and linked siblings")
@@ -43,13 +75,22 @@ def register(subparsers) -> None:
         action="store_true",
         help=(
             "Show only the theoretical holding area: findings with "
-            "evidence_type=theoretical OR verification_disposition="
-            "pending_runtime_proof (strong-but-unproven, awaiting runtime proof)."
+            "evidence_type=theoretical OR verification_status is pending_runtime_proof "
+            "or blocked."
         ),
     )
     p.add_argument("--limit", type=int, default=100, help="Maximum rows to fetch from the backend (default: 100)")
     p.add_argument("--offset", type=int, default=0, help="Backend result offset for pagination")
-    p.add_argument("--all", action="store_true", help="Fetch all matching findings instead of applying the default limit")
+    p.add_argument(
+        "--all",
+        action=RemovedOptionAction,
+        nargs=0,
+        const=(
+            "finding list --all was removed to keep output bounded; page with "
+            "--limit/--offset and use `finding get <slug>` for complete rows"
+        ),
+        help=argparse.SUPPRESS,
+    )
     p.add_argument("--json", action="store_true", help="Print filtered findings as JSON instead of a table")
     p.set_defaults(func=run)
 
@@ -57,7 +98,7 @@ def register(subparsers) -> None:
 def _finding_row(item: dict) -> str:
     """Render one finding as a pipe-delimited finding-list row.
 
-    A blocked-for-provisioning finding (verification_disposition='blocked') gets
+    A blocked-for-provisioning finding (verification_status='blocked') gets
     a trailing ``BLOCKED[(kind)]: <reason>`` cell so the operator reads WHY it is
     held out of the report without opening the finding. The disposition cell
     already shows ``.../blocked``; this adds the reason that used to live only in
@@ -67,7 +108,7 @@ def _finding_row(item: dict) -> str:
         f"{item.get('slug', '')} | "
         f"{item.get('severity', '')} | "
         f"{item.get('workflow_status', '')} | "
-        f"{item.get('verification_state', '')}/{item.get('verification_disposition', '')} | "
+        f"{item.get('verification_status', '')} | "
         f"{item.get('root_cause_role', '')} | "
         f"{item.get('title', '')}"
     )
@@ -83,6 +124,34 @@ def _matches_search(finding: dict, search: str) -> bool:
         for key in ("slug", "title", "summary", "canonical_location", "source_name")
     ).lower()
     return search in haystack
+
+
+def compact_finding_list_row(item: dict) -> dict:
+    row = {key: item[key] for key in _JSON_LIST_FIELDS if key in item}
+    slug = str(item.get("slug") or "")
+    if slug:
+        row["_point_read"] = f"vigil assess finding get {shlex.quote(slug)}"
+    return row
+
+
+def _continuation_command(args, offset: int) -> str:
+    parts = ["vigil", "assess", "finding", "list"]
+    for attr, flag in (
+        ("severity", "--severity"),
+        ("workflow_status", "--workflow-status"),
+        ("verification_status", "--verification-status"),
+        ("source_name", "--source-name"),
+        ("slug", "--slug"),
+        ("root_cause_slug", "--root-cause"),
+        ("search", "--search"),
+    ):
+        value = getattr(args, attr, None)
+        if value:
+            parts.extend((flag, shlex.quote(str(value))))
+    if getattr(args, "holding", False):
+        parts.append("--holding")
+    parts.extend(("--limit", str(int(args.limit)), "--offset", str(offset)))
+    return " ".join(parts)
 
 
 def _print_root_cause_group(group: dict, root_slug: str) -> None:
@@ -123,7 +192,24 @@ def run(args) -> None:
             # sibling effect/order/note detail (folded-in list-finding-group);
             # --json still emits the flattened root+siblings finding list below.
             if not args.json:
-                _print_root_cause_group(group, root_cause_slug)
+                siblings = list(group.get("siblings", []))
+                page = page_from_complete(
+                    siblings,
+                    limit=int(args.limit),
+                    offset=int(args.offset),
+                )
+                paged_group = {**group, "siblings": page.rows}
+                if page.rows or group.get("root"):
+                    warn_untrusted_data()
+                _print_root_cause_group(paged_group, root_cause_slug)
+                report_page(
+                    page,
+                    noun="root-cause siblings",
+                    continuation_command=_continuation_command(
+                        args, page.offset + len(page.rows)
+                    ),
+                    point_read_hint="`vigil assess finding get <slug>`",
+                )
                 return
             root = dict(group.get("root", {}))
             root["root_cause_role"] = "root"
@@ -137,8 +223,7 @@ def run(args) -> None:
             for attr, key in (
                 ("severity", "severity"),
                 ("workflow_status", "workflow_status"),
-                ("verification_state", "verification_state"),
-                ("verification_disposition", "verification_disposition"),
+                ("verification_status", "verification_status"),
                 ("source_name", "source_name"),
                 ("slug", "slug"),
                 ("search", "search"),
@@ -148,59 +233,101 @@ def run(args) -> None:
                     params.append((key, str(value)))
             if getattr(args, "holding", False):
                 params.append(("holding", "true"))
-            if not getattr(args, "all", False):
-                params.append(("limit", str(int(getattr(args, "limit", 100)))))
-                params.append(("offset", str(int(getattr(args, "offset", 0)))))
+            request_limit, used_lookahead = lookahead_limit(
+                int(getattr(args, "limit", 100)), maximum=_MAX_BACKEND_LIMIT
+            )
+            params.append(("limit", str(request_limit)))
+            params.append(("offset", str(int(getattr(args, "offset", 0)))))
             endpoint = "findings"
             if params:
                 endpoint += "?" + urlencode(params, quote_via=quote)
             findings = client.get(endpoint)
 
     if not isinstance(findings, list):
-        print(json.dumps(findings, indent=2, ensure_ascii=False))
-        return
+        raise AssessError("finding list: expected a JSON array from the backend")
 
     filtered = findings
-    if args.severity:
-        filtered = [item for item in filtered if str(item.get("severity", "")).lower() == args.severity.lower()]
-    if args.workflow_status:
-        filtered = [
-            item for item in filtered if str(item.get("workflow_status", "")).lower() == args.workflow_status.lower()
-        ]
-    if args.verification_state:
-        filtered = [
-            item
-            for item in filtered
-            if str(item.get("verification_state", "")).lower() == args.verification_state.lower()
-        ]
-    if args.verification_disposition:
-        filtered = [
-            item
-            for item in filtered
-            if str(item.get("verification_disposition", "")).lower() == args.verification_disposition.lower()
-        ]
-    if args.source_name:
-        filtered = [item for item in filtered if str(item.get("source_name", "")).lower() == args.source_name.lower()]
-    if args.slug:
-        filtered = [item for item in filtered if str(item.get("slug", "")).lower() == args.slug.lower()]
-    if args.search:
-        needle = args.search.lower()
-        filtered = [item for item in filtered if _matches_search(item, needle)]
-    if getattr(args, "holding", False):
-        filtered = [
-            item
-            for item in filtered
-            if str(item.get("evidence_type", "")).lower() == "theoretical"
-            or str(item.get("verification_disposition", "")).lower() == "pending_runtime_proof"
-        ]
-    if not getattr(args, "all", False):
-        limit = int(getattr(args, "limit", 100))
-        if len(filtered) > limit:
-            offset = int(getattr(args, "offset", 0))
-            filtered = filtered[offset : offset + limit]
+    if root_cause_slug:
+        # The dedicated group endpoint returns the complete root + sibling set,
+        # so its flattened JSON view still applies the common list filters here.
+        # The ordinary findings endpoint already owns these predicates; applying
+        # them again in the CLI creates a second, drift-prone source of truth.
+        if args.severity:
+            filtered = [
+                item
+                for item in filtered
+                if str(item.get("severity", "")).lower() == args.severity.lower()
+            ]
+        if args.workflow_status:
+            filtered = [
+                item
+                for item in filtered
+                if str(item.get("workflow_status", "")).lower()
+                == args.workflow_status.lower()
+            ]
+        if args.verification_status:
+            filtered = [
+                item
+                for item in filtered
+                if str(item.get("verification_status", "")).lower()
+                == args.verification_status.lower()
+            ]
+        if args.source_name:
+            filtered = [
+                item
+                for item in filtered
+                if str(item.get("source_name", "")).lower()
+                == args.source_name.lower()
+            ]
+        if args.slug:
+            filtered = [
+                item
+                for item in filtered
+                if str(item.get("slug", "")).lower() == args.slug.lower()
+            ]
+        if args.search:
+            needle = args.search.lower()
+            filtered = [item for item in filtered if _matches_search(item, needle)]
+        if getattr(args, "holding", False):
+            filtered = [
+                item
+                for item in filtered
+                if str(item.get("evidence_type", "")).lower() == "theoretical"
+                or str(item.get("verification_status", "")).lower()
+                in {"pending_runtime_proof", "blocked"}
+            ]
+    limit = int(getattr(args, "limit", 100))
+    offset = int(getattr(args, "offset", 0))
+    if root_cause_slug:
+        page = page_from_complete(filtered, limit=limit, offset=offset)
+    else:
+        page = page_from_backend(
+            filtered,
+            limit=limit,
+            offset=offset,
+            used_lookahead=used_lookahead,
+        )
+    filtered = page.rows
+    report_page(
+        page,
+        noun="findings",
+        continuation_command=_continuation_command(
+            args, page.offset + len(page.rows)
+        ),
+        point_read_hint="`vigil assess finding get <slug>`",
+    )
+
+    if filtered:
+        warn_untrusted_data()
 
     if args.json:
-        print(json.dumps(filtered, indent=2, ensure_ascii=False))
+        print(
+            json.dumps(
+                [compact_finding_list_row(item) for item in filtered],
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
         return
 
     if not filtered:

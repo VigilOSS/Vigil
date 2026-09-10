@@ -46,13 +46,15 @@ class KaliResult:
     transport_error_detail: str = ""
     # W1 WAF/bot-challenge guard. True when the run came back with a real HTTP
     # exchange whose BODY is a vendor interstitial / bot-challenge (Cloudflare
-    # "Just a moment", Akamai "Access Denied", Imperva "Pardon Our Interruption")
-    # or a renamed-marker page whose SHAPE is a JS-only challenge shell behind a
-    # CDN/edge. That body is the WAF's, NOT the origin app's, so the run MUST NOT
+    # "Just a moment", Akamai "Access Denied", Imperva "Pardon Our Interruption"),
+    # a renamed-marker page whose SHAPE is a JS-only challenge shell behind a
+    # CDN/edge, or a hard edge-block envelope. That response is NOT the origin
+    # app's, so the run MUST NOT
     # be recorded as a target verdict (404/patched/gated). Surfaced exactly like
     # ``transport_error`` (out-of-band on the KaliResult, loud stderr, agent-
-    # facing status='waf_challenge') so the agent re-renders the URL with
-    # ``vigil assess kali browser`` to obtain the real origin response. Stays
+    # facing status='waf_challenge') so the agent chooses an evidence-specific
+    # recovery (browser for JS interstitials; route/request/egress correction for
+    # hard blocks) before claiming an origin response. Stays
     # False for a genuine app body and for non-HTTP-prober tools (incl. the
     # browser verb itself, so the recovery path never self-flags into a loop).
     waf_challenge: bool = False
@@ -89,11 +91,11 @@ class KaliResult:
 # negative unless the caller parsed `.status` out of the JSON. These codes put
 # the run's own verdict in `$?`.
 #
-# 0 means "a usable result came back": `completed`, and `waf_challenge` — a WAF
-# challenge IS a complete HTTP exchange (the process exited 0), the body is
-# merely the WAF's rather than the origin's, which is already loud on stderr and
-# in `.status`/`.waf_challenge`, and its documented remedy is to re-render with
-# `kali browser`, not to abort a `&&` chain. Non-zero is reserved for "no
+# 0 means "a usable result came back": `completed`, and `waf_challenge` — a
+# WAF/challenge/edge block IS a complete HTTP exchange (the process exited 0),
+# but not the origin's verdict. Its evidence-specific recovery is already loud
+# on stderr and in `.status`/`.waf_challenge`; it does not abort a `&&` chain.
+# Non-zero is reserved for "no
 # complete output exists to interpret".
 #
 # 1 and 2 are deliberately unused here: `cli.main` exits 1 on an AssessError
@@ -582,8 +584,9 @@ def detect_waf_challenge(
     """Detect a WAF / bot-challenge interstitial in a finished HTTP run.
 
     Returns ``(is_waf_challenge, reason)``. When True, the run produced a real
-    HTTP exchange whose BODY is the WAF's challenge page (not the origin app's
-    response), so its terminal status MUST NOT be read as a target verdict.
+    HTTP exchange whose response shape is a WAF challenge/interstitial or a
+    hard edge-block envelope, not verified application behavior. Its terminal
+    status therefore MUST NOT be read as a target verdict.
 
     Composes the named-vendor-signature pass with the generic challenge-SHAPE
     heuristic. ``headers`` (when a caller has parsed them) is folded into the
@@ -602,6 +605,33 @@ def detect_waf_challenge(
     # markers still substring-match even if the caller did not thread a dict) plus
     # the threaded header text and stderr.
     haystack = f"{raw}\n{header_text}\n{stderr_preview or ''}".lower()
+
+    # A CloudFront-generated S3 403 is an edge response, not an application
+    # verdict. The missing application request id is deliberately part of this
+    # conjunction: CloudFront or AmazonS3 headers alone are ordinary deployment
+    # fingerprints and must never become a universal "WAF present" truth.
+    # ``waf_challenge`` is the established compatibility label for every HTTP
+    # response that must be withheld as a target verdict, including this hard
+    # edge-block envelope (which is not necessarily a browser-solvable JS
+    # challenge).
+    if isinstance(headers, dict):
+        normalized_headers = {
+            str(name).strip().lower(): _flatten_header_value(value).strip()
+            for name, value in headers.items()
+        }
+        server = normalized_headers.get("server", "").lower()
+        cache = normalized_headers.get("x-cache", "").lower()
+        status = extract_http_status(raw, normalized_headers)
+        if (
+            status == 403
+            and ("amazons3" in server or "cloudfront" in server)
+            and "error from cloudfront" in cache
+            and not normalized_headers.get("x-request-id")
+        ):
+            return True, (
+                "CloudFront/S3 edge-block envelope: status=403, "
+                "x-cache=Error from cloudfront, no origin x-request-id"
+            )
 
     for needle, vendor in _WAF_NAMED_SIGNATURES:
         if needle in haystack:

@@ -141,6 +141,9 @@ def _wrapper_output_truth(
     stderr_bytes: int | None,
     stdout_sha256: str | None,
     stderr_sha256: str | None,
+    stdout_preview: str | None,
+    stderr_preview: str | None,
+    existing_row: sqlite3.Row,
 ) -> dict[str, Any]:
     """Columns recording the byte truth a non-host_exec wrapper measured itself.
 
@@ -153,9 +156,32 @@ def _wrapper_output_truth(
     run with real output reads as ``stdout_bytes=0`` / ``empty`` — evidence that
     exists on disk looks destroyed.
 
-    Returns ``{}`` when the wrapper reported nothing, leaving the row untouched
-    rather than guessing.
+    A preview proves that some output was observed but cannot establish its
+    total byte count. Likewise, absent previews and counts are unmeasured, not
+    measured-empty. The byte columns retain their schema defaults in both cases;
+    the retention status carries the distinction without inventing totals or
+    hashes.
     """
+    supplied_output_truth = (
+        stdout_bytes is not None
+        or stderr_bytes is not None
+        or bool(stdout_preview)
+        or bool(stderr_preview)
+    )
+    if not supplied_output_truth:
+        existing_status = str(existing_row["output_retention_status"] or "")
+        existing_has_truth = (
+            existing_status != "empty"
+            or int(existing_row["stdout_bytes"] or 0) > 0
+            or int(existing_row["stderr_bytes"] or 0) > 0
+            or bool(existing_row["stdout_sha256"] or existing_row["stderr_sha256"])
+        )
+        if existing_has_truth:
+            return {}
+        if existing_row["stdout_preview"] or existing_row["stderr_preview"]:
+            return {"output_retention_status": "preview_only"}
+        return {"output_retention_status": "unmeasured"}
+
     fields: dict[str, Any] = {}
     total = 0
     for stream, size, digest in (
@@ -167,13 +193,27 @@ def _wrapper_output_truth(
         fields[f"{stream}_bytes"] = int(size)
         fields[f"{stream}_sha256"] = str(digest or "")
         total += int(size)
-    if not fields:
-        return {}
-    # ``retained``, not ``artifact``: the full bytes live in the wrapper's own
-    # spill named by this row's ``stdout_path``/``stderr_path``, not in a
-    # backend-published verified-output artifact, and ``artifact`` is the status
-    # readers use to mean the latter.
-    fields["output_retention_status"] = "retained" if total else "empty"
+    measured_both_streams = stdout_bytes is not None and stderr_bytes is not None
+    has_preview = bool(
+        stdout_preview
+        or stderr_preview
+        or existing_row["stdout_preview"]
+        or existing_row["stderr_preview"]
+    )
+    if measured_both_streams and total == 0 and has_preview:
+        fields["output_retention_status"] = "measurement_conflict"
+    elif measured_both_streams:
+        # ``retained``, not ``artifact``: the full bytes live in the wrapper's
+        # own spill named by this row's ``stdout_path``/``stderr_path``, not in a
+        # backend-published verified-output artifact, and ``artifact`` is the
+        # status readers use to mean the latter.
+        fields["output_retention_status"] = "retained" if total else "empty"
+    elif stdout_bytes is not None or stderr_bytes is not None:
+        fields["output_retention_status"] = "partially_measured"
+    elif has_preview:
+        fields["output_retention_status"] = "preview_only"
+    else:
+        fields["output_retention_status"] = "unmeasured"
     return fields
 
 
@@ -2025,10 +2065,10 @@ def finalize_command_run(
                 for column, value in retention_fields.items():
                     sets.append(f"{column} = ?")
                     values.append(value)
-            elif stdout_preview is not None:
+            elif stdout_preview:
                 sets.append("stdout_preview = ?")
                 values.append(stdout_preview)
-            if host_stderr_retention is None and stderr_preview is not None:
+            if host_stderr_retention is None and stderr_preview:
                 sets.append("stderr_preview = ?")
                 values.append(stderr_preview)
             if host_stdout_retention is None and host_stderr_retention is None:
@@ -2037,6 +2077,9 @@ def finalize_command_run(
                     stderr_bytes=stderr_bytes,
                     stdout_sha256=stdout_sha256,
                     stderr_sha256=stderr_sha256,
+                    stdout_preview=stdout_preview,
+                    stderr_preview=stderr_preview,
+                    existing_row=existing_row,
                 ).items():
                     sets.append(f"{column} = ?")
                     values.append(value)
@@ -2575,6 +2618,7 @@ def list_command_runs(
     tool_name: str = "",
     tool_bin: str = "",
     target_host: str = "",
+    auth_context: str = "",
     audit_source: str = "",
     route: str = "",
     success: bool | None = None,
@@ -2636,6 +2680,8 @@ def list_command_runs(
         # Case-insensitive exact match against the parsed target_host column.
         # NULL-tolerant (LOWER(NULL) = NULL, which will not match the literal).
         filters.append(("LOWER(r.target_host) = ?", [target_host.strip().lower()]))
+    if auth_context:
+        filters.append(("r.auth_context = ?", [auth_context]))
     if audit_source:
         filters.append(("r.audit_source = ?", [audit_source]))
     if route:
@@ -2665,7 +2711,8 @@ def list_command_runs(
             (
                 "("
                 "r.output_retention_status IN "
-                "('integrity_failure', 'suppression_deferred', 'untrusted') "
+                "('integrity_failure', 'measurement_conflict', 'partially_measured', "
+                "'suppression_deferred', 'untrusted', 'preview_only', 'unmeasured') "
                 "OR r.output_cleanup_status IN ('deferred', 'pending', 'warning') "
                 "OR r.output_integrity_status IN ('pending', 'warning')"
                 ")",

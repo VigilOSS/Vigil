@@ -189,6 +189,44 @@ def test_list_json_redacts_header_and_token_values(tmp_path, monkeypatch, capsys
     assert "SECRET-BEARER-XYZ" not in out
 
 
+def test_last_auth_probe_filters_for_the_requested_identity_server_side() -> None:
+    class _ProbeClient:
+        def __init__(self) -> None:
+            self.gets: list[str] = []
+
+        def get(self, endpoint: str):
+            self.gets.append(endpoint)
+            if "auth_context=cap-target" in endpoint:
+                return [
+                    {
+                        "id": 73,
+                        "auth_context": "cap-target",
+                        "status": "completed",
+                        "intent": "auth liveness probe",
+                        "started_at": "2026-09-09T10:00:00Z",
+                        "completed_at": "2026-09-09T10:00:01Z",
+                    }
+                ]
+            return [
+                {
+                    "id": index,
+                    "auth_context": "another-identity",
+                    "status": "completed",
+                }
+                for index in range(100)
+            ]
+
+    client = _ProbeClient()
+
+    probe = auth_status._last_auth_probe(client, "cap-target")
+
+    assert probe is not None
+    assert probe["run_id"] == 73
+    assert client.gets == [
+        "command-runs?technique=AUTH&auth_context=cap-target&limit=1"
+    ]
+
+
 def test_list_empty_store_renders_placeholder(tmp_path, monkeypatch, capsys):
     fake = _FakeClient(listing={"identities": {}, "active_identity": ""})
     _install(monkeypatch, tmp_path, fake)

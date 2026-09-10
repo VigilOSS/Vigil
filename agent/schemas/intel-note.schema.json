@@ -42,6 +42,24 @@
       "default": "",
       "description": "External source or tool the note summarizes (e.g., 'shodan', 'nuclei-template-xyz', 'github-advisory')."
     },
+    "authored_by": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "description": "Attributed author of this interpretation; the backend fills a visible unknown when unavailable."
+    },
+    "scope": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "description": "Where this interpretation applies (for example engagement, host, surface, or identity). This is knowledge context, never authorization."
+    },
+    "validity_context": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "description": "Attributable prose describing when this interpretation was observed and what would require revalidation."
+    },
     "lead_status": {
       "type": [
         "string",
@@ -73,6 +91,27 @@
         "captured_at": {
           "type": "string",
           "description": "ISO8601 timestamp when this row was written."
+        },
+        "command_run_id": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Command-run audit row that produced this intel."
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "Provenance-specific audit context."
+        },
+        "code_snapshot": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "repo_id": {"type": "integer", "minimum": 1},
+            "repo_generation": {"type": "integer", "minimum": 1},
+            "source_manifest_digest": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"}
+          },
+          "required": ["repo_id", "repo_generation", "source_manifest_digest"],
+          "description": "Immutable source snapshot behind code-derived intel."
         },
         "evidence_quote": {
           "type": "string",

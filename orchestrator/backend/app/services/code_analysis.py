@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -27,6 +28,7 @@ from .state_manager.findings import (
     is_file_finding,
     load_code_repo_snapshot_states,
 )
+from .state_manager import run_accounting
 from .variant_scopes import (
     MAX_VARIANT_PARENT_FINDINGS,
     VARIANT_DISPATCH_ROLE as _VARIANT_DISPATCH_ROLE,
@@ -183,7 +185,7 @@ def _normalize_variant_evidence_ref(engagement_root: str, evidence_ref: str) -> 
 def variant_input_identity_digest(
     *,
     repo: dict[str, Any],
-    file_row: dict[str, Any],
+    file_row: Any,
     parent_finding_slugs: list[str],
 ) -> str:
     payload = {
@@ -491,8 +493,7 @@ def _analysis_result_row(connection, result_id: int) -> Any:
         SELECT
             results.*,
             findings.status AS finding_workflow_status,
-            findings.verification_state AS finding_verification_state,
-            findings.verification_disposition AS finding_verification_disposition
+            findings.verification_status AS finding_verification_status
         FROM code_analysis_results AS results
         LEFT JOIN assessment_findings AS findings
           ON findings.engagement_id = results.engagement_id
@@ -4834,6 +4835,79 @@ def retry_needs_context_queue_items(
 # Analysis Results
 # =========================================================================
 
+def _require_promoted_run_candidate_for_finding_result(
+    connection: sqlite3.Connection,
+    *,
+    engagement_id: int,
+    file_row: dict[str, Any],
+    finding_slug: str | None,
+) -> sqlite3.Row:
+    repository = connection.execute(
+        """
+        SELECT repo_key, active_generation, source_manifest_digest
+        FROM code_repos WHERE engagement_id = ? AND id = ?
+        """,
+        (engagement_id, int(file_row["repo_id"])),
+    ).fetchone()
+    assert repository is not None
+    rows = connection.execute(
+        """
+        SELECT candidates.id, runs.source_generations_json,
+               sources.target_key, sources.path, sources.content_sha256
+        FROM assessment_run_candidates AS candidates
+        JOIN assessment_runs AS runs ON runs.id = candidates.run_id
+        JOIN assessment_run_sources AS sources ON sources.id = candidates.source_id
+        WHERE candidates.engagement_id = ?
+          AND candidates.state = 'promoted'
+          AND candidates.finding_slug = ?
+          AND runs.run_kind = 'code' AND runs.run_purpose = 'scan'
+          AND runs.status IN ('queued', 'running')
+          AND sources.path = ? AND sources.content_sha256 = ?
+          AND sources.target_key = ?
+        ORDER BY candidates.id
+        """,
+        (
+            engagement_id,
+            str(finding_slug or ""),
+            str(file_row["file_path"]),
+            str(file_row["file_hash"]),
+            str(repository["repo_key"]),
+        ),
+    ).fetchall()
+    exact_ids: list[int] = []
+    for row in rows:
+        generation_matches = [
+            generation
+            for generation in json.loads(str(row["source_generations_json"] or "[]"))
+            if isinstance(generation, dict)
+            and str(generation.get("target_key") or "")
+            == str(repository["repo_key"])
+        ]
+        if len(generation_matches) != 1:
+            continue
+        generation = generation_matches[0]
+        if (
+            int(generation.get("generation", -1))
+            == int(repository["active_generation"])
+            and str(generation.get("manifest_digest") or "")
+            == str(repository["source_manifest_digest"])
+        ):
+            exact_ids.append(int(row["id"]))
+    if len(exact_ids) != 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "finding analysis in an active code scan requires exactly one "
+                "promoted candidate bound to the current file and repository generation"
+            ),
+        )
+    candidate = connection.execute(
+        "SELECT * FROM assessment_run_candidates WHERE id = ?",
+        (exact_ids[0],),
+    ).fetchone()
+    assert candidate is not None
+    return candidate
+
 def create_analysis_result(
     engagement_id: int,
     result: dict[str, Any],
@@ -4847,6 +4921,20 @@ def create_analysis_result(
                 f"Invalid disposition '{disposition}'. Must be one of: "
                 f"{', '.join(sorted(_VALID_ANALYSIS_RESULT_DISPOSITIONS))}"
             ),
+        )
+    assessment_run_id = result.get("assessment_run_id")
+    assessment_source_id = result.get("assessment_source_id")
+    if (assessment_run_id is None) != (assessment_source_id is None):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "assessment_run_id and assessment_source_id must be supplied together"
+            ),
+        )
+    if assessment_run_id is not None and disposition != "suspicious":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="run candidate binding is only valid for suspicious analysis results",
         )
     with get_connection() as connection:
         queue_item_id = result.get("queue_item_id")
@@ -4887,6 +4975,28 @@ def create_analysis_result(
             {int(queue_item_id): queue_row},
             action="record analysis results",
         )
+        active_scan = connection.execute(
+            """
+            SELECT id FROM assessment_runs
+            WHERE engagement_id = ? AND run_kind = 'code'
+              AND run_purpose = 'scan' AND status IN ('queued', 'running')
+            ORDER BY id DESC LIMIT 1
+            """,
+            (engagement.id,),
+        ).fetchone()
+        if (
+            disposition == "suspicious"
+            and active_scan is not None
+            and assessment_run_id is None
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "suspicious analysis in an active code scan requires exact "
+                    "assessment_run_id and assessment_source_id candidate binding"
+                ),
+            )
+        finding_run_candidate = None
         if disposition == "finding":
             _require_current_reportable_root_file_finding(
                 connection,
@@ -4894,6 +5004,15 @@ def create_analysis_result(
                 file_row,
                 result.get("finding_slug"),
             )
+            if active_scan is not None:
+                finding_run_candidate = (
+                    _require_promoted_run_candidate_for_finding_result(
+                        connection,
+                        engagement_id=engagement.id,
+                        file_row=file_row,
+                        finding_slug=result.get("finding_slug"),
+                    )
+                )
         fingerprint_payload = {
             key: value
             for key, value in result.items()
@@ -4904,6 +5023,67 @@ def create_analysis_result(
         result_fingerprint = hashlib.sha256(
             _json_text(fingerprint_payload).encode("utf-8")
         ).hexdigest()
+        run_candidate_context: dict[str, Any] | None = None
+        run_candidate_identity = ""
+        if assessment_run_id is not None:
+            repo = connection.execute(
+                """
+                SELECT repo_key, active_generation, source_manifest_digest
+                FROM code_repos WHERE engagement_id = ? AND id = ?
+                """,
+                (engagement.id, int(file_row["repo_id"])),
+            ).fetchone()
+            assert repo is not None
+            function_name = str(result.get("function_name") or "(file)").strip()
+            source_anchor = f"{file_row['file_path']}:{function_name}"
+            # Keep exact queue/run/lease ids in the result provenance, but not in
+            # the identity used to compare the same candidate across later scans.
+            candidate_fingerprint_payload = {
+                key: value
+                for key, value in result.items()
+                if key
+                not in {
+                    "audit_metadata",
+                    "queue_item_id",
+                    "file_id",
+                    "agent_name",
+                    "lease_token",
+                    "assessment_run_id",
+                    "assessment_source_id",
+                }
+            }
+            candidate_fingerprint_payload["cross_file_triggers"] = (
+                normalized_cross_file_triggers
+            )
+            result_identity_fingerprint = hashlib.sha256(
+                _json_text(candidate_fingerprint_payload).encode("utf-8")
+            ).hexdigest()
+            run_candidate_context = {
+                "engagement_id": engagement.id,
+                "run_id": int(assessment_run_id),
+                "source_id": int(assessment_source_id),
+                "result_identity_fingerprint": result_identity_fingerprint,
+                "dispatch_agent_id": agent_name,
+                "target_key": str(repo["repo_key"]),
+                "source_path": str(file_row["file_path"]),
+                "source_sha256": str(file_row["file_hash"]),
+                "repo_generation": int(repo["active_generation"]),
+                "source_manifest_digest": str(repo["source_manifest_digest"]),
+                "source_anchor": source_anchor,
+                "vulnerability_family": str(
+                    result.get("cwe_id") or result.get("slot_type") or "unclassified"
+                ),
+                "hypothesis": str(
+                    result.get("hypothesis") or "suspicious analysis result"
+                ),
+            }
+            run_candidate_identity = run_accounting._analysis_result_candidate_identity(
+                target_key=str(run_candidate_context["target_key"]),
+                source_path=str(run_candidate_context["source_path"]),
+                source_sha256=str(run_candidate_context["source_sha256"]),
+                source_anchor=str(run_candidate_context["source_anchor"]),
+                result_identity_fingerprint=result_identity_fingerprint,
+            )
         cursor = connection.execute(
             """
             UPDATE code_analysis_queue
@@ -4930,7 +5110,36 @@ def create_analysis_result(
         if existing_result is not None:
             row = _analysis_result_row(connection, int(existing_result["id"]))
             assert row is not None
-            return _hydrate_code_analysis_result(row)
+            hydrated = _hydrate_code_analysis_result(row)
+            if assessment_run_id is not None:
+                candidate = connection.execute(
+                    """
+                    SELECT * FROM assessment_run_candidates
+                    WHERE engagement_id = ? AND run_id = ? AND originating_result_id = ?
+                    """,
+                    (engagement.id, int(assessment_run_id), int(row["id"])),
+                ).fetchone()
+                if candidate is None:
+                    candidate = connection.execute(
+                        """
+                        SELECT * FROM assessment_run_candidates
+                        WHERE engagement_id = ? AND run_id = ? AND identity_key = ?
+                        """,
+                        (engagement.id, int(assessment_run_id), run_candidate_identity),
+                    ).fetchone()
+                if candidate is None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="analysis result retry is missing its atomic run candidate",
+                    )
+                hydrated["run_candidate"] = run_accounting._serialize_candidate(
+                    candidate
+                )
+            elif finding_run_candidate is not None:
+                hydrated["run_candidate"] = run_accounting._serialize_candidate(
+                    finding_run_candidate
+                )
+            return hydrated
 
         cursor = connection.execute(
             """
@@ -4969,6 +5178,14 @@ def create_analysis_result(
         )
         row = _analysis_result_row(connection, int(cursor.lastrowid))
         assert row is not None
+        run_candidate = None
+        if assessment_run_id is not None:
+            assert run_candidate_context is not None
+            run_candidate = run_accounting.record_analysis_result_candidate_with_connection(
+                connection,
+                result_id=int(row["id"]),
+                **run_candidate_context,
+            )
         _record_cross_file_triggers(
             connection,
             engagement.id,
@@ -4977,7 +5194,14 @@ def create_analysis_result(
             cross_file_triggers=normalized_cross_file_triggers,
         )
         _sync_file_analysis_status(connection, engagement.id, int(file_row["id"]))
-        return _hydrate_code_analysis_result(row)
+        hydrated = _hydrate_code_analysis_result(row)
+        if run_candidate is not None:
+            hydrated["run_candidate"] = run_candidate
+        elif finding_run_candidate is not None:
+            hydrated["run_candidate"] = run_accounting._serialize_candidate(
+                finding_run_candidate
+            )
+        return hydrated
 
 
 def list_analysis_results(
@@ -5010,8 +5234,7 @@ def list_analysis_results(
         SELECT
             results.*,
             findings.status AS finding_workflow_status,
-            findings.verification_state AS finding_verification_state,
-            findings.verification_disposition AS finding_verification_disposition,
+            findings.verification_status AS finding_verification_status,
             files.file_path AS file_path
         FROM code_analysis_results AS results
         LEFT JOIN assessment_findings AS findings
@@ -5049,11 +5272,10 @@ def _current_variant_parent_rows_by_repo(
     reportable_statuses = sorted(_REPORTABLE_FINDING_STATUSES)
     status_placeholders = ",".join("?" for _ in reportable_statuses)
     lifecycle_clause = (
-        "AND findings.verification_state = 'verified' "
-        "AND findings.verification_disposition IN ('confirmed', 'downgraded')"
+        "AND findings.verification_status IN ('confirmed', 'downgraded')"
         if report_durable_only
         else (
-            "AND COALESCE(findings.verification_disposition, 'none') "
+            "AND COALESCE(findings.verification_status, 'unreviewed') "
             "NOT IN ('blocked', 'false_positive')"
         )
     )
@@ -6759,7 +6981,7 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                 SELECT *
                 FROM assessment_findings
                 WHERE engagement_id = ? AND status = 'draft'
-                  AND COALESCE(verification_disposition, '') != 'blocked'
+                  AND COALESCE(verification_status, '') != 'blocked'
                 ORDER BY slug
                 """,
                 (engagement.id,),
@@ -6818,11 +7040,8 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                 repo_id: [
                     str(row["slug"])
                     for row in rows
-                    if not (
-                        str(row["verification_state"] or "") == "verified"
-                        and str(row["verification_disposition"] or "")
-                        in {"confirmed", "downgraded", "pending_runtime_proof"}
-                    )
+                    if str(row["verification_status"] or "")
+                    not in {"confirmed", "downgraded", "pending_runtime_proof"}
                 ]
                 for repo_id, rows in phase2_parent_rows_by_repo.items()
             }
@@ -7241,7 +7460,7 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                       'active', 'blocked', 'exploited', 'contained',
                       'eradicated', 'recovered', 'reported'
                   )
-                  AND verification_disposition != 'blocked'
+                  AND verification_status != 'blocked'
                 """,
                 (engagement.id,),
             ).fetchall()
@@ -7265,13 +7484,14 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                 row
                 for row, snapshot_status in finding_snapshot_statuses
                 if snapshot_status == "current"
-                and str(row["verification_state"] or "") != "verified"
+                and str(row["verification_status"] or "")
+                not in {"confirmed", "downgraded", "false_positive"}
             ]
             blind_triage_findings = [
                 row
                 for row, snapshot_status in finding_snapshot_statuses
                 if snapshot_status == "current"
-                and str(row["verification_disposition"] or "")
+                and str(row["verification_status"] or "")
                 not in {"confirmed", "downgraded"}
             ]
         if stale_findings:

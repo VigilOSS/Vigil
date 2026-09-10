@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from app import db as db_module
+from tests.proof_fixtures import post_artifact_backed_source_observation
 
 
 ENGAGEMENT_KEY = "2026-07-20-120000-merge-integrity"
@@ -47,6 +48,15 @@ def _seed_engagement(client, isolate_settings, key: str = ENGAGEMENT_KEY) -> Non
     _write_engagement(isolate_settings["engagements_dir"], key)
     response = client.get("/engagements")
     assert response.status_code == 200, response.text
+    dispatch = client.post(
+        f"/engagements/{key}/assessment/dispatches",
+        json={
+            "agent_id": "test-agent",
+            "agent_role": "finding-author",
+            "task": "Author merge-integrity fixtures.",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
 
 
 def _create_finding(client, slug: str, *, key: str = ENGAGEMENT_KEY) -> dict:
@@ -57,8 +67,7 @@ def _create_finding(client, slug: str, *, key: str = ENGAGEMENT_KEY) -> dict:
             "title": f"Finding {slug}",
             "severity": "low",
             "workflow_status": "active",
-            "verification_state": "verified",
-            "verification_disposition": "confirmed",
+            "verification_status": "unreviewed",
             "defect_family": "merge-integrity",
             "auth_context": "anonymous",
             "canonical_location": f"https://merge.example/{slug.lower()}",
@@ -66,7 +75,7 @@ def _create_finding(client, slug: str, *, key: str = ENGAGEMENT_KEY) -> dict:
             "evidence_ref": f"evidence/{slug.lower()}.json",
             "source_name": "test-agent",
             "details": {"evidence": "proof", "impact": "impact"},
-            "provenance": {"agent_name": "test-agent"},
+            "provenance": {"agent_name": "test-agent", "agent_id": "test-agent"},
             "links": [],
         },
     )
@@ -86,6 +95,55 @@ def _merge(client, source_slug: str, target_slug: str):
     )
 
 
+def _confirm_finding(client, slug: str) -> dict:
+    verifier_id = f"merge-verifier-{slug.lower()}"
+    dispatch = client.post(
+        f"{ASSESSMENT_BASE}/dispatches",
+        json={
+            "agent_id": verifier_id,
+            "agent_role": "merge-verifier",
+            "task": f"Independently verify {slug}.",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
+    run = client.post(
+        f"{ASSESSMENT_BASE}/assessment-runs",
+        json={
+            "run_uuid": f"merge-proof-{slug.lower()}",
+            "run_kind": "shared",
+            "producer_dispatch_agent_id": verifier_id,
+        },
+    )
+    assert run.status_code == 201, run.text
+    receipt = post_artifact_backed_source_observation(
+        client,
+        f"{ASSESSMENT_BASE}/proof-receipts",
+        json={
+            "run_id": run.json()["id"],
+            "evidence_kind": "source_observation",
+            "expected_result": "The reported behavior follows from the recorded evidence.",
+            "observed_result": "Independent review confirmed the reported behavior.",
+        },
+    )
+    assert receipt.status_code == 201, receipt.text
+    completed = client.patch(
+        f"{ASSESSMENT_BASE}/assessment-runs/{run.json()['id']}",
+        json={"status": "completed"},
+    )
+    assert completed.status_code == 200, completed.text
+    verified = client.post(
+        f"{ASSESSMENT_BASE}/findings/{slug}/verify",
+        json={
+            "verification_status": "confirmed",
+            "reason_text": "Independent review confirmed the finding.",
+            "source_name": "merge-verifier",
+            "proof_receipt_ids": [receipt.json()["id"]],
+        },
+    )
+    assert verified.status_code == 200, verified.text
+    return verified.json()["finding"]
+
+
 # Both vectors compute EXACTLY the score they are paired with below — the
 # write-time cvss_score<->cvss_vector check rejects a fixture that does not.
 _HIGH_VECTOR = "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N"  # 8.1
@@ -101,8 +159,6 @@ def _create_cvss_finding(
     cvss_vector: str,
     impact: str,
     workflow_status: str = "active",
-    verification_state: str = "verified",
-    verification_disposition: str = "confirmed",
     key: str = ENGAGEMENT_KEY,
 ) -> dict:
     """Create a finding carrying flat CVSS/impact details_json keys."""
@@ -113,8 +169,7 @@ def _create_cvss_finding(
             "title": f"Finding {slug}",
             "severity": severity,
             "workflow_status": workflow_status,
-            "verification_state": verification_state,
-            "verification_disposition": verification_disposition,
+            "verification_status": "unreviewed",
             "defect_family": "merge-integrity",
             "auth_context": "anonymous",
             "canonical_location": f"https://merge.example/{slug.lower()}",
@@ -127,7 +182,7 @@ def _create_cvss_finding(
                 "impact": impact,
                 "evidence": "proof",
             },
-            "provenance": {"agent_name": "test-agent"},
+            "provenance": {"agent_name": "test-agent", "agent_id": "test-agent"},
             "links": [],
         },
     )
@@ -301,15 +356,16 @@ def test_merge_progressed_low_severity_source_keeps_canonical_high_cvss(
     _create_cvss_finding(
         client, "MI-405",
         severity="high", cvss_score=8.1, cvss_vector=_HIGH_VECTOR, impact="Full account takeover",
-        workflow_status="active", verification_state="unreviewed", verification_disposition="none",
+        workflow_status="active",
     )
     # Source: more-progressed (verified/confirmed) but only MEDIUM -> source_stronger by confidence,
     # even though its severity is lower.
     _create_cvss_finding(
         client, "MI-406",
         severity="medium", cvss_score=5.3, cvss_vector=_MEDIUM_VECTOR, impact="Limited disclosure",
-        workflow_status="active", verification_state="verified", verification_disposition="confirmed",
+        workflow_status="active",
     )
+    _confirm_finding(client, "MI-406")
 
     response = _merge(client, "MI-406", "MI-405")
     assert response.status_code == 200, response.text
@@ -608,8 +664,7 @@ def _create_finding_with_details(client, slug: str, *, severity: str, details: d
             "title": f"Finding {slug}",
             "severity": severity,
             "workflow_status": "active",
-            "verification_state": "verified",
-            "verification_disposition": "confirmed",
+            "verification_status": "unreviewed",
             "defect_family": "merge-integrity",
             "auth_context": "anonymous",
             "canonical_location": f"https://merge.example/{slug.lower()}",
@@ -617,7 +672,7 @@ def _create_finding_with_details(client, slug: str, *, severity: str, details: d
             "evidence_ref": f"evidence/{slug.lower()}.json",
             "source_name": "test-agent",
             "details": details,
-            "provenance": {"agent_name": "test-agent"},
+            "provenance": {"agent_name": "test-agent", "agent_id": "test-agent"},
             "links": [],
         },
     )
@@ -713,6 +768,27 @@ def test_merge_completes_over_a_legacy_cvss_defect_and_reports_it(
     warning = body["warnings"][0]
     assert expected_in_warning in warning
     assert "vigil assess finding update CV-903" in warning
+
+    # Merge correctly invalidates prior verification because it materially
+    # changes the target. Reconstruct the reportable legacy state through the
+    # real proof-backed verification path, then restore the historical defect
+    # that no public write contract permits.
+    repaired = {
+        **stored,
+        "cvss_score": 8.1,
+        "cvss_vector": _HIGH_VECTOR,
+    }
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_findings SET details_json = ? WHERE slug = ?",
+            (json.dumps(repaired), "CV-903"),
+        )
+    _confirm_finding(client, "CV-903")
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_findings SET details_json = ? WHERE slug = ?",
+            (json.dumps(stored), "CV-903"),
+        )
 
     # The backstop that actually keeps it out of a submission is still armed.
     blockers = client.get(f"{ASSESSMENT_BASE}/report-readiness").json()["blockers"]

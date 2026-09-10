@@ -475,15 +475,46 @@ class _FakeIngestClient:
             records = []
             for item in payload.get("items", []):
                 self.posts.append(("request-observations", item))
-                records.append({"request_variant": {"id": 1 + len(self.posts)}, "service": {"id": 7}})
+                records.append(self._observation_receipt(item, 1 + len(self.posts)))
             return {"count": len(records), "records": records}
         if endpoint == "coverage-items/bulk":
+            records = []
             for item in payload.get("items", []):
                 self.posts.append(("coverage-items", item))
-            return {"count": len(payload.get("items", [])), "records": payload.get("items", [])}
+                records.append(self._coverage_receipt(item, 1 + len(self.posts)))
+            return {"count": len(records), "records": records}
         self.posts.append((endpoint, payload))
-        # Return a request_variant id so ingest treats it as admitted.
-        return {"request_variant": {"id": 1 + len(self.posts)}, "service": {"id": 7}}
+        if endpoint == "request-observations":
+            return self._observation_receipt(payload, 1 + len(self.posts))
+        if endpoint == "coverage-items":
+            return self._coverage_receipt(payload, 1 + len(self.posts))
+        return {}
+
+    @staticmethod
+    def _observation_receipt(item: dict, row_id: int) -> dict:
+        return {
+            "request_variant": {
+                "id": row_id,
+                "method": str(item.get("method") or "GET").upper(),
+            },
+            "request_observation": {
+                "id": row_id,
+                "request_variant_id": row_id,
+                "observed_url": item.get("url"),
+            },
+            "service": {"id": 7},
+        }
+
+    @staticmethod
+    def _coverage_receipt(item: dict, row_id: int) -> dict:
+        return {
+            "id": row_id,
+            "request_variant_id": item.get("request_variant_id"),
+            "service_id": item.get("service_id"),
+            "auth_context": item.get("auth_context", "anonymous"),
+            "input_slot": item.get("input_slot", "endpoint"),
+            "attack_family": item.get("attack_family"),
+        }
 
     def close(self) -> None:
         self.closed = True

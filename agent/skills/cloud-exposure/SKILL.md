@@ -121,6 +121,7 @@ vigil assess agent start-swarm \
     --items-file /engagements/$ENGAGEMENT_KEY/scans/cloud-exposure/<bucket>-sources.txt \
     --skills code-vulnerability-analysis \
     --model gpt-5.6 --reasoning low \
+    --rate-budget "<exact operator-authored bucket request budget>" \
     --task "download each file in this batch from <bucket>, scan for hardcoded credentials, API keys, internal hostnames, exploitable patterns; record findings as code-vuln-hunter prefix"
 ```
 

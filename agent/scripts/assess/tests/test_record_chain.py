@@ -19,6 +19,8 @@ import argparse
 import json
 import re
 
+import pytest
+
 from assess.commands import record_chain
 
 
@@ -153,3 +155,52 @@ def test_record_chain_short_title_event_unchanged(tmp_path, monkeypatch, capsys)
     event = fake_client.events[0]
     assert event["task_name"] == full_chain_key
     assert event["summary"] == f"Attack chain recorded: {full_chain_key}"
+
+
+def test_record_chain_rejects_noncanonical_chain_key_receipt(
+    tmp_path, monkeypatch, capsys
+):
+    title = "Chain with an unusable receipt"
+    json_file = _write_chain(tmp_path, title)
+
+    class _WhitespaceKeyClient(_FakeClient):
+        def post(self, endpoint: str, payload: dict) -> dict:
+            self.posts.append((endpoint, payload))
+            return {"chain": {"chain_key": "   "}}
+
+    fake_client = _WhitespaceKeyClient()
+    monkeypatch.setattr(record_chain, "load_config", lambda *a, **k: _Cfg())
+    monkeypatch.setattr(record_chain, "AssessmentClient", lambda *a, **k: fake_client)
+
+    with pytest.raises(SystemExit) as exc:
+        record_chain.run(_record_chain_ns(json_file, str(tmp_path)))
+
+    assert exc.value.code == 1
+    error = capsys.readouterr().err
+    assert "canonical chain key" in error
+    assert "write may have committed" in error
+    assert "do not retry automatically" in error
+    assert fake_client.events == []
+
+
+def test_record_chain_rejects_wrong_nonempty_generated_chain_key(
+    tmp_path, monkeypatch, capsys
+):
+    title = "Chain whose receipt points at another row"
+    json_file = _write_chain(tmp_path, title)
+
+    class _WrongKeyClient(_FakeClient):
+        def post(self, endpoint: str, payload: dict) -> dict:
+            self.posts.append((endpoint, payload))
+            return {"chain": {"chain_key": "different-chain"}}
+
+    fake_client = _WrongKeyClient()
+    monkeypatch.setattr(record_chain, "load_config", lambda *a, **k: _Cfg())
+    monkeypatch.setattr(record_chain, "AssessmentClient", lambda *a, **k: fake_client)
+
+    with pytest.raises(SystemExit) as exc:
+        record_chain.run(_record_chain_ns(json_file, str(tmp_path)))
+
+    assert exc.value.code == 1
+    assert "canonical chain key" in capsys.readouterr().err
+    assert fake_client.events == []

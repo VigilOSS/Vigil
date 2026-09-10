@@ -43,14 +43,14 @@ unevidenced consumer-specific attacker outcome out of the claim.
 
 When you capture credentials, tokens, or keys — **use them**. Extract the token, replay it, show what it unlocks. If replay fails, say why (expiry, IP binding, CSRF token required) and mark the finding CHAIN REQUIRED with the specific gap.
 
-A strong-but-unproven finding is parked, not dropped: hold it with `evidence_type=theoretical` + `chain_required=true` at `verification_disposition=pending_runtime_proof` (see `agent/operator-core.md`), and review the holding area with `vigil assess finding list --holding`. It stays out of the report until a runtime pass proves it.
+A strong-but-unproven finding is parked, not dropped: hold it with `evidence_type=theoretical` + `chain_required=true` at `verification_status=pending_runtime_proof` (see `agent/operator-core.md`), and review the holding area with `vigil assess finding list --holding`. It stays out of the report until a runtime pass proves it.
 
 A deterministic code-mode proof through a supported product path is not "unproven" merely because
 an embedding consumer is unavailable. Record the bounded intrinsic defect under
 `shared-constraints-code.md` §5; park it only when the invariant failure or feasible harm is itself
 still unproved.
 
-**Recording a finding is not grading it.** A finding at `verification_state=unreviewed` is an **open question**, not a graded N/A — the lifecycle default means "not yet judged," not "judged harmless." Do not assert "no P2 here" / "this surface is clean" while any unauth or medium-plus finding is still `unreviewed`: an unreviewed finding is exactly what a clean-bill-of-health claim is supposed to have already resolved. Drive it to a verifier disposition before you grade the surface.
+**Recording a finding is not grading it.** A finding at `verification_status=unreviewed` is an **open question**, not a graded N/A — the lifecycle default means "not yet judged," not "judged harmless." Do not assert "no P2 here" / "this surface is clean" while any unauth or medium-plus finding is still `unreviewed`: an unreviewed finding is exactly what a clean-bill-of-health claim is supposed to have already resolved. Drive it to a verifier decision before you grade the surface.
 
 ### ROE-blocked: a candidate, not a severity downgrade
 

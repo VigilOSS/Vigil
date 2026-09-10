@@ -24,8 +24,11 @@ from __future__ import annotations
 import argparse
 import json
 
+import pytest
+
 from assess.commands import ingest_endpoints
 from assess.commands.dispatch import work_items as wi
+from assess.lib.client import AssessError
 
 from _fake_client import FakeAssessmentClient
 
@@ -73,6 +76,28 @@ def _install(monkeypatch, tmp_path, fake: FakeAssessmentClient) -> None:
     monkeypatch.setattr(
         ingest_endpoints, "AssessmentClient", lambda *a, **k: fake
     )
+
+
+def test_ingest_endpoints_rejects_noncanonical_observation_receipt(
+    tmp_path, monkeypatch
+) -> None:
+    input_file = tmp_path / "endpoints.txt"
+    input_file.write_text("https://target.example/one\n", encoding="utf-8")
+
+    class InvalidReceiptClient(FakeAssessmentClient):
+        def post(self, endpoint: str, payload: dict) -> dict:
+            response = super().post(endpoint, payload)
+            if endpoint == "request-observations/bulk":
+                response["records"] = [{"request_variant": {"id": 1}}]
+            return response
+
+    fake = InvalidReceiptClient()
+    _install(monkeypatch, tmp_path, fake)
+
+    with pytest.raises(AssessError, match="request observation.*may have committed") as exc:
+        ingest_endpoints.run(_ingest_ns(str(input_file), str(tmp_path)))
+
+    assert "do not retry automatically" in str(exc.value)
 
 
 def test_ingest_endpoints_persists_content_type_and_survives_retype(

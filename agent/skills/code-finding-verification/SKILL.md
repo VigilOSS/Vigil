@@ -480,7 +480,7 @@ pending_runtime_proof, state exactly which runtime proof is still owed>
 Register it on the verify call so it links to the finding:
 
 ```bash
-vigil assess finding verify <slug> --disposition pending_runtime_proof \
+vigil assess finding verify <slug> --status pending_runtime_proof \
   --reason "static evidence accepted; runtime PoC outstanding" \
   --narrative notes/<slug>-debate.md
 ```
@@ -489,7 +489,7 @@ vigil assess finding verify <slug> --disposition pending_runtime_proof \
 `related_finding_slug=<slug>`; retrieve later with
 `vigil assess artifact search --finding <slug> --kind verification-narrative`.
 
-### Kill Reason Format (for audit trail)
+### Structured Counter-Check Format (for audit trail)
 
 Every killed finding must record a specific, verifiable kill reason:
 
@@ -511,12 +511,15 @@ Examples:
   rejection. The `ENSURE_SIZE` macro at parser.c:89 expands to a bounds check, and every applicable
   shipped product caller reaches that macro before the vulnerable arithmetic."
 
-When you persist a false positive in structured finding state, include:
-- `details.kill_check` — integer 1-5 for the failed verification check
-- `details.kill_reason` — concise verifier rationale suitable for later query/reporting
-- Use `vigil assess finding verify <slug> --disposition false_positive ...` when you already have the kill rationale in hand, because it enforces the required false-positive fields before the request leaves the CLI
-- Use `vigil assess finding verify <slug> --disposition <verdict> --reason "<rationale>"` for confirm/downgrade/dispute flows, or `--payload-file <path>` when the verification payload already exists on disk, because the verification transition belongs in the audit ledger rather than a generic finding patch
-- Use `vigil assess finding update <slug> --status draft ...` when new evidence disproves an earlier verified or false-positive verdict, because reopening is its own lifecycle transition and should clear the prior verification state instead of patching fields by hand
+When you persist a false positive, write `counter-check.json` with `method`,
+`expected_result`, `observed_result`, `falsified_claim`, `completed: true`, and
+`proof_receipt_ids`, then use `vigil assess finding verify <slug> --status false_positive
+--counter-check-file counter-check.json --reason "<rationale>"`. If the counter-check
+could not run, record `blocked` or `pending_runtime_proof`, never `false_positive`.
+Use `finding verify --status <verdict> --reason "<rationale>"` for other flows;
+terminal decisions include `--proof-receipt-id`. Use `finding update <slug> --status
+draft ...` when new evidence disproves a prior decision so the audited invalidation
+returns it to `verification_status=unreviewed`.
 
 ## Output Format
 

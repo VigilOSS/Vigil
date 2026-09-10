@@ -54,7 +54,7 @@ Consume Phase 1-3 artifacts and rank functions for fuzzing value.
 - Findings: `vigil assess fetch findings` — filter for `defect_family` in `buffer-overflow`,
   `format-string`, `integer-overflow`, `null-dereference`, `type-confusion`,
   `uninitialized-memory`, or `use-after-free`.
-  Check `verification_state` for Phase 3 confirmation status.
+  Check `verification_status` for Phase 3 confirmation status.
 - File classifications: `vigil assess fetch "code/files?repo_id=<id>&limit=5000"` —
   `classification`, `slot_types`, `role`, `language` per file. Target critical/high C/C++ files
   with `NETWORK-INPUT`, `FILE-CONTENT`, `PROTOCOL-FIELD`, or `SERIALIZED-DATA` slot types.

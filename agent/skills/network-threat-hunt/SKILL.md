@@ -137,7 +137,7 @@ either hit the wrong index or silently miss data outside retention.
 
 - Extend the L1 handoff's `time_window_utc` backward 30 days
   (`triage.md` rule 6). Store as `[T-30d, trigger_end]` in
-  `details_json.network_window_utc`.
+  `details.network_window_utc`.
 - For each implicated `src_ip`/`src_subnet`, dump firewall + proxy
   slice for that window via SIEM. Example SPL:
 
@@ -155,7 +155,7 @@ either hit the wrong index or silently miss data outside retention.
 **Evidence.** `fw_<src_ip>_<window>.csv`,
 `proxy_<src_ip>_<window>.csv`, optional `pcap_<src_ip>_<window>.pcap`.
 Record byte count, flow count, retention window in
-`details_json.coverage`.
+`details.coverage`.
 
 **False-positive class.** Retention < 30 days hides long-jitter
 beacons. Document in `coverage_gaps[]`, do not pretend the window is
@@ -442,7 +442,7 @@ The L2 disposition feeds the verifier's five-check. Pick from
 - `escalated` — partial signal that needs endpoint corroboration.
   Chain to `agent/skills/edr-alert-triage/SKILL.md` with the
   implicated `src_ip` → `src_host` mapping; record the EDR finding
-  slug as a sibling in `details_json.cross_skill_correlation_ids[]`.
+  slug as a sibling in `details.cross_skill_correlation_ids[]`.
 
 ## Activity Log Convention
 

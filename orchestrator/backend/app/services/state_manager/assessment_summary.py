@@ -143,23 +143,13 @@ def _build_assessment_summary(engagement_id: int) -> dict[str, Any]:
             """,
             (engagement_id,),
         ).fetchall()
-        verification_state_rows = connection.execute(
+        verification_status_rows = connection.execute(
             """
-            SELECT verification_state, COUNT(*) AS total
+            SELECT verification_status, COUNT(*) AS total
             FROM assessment_findings
             WHERE engagement_id = ?
-            GROUP BY verification_state
-            ORDER BY verification_state ASC
-            """,
-            (engagement_id,),
-        ).fetchall()
-        verification_disposition_rows = connection.execute(
-            """
-            SELECT verification_disposition, COUNT(*) AS total
-            FROM assessment_findings
-            WHERE engagement_id = ?
-            GROUP BY verification_disposition
-            ORDER BY verification_disposition ASC
+            GROUP BY verification_status
+            ORDER BY verification_status ASC
             """,
             (engagement_id,),
         ).fetchall()
@@ -182,7 +172,7 @@ def _build_assessment_summary(engagement_id: int) -> dict[str, Any]:
         ).fetchall()
         top_findings = connection.execute(
             """
-            SELECT slug, title, severity, status, verification_state, verification_disposition, canonical_location, summary, source_name, updated_at
+            SELECT slug, title, severity, status, verification_status, canonical_location, summary, source_name, updated_at
             FROM assessment_findings
             WHERE engagement_id = ?
               AND status NOT IN ('merged', 'false_positive')
@@ -272,9 +262,9 @@ def _build_assessment_summary(engagement_id: int) -> dict[str, Any]:
         "coverage_statuses": {row["status"]: int(row["total"]) for row in coverage_rows},
         "coverage_by_reachability": coverage_rollup(engagement_id),
         "finding_workflow_statuses": {row["status"]: int(row["total"]) for row in finding_rows},
-        "finding_verification_states": {row["verification_state"]: int(row["total"]) for row in verification_state_rows},
-        "finding_verification_dispositions": {
-            row["verification_disposition"]: int(row["total"]) for row in verification_disposition_rows
+        "finding_verification_statuses": {
+            row["verification_status"]: int(row["total"])
+            for row in verification_status_rows
         },
         "top_surfaces": [dict(row) for row in top_surfaces],
         "top_findings": [_serialize_finding_record(row) for row in top_findings],

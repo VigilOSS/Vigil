@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessmentClient, require_write_result
 from assess.lib.config import load_config
 
 
@@ -62,7 +62,18 @@ def run(args) -> None:
     cfg = load_config(args.engagement_dir)
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.post('code/threat-model', payload)
+    require_write_result(
+        result,
+        operation="record code threat model",
+        expected={
+            "id": int(args.repo_id),
+            "active_generation": repo_generation,
+            "threat_model_generation": repo_generation,
+            "source_manifest_digest": source_manifest_digest,
+            "threat_model": threat_model,
+        },
+        positive_ids=("id",),
+    )
 
-    tm_id = result.get('id') or result.get('threat_model_id', '')
-    print(f"Threat model recorded for repo {args.repo_id} (id: {tm_id})")
+    print(f"Threat model recorded for repo {args.repo_id} (id: {result['id']})")
     print(json.dumps(result, indent=2, ensure_ascii=False))

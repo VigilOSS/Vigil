@@ -16,7 +16,11 @@ from __future__ import annotations
 
 import argparse
 
+import pytest
+
 from assess.commands.dispatch import work_items as wi
+from assess.lib.client import AssessError
+from assess.lib.surface_links import create_surface_request_variant_link
 from _fake_client import FakeAssessmentClient
 
 
@@ -72,6 +76,27 @@ def _ns(
         relation=relation,
         link_evidence_ref=link_evidence_ref,
     )
+
+
+def test_surface_link_helper_rejects_response_for_a_different_relation() -> None:
+    class _MismatchedClient:
+        def post(self, _endpoint: str, _payload: dict) -> dict:
+            return {
+                "id": 71,
+                "surface_id": 9,
+                "request_variant_id": 42,
+                "relation": "different",
+            }
+
+    with pytest.raises(AssessError, match="link surface 9 to request variant 42") as exc:
+        create_surface_request_variant_link(
+            _MismatchedClient(),
+            surface_id=9,
+            request_variant_id=42,
+            relation="supports",
+        )
+
+    assert "do not retry automatically" in str(exc.value)
 
 
 def test_link_by_cluster_creates_one_link_per_request_variant(tmp_path, capsys):

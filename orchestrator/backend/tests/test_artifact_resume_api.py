@@ -56,12 +56,28 @@ def _register_note(client, path: str, **kwargs) -> dict:
     return response.json()
 
 
+def _author_finding(client, slug: str) -> str:
+    author_id = f"artifact-author-{slug.lower()}"
+    author = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": author_id,
+            "agent_role": "vulnerability-analyst",
+            "task": f"record {slug}",
+        },
+    )
+    assert author.status_code == 201, author.text
+    return author_id
+
+
 def _seed_finding(client, eng: Path, slug: str = "VA-047") -> None:
     (eng / "notes").mkdir(parents=True, exist_ok=True)
     (eng / "notes" / "VA-047-note.md").write_text(
         "VA-047 exploit chronology and OIDC static state notes",
         encoding="utf-8",
     )
+    evidence_artifact = _register_note(client, "notes/VA-047-note.md")
+    author_id = _author_finding(client, slug)
     response = client.post(
         f"{BASE}/findings",
         json={
@@ -69,12 +85,12 @@ def _seed_finding(client, eng: Path, slug: str = "VA-047") -> None:
             "title": "OIDC static state replay",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "verified",
-            "verification_disposition": "confirmed",
+            "verification_status": "unreviewed",
             "canonical_location": "https://example.com/login",
             "summary": "Static state can be replayed",
             "evidence_ref": "notes/VA-047-note.md",
             "source_name": "vulnerability-analyst",
+            "provenance": {"agent_id": author_id},
             "details": {
                 "cvss_score": 8.1,
                 "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
@@ -86,6 +102,54 @@ def _seed_finding(client, eng: Path, slug: str = "VA-047") -> None:
         },
     )
     assert response.status_code == 201, response.text
+    _verify_finding(client, slug, artifact_id=int(evidence_artifact["id"]))
+
+
+def _verify_finding(client, slug: str, *, artifact_id: int) -> None:
+    verifier_id = f"artifact-verifier-{slug.lower()}"
+    dispatch = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": verifier_id,
+            "agent_role": "code-vuln-verifier",
+            "task": f"independently verify {slug}",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
+    run = client.post(
+        f"{BASE}/assessment-runs",
+        json={
+            "run_uuid": f"artifact-proof-{slug.lower()}",
+            "run_kind": "web",
+            "producer_dispatch_agent_id": verifier_id,
+        },
+    )
+    assert run.status_code == 201, run.text
+    receipt = client.post(
+        f"{BASE}/proof-receipts",
+        json={
+            "run_id": run.json()["id"],
+            "evidence_kind": "artifact",
+            "artifact_id": artifact_id,
+            "expected_result": "the finding evidence remains attributable and readable",
+            "observed_result": "the independently reviewed evidence supports the finding",
+        },
+    )
+    assert receipt.status_code == 201, receipt.text
+    completed = client.patch(
+        f"{BASE}/assessment-runs/{run.json()['id']}",
+        json={"status": "completed"},
+    )
+    assert completed.status_code == 200, completed.text
+    verified = client.post(
+        f"{BASE}/findings/{slug}/verify",
+        json={
+            "verification_status": "confirmed",
+            "reason_text": "independent artifact review confirmed the finding",
+            "proof_receipt_ids": [receipt.json()["id"]],
+        },
+    )
+    assert verified.status_code == 200, verified.text
 
 
 def test_artifact_register_search_and_get(client, isolate_settings) -> None:
@@ -126,6 +190,70 @@ def test_artifact_register_search_and_get(client, isolate_settings) -> None:
     # The explicitly finding-linked artifact must rank ahead of the incidental
     # name-only match.
     assert by_finding.json()[0]["relative_path"] == "notes/VA-047-note.md"
+
+
+def test_artifact_search_indexes_text_beyond_legacy_16k_boundary(
+    client, isolate_settings
+) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    note = eng / "notes" / "long-knowledge.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text(
+        "ordinary-prefix " * 1400 + " tail-only-recovery-marker\n",
+        encoding="utf-8",
+    )
+
+    registered = client.post(
+        f"{BASE}/artifacts", json={"path": "notes/long-knowledge.md"}
+    )
+    assert registered.status_code == 201, registered.text
+    assert registered.json()["index_status"] == "complete"
+
+    search = client.get(
+        f"{BASE}/artifacts/search", params={"q": "tail-only-recovery-marker"}
+    )
+    assert search.status_code == 200, search.text
+    assert [row["relative_path"] for row in search.json()] == [
+        "notes/long-knowledge.md"
+    ]
+
+
+def test_artifact_refresh_rebuilds_a_legacy_partial_text_index(
+    client, isolate_settings
+) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    note = eng / "notes" / "legacy-partial.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("prefix " * 3000 + " refresh-tail-marker\n", encoding="utf-8")
+    registered = client.post(
+        f"{BASE}/artifacts", json={"path": "notes/legacy-partial.md"}
+    )
+    assert registered.status_code == 201, registered.text
+
+    with sqlite3.connect(str(db_module.database_path())) as connection:
+        connection.execute(
+            "UPDATE assessment_artifacts SET indexed_text = substr(indexed_text, 1, 16384) "
+            "WHERE id = ?",
+            (registered.json()["id"],),
+        )
+
+    before = client.get(
+        f"{BASE}/artifacts/search", params={"q": "refresh-tail-marker"}
+    )
+    assert before.status_code == 200, before.text
+    assert before.json() == []
+
+    refreshed = client.post(f"{BASE}/artifacts/refresh")
+    assert refreshed.status_code == 200, refreshed.text
+    after = client.get(
+        f"{BASE}/artifacts/search", params={"q": "refresh-tail-marker"}
+    )
+    assert after.status_code == 200, after.text
+    assert [row["relative_path"] for row in after.json()] == [
+        "notes/legacy-partial.md"
+    ]
 
 
 def test_resume_brief_artifacts_omit_indexed_text(client, isolate_settings) -> None:
@@ -180,6 +308,9 @@ def test_artifact_refresh_updates_missing_registered_files(client, isolate_setti
 
     search = client.get(f"{BASE}/artifacts/search", params={"q": "OIDC"})
     artifact_id = next(row["id"] for row in search.json() if row["relative_path"] == "notes/VA-047-note.md")
+    original = client.get(f"{BASE}/artifacts/{artifact_id}").json()
+    assert original["sha256"]
+    assert original["size_bytes"] > 0
     (eng / "notes" / "VA-047-note.md").unlink()
 
     readiness_before = client.get(f"{BASE}/report-readiness")
@@ -192,7 +323,25 @@ def test_artifact_refresh_updates_missing_registered_files(client, isolate_setti
 
     detail = client.get(f"{BASE}/artifacts/{artifact_id}")
     assert detail.status_code == 200, detail.text
-    assert detail.json()["present"] is False
+    missing = detail.json()
+    assert missing["present"] is False
+    assert missing["integrity_status"] == "missing"
+    # A missing raw file remains an attributable tombstone. Refresh may mark
+    # presence false, but must not erase the last observed digest or extent.
+    assert missing["sha256"] == original["sha256"]
+    assert missing["size_bytes"] == original["size_bytes"]
+    assert missing["preview_text"] == original["preview_text"]
+
+    reregistered = client.post(
+        f"{BASE}/artifacts", json={"path": "notes/VA-047-note.md"}
+    )
+    assert reregistered.status_code == 201, reregistered.text
+    tombstone = reregistered.json()
+    assert tombstone["present"] is False
+    assert tombstone["integrity_status"] == "missing"
+    assert tombstone["sha256"] == original["sha256"]
+    assert tombstone["size_bytes"] == original["size_bytes"]
+    assert tombstone["preview_text"] == original["preview_text"]
     readiness_after = client.get(f"{BASE}/report-readiness")
     assert any(
         blocker["kind"] == "finding_evidence_missing_artifact" and blocker["slug"] == "VA-047"
@@ -215,10 +364,10 @@ def test_artifact_register_preserves_existing_legacy_finding_slug(client, isolat
             """
             INSERT INTO assessment_findings (
                 engagement_id, slug, title, severity, status,
-                verification_state, verification_disposition, canonical_location,
+                verification_status, canonical_location,
                 source_name, summary, evidence_ref
             ) VALUES (?, 'legacy-title-slug', 'Legacy row', 'medium', 'active',
-                'verified', 'confirmed', 'https://example.com/legacy',
+                'confirmed', 'https://example.com/legacy',
                 'legacy-import', 'Legacy row imported from an older database.',
                 'notes/legacy-note.md')
             """,
@@ -741,6 +890,30 @@ def test_report_readiness_checks_unlinked_root_markdown_documents(client, isolat
     assert "artifact register RESUME.md --finding" in advisory["detail"]
 
 
+def test_resume_brief_surfaces_bounded_unlinked_prose_as_advisory(
+    client, isolate_settings
+) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    for index in range(13):
+        relative_path = f"notes/unlinked-{index:02d}.md"
+        path = eng / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"historical note {index}\n", encoding="utf-8")
+        _register_note(client, relative_path)
+
+    response = client.get(f"{BASE}/resume-brief")
+
+    assert response.status_code == 200, response.text
+    drift = response.json()["knowledge_drift"]
+    assert drift["classification"] == "advisory"
+    assert drift["detector_status"] == "complete"
+    assert drift["unlinked_markdown_note_count"] == 13
+    assert len(drift["unlinked_markdown_notes"]) == 10
+    assert drift["truncated"] is True
+    assert all(row["kind"] == "unlinked_markdown_note" for row in drift["unlinked_markdown_notes"])
+
+
 def test_report_readiness_flags_missing_markdown_paths_cited_by_durable_notes(
     client,
     isolate_settings,
@@ -805,6 +978,7 @@ def test_report_readiness_normalizes_absolute_evidence_ref(client, isolate_setti
     evidence = eng / "notes" / "absolute-evidence.md"
     evidence.parent.mkdir(parents=True, exist_ok=True)
     evidence.write_text("absolute evidence path should index as relative", encoding="utf-8")
+    author_id = _author_finding(client, "VA-048")
     created = client.post(
         f"{BASE}/findings",
         json={
@@ -812,13 +986,13 @@ def test_report_readiness_normalizes_absolute_evidence_ref(client, isolate_setti
             "title": "Absolute evidence ref",
             "severity": "medium",
             "workflow_status": "active",
-            "verification_state": "verified",
-            "verification_disposition": "confirmed",
+            "verification_status": "unreviewed",
             "canonical_location": "https://example.com/absolute",
             "summary": "A command-run emitted an absolute path to the evidence artifact.",
             "evidence_ref": str(evidence),
-            "source_name": "vulnerability-analyst",
-            "details": {
+                "source_name": "vulnerability-analyst",
+                "provenance": {"agent_id": author_id},
+                "details": {
                 "cvss_score": 5.4,
                 "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:N",
                 "steps_to_reproduce": ["capture output", "register artifact"],
@@ -829,6 +1003,8 @@ def test_report_readiness_normalizes_absolute_evidence_ref(client, isolate_setti
         },
     )
     assert created.status_code == 201, created.text
+    evidence_artifact = _register_note(client, str(evidence))
+    _verify_finding(client, "VA-048", artifact_id=int(evidence_artifact["id"]))
     # The POST /findings call above triggers register_reference_if_local on the
     # absolute evidence_ref, which normalizes the path and indexes the note.
 
@@ -1230,8 +1406,11 @@ def test_finding_with_directory_evidence_ref_is_not_reported_missing(
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
     evidence_dir = eng / "scans" / "va-049-evidence"
     evidence_dir.mkdir(parents=True, exist_ok=True)
-    (evidence_dir / "response-01.txt").write_text("HTTP/1.1 200 OK", encoding="utf-8")
+    evidence_file = evidence_dir / "response-01.txt"
+    evidence_file.write_text("HTTP/1.1 200 OK", encoding="utf-8")
+    evidence_artifact = _register_note(client, str(evidence_file))
 
+    author_id = _author_finding(client, "VA-049")
     created = client.post(
         f"{BASE}/findings",
         json={
@@ -1239,13 +1418,13 @@ def test_finding_with_directory_evidence_ref_is_not_reported_missing(
             "title": "Directory evidence set",
             "severity": "high",
             "workflow_status": "active",
-            "verification_state": "verified",
-            "verification_disposition": "confirmed",
+            "verification_status": "unreviewed",
             "canonical_location": "https://example.com/account",
             "summary": "The proof is a directory of captured request/response pairs.",
             "evidence_ref": "scans/va-049-evidence",
-            "source_name": "vulnerability-analyst",
-            "details": {
+                "source_name": "vulnerability-analyst",
+                "provenance": {"agent_id": author_id},
+                "details": {
                 "cvss_score": 7.7,
                 "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N",
                 "steps_to_reproduce": ["capture pair", "replay as second identity"],
@@ -1256,6 +1435,7 @@ def test_finding_with_directory_evidence_ref_is_not_reported_missing(
         },
     )
     assert created.status_code == 201, created.text
+    _verify_finding(client, "VA-049", artifact_id=int(evidence_artifact["id"]))
 
     readiness = client.get(f"{BASE}/report-readiness")
     assert readiness.status_code == 200, readiness.text
@@ -1353,8 +1533,7 @@ def test_composite_evidence_ref_records_the_finding_but_mints_no_artifact_row(
                 "title": f"Composite evidence ref {slug}",
                 "severity": "medium",
                 "workflow_status": "active",
-                "verification_state": "unreviewed",
-                "verification_disposition": "none",
+                "verification_status": "unreviewed",
                 "canonical_location": f"https://example.com/{slug}",
                 "summary": "Recording must still succeed with a composite ref.",
                 "evidence_ref": ref,

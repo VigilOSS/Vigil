@@ -16,6 +16,8 @@ from __future__ import annotations
 import argparse
 import json
 
+import pytest
+
 from assess.commands import ingest_candidates
 from assess.lib.scope import ingest_scope_filter
 
@@ -37,6 +39,33 @@ def _ns(records_file: str, engagement_dir: str) -> argparse.Namespace:
         records_file=records_file,
         engagement_dir=engagement_dir,
     )
+
+
+def test_ingest_candidates_rejects_noncanonical_observation_receipt(
+    tmp_path, monkeypatch
+) -> None:
+    records_file = tmp_path / "candidates.jsonl"
+    records_file.write_text(
+        json.dumps({"method": "GET", "url": "https://target.example/one"}) + "\n",
+        encoding="utf-8",
+    )
+
+    class InvalidReceiptClient(FakeAssessmentClient):
+        def post(self, endpoint: str, payload: dict) -> dict:
+            response = super().post(endpoint, payload)
+            if endpoint == "request-observations/bulk":
+                response["records"] = [{"request_variant": {"id": 1}}]
+            return response
+
+    fake = InvalidReceiptClient()
+    monkeypatch.setattr(ingest_candidates, "load_config", lambda *_: _Cfg(str(tmp_path)))
+    monkeypatch.setattr(ingest_candidates, "auth_active_context", lambda *_: "anonymous")
+    monkeypatch.setattr(ingest_candidates, "AssessmentClient", lambda *_: fake)
+
+    with pytest.raises(Exception, match="request observation.*may have committed") as exc:
+        ingest_candidates.run(_ns(str(records_file), str(tmp_path)))
+
+    assert "do not retry automatically" in str(exc.value)
 
 
 def test_ingest_candidates_scope_filter_excludes_out_of_scope_hosts(

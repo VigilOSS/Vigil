@@ -5,8 +5,8 @@ for the host it names. `scope.json` `hosts` declares what the engagement is
 authorized against and staying inside it is the operator's and the specialist's
 job. What these tests pin is the policy that survives, because it does not
 require guessing a destination out of an argv — the engagement tool denylist,
-the declared-vs-actual tool check, and the `target_facing` signal aggregate rate
-governance reserves against. `off_limits_paths` remains engagement guidance and
+the declared-vs-actual tool check, and the `target_facing` signal used for
+non-blocking cross-lane activity context. `off_limits_paths` remains engagement guidance and
 must never become an outbound-request veto.
 """
 
@@ -487,7 +487,7 @@ def test_target_facing_honours_a_declared_tool_its_argv_hides(
     Its argv is `python3 -c <driver> <json-plan>`: the executable is not
     target-facing and the plan's URLs are inside a JSON blob, so nothing lexical
     marks the run. Without the DECLARED tool name it would drive Chromium at the
-    estate outside the engagement's aggregate rate budget.
+    estate without the target-facing cross-lane advisory.
     """
     eng = _engagement(tmp_path, {"hosts": ["example.test"]})
     plan = json.dumps({"url": "https://example.test/dashboard"})

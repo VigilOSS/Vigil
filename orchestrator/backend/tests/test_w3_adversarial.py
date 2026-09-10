@@ -147,8 +147,7 @@ def test_adversarial_unreviewed_critical_blocks(client, isolate_settings):
             "title": "Ungraded critical",
             "severity": "critical",
             "workflow_status": "draft",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "canonical_location": "https://api.example.com/x",
             "summary": "needs a grade",
             "source_name": "vulnerability-analyst",
@@ -173,8 +172,7 @@ def test_adversarial_unreviewed_high_blocks(client, isolate_settings):
             "title": "Ungraded high",
             "severity": "high",
             "workflow_status": "draft",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "canonical_location": "https://api.example.com/x",
             "summary": "needs a grade",
             "source_name": "vulnerability-analyst",
@@ -202,8 +200,7 @@ def test_adversarial_code_engagement_not_blocked(client, isolate_settings):
             "title": "Ungraded",
             "severity": "critical",
             "workflow_status": "draft",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "canonical_location": "https://api.example.com/x",
             "summary": "needs a grade",
             "source_name": "vulnerability-analyst",
@@ -231,8 +228,7 @@ def test_adversarial_blue_engagement_not_blocked(client, isolate_settings):
             "title": "Ungraded",
             "severity": "critical",
             "workflow_status": "draft",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "canonical_location": "https://api.example.com/x",
             "summary": "needs a grade",
             "source_name": "vulnerability-analyst",
@@ -260,8 +256,7 @@ def test_pending_runtime_proof_clears_unreviewed_but_not_reportable(client, isol
             "title": "Critical pending proof",
             "severity": "critical",
             "workflow_status": "active",
-            "verification_state": "unreviewed",
-            "verification_disposition": "none",
+            "verification_status": "unreviewed",
             "canonical_location": "https://api.example.com/x",
             "summary": "needs verification",
             "source_name": "vulnerability-analyst",
@@ -277,7 +272,7 @@ def test_pending_runtime_proof_clears_unreviewed_but_not_reportable(client, isol
     # Grade with pending_runtime_proof
     verify = client.post(
         f"{base}/findings/VA-500/verify",
-        json={"disposition": "pending_runtime_proof", "reason_text": "code looks bad, need runtime proof"},
+        json={"verification_status": "pending_runtime_proof", "reason_text": "code looks bad, need runtime proof"},
     )
     assert verify.status_code == 200, verify.text
 

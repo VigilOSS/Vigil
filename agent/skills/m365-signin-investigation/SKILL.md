@@ -75,7 +75,7 @@ misses 70-90% of post-compromise activity and produces a timeline that
 **UTC throughout.** Sign-in logs and UAL emit UTC by default; do not
 convert mid-investigation. ISO-8601 with explicit `Z` is the only
 acceptable timestamp format in evidence files and finding
-`details_json.timeline` rows.
+`details.timeline` rows.
 
 **Tenant-ref first.** Before the first Graph call runs, read the tenant
 ref end to end. Skip this and you will misclassify a documented
@@ -543,7 +543,7 @@ sections are the citation sources.
 | [T1556.006 MFA Authentication Process](https://attack.mitre.org/techniques/T1556/006/) | Non-interactive sign-in from new ASN with no preceding interactive sign-in from that ASN (refresh-token / session-cookie replay) | Step 2 four-stream merge + step 3 velocity calc |
 | [T1621 MFA Request Generation](https://attack.mitre.org/techniques/T1621/) | High-volume MFA challenges in `signInDetails.authenticationDetails` over a short window (push-fatigue / MFA bombing); cross-skill to `okta-investigation` if Okta is the IdP rather than Entra direct | Step 2 sign-in `authenticationDetails` |
 
-`details_json.mitre_techniques` carries the array of assigned technique
+`details.mitre_techniques` carries the array of assigned technique
 IDs on the finding. Severity follows `agent/rules/triage.md` rule 2 —
 the MITRE technique determines the impact ceiling, not the SIEM rule's
 authored severity hint.

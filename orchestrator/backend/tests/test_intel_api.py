@@ -561,6 +561,116 @@ def test_org_fact_post_get_upsert_and_extra_forbid(client, isolate_settings):
     assert _assert_present_in_search(client, "Founded")
 
 
+def test_authored_knowledge_has_explicit_scope_validity_and_attribution(
+    client, isolate_settings
+):
+    _seed_engagement(client, isolate_settings)
+
+    defaulted = client.post(
+        f"{INTEL_BASE}/org-facts",
+        json={
+            "fact_key": "service_significance",
+            "fact_value": "billing system",
+            "source_name": "operator",
+        },
+    )
+    assert defaulted.status_code == 201, defaulted.text
+    assert defaulted.json()["provenance"] == {}
+    assert defaulted.json()["authored_by"] == "operator"
+    assert defaulted.json()["scope"] == "engagement"
+    assert defaulted.json()["validity_context"] == (
+        "unreviewed; revalidate before relying on this interpretation"
+    )
+
+    explicit = client.post(
+        f"{INTEL_BASE}/notes",
+        json={
+            "title": "Identity boundary",
+            "body_markdown": "Billing admins can view invoices for their own org.",
+            "source_agent": "vulnerability-analyst",
+            "authored_by": "vulnerability-analyst",
+            "scope": "host:billing.example.com identity:billing-admin",
+            "validity_context": "observed in source snapshot generation 7",
+            "provenance": {"agent_name": "vulnerability-analyst"},
+        },
+    )
+    assert explicit.status_code == 201, explicit.text
+    assert explicit.json()["provenance"] == {"agent_name": "vulnerability-analyst"}
+    assert explicit.json()["authored_by"] == "vulnerability-analyst"
+    assert explicit.json()["scope"] == "host:billing.example.com identity:billing-admin"
+    assert explicit.json()["validity_context"] == (
+        "observed in source snapshot generation 7"
+    )
+
+    patched = client.patch(
+        f"{INTEL_BASE}/notes/{explicit.json()['id']}",
+        json={"payload": {"provenance": {"agent_name": "reviewer"}}},
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["provenance"] == {"agent_name": "reviewer"}
+    assert patched.json()["authored_by"] == "vulnerability-analyst"
+    assert patched.json()["scope"] == "host:billing.example.com identity:billing-admin"
+    assert patched.json()["validity_context"] == (
+        "observed in source snapshot generation 7"
+    )
+
+
+def test_authored_context_additive_migration_preserves_legacy_intel(
+    isolate_settings,
+):
+    import sqlite3
+
+    from app import db as db_module
+
+    db_module.init_db()
+    db_module.close_thread_connection()
+    path = db_module.database_path()
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO engagements (id, key, target, status, engagement_root) "
+            "VALUES (1, 'legacy', 'https://example.com', 'active', '/tmp/legacy')"
+        )
+        connection.execute(
+            "INSERT INTO intel_org_facts "
+            "(engagement_id, fact_key, fact_value, provenance_json) "
+            "VALUES (1, 'ownership', 'Example Holdings', '{\"source\":\"archive\"}')"
+        )
+        connection.execute(
+            "INSERT INTO intel_notes "
+            "(engagement_id, title, body_markdown, provenance_json) "
+            "VALUES (1, 'Legacy note', 'preserve me', '{\"source\":\"operator\"}')"
+        )
+        for table in ("intel_org_facts", "intel_notes"):
+            for column in ("authored_by", "scope", "validity_context"):
+                connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+
+    db_module.init_db()
+
+    with sqlite3.connect(path) as connection:
+        fact = connection.execute(
+            "SELECT fact_value, provenance_json, authored_by, scope, validity_context "
+            "FROM intel_org_facts WHERE fact_key = 'ownership'"
+        ).fetchone()
+        note = connection.execute(
+            "SELECT body_markdown, provenance_json, authored_by, scope, validity_context "
+            "FROM intel_notes WHERE title = 'Legacy note'"
+        ).fetchone()
+    assert fact == (
+        "Example Holdings",
+        '{"source":"archive"}',
+        "unknown",
+        "engagement",
+        "unreviewed; revalidate before relying on this interpretation",
+    )
+    assert note == (
+        "preserve me",
+        '{"source":"operator"}',
+        "unknown",
+        "engagement",
+        "unreviewed; revalidate before relying on this interpretation",
+    )
+
+
 # ──────────────────────────────────────────────────────────────
 # notes
 # ──────────────────────────────────────────────────────────────
@@ -714,6 +824,43 @@ def test_intel_credentials_alias_is_readable(client, isolate_settings):
     response = client.get(f"{INTEL_BASE}/credentials")
     assert response.status_code == 200, response.text
     assert isinstance(response.json(), list)
+
+
+def test_intel_credentials_alias_applies_limit_and_offset(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+    assessment_base = f"/engagements/{ENGAGEMENT_KEY}/assessment"
+    for index in range(3):
+        created = client.post(
+            f"{assessment_base}/credentials",
+            json={
+                "credential_key": f"opaque-{index}",
+                "kind": "token",
+                "principal": f"principal-{index}",
+            },
+        )
+        assert created.status_code == 201, created.text
+
+    page = client.get(
+        f"{INTEL_BASE}/credentials", params={"limit": 1, "offset": 1}
+    )
+
+    assert page.status_code == 200, page.text
+    assert [row["credential_key"] for row in page.json()] == ["opaque-1"]
+
+
+def test_typed_intel_list_applies_limit_and_offset_in_the_api(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+    for index in range(3):
+        response = client.post(
+            f"{INTEL_BASE}/notes",
+            json={"title": f"Paged note {index}", "body_markdown": f"body {index}"},
+        )
+        assert response.status_code == 201, response.text
+
+    page = client.get(f"{INTEL_BASE}/notes", params={"limit": 1, "offset": 1})
+
+    assert page.status_code == 200, page.text
+    assert [row["title"] for row in page.json()] == ["Paged note 1"]
 
 
 # ──────────────────────────────────────────────────────────────
@@ -1292,6 +1439,34 @@ def test_intel_record_schemas_omit_superseded_by_id():
         "superseded_by_id is server-managed (supersede-intel); it must not be a "
         f"record-schema property. Offending schemas: {offenders}"
     )
+
+
+def test_intel_record_schemas_share_auditable_provenance_vocabulary():
+    import json
+    from pathlib import Path
+
+    schema_dir = Path(__file__).resolve().parents[3] / "agent" / "schemas"
+    for schema_file in sorted(schema_dir.glob("intel-*.schema.json")):
+        schema = json.loads(schema_file.read_text(encoding="utf-8"))
+        provenance = schema["properties"]["provenance"]["properties"]
+        assert provenance["command_run_id"]["type"] == "integer", schema_file.name
+        assert provenance["notes"]["type"] == "string", schema_file.name
+        snapshot = provenance["code_snapshot"]
+        assert snapshot["additionalProperties"] is False, schema_file.name
+        assert snapshot["required"] == [
+            "repo_id",
+            "repo_generation",
+            "source_manifest_digest",
+        ], schema_file.name
+        if schema_file.name in {
+            "intel-note.schema.json",
+            "intel-org-fact.schema.json",
+        }:
+            assert {
+                "authored_by",
+                "scope",
+                "validity_context",
+            } <= schema["properties"].keys(), schema_file.name
 
 
 # ──────────────────────────────────────────────────────────────

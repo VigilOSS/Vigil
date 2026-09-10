@@ -68,9 +68,7 @@ function sortFindings(findings: (AssessmentFindingDetail | AssessmentFinding)[])
 }
 
 function verificationSummary(finding: AssessmentFindingDetail | AssessmentFinding) {
-  if (finding.verification_state === "disputed") return "disputed";
-  if (finding.verification_disposition !== "none") return finding.verification_disposition;
-  return finding.verification_state;
+  return finding.verification_status;
 }
 
 // C58 — labels for the five C40 per-host objectives. The map is the only

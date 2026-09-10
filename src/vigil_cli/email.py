@@ -14,7 +14,9 @@ can decode links hidden in raw MIME; and emits JSON for automation.
 """
 from __future__ import annotations
 
+import argparse
 import json
+import math
 import re
 import subprocess
 from collections.abc import Mapping, Sequence
@@ -34,13 +36,21 @@ class EmailReadError(RuntimeError):
     scan that cannot be called authoritative), so a caller can report the same
     folder-by-folder proof it would have reported on success instead of
     degrading to a bare message.
+
+    ``kind`` discriminates a read that never returned (``"timeout"``) from every
+    other failure, so the CLI can report *which* way the instrument failed
+    instead of collapsing both into one error string.
     """
 
     def __init__(
-        self, *args: object, coverage: EmailScanCoverage | None = None
+        self,
+        *args: object,
+        coverage: EmailScanCoverage | None = None,
+        kind: str = "error",
     ) -> None:
         super().__init__(*args)
         self.coverage = coverage
+        self.kind = kind
 
 
 # Default extraction pattern: a 6-8 digit verification / OTP code. Used when
@@ -57,6 +67,13 @@ DEFAULT_CODE_PATTERN = r"\b(\d{6,8})\b"
 MAILBOX_PAGE_SIZE = 200
 MIN_CANDIDATE_WINDOW = 2_000
 MAX_CANDIDATE_WINDOW = 10_000
+
+# Wall-clock budget for the whole osascript read. The previous 30s was a guess,
+# not a measured bound, and it fails asymmetrically: too short aborts a lane
+# mid-flight with a hard error, too long merely waits. A multi-account Mail.app
+# walking Inbox + Archive + Important + Spam routinely needs more than 30s.
+# `--timeout-seconds` remains the override.
+DEFAULT_READ_TIMEOUT_SECONDS = 90.0
 
 # Reads recent messages across each account's Inbox plus provider archive,
 # Important, and Spam/Junk folders, filtered host-side after collection.  The
@@ -620,7 +637,7 @@ def read_messages(
     *,
     since: datetime,
     limit: int = 200,
-    timeout_seconds: float = 30.0,
+    timeout_seconds: float = DEFAULT_READ_TIMEOUT_SECONDS,
     include_source: bool = False,
 ) -> EmailScan:
     """Scan relevant Mail.app folders and return list-compatible messages.
@@ -706,7 +723,10 @@ def filter_messages(
     (``security@acme-bank.example``) or a bare domain (``@acme-bank.example`` / ``acme-bank.example``).
     Results are returned newest-first.
     """
-    mailbox_norm = normalize_email(mailbox_address)
+    # Both filters go through the same normalizer: `mailbox_address` used to use
+    # `normalize_email`, so the bare-domain form documented above silently
+    # matched nothing while the identical `from_filter` form worked.
+    mailbox_norm = _normalize_filter(mailbox_address)
     from_norm = _normalize_filter(from_filter) if from_filter else None
     subject_norm = str(subject_filter or "").strip().casefold()
 
@@ -867,12 +887,27 @@ def _normalize_filter(value: str) -> str:
     return normalize_email(raw)
 
 
+def _strip_subaddress(address: str) -> str:
+    """``user+tag@host`` -> ``user@host`` (RFC 5233 subaddressing)."""
+    local, at, domain = address.partition("@")
+    if not at or "+" not in local:
+        return address
+    return f"{local.partition('+')[0]}@{domain}"
+
+
 def _address_matches(needle: str, addresses: Sequence[str]) -> bool:
     """True if ``needle`` matches any of ``addresses``.
 
-    A domain needle (starts with ``@``) matches by domain suffix; a full
-    address matches exactly.
+    A domain needle (starts with ``@``) matches by domain suffix. A full address
+    matches exactly and — when the needle carries no ``+tag`` — also matches any
+    plus-addressed alias of it, so ``tester@host`` finds mail sent to
+    ``tester+lane2@host``. Test identities are provisioned through subaddressed
+    mailboxes, so a literal-only compare made the DEFAULT path invisible.
+
+    The reverse direction stays strict: a needle that names a tag matches only
+    that tag, so one lane never reads a sibling lane's verification mail.
     """
+    match_subaddressed = "+" not in needle
     for raw in addresses:
         address = normalize_email(raw)
         if not address:
@@ -882,7 +917,32 @@ def _address_matches(needle: str, addresses: Sequence[str]) -> bool:
                 return True
         elif address == needle:
             return True
+        elif match_subaddressed and _strip_subaddress(address) == needle:
+            return True
     return False
+
+
+def subaddress_aliases(
+    messages: Sequence[EmailMessage], mailbox_address: str
+) -> list[str]:
+    """Scanned recipient aliases that share ``mailbox_address``'s base address.
+
+    A zero-result query against a tagged address (``tester+lane2@host``) reads
+    identically to "no mail arrived at all" unless the sibling aliases the scan
+    actually saw are named. Returns ``[]`` for a domain filter, an empty query,
+    or when nothing related was scanned.
+    """
+    needle = _normalize_filter(mailbox_address)
+    if not needle or needle.startswith("@"):
+        return []
+    base = _strip_subaddress(needle)
+    found: set[str] = set()
+    for message in messages:
+        for raw in message.recipients:
+            address = normalize_email(raw)
+            if address and address != needle and _strip_subaddress(address) == base:
+                found.add(address)
+    return sorted(found)
 
 
 def _parse_datetime(value: object) -> datetime | None:
@@ -903,6 +963,62 @@ def _parse_datetime(value: object) -> datetime | None:
 def cutoff_for_window(minutes: int, *, now: datetime | None = None) -> datetime:
     current = now or datetime.now(UTC)
     return current - timedelta(minutes=minutes)
+
+
+# Duration flags. `--within` took a bare int while every sibling was explicitly
+# unit-suffixed (`--timeout-seconds`, `--wait-seconds`, `--poll-seconds`), so
+# `--within 10m` — the natural guess for a flag whose name carries no unit —
+# died on argparse's "invalid int value". All four now accept the same forms;
+# one flag understanding durations and three that don't is the next version of
+# that bug.
+_DURATION_UNIT_SECONDS = {"s": 1.0, "m": 60.0, "h": 3600.0}
+_DURATION_UNIT_NAMES = {"s": "seconds", "m": "minutes", "h": "hours"}
+_DURATION_PATTERN = re.compile(r"\A(\d+(?:\.\d+)?)\s*([smh]?)\Z", re.IGNORECASE)
+
+
+def _duration_error(
+    value: object, default_unit: str, qualifier: str
+) -> argparse.ArgumentTypeError:
+    return argparse.ArgumentTypeError(
+        f"expected {qualifier}{_DURATION_UNIT_NAMES[default_unit]} (e.g. 30) or a "
+        f"duration (90s, 30m, 2h); got {value!r}"
+    )
+
+
+def _parse_duration(value: str, *, default_unit: str) -> float:
+    """Seconds for ``value``; an unsuffixed number is read as ``default_unit``."""
+    match = _DURATION_PATTERN.match(str(value).strip())
+    if match is None:
+        raise _duration_error(value, default_unit, "")
+    amount, suffix = match.groups()
+    return float(amount) * _DURATION_UNIT_SECONDS[(suffix or default_unit).lower()]
+
+
+def duration_minutes(value: str) -> int:
+    """argparse ``type=`` for a minutes flag: ``30``, ``30m``, ``2h``, ``90s``.
+
+    A bare number stays MINUTES so existing runbooks keep working. A sub-minute
+    duration rounds up to a whole minute: the window may end up wider than
+    asked, never narrower — a narrowed window silently misses the verification
+    mail it was opened for.
+    """
+    seconds = _parse_duration(value, default_unit="m")
+    if seconds <= 0:
+        raise _duration_error(value, "m", "a positive number of ")
+    return math.ceil(seconds / 60)
+
+
+def duration_seconds(value: str) -> float:
+    """argparse ``type=`` for a positive seconds flag: ``30``, ``90s``, ``2m``."""
+    seconds = _parse_duration(value, default_unit="s")
+    if seconds <= 0:
+        raise _duration_error(value, "s", "a positive number of ")
+    return seconds
+
+
+def duration_seconds_or_zero(value: str) -> float:
+    """argparse ``type=`` for a seconds flag where ``0`` disables the behaviour."""
+    return _parse_duration(value, default_unit="s")
 
 
 def _run_jxa_json(
@@ -927,7 +1043,9 @@ def _run_jxa_json(
             "osascript not found; `vigil email` requires macOS Mail.app automation"
         ) from exc
     except subprocess.TimeoutExpired as exc:
-        raise EmailReadError(f"osascript timed out after {timeout_seconds}s") from exc
+        raise EmailReadError(
+            f"osascript timed out after {timeout_seconds}s", kind="timeout"
+        ) from exc
 
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "unknown osascript failure"

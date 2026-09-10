@@ -132,6 +132,9 @@ def test_operational_error_passthrough_not_incompatibility(monkeypatch, isolate_
         def __exit__(self, *args):
             return False
 
+        def close(self):
+            pass
+
     def _fake_connect(path, *args, **kwargs):
         if str(path) == str(db_path):
             return _LockedConnection()
@@ -165,6 +168,111 @@ def test_check_accepts_future_shared_table_without_engagement_id(isolate_setting
         """,
     )
     db_module._check_database_compatibility(db_path)  # no raise
+
+
+def test_command_output_truth_migration_repairs_only_proven_preview_rows(
+    isolate_settings,
+):
+    """Historical repair must not invent byte totals or reclassify ambiguous rows."""
+    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+    db_module.init_db()
+    with sqlite3.connect(str(db_path)) as connection:
+        engagement_id = connection.execute(
+            """
+            INSERT INTO engagements (key, target, status, engagement_root)
+            VALUES ('output-truth', 'example.test', 'in_progress', '/tmp/output-truth')
+            """
+        ).lastrowid
+        common = (
+            engagement_id,
+            "[]",
+            "tool",
+            "vigil assess kali/tool",
+            "agent",
+            "recon",
+            "2026-09-08T12:00:00Z",
+            "2026-09-08T12:00:01Z",
+            "hash",
+        )
+        connection.execute(
+            """
+            INSERT INTO assessment_command_runs (
+                engagement_id, run_uuid, command, argv_json, tool_name, route,
+                agent_name, phase, status, started_at, completed_at, command_hash,
+                stdout_preview, stdout_bytes, stderr_bytes,
+                output_retention_status
+            ) VALUES (?, 'legacy-preview', 'tool', ?, ?, ?, ?, ?, 'completed',
+                      ?, ?, ?, 'observed output', 0, 0, 'empty')
+            """,
+            common,
+        )
+        connection.execute(
+            """
+            INSERT INTO assessment_command_runs (
+                engagement_id, run_uuid, command, argv_json, tool_name, route,
+                agent_name, phase, status, started_at, completed_at, command_hash,
+                stdout_preview, stdout_bytes, stderr_bytes,
+                output_retention_status
+            ) VALUES (?, 'legacy-whitespace', 'tool', ?, ?, ?, ?, ?, 'completed',
+                      ?, ?, ?, '   ', 0, 0, 'empty')
+            """,
+            common,
+        )
+        connection.execute(
+            """
+            INSERT INTO assessment_command_runs (
+                engagement_id, run_uuid, command, argv_json, tool_name, route,
+                agent_name, phase, status, started_at, completed_at, command_hash,
+                stdout_preview, stdout_bytes, stderr_bytes,
+                output_retention_status
+            ) VALUES (?, 'legacy-ambiguous', 'tool', ?, ?, ?, ?, ?, 'completed',
+                      ?, ?, ?, '', 0, 0, 'empty')
+            """,
+            common,
+        )
+        connection.execute(
+            """
+            INSERT INTO assessment_command_runs (
+                engagement_id, run_uuid, command, argv_json, tool_name, route,
+                agent_name, phase, status, started_at, completed_at, command_hash,
+                stdout_preview, stdout_bytes, stderr_bytes,
+                output_retention_status
+            ) VALUES (?, 'running-preview', 'tool', ?, ?, ?, ?, ?, 'running',
+                      ?, ?, ?, 'still mutable', 0, 0, 'empty')
+            """,
+            common,
+        )
+        connection.commit()
+
+    db_module.init_db()
+
+    with sqlite3.connect(str(db_path)) as connection:
+        rows = dict(
+            connection.execute(
+                """
+                SELECT run_uuid, output_retention_status
+                FROM assessment_command_runs
+                WHERE run_uuid IN (
+                    'legacy-preview', 'legacy-whitespace',
+                    'legacy-ambiguous', 'running-preview'
+                )
+                """
+            ).fetchall()
+        )
+        repaired = connection.execute(
+            """
+            SELECT stdout_bytes, stderr_bytes, stdout_sha256, stderr_sha256
+            FROM assessment_command_runs WHERE run_uuid = 'legacy-preview'
+            """
+        ).fetchone()
+
+    assert rows == {
+        "legacy-preview": "preview_only",
+        "legacy-whitespace": "preview_only",
+        "legacy-ambiguous": "empty",
+        "running-preview": "empty",
+    }
+    assert repaired == (0, 0, "", "")
 
 
 _LEGACY_CODE_ANALYSIS_QUEUE_SQL = """

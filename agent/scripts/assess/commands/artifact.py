@@ -3,11 +3,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
 from urllib.parse import quote, urlencode
 
-from assess.lib.client import AssessmentClient
+from assess.lib.client import (
+    AssessmentClient,
+    AssessError,
+    require_artifact_write_response,
+    require_write_result,
+)
 from assess.lib.config import load_config
+from assess.lib.finding_render import warn_untrusted_data
+from assess.lib.list_output import ListPage, lookahead_limit, page_from_backend, report_page
+
+
+_MAX_SEARCH_LIMIT = 1000
 
 
 class _RemovedPositionalQueryAction(argparse.Action):
@@ -55,6 +66,11 @@ def register(subparsers) -> None:
     sp_search.add_argument("--kind", default="", help="Filter by artifact kind")
     sp_search.add_argument("--limit", type=int, default=50)
     sp_search.add_argument("--offset", type=int, default=0)
+    sp_search.add_argument(
+        "--paginate",
+        action="store_true",
+        help="Fetch every matching artifact page from --offset.",
+    )
     sp_search.add_argument("--json", dest="as_json", action="store_true")
     sp_search.set_defaults(func=_run_search)
 
@@ -116,7 +132,18 @@ def _client(args) -> AssessmentClient:
 def _render_rows(rows: list[dict]) -> str:
     if not rows:
         return "(no artifacts matched)"
-    header = ["id", "present", "scratch", "kind", "finding", "bytes", "path", "preview"]
+    header = [
+        "id",
+        "present",
+        "scratch",
+        "kind",
+        "finding",
+        "bytes",
+        "indexed_bytes",
+        "index_status",
+        "path",
+        "preview",
+    ]
     lines = ["\t".join(header)]
     for row in rows:
         preview = str(row.get("preview_text") or "").replace("\t", " ").replace("\n", " ")
@@ -131,6 +158,8 @@ def _render_rows(rows: list[dict]) -> str:
                     str(row.get("kind") or "-"),
                     str(row.get("related_finding_slug") or "-"),
                     str(row.get("size_bytes") or 0),
+                    str(row.get("indexed_bytes") or 0),
+                    str(row.get("index_status") or "unknown"),
                     str(row.get("relative_path") or ""),
                     preview or "-",
                 ]
@@ -139,32 +168,120 @@ def _render_rows(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _artifact_search_endpoint(args, *, limit: int, offset: int) -> str:
+    query = str(args.query or "").strip()
+    params: list[tuple[str, str]] = []
+    if query:
+        params.append(("q", query))
+    if args.finding:
+        params.append(("finding", args.finding))
+    if args.kind:
+        params.append(("kind", args.kind))
+    params.extend((('limit', str(limit)), ('offset', str(offset))))
+    return "artifacts/search?" + urlencode(params, quote_via=quote)
+
+
+def _require_artifact_rows(value) -> list[dict]:
+    if not isinstance(value, list) or any(
+        not isinstance(row, dict)
+        or not isinstance(row.get("id"), int)
+        or isinstance(row.get("id"), bool)
+        or row["id"] < 1
+        or not isinstance(row.get("relative_path"), str)
+        or not row["relative_path"].strip()
+        or not isinstance(row.get("indexed_bytes"), int)
+        or isinstance(row.get("indexed_bytes"), bool)
+        or row["indexed_bytes"] < 0
+        or row.get("index_status")
+        not in {"complete", "missing", "not_text", "partial"}
+        for row in value
+    ):
+        raise AssessError("artifact search: malformed artifact search response")
+    return value
+
+
+def _artifact_search_continuation(args, *, offset: int) -> str:
+    parts = ["vigil", "assess", "artifact", "search"]
+    for flag, value in (
+        ("--q", str(args.query or "").strip()),
+        ("--finding", args.finding),
+        ("--kind", args.kind),
+    ):
+        if value:
+            parts.extend((flag, str(value)))
+    parts.extend(("--limit", str(args.limit), "--offset", str(offset)))
+    return shlex.join(parts)
+
+
 def _run_search(args) -> None:
+    limit = int(args.limit)
+    offset = int(args.offset)
     client = _client(args)
     try:
-        query = str(args.query or "").strip()
-        params: list[tuple[str, str]] = []
-        if query:
-            params.append(("q", query))
-        if args.finding:
-            params.append(("finding", args.finding))
-        if args.kind:
-            params.append(("kind", args.kind))
-        params.append(("limit", str(args.limit)))
-        params.append(("offset", str(args.offset)))
-        endpoint = "artifacts/search"
-        if params:
-            endpoint += "?" + urlencode(params, quote_via=quote)
-        rows = client.get(endpoint)
-        print(json.dumps(rows, indent=2, ensure_ascii=False) if args.as_json else _render_rows(rows))
+        if getattr(args, "paginate", False):
+            rows: list[dict] = []
+            next_offset = offset
+            while True:
+                page_rows = _require_artifact_rows(
+                    client.get(
+                        _artifact_search_endpoint(
+                            args, limit=limit, offset=next_offset
+                        )
+                    )
+                )
+                rows.extend(page_rows)
+                if len(page_rows) < limit:
+                    break
+                next_offset += len(page_rows)
+        else:
+            request_limit, used_lookahead = lookahead_limit(
+                limit, maximum=_MAX_SEARCH_LIMIT
+            )
+            rows = _require_artifact_rows(
+                client.get(
+                    _artifact_search_endpoint(
+                        args, limit=request_limit, offset=offset
+                    )
+                )
+            )
     finally:
         client.close()
+
+    if getattr(args, "paginate", False):
+        exact_total = offset + len(rows) if rows or offset == 0 else None
+        page = ListPage(
+            rows=rows,
+            offset=offset,
+            total=exact_total,
+            total_at_least=exact_total,
+            has_more=False,
+        )
+    else:
+        page = page_from_backend(
+            rows,
+            limit=limit,
+            offset=offset,
+            used_lookahead=used_lookahead,
+        )
+    report_page(
+        page,
+        noun="artifacts",
+        continuation_command=_artifact_search_continuation(
+            args, offset=page.offset + len(page.rows)
+        ),
+        point_read_hint="`vigil assess artifact get <id>`",
+    )
+    rows = page.rows
+    if rows:
+        warn_untrusted_data()
+    print(json.dumps(rows, indent=2, ensure_ascii=False) if args.as_json else _render_rows(rows))
 
 
 def _run_get(args) -> None:
     client = _client(args)
     try:
         row = client.get(f"artifacts/{args.artifact_id}")
+        warn_untrusted_data()
         print(json.dumps(row, indent=2, ensure_ascii=False) if args.as_json else _artifact_text(row))
     finally:
         client.close()
@@ -183,7 +300,11 @@ def _run_register(args) -> None:
             "producer_command_run_id": args.command_run_id,
             "related_finding_slug": args.finding or None,
         }
-        row = client.post("artifacts", payload)
+        row = require_artifact_write_response(
+            client.post("artifacts", payload),
+            artifact_path=args.path,
+            operation="register artifact",
+        )
         print(json.dumps(row, indent=2, ensure_ascii=False) if args.as_json else _render_rows([row]))
     finally:
         client.close()
@@ -192,7 +313,11 @@ def _run_register(args) -> None:
 def _run_refresh(args) -> None:
     client = _client(args)
     try:
-        result = client.post("artifacts/refresh", {})
+        result = require_write_result(
+            client.post("artifacts/refresh", {}),
+            operation="refresh artifacts",
+            nonnegative_counts=("refreshed", "present", "missing"),
+        )
         print(json.dumps(result, indent=2, ensure_ascii=False) if args.as_json else _refresh_text(result))
     finally:
         client.close()
@@ -209,6 +334,18 @@ def _run_scratch(args) -> None:
                 "artifacts/scratch-under",
                 {"prefix": under, "scratch": scratch},
             )
+            result = require_write_result(
+                result,
+                operation=f"artifact {action_label}",
+                nonnegative_counts=("matched",),
+            )
+            updated = result.get("updated")
+            if not isinstance(updated, list) or len(updated) != result["matched"]:
+                raise AssessError(
+                    f"artifact {action_label}: backend response paths do not match "
+                    "its count; the write may have committed, so inspect durable "
+                    "state and do not retry automatically"
+                )
             if args.as_json:
                 print(json.dumps(result, indent=2, ensure_ascii=False))
             else:
@@ -230,15 +367,29 @@ def _run_scratch(args) -> None:
             sys.exit(1)
         target = args.target
         if target.isdigit():
-            row = client.post(
-                f"artifacts/{int(target)}/scratch",
-                {"scratch": scratch},
+            row = require_write_result(
+                client.post(
+                    f"artifacts/{int(target)}/scratch",
+                    {"scratch": scratch},
+                ),
+                operation=f"artifact {action_label}",
+                expected={"id": int(target), "scratch": scratch},
             )
         else:
-            row = client.post(
-                "artifacts/scratch-by-path",
-                {"path": target, "scratch": scratch},
+            row = require_artifact_write_response(
+                client.post(
+                    "artifacts/scratch-by-path",
+                    {"path": target, "scratch": scratch},
+                ),
+                artifact_path=target,
+                operation=f"artifact {action_label}",
             )
+            if row.get("scratch") is not scratch:
+                raise AssessError(
+                    f"artifact {action_label}: backend response did not confirm the "
+                    "requested state; the write may have committed, so inspect "
+                    "durable state and do not retry automatically"
+                )
         print(json.dumps(row, indent=2, ensure_ascii=False) if args.as_json else _render_rows([row]))
     finally:
         client.close()
@@ -252,19 +403,34 @@ def _artifact_text(row: dict) -> str:
         f"present: {'yes' if row.get('present') else 'no'}",
         f"bytes: {row.get('size_bytes')}",
         f"sha256: {row.get('sha256')}",
+        f"indexed_bytes: {row.get('indexed_bytes')}",
+        f"index_status: {row.get('index_status') or 'unknown'}",
+        "content_truncated: "
+        + (
+            "yes"
+            if row.get("content_truncated") is True
+            else "no"
+            if row.get("content_truncated") is False
+            else "unknown"
+        ),
     ]
     if row.get("content"):
         lines.extend(["", str(row.get("content"))])
     elif row.get("preview_text"):
         lines.extend(["", str(row.get("preview_text"))])
-    elif row.get("content_truncated"):
-        lines.append("content: (too large; use the engagement-local path)")
+    if row.get("content_truncated"):
+        lines.extend(
+            [
+                "",
+                "content is truncated; use the engagement-local path for the remainder",
+            ]
+        )
     return "\n".join(lines)
 
 
 def _refresh_text(result: dict) -> str:
     return (
-        f"refreshed={result.get('refreshed', 0)} "
-        f"present={result.get('present', 0)} "
-        f"missing={result.get('missing', 0)}"
+        f"refreshed={result['refreshed']} "
+        f"present={result['present']} "
+        f"missing={result['missing']}"
     )

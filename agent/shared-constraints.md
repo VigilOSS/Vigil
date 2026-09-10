@@ -72,6 +72,11 @@ decisions. Resolve:
     | `dead_marker` matched | `dead` | Set only by a proven-dead probe |
     | No signature match, or a transport error | `unknown` | Never a false verdict — stays `unknown` rather than guessing |
 
+    An anonymous fallback is useful only for surfaces that actually have an anonymous lane. If the
+    dispatch objective requires a named identity and no live material exists, do not relabel the
+    anonymous attempt as coverage: write a blocked handoff naming the identity, surface, and exact
+    refresh/provisioning need so the operator can record the `dispatch_blocked` decision.
+
 `exploit_policy` governs *exploitation*, and it is resolved once **before** dispatch — not a
 per-action approval you re-request mid-task. Regardless of its value, honor the engagement boundary
 above and the program's ROE, and make no persistent or destructive change to the target's or a third
@@ -452,8 +457,8 @@ emits the canonical schema and an example):
   emit the canonical handoff blob:
   `start`, `done`, `handoff`, `decision`,
   `abort-duplicate`, `render-handoff` — `vigil assess contract agent <subverb>`
-- Lifecycle helpers (`finding verify` — including `--disposition
-  false_positive` for a kill, `finding update` — including `--status draft`
+- Lifecycle helpers (`finding verify --status <status>` — including a completed
+  counter-check for `false_positive`, `finding update` — including `--status draft`
   to reopen, `resolve <surface|coverage-item>`) — `vigil assess contract <verb>`
 
 Verbs **not** covered (skip the contract round-trip — they are read-only or
@@ -675,7 +680,7 @@ Record state immediately using `vigil assess` with JSON files:
   Advances a class-typed coverage item (one per implied vuln-class on a surface; resolve EVERY
   implied class, not just the cluster winner). `covered`/`not_applicable` require a non-empty
   rationale. Raw `patch coverage-items/<id>` is redirected here.
-- **Blocked techniques:** `vigil assess block-technique --technique <TECHNIQUE> --target-kind <kind> --target-ref <ref> --reason <why>` (the technique-key auto-derives; override with `--technique-key`. Review with `vigil assess list-blocked-techniques`). Prefer this first-class verb over the raw `vigil assess post blocked-techniques <json-file>`.
+- **Blocked techniques:** `vigil assess block-technique --technique <TECHNIQUE> --target-kind <kind> --target-ref <ref> --reason <why>` (the technique-key auto-derives; override with `--technique-key`; add `--revalidation-context-inline '{"actor":"...","basis":"..."}'` when rechecking a wall). Review current rows with `vigil assess list-blocked-techniques` and append-only retry decisions with `vigil assess list-blocked-techniques --history [--technique-key <key>]`. Prefer this first-class verb over the raw `vigil assess post blocked-techniques <json-file>`.
 - **Captured HTTP traffic:** capture is a per-engagement policy, not a proxy selector — review it
   with `vigil assess http policy`. Query the canonical full-flow store with `vigil assess http
   list --host <host> --method <verb> --content-type <family>` (`http show <flow_uid>` for one
@@ -826,7 +831,7 @@ Run `vigil assess contract intel record <type>` before authoring the JSON — in
 
 The backend deduplicates per-engagement on natural keys: tech stack on Component (+ Version), people on Name, emails on Address, domains on Identity + Kind, CVEs on `cve_id`. Credentials live in the assessment domain (`assessment_credentials`); use `vigil assess post credentials`, not `intel record`.
 
-Prose intel that doesn't fit a structured row goes to `intel record note` — it is FTS-indexed and engagement-scoped.
+Prose intel that doesn't fit a structured row goes to `intel record note` — it is FTS-indexed and engagement-scoped. Notes and org facts are authored interpretation, so supply their top-level `authored_by`, `scope`, and `validity_context` strings whenever you know them; use `provenance` separately for source evidence such as `agent_name` or `artifact_ref`. The backend supplies visible unknown-author, engagement-scope, and unreviewed-validity defaults when context is unavailable; those defaults are a revalidation warning, never authorization or permission to act.
 
 ---
 

@@ -35,8 +35,8 @@ export function findingToMarkdown(d: ReportFinding): string {
   if (d.severity) statusParts.push(`**Severity:** ${d.severity}`);
   if (d.cvss_score != null) statusParts.push(`**CVSS:** ${Number(d.cvss_score).toFixed(1)}`);
   if (d.workflow_status) statusParts.push(`**Workflow:** ${d.workflow_status}`);
-  if (d.verification_state && d.verification_state !== "unreviewed") {
-    statusParts.push(`**Verification:** ${d.verification_state}`);
+  if (d.verification_status && d.verification_status !== "unreviewed") {
+    statusParts.push(`**Verification:** ${d.verification_status}`);
   }
   if (statusParts.length > 0) {
     push(statusParts.join(" · "));

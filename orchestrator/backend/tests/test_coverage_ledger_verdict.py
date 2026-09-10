@@ -13,12 +13,13 @@ This module asserts two backend contracts W2 adds:
    (a host with a finding but no recon service/surface). Existing per-host fields
    are unchanged.
 2. ``GET /findings`` filters server-side by ``auth_context`` and
-   ``verification_state`` so the ledger can drill into a host's verdict without
+   ``verification_status`` so the ledger can drill into a host's verdict without
    pulling every finding to the client.
 """
 from __future__ import annotations
 
 from app.services import state_manager
+from tests.proof_fixtures import post_artifact_backed_source_observation
 from tests.test_engagements_api import write_engagement
 
 
@@ -58,10 +59,19 @@ def _create_finding(
     canonical_location: str,
     severity: str = "high",
     workflow_status: str = "active",
-    verification_state: str = "unreviewed",
-    verification_disposition: str = "none",
+    verification_status: str = "unreviewed",
     auth_context: str = "anonymous",
 ) -> None:
+    author_id = f"AUTHOR-{slug}"
+    author = client.post(
+        f"{ASSESSMENT_BASE}/dispatches",
+        json={
+            "agent_id": author_id,
+            "agent_role": "vulnerability-analyst",
+            "task": f"Record {slug}",
+        },
+    )
+    assert author.status_code == 201, author.text
     response = client.post(
         f"{ASSESSMENT_BASE}/findings",
         json={
@@ -69,15 +79,60 @@ def _create_finding(
             "title": slug.replace("-", " ").title(),
             "severity": severity,
             "workflow_status": workflow_status,
-            "verification_state": verification_state,
-            "verification_disposition": verification_disposition,
+            "verification_status": "unreviewed",
             "auth_context": auth_context,
             "canonical_location": canonical_location,
             "source_name": "vulnerability-analyst",
+            "provenance": {"agent_id": author_id},
             "summary": "fixture finding",
         },
     )
     assert response.status_code == 201, response.text
+    if verification_status == "confirmed":
+        agent_id = f"VERIFY-{slug}"
+        dispatch = client.post(
+            f"{ASSESSMENT_BASE}/dispatches",
+            json={
+                "agent_id": agent_id,
+                "agent_role": "coverage-ledger-verifier",
+                "task": f"Independently verify {slug}",
+            },
+        )
+        assert dispatch.status_code == 201, dispatch.text
+        run = client.post(
+            f"{ASSESSMENT_BASE}/assessment-runs",
+            json={
+                "run_uuid": f"coverage-ledger-{slug}",
+                "run_kind": "shared",
+                "producer_dispatch_agent_id": agent_id,
+            },
+        )
+        assert run.status_code == 201, run.text
+        receipt = post_artifact_backed_source_observation(
+            client,
+            f"{ASSESSMENT_BASE}/proof-receipts",
+            json={
+                "run_id": run.json()["id"],
+                "evidence_kind": "source_observation",
+                "expected_result": "the recorded finding is independently reproducible",
+                "observed_result": "the independent review reproduced the finding",
+            },
+        )
+        assert receipt.status_code == 201, receipt.text
+        completed = client.patch(
+            f"{ASSESSMENT_BASE}/assessment-runs/{run.json()['id']}",
+            json={"status": "completed"},
+        )
+        assert completed.status_code == 200, completed.text
+        verified = client.post(
+            f"{ASSESSMENT_BASE}/findings/{slug}/verify",
+            json={
+                "verification_status": "confirmed",
+                "reason_text": "independent coverage-ledger fixture proof",
+                "proof_receipt_ids": [receipt.json()["id"]],
+            },
+        )
+        assert verified.status_code == 200, verified.text
 
 
 def _by_host(body: dict) -> dict:
@@ -96,8 +151,7 @@ def test_host_with_finding_gets_inline_verdict(client, isolate_settings):
         client,
         slug="VA-001",
         canonical_location="https://api.target.example/v1/users",
-        verification_state="verified",
-        verification_disposition="confirmed",
+        verification_status="confirmed",
         auth_context="authenticated",
     )
 
@@ -186,7 +240,7 @@ def test_existing_per_host_fields_unchanged_by_verdict_join(client, isolate_sett
 
 
 # ---------------------------------------------------------------------------
-# server-side findings filters (auth_context + verification_state)
+# server-side findings filters (auth_context + verification_status)
 # ---------------------------------------------------------------------------
 
 
@@ -211,26 +265,25 @@ def test_findings_filter_by_auth_context(client, isolate_settings):
     assert slugs == {"VA-011"}
 
 
-def test_findings_filter_by_auth_context_and_verification_state(client, isolate_settings):
+def test_findings_filter_by_auth_context_and_verification_status(client, isolate_settings):
     _seed(client, isolate_settings)
     _create_finding(
         client,
         slug="VA-020",
         canonical_location="https://api.target.example/c",
         auth_context="authenticated",
-        verification_state="verified",
-        verification_disposition="confirmed",
+        verification_status="confirmed",
     )
     _create_finding(
         client,
         slug="VA-021",
         canonical_location="https://api.target.example/d",
         auth_context="authenticated",
-        verification_state="unreviewed",
+        verification_status="unreviewed",
     )
 
     response = client.get(
-        f"{ASSESSMENT_BASE}/findings?auth_context=authenticated&verification_state=verified"
+        f"{ASSESSMENT_BASE}/findings?auth_context=authenticated&verification_status=confirmed"
     )
     assert response.status_code == 200, response.text
     slugs = {row["slug"] for row in response.json()}

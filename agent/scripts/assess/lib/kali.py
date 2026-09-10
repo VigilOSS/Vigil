@@ -135,7 +135,7 @@ from .kali_tool_naming import (
     _scan_inner_for_first_exec,
     _split_inner_pipeline_stages,
 )
-from .rate_leases import aggregate_rate_reservation, target_rate_lease
+from .execution_recency import emit_foreign_lane_recency
 
 # Test-mode override: when set, skips both audit POST and `docker exec` so
 # argparse round-trip tests don't require a live backend or container. The
@@ -327,6 +327,48 @@ def _emit_probe_run(
             f"  no depth credit for this run (target_host={target_host!r}, "
             f"attack_family={attack_family!r}); record it by hand with "
             "`vigil assess record-probe` if the class was genuinely tested.",
+            file=sys.stderr,
+        )
+
+
+def _record_waf_observation(
+    client: AssessmentClient,
+    *,
+    run_id: int,
+    reason: str,
+    evidence_ref: str,
+    tool_name: str,
+    agent_name: str,
+    cmd: list[str],
+) -> None:
+    """Best-effort durable record of a WAF verdict already derived from a run."""
+
+    target_host, target_path, _target_port = _extract_target_anchor(tool_name, cmd)
+    try:
+        client.record_decision(
+            {
+                "kind": "egress_decision",
+                "surfaced_to_user": True,
+                "payload": {
+                    "subtype": "waf_challenge",
+                    "verdict": "waf_challenge",
+                    "reason": reason,
+                    "target_host": target_host,
+                    "target_path": target_path,
+                    "artifact_ref": evidence_ref,
+                    "provenance": {
+                        "source": "vigil assess kali",
+                        "detector": "detect_waf_challenge",
+                        "command_run_id": run_id,
+                        "tool_name": tool_name,
+                        "agent_name": agent_name,
+                    },
+                },
+            }
+        )
+    except Exception as exc:  # noqa: BLE001 - observation failure cannot rewrite run truth
+        print(
+            f"warning: WAF observation persistence failed for command run {run_id}: {exc}",
             file=sys.stderr,
         )
 
@@ -1453,6 +1495,7 @@ def _audit_execution_policy_refusal(
             _patch_finalize(
                 client,
                 run_id=int(run_id),
+                run_uuid=run_uuid,
                 status="failed",
                 return_code=None,
                 ended_at_iso=_utcnow_iso(),
@@ -1516,7 +1559,6 @@ def kali_exec(
     identity_target: str = "",
     identity_env=None,
     identity_probe: bool = False,
-    rate_override_reason: str = "",
     nuclei_oob_explicit: bool = False,
     prepared_auth_context: str | None = None,
 ) -> KaliResult:
@@ -1680,8 +1722,6 @@ def kali_exec(
     run_id: int | None = None
     superseded_by_id: int | None = None
     audit_failed = False
-    rate_lease_cm = None
-    rate_lease_entered = False
     # I-163 state. ``kali exec`` owns a RECORDER process (this one) and a WORKER
     # process (docker exec, spawned into its own session). Every cleanup path —
     # the audit finalize, the kill cascade, the pid-file removal — hangs off the
@@ -1781,6 +1821,7 @@ def kali_exec(
                     _patch_finalize(
                         client,
                         run_id=run_id,
+                        run_uuid=run_uuid,
                         status="killed",
                         return_code=signal_return_code,
                         ended_at_iso=_utcnow_iso(),
@@ -1808,14 +1849,6 @@ def kali_exec(
                         run_uuid=run_uuid,
                         error=f"killed by {name}; finalize PATCH failed: {exc}",
                     )
-            # We re-raise rather than unwind, so no ``finally`` runs after this
-            # point — release the rate lease here or the target stays reserved
-            # until its TTL expires.
-            if rate_lease_cm is not None and rate_lease_entered:
-                try:
-                    rate_lease_cm.__exit__(None, None, None)
-                except Exception:  # noqa: BLE001
-                    pass
             # Restore the default disposition and re-raise, so the exit status
             # honestly reports "killed by <signal>" instead of a clean 0.
             signal.signal(signum, signal.SIG_DFL)
@@ -1831,42 +1864,8 @@ def kali_exec(
                 # pre-existing (unhandled) behaviour is the fallback.
                 pass
 
-        reservation = aggregate_rate_reservation(
-            str(eng_dir), cmd, derived_tool_name, execution_policy
-        )
-        if reservation is not None:
-            rate_lease_cm = target_rate_lease(
-                config=cfg,
-                owner=f"kali:{resolved_agent}:{run_uuid}",
-                effective_rate_rps=reservation,
-                ttl_seconds=max(int(timeout) + 60, 60),
-                override_reason=rate_override_reason,
-                command_run_id=run_id,
-            )
-            try:
-                rate_lease_cm.__enter__()
-                rate_lease_entered = True
-            except Exception as exc:
-                if run_id is not None and not audit_failed:
-                    try:
-                        _patch_finalize(
-                            client,
-                            run_id=run_id,
-                            status="failed",
-                            return_code=None,
-                            ended_at_iso=_utcnow_iso(),
-                            duration_ms=0,
-                            stdout_preview="",
-                            stderr_preview=f"aggregate rate lease refused: {exc}",
-                            timed_out=False,
-                            partial_results=False,
-                            peak_rss_bytes=None,
-                            cpu_user_seconds=None,
-                            cpu_system_seconds=None,
-                        )
-                    except Exception:
-                        pass
-                raise AssessError(f"aggregate rate lease refused: {exc}") from exc
+        if execution_policy.get("target_facing"):
+            emit_foreign_lane_recency(client, current_agent=resolved_agent)
 
         # One docker-exec attempt + full telemetry snapshot. Factored into a
         # nested closure so the CR-36 false-negative guard can run it a SECOND
@@ -1903,6 +1902,7 @@ def kali_exec(
                             _patch_finalize(
                                 client,
                                 run_id=run_id,
+                                run_uuid=run_uuid,
                                 status="failed",
                                 return_code=None,
                                 ended_at_iso=_utcnow_iso(),
@@ -2116,11 +2116,12 @@ def kali_exec(
                 waf_challenge = True
                 waf_challenge_detail = waf_detail
                 print(
-                    "RUNTIME ERROR: WAF/bot-challenge interstitial detected "
-                    f"({waf_detail}) — this is NOT a target verdict (the body is "
-                    "the WAF's, not the origin app's). Re-render with `vigil assess "
-                    "kali browser <url>` (headless chromium clears the JS challenge) "
-                    "before any negative disposition.",
+                    "RUNTIME ERROR: WAF/challenge/edge-block response detected "
+                    f"({waf_detail}) — this is NOT a target verdict. Inspect the "
+                    "recorded response shape: use `vigil assess kali browser <url>` "
+                    "only for a JS/bot interstitial; a hard signature or edge block "
+                    "requires a route, request-shape, or egress correction before "
+                    "any negative disposition.",
                     file=sys.stderr,
                 )
 
@@ -2152,9 +2153,11 @@ def kali_exec(
         # member, so backend_status keeps the real terminal value (a WAF
         # challenge is a completed exchange; a connection failure already exits
         # non-zero, and 'failed' never counts as 'tested'/covered in the depth
-        # ledger). The CR-36 / W1 distinctions are carried OUT-of-band on the
-        # KaliResult flags + the loud stderr lines. The agent-facing
-        # KaliResult.status is overridden so it can never be confused with a real
+        # ledger). The CR-36 / W1 distinctions are carried on the KaliResult
+        # flags + loud stderr lines rather than overloading the backend status
+        # enum. A WAF observation is also written separately after finalization,
+        # bound to the command-run id and retained output artifact. The
+        # agent-facing status is overridden so it cannot be confused with a real
         # terminal verdict.
         backend_status = terminal_status
         if transport_error and backend_status == "failed":
@@ -2163,12 +2166,11 @@ def kali_exec(
             terminal_status = "waf_challenge"
 
         if run_id is not None and not audit_failed:
-            # From here the row is no longer the signal handler's to finalize.
-            finalized = True
             try:
                 _patch_finalize(
                     client,
                     run_id=run_id,
+                    run_uuid=run_uuid,
                     status=backend_status,
                     return_code=return_code,
                     ended_at_iso=ended_at_iso,
@@ -2190,6 +2192,9 @@ def kali_exec(
                     stdout_path=stdout_path,
                     stderr_path=stderr_path,
                 )
+                # Only a canonical row-bound terminal receipt proves the
+                # signal handler no longer owns recovery of this run.
+                finalized = True
                 finalize_ok = True
             except AssessError as exc:
                 # 409 races are now handled inside _patch_finalize; reaching
@@ -2223,6 +2228,16 @@ def kali_exec(
                     evidence_ref=evidence_ref,
                     stdout_preview=stdout_preview,
                 )
+                if waf_challenge:
+                    _record_waf_observation(
+                        client,
+                        run_id=int(run_id),
+                        reason=waf_challenge_detail,
+                        evidence_ref=evidence_ref,
+                        tool_name=derived_tool_name,
+                        agent_name=resolved_agent,
+                        cmd=cmd,
+                    )
 
         return KaliResult(
             run_id=run_id,
@@ -2253,8 +2268,6 @@ def kali_exec(
                 signal.signal(_sig, _previous)
             except (ValueError, OSError):
                 pass
-        if rate_lease_cm is not None and rate_lease_entered:
-            rate_lease_cm.__exit__(None, None, None)
         client.close()
 
 
@@ -2338,7 +2351,6 @@ __all__ = [
     "merge_auth_context",
     "required_header_env_pairs",
     "resolve_identity_env",
-    "target_rate_lease",
     # Public surface
     "kali_exec",
 ]

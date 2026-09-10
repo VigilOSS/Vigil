@@ -44,7 +44,11 @@ import json
 import sys
 from pathlib import Path
 
-from assess.lib.client import AssessError, AssessmentClient
+from assess.lib.client import (
+    AssessError,
+    AssessmentClient,
+    require_artifact_write_response,
+)
 from assess.lib.config import load_config
 from assess.lib.finding_render import (
     _fence_for,
@@ -448,18 +452,22 @@ def run(args) -> None:
         artifact_registered = False
         if reply_rel is not None:
             try:
-                client.post(
-                    "artifacts",
-                    {
-                        "path": reply_rel,
-                        "kind": "reply",
-                        "media_type": "text/markdown",
-                        "sensitive": False,
-                        "producer_agent_id": None,
-                        "producer_agent_role": None,
-                        "producer_command_run_id": None,
-                        "related_finding_slug": slug,
-                    },
+                require_artifact_write_response(
+                    client.post(
+                        "artifacts",
+                        {
+                            "path": reply_rel,
+                            "kind": "reply",
+                            "media_type": "text/markdown",
+                            "sensitive": False,
+                            "producer_agent_id": None,
+                            "producer_agent_role": None,
+                            "producer_command_run_id": None,
+                            "related_finding_slug": slug,
+                        },
+                    ),
+                    artifact_path=reply_rel,
+                    operation="register reply artifact",
                 )
                 artifact_registered = True
             except AssessError as exc:

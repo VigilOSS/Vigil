@@ -13,6 +13,7 @@ from app.api.assessment import (
 from app.services.state_manager import findings as findings_service
 from fastapi import HTTPException
 from pydantic import ValidationError
+from tests.proof_fixtures import post_artifact_backed_source_observation
 
 _CODE_SNAPSHOT = {
     "repo_id": 7,
@@ -83,8 +84,11 @@ def _finding_payload(
     *,
     location: str = "file:src/parser.c:41",
     severity: str = "info",
+    author_agent_id: str | None = None,
 ) -> dict[str, object]:
     provenance: dict[str, object] = {"agent_name": "code-vuln-hunter"}
+    if author_agent_id is not None:
+        provenance["agent_id"] = author_agent_id
     if binding is not None:
         provenance["code_snapshot"] = binding
     return {
@@ -92,8 +96,7 @@ def _finding_payload(
         "title": f"Unchecked parser length {slug}",
         "severity": severity,
         "workflow_status": "active",
-        "verification_state": "verified",
-        "verification_disposition": "confirmed",
+        "verification_status": "unreviewed",
         "defect_family": "buffer-overflow",
         "canonical_location": location,
         "summary": "An attacker-controlled length reaches a fixed-size copy.",
@@ -175,7 +178,7 @@ def test_finding_verify_requires_complete_code_snapshot_shape() -> None:
     with pytest.raises(ValidationError, match="source_manifest_digest"):
         FindingVerifyRequest.model_validate(
             {
-                "disposition": "confirmed",
+                "verification_status": "confirmed",
                 "reason_text": "Reviewed the complete dataflow.",
                 "provenance": {
                     "code_snapshot": {"repo_id": 7, "repo_generation": 3}
@@ -300,7 +303,11 @@ def test_verify_is_the_only_path_that_can_rebind_a_stale_file_finding(
     client, isolate_settings
 ) -> None:
     stale_binding = _seed_repo(client, isolate_settings)
-    created = _record(client, _finding_payload("VA-005", stale_binding))
+    _dispatch(client, "hunter-005")
+    created = _record(
+        client,
+        _finding_payload("VA-005", stale_binding, author_agent_id="hunter-005"),
+    )
     assert created.status_code == 201, created.text
     current_binding = _advance_repo(stale_binding)
 
@@ -316,6 +323,9 @@ def test_verify_is_the_only_path_that_can_rebind_a_stale_file_finding(
     assert fetched.status_code == 200, fetched.text
     assert fetched.json()["code_snapshot_status"] == "stale"
 
+    _dispatch(client, "cvv-005", role="code-vuln-verifier")
+    proof_receipt_id = _verification_receipt(client, "cvv-005", "VA-005")
+
     patch = client.patch(
         f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/VA-005",
         json={"provenance": {"code_snapshot": current_binding}},
@@ -325,8 +335,10 @@ def test_verify_is_the_only_path_that_can_rebind_a_stale_file_finding(
     verify_without_binding = client.post(
         f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/VA-005/verify",
         json={
-            "disposition": "confirmed",
+            "verification_status": "confirmed",
             "reason_text": "Re-reviewed the current dataflow.",
+            "proof_receipt_ids": [proof_receipt_id],
+            "severity_variance": _info_severity_variance(proof_receipt_id),
         },
     )
     assert verify_without_binding.status_code == 400
@@ -334,10 +346,12 @@ def test_verify_is_the_only_path_that_can_rebind_a_stale_file_finding(
     verified = client.post(
         f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/VA-005/verify",
         json={
-            "disposition": "confirmed",
+            "verification_status": "confirmed",
             "reason_text": "Re-reviewed the current dataflow.",
             "source_name": "code-vuln-verifier",
             "provenance": {"code_snapshot": current_binding},
+            "proof_receipt_ids": [proof_receipt_id],
+            "severity_variance": _info_severity_variance(proof_receipt_id),
         },
     )
     assert verified.status_code == 200, verified.text
@@ -766,25 +780,75 @@ def _verify(client, slug: str, payload: dict[str, object]):
     )
 
 
+def _verification_receipt(client, verifier_id: str, slug: str) -> int:
+    run = client.post(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/assessment-runs",
+        json={
+            "run_uuid": f"snapshot-proof-{slug.lower()}",
+            "run_kind": "code",
+            "producer_dispatch_agent_id": verifier_id,
+        },
+    )
+    assert run.status_code == 201, run.text
+    receipt = post_artifact_backed_source_observation(
+        client,
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/proof-receipts",
+        json={
+            "run_id": run.json()["id"],
+            "evidence_kind": "source_observation",
+            "expected_result": "The recorded source path does not establish the defect.",
+            "observed_result": "Independent review confirmed the recorded source path.",
+        },
+    )
+    assert receipt.status_code == 201, receipt.text
+    completed = client.patch(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/assessment-runs/{run.json()['id']}",
+        json={"status": "completed"},
+    )
+    assert completed.status_code == 200, completed.text
+    return int(receipt.json()["id"])
+
+
+def _info_severity_variance(proof_receipt_id: int) -> dict[str, object]:
+    return {
+        "normal_band": "high",
+        "chosen_severity": "info",
+        "actor": "code-vuln-verifier",
+        "reason": "This fixture isolates snapshot provenance at informational severity.",
+        "proof_receipt_id": proof_receipt_id,
+    }
+
+
 def test_verify_reports_the_snapshot_transition_on_its_own_response(
     client, isolate_settings
 ) -> None:
     """The one verb whose purpose is to MOVE the binding used to be in the set of
     projections that never reported it."""
     binding = _seed_repo(client, isolate_settings)
+    _dispatch(client, "hunter-035")
     assert _record(
-        client, _finding_payload("VA-035", binding, location="file:src/parser.c:35")
+        client,
+        _finding_payload(
+            "VA-035",
+            binding,
+            location="file:src/parser.c:35",
+            author_agent_id="hunter-035",
+        ),
     ).status_code == 201
     current = _advance_repo(binding)
+    _dispatch(client, "cvv-035", role="code-vuln-verifier")
+    proof_receipt_id = _verification_receipt(client, "cvv-035", "VA-035")
 
     rebound = _verify(
         client,
         "VA-035",
         {
-            "disposition": "confirmed",
+            "verification_status": "confirmed",
             "reason_text": "Re-read the current source; the defect stands.",
             "source_name": "code-vuln-verifier",
             "provenance": {"code_snapshot": current},
+            "proof_receipt_ids": [proof_receipt_id],
+            "severity_variance": _info_severity_variance(proof_receipt_id),
         },
     )
 
@@ -1146,15 +1210,19 @@ def test_a_verify_rebind_re_attests_under_the_verifying_agent(
     assert _record(client, payload).status_code == 201
     current = _advance_repo(binding)
     _dispatch(client, "cvv-001", role="code-vuln-verifier")
+    _dispatch(client, "cvv-proof-001", role="code-vuln-verifier")
+    proof_receipt_id = _verification_receipt(client, "cvv-proof-001", "VA-056")
 
     rebound = _verify(
         client,
         "VA-056",
         {
-            "disposition": "confirmed",
+            "verification_status": "confirmed",
             "reason_text": "Re-read the current source; the defect stands.",
             "source_name": "code-vuln-verifier",
             "provenance": {"code_snapshot": current, "agent_id": "cvv-001"},
+            "proof_receipt_ids": [proof_receipt_id],
+            "severity_variance": _info_severity_variance(proof_receipt_id),
         },
     )
 

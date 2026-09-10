@@ -6,10 +6,18 @@ import json
 import sys
 from pathlib import Path
 
-from assess.lib.client import AssessmentClient
+from assess.lib.client import (
+    AssessmentClient,
+    require_artifact_write_response,
+    require_finding_write_response,
+)
 from assess.lib.config import load_config
 from assess.lib.contracts import render_contract_epilog
 from assess.lib.json_inputs import parse_json_argument, parse_optional_inline_json
+from assess.lib.schema_validation import collect_patch_validation_errors, load_schema
+
+
+_FINDING_SCHEMA = load_schema("finding-record.schema.json")
 
 
 def register(subparsers) -> None:
@@ -23,7 +31,7 @@ def register(subparsers) -> None:
         "finding_slug",
         nargs="+",
         help="One or more canonical finding slugs to verify. Batch: every listed slug receives the "
-             "SAME disposition/payload/flags (resilient loop with a per-slug failure tally).",
+             "SAME verification status/payload/flags (resilient loop with a per-slug failure tally).",
     )
     p.add_argument(
         "--inline",
@@ -36,14 +44,13 @@ def register(subparsers) -> None:
         help="Path to a final JSON verification-transition payload",
     )
     p.add_argument(
-        "--disposition",
+        "--status",
+        dest="verification_status",
         choices=("confirmed", "downgraded", "pending_runtime_proof", "blocked", "false_positive", "disputed"),
         help=(
-            "Verification action when building the payload from flags. 'blocked' "
+            "Verification status when building the payload from flags. 'blocked' "
             "requires a block_reason (pass via --details-inline '{\"block_reason\": \"...\"}' "
-            "or already present on the finding) and holds the finding out of the report. "
-            "'disputed' sets verification_state=disputed and leaves verification_disposition "
-            "at 'none' (it is never stored as a disposition)."
+            "or already present on the finding) and holds the finding out of the report."
         ),
     )
     p.add_argument("--reason", dest="reason_text", help="Required verification rationale when building payload from flags")
@@ -64,15 +71,28 @@ def register(subparsers) -> None:
     p.add_argument("--source-name", help="Optional source/agent name")
     p.add_argument("--details-inline", help="Inline JSON object merged into the details payload")
     p.add_argument("--provenance-inline", help="Inline JSON object for provenance metadata")
-    p.add_argument("--kill-reason", help="False-positive kill reason; stored as details.kill_reason")
-    p.add_argument("--kill-check", type=int, help="False-positive kill check index; stored as details.kill_check")
+    p.add_argument(
+        "--proof-receipt-id",
+        dest="proof_receipt_ids",
+        action="append",
+        type=int,
+        help="Proof-receipt id produced by the independent verifier (repeatable)",
+    )
+    p.add_argument(
+        "--counter-check-file",
+        help="JSON file containing the completed structured false-positive counter-check",
+    )
+    p.add_argument(
+        "--severity-variance-file",
+        help="JSON file containing an attributed CVSS-band variance event",
+    )
     p.set_defaults(func=run)
 
 
-_KNOWN_DISPOSITIONS = frozenset({"confirmed", "downgraded", "pending_runtime_proof", "blocked", "false_positive", "disputed"})
+_KNOWN_STATUSES = frozenset({"confirmed", "downgraded", "pending_runtime_proof", "blocked", "false_positive", "disputed"})
 
 _CONTENT_FLAGS = (
-    ("disposition", "--disposition"),
+    ("verification_status", "--status"),
     ("reason_text", "--reason"),
     ("reason_code", "--reason-code"),
     ("new_severity", "--new-severity"),
@@ -82,8 +102,9 @@ _CONTENT_FLAGS = (
     ("source_name", "--source-name"),
     ("details_inline", "--details-inline"),
     ("provenance_inline", "--provenance-inline"),
-    ("kill_reason", "--kill-reason"),
-    ("kill_check", "--kill-check"),
+    ("proof_receipt_ids", "--proof-receipt-id"),
+    ("counter_check_file", "--counter-check-file"),
+    ("severity_variance_file", "--severity-variance-file"),
 )
 
 
@@ -108,7 +129,7 @@ def run(args) -> None:
         legacy_inline = getattr(args, "inline_payload", None)
     if legacy_inline is not None:
         print(
-            "finding verify: --inline was removed; use --disposition/--reason and related "
+            "finding verify: --inline was removed; use --status/--reason and related "
             "explicit flags, or --payload-file <path> for a final transition payload.",
             file=sys.stderr,
         )
@@ -116,15 +137,15 @@ def run(args) -> None:
 
     slugs = args.finding_slug if isinstance(args.finding_slug, list) else [args.finding_slug]
     # The trailing positional payload arg was removed (it collided with a variadic
-    # slug list). Catch a legacy JSON blob / disposition passed positionally and
+    # slug list). Catch a legacy JSON blob / status passed positionally and
     # point the caller at the flag form.
     example_slug = slugs[0] if slugs else "<slug>"
     for token in slugs:
         t = str(token).strip()
-        if t in _KNOWN_DISPOSITIONS:
+        if t in _KNOWN_STATUSES:
             print(
-                f"'{t}' looks like a disposition, not a finding slug.\n"
-                f"Use: vigil assess finding verify {example_slug} --disposition {t} --reason \"...\"",
+                f"'{t}' looks like a verification status, not a finding slug.\n"
+                f"Use: vigil assess finding verify {example_slug} --status {t} --reason \"...\"",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -166,9 +187,9 @@ def run(args) -> None:
             print(str(exc), file=sys.stderr)
             sys.exit(1)
     else:
-        if not args.disposition or not args.reason_text:
+        if not args.verification_status or not args.reason_text:
             print(
-                "finding verify requires --payload-file or both --disposition and --reason",
+                "finding verify requires --payload-file or both --status and --reason",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -192,12 +213,39 @@ def run(args) -> None:
         if not isinstance(provenance, dict):
             print("provenance JSON must be an object", file=sys.stderr)
             sys.exit(1)
-        if args.kill_reason:
-            details["kill_reason"] = args.kill_reason
-        if args.kill_check is not None:
-            details["kill_check"] = args.kill_check
+        structured_decisions: dict[str, dict] = {}
+        for field_name, path_value, description in (
+            (
+                "counter_check",
+                getattr(args, "counter_check_file", None),
+                "counter-check payload",
+            ),
+            (
+                "severity_variance",
+                getattr(args, "severity_variance_file", None),
+                "severity-variance payload",
+            ),
+        ):
+            if not path_value:
+                continue
+            if not Path(path_value).is_file():
+                print(f"{description} file not found: {path_value}", file=sys.stderr)
+                sys.exit(1)
+            try:
+                structured, _ = parse_json_argument(
+                    path_value,
+                    inline=False,
+                    description=description,
+                )
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                sys.exit(1)
+            if not isinstance(structured, dict):
+                print(f"{description} must be a JSON object", file=sys.stderr)
+                sys.exit(1)
+            structured_decisions[field_name] = structured
         payload = {
-            "disposition": args.disposition,
+            "verification_status": args.verification_status,
             "reason_code": args.reason_code,
             "reason_text": args.reason_text,
             "new_severity": args.new_severity,
@@ -207,35 +255,65 @@ def run(args) -> None:
             "source_name": args.source_name,
             "details": details,
             "provenance": provenance,
+            "proof_receipt_ids": getattr(args, "proof_receipt_ids", None) or [],
+            **structured_decisions,
         }
         payload = {key: value for key, value in payload.items() if value is not None}
 
     if not isinstance(payload, dict):
         print("verification payload must be a JSON object", file=sys.stderr)
         sys.exit(1)
-    if payload.get("disposition") == "false_positive":
-        details = payload.get("details") or {}
-        if not isinstance(details, dict):
-            print("false_positive verification details must be a JSON object", file=sys.stderr)
-            sys.exit(1)
-        if not details.get("kill_reason") or details.get("kill_check") is None:
+    details = payload.get("details")
+    details_schema = _FINDING_SCHEMA["properties"].get("details")
+    if details is not None and isinstance(details_schema, dict):
+        schema_errors = collect_patch_validation_errors(
+            details, details_schema, path="details"
+        )
+        if schema_errors:
+            print("finding verify: payload failed schema validation:", file=sys.stderr)
+            for error in schema_errors:
+                print(f"  - {error}", file=sys.stderr)
             print(
-                "false_positive verification requires details.kill_reason and details.kill_check",
+                "Run `vigil assess contract finding verify` for the allowed details keys.",
                 file=sys.stderr,
             )
             sys.exit(1)
-    if payload.get("disposition") == "downgraded" and not payload.get("new_severity"):
+    if payload.get("verification_status") == "false_positive":
+        counter_check = payload.get("counter_check")
+        if not isinstance(counter_check, dict):
+            print(
+                "false_positive verification requires --counter-check-file with a "
+                "completed structured counter-check",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if counter_check.get("completed") is not True:
+            print(
+                "false_positive counter-check must be completed; use blocked or "
+                "pending_runtime_proof when the check could not run",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    if payload.get("verification_status") in {"confirmed", "downgraded"} and not payload.get(
+        "proof_receipt_ids"
+    ):
+        print(
+            "terminal verification requires at least one --proof-receipt-id",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if payload.get("verification_status") == "downgraded" and not payload.get("new_severity"):
         print("downgraded verification requires new_severity", file=sys.stderr)
         sys.exit(1)
-    if payload.get("new_severity") and payload.get("disposition") != "downgraded":
-        # Only the downgraded disposition consumes new_severity; anywhere else it
+    if payload.get("new_severity") and payload.get("verification_status") != "downgraded":
+        # Only the downgraded status consumes new_severity; anywhere else it
         # was silently dropped server-side. Fail before the POST with the verb
         # that actually re-bands a finding (mirrors the backend rejection). The
         # remedy names EVERY slug in the batch: naming only the first would
         # re-band one finding and silently leave the rest at the old severity.
         print(
-            "new_severity applies only to --disposition downgraded (got "
-            f"'{payload.get('disposition')}'); change the band with "
+            "new_severity applies only to --status downgraded (got "
+            f"'{payload.get('verification_status')}'); change the band with "
             f"`vigil assess finding update {' '.join(slugs) or '<slug>'} --severity "
             f"{payload['new_severity']}`",
             file=sys.stderr,
@@ -243,6 +321,7 @@ def run(args) -> None:
         sys.exit(1)
 
     narrative_path = getattr(args, "narrative", "") or ""
+    narrative_artifact_path = narrative_path
     producer_role = str(payload.get("source_name") or getattr(args, "source_name", "") or "")
 
     cfg = load_config(args.engagement_dir)
@@ -262,13 +341,26 @@ def run(args) -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
+        try:
+            narrative_artifact_path = narrative_file.resolve().relative_to(
+                Path(cfg.engagement_dir).resolve()
+            ).as_posix()
+        except ValueError:
+            # The backend owns the authoritative containment refusal. Retain the
+            # submitted path here so an impossible success still cannot validate
+            # as an unrelated artifact.
+            narrative_artifact_path = narrative_path
 
     results: list = []
     failed = 0
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         for slug in slugs:
             try:
-                result = client.post(f"findings/{slug}/verify", payload)
+                result = require_finding_write_response(
+                    client.post(f"findings/{slug}/verify", payload),
+                    finding_slug=slug,
+                    operation="finding verify",
+                )
                 if narrative_path:
                     narrative_payload = {
                         "path": narrative_path,
@@ -277,7 +369,11 @@ def run(args) -> None:
                     }
                     if producer_role:
                         narrative_payload["producer_agent_role"] = producer_role
-                    result["narrative_artifact"] = client.post("artifacts", narrative_payload)
+                    result["narrative_artifact"] = require_artifact_write_response(
+                        client.post("artifacts", narrative_payload),
+                        artifact_path=narrative_artifact_path,
+                        operation=f"register verification narrative for {slug}",
+                    )
             except Exception as exc:  # noqa: BLE001 - one bad slug must not drop the rest
                 failed += 1
                 print(f"finding verify: {slug} failed: {exc}", file=sys.stderr)

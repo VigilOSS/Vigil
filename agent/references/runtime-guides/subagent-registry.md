@@ -29,12 +29,10 @@ The operator's audit trail. One row per dispatched specialist agent.
 | `dispatched_at` | ISO datetime | Set on agent start (`POST /dispatches`). |
 | `completed_at` | ISO datetime | Set on `vigil assess agent done` when status moves to a terminal value. |
 | `status` | enum | `in-progress` / `completed` / `failed` / `aborted` / `blocked`. |
-| `model` | string | Denormalized copy of the requested model for compact dispatch projections. |
-| `reasoning` | string | Denormalized requested reasoning level (`low` / `medium` / `high`). |
 | `requested_model` | string | Operator-requested model id (`claude-opus-4-7`, …). |
-| `actual_model` | string | Model that actually executed when it differs from the request. |
+| `actual_model` | string | Provider-observed model, or `unknown`; read-only to dispatch callers. |
 | `requested_reasoning` | string | Requested reasoning level. |
-| `actual_reasoning` | string | Observed reasoning level when it differs from the request. |
+| `actual_reasoning` | string | Provider-observed reasoning level, or `unknown`; read-only to dispatch callers. |
 | `dispatch_mode` | string | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` / `swarm`. |
 | `finding_slugs_json` | JSON array | Finding slugs the dispatch produced (`agent done` PATCH may append additively). |
 
@@ -49,7 +47,10 @@ vigil assess agent start \
     --model claude-opus-4-7 \
     --reasoning high \
     --dispatch-mode hypothesis-driven \
-    --skills subdomain-enumeration,web-recon
+    --skills subdomain-enumeration,web-recon \
+    --rate-budget "<exact operator-authored rate/concurrency instruction>" \
+    --prompt-context-json dispatch-context.json \
+    --emit-prompt
 
 # Then launch the specialist with the client-native agent tool and pass it
 # the Runtime Identity block printed by `agent start`.
@@ -67,15 +68,14 @@ vigil assess agent list --task-q "wildcard subdomain"
 vigil assess agent get recon_a3f9
 ```
 
-The contract fields (`application_unit_id`, `requested_model`/`actual_model`,
-`requested_reasoning`/`actual_reasoning`, `dispatch_mode`, `skills`) capture the
-dispatch shape alongside the audit fields. Report-writer and later operators
-read these to audit not only what was dispatched but also the dispatch
-configuration.
+The request fields (`application_unit_id`, `requested_model`,
+`requested_reasoning`, `dispatch_mode`, `skills`) capture the intended dispatch
+shape. Responses also expose provider-observed actual model/reasoning when a
+trusted integration has supplied them; otherwise both remain `unknown`.
 
 ## Contract Schema
 
-The contract fields recorded on every `vigil assess agent start` / `POST /dispatches` call:
+The public fields accepted on every `vigil assess agent start` / `POST /dispatches` call:
 
 | Field | Type | Values |
 |---|---|---|
@@ -83,9 +83,19 @@ The contract fields recorded on every `vigil assess agent start` / `POST /dispat
 | `dispatch_mode` | string | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` / `swarm` (see "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`) |
 | `skills` | string | Comma-separated skill names loaded by the specialist; required for non-operator roles. |
 | `requested_model` | string (optional) | Intended model id from the operator |
-| `actual_model` | string (optional) | Model that actually executed |
 | `requested_reasoning` | string (optional) | Intended reasoning level (`low` / `medium` / `high`) |
-| `actual_reasoning` | string (optional) | Actual reasoning tier when recorded |
+
+The CLI also requires exactly one non-persisted traffic declaration:
+`--rate-budget "<exact authored instruction>"` or `--no-target-traffic`. It
+prints that declaration on every start path; `--emit-prompt` renders it into the
+complete prompt. Emission also requires `--prompt-context-json` (or top-level
+`prompt_context` in `--from-json`) with every canonical prompt-only field listed
+in `dispatch-template.md`; missing or empty values fail before the dispatch
+write. These presentation fields are intentionally not duplicated in the
+backend dispatch schema.
+
+`actual_model` and `actual_reasoning` are audit response fields, not public
+write inputs. Caller-provided values are rejected rather than treated as proof.
 
 ## Table 2 — `assessment_dispatch_handoffs`
 
@@ -111,7 +121,9 @@ The renderer reads the handoff row, fetches each finding slug from the backend
 (missing → "(state: missing)"), and emits a markdown blob hard-capped at
 `--max-lines` (default 40). Findings list collapses to "... and N more" before
 runtime_issues / working_artifacts. Summary, coverage gaps, and next steps are
-never trimmed.
+preserved through the normal list-collapse passes; if their multiline prose
+alone exceeds the hard cap, the renderer marks the remaining lines as truncated
+and names the `--max-lines` recovery path.
 
 ## Table 3 — `assessment_dispatch_decisions`
 

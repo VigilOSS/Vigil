@@ -30,6 +30,16 @@ export function MarkdownBlock({ text }: { text: string }) {
           a: ({ node: _node, ...props }) => (
             <a {...props} target="_blank" rel="noopener noreferrer" />
           ),
+          // Markdown image targets are attacker-controlled. Rendering an
+          // <img> would make the browser fetch them without operator intent,
+          // so preserve the review context as inert text instead.
+          img: ({ node: _node, alt, src }) => (
+            <span className="md-image-reference">
+              <span>Image reference</span>
+              <strong>{alt?.trim() || "Unlabelled image"}</strong>
+              <code>{src || "Source blocked by Markdown URL policy"}</code>
+            </span>
+          ),
         }}
       >
         {text}

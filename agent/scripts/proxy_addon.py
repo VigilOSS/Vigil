@@ -382,7 +382,9 @@ def _normalize_capture_policy(raw) -> dict:
         "max_body_bytes": max(0, max_body),
         "content_type_allow": _ct_list("content_type_allow"),
         "content_type_deny": _ct_list("content_type_deny"),
-        "redaction_profile": str(data.get("redaction_profile") or "none"),
+        # No capture-time redactor exists. Never label raw body bytes as if an
+        # unknown historical/requested profile had transformed them.
+        "redaction_profile": "none",
     }
 
 
@@ -1693,27 +1695,29 @@ class CaseCollector:
 
     def _write_body_sidecar(
         self, root: Path, body: bytes, policy: dict, content_type: str
-    ) -> tuple[str | None, str, int, bool]:
+    ) -> tuple[str | None, str, int, bool, str, str]:
         """Persist a body under ``traffic/mitmproxy/bodies/<sha256>.bin``.
 
         Honors the content-type allow/deny lists and ``max_body_bytes``. Returns
-        ``(relative_path, sha256, stored_bytes, truncated)``. The sha256 is over
-        the STORED bytes so the sidecar content hashes to its own filename and
-        identical bodies dedupe. Returns ``(None, "", 0, False)`` when the body is
-        empty or the policy excludes this content type. Degrades gracefully: a
-        write failure logs and returns no path rather than raising.
+        ``(relative_path, sha256, stored_bytes, truncated, status, error)``. The
+        sha256 is over the STORED bytes so the sidecar content hashes to its own
+        filename and identical bodies dedupe. Status distinguishes an empty or
+        policy-excluded body from a failed write, so the audit row never makes
+        missing evidence look intentionally absent.
         """
         if not body:
-            return None, "", 0, False
+            return None, "", 0, False, "empty", ""
         if not _body_capture_allowed(
             content_type,
             policy.get("content_type_allow") or [],
             policy.get("content_type_deny") or [],
         ):
-            return None, "", 0, False
+            return None, "", 0, False, "excluded_content_type", ""
         cap = policy.get("max_body_bytes", BODY_TRUNCATE)
         if not isinstance(cap, int) or cap < 0:
             cap = BODY_TRUNCATE
+        if cap == 0:
+            return None, "", 0, True, "excluded_by_limit", ""
         stored = body[:cap]
         truncated = len(body) > len(stored)
         sha = hashlib.sha256(stored).hexdigest()
@@ -1728,8 +1732,9 @@ class CaseCollector:
                 tmp.rename(target)
         except OSError as exc:
             ctx.log.warn(f"proxy_addon: cannot write body sidecar {rel_path} — {exc}")
-            return None, sha, len(stored), truncated
-        return rel_path, sha, len(stored), truncated
+            return None, "", 0, False, "write_failed", str(exc)[:1000]
+        status = "retained_truncated" if truncated else "retained"
+        return rel_path, sha, len(stored), truncated, status, ""
 
     def _append_flow_index(self, root: Path, record: dict) -> str | None:
         """Append one JSONL line to ``traffic/mitmproxy/flows/<date>.jsonl``.
@@ -1808,19 +1813,33 @@ class CaseCollector:
             req_sha = ""
             req_bytes = 0
             req_trunc = False
+            req_capture_status = "not_requested"
+            req_capture_error = ""
             if policy.get("capture_request_bodies"):
-                req_path, req_sha, req_bytes, req_trunc = self._write_body_sidecar(
-                    root, raw_req_body, policy, request_content_type
-                )
+                (
+                    req_path,
+                    req_sha,
+                    req_bytes,
+                    req_trunc,
+                    req_capture_status,
+                    req_capture_error,
+                ) = self._write_body_sidecar(root, raw_req_body, policy, request_content_type)
 
             resp_path = None
             resp_sha = ""
             resp_bytes = 0
             resp_trunc = False
+            resp_capture_status = "not_requested"
+            resp_capture_error = ""
             if policy.get("capture_response_bodies"):
-                resp_path, resp_sha, resp_bytes, resp_trunc = self._write_body_sidecar(
-                    root, resp_body, policy, response_content_type
-                )
+                (
+                    resp_path,
+                    resp_sha,
+                    resp_bytes,
+                    resp_trunc,
+                    resp_capture_status,
+                    resp_capture_error,
+                ) = self._write_body_sidecar(root, resp_body, policy, response_content_type)
 
             started_at, timing_ms = self._flow_timing(flow)
 
@@ -1873,6 +1892,10 @@ class CaseCollector:
                 "response_body_bytes": resp_bytes,
                 "request_body_truncated": req_trunc,
                 "response_body_truncated": resp_trunc,
+                "request_body_capture_status": req_capture_status,
+                "response_body_capture_status": resp_capture_status,
+                "request_body_capture_error": req_capture_error,
+                "response_body_capture_error": resp_capture_error,
                 "request_body_artifact_path": req_path,
                 "response_body_artifact_path": resp_path,
                 "request_headers": dict(req.headers),

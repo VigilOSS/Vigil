@@ -125,12 +125,12 @@ Full table and detection commands: `agent/references/tools/recon/wafw00f.md`. Th
 ### Step 0b — Egress reputation (operator-run; you review the verdict)
 
 The **operator** runs `vigil assess egress-check` after the recon job's web stage
-populates the live-host set, producing an `egress_decision` and a blocked-hosts
-deferral file. **Review that verdict** as part of your completeness assessment: a
-pattern of 403 across alive hosts (or `egress_block_pct > 50`) is the signature of
-an IP-reputation block (or a JA3/JA4 TLS fingerprint block) — flag the blocked
-cluster as a coverage gap and confirm the deferral, never a target verdict (a `000`
-from curl is a dead host, excluded). Running nmap, ffuf, and nuclei against a
+populates the live-host set, producing an evidence-backed `egress_decision` and,
+only for a control-live observed blackhole, a blocked-hosts deferral file. **Review
+that verdict** as part of your completeness assessment: repeated 403/000 patterns
+are candidates, not cause proof; `000` means no HTTP answer was observed, and a WAF
+or edge response is inconclusive rather than application reachability. One control
+cannot prove an estate-wide, per-host, or per-route claim. Running nmap, ffuf, and nuclei against a
 blocked egress burns a full dispatch with no signal. If you must sample manually as
 a fallback, this bounded one-shot catches the block once:
 
@@ -147,8 +147,8 @@ for h in $REPRS; do
   code=$(curl -sS -o /dev/null -w "%{http_code}" -m 10 "https://$h/")
   case "$code" in
     000)
-      # Dead host — DNS failure, no listener, or TCP-reset. Not what we
-      # are sampling for; exclude from total.
+      # No HTTP answer observed. Cause unknown; exclude from this legacy
+      # percentage rather than pretending it is dead or blocked.
       ;;
     403)
       blocked=$((blocked+1)); total=$((total+1))
@@ -169,7 +169,8 @@ echo "egress_block_pct=$pct (blocked=$blocked alive=$total)"
 '
 ```
 
-If `egress_block_pct > 50`, STOP target-facing recon, pause five minutes,
+If the evidence-backed `egress-check` verdict is `cluster_blackholed`, STOP
+target-facing recon, pause five minutes,
 and re-run the sample. Transient rate-limit shape often clears on its own
 and trips the sweep above the 50% line for one sample window. Only when
 the second sample also stays >50% should you surface the Egress reputation
@@ -177,9 +178,9 @@ checkpoint (numbered choice with the four mitigation options). Methodology,
 the four mitigation options, and the give-up-vs-escalate rule live in
 `agent/references/runtime-guides/cdn-ip-blocking.md`.
 
-If a subset of representative hosts returned 100% 403, write those host
-strings into `$DIR/scans/egress_blocked_hosts.txt` so subsequent
-`vigil assess ingest endpoints --egress-blocked-hosts <file>` invocations
+Use the supported verb's emitted blocked-hosts file only when it reports an
+observed blackhole; a bare 403 percentage is not sufficient. Subsequent `vigil
+assess ingest endpoints --egress-blocked-hosts <file>` invocations
 defer URLs to those hosts with `cluster_key=deferred:egress-blocked`
 instead of polluting the work buffer.
 

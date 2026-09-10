@@ -4,8 +4,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessmentClient, AssessError
 from assess.lib.config import load_config
+from assess.lib.finding_render import warn_untrusted_data
 
 
 def register(subparsers) -> None:
@@ -16,12 +17,6 @@ def register(subparsers) -> None:
     p.add_argument("command_run_id", type=int, help="numeric id from `vigil assess command-run list`")
     p.add_argument("--json", dest="as_json", action="store_true", help="No-op: `command-run get` always emits JSON.")
     p.add_argument(
-        "--include-output",
-        dest="include_output",
-        action="store_true",
-        help="No-op: `command-run get` always returns the full stdout/stderr previews. Accepted so the flag carried over from `command-run list` does not read as a CLI breakage.",
-    )
-    p.add_argument(
         "--live",
         action="store_true",
         help="Read the current on-disk stdout/stderr tails instead of relying only on finalized previews.",
@@ -31,14 +26,26 @@ def register(subparsers) -> None:
 
 def run(args) -> None:
     cfg = load_config(args.engagement_dir)
+    requested_id = int(args.command_run_id)
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        row = client.get(f"command-runs/{int(args.command_run_id)}")
+        row = client.get(f"command-runs/{requested_id}")
+    returned_id = row.get("id") if isinstance(row, dict) else None
+    if (
+        not isinstance(returned_id, int)
+        or isinstance(returned_id, bool)
+        or returned_id != requested_id
+    ):
+        raise AssessError(
+            f"command-run get: backend response did not identify requested "
+            f"command run {requested_id}"
+        )
     if getattr(args, "live", False):
         engagement_root = Path(cfg.engagement_dir).resolve()
         row["live_output"] = {
             "stdout": _tail_file(row.get("stdout_path"), engagement_root=engagement_root),
             "stderr": _tail_file(row.get("stderr_path"), engagement_root=engagement_root),
         }
+    warn_untrusted_data()
     print(json.dumps(row, indent=2, ensure_ascii=False))
 
 

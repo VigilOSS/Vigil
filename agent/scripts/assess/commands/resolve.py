@@ -23,7 +23,7 @@ import argparse
 import json
 import sys
 
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessmentClient, require_write_result
 from assess.lib.config import load_config
 from assess.lib.contracts import add_contract_subparser, render_contract_epilog
 from assess.lib.surfaces import RESOLVABLE_STATUSES
@@ -180,17 +180,14 @@ def run(args) -> None:
         for row_id in args.ids:
             endpoint = _endpoint(target_kind, row_id)
             try:
-                record = client.patch(endpoint, payload)
+                record = require_write_result(
+                    client.patch(endpoint, payload),
+                    operation=f"resolve {target_kind} {row_id}",
+                    expected={"id": int(row_id), "status": status},
+                )
             except Exception as exc:  # noqa: BLE001 - one bad id must not drop the rest
                 failed += 1
                 print(f"resolve {target_kind}: {row_id} failed: {exc}", file=sys.stderr)
-                continue
-            if not isinstance(record, dict) or "id" not in record:
-                failed += 1
-                print(
-                    f"resolve {target_kind}: {row_id} returned an unexpected response",
-                    file=sys.stderr,
-                )
                 continue
             records.append(record)
 

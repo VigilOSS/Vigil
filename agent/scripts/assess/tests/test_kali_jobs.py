@@ -164,7 +164,7 @@ def test_start_job_wrapper_and_started_at(monkeypatch, tmp_path):
     assert running_patches[-1].get("started_at"), "running PATCH must stamp started_at"
 
 
-def test_start_job_acquires_rate_lease_before_dtach_and_persists_token(
+def test_start_job_emits_nonblocking_recency_advisory_before_dtach(
     monkeypatch, tmp_path
 ):
     fake = FakeClient(post_value={"id": 17})
@@ -175,8 +175,8 @@ def test_start_job_acquires_rate_lease_before_dtach_and_persists_token(
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake)
     monkeypatch.setattr(
         kali_jobs,
-        "acquire_target_rate_lease",
-        lambda **kwargs: events.append("lease") or {"lease_token": "rate-17"},
+        "emit_foreign_lane_recency",
+        lambda *_args, **_kwargs: events.append("advisory"),
     )
     monkeypatch.setattr(
         kali_jobs.subprocess,
@@ -190,8 +190,6 @@ def test_start_job_acquires_rate_lease_before_dtach_and_persists_token(
             "technique": "RECON",
             "agent_name": "recon-specialist",
             "timeout_seconds_requested": 120,
-            "effective_rate_rps": 5,
-            "rate_override_reason": "",
         },
         engagement_dir=tmp_path,
         container_name="vigil",
@@ -199,11 +197,11 @@ def test_start_job_acquires_rate_lease_before_dtach_and_persists_token(
         execution_policy={"target_facing": True},
     )
 
-    assert events.index("lease") < events.index("spawn")
+    assert events.index("advisory") < events.index("spawn")
     metadata_patches = [
         payload for _, payload in fake.patches if "audit_metadata" in payload
     ]
-    assert metadata_patches[-1]["audit_metadata"]["rate_lease_token"] == "rate-17"
+    assert not metadata_patches
 
 
 def test_start_job_creates_command_audit_before_linked_job_and_spawn(
@@ -574,21 +572,16 @@ def test_finalize_reconciles_stop_failed_when_marker_arrives(tmp_path):
     assert client.patches[-1][1]["exit_code"] == 0
 
 
-def test_finalize_releases_persisted_rate_lease(monkeypatch, tmp_path):
-    rec = _running_record(tmp_path, job_id=15, uuid="leased")
+def test_finalize_preserves_historical_rate_lease_metadata(tmp_path):
+    rec = _running_record(tmp_path, job_id=15, uuid="legacy-leased")
     rec["audit_metadata"] = {"rate_lease_token": "rate-15"}
-    _write_marker(tmp_path, "leased", 0)
+    _write_marker(tmp_path, "legacy-leased", 0)
     client = FakeClient()
-    released: list[str] = []
-    monkeypatch.setattr(
-        kali_jobs,
-        "release_target_rate_lease",
-        lambda token, **kwargs: released.append(token),
-    )
 
-    kali_jobs._finalize_if_marker_present(client, rec)
+    result = kali_jobs._finalize_if_marker_present(client, rec)
 
-    assert released == ["rate-15"]
+    assert result["status"] == "completed"
+    assert rec["audit_metadata"] == {"rate_lease_token": "rate-15"}
 
 
 # --------------------------------------------------------------------------- #
@@ -873,12 +866,6 @@ def test_jobs_sweep_marker_finalizes_completed(monkeypatch, tmp_path):
     row["parent_command_run_id"] = 101
     row["audit_metadata"] = {"rate_lease_token": "rate-sweep"}
     fake = FakeJobsSweepClient(running=[row])
-    released: list[str] = []
-    monkeypatch.setattr(
-        kso,
-        "release_target_rate_lease",
-        lambda token, **kwargs: released.append(token),
-    )
     _write_marker(tmp_path, "m000", 0)
     _run_jobs_sweep(monkeypatch, tmp_path, fake)
     job_patch = next(payload for endpoint, payload in fake.patches if endpoint == "jobs/1")
@@ -891,7 +878,7 @@ def test_jobs_sweep_marker_finalizes_completed(monkeypatch, tmp_path):
     )
     assert parent_patch["status"] == "completed"
     assert parent_patch["return_code"] == 0
-    assert released == ["rate-sweep"]
+    assert row["audit_metadata"] == {"rate_lease_token": "rate-sweep"}
 
 
 def test_jobs_sweep_marker_finalizes_failed(monkeypatch, tmp_path):

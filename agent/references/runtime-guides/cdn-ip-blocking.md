@@ -7,10 +7,12 @@ description: CDN/edge IP-reputation block detection signals (403 + reference cod
 > **Automated version:** `vigil assess egress-check --hosts <hosts> --control example.com --emit-blocked-hosts <file>`
 > runs this detection robustly — it samples in-scope hosts + a known-good control, classifies each with the
 > shared `reachability.classify_probe` verdict (a bare `connect=000` is NOT treated as blocked unless there is
-> no TCP connect AND no resolved IP; a TLS-1.3 reset is retried with `--tls-max 1.2`), records an advisory
-> `egress_decision` only when controls connect but the sample is overwhelmingly blackholed, and writes the
+> no TCP connect AND no resolved IP; a TLS-1.3 reset is retried with `--tls-max 1.2`), captures bounded
+> headers/body bytes so an edge block cannot look reachable, records every outcome as an evidence-backed
+> advisory `egress_decision`, and writes the
 > blocked-hosts file for `ingest endpoints --egress-blocked-hosts`. The manual script below is the reference it
-> implements — prefer the verb; reach for the script when you need to tune the probe by hand.
+> supersedes — prefer the verb. The legacy script is only a candidate-signal sampler because it discards
+> headers/bodies and cannot distinguish a WAF response from an application response.
 
 When the runtime container's egress IP is on a CDN edge's reputation list,
 target-facing recon collapses into uninformative 403s and 000-status timeouts.
@@ -32,8 +34,9 @@ specialist rediscover it.
 
 ## Detection signals
 
-The egress block presents in three shapes; any single shape across the
-representative live-host set is enough to dispatch the checkpoint.
+The egress block presents in three common shapes. A shape is a candidate, not a
+verdict: retain its response evidence and compare multiple controls/routes before
+dispatching the checkpoint.
 
 ### 1. Hard 403 with a CDN reference code
 
@@ -65,11 +68,15 @@ error. Pattern:
 
 A host other tools confirm is up returns `000` from curl with no HTTP body.
 This usually overlaps with shape #2 but also covers TLS handshake aborts
-(JA3/JA4 fingerprint blocks where the edge resets the connection mid-TLS).
+(including possible JA3/JA4 fingerprint blocks). On its own `000` means only
+that no HTTP answer was observed; it does not prove a dead host or the cause.
 
 ## Egress reputation script
 
-Run this against the live-host list during Phase 1 Step 0b (recon-specialist,
+This historical fallback illustrates the earlier percentage calculation. Run it
+only when the supported verb is unavailable, and do not turn its percentage into
+a blocked-hosts file or target verdict without separately retaining headers/body
+and performing the control/route disambiguation above. Run it against the live-host list during Phase 1 Step 0b (recon-specialist,
 after subdomain-enum + httpx have populated `live_hosts.txt`). It samples up
 to 10 representative hosts, distinguishes alive-and-blocked from dead, and
 emits the block percentage over the alive sample. Default-conservative: do
@@ -91,8 +98,8 @@ for h in $REPRS; do
   code=$(curl -sS -o /dev/null -w "%{http_code}" -m 10 "https://$h/")
   case "$code" in
     000)
-      # Dead host (DNS failure, no listener, connection refused). Not the
-      # signal we are sampling for — exclude from total.
+      # No HTTP answer observed. Cause unknown; exclude from this legacy
+      # percentage rather than pretending it is dead or blocked.
       ;;
     403)
       blocked=$((blocked+1)); total=$((total+1))
@@ -113,10 +120,12 @@ echo "egress_block_pct=$pct (blocked=$blocked alive=$total)"
 '
 ```
 
-When the script reports `egress_block_pct > 50`, re-run the script after a
+When the fallback script reports `egress_block_pct > 50`, treat that as a lead and
+re-run an evidence-retaining check after a
 five-minute pause; transient rate-limit shape often clears on its own and
 fires the sweep above the 50% line for one sample window. Only fire the
-four-way checkpoint below when the second sample also stays >50%. Record
+four-way checkpoint below when the second sample also stays >50% and the retained
+response/control evidence supports the same conclusion. Record
 the chosen option via:
 
 ```bash
@@ -125,9 +134,9 @@ vigil assess agent decision --kind egress_decision \
     --note "<one-line rationale>"
 ```
 
-If a subset of hosts in the representative set returned 100% 403, write
-those host strings to `$DIR/scans/egress_blocked_hosts.txt` and pass the
-file to subsequent ingestion runs:
+Do not create a blocked-hosts file from the fallback's 403 percentage. Use the
+supported verb's emitted file only after it reports an observed transport
+blackhole, then pass that file to subsequent ingestion runs:
 
 ```bash
 vigil assess ingest endpoints \

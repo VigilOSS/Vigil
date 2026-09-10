@@ -184,6 +184,38 @@ def test_detect_cloudflare_just_a_moment_is_flagged():
     assert "cloudflare" in reason.lower()
 
 
+def test_cloudfront_s3_403_without_origin_request_id_is_an_edge_block() -> None:
+    is_waf, reason = ko.detect_waf_challenge(
+        "<Error><Code>AccessDenied</Code><Message>Request blocked.</Message></Error>",
+        "",
+        {
+            "status_code": "403",
+            "Server": "AmazonS3",
+            "X-Cache": "Error from cloudfront",
+            "X-Amz-Cf-Id": "opaque-edge-request",
+        },
+    )
+
+    assert is_waf is True
+    assert "CloudFront/S3 edge-block envelope" in reason
+
+
+def test_cloudfront_s3_403_with_origin_request_id_is_not_universally_a_waf() -> None:
+    is_waf, reason = ko.detect_waf_challenge(
+        '{"message":"Forbidden"}',
+        "",
+        {
+            "status_code": "403",
+            "Server": "AmazonS3",
+            "X-Cache": "Error from cloudfront",
+            "X-Request-Id": "origin-observed-request",
+        },
+    )
+
+    assert is_waf is False
+    assert reason == ""
+
+
 def test_detect_akamai_access_denied_is_flagged():
     is_waf, reason = ko.detect_waf_challenge(_AKAMAI_BODY, "", _AKAMAI_HEADERS)
     assert is_waf is True
@@ -554,14 +586,28 @@ class _FakeClient:
     def __init__(self, base_url, engagement_key):
         self.posts: list = []
         self.patches: list = []
+        self.decisions: list = []
 
     def post(self, endpoint, payload):
         self.posts.append((endpoint, payload))
-        return {"id": 7, "superseded_by_id": None}
+        return {
+            "id": 7,
+            "run_uuid": payload.get("run_uuid"),
+            "superseded_by_id": None,
+        }
 
     def patch(self, endpoint, payload, *, accept_409: bool = False):
         self.patches.append((endpoint, payload))
-        return {"id": 7, "status": payload.get("status")}
+        run_uuid = next(
+            posted_payload["run_uuid"]
+            for posted_endpoint, posted_payload in self.posts
+            if posted_endpoint == "command-runs"
+        )
+        return {"id": 7, "run_uuid": run_uuid, "status": payload.get("status")}
+
+    def record_decision(self, payload):
+        self.decisions.append(payload)
+        return {"id": 81}
 
     def close(self):
         return None
@@ -636,6 +682,23 @@ def test_kali_exec_waf_challenge_blocks_verdict(monkeypatch, fake_engagement, ca
     assert result.waf_challenge_detail
     # Backend PATCH status stayed inside the enum (completed — rc=0 real exchange).
     assert client.patches[-1][1]["status"] == "completed"
+    assert len(client.decisions) == 1
+    decision = client.decisions[0]
+    assert decision["kind"] == "egress_decision"
+    assert decision["surfaced_to_user"] is True
+    assert decision["payload"]["subtype"] == "waf_challenge"
+    assert decision["payload"]["verdict"] == "waf_challenge"
+    assert decision["payload"]["reason"] == result.waf_challenge_detail
+    assert decision["payload"]["artifact_ref"].startswith(
+        f"/engagements/{fake_engagement.name}/scans/kali/"
+    )
+    assert decision["payload"]["provenance"] == {
+        "source": "vigil assess kali",
+        "detector": "detect_waf_challenge",
+        "command_run_id": 7,
+        "tool_name": "curl",
+        "agent_name": "vulnerability-analyst",
+    }
     # Loud stderr line surfaced.
     err = capsys.readouterr().err
     assert "WAF" in err or "challenge" in err.lower()
@@ -704,7 +767,7 @@ def test_kali_exec_clean_httpx_json_not_flagged(monkeypatch, fake_engagement):
 
 
 def test_kali_exec_real_answer_not_waf_flagged(monkeypatch, fake_engagement):
-    kali, _client = _setup(monkeypatch, fake_engagement)
+    kali, client = _setup(monkeypatch, fake_engagement)
     result = _run_with_stdout(
         monkeypatch, kali, _REAL_APP_BODY,
         cmd=["curl", "-sS", "https://api.example.com/"], tool_name="curl",
@@ -712,6 +775,7 @@ def test_kali_exec_real_answer_not_waf_flagged(monkeypatch, fake_engagement):
     )
     assert result.waf_challenge is False
     assert result.status == "completed"
+    assert client.decisions == []
 
 
 def test_kali_exec_browser_tool_never_waf_flagged(monkeypatch, fake_engagement):

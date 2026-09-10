@@ -47,7 +47,7 @@ only the first is a downgrade — reach for it last, not first:
 - **The hop is still provable, just not proven yet** — the guard did not hold, you simply have not
   landed the bug or the runtime proof that completes it. Do NOT revert severity: park it per
   `agent/rules/hunting.md` §2 with `evidence_type=theoretical` + `chain_required=true` at
-  `verification_disposition=pending_runtime_proof`, and it stays out of the report until a runtime
+  `verification_status=pending_runtime_proof`, and it stays out of the report until a runtime
   pass proves it. `CHAIN PRIMITIVE` covers a theoretical hop too, so decide which of these two you
   are in *before* you reach for the severity revert — the revert is correct only for the case
   above.

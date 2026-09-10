@@ -1,11 +1,18 @@
 # Recon Dispatch Resource Policy
 
-Runtime guide extracted from `agent/operator-core.md` (operator-core phase-split, WS6). This is operator-owned cross-phase machinery — the single source of truth for per-target rate calibration and aggregate-concurrency / shared-VM safety. The Phase-1 and Phase-4 docs (`agent/phases/phase-1-recon.md`, `agent/phases/phase-4-consume-test.md`) point here for dispatch-shape and concurrency-floor/ceiling decisions.
+Runtime guide extracted from `agent/operator-core.md` (operator-core phase-split, WS6). This is operator-owned cross-phase machinery — the single source of truth for per-target rate calibration and cross-dispatch / shared-VM safety. The Phase-1 and Phase-4 docs (`agent/phases/phase-1-recon.md`, `agent/phases/phase-4-consume-test.md`) point here for dispatch-shape and concurrency-floor/ceiling decisions.
 
 Every active recon dispatch passes through this policy before the operator hands the
 work to a specialist. The policy is the single source of truth for per-target rate
 calibration; specialists pull values from this table rather than guessing, and the
 operator catches dispatch-context drift before it reaches the runtime.
+
+This is prompt discipline, not an automated lease or reservation. The operator
+passes the exact authored instruction through `agent start --rate-budget`; Vigil
+infers no numeric default. Before a target-facing process starts, the CLI prints
+bounded context about other lanes' observed target-facing commands and latest
+timing. That advisory does not count HTTP requests, reserve capacity, impose a
+window/cooldown, or enforce the limits below.
 
 ### Resource-safety preflight rule
 
@@ -89,4 +96,3 @@ pipeline**: run one heavy op (the `vigil assess recon` job is the heavy one to s
 next. Fan out only once you have confirmed the runtime can absorb concurrent heavy work. This
 preserves the parallel-throughput win where the box can take it without reproducing the
 load-36 near-crash on a shared box.
-

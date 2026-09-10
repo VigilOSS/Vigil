@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import NoReturn
 
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessmentClient, require_write_result
 from assess.lib.code_snapshot import MAX_JSON_ARTIFACT_BYTES, read_bounded_regular_file
 from assess.lib.config import load_config
 from assess.lib.contracts import MAX_VARIANT_PARENT_FINDINGS
@@ -176,4 +176,18 @@ def run(args) -> None:
         result = client.post("code/variant-checks", payload)
     if not isinstance(result, dict):
         _fail("backend response must be a JSON object")
+    require_write_result(
+        result,
+        operation="record code variant check",
+        expected={
+            "dispatch_id": payload["dispatch_id"],
+            "current_file_id": payload["file_id"],
+            "repo_id": payload["repo_id"],
+            "repo_generation": payload["repo_generation"],
+            "source_manifest_digest": payload["source_manifest_digest"],
+            "file_sha256": payload["file_sha256"],
+            "status": payload["status"],
+        },
+        positive_ids=("id",),
+    )
     print(json.dumps(result, indent=2, sort_keys=True))

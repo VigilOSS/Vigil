@@ -1,9 +1,12 @@
 // Rationale for the order:
 //   Overview   — at-a-glance dashboard, always first
+//   Runs       — shared code/web/blue audit and comparison surface
 //   Intel      — "what do we know about the target" (pre-attack context),
 //                sits next to Overview because operators triage intel before
 //                they attack surfaces or dig into findings
 //   Findings   — the primary deliverable, high up
+//   Submissions — human review and immutable filing packages, directly after
+//                 the finding records they snapshot
 //   Surfaces   — what we can attack (bridges intel → findings)
 //   HTTP       — observed request traffic (one row per request variant);
 //                surface-adjacent because a variant IS an attackable
@@ -21,8 +24,10 @@
 //   Artifacts  — raw files, last (catch-all archive)
 export const TABS = [
   { key: "overview", label: "Overview" },
+  { key: "runs", label: "Runs" },
   { key: "intel", label: "Intel" },
   { key: "findings", label: "Findings" },
+  { key: "submissions", label: "Submissions" },
   { key: "surfaces", label: "Surfaces" },
   { key: "http", label: "HTTP" },
   { key: "coverage", label: "Coverage" },

@@ -5,13 +5,14 @@ import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import anyio
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..models.engagement import Engagement
+from ..retry_state import RETRY_STATES
 from ..services import activity as activity_service
 from ..services import assessment_memory
 from ..services import artifact_index
@@ -34,6 +35,7 @@ from ..services.state_manager.coverage import (
 # it is imported directly from the submodule rather than via ``state_manager``.
 from ..services.state_manager.depth_ledger import by_family_coverage
 from ..services.state_manager.http_flows import (
+    CapturePolicyMirrorError,
     DEFAULT_HTTP_FLOW_LIMIT,
     MAX_HTTP_FLOW_LIST_LIMIT,
 )
@@ -297,6 +299,10 @@ class HttpFlowIngestRequest(BaseModel):
     response_body_bytes: int = 0
     request_body_truncated: bool = False
     response_body_truncated: bool = False
+    request_body_capture_status: str = Field(default="unknown", max_length=64)
+    response_body_capture_status: str = Field(default="unknown", max_length=64)
+    request_body_capture_error: str = Field(default="", max_length=1000)
+    response_body_capture_error: str = Field(default="", max_length=1000)
     request_body_artifact_path: str | None = Field(default=None, max_length=1024)
     response_body_artifact_path: str | None = Field(default=None, max_length=1024)
     request_headers: dict[str, Any] = Field(default_factory=dict)
@@ -326,7 +332,9 @@ class CapturePolicyUpdateRequest(BaseModel):
     max_body_bytes: int | None = Field(default=None, ge=0, le=1_073_741_824)
     content_type_allow: list[str] | None = None
     content_type_deny: list[str] | None = None
-    redaction_profile: str | None = Field(default=None, max_length=64)
+    # Raw evidence is preserved; automatic redaction awaits the Phase 3D design
+    # decision. Keep the stored compatibility column truthful in the meantime.
+    redaction_profile: Literal["none"] | None = None
 
 
 class ProbeRunRecordRequest(BaseModel):
@@ -602,29 +610,6 @@ class JobRecord(BaseModel):
     updated_at: datetime
 
 
-class RateLeaseCreate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    owner: str = Field(min_length=1, max_length=256)
-    effective_rate_rps: float = Field(gt=0)
-    ttl_seconds: int = Field(default=300, ge=1, le=86_400)
-    override_reason: str = Field(default="", max_length=2048)
-    command_run_id: int | None = Field(default=None, ge=1)
-
-
-class RateLeaseUpdate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    ttl_seconds: int | None = Field(default=None, ge=1, le=86_400)
-    release: bool = False
-
-    @model_validator(mode="after")
-    def _one_action(self) -> "RateLeaseUpdate":
-        if self.release == (self.ttl_seconds is not None):
-            raise ValueError("provide exactly one of release=true or ttl_seconds")
-        return self
-
-
 class SurfaceRecordRequest(BaseModel):
     surface_type: Literal[
         "account_recovery",
@@ -799,15 +784,20 @@ class BlockedTechniqueRecordRequest(BaseModel):
     target_kind: str = Field(min_length=1, max_length=64)
     target_ref: str = Field(min_length=1, max_length=1024)
     reason: str = Field(min_length=1, max_length=4096)
-    # Align the API default with the SQL column default (db.py: assessment_
-    # blocked_techniques.retry_state DEFAULT 'pending'). Both are free TEXT with
-    # no CHECK; a mismatched default (was "no_retry") meant a create that omitted
-    # retry_state landed a different value depending on whether it went through
-    # the Pydantic model or a raw INSERT. Soft vocab: pending|retryable|no_retry.
     retry_state: str = Field(default="pending", min_length=1, max_length=64)
     evidence_ref: str = Field(default="", max_length=1024)
     notes: str = Field(default="", max_length=4096)
     provenance: dict[str, Any] = Field(default_factory=dict)
+    revalidation_context: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("retry_state")
+    @classmethod
+    def validate_retry_state(cls, value: str) -> str:
+        if value not in RETRY_STATES:
+            raise ValueError(
+                "retry_state must be one of " + ", ".join(RETRY_STATES)
+            )
+        return value
 
 
 class FindingLinkRequest(BaseModel):
@@ -913,6 +903,15 @@ class FindingProvenance(BaseModel):
     code_snapshot: CodeSnapshotProvenance | None = None
 
 
+class FindingRunCandidatePromotion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: int = Field(ge=1)
+    candidate_id: int = Field(ge=1)
+    reason: str = Field(min_length=1, max_length=8192)
+    proof_receipt_ids: list[int] = Field(min_length=1, max_length=1000)
+
+
 class FindingRecordRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -926,8 +925,7 @@ class FindingRecordRequest(BaseModel):
     # stored rows keep their own value (DB-read compat unaffected).
     severity: str = Field(default="medium", min_length=1, max_length=32)
     workflow_status: str = Field(default="active", min_length=1, max_length=32)
-    verification_state: str = Field(default="unreviewed", min_length=1, max_length=32)
-    verification_disposition: str = Field(default="none", min_length=1, max_length=32)
+    verification_status: Literal["unreviewed"] = "unreviewed"
     defect_family: str = Field(default="", max_length=128)
     root_cause_key: str = Field(default="", max_length=256)
     auth_context: str = Field(default="anonymous", min_length=1, max_length=128)
@@ -960,6 +958,7 @@ class FindingRecordRequest(BaseModel):
     service_id: int | None = None
     surface_id: int | None = None
     links: list[FindingLinkRequest] = Field(default_factory=list)
+    run_candidate: FindingRunCandidatePromotion | None = None
     # D4 (kill re-mint override): control flag, NOT a stored column. When true it
     # skips the killed-finding re-mint guard so an intentional distinct re-mint of
     # a finding that only coincidentally shares an endpoint + technique with a prior
@@ -1145,10 +1144,38 @@ class FindingPatchRequest(BaseModel):
         return self
 
 
+class FindingCounterCheckRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    method: str = Field(min_length=1, max_length=4096)
+    expected_result: str = Field(min_length=1, max_length=4096)
+    observed_result: str = Field(min_length=1, max_length=4096)
+    falsified_claim: str = Field(min_length=1, max_length=4096)
+    completed: bool
+    proof_receipt_ids: list[int] = Field(min_length=1)
+
+
+class FindingSeverityVarianceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    normal_band: Literal["info", "low", "medium", "high", "critical"]
+    chosen_severity: Literal["info", "low", "medium", "high", "critical"]
+    actor: str = Field(min_length=1, max_length=128)
+    reason: str = Field(min_length=1, max_length=4096)
+    proof_receipt_id: int = Field(ge=1)
+
+
 class FindingVerifyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    disposition: Literal["confirmed", "downgraded", "pending_runtime_proof", "blocked", "false_positive", "disputed"]
+    verification_status: Literal[
+        "confirmed",
+        "downgraded",
+        "pending_runtime_proof",
+        "blocked",
+        "false_positive",
+        "disputed",
+    ]
     reason_code: str = Field(default="", max_length=128)
     reason_text: str = Field(min_length=1, max_length=4096)
     new_severity: str | None = Field(default=None, min_length=1, max_length=32)
@@ -1158,6 +1185,201 @@ class FindingVerifyRequest(BaseModel):
     source_name: str = Field(default="", max_length=128)
     details: dict[str, Any] = Field(default_factory=dict)
     provenance: FindingProvenance = Field(default_factory=FindingProvenance)
+    proof_receipt_ids: list[int] = Field(default_factory=list)
+    counter_check: FindingCounterCheckRequest | None = None
+    severity_variance: FindingSeverityVarianceRequest | None = None
+
+
+class AssessmentRunSourceGenerationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_key: str = Field(min_length=1, max_length=512)
+    generation: int | None = Field(default=None, ge=0)
+    manifest_digest: str | None = Field(default=None, min_length=64, max_length=64)
+    inventory_commitment_version: Literal["v1"] | None = None
+    inventory_count: int | None = Field(default=None, ge=0)
+    inventory_digest: str | None = Field(default=None, min_length=64, max_length=64)
+
+
+class AssessmentRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_uuid: str = Field(min_length=1, max_length=128)
+    run_kind: Literal["code", "web", "blue", "shared"]
+    run_purpose: Literal["proof", "scan"] = "proof"
+    producer_dispatch_agent_id: str = Field(min_length=1, max_length=128)
+    target_identity: dict[str, Any] = Field(default_factory=dict)
+    source_generations: list[AssessmentRunSourceGenerationRequest] = Field(
+        default_factory=list
+    )
+    exclusions: list[dict[str, Any]] = Field(default_factory=list)
+    resumed_from_run_id: int | None = Field(default=None, ge=1)
+
+
+class AssessmentRunTransitionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal[
+        "running", "partial", "completed", "failed", "interrupted", "canceled"
+    ]
+    reason: str = Field(default="", max_length=4096)
+
+
+class AssessmentRunSourceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_key: str = Field(min_length=1, max_length=512)
+    declared_root: str = Field(min_length=1, max_length=4096)
+    path: str = Field(min_length=1, max_length=4096)
+    content_sha256: str = Field(min_length=64, max_length=64)
+    byte_size: int = Field(ge=0)
+    line_count: int = Field(ge=0)
+    encoding: str = Field(min_length=1, max_length=64)
+    inventory_status: Literal["included", "excluded", "missing"]
+    exclusion_reason: str = Field(default="", max_length=4096)
+    parser_status: Literal["parsed", "failed", "not_applicable"]
+    parser_error: str = Field(default="", max_length=4096)
+
+
+class AssessmentRunSourcesRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sources: list[AssessmentRunSourceRequest] = Field(min_length=1, max_length=10000)
+
+
+class AssessmentRunSourceReadRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: int = Field(ge=1)
+    dispatch_agent_id: str = Field(min_length=1, max_length=128)
+    attempt: int = Field(ge=1)
+    byte_start: int = Field(ge=0)
+    byte_end: int = Field(ge=0)
+    line_start: int = Field(ge=1)
+    line_end: int = Field(ge=1)
+    proof_receipt_id: int | None = Field(default=None, ge=1)
+
+
+class AssessmentRunObligationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    identity_key: str = Field(min_length=1, max_length=1024)
+    obligation_kind: str = Field(min_length=1, max_length=128)
+    object_type: str = Field(min_length=1, max_length=128)
+    object_key: str = Field(min_length=1, max_length=4096)
+    hard: bool = True
+    status: Literal["open", "resolved", "blocked", "deferred", "accepted_gap"] = "open"
+    resolution: str = Field(default="", max_length=8192)
+    proof_receipt_ids: list[int] = Field(default_factory=list, max_length=1000)
+
+
+class AssessmentRunObligationUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["resolved", "blocked", "deferred", "accepted_gap"]
+    resolution: str = Field(min_length=1, max_length=8192)
+    proof_receipt_ids: list[int] = Field(default_factory=list, max_length=1000)
+
+
+class AssessmentRunCandidateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    identity_key: str = Field(min_length=1, max_length=1024)
+    target_key: str = Field(min_length=1, max_length=512)
+    source_id: int | None = Field(default=None, ge=1)
+    source_anchor: str = Field(min_length=1, max_length=4096)
+    vulnerability_family: str = Field(min_length=1, max_length=128)
+    hypothesis: str = Field(min_length=1, max_length=8192)
+    originating_result_id: int | None = Field(default=None, ge=1)
+    dispatch_agent_id: str = Field(min_length=1, max_length=128)
+    proof_receipt_ids: list[int] = Field(default_factory=list, max_length=1000)
+    state: Literal["open"] = "open"
+    finding_slug: str = Field(default="", max_length=128)
+
+
+class AssessmentRunCandidateUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    state: Literal["promoted", "rejected", "duplicate", "deferred"]
+    reason: str = Field(min_length=1, max_length=8192)
+    proof_receipt_ids: list[int] = Field(default_factory=list, max_length=1000)
+    finding_slug: str = Field(default="", max_length=128)
+
+
+class AssessmentRunToolSignalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    identity_key: str = Field(min_length=1, max_length=1024)
+    signal_kind: Literal[
+        "sanitizer_violation", "reproducible_crash", "attributed_oob_callback"
+    ]
+    dispatch_agent_id: str = Field(min_length=1, max_length=128)
+    target_key: str = Field(min_length=1, max_length=512)
+    source_id: int | None = Field(default=None, ge=1)
+    source_anchor: str = Field(min_length=1, max_length=4096)
+    vulnerability_family: str = Field(min_length=1, max_length=128)
+    hypothesis: str = Field(min_length=1, max_length=8192)
+    observed_signature: str = Field(min_length=1, max_length=8192)
+    exact_input_sha256: str = Field(default="", max_length=64)
+    command_run_id: int | None = Field(default=None, ge=1)
+    proof_receipt_ids: list[int] = Field(min_length=1, max_length=1000)
+
+
+class AssessmentRunDiscoveryPassRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    identity_key: str = Field(min_length=1, max_length=1024)
+    dispatch_agent_id: str = Field(min_length=1, max_length=128)
+    frontier_identity_sha256: str = Field(min_length=64, max_length=64)
+    terminal_reason: Literal[
+        "frontier_exhausted", "no_new_candidates", "cap_reached", "interrupted", "failed"
+    ]
+    candidate_identity_keys: list[
+        Annotated[str, Field(min_length=1, max_length=1024)]
+    ] = Field(default_factory=list, max_length=10000)
+    proof_receipt_ids: list[int] = Field(min_length=1, max_length=1000)
+
+
+class AssessmentRunCodeReceiptRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    receipt_kind: Literal["variant_check", "fuzz_decision", "fuzz_campaign"]
+    receipt_id: int = Field(ge=1)
+    target_key: str = Field(min_length=1, max_length=512)
+    obligation_id: int = Field(ge=1)
+    candidate_ids: list[int] = Field(default_factory=list, max_length=1000)
+    signal_ids: list[int] = Field(default_factory=list, max_length=1000)
+    proof_receipt_ids: list[int] = Field(min_length=1, max_length=1000)
+
+
+class AssessmentRunComparisonRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    baseline_run_id: int | None = Field(default=None, ge=1)
+
+
+class ProofReceiptRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: int = Field(ge=1)
+    evidence_kind: Literal[
+        "source_observation",
+        "command",
+        "http_exchange",
+        "browser_action",
+        "oob_event",
+        "artifact",
+    ]
+    expected_result: str = Field(default="", max_length=4096)
+    observed_result: str = Field(default="", max_length=4096)
+    artifact_id: int | None = Field(default=None, ge=1)
+    source_read_id: int | None = Field(default=None, ge=1)
+    command_run_id: int | None = Field(default=None, ge=1)
+    evidence_sha256: str = Field(default="", max_length=64)
+    evidence_health: Literal["healthy", "missing", "stale", "tombstoned"] = "healthy"
+    redaction_status: Literal["raw", "redacted"] = "raw"
+    derivative_of_receipt_id: int | None = Field(default=None, ge=1)
+    tombstone_reason: str = Field(default="", max_length=1024)
 
 
 _SUMMARY_AFFECTING_RECORD_TYPES = frozenset(
@@ -1535,6 +1757,7 @@ def get_command_runs(
     tool_name: str = "",
     tool_bin: str = "",
     target_host: str = "",
+    auth_context: str = "",
     audit_source: str = "",
     route: str = "",
     success: bool | None = Query(default=None),
@@ -1570,6 +1793,7 @@ def get_command_runs(
         tool_name=tool_name,
         tool_bin=tool_bin,
         target_host=target_host,
+        auth_context=auth_context,
         audit_source=audit_source,
         route=route,
         success=success,
@@ -1842,8 +2066,7 @@ def get_findings(
     engagement_key: str,
     severity: str | None = None,
     workflow_status: str | None = None,
-    verification_state: str | None = None,
-    verification_disposition: str | None = None,
+    verification_status: str | None = None,
     auth_context: str | None = None,
     source_name: str | None = None,
     slug: str | None = None,
@@ -1857,8 +2080,7 @@ def get_findings(
         engagement.id,
         severity=severity,
         workflow_status=workflow_status,
-        verification_state=verification_state,
-        verification_disposition=verification_disposition,
+        verification_status=verification_status,
         auth_context=auth_context,
         source_name=source_name,
         slug=slug,
@@ -1869,6 +2091,540 @@ def get_findings(
     )
 
 
+@router.post("/assessment-runs", status_code=status.HTTP_201_CREATED)
+async def create_assessment_run(
+    engagement_key: str, request: AssessmentRunRequest
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(
+        lambda: get_engagement_or_404(engagement_key)
+    )
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.create_assessment_run,
+            engagement.id,
+            run_uuid=request.run_uuid,
+            run_kind=request.run_kind,
+            run_purpose=request.run_purpose,
+            producer_dispatch_agent_id=request.producer_dispatch_agent_id,
+            target_identity=request.target_identity,
+            source_generations=[
+                generation.model_dump(exclude_none=True)
+                for generation in request.source_generations
+            ],
+            exclusions=request.exclusions,
+            resumed_from_run_id=request.resumed_from_run_id,
+        )
+    )
+    await _broadcast(engagement.key, "assessment_run", record)
+    return record
+
+
+@router.get("/assessment-runs")
+def get_assessment_runs(
+    engagement_key: str,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_assessment_runs(
+        engagement.id, limit=limit, offset=offset
+    )
+
+
+@router.get("/assessment-runs/{run_id}")
+def get_assessment_run(engagement_key: str, run_id: int) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.get_assessment_run(engagement.id, run_id)
+
+
+@router.patch("/assessment-runs/{run_id}")
+async def transition_assessment_run(
+    engagement_key: str,
+    run_id: int,
+    request: AssessmentRunTransitionRequest,
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(
+        lambda: get_engagement_or_404(engagement_key)
+    )
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.transition_assessment_run,
+            engagement.id,
+            run_id=run_id,
+            status_value=request.status,
+            reason=request.reason,
+        )
+    )
+    await _broadcast(engagement.key, "assessment_run", record)
+    return record
+
+
+@router.post("/assessment-runs/{run_id}/sources", status_code=status.HTTP_201_CREATED)
+def record_assessment_run_sources(
+    engagement_key: str,
+    run_id: int,
+    request: AssessmentRunSourcesRequest,
+) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.record_run_sources(
+        engagement.id,
+        run_id=run_id,
+        sources=[source.model_dump() for source in request.sources],
+    )
+
+
+@router.get("/assessment-runs/{run_id}/sources")
+def get_assessment_run_sources(
+    engagement_key: str,
+    run_id: int,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_run_sources(
+        engagement.id, run_id=run_id, limit=limit, offset=offset
+    )
+
+
+@router.post(
+    "/assessment-runs/{run_id}/source-reads", status_code=status.HTTP_201_CREATED
+)
+def record_assessment_run_source_read(
+    engagement_key: str,
+    run_id: int,
+    request: AssessmentRunSourceReadRequest,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.record_source_read(
+        engagement.id,
+        run_id=run_id,
+        source_id=request.source_id,
+        dispatch_agent_id=request.dispatch_agent_id,
+        attempt=request.attempt,
+        byte_start=request.byte_start,
+        byte_end=request.byte_end,
+        line_start=request.line_start,
+        line_end=request.line_end,
+        proof_receipt_id=request.proof_receipt_id,
+    )
+
+
+@router.get("/assessment-runs/{run_id}/source-reads")
+def get_assessment_run_source_reads(
+    engagement_key: str,
+    run_id: int,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_source_reads(
+        engagement.id, run_id=run_id, limit=limit, offset=offset
+    )
+
+
+@router.get("/assessment-runs/{run_id}/dispatches")
+def get_assessment_run_dispatches(
+    engagement_key: str,
+    run_id: int,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_run_dispatches(
+        engagement.id, run_id=run_id, limit=limit, offset=offset
+    )
+
+
+@router.get("/assessment-runs/{run_id}/proof-receipts")
+def get_assessment_run_proof_receipts(
+    engagement_key: str,
+    run_id: int,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_run_proof_receipts(
+        engagement.id, run_id=run_id, limit=limit, offset=offset
+    )
+
+
+@router.get("/assessment-runs/{run_id}/commands")
+def get_assessment_run_commands(
+    engagement_key: str,
+    run_id: int,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_run_command_receipts(
+        engagement.id, run_id=run_id, limit=limit, offset=offset
+    )
+
+
+@router.get("/assessment-runs/{run_id}/observed-events")
+def get_assessment_run_observed_events(
+    engagement_key: str,
+    run_id: int,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_run_observed_events(
+        engagement.id, run_id=run_id, limit=limit, offset=offset
+    )
+
+
+@router.get("/assessment-runs/{run_id}/decision-history")
+def get_assessment_run_decision_history(
+    engagement_key: str,
+    run_id: int,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_run_decision_history(
+        engagement.id, run_id=run_id, limit=limit, offset=offset
+    )
+
+
+@router.post(
+    "/assessment-runs/{run_id}/obligations", status_code=status.HTTP_201_CREATED
+)
+def record_assessment_run_obligation(
+    engagement_key: str,
+    run_id: int,
+    request: AssessmentRunObligationRequest,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.record_run_obligation(
+        engagement.id,
+        run_id=run_id,
+        identity_key=request.identity_key,
+        obligation_kind=request.obligation_kind,
+        object_type=request.object_type,
+        object_key=request.object_key,
+        hard=request.hard,
+        status_value=request.status,
+        resolution=request.resolution,
+        proof_receipt_ids=request.proof_receipt_ids,
+    )
+
+
+@router.get("/assessment-runs/{run_id}/obligations")
+def get_assessment_run_obligations(
+    engagement_key: str,
+    run_id: int,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_run_obligations(
+        engagement.id, run_id=run_id, limit=limit, offset=offset
+    )
+
+
+@router.patch("/assessment-runs/{run_id}/obligations/{obligation_id}")
+def update_assessment_run_obligation(
+    engagement_key: str,
+    run_id: int,
+    obligation_id: int,
+    request: AssessmentRunObligationUpdate,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.update_run_obligation(
+        engagement.id,
+        run_id=run_id,
+        obligation_id=obligation_id,
+        status_value=request.status,
+        resolution=request.resolution,
+        proof_receipt_ids=request.proof_receipt_ids,
+    )
+
+
+@router.get("/assessment-runs/{run_id}/obligations/{obligation_id}/history")
+def get_assessment_run_obligation_history(
+    engagement_key: str,
+    run_id: int,
+    obligation_id: int,
+) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_obligation_history(
+        engagement.id, run_id=run_id, obligation_id=obligation_id
+    )
+
+
+@router.post(
+    "/assessment-runs/{run_id}/candidates", status_code=status.HTTP_201_CREATED
+)
+def record_assessment_run_candidate(
+    engagement_key: str,
+    run_id: int,
+    request: AssessmentRunCandidateRequest,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.record_run_candidate(
+        engagement.id,
+        run_id=run_id,
+        identity_key=request.identity_key,
+        target_key=request.target_key,
+        source_id=request.source_id,
+        source_anchor=request.source_anchor,
+        vulnerability_family=request.vulnerability_family,
+        hypothesis=request.hypothesis,
+        originating_result_id=request.originating_result_id,
+        dispatch_agent_id=request.dispatch_agent_id,
+        proof_receipt_ids=request.proof_receipt_ids,
+        state_value=request.state,
+        finding_slug=request.finding_slug,
+    )
+
+
+@router.get("/assessment-runs/{run_id}/candidates")
+def get_assessment_run_candidates(
+    engagement_key: str,
+    run_id: int,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_run_candidates(
+        engagement.id, run_id=run_id, limit=limit, offset=offset
+    )
+
+
+@router.patch("/assessment-runs/{run_id}/candidates/{candidate_id}")
+def update_assessment_run_candidate(
+    engagement_key: str,
+    run_id: int,
+    candidate_id: int,
+    request: AssessmentRunCandidateUpdate,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.update_run_candidate(
+        engagement.id,
+        run_id=run_id,
+        candidate_id=candidate_id,
+        state_value=request.state,
+        reason=request.reason,
+        proof_receipt_ids=request.proof_receipt_ids,
+        finding_slug=request.finding_slug,
+    )
+
+
+@router.get("/assessment-runs/{run_id}/candidates/{candidate_id}/history")
+def get_assessment_run_candidate_history(
+    engagement_key: str,
+    run_id: int,
+    candidate_id: int,
+) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_candidate_history(
+        engagement.id, run_id=run_id, candidate_id=candidate_id
+    )
+
+
+@router.post(
+    "/assessment-runs/{run_id}/tool-signals", status_code=status.HTTP_201_CREATED
+)
+def record_assessment_run_tool_signal(
+    engagement_key: str,
+    run_id: int,
+    request: AssessmentRunToolSignalRequest,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.record_run_tool_signal(
+        engagement.id,
+        run_id=run_id,
+        identity_key=request.identity_key,
+        signal_kind=request.signal_kind,
+        dispatch_agent_id=request.dispatch_agent_id,
+        target_key=request.target_key,
+        source_id=request.source_id,
+        source_anchor=request.source_anchor,
+        vulnerability_family=request.vulnerability_family,
+        hypothesis=request.hypothesis,
+        observed_signature=request.observed_signature,
+        exact_input_sha256=request.exact_input_sha256,
+        command_run_id=request.command_run_id,
+        proof_receipt_ids=request.proof_receipt_ids,
+    )
+
+
+@router.get("/assessment-runs/{run_id}/tool-signals")
+def get_assessment_run_tool_signals(
+    engagement_key: str,
+    run_id: int,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_run_tool_signals(
+        engagement.id, run_id=run_id, limit=limit, offset=offset
+    )
+
+
+@router.post(
+    "/assessment-runs/{run_id}/discovery-passes",
+    status_code=status.HTTP_201_CREATED,
+)
+def record_assessment_run_discovery_pass(
+    engagement_key: str,
+    run_id: int,
+    request: AssessmentRunDiscoveryPassRequest,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.record_run_discovery_pass(
+        engagement.id,
+        run_id=run_id,
+        identity_key=request.identity_key,
+        dispatch_agent_id=request.dispatch_agent_id,
+        frontier_identity_sha256=request.frontier_identity_sha256,
+        terminal_reason=request.terminal_reason,
+        candidate_identity_keys=request.candidate_identity_keys,
+        proof_receipt_ids=request.proof_receipt_ids,
+    )
+
+
+@router.get("/assessment-runs/{run_id}/discovery-passes")
+def get_assessment_run_discovery_passes(
+    engagement_key: str,
+    run_id: int,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_run_discovery_passes(
+        engagement.id, run_id=run_id, limit=limit, offset=offset
+    )
+
+
+@router.post(
+    "/assessment-runs/{run_id}/code-receipts", status_code=status.HTTP_201_CREATED
+)
+def record_assessment_run_code_receipt(
+    engagement_key: str,
+    run_id: int,
+    request: AssessmentRunCodeReceiptRequest,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.record_run_code_receipt_link(
+        engagement.id,
+        run_id=run_id,
+        receipt_kind=request.receipt_kind,
+        receipt_id=request.receipt_id,
+        target_key=request.target_key,
+        obligation_id=request.obligation_id,
+        candidate_ids=request.candidate_ids,
+        signal_ids=request.signal_ids,
+        proof_receipt_ids=request.proof_receipt_ids,
+    )
+
+
+@router.get("/assessment-runs/{run_id}/code-receipts")
+def get_assessment_run_code_receipts(
+    engagement_key: str,
+    run_id: int,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_run_code_receipt_links(
+        engagement.id, run_id=run_id, limit=limit, offset=offset
+    )
+
+
+@router.get("/assessment-runs/{run_id}/comparison")
+def compare_assessment_run(
+    engagement_key: str,
+    run_id: int,
+    baseline_run_id: int | None = Query(default=None, ge=1),
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.compare_assessment_runs(
+        engagement.id, run_id=run_id, baseline_run_id=baseline_run_id
+    )
+
+
+@router.post(
+    "/assessment-runs/{run_id}/comparisons", status_code=status.HTTP_201_CREATED
+)
+def record_assessment_run_comparison(
+    engagement_key: str,
+    run_id: int,
+    request: AssessmentRunComparisonRequest,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.record_assessment_run_comparison(
+        engagement.id,
+        run_id=run_id,
+        baseline_run_id=request.baseline_run_id,
+    )
+
+
+@router.get("/assessment-runs/{run_id}/comparisons")
+def get_assessment_run_comparisons(
+    engagement_key: str,
+    run_id: int,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_run_comparisons(
+        engagement.id, run_id=run_id, limit=limit, offset=offset
+    )
+
+
+@router.post("/proof-receipts", status_code=status.HTTP_201_CREATED)
+async def create_proof_receipt(
+    engagement_key: str, request: ProofReceiptRequest
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(
+        lambda: get_engagement_or_404(engagement_key)
+    )
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.create_proof_receipt,
+            engagement.id,
+            run_id=request.run_id,
+            evidence_kind=request.evidence_kind,
+            expected_result=request.expected_result,
+            observed_result=request.observed_result,
+            artifact_id=request.artifact_id,
+            source_read_id=request.source_read_id,
+            command_run_id=request.command_run_id,
+            evidence_sha256=request.evidence_sha256,
+            evidence_health=request.evidence_health,
+            redaction_status=request.redaction_status,
+            derivative_of_receipt_id=request.derivative_of_receipt_id,
+            tombstone_reason=request.tombstone_reason,
+        )
+    )
+    await _broadcast(engagement.key, "proof_receipt", record)
+    return record
+
+
+@router.get("/proof-receipts")
+def get_proof_receipts(
+    engagement_key: str,
+    finding_slug: str = "",
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_proof_receipts(
+        engagement.id,
+        finding_slug=finding_slug,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/proof-receipts/{receipt_id}")
+def get_proof_receipt(engagement_key: str, receipt_id: int) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.get_proof_receipt(engagement.id, receipt_id)
+
+
 @router.get("/findings/{finding_slug}")
 def get_finding(engagement_key: str, finding_slug: str) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
@@ -1876,9 +2632,19 @@ def get_finding(engagement_key: str, finding_slug: str) -> dict[str, Any]:
 
 
 @router.get("/findings/{finding_slug}/transitions")
-def get_finding_transitions(engagement_key: str, finding_slug: str) -> list[dict[str, Any]]:
+def get_finding_transitions(
+    engagement_key: str,
+    finding_slug: str,
+    limit: int = Query(default=100, ge=1, le=MAX_ASSESSMENT_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
-    return state_manager.list_finding_transitions(engagement.id, slug=finding_slug)
+    return state_manager.list_finding_transitions(
+        engagement.id,
+        slug=finding_slug,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/report-findings")
@@ -1970,6 +2736,18 @@ def get_tunnels(engagement_key: str) -> list[dict[str, Any]]:
 def get_blocked_techniques(engagement_key: str) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
     return state_manager.list_blocked_techniques(engagement.id)
+
+
+@router.get("/blocked-techniques/history")
+def get_blocked_technique_history(
+    engagement_key: str,
+    technique_key: str = Query(default="", max_length=256),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[dict[str, Any]]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.list_blocked_technique_history(
+        engagement.id, technique_key=technique_key, limit=limit
+    )
 
 
 @router.post("/request-observations", status_code=status.HTTP_201_CREATED)
@@ -2323,13 +3101,25 @@ async def put_capture_policy(
     engagement_key: str, request: CapturePolicyUpdateRequest
 ) -> dict[str, Any]:
     engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            state_manager.set_capture_policy,
-            engagement.id,
-            **request.model_dump(exclude_unset=True),
+    try:
+        record = await anyio.to_thread.run_sync(
+            functools.partial(
+                state_manager.set_capture_policy,
+                engagement.id,
+                **request.model_dump(exclude_unset=True),
+            )
         )
-    )
+    except CapturePolicyMirrorError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "message": "capture policy saved, but its filesystem mirror was not updated",
+                "database_updated": True,
+                "filesystem_mirror_updated": False,
+                "error": str(exc),
+                "policy": exc.record,
+            },
+        ) from exc
     await _broadcast(engagement.key, "capture_policy", {**record, "engagement_id": engagement.id})
     return record
 
@@ -2632,46 +3422,6 @@ async def patch_job(
     return record
 
 
-@router.post("/rate-leases", status_code=status.HTTP_201_CREATED)
-def create_rate_lease(
-    engagement_key: str,
-    request: RateLeaseCreate,
-) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    return state_manager.acquire_rate_lease(
-        engagement.id,
-        owner=request.owner,
-        effective_rate_rps=request.effective_rate_rps,
-        ttl_seconds=request.ttl_seconds,
-        override_reason=request.override_reason,
-        command_run_id=request.command_run_id,
-    )
-
-
-@router.get("/rate-leases")
-def get_rate_leases(
-    engagement_key: str,
-    active_only: bool = Query(default=False),
-) -> list[dict[str, Any]]:
-    engagement = get_engagement_or_404(engagement_key)
-    return state_manager.list_rate_leases(engagement.id, active_only=active_only)
-
-
-@router.patch("/rate-leases/{lease_token}")
-def patch_rate_lease(
-    engagement_key: str,
-    lease_token: str,
-    request: RateLeaseUpdate,
-) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    return state_manager.update_rate_lease(
-        engagement.id,
-        lease_token=lease_token,
-        ttl_seconds=request.ttl_seconds,
-        release=request.release,
-    )
-
-
 @router.post("/oob-probes", status_code=status.HTTP_201_CREATED)
 async def create_oob_probe(engagement_key: str, request: OobProbeRecordRequest) -> dict[str, Any]:
     """Record an OAST probe (called by ``vigil oob mint``).
@@ -2957,8 +3707,7 @@ async def create_finding(engagement_key: str, request: FindingRecordRequest) -> 
             title=request.title,
             severity=request.severity,
             workflow_status=request.workflow_status,
-            verification_state=request.verification_state,
-            verification_disposition=request.verification_disposition,
+            verification_status=request.verification_status,
             defect_family=request.defect_family,
             root_cause_key=request.root_cause_key,
             auth_context=request.auth_context,
@@ -2979,6 +3728,11 @@ async def create_finding(engagement_key: str, request: FindingRecordRequest) -> 
             surface_id=request.surface_id,
             links=[item.model_dump() for item in request.links],
             allow_remint=request.allow_remint,
+            run_candidate=(
+                request.run_candidate.model_dump()
+                if request.run_candidate is not None
+                else None
+            ),
         )
     )
     await anyio.to_thread.run_sync(
@@ -3247,7 +4001,7 @@ async def verify_finding(
             state_manager.verify_finding,
             engagement.id,
             slug=finding_slug,
-            disposition=request.disposition,
+            verification_status=request.verification_status,
             reason_code=request.reason_code,
             reason_text=request.reason_text,
             source_name=request.source_name,
@@ -3257,6 +4011,17 @@ async def verify_finding(
             provenance=request.provenance.model_dump(exclude_none=True),
             artifact_ref=request.artifact_ref,
             new_severity=request.new_severity,
+            proof_receipt_ids=request.proof_receipt_ids,
+            counter_check=(
+                request.counter_check.model_dump()
+                if request.counter_check is not None
+                else None
+            ),
+            severity_variance=(
+                request.severity_variance.model_dump()
+                if request.severity_variance is not None
+                else None
+            ),
         )
     )
     await anyio.to_thread.run_sync(
@@ -3264,10 +4029,13 @@ async def verify_finding(
             _audit_assessment_mutation,
             engagement.id,
             title="finding-verify",
-            action=f"finding={finding_slug} disposition={request.disposition}",
+            action=f"finding={finding_slug} verification_status={request.verification_status}",
             actor_name=request.source_name,
-            result=request.reason_code or request.reason_text or request.disposition,
-            metadata={"finding_slug": finding_slug, "disposition": request.disposition},
+            result=request.reason_code or request.reason_text or request.verification_status,
+            metadata={
+                "finding_slug": finding_slug,
+                "verification_status": request.verification_status,
+            },
         )
     )
     await _broadcast(engagement.key, "finding_verify", record)
@@ -3392,6 +4160,7 @@ async def create_blocked_technique(engagement_key: str, request: BlockedTechniqu
             evidence_ref=request.evidence_ref,
             notes=request.notes,
             provenance=request.provenance,
+            revalidation_context=request.revalidation_context,
         )
     )
     await _broadcast(engagement.key, "blocked_technique", record)
@@ -3433,12 +4202,22 @@ class DispatchCreate(BaseModel):
     application_unit_id: int | None = Field(default=None, gt=0)
     dispatched_at: str | None = Field(default=None, max_length=64)
     status: _DISPATCH_STATUS = "in-progress"
-    model: str | None = Field(default=None, max_length=128)
-    reasoning: _REASONING | None = None
     requested_model: str | None = Field(default=None, max_length=128)
-    actual_model: str | None = Field(default=None, max_length=128)
     requested_reasoning: _REASONING | None = None
-    actual_reasoning: _REASONING | None = None
+    client_name: Literal["claude", "codex", "goose", "kimi", "opencode", "unknown"] = (
+        "unknown"
+    )
+    source_revision: str = Field(default="unknown", max_length=128)
+    operator_instruction_path: str | None = Field(default=None, max_length=1024)
+    operator_instruction_sha256: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$"
+    )
+    specialist_instruction_path: str | None = Field(default=None, max_length=1024)
+    specialist_instruction_sha256: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$"
+    )
+    instruction_identity_status: Literal["verified", "incomplete"] = "incomplete"
+    instructions_stale: bool | None = None
     dispatch_mode: str | None = Field(
         default=None,
         max_length=64,
@@ -3452,6 +4231,29 @@ class DispatchCreate(BaseModel):
     tier: Literal["L1", "L2", "L3", "L4"] | None = None
     vuln_classes: str | None = Field(default=None, max_length=2048)
     identity: str | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def _validate_instruction_identity(self) -> DispatchCreate:
+        if self.instruction_identity_status == "verified":
+            complete = all(
+                (
+                    self.client_name != "unknown",
+                    self.operator_instruction_path,
+                    self.operator_instruction_sha256,
+                    self.specialist_instruction_path,
+                    self.specialist_instruction_sha256,
+                )
+            )
+            if not complete:
+                raise ValueError(
+                    "verified instruction identity requires a known client plus both "
+                    "installed instruction paths and SHA-256 fingerprints"
+                )
+        elif self.instructions_stale is not None:
+            raise ValueError(
+                "instructions_stale is only known for a verified instruction identity"
+            )
+        return self
 
 
 class DispatchUpdate(BaseModel):
@@ -3684,6 +4486,25 @@ class DepthDeferralPayload(BaseModel):
         return self
 
 
+class BlindTriageVerdictPayload(BaseModel):
+    """Fields the report gate consumes from a blind-triage decision."""
+
+    model_config = ConfigDict(extra="allow")
+
+    finding_slug: str = Field(min_length=1)
+    verdict: Literal[
+        "Accept@P1",
+        "Accept@P2",
+        "Accept@P3",
+        "Accept@P4",
+        "Accept@P5",
+        "Need-More-Info",
+        "Not-Applicable-Informational",
+        "Out-of-Scope",
+        "Duplicate",
+    ]
+
+
 class DecisionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -3727,6 +4548,8 @@ class DecisionCreate(BaseModel):
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail=f"containment_proposal payload invalid: {exc}",
                 ) from exc
+        elif self.kind == "blind_triage_verdict":
+            BlindTriageVerdictPayload.model_validate(self.payload)
         return self
 
 
@@ -3751,12 +4574,18 @@ async def create_dispatch(engagement_key: str, request: DispatchCreate) -> dict[
             application_unit_id=request.application_unit_id,
             dispatched_at=request.dispatched_at,
             status_value=request.status,
-            model=request.model,
-            reasoning=request.reasoning,
             requested_model=request.requested_model,
-            actual_model=request.actual_model,
+            actual_model="unknown",
             requested_reasoning=request.requested_reasoning,
-            actual_reasoning=request.actual_reasoning,
+            actual_reasoning="unknown",
+            client_name=request.client_name,
+            source_revision=request.source_revision,
+            operator_instruction_path=request.operator_instruction_path,
+            operator_instruction_sha256=request.operator_instruction_sha256,
+            specialist_instruction_path=request.specialist_instruction_path,
+            specialist_instruction_sha256=request.specialist_instruction_sha256,
+            instruction_identity_status=request.instruction_identity_status,
+            instructions_stale=request.instructions_stale,
             dispatch_mode=request.dispatch_mode,
             finding_slugs=request.finding_slugs,
             skills=request.skills,
@@ -3833,7 +4662,10 @@ async def patch_dispatch(
             action=f"agent_id={agent_id}",
             actor_name=agent_id,
             result=request.status or "",
-            metadata={"agent_id": agent_id, "finding_slugs": request.finding_slugs or []},
+            metadata={
+                "agent_id": agent_id,
+                "finding_slugs": request.finding_slugs or [],
+            },
         )
     )
     await _broadcast(engagement.key, "dispatch", record)
@@ -3885,6 +4717,7 @@ def get_handoffs(
     role: str = "",
     since: str = "",
     limit: int = Query(default=100, ge=1, le=MAX_ASSESSMENT_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
     return state_manager.list_handoffs(
@@ -3892,6 +4725,7 @@ def get_handoffs(
         role=role,
         since=since,
         limit=limit,
+        offset=offset,
     )
 
 

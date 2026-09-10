@@ -18,7 +18,10 @@ from .events import _engagement_or_404
 from .search import canonical_finding_alias, expanded_fts_query
 
 PREVIEW_BYTES = 4096
-INDEXED_TEXT_BYTES = 16384
+# Verified command-output registration receives a bounded sample from the
+# retention owner. Ordinary registered text is indexed in full below; this
+# remaining sealed-output boundary is reported as ``index_status=partial``.
+VERIFIED_OUTPUT_INDEX_BYTES = 16384
 GET_CONTENT_BYTES = 65536
 
 
@@ -208,8 +211,7 @@ def _file_payload(
             size += len(chunk)
             if len(preview) < PREVIEW_BYTES:
                 preview.extend(chunk[: PREVIEW_BYTES - len(preview)])
-            if len(indexed) < INDEXED_TEXT_BYTES:
-                indexed.extend(chunk[: INDEXED_TEXT_BYTES - len(indexed)])
+            indexed.extend(chunk)
         after = os.fstat(descriptor)
         if (
             before.st_dev != after.st_dev
@@ -252,6 +254,19 @@ def _serialize_artifact(row, *, compact: bool = False) -> dict[str, Any]:
     data = dict(row)
     for key in ("sensitive", "present", "scratch"):
         data[key] = bool(data.get(key))
+    indexed_text = str(data.get("indexed_text") or "")
+    indexed_bytes = len(indexed_text.encode("utf-8"))
+    size_bytes = int(data.get("size_bytes") or 0)
+    if not data["present"]:
+        index_status = "missing"
+    elif indexed_text:
+        index_status = "partial" if indexed_bytes < size_bytes else "complete"
+    elif size_bytes == 0:
+        index_status = "complete"
+    else:
+        index_status = "not_text"
+    data["indexed_bytes"] = indexed_bytes
+    data["index_status"] = index_status
     if compact:
         data.pop("indexed_text", None)
     return data
@@ -351,20 +366,24 @@ def _store_artifact(
                     ELSE COALESCE(NULLIF(?, ''), assessment_artifacts.media_type)
                 END,
                 size_bytes = CASE
-                    WHEN assessment_artifacts.verified_device IS NOT NULL
-                     AND excluded.verified_device IS NULL
+                    WHEN (assessment_artifacts.verified_device IS NOT NULL
+                      AND excluded.verified_device IS NULL)
+                      OR excluded.present = 0
                     THEN assessment_artifacts.size_bytes ELSE excluded.size_bytes END,
                 sha256 = CASE
-                    WHEN assessment_artifacts.verified_device IS NOT NULL
-                     AND excluded.verified_device IS NULL
+                    WHEN (assessment_artifacts.verified_device IS NOT NULL
+                      AND excluded.verified_device IS NULL)
+                      OR excluded.present = 0
                     THEN assessment_artifacts.sha256 ELSE excluded.sha256 END,
                 preview_text = CASE
-                    WHEN assessment_artifacts.verified_device IS NOT NULL
-                     AND excluded.verified_device IS NULL
+                    WHEN (assessment_artifacts.verified_device IS NOT NULL
+                      AND excluded.verified_device IS NULL)
+                      OR excluded.present = 0
                     THEN assessment_artifacts.preview_text ELSE excluded.preview_text END,
                 indexed_text = CASE
-                    WHEN assessment_artifacts.verified_device IS NOT NULL
-                     AND excluded.verified_device IS NULL
+                    WHEN (assessment_artifacts.verified_device IS NOT NULL
+                      AND excluded.verified_device IS NULL)
+                      OR excluded.present = 0
                     THEN assessment_artifacts.indexed_text ELSE excluded.indexed_text END,
                 sensitive = CASE
                     WHEN assessment_artifacts.verified_device IS NOT NULL
@@ -381,7 +400,11 @@ def _store_artifact(
                     WHEN excluded.verified_device IS NOT NULL
                      AND excluded.verified_inode IS NOT NULL
                     THEN excluded.integrity_status
-                    ELSE assessment_artifacts.integrity_status
+                    WHEN assessment_artifacts.verified_device IS NOT NULL
+                     AND excluded.verified_device IS NULL
+                    THEN assessment_artifacts.integrity_status
+                    WHEN excluded.present = 0 THEN 'missing'
+                    ELSE 'unverified'
                 END,
                 producer_agent_id = CASE
                     WHEN assessment_artifacts.verified_device IS NOT NULL
@@ -672,7 +695,7 @@ def register_verified_command_output(
     """
     normalized = _verified_command_output_relative_path(relative_path)
     media_type_value = _media_type(normalized)
-    sample = bytes(sample_bytes[:INDEXED_TEXT_BYTES])
+    sample = bytes(sample_bytes[:VERIFIED_OUTPUT_INDEX_BYTES])
     if _is_textual(media_type_value, sample):
         preview_text = sample[:PREVIEW_BYTES].decode("utf-8", errors="replace")
         indexed_text = sample.decode("utf-8", errors="replace")
@@ -823,11 +846,26 @@ def refresh_artifacts(engagement_id: int) -> dict[str, Any]:
                 present += 1
             else:
                 missing += 1
+                # The artifact row is also the durable tombstone for evidence
+                # that has disappeared from disk. Keep its last observed hash,
+                # extent, preview, and indexed text so absence never rewrites
+                # history into an empty artifact.
+                connection.execute(
+                    """
+                    UPDATE assessment_artifacts
+                    SET media_type = ?, present = 0, integrity_status = 'missing',
+                        updated_at = ?, last_indexed_at = ?
+                    WHERE id = ?
+                    """,
+                    (media_type_value, now, now, int(row["id"])),
+                )
+                continue
             connection.execute(
                 """
                 UPDATE assessment_artifacts
                 SET media_type = ?, size_bytes = ?, sha256 = ?, preview_text = ?,
-                    indexed_text = ?, present = ?, updated_at = ?, last_indexed_at = ?
+                    indexed_text = ?, present = 1, integrity_status = 'unverified',
+                    updated_at = ?, last_indexed_at = ?
                 WHERE id = ?
                 """,
                 (
@@ -836,7 +874,6 @@ def refresh_artifacts(engagement_id: int) -> dict[str, Any]:
                     str(file_data["sha256"]),
                     str(file_data["preview_text"]),
                     str(file_data["indexed_text"]),
-                    1 if file_data["present"] else 0,
                     now,
                     now,
                     int(row["id"]),

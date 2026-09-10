@@ -152,7 +152,7 @@ Chronological oldest-first. UTC with `Z` or `+00:00`. One row per load-bearing
 event (drop keep-alives, heartbeats, routine refreshes unless they bracket the
 attacker session). Cite an artifact_id under "Evidence ref" — never inline log
 lines. Pull from `activity_entries` (`metadata.kind='timeline'`) plus
-L2-handoff rows via `assessment_findings.details_json.timeline`.
+L2-handoff rows via the parsed finding field `details.timeline`.
 -->
 
 | UTC timestamp | Observed-via | Evidence ref | MITRE | Event description | Confidence |

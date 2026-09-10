@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from app.config import settings
+from tests.proof_fixtures import post_artifact_backed_source_observation
 
 
 ENGAGEMENT_KEY = "2026-06-01-090000-report-export"
@@ -79,12 +80,12 @@ def _finding(slug: str, title: str, *, severity: str = "high") -> dict:
         "title": title,
         "severity": severity,
         "workflow_status": "exploited",
-        "verification_state": "verified",
-        "verification_disposition": "confirmed",
+        "verification_status": "unreviewed",
         "canonical_location": f"https://acme.example/{slug.lower()}",
         "summary": title,
         "evidence_ref": "findings.md",
         "source_name": "test",
+        "provenance": {"agent_id": f"SOURCE-{slug}"},
         "details": {
             "cvss_score": 8.1,
             "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
@@ -97,8 +98,63 @@ def _finding(slug: str, title: str, *, severity: str = "high") -> dict:
 
 
 def _add_finding(client, payload: dict) -> None:
+    author_id = str(payload["provenance"]["agent_id"])
+    author = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/dispatches",
+        json={
+            "agent_id": author_id,
+            "agent_role": "vulnerability-analyst",
+            "task": f"record {payload['slug']}",
+        },
+    )
+    assert author.status_code == 201, author.text
     response = client.post(f"/engagements/{ENGAGEMENT_KEY}/assessment/findings", json=payload)
     assert response.status_code in {200, 201}, response.text
+    slug = str(payload["slug"])
+    verifier_id = f"VERIFY-{slug}"
+    dispatch = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/dispatches",
+        json={
+            "agent_id": verifier_id,
+            "agent_role": "code-vuln-verifier",
+            "task": f"independently verify {slug}",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
+    run = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/assessment-runs",
+        json={
+            "run_uuid": f"report-export-{slug}",
+            "run_kind": "code",
+            "producer_dispatch_agent_id": verifier_id,
+        },
+    )
+    assert run.status_code == 201, run.text
+    receipt = post_artifact_backed_source_observation(
+        client,
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/proof-receipts",
+        json={
+            "run_id": run.json()["id"],
+            "evidence_kind": "source_observation",
+            "expected_result": "the report finding survives independent review",
+            "observed_result": "the report finding was independently reproduced",
+        },
+    )
+    assert receipt.status_code == 201, receipt.text
+    completed = client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/assessment-runs/{run.json()['id']}",
+        json={"status": "completed"},
+    )
+    assert completed.status_code == 200, completed.text
+    verified = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/findings/{slug}/verify",
+        json={
+            "verification_status": "confirmed",
+            "reason_text": "independently reproduced",
+            "proof_receipt_ids": [receipt.json()["id"]],
+        },
+    )
+    assert verified.status_code == 200, verified.text
 
 
 def test_report_export_writes_injected_report_and_registers_artifact(
@@ -323,24 +379,24 @@ def test_report_export_final_mode_blocked_when_not_ready(
     client, isolate_settings, fake_template
 ):
     _seed(client, isolate_settings)
-    # A verified+confirmed finding missing structured quality fields (no
+    # A confirmed finding missing structured quality fields (no
     # impact/evidence/cvss_vector/steps) → report_readiness raises a
     # `finding_field_quality` blocker → not ready. (An empty engagement is
     # considered ready, so we must seed a low-quality finding to exercise the
     # gate deterministically.)
-    client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/findings",
-        json={
+    _add_finding(
+        client,
+        {
             "slug": "VA-001",
             "title": "Low-quality finding",
             "severity": "high",
             "workflow_status": "exploited",
-            "verification_state": "verified",
-            "verification_disposition": "confirmed",
+            "verification_status": "unreviewed",
             "canonical_location": "https://acme.example/va-001",
             "summary": "missing the structured fields the report gate requires",
             "evidence_ref": "findings.md",
             "source_name": "test",
+            "provenance": {"agent_id": "SOURCE-VA-001"},
             "details": {},
         },
     )

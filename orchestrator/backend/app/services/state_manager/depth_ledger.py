@@ -115,6 +115,8 @@ _TIER_WEIGHT: dict[str, int] = {
     "application": 3,
 }
 
+_IDENTITY_OUTCOME_DIFFERENCE_LIMIT = 20
+
 
 def depth_ledger(engagement_id: int) -> dict[str, Any]:
     """Compute the per-unit depth ledger, EV-ranked, for an engagement.
@@ -196,7 +198,8 @@ def depth_ledger(engagement_id: int) -> dict[str, Any]:
         probes = _fetch_all(
             connection,
             "SELECT id, application_unit_id, request_variant_id, attack_family, result_status, "
-            "tool_name, target_host, target_path, target_port, auth_context "
+            "tool_name, target_host, target_path, target_port, auth_context, "
+            "observed_http_status, outcome_assertion, evidence_ref, finding_id "
             "FROM assessment_probe_runs WHERE engagement_id = ?",
             (eng_id,),
         )
@@ -440,6 +443,111 @@ def _covered_families_for_unit(
     }
 
 
+def _identity_outcome_differences(
+    unit_probes: list[dict[str, Any]],
+    variant_by_id: dict[int, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return observed per-identity HTTP differences without inferring impact.
+
+    ``observed_http_status`` is evidence, not a vulnerability verdict. Authored
+    outcome assertions and finding links therefore live under a separate
+    ``conclusions`` object and never change depth or coverage classification.
+    """
+    probes_by_variant: dict[int, list[dict[str, Any]]] = {}
+    for probe in unit_probes:
+        request_variant_id = probe.get("request_variant_id")
+        if request_variant_id is None:
+            continue
+        probes_by_variant.setdefault(int(request_variant_id), []).append(probe)
+
+    differences: list[dict[str, Any]] = []
+    for request_variant_id in sorted(probes_by_variant):
+        probes = probes_by_variant[request_variant_id]
+        statuses_by_identity: dict[str, set[int]] = {}
+        observed_probes_by_identity: dict[str, list[dict[str, Any]]] = {}
+        for probe in probes:
+            auth_context = str(probe.get("auth_context") or "").strip()
+            observed_status = probe.get("observed_http_status")
+            if not auth_context or observed_status is None:
+                continue
+            statuses_by_identity.setdefault(auth_context, set()).add(
+                int(observed_status)
+            )
+            observed_probes_by_identity.setdefault(auth_context, []).append(probe)
+        if len(statuses_by_identity) < 2:
+            continue
+        distinct_outcomes = {
+            tuple(sorted(statuses)) for statuses in statuses_by_identity.values()
+        }
+        if len(distinct_outcomes) < 2:
+            continue
+
+        by_identity = []
+        for auth_context in sorted(statuses_by_identity):
+            identity_probes = observed_probes_by_identity[auth_context]
+            by_identity.append(
+                {
+                    "auth_context": auth_context,
+                    "observed_http_statuses": sorted(
+                        statuses_by_identity[auth_context]
+                    ),
+                    "probe_count": len(identity_probes),
+                    "evidence_refs": sorted(
+                        {
+                            str(probe.get("evidence_ref") or "").strip()
+                            for probe in identity_probes
+                            if str(probe.get("evidence_ref") or "").strip()
+                        }
+                    ),
+                }
+            )
+
+        recorded_assertions = sorted(
+            {
+                (
+                    str(probe.get("auth_context") or "").strip(),
+                    str(probe.get("outcome_assertion") or "").strip(),
+                    str(probe.get("evidence_ref") or "").strip(),
+                )
+                for probe in probes
+                if str(probe.get("outcome_assertion") or "").strip()
+            }
+        )
+        linked_finding_ids = sorted(
+            {
+                int(probe["finding_id"])
+                for probe in probes
+                if probe.get("finding_id") is not None
+            }
+        )
+        variant = variant_by_id.get(request_variant_id, {})
+        differences.append(
+            {
+                "request_variant_id": request_variant_id,
+                "method": str(variant.get("method") or ""),
+                "path": str(variant.get("normalized_path") or ""),
+                "observation": {
+                    "kind": "identity_http_status_difference",
+                    "identity_count": len(statuses_by_identity),
+                    "by_identity": by_identity,
+                },
+                "conclusions": {
+                    "derived_from_status_difference": False,
+                    "recorded_outcome_assertions": [
+                        {
+                            "auth_context": auth_context,
+                            "assertion": assertion,
+                            "evidence_ref": evidence_ref,
+                        }
+                        for auth_context, assertion, evidence_ref in recorded_assertions
+                    ],
+                    "linked_finding_ids": linked_finding_ids,
+                },
+            }
+        )
+    return differences
+
+
 def _unit_ledger(
     unit: dict[str, Any],
     *,
@@ -487,6 +595,9 @@ def _unit_ledger(
         ci for ci in coverage_items if _coverage_maps_to_unit(ci, unit_id, unit_variant_ids)
     ]
     unit_findings = [f for f in findings if _finding_maps_to_unit(f, host, prefix)]
+    identity_outcome_differences = _identity_outcome_differences(
+        unit_probes, variant_by_id
+    )
     unit_has_covering_probe = any(
         str(p.get("result_status") or "").strip().lower() in PROBE_RESULT_STATUSES_COVERING
         for p in unit_probes
@@ -680,6 +791,14 @@ def _unit_ledger(
         # high-confidence units only (ADR 0012). Non-decisive units keep it
         # advisory-only.
         "signal_classes_uncovered": signal_classes_uncovered,
+        # Audit-only observation projection. It is intentionally excluded from
+        # `covered`, `missing_*`, `depth_satisfied`, and EV calculations: a
+        # status difference between identities is a review signal, not proof of
+        # a vulnerability. Authored assertions/finding links remain separate.
+        "identity_outcome_differences": identity_outcome_differences[
+            :_IDENTITY_OUTCOME_DIFFERENCE_LIMIT
+        ],
+        "identity_outcome_difference_count": len(identity_outcome_differences),
     }
 
 

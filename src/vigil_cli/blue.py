@@ -13,7 +13,7 @@ blue operator core) and the blue section of the repo ``README.md``.
 Critical CLI-verb drift handled here:
 
 * ``vigil assess log-entry`` does NOT exist — the real verb is ``vigil assess log``.
-* ``vigil assess finding verify --disposition`` accepts CLI vocab
+* ``vigil assess finding verify --status`` accepts CLI vocab
   ``{confirmed | downgraded | false_positive | disputed}`` while blue
   specialists speak ``{verified | false_positive | downgraded | escalated}``.
   ``vigil blue verify`` translates blue → CLI for the storage row and
@@ -64,32 +64,6 @@ PLATFORM_TO_TENANT_SUFFIX: dict[str, str] = {
     "generic": "generic",
 }
 
-# Blue specialists per plan §3.
-BLUE_ROLES: frozenset[str] = frozenset(
-    {
-        "alert-triage-specialist",
-        "investigator",
-        "incident-verifier",
-        "ir-lead",
-        "osint-analyst",
-        "report-writer",
-    }
-)
-
-# Dispatchable blue investigation skills. This list is used only to warn on
-# likely typos; each named skill has a tracked prompt under agent/skills/.
-INVESTIGATOR_PLATFORM_SKILLS: frozenset[str] = frozenset(
-    {
-        "google-workspaces",
-        "m365-signin-investigation",
-        "aws-cloudtrail-investigation",
-        "okta-investigation",
-        "edr-alert-triage",
-        "network-threat-hunt",
-        "phishing-triage",
-    }
-)
-
 # Blue → CLI disposition. The CLI/storage layer uses red-team vocab; we
 # translate at the wrapper level so blue specialists keep their vocabulary
 # (and the report-writer reads it verbatim from details.disposition).
@@ -134,7 +108,9 @@ def register_blue_parser(sub: argparse._SubParsersAction) -> None:
             "\n"
             "OPERATOR verbs (the LLM operator runs these inside the session):\n"
             "  alert record   record the pasted alert body into scope.json + artifact index\n"
-            "  dispatch       dispatch a blue specialist with tenant ref(s) auto-injected\n"
+            "  Specialist dispatch: use `vigil assess agent start ... "
+            "--prompt-context-json <file> --emit-prompt`; blue tenant refs are "
+            "validated and injected from scope.json.\n"
             "  tier           record the current tier on a finding\n"
             "  verify         verify a finding (blue vocab -> CLI storage)\n"
             "  propose-contain  record a containment proposal (operator-approved before execute)\n"
@@ -205,23 +181,6 @@ def register_blue_parser(sub: argparse._SubParsersAction) -> None:
     show_p = blue_sub.add_parser("show", help="(human) Show blue engagement status")
     show_p.add_argument("engagement_key", nargs="?")
     show_p.add_argument("--select", action="store_true")
-
-    dispatch_p = blue_sub.add_parser("dispatch", help="(operator) Dispatch a blue specialist with tenant ref(s) auto-injected")
-    dispatch_p.add_argument("--role", required=True, help=f"Blue role: {sorted(BLUE_ROLES)}")
-    dispatch_p.add_argument("--skills", required=True, help="Comma-separated skills")
-    dispatch_p.add_argument("--tier", choices=("L1", "L2", "L3", "L4"), default=None)
-    dispatch_p.add_argument("--task", default=None)
-    dispatch_p.add_argument("--model", dest="dispatch_model", default=None)
-    dispatch_p.add_argument("--reasoning", default=None)
-    dispatch_p.add_argument(
-        "--dispatch-mode",
-        choices=("hypothesis-driven", "item-iterating", "deep-manual", "variant-rotation", "swarm"),
-        default=None,
-    )
-    dispatch_p.add_argument("--agent-id", default=None)
-    dispatch_p.add_argument("--scope-host", default=None)
-    dispatch_p.add_argument("-k", "--engagement-key", default=None)
-    dispatch_p.add_argument("--select", action="store_true")
 
     tier_p = blue_sub.add_parser("tier", help="(operator) Record current tier on a finding's details_json")
     tier_p.add_argument("finding_slug")
@@ -325,8 +284,6 @@ def run_blue(args: argparse.Namespace, install_root: Path) -> None:
         _cmd_list(args, install_root)
     elif command == "show":
         _cmd_show(args, install_root)
-    elif command == "dispatch":
-        _cmd_dispatch(args, install_root)
     elif command == "tier":
         _cmd_tier(args, install_root)
     elif command == "verify":
@@ -533,7 +490,11 @@ def _cmd_engage(args: argparse.Namespace, install_root: Path) -> None:
         print(f"[vigil blue] engagement: {created.key}", file=sys.stderr)
         print(f"[vigil blue] launching operator session ({args.start})…", file=sys.stderr)
         print("  Paste the alert into the operator chat; the operator records intake", file=sys.stderr)
-        print("  (vigil blue alert record) and dispatches triage (vigil blue dispatch).", file=sys.stderr)
+        print(
+            "  (vigil blue alert record), then dispatches triage with "
+            "`vigil assess agent start ... --prompt-context-json <file> --emit-prompt`.",
+            file=sys.stderr,
+        )
         sys.stderr.flush()
         if args.start == "opencode":
             # Mirror main.py: ensure the opencode permission block exists. A
@@ -548,7 +509,11 @@ def _cmd_engage(args: argparse.Namespace, install_root: Path) -> None:
     print("next:", file=sys.stderr)
     print(f"  vigil engagement start {created.key} --client codex   (or --client claude)", file=sys.stderr)
     print("  Then paste the alert into the operator chat; the operator records intake", file=sys.stderr)
-    print("  (vigil blue alert record) and dispatches triage (vigil blue dispatch).", file=sys.stderr)
+    print(
+        "  (vigil blue alert record), then dispatches triage with "
+        "`vigil assess agent start ... --prompt-context-json <file> --emit-prompt`.",
+        file=sys.stderr,
+    )
     print(f"  Shortcut next time: vigil blue engage --customer {customer} --platform {','.join(raw_platforms)} --start codex", file=sys.stderr)
 
 
@@ -728,7 +693,9 @@ def _cmd_alert_record(args: argparse.Namespace, install_root: Path) -> None:
 
     print(str(raw_path))
     print(
-        "\nnext: vigil blue dispatch --role alert-triage-specialist --tier L1 --skills alert-triage",
+        "\nnext: vigil assess agent start --role alert-triage-specialist --tier L1 "
+        "--skills alert-triage --rate-budget '<authored tenant query budget>' "
+        "--prompt-context-json dispatch-context.json --emit-prompt",
         file=sys.stderr,
     )
 
@@ -860,109 +827,6 @@ def _cmd_show(args: argparse.Namespace, install_root: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# dispatch
-# ---------------------------------------------------------------------------
-
-
-def _cmd_dispatch(args: argparse.Namespace, install_root: Path) -> None:
-    role = args.role
-    if role not in BLUE_ROLES:
-        raise SystemExit(
-            f"--role must be one of {sorted(BLUE_ROLES)} (got {role!r}). "
-            f"Use `vigil assess agent start` directly for non-blue roles."
-        )
-    eng_dir = _resolve_blue_engagement(install_root, args)
-    scope = _read_scope(eng_dir / "scope.json", require_blue=True)
-
-    skill_list = [piece.strip() for piece in (args.skills or "").split(",") if piece.strip()]
-    if not skill_list:
-        raise SystemExit("--skills must list at least one skill name")
-
-    if role == "investigator":
-        platform_skills = [s for s in skill_list if s in INVESTIGATOR_PLATFORM_SKILLS]
-        if not platform_skills:
-            print(
-                f"WARN vigil blue dispatch: investigator skills {skill_list} do not include a known "
-                f"dispatchable investigation skill ({sorted(INVESTIGATOR_PLATFORM_SKILLS)}). "
-                "Check the skill name before dispatching.",
-                file=sys.stderr,
-            )
-
-    tenant_refs: list[str] = list(scope.get("tenant_reference_paths") or [])
-    if not tenant_refs:
-        raise SystemExit(
-            "scope.json:tenant_reference_paths[] is empty. Recreate the engagement via `vigil blue engage` "
-            "so tenant context is resolved, or hand-edit scope.json before dispatching."
-        )
-
-    user_task = args.task or _default_task_for_role(role)
-    load_first = "## Load First (tenant context — read before role-specific skill)\n" + "\n".join(
-        f"- {p}" for p in tenant_refs
-    )
-    full_task = f"{load_first}\n\n## Role objective\n{user_task}".strip()
-
-    scope_host = args.scope_host or str(scope.get("customer") or "")
-    # The backend ``agent start`` validator requires --agent-id (see
-    # agent/scripts/assess/commands/dispatch.py:_build_register_payload). The
-    # agent.py:_start handler auto-generates a fallback, but the operator
-    # never sees the chosen id from the CLI surface. Auto-generate here so the
-    # walkthrough hints work without ``--agent-id`` AND surface the chosen id
-    # on stderr so the operator can reference it in later commands
-    # (handoff, done, render-handoff). Convention matches agent.py:_start.
-    agent_id = args.agent_id
-    if not agent_id:
-        agent_id = f"{role}-{uuid.uuid4().hex[:8]}"
-        print(f"[vigil blue] dispatched with agent-id={agent_id}", file=sys.stderr)
-    assess_args: list[str] = [
-        "agent",
-        "start",
-        "--role",
-        role,
-        "--skills",
-        ",".join(skill_list),
-        "--task",
-        full_task,
-        "--scope-host",
-        scope_host,
-        "--agent-id",
-        agent_id,
-    ]
-    if args.tier:
-        assess_args.extend(["--tier", args.tier])
-    if getattr(args, "dispatch_model", None):
-        assess_args.extend(["--model", args.dispatch_model])
-    if getattr(args, "reasoning", None):
-        assess_args.extend(["--reasoning", args.reasoning])
-    assess_args.extend(["--dispatch-mode", args.dispatch_mode or _default_dispatch_mode_for_role(role)])
-
-    rc = _run_assess(install_root, eng_dir, assess_args, check=False)
-    if rc != 0:
-        raise SystemExit(rc)
-
-
-def _default_dispatch_mode_for_role(role: str) -> str:
-    return {
-        "alert-triage-specialist": "item-iterating",
-        "investigator": "item-iterating",
-        "incident-verifier": "deep-manual",
-        "ir-lead": "deep-manual",
-        "osint-analyst": "hypothesis-driven",
-        "report-writer": "deep-manual",
-    }.get(role, "hypothesis-driven")
-
-
-def _default_task_for_role(role: str) -> str:
-    return {
-        "alert-triage-specialist": "Normalize alert, classify, draft finding skeleton, name downstream skill/tenant-ref for L2.",
-        "investigator": "Pull platform telemetry, build evidence ladder, draft full finding with timeline + IOCs.",
-        "incident-verifier": "Run the five-check alert-FP-verification protocol; assign disposition with cited evidence.",
-        "ir-lead": "Surface containment actions as proposals; per-action operator approval required before execution.",
-        "osint-analyst": "Enrich IOCs (hash/IP/domain/URL/email); link to findings via related_intel_ids.",
-        "report-writer": "Render the blue incident report from durable backend state.",
-    }.get(role, "Continue blue engagement work per scope.json + tenant references.")
-
-
-# ---------------------------------------------------------------------------
 # tier
 # ---------------------------------------------------------------------------
 
@@ -1006,8 +870,11 @@ def _cmd_verify(args: argparse.Namespace, install_root: Path) -> None:
         raise SystemExit(
             f"vigil blue verify: no incident-verifier dispatch found that references "
             f"finding {args.finding_slug!r}. Dispatch the verifier first via: "
-            f"vigil blue dispatch --role incident-verifier --tier L3 --skills alert-fp-verification "
-            f"--task 'verify {args.finding_slug}', or rerun with --force to record an operator-approved bypass."
+            f"vigil assess agent start --role incident-verifier --tier L3 "
+            f"--skills alert-fp-verification --task 'verify {args.finding_slug}' "
+            f"--rate-budget '<authored tenant query budget>' "
+            f"--prompt-context-json dispatch-context.json --emit-prompt, or rerun "
+            "with --force to record an operator-approved bypass."
         )
 
     evidence_refs: list[str] = []
@@ -1029,7 +896,7 @@ def _cmd_verify(args: argparse.Namespace, install_root: Path) -> None:
             "finding",
             "verify",
             args.finding_slug,
-            "--disposition",
+            "--status",
             cli_disp,
             "--reason",
             args.reason,
@@ -1049,7 +916,7 @@ def _cmd_verify(args: argparse.Namespace, install_root: Path) -> None:
             "finding",
             "verify",
             args.finding_slug,
-            "--disposition",
+            "--status",
             cli_disp,
             "--reason",
             args.reason,
@@ -1441,7 +1308,7 @@ def _cmd_contain(args: argparse.Namespace, install_root: Path) -> None:
 
 def _cmd_report(args: argparse.Namespace, install_root: Path) -> None:
     eng_dir = _resolve_blue_engagement(install_root, args)
-    _read_scope(eng_dir / "scope.json", require_blue=True)
+    scope = _read_scope(eng_dir / "scope.json", require_blue=True)
     # Pre-flight: emit the gathered report-findings table so the operator sees
     # the input set before report-writer is dispatched.
     preflight_rc = _run_assess(install_root, eng_dir, ["finding", "report", "--mode", "final"], check=False)
@@ -1478,6 +1345,10 @@ def _cmd_report(args: argparse.Namespace, install_root: Path) -> None:
             "deep-manual",
             "--agent-id",
             agent_id,
+            "--no-target-traffic",
+            "--emit-prompt",
+            "--prompt-context-json",
+            json.dumps(_blue_report_prompt_context(scope, eng_dir, "incident report")),
         ],
         check=False,
     )
@@ -1492,7 +1363,7 @@ def _cmd_report(args: argparse.Namespace, install_root: Path) -> None:
 
 def _cmd_closeout(args: argparse.Namespace, install_root: Path) -> None:
     eng_dir = _resolve_blue_engagement(install_root, args)
-    _read_scope(eng_dir / "scope.json", require_blue=True)
+    scope = _read_scope(eng_dir / "scope.json", require_blue=True)
     preflight_rc = _run_assess(install_root, eng_dir, ["finding", "report", "--mode", "final"], check=False)
     if preflight_rc != 0:
         raise SystemExit(preflight_rc)
@@ -1525,11 +1396,39 @@ def _cmd_closeout(args: argparse.Namespace, install_root: Path) -> None:
             "deep-manual",
             "--agent-id",
             agent_id,
+            "--no-target-traffic",
+            "--emit-prompt",
+            "--prompt-context-json",
+            json.dumps(_blue_report_prompt_context(scope, eng_dir, "incident closeout")),
         ],
         check=False,
     )
     if rc != 0:
         raise SystemExit(rc)
+
+
+def _blue_report_prompt_context(
+    scope: dict, engagement_dir: Path, artifact_kind: str
+) -> dict[str, str]:
+    """Build the complete offline report-writer context from owned state."""
+    return {
+        "authorized_phase": "report",
+        "target": (
+            f"blue engagement {engagement_dir.name}; customer="
+            f"{scope.get('customer') or 'unknown'}"
+        ),
+        "hunt_scope": f"not applicable — render the {artifact_kind}",
+        "mindset_lens": "not applicable — report composition",
+        "depth_expectation": "complete every template section from durable state",
+        "oob": "not needed — no target traffic",
+        "auth_context": "backend read-only reporting",
+        "credential_id": "none",
+        "prior_state": "final finding projection, activity, artifacts, and handoffs",
+        "coverage": "all report-ready durable backend records",
+        "cleanup": "none expected — offline report composition",
+        "human_reach_decision": "none — no target traffic",
+        "role_specific_additions": f"render and register the {artifact_kind}",
+    }
 
 
 # ---------------------------------------------------------------------------
