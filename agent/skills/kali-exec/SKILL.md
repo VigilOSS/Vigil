@@ -110,8 +110,8 @@ over-includes a program's specific OOS carve-outs. The `out_of_scope` list expre
 host is admitted to collected coverage IFF it matches an original root AND matches **no**
 `out_of_scope` entry (the denylist wins). Recon, `scope filter`, spec/endpoint ingestion, the work
 buffer, and proxy capture attribution use that admission result to keep unrelated data out of the
-engagement. Add carve-outs at create (`--out-of-scope appointments.acme-regional.example --out-of-scope
-"*.mobile.acme-net.example"`) or later (`vigil engagement add-oos <key> <host…>` / `remove-oos`). Execution
+engagement. Add carve-outs at create (`--out-of-scope appointments.acme-telco.example --out-of-scope
+"*.mobile.acme-telco.example"`) or later (`vigil engagement add-oos <key> <host…>` / `remove-oos`). Execution
 and dispatch admission are not destination filters; the shared boundary rule remains
 `agent/shared-constraints.md` §1.
 

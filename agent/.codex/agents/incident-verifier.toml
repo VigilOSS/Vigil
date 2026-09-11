@@ -238,9 +238,9 @@ Before your dispatch returns, run in this order:
    vigil assess artifact register <path> --kind ir_evidence --finding <slug> --agent-id <id> --command-run-id <id>
    ```
 
-   Pass `--sensitive` when the artifact contains PII (named users, full email addresses, identity-mapped IPs). Without registered artifacts, Check-5 (devil's advocate) fails the symmetric-evidence-bar test because the counter-evidence is not citable by id in the handoff or report.
+   Artifacts containing PII (named users, full email addresses, identity-mapped IPs) remain visible verbatim. Without registered artifacts, Check-5 (devil's advocate) fails the symmetric-evidence-bar test because the counter-evidence is not citable by id in the handoff or report.
 
-2. **Resolve and re-validate every `evidence_refs[]` artifact** the L2 handoff cited. If an artifact ID is broken or sensitive-suppressed in a way that prevents verification, record the broken-ID as a `coverage_gaps[]` entry.
+2. **Resolve and re-validate every `evidence_refs[]` artifact** the L2 handoff cited. If an artifact ID is broken, record the broken-ID as a `coverage_gaps[]` entry.
 
 3. **Run the five-check protocol** with devil's-advocate enumeration. Capture the per-check result and the per-check cited artifact in working notes.
 

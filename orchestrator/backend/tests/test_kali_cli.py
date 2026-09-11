@@ -937,7 +937,9 @@ def test_kali_exec_passthrough_carries_full_command(monkeypatch):
 def fake_engagement(tmp_path, monkeypatch):
     eng_dir = tmp_path / "engagements" / "2026-04-26-test"
     eng_dir.mkdir(parents=True, exist_ok=True)
-    (eng_dir / "scope.json").write_text(json.dumps({"hostname": "example.com"}))
+    (eng_dir / "scope.json").write_text(
+        json.dumps({"hostname": "example.com", "hosts": ["example.com"]})
+    )
     # Credentials are centralized in the backend store; no auth.json file. The
     # runtime creds_client fails closed (anonymous) when the backend is absent.
     monkeypatch.setenv("ENGAGEMENT_DIR", str(eng_dir))
@@ -1134,7 +1136,10 @@ def test_kali_exec_runs_a_command_naming_an_undeclared_host_and_audits_it(
     assert fake_client.posts[0][1]["status"] == "running"
     assert "unrelated.example" in fake_client.posts[0][1]["command"]
     notes = json.loads(fake_client.posts[0][1]["notes"])
-    assert notes == {"target_facing": True}
+    assert notes == {
+        "required_header_status": "none_required",
+        "target_facing": True,
+    }
 
 
 def test_kali_exec_refuses_a_denied_tool_before_container_and_audits_refusal(
@@ -1171,6 +1176,38 @@ def test_kali_exec_refuses_a_denied_tool_before_container_and_audits_refusal(
     assert len(fake_client.patches) == 1
     assert fake_client.patches[0][1]["status"] == "failed"
     assert fake_client.patches[0][1]["return_code"] is None
+
+
+def test_kali_exec_refuses_script_path_for_another_engagement_before_container(
+    monkeypatch, fake_engagement
+):
+    kali = _setup_fake_config(monkeypatch, fake_engagement)
+    (fake_engagement / "scope.json").write_text(
+        json.dumps({"hosts": ["allowed.example"]}), encoding="utf-8"
+    )
+    (fake_engagement / "probe.py").write_text(
+        'import requests\nrequests.get("https://allowed.example")\n',
+        encoding="utf-8",
+    )
+    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
+    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
+    container_checks: list[str] = []
+    monkeypatch.setattr(kali, "_check_container_running", container_checks.append)
+
+    with pytest.raises(kali.AssessError, match="other-engagement.*does not match"):
+        kali.kali_exec(
+            ["python3", "/engagements/other-engagement/probe.py"],
+            technique="RECON",
+            intent="cross-engagement script path",
+            probe_kind="fingerprint",
+            phase="recon",
+            timeout=60,
+            engagement_dir=fake_engagement,
+            tool_name="python3",
+        )
+
+    assert container_checks == []
+    assert json.loads(fake_client.posts[0][1]["notes"])["policy_refusal"]
 
 
 def test_kali_exec_emits_nonblocking_recency_advisory_after_audit_before_process(
@@ -3090,6 +3127,7 @@ def test_kali_job_start_uses_shared_identity_header_and_oob_preparation(
     def fake_start_job(cmd, *, audit_meta, **kwargs):
         captured["cmd"] = list(cmd)
         captured["audit_meta"] = dict(audit_meta)
+        captured["kwargs"] = dict(kwargs)
         return {"id": 12, "status": "running"}
 
     monkeypatch.setattr(mod, "start_job", fake_start_job)
@@ -3121,6 +3159,15 @@ def test_kali_job_start_uses_shared_identity_header_and_oob_preparation(
     assert "Authorization: Bearer session-token" in headers
     assert "X-Attribution: researcher" in headers
     assert captured["audit_meta"]["auth_context"] == "member"
+    assert captured["audit_meta"]["required_header_status"] == "injected"
+    assert (
+        "VIGIL_REQUIRED_HEADERS",
+        "X-Attribution: researcher",
+    ) in captured["kwargs"]["env_pairs"]
+    assert (
+        "VIGIL_REQUIRED_HEADER_X_ATTRIBUTION",
+        "researcher",
+    ) in captured["kwargs"]["env_pairs"]
     assert resolved_scopes == ["billing"]
 
 
@@ -3172,6 +3219,63 @@ def test_kali_job_start_applies_scope_policy_before_spawning(monkeypatch, fake_e
     assert refusal["run_uuid"]
     assert str(refusal["stdout_path"]).endswith(".out")
     assert str(refusal["stderr_path"]).endswith(".err")
+
+
+def test_kali_job_start_refuses_script_path_for_another_engagement(
+    monkeypatch, fake_engagement
+):
+    mod = _import("assess.commands.kali_job")
+    (fake_engagement / "scope.json").write_text(
+        json.dumps({"hosts": ["allowed.example"]}), encoding="utf-8"
+    )
+    (fake_engagement / "probe.py").write_text(
+        'import requests\nrequests.get("https://allowed.example")\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        mod,
+        "_load_job_config",
+        lambda _args: SimpleNamespace(
+            base_url="http://127.0.0.1:18000",
+            engagement_dir=str(fake_engagement),
+            engagement_key=fake_engagement.name,
+        ),
+    )
+    monkeypatch.setattr(mod, "start_job", lambda *a, **k: pytest.fail("must not spawn"))
+    refusals: list[dict] = []
+    monkeypatch.setattr(
+        mod,
+        "_audit_execution_policy_refusal",
+        lambda **kwargs: refusals.append(kwargs),
+    )
+    args = SimpleNamespace(
+        technique="RECON",
+        intent="cross-engagement script path",
+        probe_kind="fingerprint",
+        phase="recon",
+        timeout=60,
+        destructive=False,
+        agent_name="recon-specialist",
+        target_host="allowed.example",
+        engagement_dir=str(fake_engagement),
+        command=["python3", "/engagements/other-engagement/probe.py"],
+        container_name="vigil",
+        parent_command_run_id=None,
+        identity=None,
+        identity_env=None,
+        identity_scope="",
+        identity_target="",
+        prepared_auth_context=None,
+    )
+
+    with pytest.raises(mod.AssessError, match="other-engagement.*does not match"):
+        mod._run_start(args)
+
+    assert len(refusals) == 1
+    assert refusals[0]["cmd"] == [
+        "python3",
+        "/engagements/other-engagement/probe.py",
+    ]
 
 
 def test_kali_job_start_rejects_caller_owned_parent_command_run(
@@ -5846,7 +5950,13 @@ def _run_emit_case(
         )
     if engagement_type is not None:
         (fake_engagement / "scope.json").write_text(
-            json.dumps({"hostname": "example.com", "engagement_type": engagement_type})
+            json.dumps(
+                {
+                    "hostname": "example.com",
+                    "hosts": ["example.com"],
+                    "engagement_type": engagement_type,
+                }
+            )
         )
     fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
@@ -5951,7 +6061,9 @@ def test_probe_emit_code_engagement_emits_nothing(monkeypatch, fake_engagement):
 def test_probe_emit_best_effort_never_raises(monkeypatch, fake_engagement):
     kali = _setup_fake_config(monkeypatch, fake_engagement)
     (fake_engagement / "scope.json").write_text(
-        json.dumps({"hostname": "example.com", "engagement_type": "web"})
+        json.dumps(
+            {"hostname": "example.com", "hosts": ["example.com"], "engagement_type": "web"}
+        )
     )
 
     class _RaisingClient(_FakeClient):
@@ -6016,7 +6128,9 @@ def test_kali_identity_stamps_auth_context_on_command_and_probe(monkeypatch, fak
     _write_multi_identity_auth(monkeypatch, fake_engagement)
     kali = _setup_fake_config(monkeypatch, fake_engagement)
     (fake_engagement / "scope.json").write_text(
-        json.dumps({"hostname": "example.com", "engagement_type": "web"})
+        json.dumps(
+            {"hostname": "example.com", "hosts": ["example.com"], "engagement_type": "web"}
+        )
     )
     fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
@@ -6059,7 +6173,9 @@ def test_kali_without_identity_uses_anonymous_context_without_credential_lookup(
     )
     kali = _setup_fake_config(monkeypatch, fake_engagement)
     (fake_engagement / "scope.json").write_text(
-        json.dumps({"hostname": "example.com", "engagement_type": "web"})
+        json.dumps(
+            {"hostname": "example.com", "hosts": ["example.com"], "engagement_type": "web"}
+        )
     )
     fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
@@ -6090,7 +6206,9 @@ def test_kali_unknown_identity_refuses_anonymous_execution(
     _write_multi_identity_auth(monkeypatch, fake_engagement)
     kali = _setup_fake_config(monkeypatch, fake_engagement)
     (fake_engagement / "scope.json").write_text(
-        json.dumps({"hostname": "example.com", "engagement_type": "web"})
+        json.dumps(
+            {"hostname": "example.com", "hosts": ["example.com"], "engagement_type": "web"}
+        )
     )
     fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
@@ -6124,7 +6242,9 @@ def test_kali_identity_injects_credentials_into_http_command(monkeypatch, fake_e
     _write_multi_identity_auth(monkeypatch, fake_engagement)
     kali = _setup_fake_config(monkeypatch, fake_engagement)
     (fake_engagement / "scope.json").write_text(
-        json.dumps({"hostname": "example.com", "engagement_type": "web"})
+        json.dumps(
+            {"hostname": "example.com", "hosts": ["example.com"], "engagement_type": "web"}
+        )
     )
     fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
@@ -6161,7 +6281,9 @@ def test_kali_identity_injects_backend_access_token(monkeypatch, fake_engagement
     )
     kali = _setup_fake_config(monkeypatch, fake_engagement)
     (fake_engagement / "scope.json").write_text(
-        json.dumps({"hostname": "example.com", "engagement_type": "web"})
+        json.dumps(
+            {"hostname": "example.com", "hosts": ["example.com"], "engagement_type": "web"}
+        )
     )
     fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
@@ -6192,7 +6314,9 @@ def test_kali_identity_non_http_tool_refuses_anonymous_execution(
     _write_multi_identity_auth(monkeypatch, fake_engagement)
     kali = _setup_fake_config(monkeypatch, fake_engagement)
     (fake_engagement / "scope.json").write_text(
-        json.dumps({"hostname": "example.com", "engagement_type": "web"})
+        json.dumps(
+            {"hostname": "example.com", "hosts": ["example.com"], "engagement_type": "web"}
+        )
     )
     fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
@@ -6232,7 +6356,9 @@ def test_kali_identity_shell_wrapper_injects_and_stamps(monkeypatch, fake_engage
     _write_multi_identity_auth(monkeypatch, fake_engagement)
     kali = _setup_fake_config(monkeypatch, fake_engagement)
     (fake_engagement / "scope.json").write_text(
-        json.dumps({"hostname": "example.com", "engagement_type": "web"})
+        json.dumps(
+            {"hostname": "example.com", "hosts": ["example.com"], "engagement_type": "web"}
+        )
     )
     fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)

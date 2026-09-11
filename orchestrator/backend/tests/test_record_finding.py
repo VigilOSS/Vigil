@@ -32,6 +32,7 @@ if str(_SCRIPTS_ROOT) not in sys.path:
 
 
 ENGAGEMENT_KEY = "2026-06-30-120000-clobber"
+AUTHOR_DISPATCH = "HUNT-CLOBBER-1"
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -48,6 +49,15 @@ def _seed(client, isolate_settings) -> None:
     )
     (engagement_dir / "findings.md").write_text("# Findings\n", encoding="utf-8")
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    dispatch = client.post(
+        f"{_base()}/dispatches",
+        json={
+            "agent_id": AUTHOR_DISPATCH,
+            "agent_role": "vulnerability-analyst",
+            "task": "exercise finding record behavior",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
 
 
 def _base() -> str:
@@ -79,7 +89,10 @@ def _finding(
         "evidence_ref": "findings.md",
         "source_name": "vulnerability-analyst",
         "details": {"evidence": "Replayable request.", "impact": "PII disclosure."},
-        "provenance": {"agent_name": "vulnerability-analyst"},
+        "provenance": {
+            "agent_name": "vulnerability-analyst",
+            "agent_id": AUTHOR_DISPATCH,
+        },
         "links": [],
     }
     if slug is not None:
@@ -595,6 +608,8 @@ def _run_record_finding_with_flags(monkeypatch, tmp_path, *, allow_remint: bool)
             pass
 
         def get(self, endpoint):
+            if endpoint == f"dispatches/{AUTHOR_DISPATCH}":
+                return {"agent_id": AUTHOR_DISPATCH}
             return []  # no existing findings => no clobber
 
         def post(self, endpoint, payload):
@@ -631,6 +646,7 @@ def _run_record_finding_with_flags(monkeypatch, tmp_path, *, allow_remint: bool)
         allow_unindexed_evidence=True,
         update_slug="",
         allow_remint=allow_remint,
+        agent_id=AUTHOR_DISPATCH,
     )
     rf.run(args)
     return posted

@@ -35,6 +35,10 @@ mandatory Load-First entry, note the resulting total against the role's stated b
 if none exists). Growth past the budget is a signal to trim or hoist content out (per Rule 3),
 not to accept a creeping standing load.
 
+Run `vigil assess prompt-census` for the advisory structural and approximate-byte view. Pass
+`--read-bytes <n>` when a reader reports a bounded read so the census shows whether that boundary
+missed or cut through the Load First section; this is visibility, never a progress gate.
+
 ### 2. Split Load First into MANDATORY vs LOAD-ON-FIRST-USE
 
 Every role's `## Load First` section separates what is loaded unconditionally from what is loaded
@@ -54,6 +58,12 @@ paraphrase — for example, the canonical cross-family pointer used by every off
 context-isolation, finding-recording format, and closing-sequence wrapper is:
 
 > **Specialist context isolation, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+
+Write the owning rule for the agent doing the work now, not as repository archaeology. Historical
+mechanisms, superseded names, migration rationale, and commentary addressed to a future editor
+belong in plans, ADRs, or history—not in the runtime prompt. Keep rationale that tells the agent
+what breaks during the engagement; remove rationale whose only purpose is to explain what an older
+prompt used to say.
 
 ### 4. Single responsibility, mode-gated
 
@@ -101,7 +111,13 @@ When a role file's or shared layer's line count changes meaningfully, restate it
 the Rule 1 budget in the same change — a trim that isn't reflected in the stated budget, or a
 growth that silently blows past it, is exactly the drift this checklist exists to catch.
 
-### 10. No CI wording tests — advisory only
+### 10. No self-reported or wording-only gates
+
+No quota, percentage, effort score, iteration count, or threshold that the agent can satisfy by
+shaping its own prose may gate progress. Express the evidence-bearing judgment directly: name the
+privileged operations or input boundaries traced, the unresolved ones, and the evidence supporting
+closure. Never tell the agent how many bugs exist or imply that a clean target must contain a
+finding; unknown facts remain unknown.
 
 Per the **Markdown prompt/doc testing policy** in [`AGENTS.md`](../AGENTS.md), prompt/doc health
 (including any per-role line-count check) is enforced as a human authoring checklist plus, at most,

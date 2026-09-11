@@ -25,7 +25,8 @@
 # bench-guard.sh / scope-check.sh now ALSO accept the raw shell tool names
 # (`shell`/`developer__shell`) — so a reshape failure no longer silently allows a shell
 # cheat. (Goose hooks themselves fail open on a crashing hook; the load-bearing controls
-# remain network isolation + the host-side audit, ADR 0005.)
+# remain ADR 0020's attested guest/bundle boundary; the host-side audit is
+# defense in depth.)
 set -uo pipefail
 
 target="${1:-}"

@@ -24,12 +24,22 @@ BASE = f"/engagements/{ENGAGEMENT_KEY}/assessment"
 
 HOST = "app.example.com"
 OTHER_HOST = "other.example.com"
+AUTHOR_DISPATCH = "ATTEMPTS-AUTHOR-1"
 
 
 def _seed(client, isolate_settings) -> int:
     write_engagement(isolate_settings["engagements_dir"], key=ENGAGEMENT_KEY)
     response = client.get(f"/engagements/{ENGAGEMENT_KEY}")
     assert response.status_code == 200, response.text
+    dispatch = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": AUTHOR_DISPATCH,
+            "agent_role": "vulnerability-analyst",
+            "task": "record attempts fixture finding",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
     return int(response.json()["id"])
 
 
@@ -83,6 +93,7 @@ def _create_finding(client, slug: str) -> tuple[int, str]:
             "summary": "Broken object level authorization",
             "evidence_ref": "findings.md",
             "source_name": "vulnerability-analyst",
+            "provenance": {"agent_id": AUTHOR_DISPATCH},
             "details": {"evidence": "Replayable request.", "impact": "PII read."},
         },
     )

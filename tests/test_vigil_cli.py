@@ -15,6 +15,7 @@ import subprocess
 import sys
 import urllib.error
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -381,3 +382,381 @@ def test_repo_tree_artifacts_stay_unstamped_and_render_check_stays_clean():
 
     check = _render("check")
     assert check.returncode == 0, check.stdout + check.stderr
+
+
+def _git_init(path: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    subprocess.run(
+        ["git", "-C", str(path), "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-q", "--allow-empty", "-m", "init"],
+        check=True,
+    )
+
+
+def test_source_revision_prefers_the_jj_working_copy_over_git_head(tmp_path):
+    """A jj-managed source must stamp the tree it actually installs.
+
+    In a colocated repo the jj working copy is a commit git HEAD does not track,
+    so a git-only stamp names its PARENT: the install records the wrong revision
+    and `vigil status` then reports `current` while the working root is a commit
+    behind. AGENTS.md mandates jj, so that is the normal path, not an edge case.
+    """
+    from vigil_cli.status import source_revision_sha
+
+    repo = tmp_path / "colocated"
+    repo.mkdir()
+    _git_init(repo)
+    (repo / ".jj").mkdir()
+
+    jj_sha = "b" * 40
+    git_sha = "a" * 40
+    calls: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd[0])
+        sha = jj_sha if cmd[0] == "jj" else git_sha
+        return subprocess.CompletedProcess(cmd, 0, stdout=sha + "\n", stderr="")
+
+    with mock.patch("vigil_cli.status.subprocess.run", side_effect=fake_run):
+        assert source_revision_sha(repo) == jj_sha
+    assert "git" not in calls, "git must not be consulted when jj resolves"
+
+
+def test_source_revision_falls_back_to_git_without_jj(tmp_path):
+    """Contributors who never touch jj keep the original behavior."""
+    from vigil_cli.status import source_revision_sha
+
+    repo = tmp_path / "gitonly"
+    repo.mkdir()
+    _git_init(repo)
+    assert not (repo / ".jj").exists()
+
+    sha = source_revision_sha(repo)
+    assert sha is not None and len(sha) == 40
+
+
+def test_source_revision_is_none_outside_any_vcs(tmp_path):
+    """No git, no jj, no crash — staleness degrades to `unknown`."""
+    from vigil_cli.status import source_revision_sha
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert source_revision_sha(plain) is None
+    assert source_revision_sha(None) is None
+
+
+def test_jj_revision_read_never_snapshots_the_working_copy(tmp_path):
+    """Reading a revision must not mutate the user's repo.
+
+    Every ordinary jj command snapshots the working copy first, which would make
+    `vigil status` and `vigil install` write to the source as a side effect.
+    """
+    from vigil_cli.status import _jj_working_copy_sha
+
+    repo = tmp_path / "colocated"
+    (repo / ".jj").mkdir(parents=True)
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="c" * 40 + "\n", stderr="")
+
+    with mock.patch("vigil_cli.status.subprocess.run", side_effect=fake_run):
+        _jj_working_copy_sha(repo)
+
+    assert seen and "--ignore-working-copy" in seen[0]
+
+
+def test_install_staleness_tracks_unsnapshotted_source_bytes_not_stale_jj_commit(
+    tmp_path, capsys
+):
+    """The copied bytes, not jj's possibly stale ``@``, decide freshness.
+
+    ``--ignore-working-copy`` deliberately avoids snapshotting, so an install can
+    copy edits that its revision stamp cannot see. A later snapshot also changes
+    the commit id without changing those installed bytes. Neither case may make
+    the freshness verdict lie.
+    """
+    from vigil_cli.status import (
+        _print_install_staleness_warning,
+        install_staleness,
+        write_install_meta,
+    )
+
+    source = tmp_path / "source"
+    installed = tmp_path / "installed"
+    source_file = source / "src" / "vigil_cli" / "feature.py"
+    installed_file = installed / "src" / "vigil_cli" / "feature.py"
+    source_file.parent.mkdir(parents=True)
+    installed_file.parent.mkdir(parents=True)
+    source_file.write_text("current = 'unsnapshotted'\n", encoding="utf-8")
+    installed_file.write_bytes(source_file.read_bytes())
+    revision = {"sha": "a" * 40}
+
+    with mock.patch(
+        "vigil_cli.status.source_revision_sha",
+        side_effect=lambda _repo: revision["sha"],
+    ):
+        meta = write_install_meta(installed, source)
+        assert isinstance(meta["source_content_sha256"], str)
+
+        source_file.write_text("current = 'newer edit'\n", encoding="utf-8")
+        stale = install_staleness(installed, source_root=source)
+        assert stale["state"] == "stale"
+        assert stale["reason"] == "source_content_changed_without_revision"
+        assert stale["installed_sha"] == stale["current_source_sha"]
+        _print_install_staleness_warning(stale)
+        assert "source files changed without a new revision" in capsys.readouterr().out
+
+        source_file.write_bytes(installed_file.read_bytes())
+        revision["sha"] = "b" * 40
+        current = install_staleness(installed, source_root=source)
+        assert current["state"] == "current"
+        assert current["installed_sha"] != current["current_source_sha"]
+
+
+@pytest.mark.parametrize(
+    ("has_stamp", "planned_action"),
+    [(False, "planned install"), (True, "planned update")],
+)
+def test_install_cli_dry_run_names_plan_and_preserves_destination(
+    tmp_path, monkeypatch, capsys, has_stamp: bool, planned_action: str
+) -> None:
+    from vigil_cli import main as main_module
+
+    source = tmp_path / "source"
+    (source / "agent").mkdir(parents=True)
+    (source / "README.md").write_text("new\n", encoding="utf-8")
+    install = tmp_path / "install"
+    install.mkdir()
+    sentinel = install / "README.md"
+    sentinel.write_text("old\n", encoding="utf-8")
+    if has_stamp:
+        (install / ".vigil-install-meta.json").write_text("{}\n", encoding="utf-8")
+    config = tmp_path / "config.json"
+    monkeypatch.setenv("VIGIL_CONFIG", str(config))
+
+    main_module.main(
+        [
+            "--source",
+            str(source),
+            "install",
+            str(install),
+            "--dry-run",
+            "--force-image",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out.strip() == str(install)
+    assert "dry-run" in captured.err
+    assert planned_action in captured.err
+    assert str(install) in captured.err
+    assert sentinel.read_text(encoding="utf-8") == "old\n"
+    assert not config.exists()
+
+
+def test_install_manifest_framing_distinguishes_file_directory_and_absence(
+    tmp_path,
+) -> None:
+    from vigil_cli.install_manifest import install_source_content_sha256
+
+    file_tree = tmp_path / "file-tree"
+    directory_tree = tmp_path / "directory-tree"
+    absent_tree = tmp_path / "absent-tree"
+    absent_marker_tree = tmp_path / "absent-marker-tree"
+    for root in (file_tree, directory_tree, absent_tree, absent_marker_tree):
+        root.mkdir()
+    (file_tree / "src").write_bytes(b"<directory>")
+    (directory_tree / "src").mkdir()
+    (absent_marker_tree / "README.md").write_bytes(b"<absent>")
+
+    assert install_source_content_sha256(file_tree) != install_source_content_sha256(
+        directory_tree
+    )
+    assert install_source_content_sha256(absent_tree) != install_source_content_sha256(
+        absent_marker_tree
+    )
+
+
+def test_install_manifest_length_frames_arbitrary_binary_payloads(tmp_path) -> None:
+    from vigil_cli.install_manifest import install_source_content_sha256
+
+    one_file = tmp_path / "one-file"
+    two_files = tmp_path / "two-files"
+    (one_file / "src").mkdir(parents=True)
+    (two_files / "src").mkdir(parents=True)
+    (one_file / "src" / "a").write_bytes(b"X\0src/b\0Y")
+    (two_files / "src" / "a").write_bytes(b"X")
+    (two_files / "src" / "b").write_bytes(b"Y")
+
+    assert install_source_content_sha256(one_file) != install_source_content_sha256(
+        two_files
+    )
+
+
+def test_install_manifest_ignores_finder_metadata_at_every_depth(tmp_path) -> None:
+    from vigil_cli.install_manifest import install_source_content_sha256
+
+    source = tmp_path / "source"
+    (source / "agent" / "scripts").mkdir(parents=True)
+    (source / "agent" / "scripts" / "assess.py").write_text(
+        "#!/usr/bin/env python3\n", encoding="utf-8"
+    )
+    expected = install_source_content_sha256(source)
+
+    (source / ".DS_Store").write_bytes(b"root finder metadata")
+    (source / "agent" / ".DS_Store").write_bytes(b"agent finder metadata")
+    (source / "agent" / "scripts" / ".DS_Store").write_bytes(
+        b"nested finder metadata"
+    )
+
+    assert install_source_content_sha256(source) == expected
+
+
+def test_install_staleness_is_no_stamp_for_readable_non_vcs_source(tmp_path) -> None:
+    from vigil_cli.status import install_staleness
+
+    source = tmp_path / "source"
+    (source / "src").mkdir(parents=True)
+    (source / "src" / "feature.py").write_text("enabled = True\n", encoding="utf-8")
+    installed = tmp_path / "installed"
+    installed.mkdir()
+
+    result = install_staleness(installed, source_root=source)
+
+    assert result["state"] == "no-stamp"
+
+
+@pytest.mark.parametrize("link_target", ["outside", "loop"])
+def test_install_staleness_degrades_safely_for_symlinked_source_tree(
+    tmp_path, link_target: str
+) -> None:
+    from vigil_cli.status import INSTALL_META_FILENAME, install_staleness
+
+    source = tmp_path / "source"
+    installed = tmp_path / "installed"
+    outside = tmp_path / "outside"
+    (source / "src").mkdir(parents=True)
+    installed.mkdir()
+    outside.mkdir()
+    target = outside if link_target == "outside" else source / "src" / "link"
+    try:
+        (source / "src" / "link").symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    (installed / INSTALL_META_FILENAME).write_text(
+        '{"source_content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n',
+        encoding="utf-8",
+    )
+
+    result = install_staleness(installed, source_root=source)
+
+    assert result["state"] == "unknown"
+
+
+def test_legacy_revision_only_install_stamp_keeps_commit_distance(
+    tmp_path,
+) -> None:
+    from vigil_cli.status import INSTALL_META_FILENAME, install_staleness
+
+    source = tmp_path / "source"
+    installed = tmp_path / "installed"
+    source.mkdir()
+    installed.mkdir()
+    (installed / INSTALL_META_FILENAME).write_text(
+        '{"source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n',
+        encoding="utf-8",
+    )
+
+    with (
+        mock.patch("vigil_cli.status.source_revision_sha", return_value="b" * 40),
+        mock.patch("vigil_cli.status._commits_behind", return_value=3),
+    ):
+        result = install_staleness(installed, source_root=source)
+
+    assert result["state"] == "stale"
+    assert result["behind_count"] == 3
+
+
+def test_assess_stale_warning_explains_unsnapshotted_source_content(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from vigil_cli import main as main_module
+
+    monkeypatch.setattr(
+        main_module,
+        "install_staleness",
+        lambda _root: {
+            "state": "stale",
+            "reason": "source_content_changed_without_revision",
+            "installed_sha": "a" * 40,
+            "current_source_sha": "a" * 40,
+        },
+    )
+
+    main_module._warn_if_install_stale(tmp_path)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "source files changed without a new revision" in captured.err
+    assert "run `vigil install`" in captured.err
+
+
+def test_status_stale_warning_is_neutral_without_positive_commit_distance(
+    capsys,
+) -> None:
+    from vigil_cli.status import _print_install_staleness_warning
+
+    _print_install_staleness_warning(
+        {
+            "state": "stale",
+            "reason": "source_content_changed",
+            "installed_sha": "a" * 40,
+            "current_source_sha": "b" * 40,
+        }
+    )
+
+    output = capsys.readouterr().out
+    assert "working root differs from source" in output
+    assert "behind" not in output
+
+
+def test_doctor_fails_on_a_corrupt_orchestrator_database(tmp_path):
+    """`PRAGMA quick_check` reports corruption in its ROW, not by raising.
+
+    Discarding the row made `vigil doctor` report OK on a corrupt database — the
+    one condition it exists to rule out.
+    """
+    import sqlite3 as _sqlite3
+
+    from vigil_cli.status import _database_check
+
+    healthy = tmp_path / "healthy.sqlite3"
+    with _sqlite3.connect(str(healthy)) as connection:
+        connection.execute("CREATE TABLE t (a INTEGER PRIMARY KEY, b TEXT)")
+        # Enough rows to span many pages, so damaging one leaves a valid header
+        # and an intact file that still opens — the shape a real corruption takes.
+        connection.executemany(
+            "INSERT INTO t (b) VALUES (?)", [(f"row-{i}" * 40,) for i in range(4000)]
+        )
+        connection.execute("CREATE INDEX t_b ON t (b)")
+    assert _database_check(healthy).status == "OK"
+
+    corrupt = tmp_path / "corrupt.sqlite3"
+    raw = bytearray(healthy.read_bytes())
+    assert len(raw) > 200_000, f"fixture too small to corrupt meaningfully: {len(raw)}"
+    # Scribble deep inside the b-tree, well past the header page.
+    for offset in range(len(raw) // 2, len(raw) // 2 + 40_000, 4):
+        raw[offset : offset + 4] = b"\xde\xad\xbe\xef"
+    corrupt.write_bytes(bytes(raw))
+
+    result = _database_check(corrupt)
+    assert result.status == "FAIL", f"corrupt database reported {result.status}"
+    assert result.detail, "a failing integrity check must say what was wrong"
+
+
+def test_doctor_reports_missing_database_without_touching_sqlite(tmp_path):
+    from vigil_cli.status import _database_check
+
+    assert _database_check(tmp_path / "absent.sqlite3").status == "MISSING"

@@ -13,16 +13,20 @@ from pathlib import Path
 
 from . import docker
 from .backup import latest_backup, live_database
-from .image_freshness import proxy_image_drift
 from .config import get_config_value
 from .engagements import list_engagements
+from .image_freshness import proxy_image_drift
+from .install_fs import atomic_write_bytes, open_pinned_directory
+from .install_manifest import (
+    INSTALL_META_FILENAME,
+    install_content_sha256_from_fd,
+    install_source_content_sha256,
+)
 from .oob import oob_options, oob_status
 from .oob_tenants import load_tenant_route
 from .orchestrator import orchestrator_status
 from .paths import default_runtime_container, engagements_root, resolve_orchestrator_base_url
 from .runtime import runtime_mounts_ok, runtime_resource_state, runtime_status
-
-INSTALL_META_FILENAME = ".vigil-install-meta.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,10 +39,8 @@ class Check:
 def git_head_sha(repo: Path | None) -> str | None:
     """Resolved HEAD commit sha of a git checkout, or None.
 
-    Used both to stamp the install (the source the working root was built from)
-    and to read the live source HEAD in ``vigil status``. Never raises: a missing
-    ``git`` binary, a non-repo path, or an empty/unborn repo all yield None so the
-    staleness check degrades to ``unknown`` instead of failing the command.
+    Never raises: a missing ``git`` binary, a non-repo path, or an empty/unborn
+    repo all yield None so the caller degrades to ``unknown`` instead of failing.
     """
     if repo is None:
         return None
@@ -55,11 +57,62 @@ def git_head_sha(repo: Path | None) -> str | None:
     return sha if result.returncode == 0 and sha else None
 
 
+def _jj_working_copy_sha(repo: Path | None) -> str | None:
+    """Commit sha of a Jujutsu working copy, or None when this is not one.
+
+    ``--ignore-working-copy`` keeps this a pure read: every ordinary jj command
+    snapshots the working copy first, and stamping an install or printing status
+    must not mutate the user's repository as a side effect.
+    """
+    if repo is None or not (repo / ".jj").is_dir():
+        return None
+    try:
+        result = subprocess.run(
+            [
+                "jj", "--repository", str(repo), "--ignore-working-copy",
+                "log", "--revisions", "@", "--no-graph", "--template", "commit_id",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except (FileNotFoundError, OSError):
+        return None
+    sha = (result.stdout or "").strip()
+    return sha if result.returncode == 0 and sha else None
+
+
+def source_revision_sha(repo: Path | None) -> str | None:
+    """Best-effort provenance revision for the source tree, or None.
+
+    Jujutsu first, because this repository is jj-managed and in a colocated repo
+    the jj working copy is a commit git HEAD does not track. ``--ignore-working-copy``
+    intentionally avoids mutating the checkout, so this revision can lag live
+    filesystem edits; the content digest, not this value, decides freshness.
+    Plain git checkouts (and contributors who never touch jj) fall through to
+    git unchanged. jj working-copy commits are real git objects in a colocated
+    repo, so the result remains useful for provenance and commit-distance output.
+    """
+    return _jj_working_copy_sha(repo) or git_head_sha(repo)
+
+
+def source_content_sha256(repo: Path | None) -> str | None:
+    """Digest current install-managed source bytes without consulting VCS state."""
+
+    if repo is None:
+        return None
+    try:
+        return install_source_content_sha256(repo)
+    except OSError:
+        return None
+
+
 def read_install_meta(install_root: Path) -> dict[str, object] | None:
     """Read ``.vigil-install-meta.json`` from the working root, or None.
 
-    The stamp records which source commit ``vigil install`` last synced into the
-    working root. Missing / unreadable / malformed files all return None.
+    The stamp records the source revision and install-managed content digest that
+    ``vigil install`` last synced. Missing, unreadable, or malformed files return
+    None.
     """
     path = install_root.expanduser() / INSTALL_META_FILENAME
     try:
@@ -69,24 +122,55 @@ def read_install_meta(install_root: Path) -> dict[str, object] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def write_install_meta(install_root: Path, source_root: Path) -> dict[str, object]:
+def write_install_meta(
+    install_root: Path,
+    source_root: Path,
+    *,
+    install_fd: int | None = None,
+) -> dict[str, object]:
     """Stamp ``.vigil-install-meta.json`` at install time.
 
-    Records the source git sha (None when the source is not a git checkout) plus
-    an install timestamp so ``vigil status`` can later detect a working root that
-    has fallen behind the source it was installed from — the I-5 root cause, where
-    a lagging install silently disables the whole feature set. Best-effort: a
-    write failure never aborts the install.
+    Records the normalized content actually present in the installed managed
+    tree, the best-effort source revision, and an install timestamp. Status
+    compares that installed-tree digest with the same manifest over the live
+    source. This closes the copy-then-source-hash race while the revision remains
+    useful for provenance and commit-distance output. Best-effort: a write
+    failure never aborts the install.
     """
     meta: dict[str, object] = {
-        "source_sha": git_head_sha(source_root),
+        "source_sha": source_revision_sha(source_root),
+        # Keep the field name for stamp compatibility. Its value is the
+        # normalized installed content copied from source, not a second read of
+        # source after the copy has completed.
+        "source_content_sha256": (
+            install_content_sha256_from_fd(install_fd, display_root=install_root)
+            if install_fd is not None
+            else install_source_content_sha256(install_root)
+        ),
         "source_root": str(source_root),
         "installed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     try:
-        (install_root.expanduser() / INSTALL_META_FILENAME).write_text(
-            json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
+        payload = (json.dumps(meta, indent=2, sort_keys=True) + "\n").encode()
+        if install_fd is None:
+            pinned = open_pinned_directory(install_root)
+            assert pinned is not None
+            with pinned:
+                atomic_write_bytes(
+                    pinned.fd,
+                    INSTALL_META_FILENAME,
+                    payload,
+                    mode=0o644,
+                    display=pinned.path / INSTALL_META_FILENAME,
+                )
+        else:
+            atomic_write_bytes(
+                install_fd,
+                INSTALL_META_FILENAME,
+                payload,
+                mode=0o644,
+                display=install_root / INSTALL_META_FILENAME,
+            )
     except OSError:
         pass
     return meta
@@ -154,7 +238,7 @@ def _commits_behind(source_root: Path | None, installed_sha: str, current_sha: s
 def install_staleness(
     install_root: Path, *, source_root: Path | None = None
 ) -> dict[str, object]:
-    """Compare the working root's recorded install sha to the live source sha.
+    """Compare installed source content with the live install-managed inputs.
 
     Two-layer model: ``vigil install``/``update`` upgrades the WORKING ROOT (the
     ``~/vigil/agent`` code/prompts/skills/scripts), while ``uv tool upgrade vigil``
@@ -163,32 +247,68 @@ def install_staleness(
     the new feature set is inert (I-5). This surfaces that drift.
 
     ``state`` is one of:
-      - ``current``  installed sha == live source sha
-      - ``stale``    installed sha != live source sha (definite drift)
+      - ``current``  installed content == live install-managed source content
+      - ``stale``    installed content != live source content (definite drift)
       - ``no-stamp`` install predates stamping (or the meta is unreadable) but a
                      live source is resolvable — likely stale; recommend reinstall
-      - ``unknown``  no live source sha is resolvable to compare against
+      - ``unknown``  no live source content is readable to compare against
+
+    Legacy revision-only stamps retain their original SHA comparison and commit
+    distance behavior until the next install writes a content digest.
     """
     meta = read_install_meta(install_root)
     installed_sha: str | None = None
+    installed_content_sha256: str | None = None
     if isinstance(meta, dict):
         raw = meta.get("source_sha")
         installed_sha = raw if isinstance(raw, str) and raw else None
+        raw_content = meta.get("source_content_sha256")
+        installed_content_sha256 = (
+            raw_content if isinstance(raw_content, str) and raw_content else None
+        )
     if source_root is None:
         source_root = _resolve_source_root_offline(install_root)
-    current_sha = git_head_sha(source_root)
+    current_sha = source_revision_sha(source_root)
+    current_content_sha256 = source_content_sha256(source_root)
 
     result: dict[str, object] = {
         "installed_sha": installed_sha,
         "current_source_sha": current_sha,
+        "installed_content_sha256": installed_content_sha256,
+        "current_source_content_sha256": current_content_sha256,
         "source_root": str(source_root) if source_root is not None else None,
         "meta_present": meta is not None,
     }
-    if current_sha is None:
-        result["state"] = "unknown"
+    if installed_content_sha256 is not None:
+        result["comparison_basis"] = "content"
+        if current_content_sha256 is None:
+            result["state"] = "unknown"
+            return result
+        if installed_content_sha256 == current_content_sha256:
+            result["state"] = "current"
+            return result
+        result["state"] = "stale"
+        result["reason"] = (
+            "source_content_changed_without_revision"
+            if installed_sha is not None and installed_sha == current_sha
+            else "source_content_changed"
+        )
+        if installed_sha is not None and current_sha is not None:
+            behind = _commits_behind(source_root, installed_sha, current_sha)
+            if behind is not None:
+                result["behind_count"] = behind
         return result
     if installed_sha is None:
-        result["state"] = "no-stamp"
+        result["comparison_basis"] = "none"
+        result["state"] = (
+            "no-stamp"
+            if current_content_sha256 is not None or current_sha is not None
+            else "unknown"
+        )
+        return result
+    result["comparison_basis"] = "revision"
+    if current_sha is None:
+        result["state"] = "unknown"
         return result
     if installed_sha == current_sha:
         result["state"] = "current"
@@ -209,9 +329,8 @@ def collect_status(
     install_root = install_root.expanduser().resolve()
     rows = list_engagements(install_root)
     # C36: surface legacy engagement_type=both engagements that predate
-    # dual-track phase tracking. They are not broken — they just have no
-    # `code_phase` field, which makes `vigil assess transition-phase --track
-    # code` confusing. Setting code_phase=ingest in scope.json clears it.
+    # dual-track phase tracking. The explicit repair command records the
+    # initialization instead of asking an operator to edit durable state by hand.
     from .engagements import _both_engagements_missing_code_phase
     legacy_both_missing_code_phase = [
         eng_dir.name for eng_dir in _both_engagements_missing_code_phase(install_root)
@@ -335,10 +454,11 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
     legacy_keys = status.get("legacy_both_missing_code_phase") or []
     if isinstance(legacy_keys, list) and legacy_keys:
         preview = ", ".join(legacy_keys[:3]) + (" ..." if len(legacy_keys) > 3 else "")
+        first_key = str(legacy_keys[0])
         print(
             f"warn\t{len(legacy_keys)} legacy `engagement_type=both` engagement(s) "
-            f"missing `code_phase` ({preview}); set code_phase=ingest in each "
-            "scope.json to clear this"
+            f"missing `code_phase` ({preview}); run `vigil engagement repair-tracks "
+            f"{first_key}` (once for each listed key)"
         )
     _print_install_staleness_warning(status.get("install_staleness"))
 
@@ -358,9 +478,24 @@ def _print_install_staleness_warning(staleness: object) -> None:
         installed = _short_sha(staleness.get("installed_sha"))
         current = _short_sha(staleness.get("current_source_sha"))
         behind = staleness.get("behind_count")
-        behind_str = f" ({behind} commit(s) behind)" if isinstance(behind, int) else ""
+        positively_behind = isinstance(behind, int) and behind > 0
+        behind_str = f" ({behind} commit(s) behind)" if positively_behind else ""
+        if staleness.get("reason") == "source_content_changed_without_revision":
+            installed_content = _short_sha(staleness.get("installed_content_sha256"))
+            current_content = _short_sha(staleness.get("current_source_content_sha256"))
+            print(
+                "warn\tworking root is stale: source files changed without a new "
+                f"revision (revision {current}; installed content {installed_content}, "
+                f"source content {current_content}); run `vigil install` to refresh "
+                "the working root (code/prompts/skills/scripts) — `uv tool upgrade "
+                "vigil` updates only the CLI binary"
+            )
+            return
+        relationship = (
+            f"is behind source{behind_str}" if positively_behind else "differs from source"
+        )
         print(
-            f"warn\tworking root is behind source{behind_str}: installed {installed} "
+            f"warn\tworking root {relationship}: installed {installed} "
             f"vs source {current}; run `vigil install` to refresh the working root "
             "(code/prompts/skills/scripts) — `uv tool upgrade vigil` updates only the CLI binary"
         )
@@ -391,6 +526,12 @@ def _install_staleness_check(install_root: Path) -> Check:
         return Check("install-staleness", "SKIPPED", "no source checkout to compare against")
     installed = _short_sha(staleness.get("installed_sha"))
     current = _short_sha(staleness.get("current_source_sha"))
+    if staleness.get("reason") == "source_content_changed_without_revision":
+        return Check(
+            "install-staleness",
+            "STALE",
+            f"source files changed without a new revision at {current}; run `vigil install`",
+        )
     return Check(
         "install-staleness",
         "STALE",
@@ -510,13 +651,24 @@ def _binary_check(command: str) -> Check:
 
 
 def _database_check(path: Path) -> Check:
+    """Report the orchestrator database's integrity.
+
+    ``PRAGMA quick_check`` reports corruption in its RESULT ROW — it returns the
+    first errors it finds and does not raise — so reading the row is the whole
+    check. Discarding it makes this report OK on a corrupt database, which is the
+    one condition an operator runs ``vigil doctor`` to rule out. Mirrors the
+    verification ``backup.py`` already performs on every snapshot it writes.
+    """
     if not path.exists():
         return Check("orchestrator-db", "MISSING", str(path))
     try:
         with sqlite3.connect(str(path)) as connection:
-            connection.execute("PRAGMA quick_check").fetchone()
+            row = connection.execute("PRAGMA quick_check").fetchone()
     except sqlite3.Error as exc:
         return Check("orchestrator-db", "FAIL", str(exc))
+    if not row or row[0] != "ok":
+        detail = str(row[0]) if row else "quick_check returned no result"
+        return Check("orchestrator-db", "FAIL", f"{path}: {detail}")
     return Check("orchestrator-db", "OK", str(path))
 
 

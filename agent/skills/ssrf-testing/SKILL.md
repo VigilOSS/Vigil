@@ -108,15 +108,15 @@ OOB callback is the fastest confirmation method. Confirm `vigil oob status --jso
 ```bash
 # 1. MINT a nonce-tagged callback URL bound to your running client, and record
 #    the correlation context (target/param/technique) in one step. mint prints
-#    the full host as $OOB_HOST = <nonce>.<client-id>.oob.example.com.
+#    the full host as $OOB_HOST = <nonce>.<client-id>.<configured-oob-domain>.
 vigil oob mint --client <name> --technique ssrf \
   --target-url "https://target/api/fetch" --param url \
   --probe-kind blind-confirm
-# → host  <nonce>.<client-id>.oob.example.com      ← this is $OOB_HOST
+# → host  <nonce>.<client-id>.<configured-oob-domain>      ← this is $OOB_HOST
 
 # 2. FIRE the payload, substituting the EXACT host mint printed ($OOB_HOST). mint
 #    binds the nonce under the client's interactsh id; that binding is what lets
-#    poll attribute the hit. A bare <nonce>.oob.example.com would never reach
+#    poll attribute the hit. A bare <nonce>.<configured-oob-domain> would never reach
 #    poll — substitute mint's output verbatim, never hand-build the host.
 ?url=http://$OOB_HOST/ssrf-confirm
 

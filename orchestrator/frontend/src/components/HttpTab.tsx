@@ -1264,15 +1264,7 @@ function CapturePolicyControl({
           <span className="meta-text">
             Content types: allow {policy.content_type_allow.join(", ") || "all"}; deny {policy.content_type_deny.join(", ") || "none"}
           </span>
-          <span className="meta-text">
-            Redaction: {policy.redaction_profile} (raw evidence preserved)
-          </span>
         </div>
-      )}
-      {policy.redaction_warning && (
-        <p className="empty" style={{ textAlign: "left", paddingTop: 8 }}>
-          {policy.redaction_warning}
-        </p>
       )}
       {error && (
         <p className="empty" style={{ textAlign: "left", paddingTop: 8 }}>
@@ -1364,9 +1356,6 @@ function FlowDrawer({
               <span className="tag">{row.content_type_family}</span>
             )}
             {row.auth_context && <span className="tag">{row.auth_context}</span>}
-            {row.redaction_status && row.redaction_status !== "none" && (
-              <span className="tag">redacted: {row.redaction_status}</span>
-            )}
             {row.host_mismatch && (
               <span className="tag warning" title="URL authority / Host header / SNI disagree">
                 host mismatch

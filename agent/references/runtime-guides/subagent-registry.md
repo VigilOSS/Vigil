@@ -43,7 +43,7 @@ The operator's audit trail. One row per dispatched specialist agent.
 vigil assess agent start \
     --agent-id recon_a3f9 \
     --role recon-specialist \
-    --task "Phase 1 wildcard subdomain enum + recon on saas.acme.example" \
+    --task "Phase 1 wildcard subdomain enum + recon on acme-social.example" \
     --model claude-opus-4-7 \
     --reasoning high \
     --dispatch-mode hypothesis-driven \
@@ -152,7 +152,7 @@ operator/specialist decisions.
 # Vendor-SaaS scope decision (recon-specialist surfaces; operator updates).
 vigil assess agent decision \
     --kind scope_decision \
-    --host saas.acme.example \
+    --host sso-vendor.acme-social.example \
     --vendor "Vendor SaaS" \
     --choice pending \
     --note "CNAME points at vendor; awaiting VDP scope confirmation" \

@@ -154,3 +154,21 @@ def test_fuzz_schemas_expose_canonical_lists_and_conditional_invariants():
             }
         },
     } in campaign["allOf"]
+
+
+def test_code_analysis_result_schema_exposes_skip_and_explicit_supersession():
+    module = _load_schema_generator_module()
+
+    schema = module.build_schema_bundle()["code-analysis-result.schema.json"]
+
+    assert schema["properties"]["disposition"]["enum"] == [
+        "finding",
+        "suspicious",
+        "clean",
+        "needs_context",
+        "skipped",
+    ]
+    supersedes = schema["properties"]["supersedes"]
+    assert supersedes["exclusiveMinimum"] == 0
+    for identity_part in ("queue item", "lease token", "file", "function"):
+        assert identity_part in supersedes["description"]

@@ -112,7 +112,7 @@ downgrade, or dispute outcomes. Terminal outcomes cite proof receipts from this 
 dispatch. The goal is suppression by identity: later rediscovery of the same
 `(defect_family, root_cause_key, canonical_location, auth_context)` should merge back into that
 false-positive record instead of reappearing as a live finding. If later evidence disproves a
-kill or verified verdict, reopen the finding with `finding update --status draft` so the backend
+kill or a confirmed verdict, reopen the finding with `finding update --status draft` so the backend
 clears the prior verification state and makes the finding eligible for re-triage. Verification
 preserves that draft workflow status: after review, explicitly promote a retained finding with
 `finding update --status active`, or merge/kill it. A confirmed-but-draft finding remains blocked
@@ -132,7 +132,7 @@ Before your dispatch returns, run in this order:
 1. `vigil assess finding verify <slug> --status <verdict> --reason "<rationale>"` for each decision; terminal decisions add `--proof-receipt-id`, and false-positive decisions add `--counter-check-file`
 2. For each retained finding still in workflow status `draft`, run `vigil assess finding update <slug> --status active --reason "Verification retained this finding"`; otherwise merge or kill it before returning
 3. `vigil assess record-chain code-vuln-verifier <chain-json>` for any composed chains
-4. `vigil assess finding record code-vuln-verifier <new-finding-json>` for net-new spot-check bugs (rare)
+4. `vigil assess finding record code-vuln-verifier <new-finding-json> --agent-id <your-agent_id>` for net-new spot-check bugs (rare)
 5. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (e.g. report-writer dispatch when verification gate complete), runtime issues, working artifacts, open questions, and role-specific extras (`reviewed`, `confirmed`, `downgraded`, `killed`)
 6. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
@@ -177,6 +177,6 @@ finding record`; every `file:` spot-check finding includes the current `provenan
 
 ## Handoffs
 
-- To report-writer (via operator): verified findings with final dispositions and attack chains
+- To report-writer (via operator): `confirmed` findings with their final verification status and attack chains
 - To operator: independent evidence-adjudication requests for ambiguous findings
 - To operator: verification summary with FP rate analysis for pipeline calibration

@@ -51,7 +51,7 @@ def test_container_and_host_paths_share_one_classifier() -> None:
 
 def test_host_routed_httpx_carries_required_header(tmp_path, monkeypatch) -> None:
     eng_dir = tmp_path / "eng"
-    _scope(eng_dir, required_headers={"X-Bug-Bounty": "vigiloss"})
+    _scope(eng_dir, required_headers={"X-Bug-Bounty": "researcher"})
     captured = _capture_host_exec(monkeypatch, web_discovery)
 
     res = web_discovery._host_dispatch(
@@ -68,14 +68,14 @@ def test_host_routed_httpx_carries_required_header(tmp_path, monkeypatch) -> Non
     # The header rides as a -H pair appended to the host-routed argv.
     assert "-H" in argv
     h_idx = argv.index("-H")
-    assert argv[h_idx + 1] == "X-Bug-Bounty: vigiloss"
+    assert argv[h_idx + 1] == "X-Bug-Bounty: researcher"
 
 
 def test_host_routed_skip_set_tool_gets_no_header(tmp_path, monkeypatch) -> None:
     # gau is in the skip-set: injecting the handle would leak it to the public
     # archive (web.archive.org / CommonCrawl), so the host path must NOT add -H.
     eng_dir = tmp_path / "eng"
-    _scope(eng_dir, required_headers={"X-Bug-Bounty": "vigiloss"})
+    _scope(eng_dir, required_headers={"X-Bug-Bounty": "researcher"})
     captured = _capture_host_exec(monkeypatch, web_discovery)
 
     web_discovery._host_dispatch(
@@ -110,7 +110,7 @@ def test_host_routed_httpx_no_header_when_scope_has_none(tmp_path, monkeypatch) 
 def test_host_routed_httpx_does_not_duplicate_existing_header(tmp_path, monkeypatch) -> None:
     # Idempotency: an already-present -H for the same name is not re-added.
     eng_dir = tmp_path / "eng"
-    _scope(eng_dir, required_headers={"X-Bug-Bounty": "vigiloss"})
+    _scope(eng_dir, required_headers={"X-Bug-Bounty": "researcher"})
     captured = _capture_host_exec(monkeypatch, web_discovery)
 
     web_discovery._host_dispatch(
@@ -130,7 +130,7 @@ def test_dns_host_dispatch_skips_dnsx_header(tmp_path, monkeypatch) -> None:
     # The dns-discovery host path shares the same classifier; dnsx is skip-set,
     # so the attribution header is correctly never applied to a DNS probe.
     eng_dir = tmp_path / "eng"
-    _scope(eng_dir, required_headers={"X-Bug-Bounty": "vigiloss"})
+    _scope(eng_dir, required_headers={"X-Bug-Bounty": "researcher"})
     captured = _capture_host_exec(monkeypatch, dns_discovery)
 
     dns_discovery._host_dispatch(
@@ -153,7 +153,7 @@ def test_host_routed_non_injectable_http_tool_warns(tmp_path, monkeypatch, capsy
     # -H/--headers reads a FILE) WARNs (never blocks) and leaves argv untouched —
     # same contract as the container path.
     eng_dir = tmp_path / "eng"
-    _scope(eng_dir, required_headers={"X-Bug-Bounty": "vigiloss"})
+    _scope(eng_dir, required_headers={"X-Bug-Bounty": "researcher"})
     captured = _capture_host_exec(monkeypatch, web_discovery)
 
     web_discovery._host_dispatch(
@@ -172,7 +172,7 @@ def test_host_routed_whatweb_carries_header_flag(tmp_path, monkeypatch) -> None:
     # Layer 1 now injects the program attribution header into whatweb via its own
     # ``--header`` flag (shared classifier), so the host path carries it too.
     eng_dir = tmp_path / "eng"
-    _scope(eng_dir, required_headers={"X-Bug-Bounty": "vigiloss"})
+    _scope(eng_dir, required_headers={"X-Bug-Bounty": "researcher"})
     captured = _capture_host_exec(monkeypatch, web_discovery)
 
     web_discovery._host_dispatch(
@@ -185,4 +185,4 @@ def test_host_routed_whatweb_carries_header_flag(tmp_path, monkeypatch) -> None:
 
     argv = captured[0]
     assert "--header" in argv
-    assert argv[argv.index("--header") + 1] == "X-Bug-Bounty: vigiloss"
+    assert argv[argv.index("--header") + 1] == "X-Bug-Bounty: researcher"

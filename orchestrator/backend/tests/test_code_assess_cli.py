@@ -15,6 +15,18 @@ from types import SimpleNamespace
 import pytest
 
 
+def _file_page(rows: list[dict], *, offset: int = 0, total: int | None = None) -> dict:
+    count = len(rows)
+    page_total = offset + count if total is None else total
+    return {
+        "total": page_total,
+        "offset": offset,
+        "count": count,
+        "has_more": offset + count < page_total,
+        "items": rows,
+    }
+
+
 def _load_assess_module(module_filename: str, module_name: str):
     repo_root = Path(__file__).resolve().parents[3]
     scripts_root = repo_root / "agent" / "scripts"
@@ -535,7 +547,7 @@ def test_code_size_summary_uses_backend_code_files(monkeypatch, capsys):
 
         def get(self, endpoint: str):
             self.calls.append(endpoint)
-            return [
+            return _file_page([
                 {
                     "id": 1,
                     "repo_id": 10,
@@ -564,7 +576,7 @@ def test_code_size_summary_uses_backend_code_files(monkeypatch, capsys):
                     "language": "go",
                     "loc": 800,
                 },
-            ]
+            ])
 
         def close(self) -> None:
             return None
@@ -825,7 +837,7 @@ def test_code_index_default_output_uses_engagement_analysis_state(monkeypatch, t
     monkeypatch.setattr(
         module,
         "index_file",
-        lambda _path, language, source=None: {
+        lambda _path, language, source=None, **_kwargs: {
             "language": language,
             "structural_index_available": True,
             "analysis_status": "complete",
@@ -870,7 +882,7 @@ def test_code_index_default_output_uses_engagement_analysis_state(monkeypatch, t
                     "source_manifest_digest": "e" * 64,
                 }
             if endpoint == "code/files?limit=5000&offset=0&repo_id=7":
-                return [
+                return _file_page([
                     {
                         "id": 11,
                         "repo_id": 7,
@@ -878,7 +890,7 @@ def test_code_index_default_output_uses_engagement_analysis_state(monkeypatch, t
                         "file_hash": hashlib.sha256(raw).hexdigest(),
                         "language": "python",
                     }
-                ]
+                ])
             raise AssertionError(endpoint)
 
         def __enter__(self):
@@ -1106,7 +1118,7 @@ def test_code_classify_resolves_file_path_to_file_id(monkeypatch, tmp_path):
 
         def get(self, endpoint: str):
             assert endpoint == "code/files?limit=10000&offset=0"
-            return [{"id": 42, "repo_id": 7, "file_path": "src/parser.py"}]
+            return _file_page([{"id": 42, "repo_id": 7, "file_path": "src/parser.py"}])
 
         def post(self, endpoint: str, payload: dict):
             captured["endpoint"] = endpoint
@@ -1167,12 +1179,16 @@ def test_code_classify_resolves_file_path_from_later_pages(monkeypatch, tmp_path
         def get(self, endpoint: str):
             captured["requests"].append(endpoint)
             if endpoint == "code/files?limit=2&offset=0":
-                return [
+                return _file_page([
                     {"id": 40, "repo_id": 7, "file_path": "src/parser.py"},
                     {"id": 41, "repo_id": 7, "file_path": "src/helpers.py"},
-                ]
+                ], total=3)
             if endpoint == "code/files?limit=2&offset=2":
-                return [{"id": 42, "repo_id": 7, "file_path": "src/routes.py"}]
+                return _file_page(
+                    [{"id": 42, "repo_id": 7, "file_path": "src/routes.py"}],
+                    offset=2,
+                    total=3,
+                )
             raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
         def post(self, endpoint: str, payload: dict):
@@ -1420,11 +1436,11 @@ def test_code_dispatch_queue_flattens_batch_wrappers_and_resolves_paths(monkeypa
 
         def get(self, endpoint: str):
             assert endpoint == "code/files?limit=10000&offset=0"
-            return [
+            return _file_page([
                 {"id": 10, "repo_id": 1, "file_path": "src/parser.py"},
                 {"id": 11, "repo_id": 1, "file_path": "src/helpers/auth.py"},
                 {"id": 12, "repo_id": 1, "file_path": "src/routes.py"},
-            ]
+            ])
 
         def post(self, endpoint: str, payload: dict):
             captured["endpoint"] = endpoint
@@ -1519,12 +1535,16 @@ def test_code_dispatch_queue_resolves_file_path_from_later_pages(monkeypatch, tm
         def get(self, endpoint: str):
             captured["requests"].append(endpoint)
             if endpoint == "code/files?limit=2&offset=0":
-                return [
+                return _file_page([
                     {"id": 10, "repo_id": 1, "file_path": "src/parser.py"},
                     {"id": 11, "repo_id": 1, "file_path": "src/helpers/auth.py"},
-                ]
+                ], total=3)
             if endpoint == "code/files?limit=2&offset=2":
-                return [{"id": 12, "repo_id": 1, "file_path": "src/routes.py"}]
+                return _file_page(
+                    [{"id": 12, "repo_id": 1, "file_path": "src/routes.py"}],
+                    offset=2,
+                    total=3,
+                )
             raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
         def post(self, endpoint: str, payload: dict):

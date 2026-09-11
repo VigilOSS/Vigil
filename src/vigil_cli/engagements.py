@@ -34,6 +34,7 @@ from .paths import (
     resolve_orchestrator_base_url,
     resolve_orchestrator_data_dir,
 )
+from .scope_entries import ScopeEntryError, canonicalize_scope_entry
 
 # Persisted active-engagement pointer key in ~/.config/vigil/config.json. This
 # serves top-level `vigil` verbs and shared services; `vigil assess` deliberately
@@ -44,6 +45,7 @@ ENGAGEMENT_TYPES = {"web", "code", "both", "android", "blue"}
 ANDROID_DYNAMIC_MODES = {"static_only", "device", "emulator"}
 ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES_ENV = "VIGIL_ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES"
 DEFAULT_ENGAGEMENT_DB_SNAPSHOT_MAX_COPIES = 2
+CODE_TARGET_CONTACT_POLICY = "warn-do-not-contact-declared-hosts"
 
 # Engagement types that probe a live HTTP target and so can carry required
 # attribution headers / out-of-scope carve-outs. code/blue have no HTTP target.
@@ -346,12 +348,11 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
         scope = {
             "engagement_type": "code",
             "name": name,
-            "repos": repos,
             "hosts": [],
+            "code_target_contact_policy": CODE_TARGET_CONTACT_POLICY,
             "exploit_policy": "pause",
             "exploit_review_state": "pending",
             "approved_targets": [],
-            "source_repos": [],
             "status": "in_progress",
             "current_phase": "ingest",
         }
@@ -370,7 +371,6 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
             "exploit_policy": "pause",
             "exploit_review_state": "pending",
             "approved_targets": [],
-            "source_repos": [],
             "status": "in_progress",
             "current_phase": "ingest",
         }
@@ -436,11 +436,10 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
             "name": name,
             "hostname": hostname,
             "hosts": hosts,
-            "repos": repos,
+            "code_target_contact_policy": CODE_TARGET_CONTACT_POLICY,
             "exploit_policy": "pause",
             "exploit_review_state": "pending",
             "approved_targets": [],
-            "source_repos": [],
             "status": "in_progress",
             "current_phase": "recon",
             "code_phase": "ingest",
@@ -638,7 +637,7 @@ def _emit_post_create_footer(key: str, *, runner: docker.Runner = docker.run_com
     )
 
 
-def _verify_backend_install_root(install_root: Path, eng_dir: Path) -> None:
+def _verify_backend_install_root(install_root: Path, eng_dir: Path) -> bool:
     """Detect install-root mismatch between this CLI and the running orchestrator.
 
     The orchestrator picks ``settings.install_dir`` at startup time from
@@ -650,7 +649,7 @@ def _verify_backend_install_root(install_root: Path, eng_dir: Path) -> None:
     cannot see the engagement, silently dropping recon evidence.
 
     Strategy:
-      - If the backend is unreachable (offline / not started yet), do nothing.
+      - If the backend is unreachable (offline / not started yet), return false.
         Local-only workflows are valid and ``vigil engagement create`` should
         succeed when the orchestrator is intentionally down.
       - If the backend is reachable AND its install_root matches ours, force a
@@ -695,18 +694,18 @@ def _verify_backend_install_root(install_root: Path, eng_dir: Path) -> None:
                 "for /admin/install-root; skipping install-root drift check.",
                 file=sys.stderr,
             )
-            return
+            return False
     except (OSError, _json.JSONDecodeError):
         # Backend unreachable or unparseable — local-only workflows are valid,
         # so engagement creation should still succeed.
-        return
+        return False
 
     expected = str(install_root.expanduser().resolve())
     if backend_install_root and Path(backend_install_root).resolve() != Path(expected).resolve():
         raise SystemExit(
             "\n".join(
                 [
-                    f"Engagement created at {eng_dir}, but the running orchestrator does not know about it.",
+                    f"Engagement state at {eng_dir} exists, but the running orchestrator does not know about it.",
                     f"  The orchestrator was started against install_root={backend_install_root}",
                     f"  This engagement is at install_root={expected}",
                     "",
@@ -725,9 +724,10 @@ def _verify_backend_install_root(install_root: Path, eng_dir: Path) -> None:
         resp = conn.getresponse()
         resp.read()
         conn.close()
+        return 200 <= resp.status < 300
     except OSError:
         # Sync race conditions are non-fatal — the next implicit sync covers it.
-        pass
+        return False
 
 
 def _emit_bootstrap_scope_summary(scope: dict[str, object]) -> None:
@@ -864,6 +864,167 @@ def remove_out_of_scope(install_root: Path, key: str, entry: str) -> list[str]:
     scope = _mutate_http_scope(install_root, key, update)
     remaining = scope.get("out_of_scope")
     return list(remaining) if isinstance(remaining, list) else []
+
+
+def _track_state(scope: dict[str, Any]) -> dict[str, str]:
+    return {
+        "engagement_type": str(scope.get("engagement_type") or ""),
+        "current_phase": str(scope.get("current_phase") or ""),
+        "code_phase": str(scope.get("code_phase") or ""),
+    }
+
+
+def _append_track_transition(
+    scope: dict[str, Any],
+    *,
+    operation: str,
+    actor: str,
+    before: dict[str, str],
+) -> None:
+    history = scope.get("track_transitions")
+    if not isinstance(history, list):
+        history = []
+    history.append(
+        {
+            "operation": operation,
+            "actor": actor or "operator",
+            "before": before,
+            "after": _track_state(scope),
+            "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+    )
+    scope["track_transitions"] = history
+
+
+def add_engagement_track(
+    install_root: Path,
+    key: str,
+    track: str,
+    *,
+    actor: str = "operator",
+) -> dict[str, str]:
+    """Explicitly upgrade a single-track web/code engagement to ``both``.
+
+    The existing track phase is preserved. Only the newly enabled track is
+    initialized, and the transition is retained in scope.json so an implicit
+    ingest/probe side effect can never masquerade as operator authorization.
+    """
+    requested = track.strip().lower()
+    if requested not in {"web", "code"}:
+        raise SystemExit(f"cannot add track '{track}'; choose web or code.")
+    scope_path = _engagement_scope_path(install_root, key)
+
+    def update(scope: dict[str, Any]) -> None:
+        current_type = str(scope.get("engagement_type") or "")
+        if current_type == "both":
+            if not scope.get("current_phase") or not scope.get("code_phase"):
+                raise SystemExit(
+                    f"engagement '{key}' is both but has incomplete track state; "
+                    f"run `vigil engagement repair-tracks {key}` first."
+                )
+            return
+        expected = "code" if requested == "web" else "web"
+        if current_type != expected:
+            raise SystemExit(
+                f"cannot add {requested} track to engagement '{key}' of type "
+                f"'{current_type or 'unknown'}'; expected {expected}."
+            )
+        before = _track_state(scope)
+        previous_phase = str(scope.get("current_phase") or "")
+        if current_type == "code":
+            scope["code_phase"] = previous_phase or "ingest"
+            scope["current_phase"] = "recon"
+        else:
+            scope["current_phase"] = previous_phase or "recon"
+            scope["code_phase"] = "ingest"
+        scope["engagement_type"] = "both"
+        scope["code_target_contact_policy"] = CODE_TARGET_CONTACT_POLICY
+        scope["status"] = "in_progress"
+        _append_track_transition(
+            scope,
+            operation=f"add-{requested}",
+            actor=actor,
+            before=before,
+        )
+
+    scope = mutate_scope_file(scope_path, update)
+    return _track_state(scope)
+
+
+def repair_engagement_tracks(
+    install_root: Path,
+    key: str,
+    *,
+    actor: str = "operator",
+) -> dict[str, str]:
+    """Repair the one supported legacy shape: ``both`` without code_phase."""
+    scope_path = _engagement_scope_path(install_root, key)
+
+    def update(scope: dict[str, Any]) -> None:
+        if str(scope.get("engagement_type") or "") != "both":
+            raise SystemExit(f"engagement '{key}' is not a both-track engagement.")
+        if scope.get("code_phase"):
+            raise SystemExit(f"engagement '{key}' already has code_phase.")
+        before = _track_state(scope)
+        scope["current_phase"] = str(scope.get("current_phase") or "recon")
+        scope["code_phase"] = "ingest"
+        scope["status"] = "in_progress"
+        _append_track_transition(
+            scope,
+            operation="repair-missing-code-phase",
+            actor=actor,
+            before=before,
+        )
+
+    scope = mutate_scope_file(scope_path, update)
+    return _track_state(scope)
+
+
+def add_engagement_hosts(
+    install_root: Path,
+    key: str,
+    entries: list[str],
+) -> list[str]:
+    """Append normalized authorization roots to canonical ``scope.json``."""
+    added: list[str] = []
+    for raw in entries:
+        try:
+            canonical = canonicalize_scope_entry(raw)
+        except ScopeEntryError as exc:
+            raise SystemExit(f"invalid host entry {raw!r}: {exc}") from exc
+        if canonical not in added:
+            added.append(canonical)
+    if not added:
+        raise SystemExit("no valid host entries given.")
+
+    def update(scope: dict[str, Any]) -> None:
+        current = scope.get("hosts")
+        merged = [str(item).strip().lower() for item in current] if isinstance(current, list) else []
+        for entry in added:
+            if entry not in merged:
+                merged.append(entry)
+        scope["hosts"] = merged
+
+    scope = _mutate_http_scope(install_root, key, update)
+    return list(scope["hosts"])
+
+
+def set_engagement_rate_limit(
+    install_root: Path,
+    key: str,
+    value: float | str,
+) -> float:
+    """Set the canonical per-invocation HTTP rate ceiling."""
+    rate = resolve_rate_limit(value)
+    if rate is None:
+        raise SystemExit("rate limit value is required.")
+
+    scope = _mutate_http_scope(
+        install_root,
+        key,
+        lambda current: current.__setitem__("rate_limit", rate),
+    )
+    return float(scope["rate_limit"])
 
 
 def list_engagements(install_root: Path) -> list[EngagementRow]:
@@ -1050,14 +1211,17 @@ def _write_active_mirror(install_root: Path, key: str) -> None:
 def _select_engagement(rows: list[EngagementRow]) -> EngagementRow:
     if not rows:
         raise SystemExit("No engagements found")
+    if not sys.stdin.isatty():
+        raise SystemExit(
+            "Interactive --select is unavailable in a non-interactive process; "
+            "pass the optional engagement key explicitly"
+        )
     if shutil.which("fzf"):
         lines = [f"{row.key}\t{row.status}\t{row.current_phase}\t{row.target}\t{row.path}" for row in rows]
         result = subprocess.run(["fzf", "--with-nth", "1,2,3,4"], input="\n".join(lines), text=True, capture_output=True, check=False)
         if result.returncode == 0 and result.stdout.strip():
             selected = result.stdout.split("\t", 1)[0]
             return next(row for row in rows if row.key == selected)
-    if not sys.stdin.isatty():
-        raise SystemExit("Interactive selection requires fzf or a TTY")
     for idx, row in enumerate(rows, start=1):
         print(f"{idx}. {row.key} [{row.status}/{row.current_phase}] {row.target}", file=sys.stderr)
     choice = input("> ").strip()
@@ -1085,6 +1249,10 @@ def start_engagement(install_root: Path, engagement_dir: Path, client: str, extr
         set_active_engagement(install_root, engagement_dir)
     except (SystemExit, OSError):
         pass
+    # Keep operator intent distinct from the launcher's effective identity.
+    # The generated wrapper exports VIGIL_CLIENT_NAME; neither fact is a
+    # provider-owned observation.
+    os.environ["VIGIL_REQUESTED_CLIENT"] = client
     os.chdir(engagement_dir)
     os.execv(str(launcher), [str(launcher), *extra_args])
 
@@ -1857,9 +2025,18 @@ def _write_codex_config(agent_root: Path, eng_dir: Path) -> None:
     ensure_codex_agents_link(agent_root, codex_dir)
 
 
-def _write_claude_config(agent_root: Path, eng_dir: Path) -> None:
+def _write_claude_config(
+    agent_root: Path,
+    eng_dir: Path,
+    *,
+    rendered_agent_root: Path | None = None,
+) -> None:
     claude_dir = eng_dir / ".claude"
-    ensure_claude_settings(agent_root, claude_dir)
+    ensure_claude_settings(
+        agent_root,
+        claude_dir,
+        rendered_agent_root=rendered_agent_root,
+    )
     ensure_claude_agents_link(agent_root, claude_dir)
 
 
@@ -1954,7 +2131,12 @@ GOOSE_DISPATCH_DIRECTIVE = (
 )
 
 
-def _write_goose_config(agent_root: Path, eng_dir: Path) -> None:
+def _write_goose_config(
+    agent_root: Path,
+    eng_dir: Path,
+    *,
+    rendered_agent_root: Path | None = None,
+) -> None:
     """Install Goose's operator prompt, specialist roster, and standard hooks.
 
     Mirrors ``_write_opencode_config`` but Goose-native (see docs/goose-bench.md):
@@ -1979,7 +2161,11 @@ def _write_goose_config(agent_root: Path, eng_dir: Path) -> None:
     # actually orchestrates instead of soloing inline; Goose auto-loads .goosehints.
     (eng_dir / ".goosehints").write_text(base + GOOSE_DISPATCH_DIRECTIVE, encoding="utf-8")
     ensure_goose_recipes_link(agent_root, eng_dir / ".goose")
-    ensure_goose_standard_hooks(agent_root, eng_dir)
+    ensure_goose_standard_hooks(
+        agent_root,
+        eng_dir,
+        rendered_agent_root=rendered_agent_root,
+    )
 
 
 # DeepSeek thinking levels → opencode per-model options. OpenCode deep-merges this
@@ -2305,6 +2491,7 @@ def repair_engagement_client_entrypoints(
     install_root: Path,
     *,
     ambiguous_permissions_as_skip: bool = False,
+    rendered_install_root: Path | None = None,
 ) -> ClientEntrypointRepairResult:
     """Refresh installer-owned client entrypoints in existing engagements.
 
@@ -2320,6 +2507,7 @@ def repair_engagement_client_entrypoints(
     engagement.
     """
     agent_root = install_root / "agent"
+    rendered_agent_root = (rendered_install_root or install_root) / "agent"
     root = agent_root / "engagements"
     if not root.is_dir():
         return ClientEntrypointRepairResult(scanned_count=0, reconciled=(), skipped=())
@@ -2381,11 +2569,19 @@ def repair_engagement_client_entrypoints(
         if client_kind in {"codex", "both"}:
             _write_codex_config(agent_root, eng_dir)
         if client_kind in {"claude", "both"}:
-            _write_claude_config(agent_root, eng_dir)
+            _write_claude_config(
+                agent_root,
+                eng_dir,
+                rendered_agent_root=rendered_agent_root,
+            )
         _write_opencode_config(agent_root, eng_dir)
-        _write_goose_config(agent_root, eng_dir)
-        _write_launchers(
+        _write_goose_config(
             agent_root,
+            eng_dir,
+            rendered_agent_root=rendered_agent_root,
+        )
+        _write_launchers(
+            rendered_agent_root,
             eng_dir,
             client_kind,
             skip_permissions=skip_permissions,

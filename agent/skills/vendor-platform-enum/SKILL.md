@@ -235,7 +235,7 @@ Pexip configuration namespaces are admin-tier endpoints — assume the managemen
 
 ## Recording the deep-enum result
 
-For each vendor class, record one or more findings via `vigil assess finding record <agent> <finding-json-file>`:
+For each vendor class, record one or more findings via `vigil assess finding record <agent> <finding-json-file> --agent-id <your-agent_id>`:
 
 - One finding per **bounded** anonymous-read primitive (org-singleton + chain-walk graph of length ≥ 1).
 - One finding per **systemic** anonymous-read primitive (the bounded-vs-systemic test returned 200 on adjacent IDs).

@@ -31,6 +31,7 @@ PORT_BLOCK_SIZE = 2
 PORT_SLOT_COUNT = 20_000
 LEGACY_DNS_REMOTE_PORT = 53
 LEGACY_REVERSE_REMOTE_PORT = 8443
+OOB_ALLOCATION_REGISTRY_FILENAME = "oob-allocations.json"
 
 _THREAD_LOCKS: dict[str, threading.Lock] = {}
 _THREAD_LOCKS_GUARD = threading.Lock()
@@ -98,10 +99,15 @@ def _default_slot_candidates(identity: str) -> Iterable[int]:
         yield (start + offset) % PORT_SLOT_COUNT
 
 
-def _metadata_path(install_root: Path) -> Path:
-    root = install_root.expanduser().resolve()
+def _metadata_path(
+    install_root: Path, *, preserve_install_path: bool = False
+) -> Path:
+    root = install_root.expanduser()
+    resolved_root = root.resolve()
+    if not preserve_install_path:
+        root = resolved_root
     path = root / TENANT_METADATA_RELATIVE_PATH
-    if not path.parent.resolve(strict=False).is_relative_to(root):
+    if not path.parent.resolve(strict=False).is_relative_to(resolved_root):
         raise SystemExit(
             f"Invalid OOB metadata path {path}: parent escapes install root through a symlink."
         )
@@ -286,8 +292,12 @@ def _validate_route(route: OobTenantRoute) -> None:
         )
 
 
-def load_tenant_route(install_root: Path) -> OobTenantRoute | None:
-    path = _metadata_path(install_root)
+def load_tenant_route(
+    install_root: Path, *, preserve_install_path: bool = False
+) -> OobTenantRoute | None:
+    path = _metadata_path(
+        install_root, preserve_install_path=preserve_install_path
+    )
     if path.is_symlink():
         raise SystemExit(f"Invalid OOB routing metadata at {path}: symlink files are not allowed.")
     if not path.exists():
@@ -295,8 +305,15 @@ def load_tenant_route(install_root: Path) -> OobTenantRoute | None:
     return _route_from_payload(path, _read_json(path))
 
 
-def legacy_tenant_route(install_root: Path, *, base_domain: str) -> OobTenantRoute:
-    path = _metadata_path(install_root)
+def legacy_tenant_route(
+    install_root: Path,
+    *,
+    base_domain: str,
+    preserve_install_path: bool = False,
+) -> OobTenantRoute:
+    path = _metadata_path(
+        install_root, preserve_install_path=preserve_install_path
+    )
     domain = normalize_base_domain(base_domain)
     route = OobTenantRoute(
         version=ROUTING_VERSION,
@@ -317,7 +334,7 @@ def legacy_tenant_route(install_root: Path, *, base_domain: str) -> OobTenantRou
 
 def _resolved_registry_path(registry_path: Path | None) -> Path:
     return (
-        registry_path or config_path().with_name("oob-allocations.json")
+        registry_path or config_path().with_name(OOB_ALLOCATION_REGISTRY_FILENAME)
     ).expanduser().resolve()
 
 
@@ -403,6 +420,7 @@ def _reconcile_existing_route_locked(
     registry_path: Path,
     *,
     atomic_writer: Callable[[Path, dict[str, object]], None] = _atomic_write_json_real,
+    preserve_install_path: bool = False,
 ) -> OobTenantRoute:
     if route.legacy:
         return route
@@ -414,7 +432,10 @@ def _reconcile_existing_route_locked(
     expected = _allocation_row(route, install_root)
     prior = allocations.get(route.install_id)
     if prior is not None:
-        prior_root = Path(str(prior["install_root"])).expanduser().resolve(strict=False)
+        prior_root = _install_identity_path(
+            Path(str(prior["install_root"])),
+            preserve_install_path=preserve_install_path,
+        )
         if prior_root != install_root:
             if prior_root.exists():
                 raise SystemExit(
@@ -447,17 +468,34 @@ def _reconcile_existing_route_locked(
     return route
 
 
+def _install_identity_path(
+    install_root: Path, *, preserve_install_path: bool
+) -> Path:
+    expanded = install_root.expanduser()
+    if preserve_install_path:
+        return Path(os.path.abspath(expanded))
+    return expanded.resolve()
+
+
 def reconcile_tenant_route_registry(
     route: OobTenantRoute,
     install_root: Path,
     *,
     registry_path: Path | None = None,
+    preserve_install_path: bool = False,
 ) -> OobTenantRoute:
-    install_root = install_root.expanduser().resolve()
+    install_root = _install_identity_path(
+        install_root, preserve_install_path=preserve_install_path
+    )
     resolved_registry = _resolved_registry_path(registry_path)
     lock_path = resolved_registry.with_suffix(resolved_registry.suffix + ".lock")
     with _FileLock(lock_path):
-        return _reconcile_existing_route_locked(route, install_root, resolved_registry)
+        return _reconcile_existing_route_locked(
+            route,
+            install_root,
+            resolved_registry,
+            preserve_install_path=preserve_install_path,
+        )
 
 
 def initialize_tenant_route(
@@ -467,23 +505,42 @@ def initialize_tenant_route(
     tenant_name: str | None = None,
     base_domain: str,
     registry_path: Path | None = None,
+    canonical_install_root: Path | None = None,
+    preserve_install_path: bool = False,
 ) -> OobTenantRoute:
-    existing = load_tenant_route(install_root)
+    existing = load_tenant_route(
+        install_root, preserve_install_path=preserve_install_path
+    )
+    registry_install_root = _install_identity_path(
+        canonical_install_root or install_root,
+        preserve_install_path=preserve_install_path,
+    )
     if existing is not None:
         return reconcile_tenant_route_registry(
-            existing, install_root, registry_path=registry_path
+            existing,
+            registry_install_root,
+            registry_path=registry_path,
+            preserve_install_path=preserve_install_path,
         )
     if not is_upgrade:
         return allocate_tenant_route(
             install_root,
-            tenant_name=tenant_name or install_root.expanduser().resolve().name,
+            tenant_name=tenant_name or registry_install_root.name,
             base_domain=base_domain,
             registry_path=registry_path,
+            canonical_install_root=registry_install_root,
+            preserve_install_path=preserve_install_path,
         )
-    route = legacy_tenant_route(install_root, base_domain=base_domain)
+    route = legacy_tenant_route(
+        install_root,
+        base_domain=base_domain,
+        preserve_install_path=preserve_install_path,
+    )
     path = route.metadata_path
     with _FileLock(path.with_suffix(".lock")):
-        existing = load_tenant_route(install_root)
+        existing = load_tenant_route(
+            install_root, preserve_install_path=preserve_install_path
+        )
         if existing is not None:
             return existing
         _atomic_write_json_real(path, route.serializable())
@@ -494,25 +551,40 @@ def allocate_tenant_route(
     install_root: Path,
     *,
     tenant_name: str,
-    base_domain: str = "oob.example.com",
+    base_domain: str = "oob.invalid",
     registry_path: Path | None = None,
     identity_factory: Callable[[], str] = _default_identity,
     slot_candidates: Callable[[str], Iterable[int]] = _default_slot_candidates,
     atomic_writer: Callable[[Path, dict[str, object]], None] = _atomic_write_json_real,
+    canonical_install_root: Path | None = None,
+    preserve_install_path: bool = False,
 ) -> OobTenantRoute:
     clean = sanitize_tenant_prefix(tenant_name)
-    install_root = install_root.expanduser().resolve()
-    metadata_path = _metadata_path(install_root)
+    filesystem_install_root = install_root.expanduser()
+    registry_install_root = _install_identity_path(
+        canonical_install_root or filesystem_install_root,
+        preserve_install_path=preserve_install_path,
+    )
+    if not preserve_install_path:
+        filesystem_install_root = filesystem_install_root.resolve()
+    metadata_path = _metadata_path(
+        filesystem_install_root,
+        preserve_install_path=preserve_install_path,
+    )
     registry_path = _resolved_registry_path(registry_path)
     lock_path = registry_path.with_suffix(registry_path.suffix + ".lock")
     with _FileLock(lock_path):
-        existing = load_tenant_route(install_root)
+        existing = load_tenant_route(
+            filesystem_install_root,
+            preserve_install_path=preserve_install_path,
+        )
         if existing is not None:
             return _reconcile_existing_route_locked(
                 existing,
-                install_root,
+                registry_install_root,
                 registry_path,
                 atomic_writer=atomic_writer,
+                preserve_install_path=preserve_install_path,
             )
         registry = _read_json(registry_path, default={"version": ROUTING_VERSION, "allocations": {}})
         allocations = _validated_allocations(registry_path, registry)
@@ -562,7 +634,7 @@ def allocate_tenant_route(
         )
         _validate_route(route)
         original_registry = {"version": ROUTING_VERSION, "allocations": dict(allocations)}
-        allocations[install_id] = _allocation_row(route, install_root)
+        allocations[install_id] = _allocation_row(route, registry_install_root)
         updated_registry = {"version": ROUTING_VERSION, "allocations": allocations}
         atomic_writer(registry_path, updated_registry)
         try:

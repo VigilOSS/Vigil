@@ -623,6 +623,37 @@ def test_update_allows_intentional_empty_replacements_with_cas(
     assert fake.patches == [("findings/VA-1", expected_payload)]
 
 
+def test_update_exposes_notes_rotation_with_cas(tmp_path, monkeypatch):
+    fake = _FakeClient()
+    _install(monkeypatch, update_finding, tmp_path, fake)
+    args = _parse(
+        update_finding,
+        [
+            "update",
+            "VA-1",
+            "--notes",
+            "new working notes",
+            "--notes-rotate",
+            "--expected-row-version",
+            "4",
+        ],
+        tmp_path,
+    )
+
+    update_finding.run(args)
+
+    assert fake.patches == [
+        (
+            "findings/VA-1",
+            {
+                "notes": "new working notes",
+                "notes_mode": "rotate",
+                "expected_row_version": 4,
+            },
+        )
+    ]
+
+
 @pytest.mark.parametrize("notes_mode", [None, "invalid"])
 def test_update_payload_file_notes_require_explicit_valid_mode(
     notes_mode, tmp_path, monkeypatch, capsys

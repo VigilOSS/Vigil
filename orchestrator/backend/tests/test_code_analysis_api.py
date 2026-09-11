@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -9,11 +10,15 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Barrier, Event
+from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from app import db as db_module
+from app.api.code_analysis import QueueItemsBulkCreateRequest
 from app.services import code_analysis, code_fuzz_completion
 from fastapi import HTTPException
+from pydantic import ValidationError
 from tests.proof_fixtures import post_artifact_backed_source_observation
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -22,6 +27,7 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from assess.lib.code_snapshot import SnapshotBuilder, capture_regular_file  # noqa: E402
+from assess.commands import code_dispatch  # noqa: E402
 from assess.lib.code_structural_identity import (  # noqa: E402
     STRUCTURAL_INDEX_SCHEMA as CLI_STRUCTURAL_INDEX_SCHEMA,
     structural_input_digest as cli_structural_input_digest,
@@ -29,6 +35,258 @@ from assess.lib.code_structural_identity import (  # noqa: E402
 
 
 _SEALED_TEST_BYTES_BY_HASH: dict[str, bytes] = {}
+
+
+def test_million_file_inventory_dispatch_and_queue_retry_qualification(
+    client, isolate_settings, monkeypatch, tmp_path, capsys
+) -> None:
+    """Exercise production listing and dispatch without materializing 1M DB rows."""
+
+    engagement_key = "million-file-qualification"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    assert client.get("/engagements").status_code == 200
+    repo = _create_repo(client, engagement_key, "million-file-repo")
+    repo_id = int(repo["id"])
+    selected_manifest = [
+        {
+            "file_path": f"src/selected-{index:03d}.py",
+            "language": "python",
+            "loc": 1,
+            "file_hash": _source_hash(f"million-selected-{index}"),
+            "header_snippet": "pass\n",
+            "git_churn_score": 0,
+            "has_past_cve_fix": False,
+        }
+        for index in range(200)
+    ]
+    selected_rows = _refresh_repo_files(
+        client, engagement_key, repo_id, selected_manifest
+    )
+    selected_paths_by_id = {
+        int(row["id"]): str(row["file_path"]) for row in selected_rows
+    }
+    assert len(selected_paths_by_id) == 200
+    total_files = 1_000_000
+    selected_ids = sorted(selected_paths_by_id)
+    selected_positions = [
+        1 + (index * (total_files - 1) // (len(selected_ids) - 1))
+        for index in range(len(selected_ids))
+    ]
+    selected_id_by_position = dict(zip(selected_positions, selected_ids, strict=True))
+    assert selected_positions[0] == 1
+    assert selected_positions[-1] == total_files
+    assert any(
+        total_files // 2 <= position < total_files // 2 + 10_000
+        for position in selected_positions
+    )
+
+    selectors = [
+        {
+            "file_path": selected_paths_by_id[file_id],
+            "repo_id": repo_id,
+            "priority": 0,
+        }
+        for file_id in sorted(selected_paths_by_id)
+    ]
+    # The production dispatcher must compile exact selectors once. A per-row
+    # scan of all 200 selectors turns this qualification into 200M comparisons.
+    code_dispatch._compile_queue_lookup(selectors)
+
+    class VirtualCursor:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def fetchone(self):
+            return self.rows[0] if self.rows else None
+
+        def fetchall(self):
+            return self.rows
+
+    class VirtualInventory:
+        scan = 0
+        opened = 0
+        closed = 0
+        returned_rows = {1: 0, 2: 0}
+        requested_offsets = {1: [], 2: []}
+        max_page_rows = 0
+
+        def execute(self, statement: str, _params=()):
+            if "SELECT COUNT(*)" in statement:
+                return VirtualCursor([(total_files,)])
+            if "SELECT files.*" in statement:
+                limit_match = re.search(r"LIMIT (\d+)", statement)
+                offset_match = re.search(r"OFFSET (\d+)", statement)
+                assert limit_match is not None
+                limit = int(limit_match.group(1))
+                offset = int(offset_match.group(1)) if offset_match else 0
+                if offset == 0:
+                    type(self).scan += 1
+                scan = type(self).scan
+                type(self).requested_offsets[scan].append(offset)
+                if scan == 1 and offset == total_files // 2:
+                    raise KeyboardInterrupt
+                stop = min(total_files, offset + limit)
+                rows = []
+                for position in range(offset + 1, stop + 1):
+                    selected_id = selected_id_by_position.get(position)
+                    file_id = selected_id or 1_000_000_000 + position
+                    type(self).returned_rows[scan] += 1
+                    rows.append(
+                        {
+                            "id": file_id,
+                            "engagement_id": 1,
+                            "repo_id": repo_id,
+                            "file_path": (
+                                selected_paths_by_id[selected_id]
+                                if selected_id is not None
+                                else f"virtual/{position:07d}.py"
+                            ),
+                            "analysis_priority": 0,
+                            "slot_types_json": "[]",
+                            "structural_unavailable_dimensions_json": "[]",
+                            "structural_truncated_dimensions_json": "[]",
+                            "structural_signal_counts_json": "{}",
+                            "structural_artifact_truncated": 0,
+                            "variant_check_status": "pending",
+                        }
+                    )
+                type(self).max_page_rows = max(
+                    type(self).max_page_rows, len(rows)
+                )
+                return VirtualCursor(rows)
+            if "SELECT queue.*, repos.active_generation" in statement:
+                return VirtualCursor([])
+            raise AssertionError(f"unexpected virtual inventory query: {statement}")
+
+    inventory = VirtualInventory()
+
+    @contextmanager
+    def virtual_connection():
+        type(inventory).opened += 1
+        try:
+            yield inventory
+        finally:
+            type(inventory).closed += 1
+
+    class InventoryClient:
+        def __init__(self, *_args) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def get(self, endpoint: str):
+            query = parse_qs(urlsplit(endpoint).query)
+            return code_analysis.list_code_files(
+                int(repo["engagement_id"]),
+                limit=int(query["limit"][0]),
+                offset=int(query["offset"][0]),
+            )
+
+    cfg = SimpleNamespace(
+        base_url="http://example.test",
+        engagement_key=engagement_key,
+        engagement_dir=str(tmp_path),
+    )
+    with monkeypatch.context() as inventory_patch:
+        inventory_patch.setattr(code_analysis, "get_connection", virtual_connection)
+        inventory_patch.setattr(
+            code_dispatch, "AssessmentClient", InventoryClient
+        )
+        with pytest.raises(KeyboardInterrupt):
+            code_dispatch._normalize_queue_items(cfg, selectors)
+        normalized = code_dispatch._normalize_queue_items(cfg, selectors)
+
+    expected_offsets = list(
+        range(0, total_files, code_dispatch._CODE_FILE_LOOKUP_PAGE_SIZE)
+    )
+    assert {
+        (position - 1) // code_dispatch._CODE_FILE_LOOKUP_PAGE_SIZE
+        * code_dispatch._CODE_FILE_LOOKUP_PAGE_SIZE
+        for position in selected_positions
+    } == set(expected_offsets)
+    assert VirtualInventory.requested_offsets == {
+        1: expected_offsets[: total_files // 2 // 10_000 + 1],
+        2: expected_offsets,
+    }
+    assert VirtualInventory.returned_rows == {
+        1: total_files // 2,
+        2: total_files,
+    }
+    assert VirtualInventory.opened == VirtualInventory.closed
+    assert VirtualInventory.max_page_rows == code_dispatch._CODE_FILE_LOOKUP_PAGE_SIZE
+    assert len(normalized) == 200
+    assert {item["file_id"] for item in normalized} == set(selected_paths_by_id)
+
+    queue_path = tmp_path / "million-qualified-queue.json"
+    queue_path.write_text(json.dumps(normalized), encoding="utf-8")
+    snapshots = iter(range(10))
+
+    def snapshot(*_args, **_kwargs):
+        path = tmp_path / f"queue-snapshot-{next(snapshots)}.json"
+        path.write_text("{}", encoding="utf-8")
+        return path
+
+    posted_sizes: list[int] = []
+
+    class QueueClient:
+        cancel_after_commit = True
+
+        def __init__(self, *_args) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def post(self, endpoint: str, payload: dict[str, object]):
+            assert endpoint == "code/analysis-queue"
+            request = QueueItemsBulkCreateRequest.model_validate(payload)
+            posted_sizes.append(len(request.items))
+            response = client.post(
+                f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+                json=payload,
+            )
+            assert response.status_code == 201, response.text
+            if type(self).cancel_after_commit:
+                type(self).cancel_after_commit = False
+                raise KeyboardInterrupt
+            return response.json()
+
+    monkeypatch.setattr(code_dispatch, "write_json_snapshot", snapshot)
+    monkeypatch.setattr(code_dispatch, "AssessmentClient", QueueClient)
+    with pytest.raises(KeyboardInterrupt):
+        code_dispatch._queue(cfg, str(queue_path))
+    code_dispatch._queue(cfg, str(queue_path))
+
+    output = capsys.readouterr().out
+    assert posted_sizes == [200, 200]
+    assert "inserted=0, updated=0, already-active=200, conflicts=0" in output
+    assert '"outcomes_truncated": false' in output
+    with db_module.get_connection() as connection:
+        stored_count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM code_analysis_queue"
+            ).fetchone()[0]
+        )
+    assert stored_count == 200
+
+
+def test_queue_bulk_request_rejects_more_than_one_bounded_submission() -> None:
+    with pytest.raises(ValidationError):
+        QueueItemsBulkCreateRequest.model_validate(
+            {
+                "items": [
+                    {"file_id": file_id, "priority": 90}
+                    for file_id in range(1, 202)
+                ]
+            }
+        )
 
 
 def _source_hash(label: str) -> str:
@@ -342,9 +600,10 @@ def _create_files(client, engagement_key: str, repo_id: int) -> list[dict[str, o
 
     files_response = client.get(
         f"/engagements/{engagement_key}/assessment/code/files?repo_id={repo_id}&limit=20"
+        "&include_header_snippet=true"
     )
     assert files_response.status_code == 200
-    return files_response.json()
+    return files_response.json()["items"]
 
 
 def _refresh_repo_files(
@@ -379,7 +638,9 @@ def _refresh_repo_files(
         json={"refresh_token": token, "manifest_complete": True},
     )
     assert committed.status_code == 200, committed.text
-    return client.get(f"{base}/files?repo_id={repo_id}&limit=10000").json()
+    return client.get(
+        f"{base}/files?repo_id={repo_id}&limit=10000&include_header_snippet=true"
+    ).json()["items"]
 
 
 def _append_repo_files(
@@ -389,7 +650,9 @@ def _append_repo_files(
     additions: list[dict[str, object]],
 ) -> list[dict[str, object]]:
     base = f"/engagements/{engagement_key}/assessment/code"
-    current = client.get(f"{base}/files?repo_id={repo_id}&limit=10000").json()
+    current = client.get(
+        f"{base}/files?repo_id={repo_id}&limit=10000&include_header_snippet=true"
+    ).json()["items"]
     fields = {
         "file_path", "language", "loc", "file_hash", "header_snippet",
         "git_churn_score", "has_past_cve_fix",
@@ -621,7 +884,7 @@ def _variant_receipt_payload(
 
 def _bind_structural_identity(payload: dict[str, object]) -> dict[str, object]:
     bound = json.loads(json.dumps(payload))
-    bound.setdefault("structural_index_schema", "structural-index/v5")
+    bound.setdefault("structural_index_schema", "structural-index/v6")
     repo_id = int(bound["repo_id"])
     with db_module.get_connection() as connection:
         current_files = [
@@ -775,12 +1038,35 @@ def _claim_file_for_reanalysis(
         )
         assert file_response.status_code == 200, file_response.text
         priority = int(file_response.json()["analysis_priority"])
+    with db_module.get_connection() as connection:
+        predecessor = connection.execute(
+            """
+            SELECT queue.id
+            FROM code_analysis_queue AS queue
+            JOIN code_files AS files ON files.id = queue.file_id
+            JOIN code_repos AS repos ON repos.id = files.repo_id
+            WHERE queue.engagement_id = (
+                SELECT id FROM engagements WHERE key = ?
+            )
+              AND queue.file_id = ?
+              AND queue.repo_generation = repos.active_generation
+            ORDER BY queue.id DESC LIMIT 1
+            """,
+            (engagement_key, file_id),
+        ).fetchone()
+    assert predecessor is not None
     queue_response = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-queue",
         json={
             "mode": "reanalysis",
             "reason": reason,
-            "items": [{"file_id": file_id, "priority": priority}],
+            "items": [
+                {
+                    "file_id": file_id,
+                    "priority": priority,
+                    "supersedes": int(predecessor["id"]),
+                }
+            ],
         },
     )
     assert queue_response.status_code == 201, queue_response.text
@@ -893,7 +1179,9 @@ def _refresh_one_file_metadata(
     **changes,
 ):
     base = f"/engagements/{engagement_key}/assessment/code"
-    current = client.get(f"{base}/files?repo_id={repo_id}&limit=10000").json()
+    current = client.get(
+        f"{base}/files?repo_id={repo_id}&limit=10000&include_header_snippet=true"
+    ).json()["items"]
     fields = {
         "file_path", "language", "loc", "file_hash", "header_snippet",
         "git_churn_score", "has_past_cve_fix",
@@ -936,7 +1224,9 @@ def _refresh_one_file_metadata(
         json={"refresh_token": token, "manifest_complete": True},
     )
     assert committed.status_code == 200, committed.text
-    return client.get(f"{base}/files?repo_id={repo_id}&limit=10000").json()
+    return client.get(
+        f"{base}/files?repo_id={repo_id}&limit=10000&include_header_snippet=true"
+    ).json()["items"]
 
 
 @pytest.mark.parametrize(
@@ -1002,6 +1292,57 @@ def test_legacy_repo_and_file_create_routes_are_not_public(client, isolate_setti
 
     assert repo_response.status_code == 405
     assert files_response.status_code == 405
+
+
+def test_code_file_listing_is_bounded_envelope_with_current_queue_join(
+    client, isolate_settings
+):
+    engagement_key = "2026-09-11-code-file-envelope"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="file-envelope-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(row for row in files if row["file_path"] == "src/parser.py")
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
+    queue = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={"items": [{"file_id": parser_file["id"], "priority": 95}]},
+    )
+    assert queue.status_code == 201, queue.text
+    queue_id = queue.json()["outcomes"][0]["queue_item_id"]
+
+    endpoint = (
+        f"/engagements/{engagement_key}/assessment/code/files"
+        f"?repo_id={repo['id']}&limit=1&offset=0"
+    )
+    response = client.get(endpoint)
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload.keys() == {"total", "offset", "count", "has_more", "items"}
+    assert payload["total"] == 2
+    assert payload["offset"] == 0
+    assert payload["count"] == 1
+    assert payload["has_more"] is True
+    assert len(payload["items"]) == 1
+    item = payload["items"][0]
+    assert "header_snippet" not in item
+    assert item["queue"] == {
+        "state": "current",
+        "current_attempt": {
+            "id": queue_id,
+            "status": "pending",
+            "priority": 95,
+            "queue_mode": "initial",
+            "batch_theme": "",
+            "repo_generation": 2,
+            "agent_name": "",
+            "lease_token": "",
+        },
+        "historical_attempts": 0,
+    }
+
+    with_snippet = client.get(endpoint + "&include_header_snippet=true").json()
+    assert "header_snippet" in with_snippet["items"][0]
 
 
 def test_refresh_start_does_not_promote_a_generation_before_commit(client, isolate_settings):
@@ -1658,7 +1999,7 @@ def test_verified_refresh_commit_rejects_staged_drift_without_promoting(
     assert after["active_generation"] == before["active_generation"]
     assert after["snapshot_digest"] == before["snapshot_digest"]
     assert after["source_manifest_digest"] == before["source_manifest_digest"]
-    assert client.get(f"{base}/files?repo_id={repo['id']}&limit=20").json() == []
+    assert client.get(f"{base}/files?repo_id={repo['id']}&limit=20").json()["items"] == []
 
 
 def test_verified_refresh_final_manifest_race_rolls_back_as_conflict(
@@ -1889,7 +2230,7 @@ def test_language_change_advances_generation_and_clears_derived_bindings(
     assert noop_commit.status_code == 200, noop_commit.text
     assert noop_commit.json()["generation_changed"] is False
     after_noop = client.get(f"{base}/repos/{repo['id']}").json()
-    assert after_noop["structural_index_schema"] == "structural-index/v5"
+    assert after_noop["structural_index_schema"] == "structural-index/v6"
     assert after_noop["structural_index_generation"] == binding["active_generation"]
     assert after_noop["structural_index_manifest_path"].endswith("manifest.json")
     assert after_noop["lsp_config"]["ctags"]["tags_path"] == "old-generation/tags"
@@ -2013,7 +2354,7 @@ def test_language_correction_invalidates_structural_index_until_rebuilt(
     assert invalidated_repo["structural_index_generation"] is None
     assert invalidated_repo["structural_index_manifest_path"] == ""
     assert invalidated_repo["structural_analysis_status_counts"] == {}
-    invalidated_files = client.get(f"{base}/files?repo_id={repo['id']}&limit=20").json()
+    invalidated_files = client.get(f"{base}/files?repo_id={repo['id']}&limit=20").json()["items"]
     assert {row["structural_analysis_status"] for row in invalidated_files} == {"pending"}
     assert {row["total_functions"] for row in invalidated_files} == {0}
     current_results = client.get(f"{base}/analysis-results?file_id={parser['id']}").json()
@@ -2031,7 +2372,7 @@ def test_language_correction_invalidates_structural_index_until_rebuilt(
     readiness = client.get(f"{base}/readiness?target_phase=classify-map").json()
     assert "structural_index_stale" in {blocker["code"] for blocker in readiness["blockers"]}
 
-    rebuilt_files = client.get(f"{base}/files?repo_id={repo['id']}&limit=20").json()
+    rebuilt_files = client.get(f"{base}/files?repo_id={repo['id']}&limit=20").json()["items"]
     rebuilt = client.post(
         f"{base}/files/bulk-structural-metadata",
         json=_complete_structural_payload(
@@ -2496,7 +2837,7 @@ def test_generation_zero_repo_children_are_hidden_and_immutable_across_public_ap
         connection.commit()
 
     # Engagement-wide readers must project only children of published repos.
-    assert client.get(f"{base}/files").json() == []
+    assert client.get(f"{base}/files").json()["items"] == []
     assert client.get(f"{base}/files/{hidden_file_id}").status_code == 404
     assert client.get(f"{base}/modules").json() == []
     assert client.get(f"{base}/analysis-queue/stats").json() == {
@@ -3293,7 +3634,8 @@ def test_rename_preserves_file_id_and_invalidates_path_sensitive_analysis(client
     parser = next(
         row for row in client.get(
             f"/engagements/{engagement_key}/assessment/code/files?repo_id={repo['id']}"
-        ).json()
+            "&include_header_snippet=true"
+        ).json()["items"]
         if row["file_path"] == "src/parser.py"
     )
     _classify_file(client, engagement_key, int(parser["id"]), "medium", 49)
@@ -3634,6 +3976,85 @@ def test_analysis_result_retry_is_idempotent_within_lease(client, isolate_settin
     assert second.json()["id"] == first.json()["id"]
 
 
+def test_analysis_result_explicit_supersession_replaces_one_function_result(
+    client, isolate_settings
+):
+    engagement_key = "2026-09-11-code-result-explicit-supersession"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="result-supersession-repo")
+    parser_file = next(
+        row for row in _create_files(client, engagement_key, int(repo["id"]))
+        if row["file_path"] == "src/parser.py"
+    )
+    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
+    claim = _claim_file_for_analysis(
+        client, engagement_key, int(parser_file["id"]), agent_name="result-agent"
+    )
+    endpoint = f"/engagements/{engagement_key}/assessment/code/analysis-results"
+    payload = {
+        "queue_item_id": claim["id"],
+        "file_id": parser_file["id"],
+        "agent_name": "result-agent",
+        "lease_token": claim["lease_token"],
+        "function_name": "parse",
+        "hypothesis": "input may reach parser",
+        "evidence": "src/parser.py:1",
+        "disposition": "suspicious",
+        "confidence": "medium",
+    }
+    original = client.post(endpoint, json=payload)
+    assert original.status_code == 201, original.text
+
+    replacement_payload = payload | {
+        "supersedes": original.json()["id"],
+        "hypothesis": "guard rejects the input",
+        "disposition": "clean",
+        "confidence": "high",
+    }
+    replacement = client.post(endpoint, json=replacement_payload)
+    assert replacement.status_code == 201, replacement.text
+    assert replacement.json()["supersedes"] == original.json()["id"]
+    assert client.post(endpoint, json=replacement_payload).json()["id"] == replacement.json()["id"]
+
+    current = client.get(
+        endpoint
+        + f"?queue_item_id={claim['id']}&lease_token={claim['lease_token']}"
+        + "&function_name=parse"
+    )
+    assert current.status_code == 200, current.text
+    assert [row["id"] for row in current.json()] == [replacement.json()["id"]]
+
+    history = client.get(endpoint + "?include_superseded=true")
+    assert history.status_code == 200, history.text
+    history_by_id = {row["id"]: row for row in history.json()}
+    assert history_by_id[original.json()["id"]]["superseded_at"] is None
+    assert history_by_id[original.json()["id"]]["replaced_by_result_id"] == replacement.json()["id"]
+
+    conflicting = client.post(
+        endpoint,
+        json=payload
+        | {
+            "supersedes": original.json()["id"],
+            "hypothesis": "a second correction",
+            "disposition": "clean",
+        },
+    )
+    assert conflicting.status_code == 409
+    assert "already replaced" in conflicting.json()["detail"]
+
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json=_owned(
+            claim,
+            item_ids=[claim["id"]],
+            disposition="clean",
+            notes="Corrected function result is authoritative for this lease.",
+            cwe_coverage=_network_input_coverage(default_effort=80),
+        ),
+    )
+    assert done.status_code == 200, done.text
+
+
 def test_suspicious_result_atomically_materializes_its_run_candidate(
     client, isolate_settings
 ) -> None:
@@ -3753,8 +4174,9 @@ def test_suspicious_result_atomically_materializes_its_run_candidate(
             "canonical_location": "file:src/parser.py:1",
             "summary": "A current finding exists, but it did not enter the run candidate lifecycle.",
             "source_name": "result-agent",
-            "provenance": {
-                "code_snapshot": {
+                "provenance": {
+                    "agent_id": "result-agent",
+                    "code_snapshot": {
                     "repo_id": repo["id"],
                     "repo_generation": repo["active_generation"],
                     "source_manifest_digest": repo["source_manifest_digest"],
@@ -3839,9 +4261,10 @@ def test_suspicious_result_atomically_materializes_its_run_candidate(
             "workflow_status": "active",
             "canonical_location": "file:src/parser.py:1",
             "summary": "The exact analysis candidate was promoted with this finding.",
-            "source_name": "result-agent",
-            "provenance": {
-                "code_snapshot": {
+                "source_name": "result-agent",
+                "provenance": {
+                    "agent_id": "result-agent",
+                    "code_snapshot": {
                     "repo_id": repo["id"],
                     "repo_generation": repo["active_generation"],
                     "source_manifest_digest": repo["source_manifest_digest"],
@@ -4648,7 +5071,7 @@ def test_repo_refresh_is_atomic_and_reconciles_changed_deleted_and_renamed_files
     # An interrupted refresh leaves the last committed tree authoritative.
     before_commit = client.get(
         f"/engagements/{engagement_key}/assessment/code/files?repo_id={repo['id']}&limit=20"
-    ).json()
+    ).json()["items"]
     assert {row["file_path"] for row in before_commit} == {"src/parser.py", "src/helpers.py"}
     visible_repos = client.get(
         f"/engagements/{engagement_key}/assessment/code/repos"
@@ -4667,7 +5090,7 @@ def test_repo_refresh_is_atomic_and_reconciles_changed_deleted_and_renamed_files
 
     after = client.get(
         f"/engagements/{engagement_key}/assessment/code/files?repo_id={repo['id']}&limit=20"
-    ).json()
+    ).json()["items"]
     by_path = {row["file_path"]: row for row in after}
     assert set(by_path) == {"src/parser.py", "src/renamed_helpers.py", "src/new.py"}
     assert by_path["src/renamed_helpers.py"]["id"] == helper["id"]
@@ -4708,7 +5131,7 @@ def test_repo_refresh_complete_empty_manifest_deletes_last_file(client, isolate_
     files = client.get(
         f"/engagements/{engagement_key}/assessment/code/files?repo_id={repo['id']}&limit=20"
     )
-    assert files.json() == []
+    assert files.json()["items"] == []
 
 
 def test_interrupted_first_ingest_does_not_publish_generation_zero_repo(client, isolate_settings):
@@ -4894,15 +5317,25 @@ def test_native_files_include_resource_and_error_handling_families_with_sparse_c
     assert "error-handling" in families
 
 
-def test_managed_non_transport_file_does_not_inherit_native_baseline_families():
+def test_managed_supported_file_has_real_resource_and_error_handling_floor():
     families = code_analysis._applicable_families_for_file(
         ["FILE-CONTENT"],
         language="python",
         role="storage",
     )
 
-    assert "algorithmic-dos" not in families
-    assert "error-handling" not in families
+    assert "algorithmic-dos" in families
+    assert "error-handling" in families
+
+
+def test_unknown_language_does_not_receive_a_synthetic_family_floor():
+    families = code_analysis._applicable_families_for_file(
+        [],
+        language="",
+        role="",
+    )
+
+    assert families == []
 
 
 def _network_input_coverage(
@@ -5377,7 +5810,10 @@ def test_queue_done_requires_processing_state(client, isolate_settings):
         },
     )
     assert done.status_code == 409
-    assert "unless they are processing" in done.json()["detail"]
+    assert done.json()["detail"] == (
+        f"Cannot complete queue item {queue_item_id} unless it is processing; "
+        "current status is pending"
+    )
 
 
 def test_analysis_result_requires_processing_queue_item(client, isolate_settings):
@@ -5417,7 +5853,26 @@ def test_analysis_result_requires_processing_queue_item(client, isolate_settings
         },
     )
     assert analysis_result.status_code == 409
-    assert "unless they are processing" in analysis_result.json()["detail"]
+    assert analysis_result.json()["detail"] == (
+        f"Cannot record analysis results for queue item {queue_item_id} unless it is "
+        "processing; current status is pending"
+    )
+
+
+def test_queue_status_validation_retains_plural_batch_diagnostics() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        code_analysis._require_queue_status(
+            {
+                41: {"status": "pending"},
+                42: {"status": "processing"},
+            },
+            expected_status="error",
+            action="retry",
+        )
+
+    assert exc_info.value.detail == (
+        "Cannot retry queue items unless they are error: 41=pending, 42=processing"
+    )
 
 
 def test_reset_stale_queue_items_parses_iso_consumed_at(client, isolate_settings):
@@ -5629,7 +6084,10 @@ def test_retry_error_queue_item_returns_to_pending_with_audit_row(client, isolat
         json={"item_ids": [queue_item["id"]], "reason": "should not apply"},
     )
     assert rejected.status_code == 409
-    assert "unless they are error" in rejected.json()["detail"]
+    assert rejected.json()["detail"] == (
+        f"Cannot retry queue item {queue_item['id']} unless it is error; "
+        "current status is processing"
+    )
 
     activity = client.get(
         f"/engagements/{engagement_key}/activity-entries",
@@ -6570,6 +7028,8 @@ def test_coverage_summary_scopes_findings_to_repo_and_rejects_unknown_repo(clien
 
     _create_root_finding(client, engagement_key, "CH-090")
     _create_root_finding(client, engagement_key, "CH-091")
+    _ensure_finding_author_dispatch(client, engagement_key, "AUTHOR-CH-001")
+    _ensure_finding_author_dispatch(client, engagement_key, "AUTHOR-CH-002")
     finding_a = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
@@ -6588,6 +7048,7 @@ def test_coverage_summary_scopes_findings_to_repo_and_rejects_unknown_repo(clien
             "source_name": "code-vuln-hunter",
             "details": {"evidence": "A"},
             "provenance": {
+                "agent_id": "AUTHOR-CH-001",
                 "agent_name": "code-vuln-hunter",
                 "code_snapshot": _finding_code_snapshot(
                     client, engagement_key, int(repo_a["id"])
@@ -6622,6 +7083,7 @@ def test_coverage_summary_scopes_findings_to_repo_and_rejects_unknown_repo(clien
             "source_name": "code-vuln-hunter",
             "details": {"evidence": "B"},
             "provenance": {
+                "agent_id": "AUTHOR-CH-002",
                 "agent_name": "code-vuln-hunter",
                 "code_snapshot": _finding_code_snapshot(
                     client, engagement_key, int(repo_b["id"])
@@ -6786,6 +7248,7 @@ def test_coverage_summary_excludes_non_code_variants(client, isolate_settings):
     _create_files(client, engagement_key, int(repo["id"]))
 
     _create_root_finding(client, engagement_key, "VA-090", source_name="vulnerability-analyst")
+    _ensure_finding_author_dispatch(client, engagement_key, "AUTHOR-VA-001")
     finding = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
@@ -6803,7 +7266,10 @@ def test_coverage_summary_excludes_non_code_variants(client, isolate_settings):
             "notes": "",
             "source_name": "vulnerability-analyst",
             "details": {"evidence": "A"},
-            "provenance": {"agent_name": "vulnerability-analyst"},
+            "provenance": {
+                "agent_id": "AUTHOR-VA-001",
+                "agent_name": "vulnerability-analyst",
+            },
             "links": [
                 {
                     "link_kind": "variant_of",
@@ -6862,6 +7328,7 @@ def test_repo_scoped_coverage_excludes_ambiguous_shared_file_paths(client, isola
     assert shared_files_b[0]["file_path"] == "src/shared.py"
 
     _create_root_finding(client, engagement_key, "CH-090")
+    _ensure_finding_author_dispatch(client, engagement_key, "AUTHOR-CH-001")
     finding = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
@@ -6880,6 +7347,7 @@ def test_repo_scoped_coverage_excludes_ambiguous_shared_file_paths(client, isola
             "source_name": "code-vuln-hunter",
             "details": {"evidence": "A"},
             "provenance": {
+                "agent_id": "AUTHOR-CH-001",
                 "agent_name": "code-vuln-hunter",
                 "code_snapshot": _finding_code_snapshot(
                     client, engagement_key, int(repo_a["id"])
@@ -6947,7 +7415,10 @@ def test_module_creation_assigns_files_and_supports_module_scoped_fetch(client, 
         f"/engagements/{engagement_key}/assessment/code/files?module_id={module['id']}&limit=20"
     )
     assert scoped_files.status_code == 200
-    assert {item["file_path"] for item in scoped_files.json()} == {"src/parser.py", "src/helpers.py"}
+    assert {item["file_path"] for item in scoped_files.json()["items"]} == {
+        "src/parser.py",
+        "src/helpers.py",
+    }
 
 
 def test_module_analysis_status_tracks_file_progress(client, isolate_settings):
@@ -7416,7 +7887,7 @@ def test_bulk_structural_metadata_accepts_bounded_parser_signal_truncation(
     assert response.status_code == 200, response.text
     persisted = {
         row["id"]: row
-        for row in client.get(f"{base}/files?repo_id={repo['id']}&limit=20").json()
+        for row in client.get(f"{base}/files?repo_id={repo['id']}&limit=20").json()["items"]
     }[truncated["file_id"]]
     assert persisted["structural_analysis_status"] == "degraded"
     assert persisted["structural_analysis_mode"] == analysis_mode
@@ -7506,7 +7977,7 @@ def test_unsupported_structural_metadata_is_explicit_review_debt(
     assert response.status_code == 200, response.text
     persisted = {
         row["id"]: row
-        for row in client.get(f"{base}/files?repo_id={repo['id']}&limit=20").json()
+        for row in client.get(f"{base}/files?repo_id={repo['id']}&limit=20").json()["items"]
     }[payload["updates"][0]["file_id"]]
     assert persisted["structural_analysis_status"] == "unsupported"
     assert persisted["structural_degradation_reason"] == "unsupported_language"
@@ -7565,7 +8036,7 @@ def test_structural_index_update_is_all_or_none_snapshot_cas(client, isolate_set
         "repo_id": repo["id"],
         "repo_generation": binding["active_generation"],
         "source_manifest_digest": binding["source_manifest_digest"],
-        "structural_index_schema": "structural-index/v5",
+        "structural_index_schema": "structural-index/v6",
         "structural_input_digest": payload["structural_input_digest"],
         "structural_index_manifest_path": "tools/analysis-state/structural-index/manifest.json",
         "degraded_files": 0,
@@ -7576,7 +8047,7 @@ def test_structural_index_update_is_all_or_none_snapshot_cas(client, isolate_set
         "updated": 2,
     }
     indexed = client.get(f"{base}/repos/{repo['id']}").json()
-    assert indexed["structural_index_schema"] == "structural-index/v5"
+    assert indexed["structural_index_schema"] == "structural-index/v6"
     assert indexed["structural_index_generation"] == binding["active_generation"]
     assert indexed["structural_index_manifest_path"].endswith("manifest.json")
 
@@ -7589,7 +8060,7 @@ def test_structural_index_update_is_all_or_none_snapshot_cas(client, isolate_set
     assert "source hash" in rejected.json()["detail"].lower()
     after = {
         row["id"]: row
-        for row in client.get(f"{base}/files?repo_id={repo['id']}&limit=20").json()
+        for row in client.get(f"{base}/files?repo_id={repo['id']}&limit=20").json()["items"]
     }
     assert after[updates[0]["file_id"]]["total_functions"] == updates[0]["total_functions"]
 
@@ -7631,7 +8102,7 @@ def test_structural_publication_rejects_payload_from_prior_file_language_identit
     base = f"/engagements/{engagement_key}/assessment/code"
     changed_to_c = client.patch(f"{base}/files/{parser['id']}", json={"language": "c"})
     assert changed_to_c.status_code == 200, changed_to_c.text
-    current_files = client.get(f"{base}/files?repo_id={repo['id']}&limit=20").json()
+    current_files = client.get(f"{base}/files?repo_id={repo['id']}&limit=20").json()["items"]
     binding = client.get(f"{base}/repos/{repo['id']}").json()
     updates = [
         {
@@ -7658,14 +8129,14 @@ def test_structural_publication_rejects_payload_from_prior_file_language_identit
     corrected = client.patch(f"{base}/files/{parser['id']}", json={"language": "c++"})
     assert corrected.status_code == 200, corrected.text
     assert corrected.json()["language"] == "c++"
-    invalidated = client.get(f"{base}/files?repo_id={repo['id']}&limit=20").json()
+    invalidated = client.get(f"{base}/files?repo_id={repo['id']}&limit=20").json()["items"]
     assert {row["total_functions"] for row in invalidated} == {0}
 
     stale = client.post(f"{base}/files/bulk-structural-metadata", json=c_payload)
 
     assert stale.status_code == 409
     assert "language" in stale.json()["detail"].lower()
-    still_invalidated = client.get(f"{base}/files?repo_id={repo['id']}&limit=20").json()
+    still_invalidated = client.get(f"{base}/files?repo_id={repo['id']}&limit=20").json()["items"]
     assert {row["total_functions"] for row in still_invalidated} == {0}
     assert client.get(f"{base}/repos/{repo['id']}").json()[
         "structural_index_generation"
@@ -7688,7 +8159,7 @@ def test_structural_publication_rejects_payload_from_prior_file_language_identit
 
 def test_structural_input_digest_matches_cli_known_vector():
     assert code_analysis.STRUCTURAL_INDEX_SCHEMA == CLI_STRUCTURAL_INDEX_SCHEMA
-    assert code_analysis.STRUCTURAL_INDEX_SCHEMA == "structural-index/v5"
+    assert code_analysis.STRUCTURAL_INDEX_SCHEMA == "structural-index/v6"
     source_manifest_digest = "ab" * 32
     files = [
         {
@@ -7976,7 +8447,9 @@ def test_coverage_skip_reasons_come_from_current_terminal_queue_receipts(
         json={
             "mode": "reanalysis",
             "reason": "Re-open skipped file for an independent review",
-            "items": [{"file_id": helper["id"], "priority": 10}],
+            "items": [
+                {"file_id": helper["id"], "priority": 10, "supersedes": claim["id"]}
+            ],
         },
     )
     assert queued.status_code == 201, queued.text
@@ -8023,7 +8496,13 @@ def test_coverage_skip_reasons_come_from_current_terminal_queue_receipts(
         json={
             "mode": "reanalysis",
             "reason": "Run a third independent review",
-            "items": [{"file_id": helper["id"], "priority": 10}],
+            "items": [
+                {
+                    "file_id": helper["id"],
+                    "priority": 10,
+                    "supersedes": replacement_claim["id"],
+                }
+            ],
         },
     )
     assert final_queue.status_code == 201, final_queue.text
@@ -8047,13 +8526,18 @@ def test_coverage_skip_reasons_come_from_current_terminal_queue_receipts(
             item_ids=[final_claim["id"]],
             disposition="clean",
             notes="Latest attempt completed with a clean source review.",
-            cwe_coverage=[
-                {
-                    "family": "error-handling",
-                    "effort": 20,
-                    "notes": "Reviewed helper error paths.",
-                }
-            ],
+                cwe_coverage=[
+                    {
+                        "family": "error-handling",
+                        "effort": 20,
+                        "notes": "Reviewed helper error paths.",
+                    },
+                    {
+                        "family": "algorithmic-dos",
+                        "effort": 20,
+                        "notes": "Reviewed helper complexity and resource bounds.",
+                    },
+                ],
         ),
     )
     assert final.status_code == 200, final.text
@@ -8230,7 +8714,7 @@ def test_degraded_structural_metadata_is_durable_and_requires_manual_review(
     assert published.json()["degraded_files"] == 1
 
     persisted_repo = client.get(f"{base}/repos/{repo['id']}").json()
-    assert persisted_repo["structural_index_schema"] == "structural-index/v5"
+    assert persisted_repo["structural_index_schema"] == "structural-index/v6"
     assert persisted_repo["structural_degraded_files"] == 1
     assert persisted_repo["structural_degraded_file_paths"] == ["src/helpers.py"]
     assert persisted_repo["structural_analysis_status_counts"] == {
@@ -8240,7 +8724,7 @@ def test_degraded_structural_metadata_is_durable_and_requires_manual_review(
     }
     persisted_files = {
         row["id"]: row
-        for row in client.get(f"{base}/files?repo_id={repo['id']}&limit=20").json()
+        for row in client.get(f"{base}/files?repo_id={repo['id']}&limit=20").json()["items"]
     }
     degraded = persisted_files[helper["id"]]
     assert degraded["structural_analysis_status"] == "degraded"
@@ -8331,7 +8815,11 @@ def test_degraded_structural_metadata_is_durable_and_requires_manual_review(
             item_ids=[claim["id"]],
             disposition="clean",
             notes="Manual sealed-source review completed.",
-            cwe_coverage=[{"family": "manual-structural-review", "effort": 100}],
+                cwe_coverage=[
+                    {"family": "manual-structural-review", "effort": 100},
+                    {"family": "algorithmic-dos", "effort": 80},
+                    {"family": "error-handling", "effort": 80},
+                ],
         ),
     )
     assert reviewed.status_code == 200, reviewed.text
@@ -8386,7 +8874,7 @@ def test_degraded_structural_metadata_is_durable_and_requires_manual_review(
     assert reset_repo["structural_artifact_truncated_files"] == 0
     assert reset_repo["structural_artifact_truncated_file_paths"] == []
     assert reset_repo["structural_analysis_status_counts"] == {}
-    reset_files = client.get(f"{base}/files?repo_id={repo['id']}&limit=20").json()
+    reset_files = client.get(f"{base}/files?repo_id={repo['id']}&limit=20").json()["items"]
     assert {row["structural_analysis_status"] for row in reset_files} == {"pending"}
     assert all(row["structural_unavailable_dimensions"] == [] for row in reset_files)
     assert all(row["structural_signal_counts"] == {} for row in reset_files)
@@ -8875,6 +9363,7 @@ def test_code_readiness_blocks_current_stale_and_unbound_drafts_but_not_terminal
 
     readiness = client.get(f"{base}/readiness?target_phase=complete")
     assert readiness.status_code == 200, readiness.text
+    assert readiness.json()["track"] == "code"
     blockers = readiness.json()["blockers"]
     repo_blocker = next(
         row for row in blockers if row["code"] == "draft_code_findings_unresolved"
@@ -10360,6 +10849,7 @@ def test_complete_readiness_requires_snapshot_current_verification_and_blind_tri
     ).status_code == 200
     for row in files:
         _classify_file(client, engagement_key, int(row["id"]), "low", 10)
+    _ensure_finding_author_dispatch(client, engagement_key, "AUTHOR-CH-001")
     finding = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
@@ -10378,6 +10868,7 @@ def test_complete_readiness_requires_snapshot_current_verification_and_blind_tri
             "source_name": "code-vuln-hunter",
             "details": {"evidence": "informational hardening observation"},
             "provenance": {
+                "agent_id": "AUTHOR-CH-001",
                 "agent_name": "code-vuln-hunter",
                 "code_snapshot": _finding_code_snapshot(
                     client, engagement_key, int(repo["id"])
@@ -10789,8 +11280,10 @@ def test_queue_done_rejects_items_reset_out_of_processing(client, isolate_settin
         },
     )
     assert done.status_code == 409
-    assert "unless they are processing" in done.json()["detail"]
-    assert "pending" in done.json()["detail"]
+    assert done.json()["detail"] == (
+        f"Cannot complete queue item {queue_item['id']} unless it is processing; "
+        "current status is pending"
+    )
 
 
 def test_queue_error_rejects_items_reclaimed_after_validation(client, isolate_settings, monkeypatch):
@@ -11197,6 +11690,7 @@ def test_analysis_results_include_linked_finding_lifecycle(client, isolate_setti
     files = _create_files(client, engagement_key, int(repo["id"]))
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
 
+    _ensure_finding_author_dispatch(client, engagement_key, "AUTHOR-CH-777")
     finding = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
@@ -11218,6 +11712,7 @@ def test_analysis_results_include_linked_finding_lifecycle(client, isolate_setti
                 "impact": "No live issue.",
             },
             "provenance": {
+                "agent_id": "AUTHOR-CH-777",
                 "agent_name": "code-vuln-hunter",
                 "code_snapshot": _finding_code_snapshot(
                     client, engagement_key, int(repo["id"])
@@ -11344,6 +11839,7 @@ def test_coverage_detail_cwe(client, isolate_settings):
                     "file_id": parser_file["id"],
                     "priority": 95,
                     "slot_types": ["NETWORK-INPUT"],
+                    "supersedes": item1["id"],
                 }
             ],
         },
@@ -11522,8 +12018,8 @@ def test_coverage_integrity_passes_with_matching_results(client, isolate_setting
     assert len(integrity["warnings"]) == 0
 
 
-def test_coverage_integrity_warns_claimed_exceeds_total(client, isolate_settings):
-    """Claiming more functions_analyzed than total_functions on file triggers a warning."""
+def test_coverage_integrity_treats_claimed_exceeds_total_as_advisory(client, isolate_settings):
+    """An index undercount can focus review but cannot reject deeper observed coverage."""
     engagement_key = "2026-05-12-integrity-exceeds"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)
     repo = _create_repo(client, engagement_key, repo_key="integrity-exceeds-repo")
@@ -11571,8 +12067,9 @@ def test_coverage_integrity_warns_claimed_exceeds_total(client, isolate_settings
     )
     assert done.status_code == 200
     integrity = done.json()["coverage_integrity"]
-    assert integrity["plausible"] is False
-    assert any("exceeds" in w for w in integrity["warnings"])
+    assert integrity["plausible"] is True
+    assert integrity["authoritative_blockers"] == []
+    assert any("exceeds" in item for item in integrity["advisories"])
 
 
 def test_coverage_integrity_skips_not_applicable_entries(client, isolate_settings):
@@ -11820,7 +12317,7 @@ def test_queue_priority_mismatch_rejects_whole_batch_before_mutation(
         for row in client.get(
             f"/engagements/{engagement_key}/assessment/code/files"
             f"?repo_id={repo['id']}&limit=20"
-        ).json()
+        ).json()["items"]
         if row["file_path"] == "src/helpers.py"
     )
     _classify_file(client, engagement_key, int(helper_file["id"]), "high", 60)
@@ -11878,7 +12375,7 @@ def test_queue_batch_rolls_back_when_later_item_normalization_fails(
         for row in client.get(
             f"/engagements/{engagement_key}/assessment/code/files"
             f"?repo_id={repo['id']}&limit=20"
-        ).json()
+        ).json()["items"]
         if row["file_path"] == "src/helpers.py"
     )
     _classify_file(client, engagement_key, int(helper_file["id"]), "high", 60)
@@ -12126,12 +12623,30 @@ def test_explicit_reanalysis_requires_terminal_predecessor_and_records_audit_lin
     assert accidental_retry.json()["conflicts"] == 1
 
     reason = "Phase 2C independent adversarial reread"
+    missing_predecessor = client.post(
+        f"{base}/analysis-queue",
+        json={
+            "mode": "reanalysis",
+            "reason": reason,
+            "items": [{**item, "batch_theme": "phase-2c"}],
+        },
+    )
+    assert missing_predecessor.status_code == 422
+    assert "supersedes" in missing_predecessor.text
+
     mismatched_priority = client.post(
         f"{base}/analysis-queue",
         json={
             "mode": "reanalysis",
             "reason": reason,
-            "items": [{**item, "priority": 81, "batch_theme": "phase-2c"}],
+            "items": [
+                {
+                    **item,
+                    "priority": 81,
+                    "batch_theme": "phase-2c",
+                    "supersedes": original_id,
+                }
+            ],
         },
     )
     assert mismatched_priority.status_code == 409, mismatched_priority.text
@@ -12141,7 +12656,7 @@ def test_explicit_reanalysis_requires_terminal_predecessor_and_records_audit_lin
         json={
             "mode": "reanalysis",
             "reason": reason,
-            "items": [{**item, "batch_theme": "phase-2c"}],
+            "items": [{**item, "batch_theme": "phase-2c", "supersedes": original_id}],
         },
     )
     assert reanalysis.status_code == 201, reanalysis.text
@@ -12182,7 +12697,7 @@ def test_explicit_reanalysis_requires_terminal_predecessor_and_records_audit_lin
         json={
             "mode": "reanalysis",
             "reason": reason,
-            "items": [{**item, "batch_theme": "phase-2c"}],
+            "items": [{**item, "batch_theme": "phase-2c", "supersedes": original_id}],
         },
     )
     assert duplicate_reanalysis.status_code == 201
@@ -12210,7 +12725,13 @@ def test_reanalysis_history_does_not_block_content_refresh(client, isolate_setti
         json={
             "mode": "reanalysis",
             "reason": "Review the changed parser surface independently.",
-            "items": [{"file_id": file_row["id"], "priority": 80}],
+            "items": [
+                {
+                    "file_id": file_row["id"],
+                    "priority": 80,
+                    "supersedes": initial["id"],
+                }
+            ],
         },
     )
     assert reanalysis.status_code == 201, reanalysis.text
@@ -12225,8 +12746,8 @@ def test_reanalysis_history_does_not_block_content_refresh(client, isolate_setti
         "has_past_cve_fix",
     }
     current_files = client.get(
-        f"{base}/files?repo_id={repo['id']}&limit=20"
-    ).json()
+        f"{base}/files?repo_id={repo['id']}&limit=20&include_header_snippet=true"
+    ).json()["items"]
     manifest = [{key: row[key] for key in manifest_fields} for row in current_files]
     for row in manifest:
         if row["file_path"] == file_row["file_path"]:
@@ -12275,8 +12796,8 @@ def test_concurrent_fetch_never_promotes_stale_generation_history(
         "has_past_cve_fix",
     }
     current_files = client.get(
-        f"{base}/files?repo_id={repo['id']}&limit=20"
-    ).json()
+        f"{base}/files?repo_id={repo['id']}&limit=20&include_header_snippet=true"
+    ).json()["items"]
     manifest = [{key: row[key] for key in manifest_fields} for row in current_files]
     next(row for row in manifest if row["file_path"] == "src/helpers.py")[
         "file_hash"
@@ -12579,7 +13100,7 @@ def test_bulk_classify_priority_failure_rolls_back_whole_batch(
     assert response.status_code == 400, response.text
     persisted = client.get(
         f"/engagements/{engagement_key}/assessment/code/files?limit=20"
-    ).json()
+    ).json()["items"]
     assert {
         (row["classification"], row["analysis_priority"]) for row in persisted
     } == {("unclassified", 0)}
@@ -13309,7 +13830,9 @@ def test_verify_variant_readiness_blocks_only_current_suspicious_attempt(
     # A source-generation advance turns both prior attempts into retained history.
     # Neither an old-generation suspicious row nor a same-generation superseded
     # suspicious row may poison readiness for the new sealed source identity.
-    current_files = client.get(f"{base}/files?repo_id={repo['id']}&limit=20").json()
+    current_files = client.get(
+        f"{base}/files?repo_id={repo['id']}&limit=20&include_header_snippet=true"
+    ).json()["items"]
     manifest_fields = {
         "file_path",
         "language",
@@ -13425,7 +13948,13 @@ def test_suspicious_obligation_survives_nonsemantic_reanalysis_states_until_reso
         json={
             "mode": "reanalysis",
             "reason": "Exercise every nonsemantic successor state.",
-            "items": [{"file_id": file_row["id"], "priority": 80}],
+            "items": [
+                {
+                    "file_id": file_row["id"],
+                    "priority": 80,
+                    "supersedes": suspicious["id"],
+                }
+            ],
         },
     )
     assert queued.status_code == 201, queued.text

@@ -162,7 +162,7 @@ mindset lens: agent/rules/mindsets/idor-bac.md — Pass-1 wide sweep flagged num
 --- END PERSISTED PRIOR-STATE DATA ---
 
 ## Dispatch Context
-target: https://saas.acme.example/api/v1/orders/{id} and /api/v1/invoices/{id}
+target: https://api.acme-social.example/api/v1/orders/{id} and /api/v1/invoices/{id}
 application_unit_id: 42
 outcome objective: hunt the orders/invoices surface for access-control and object-reference
   weaknesses across the two named identities; prove any attacker outcome you find (read, write,
@@ -246,7 +246,7 @@ mindset lens: agent/rules/mindsets/chain-impact.md — two confirmed findings on
 --- END PERSISTED PRIOR-STATE DATA ---
 
 ## Dispatch Context
-target: https://saas.acme.example (repo n/a)
+target: https://api.acme-social.example (repo n/a)
 outcome objective: find and prove P1/P2 impact across the confirmed set on this target — start
   with the full endpoint map and coverage gaps (self-serve via `vigil assess fetch`), then
   narrow to whether the admin SSO auth-bypass and the orders IDOR compose into a single chain

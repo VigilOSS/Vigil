@@ -40,15 +40,18 @@ def _operator_relative_path(engagement_dir: Path) -> Path:
     return Path("agent") / name
 
 
-def _client_name(explicit: str | None) -> str:
-    value = (
+def _known_client(value: object) -> str:
+    normalized = str(value).strip().lower()
+    return normalized if normalized in _KNOWN_CLIENTS else "unknown"
+
+
+def _launcher_effective_client(explicit: str | None) -> str:
+    return _known_client(
         explicit
         or os.environ.get("VIGIL_CLIENT_NAME")
         or os.environ.get("VIGIL_CLIENT")
         or ""
     )
-    normalized = str(value).strip().lower()
-    return normalized if normalized in _KNOWN_CLIENTS else "unknown"
 
 
 def _safe_role_basename(value: str) -> str | None:
@@ -82,7 +85,8 @@ def build_dispatch_instruction_identity(
     install_root = agent_root.parent
     engagement_dir = engagement_dir.resolve()
     warnings: list[str] = []
-    client = _client_name(client_name)
+    launcher_client = _launcher_effective_client(client_name)
+    requested_client = _known_client(os.environ.get("VIGIL_REQUESTED_CLIENT", ""))
     meta = _load_object(install_root / ".vigil-install-meta.json")
     raw_revision = meta.get("source_sha")
     source_revision = (
@@ -103,15 +107,15 @@ def build_dispatch_instruction_identity(
 
     specialist_relative: Path | None = None
     specialist_digest: str | None = None
-    template = _CLIENT_SPECIALIST_PATHS.get(client)
+    template = _CLIENT_SPECIALIST_PATHS.get(launcher_client)
     if template is None:
-        if client == "unknown":
+        if launcher_client == "unknown":
             warnings.append(
                 "client identity is unavailable; specialist instruction fingerprint is unknown"
             )
         else:
             warnings.append(
-                f"client {client} does not install a specialist wrapper; "
+                f"client {launcher_client} does not install a specialist wrapper; "
                 "specialist instruction fingerprint is unknown"
             )
     else:
@@ -158,7 +162,14 @@ def build_dispatch_instruction_identity(
             )
 
     identity = {
-        "client_name": client,
+        # ``client_name`` remains a compatible projection for older backends and
+        # readers. It is launcher truth, never a provider-observed claim.
+        "client_name": launcher_client,
+        "requested_client": requested_client,
+        "launcher_effective_client": launcher_client,
+        # No supported provider currently exposes one stable, client-owned signal
+        # across every launch context. Unknown is data, not a failure to guess.
+        "provider_observed_client": "unknown",
         "source_revision": source_revision,
         "operator_instruction_path": str(operator_relative),
         "operator_instruction_sha256": operator_digest,

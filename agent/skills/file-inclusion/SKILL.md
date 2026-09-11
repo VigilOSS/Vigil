@@ -176,7 +176,7 @@ Before serving a shell, confirm the server actually fetches an attacker URL — 
 ```bash
 vigil oob status --json
 vigil oob mint --client <name> --technique rfi --target-url "https://target/index.php" --param page --probe-kind http
-# → host  <prefix>-<token>.<client-id>.oob.example.com   (= $OOB_HOST)
+# → host  <prefix>-<token>.<client-id>.<configured-oob-domain>   (= $OOB_HOST)
 ```
 
 Point the inclusion at the EXACT host mint prints (`$OOB_HOST` — the nonce bound under the client id; never hand-build a bare `<nonce>.oob...` host):

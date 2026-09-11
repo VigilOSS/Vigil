@@ -192,12 +192,19 @@ def _manifest_for(engagement_dir: Path) -> dict[str, Any]:
     scope = _migrate_scope_file(scope_path)
     key = engagement_dir.name
     target = str(manifest.get("target") or manifest.get("hostname") or scope.get("hostname") or key)
-    status = str(scope.get("status") or "in_progress")
     # ``engagement_type`` comes from scope.json (preferred) with a fallback to
     # engagement.json. None means "leave whatever the DB had", which preserves
     # the DEFAULT 'red' for fresh rows without overriding existing values.
     raw_type = scope.get("engagement_type") or manifest.get("engagement_type")
     engagement_type: str | None = str(raw_type) if raw_type else None
+    status = str(scope.get("status") or "in_progress")
+    if engagement_type == "both" and status in {"in_progress", "completed"}:
+        status = (
+            "completed"
+            if scope.get("current_phase") == "complete"
+            and scope.get("code_phase") == "complete"
+            else "in_progress"
+        )
     return {
         "key": key,
         "target": target,

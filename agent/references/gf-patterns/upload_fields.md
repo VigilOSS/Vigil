@@ -1,7 +1,7 @@
 ---
 name: gf-patterns:upload_fields
 description: File-upload parameters (`file`, `filename`, `attachment`, `avatar`)
-origin: 1ndianl33t/Gf-Patterns (+ local overlay)
+origin: local overlay (no upstream 1ndianl33t/Gf-Patterns pattern at the audited revision)
 bucket: upload_fields
 skill: file-upload-testing
 weight: 30

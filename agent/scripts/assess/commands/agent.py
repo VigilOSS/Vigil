@@ -114,6 +114,11 @@ def register(subparsers) -> None:
         help="Print a filled dispatch prompt after the durable row is recorded.",
     )
     start.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate and render the dispatch without persisting a row.",
+    )
+    start.add_argument(
         "--prompt-context-json",
         help=(
             "JSON object (inline or file) containing every canonical prompt-only "
@@ -410,9 +415,9 @@ def _close_one(args, agent_id: str) -> None:
                 f"`vigil assess agent done {agent_id} --status completed` "
                 f"(or --status failed / blocked / aborted).\n"
                 f"  3. Operator override: write the closing handoff manually with "
-                f"`vigil assess agent handoff --agent-id {agent_id} --role <role> "
-                f"--summary \"...\" --handoff-status blocked` then re-run "
-                f"`agent close`.",
+                f"`vigil assess agent handoff --from-json <path>` — a JSON object "
+                f"carrying agent_id={agent_id}, agent_role, summary, and "
+                f"handoff_status \"blocked\" — then re-run `agent close`.",
                 file=sys.stderr,
             )
             sys.exit(2)
@@ -676,7 +681,8 @@ def _start(args) -> None:
         )
         if not getattr(args, "allow_duplicate", False):
             dispatch._warn_on_overlapping_dispatch(client, payload)  # noqa: SLF001
-        row = client.record_dispatch(payload)
+        dry_run = bool(getattr(args, "dry_run", False))
+        row = {"id": None, **payload} if dry_run else client.record_dispatch(payload)
     finally:
         client.close()
     role = str(row.get("agent_role") or "")
@@ -687,6 +693,7 @@ def _start(args) -> None:
         "dispatch_id": row.get("id"),
         "agent_id": row.get("agent_id"),
         "status": row.get("status"),
+        "dry_run": dry_run,
     }, ensure_ascii=False))
     identity_lines = _runtime_identity_lines(row)
     if source_identity:
@@ -699,7 +706,11 @@ def _start(args) -> None:
     )
     next_action = [
         "## Next action",
-        "This command records the dispatch only; it does not spawn or launch the specialist.",
+        (
+            "Dry run validated this dispatch; no row was persisted."
+            if dry_run
+            else "This command records the dispatch only; it does not spawn or launch the specialist."
+        ),
         f"Launch the specialist with {_spawn_command_hint(Path(cfg.engagement_dir), role)} "
         f"and pass it the {blocks} above.",
     ]

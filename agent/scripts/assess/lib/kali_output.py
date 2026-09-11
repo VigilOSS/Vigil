@@ -74,9 +74,12 @@ class KaliResult:
     #   ``self_attributed``    — the tool applies them itself (the browser verb);
     #   ``skipped``            — a passive/DNS/L3-L4 tool that sends no HTTP to
     #                            the in-scope target, so none can ride;
-    #   ``verified_in_script`` — a script FILE, whose text references every
-    #                            required header (a text scan, not a proof —
-    #                            see ``kali._script_references_required_headers``);
+    #   ``referenced_in_script`` — a script FILE, whose non-comment text
+    #                              references every required header (a text scan,
+    #                              not proof that each request carries it);
+    #   ``not_applicable_no_in_scope_url`` — no literal admitted request found;
+    #   ``unknown_dynamic_target`` — target attribution is dynamic/unknown;
+    #   ``unknown_script_unreadable`` — the exact selected file was unavailable;
     #   ``warned``             — an unclassifiable tool with no script to read;
     #                            the run proceeded unattributed.
     required_header_status: str = "none_required"
@@ -1320,25 +1323,17 @@ def shell_script_file_argv(cmd: list[str]) -> str:
     and never reach the requests inside it.
     """
     effective = scope_lib._unwrap_launcher_argv([str(token) for token in cmd])
-    if not effective or _wrapped_shell_script_index(cmd) is not None:
+    if not effective:
         return ""
     head = effective[0]
     if head not in _SHELL_BINARIES and os.path.basename(head) not in _SHELL_BINARIES:
         return ""
-    for token in effective[1:]:
-        if not token.startswith("-"):
-            return token
-    return ""
+    return scope_lib.execution_script_argv([str(token) for token in cmd])
 
 
 # Interpreter heads whose first non-flag argument is a SCRIPT FILE, not a target.
 # Same argv shape as ``bash poc.sh``: there is no request on the command line to
 # rewrite, so an appended ``-H`` lands on the interpreter as ``sys.argv[1]``.
-_SCRIPT_INTERPRETERS = frozenset(
-    {"python", "python3", "perl", "ruby", "node", "nodejs", "php"}
-)
-
-
 def interpreter_script_argv(cmd: list[str]) -> str:
     """The script path when ``cmd`` runs a SCRIPT FILE, else ``""``.
 
@@ -1348,23 +1343,7 @@ def interpreter_script_argv(cmd: list[str]) -> str:
     probe.sh`` does. Kept separate from the shell-only helper, whose message
     ("re-shape it as ``bash -c``") is advice only a shell invocation can take.
     """
-    shell = shell_script_file_argv(cmd)
-    if shell:
-        return shell
-    effective = scope_lib._unwrap_launcher_argv([str(token) for token in cmd])
-    if not effective:
-        return ""
-    head = os.path.basename(str(effective[0])).lower()
-    if head not in _SCRIPT_INTERPRETERS:
-        return ""
-    for index, token in enumerate(effective[1:]):
-        if token.startswith("-"):
-            # ``-c <program-text>`` is source on the command line, not a file.
-            if token == "-c":
-                return ""
-            continue
-        return effective[1 + index]
-    return ""
+    return scope_lib.execution_script_argv([str(token) for token in cmd])
 
 
 def shell_script_body_gap(cmd: list[str]) -> str:

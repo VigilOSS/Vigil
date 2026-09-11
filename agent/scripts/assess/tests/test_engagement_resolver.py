@@ -117,7 +117,7 @@ def test_empty_explicit_flag_never_falls_through(tmp_path, neutral_cwd, monkeypa
 
 def test_cwd_session_disagreement_fails_closed(tmp_path, monkeypatch):
     session = _make_engagement(tmp_path, "acme-telco")
-    here = _make_engagement(tmp_path, "Acme")
+    here = _make_engagement(tmp_path, "acme-planner")
     monkeypatch.setenv("VIGIL_SESSION_ENGAGEMENT_DIR", str(session))
     monkeypatch.chdir(here)
     with pytest.raises(SystemExit) as exc:

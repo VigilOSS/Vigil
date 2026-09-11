@@ -122,7 +122,7 @@ Forbidden proposal phrasings (drop the alert into `dispatch_to_L2` instead):
 Proposal payload shape (stored on an unreviewed finding for L3):
 
 ```bash
-vigil assess finding record alert-triage-specialist <finding-json>
+vigil assess finding record alert-triage-specialist <finding-json> --agent-id <your-agent_id>
 ```
 
 ## L1→L2 Handoff Contract
@@ -191,10 +191,10 @@ Before your dispatch returns, run in this order:
 
 4. **Record the finding.**
    - Mechanical-FP path: `vigil assess finding record alert-triage-specialist
-     <finding-json>` with `verification_status=unreviewed`, then hand it to L3 with
+     <finding-json> --agent-id <your-agent_id>` with `verification_status=unreviewed`, then hand it to L3 with
      the verbatim tenant-ref citation and matching fields for a structured counter-check.
    - Dispatch-to-L2 path: `vigil assess finding record alert-triage-specialist
-     <finding-json>` with `status=draft`, `verification_status=unreviewed`.
+     <finding-json> --agent-id <your-agent_id>` with `status=draft`, `verification_status=unreviewed`.
 
 5. **Record the activity entry.** `vigil assess log` with `--actor-kind agent`,
    `action=alert_triaged`, and `--metadata-inline` carrying `{tier:"L1",
@@ -234,7 +234,7 @@ cited observations in an L1 finding's `summary`, `details`, or handoff `next_ste
 - "Pending verifier review" — every L1 dispatch is by definition pending
   verifier review; restating it is noise
 
-Use specific, citable claims instead: "actor IP 80.94.92.234 (ASN 197207, RU)
+Use specific, citable claims instead: "actor IP 198.51.100.42 (documentation range)
 outside the user's 30-day baseline ASN set (US-AS7922 only)", "OAuth grant to
 `client_id=8675309-abc.apps.googleusercontent.com` not on the tenant ref's
 approved-OAuth-clients list".

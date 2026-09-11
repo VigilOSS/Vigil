@@ -77,13 +77,13 @@ The `code-index` command:
 - Reconciles the complete sealed path/hash inventory with the current backend language inventory;
   documented aliases such as `c++` normalize to the parser identity `cpp`, while unknown labels fail
   closed instead of falling back from the filename
-- Writes a `structural-index/v5` per-repo manifest bound to `repo_id`, generation, source-manifest
+- Writes a `structural-index/v6` per-repo manifest bound to `repo_id`, generation, source-manifest
   digest, snapshot path, per-file source hashes, and a canonical structural-input digest that includes
   every indexed language. Its `path_to_index` map is the only supported file-to-index lookup; the
   backend's `structural_index_schema` and `structural_index_manifest_path` record the accepted
   contract and location. A language-only correction creates a distinct immutable derived artifact
   while retaining the old one as history
-- Upgrades only the exact writer-shaped legacy v3 aggregate during build, after the new v5 artifact
+- Upgrades only the exact writer-shaped legacy v3 aggregate during build, after the new v6 artifact
   is complete: unique keys, numeric/digest/path bindings, and debt-count invariants are validated;
   its exact bytes are then retained at
   `structural-index/history/aggregates/v3/<sha256>.json`, and the canonical file is atomically

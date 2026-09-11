@@ -94,7 +94,7 @@ When `{{7*7}}` evaluates server-side but the result is not reflected back (rende
       ```bash
       vigil oob status --json   # confirm readiness
       vigil oob mint --client <name> --technique ssti --target-url "https://target/profile" --param bio --probe-kind http
-      # -> http  http://<prefix>-<token>.<client-id>.oob.example.com/   (= $OOB_HOST)
+      # -> http  http://<prefix>-<token>.<client-id>.<configured-oob-domain>/   (= $OOB_HOST)
       ```
       Embed the EXACT host mint printed (`$OOB_HOST` — the nonce bound under the client id; never hand-build a bare `<nonce>.oob...` host) in the gadget for the fingerprinted engine and deliver via the kali exec wrapper:
       ```

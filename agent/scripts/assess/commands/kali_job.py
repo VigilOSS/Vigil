@@ -32,9 +32,11 @@ from assess.lib.kali import (
     _utcnow_iso,
     merge_auth_context,
     prepare_execution_command,
+    required_header_env_pairs,
     resolve_identity_env,
+    _required_headers,
 )
-from assess.lib.kali_audit import _enum_reject_message
+from assess.lib.kali_audit import _enum_reject_message, _extract_target_anchor
 from assess.lib.kali_jobs import (
     job_list,
     job_status,
@@ -234,6 +236,10 @@ def _run_start(args) -> None:
         raise AssessError(
             "--parent-command-run-id is system-owned for async jobs and cannot be supplied"
         )
+    prepare_report: dict[str, str] = {}
+    required_header_pairs = required_header_env_pairs(
+        _required_headers(engagement_dir)
+    )
     try:
         identity_env_pairs, identity_env_names = resolve_identity_env(
             getattr(args, "identity_env", None),
@@ -250,13 +256,18 @@ def _run_start(args) -> None:
             identity_scope=getattr(args, "identity_scope", "") or "",
             identity_target=getattr(args, "identity_target", "") or "",
             prepared_auth_context=getattr(args, "prepared_auth_context", None),
+            report=prepare_report,
         )
         auth_context = merge_auth_context(auth_context, *identity_env_names)
+        inferred_target_host = _extract_target_anchor(derived_tool_name, command)[0]
         execution_policy = scope_lib.enforce_execution_policy(
             command,
             tool_name=derived_tool_name,
             engagement_dir=engagement_dir,
+            target_host=(getattr(args, "target_host", None) or inferred_target_host or "").strip(),
+            execution_phase=str(getattr(args, "phase", "") or "").strip(),
         )
+        execution_policy.update(prepare_report)
     except scope_lib.ScopePolicyError as exc:
         run_uuid = uuid.uuid4().hex
         output_dir = engagement_dir / "scans" / "kali" / "jobs"
@@ -295,6 +306,7 @@ def _run_start(args) -> None:
         "timeout_seconds_requested": int(timeout_value),
         "scope_version": _scope_version(engagement_dir),
         "auth_context": auth_context,
+        **prepare_report,
         **execution_policy,
     }
     record = start_job(
@@ -305,7 +317,7 @@ def _run_start(args) -> None:
         tool_name=derived_tool_name,
         engagement_dir=engagement_dir,
         config=cfg,
-        env_pairs=identity_env_pairs,
+        env_pairs=[*required_header_pairs, *identity_env_pairs],
     )
     print(json.dumps(record, indent=2, ensure_ascii=False))
 

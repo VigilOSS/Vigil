@@ -1,7 +1,7 @@
 <!--
 Blue incident report template. Loaded by `report-writer` when
 `engagement_type=blue`. Readers: tenant exec stakeholder (§1-3, 9, 10), tenant
-security team (all), counsel/compliance (§3, 7, 11). PII ships in Appendix B
+security team (all), counsel/compliance (§3, 7, 11). Exact PII ships in Appendix B
 out-of-band.
 
 Full anti-slop rule set: `agent/rules/triage.md` §21. The operative banned
@@ -33,7 +33,7 @@ SECTION LIMITS (HARD) — referenced from every section header
 | Recommendations | 300 words (table preferred) |
 | Coverage Gaps & Limitations | 300 words |
 | Appendix A (Evidence Index) | Unbounded, strictly tabular |
-| Appendix B (Sensitive Annex) | One paragraph in the main report |
+| Appendix B (Evidence Annex) | One paragraph in the main report |
 
 If a section needs more space, split the finding or move detail to an artifact.
 
@@ -222,9 +222,9 @@ Cite the `command-run-id` if the original investigator pull is in `assessment_co
 | 5. Devil's advocate | `PASS (survives)` | `<art_id>` | <hypotheses inspected; ruled-out evidence for each> |
 
 <!--
-`verified`: every check has cited PASS evidence + a non-empty rebuttal.
+`confirmed`: every check has cited PASS evidence + a non-empty rebuttal.
 `downgraded`: at least one check is DOWNGRADE; name which and what narrowed it.
-`escalated`: render the FOR / AGAINST voting summary from the verifier handoff.
+`disputed`: render the FOR / AGAINST voting summary from the verifier handoff.
 -->
 
 #### Cross-platform correlation (when applicable)
@@ -406,25 +406,25 @@ entries and the L3 handoff's `coverage_gaps` array.
 LIMIT: Unbounded, STRICTLY TABULAR. Pull from `assessment_artifacts WHERE
 engagement_id=<current> AND scratch=0`. Sort by `kind`, then `relative_path`.
 Exclude `false_positive`-only artifacts (they are marked scratch). SHA-256 is
-the backend-computed value — do NOT recompute. `--sensitive` rows show kind +
-sha + link but suppress the FTS preview; body lives in Appendix B.
+the backend-computed value — do NOT recompute. Artifact previews and indexed
+content remain operator-visible; the evidence body may also be included in Appendix B.
 -->
 
 | Artifact ID | Relative path | Producer (agent / cmd-run) | SHA-256 | Size | Kind | Linked finding |
 |-------------|---------------|----------------------------|---------|------|------|----------------|
 | `<art_id>` | `ir/reports/<feed>_<target>_<window>.json` | `<role>` / `<cmd-run-id>` | `<sha256>` | `<bytes>` | `<alert_intake | ir_log | ir_evidence | timeline | ioc_dump | containment_proof | ir_closeout>` | `<finding-slug>` |
 | `<art_id>` | `ir/evidence/<topic>.md` | `<role>` / `<cmd-run-id>` | `<sha256>` | `<bytes>` | `<kind>` | `<finding-slug>` |
-| `<art_id>` | `ir/reports/<sensitive_export>.csv` | `<role>` | `<sha256>` | `<bytes>` | `<kind>` `--sensitive` | `<finding-slug>` — preview suppressed (see Appendix B) |
+| `<art_id>` | `ir/reports/<evidence_export>.csv` | `<role>` | `<sha256>` | `<bytes>` | `<kind>` | `<finding-slug>` — see Appendix B |
 
 <!-- Shape example. Real engagements carry 20-200 rows. -->
 
 ---
 
-## Appendix B — Sensitive Annex (separate delivery)
+## Appendix B — Evidence Annex (separate delivery)
 
 <!-- LIMIT: One paragraph here. The annex itself ships separately. -->
 
-Delivered separately on encrypted channel to `<contact-role-or-name>`. Contents: PII (mapping `actor.email` to human owners), attacker-modified message bodies, credential fragments observed in audit, IP/UPN combinations, and any other PII surfaced during investigation. Distribution list: `<named-recipients>`. Encrypted-channel reference: `<channel-id or PGP-key-fingerprint>`. The main report names the Annex but does not reproduce its contents.
+Delivered separately on encrypted channel to `<contact-role-or-name>`. Contents: exact PII (mapping `actor.email` to human owners), attacker-modified message bodies, credentials observed in audit, IP/UPN combinations, and other evidence surfaced during investigation. Distribution list: `<named-recipients>`. Encrypted-channel reference: `<channel-id or PGP-key-fingerprint>`. The main report names the Annex and keeps the same exact values available to the operator.
 
 ---
 

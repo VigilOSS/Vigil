@@ -31,7 +31,7 @@ reads, then stores and returns. That is the intended inject-and-audit mechanism 
 finding, and never a reason to redact it or pause authenticated work. (`vigil assess auth list`
 prints cookie names only to stay scannable, not because the value is secret.)
 
-Redaction and PII-masking are the report-writer's job at submission time, not yours. The one limit
+Do not redact or mask operator-owned evidence at any stage, including submission authoring. The one limit
 that still binds you is about the *target's* data, not your own: don't bulk-pull real user records
 to "prove" a finding — one minimal sample is the evidence (§4).
 
@@ -544,8 +544,17 @@ there, do not re-derive it here.
 
 Record every finding with:
 ```
-vigil assess finding record <agent-name> <finding-json-file>
+vigil assess finding record <agent-name> <finding-json-file> --agent-id <your-agent_id>
 ```
+
+**`--agent-id` is your DISPATCH id, copied verbatim from the Runtime Identity block at the top of
+your prompt (e.g. `VA-RUN-3`) — not the role name the positional `<agent-name>` carries.** It is
+stored as `provenance.agent_id`, the finding's durable author identity, and it is what lets the
+backend prove a later verifier was a *different* dispatch. Omit it and the finding is stranded at
+`verification_status=unreviewed` forever: every terminal transition (`confirmed`, `downgraded`,
+`false_positive`) is refused with "terminal verification cannot establish an independent verifier".
+Passing the *wrong* id is worse than omitting it — it attributes your finding to another dispatch,
+and the value is immutable once stored, so get it right on the first record.
 
 The JSON payload must match `schemas/finding-record.schema.json`. Findings are always JSON — convert from markdown before recording.
 Run `vigil assess contract finding record` for the canonical field list and examples.
@@ -575,8 +584,8 @@ downstream can recover them. `repro_runs` carries the `command-run` ids behind t
 order (`vigil assess command-run list --q "<url/param/payload>"` finds ids you did not note);
 `export submission` renders their real argv and reports an id that does not resolve. **A step with
 no run id behind it was imagined, not executed.** Do not sanitize as you write: credentials and
-local state are self-owned (see "Credentials and Local State Are Self-Owned"), redaction is the
-report-writer's job at submission time, and an unbound placeholder — or one placeholder reused
+local state are self-owned (see "Credentials and Local State Are Self-Owned"). Preserve exact
+values through submission; an unbound placeholder — or one placeholder reused
 across different objects — makes the reproduction unfollowable by construction.
 
 When a finding is only reportable as part of a chain, keep it in the same finding lifecycle and

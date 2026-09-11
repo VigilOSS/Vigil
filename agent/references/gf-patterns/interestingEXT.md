@@ -1,7 +1,7 @@
 ---
 name: gf-patterns:interestingEXT
 description: File extensions that signal backup, config, source, and sensitive-file exposure
-origin: 1ndianl33t/Gf-Patterns (+ local overlay)
+origin: 1ndianl33t/Gf-Patterns@f686f06ae647726578920084c894100d702496cc (+ local overlay)
 bucket: interestingext
 skill: sensitive-data-detection, source-analysis
 weight: 10
@@ -91,7 +91,7 @@ because they are full path-segment filenames rather than trailing extensions.
 
 - [1ndianl33t/Gf-Patterns](https://github.com/1ndianl33t/Gf-Patterns) — canonical community pattern set
 - [tomnomnom/gf](https://github.com/tomnomnom/gf) — tool
-- [PayloadsAllTheThings Info Disclosure](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Insecure%20Source%20Code%20Management)
+- [PayloadsAllTheThings Info Disclosure](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/3ac27901c711bdf3f5b65a7b1d1820a1f65bd09a/Insecure%20Source%20Code%20Management)
 
 ## Related
 

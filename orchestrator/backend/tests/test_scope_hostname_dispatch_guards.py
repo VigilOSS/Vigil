@@ -7,7 +7,7 @@ Covers three verified defects:
     scorer, and work-buffer claim projections now route every host through the
     SAME ``_host_admitted_by_scope`` primitive ``web_uncovered_high_route_hosts``
     uses, so a host the engagement does not own (a wildcard co-tenant like
-    ``otherchurch.acme-portal.example`` under a specific-host allowlist, or an
+    ``otherchurch.acme-church.example`` under a specific-host allowlist, or an
     explicit ``out_of_scope`` carve-out) is never a depth blocker nor a dispatch
     target — while a legitimately in-scope subdomain still is.
   * I-08 — malformed host keys: the maximally-lenient surface/probe parser is
@@ -241,40 +241,40 @@ def test_garbage_probe_target_host_mints_no_under_observed_unit(client, isolate_
 # I-07 — out-of-scope / co-tenant hosts excluded from scorer + depth ledger
 # --------------------------------------------------------------------------- #
 def test_scorer_drops_wildcard_co_tenant_variant_host(client, isolate_settings) -> None:
-    """A specific-host allowlist (``mychurch.acme-portal.example``) must NOT admit a
-    co-tenant (``otherchurch.acme-portal.example``) discovered via proxy/redirect."""
+    """A specific-host allowlist (``mychurch.acme-church.example``) must NOT admit a
+    co-tenant (``otherchurch.acme-church.example``) discovered via proxy/redirect."""
     key = "2026-07-24-000000-i07-cotenant"
     _write_engagement(
         isolate_settings["engagements_dir"],
         key=key,
-        scope_hosts=["mychurch.acme-portal.example"],
+        scope_hosts=["mychurch.acme-church.example"],
     )
     eng_id, _base = _register(client, key)
-    _variant(eng_id, url="https://mychurch.acme-portal.example/giving/account")
-    _variant(eng_id, url="https://otherchurch.acme-portal.example/giving/account")
+    _variant(eng_id, url="https://mychurch.acme-church.example/giving/account")
+    _variant(eng_id, url="https://otherchurch.acme-church.example/giving/account")
 
     state_manager.score_application_units(eng_id)
     hosts = _hosts(state_manager.list_application_units(eng_id))
-    assert "mychurch.acme-portal.example" in hosts
-    assert "otherchurch.acme-portal.example" not in hosts
+    assert "mychurch.acme-church.example" in hosts
+    assert "otherchurch.acme-church.example" not in hosts
 
 
 def test_legit_wildcard_scope_admits_all_subdomains(client, isolate_settings) -> None:
-    """The don't-over-block guard: when the operator authored ``*.acme-portal.example``
+    """The don't-over-block guard: when the operator authored ``*.acme-church.example``
     the co-tenant IS in scope and must still score (no regression)."""
     key = "2026-07-24-000000-i07-wildcard-ok"
     _write_engagement(
         isolate_settings["engagements_dir"],
         key=key,
-        scope_hosts=["*.acme-portal.example"],
+        scope_hosts=["*.acme-church.example"],
     )
     eng_id, _base = _register(client, key)
-    _variant(eng_id, url="https://mychurch.acme-portal.example/giving/account")
-    _variant(eng_id, url="https://otherchurch.acme-portal.example/giving/account")
+    _variant(eng_id, url="https://mychurch.acme-church.example/giving/account")
+    _variant(eng_id, url="https://otherchurch.acme-church.example/giving/account")
 
     state_manager.score_application_units(eng_id)
     hosts = _hosts(state_manager.list_application_units(eng_id))
-    assert {"mychurch.acme-portal.example", "otherchurch.acme-portal.example"} <= hosts
+    assert {"mychurch.acme-church.example", "otherchurch.acme-church.example"} <= hosts
 
 
 def test_depth_block_excludes_out_of_scope_carveout_surface(client, isolate_settings) -> None:
@@ -370,16 +370,16 @@ def test_fetch_by_priority_never_claims_out_of_scope_host(client, isolate_settin
     _write_engagement(
         isolate_settings["engagements_dir"],
         key=key,
-        scope_hosts=["mychurch.acme-portal.example"],
+        scope_hosts=["mychurch.acme-church.example"],
     )
     eng_id, _base = _register(client, key)
-    _bulk_pending(eng_id, host="mychurch.acme-portal.example", path_id="a", priority=10, queue="wi:in")
+    _bulk_pending(eng_id, host="mychurch.acme-church.example", path_id="a", priority=10, queue="wi:in")
     # Higher priority, but an out-of-scope co-tenant → must be skipped.
-    _bulk_pending(eng_id, host="otherchurch.acme-portal.example", path_id="b", priority=90, queue="wi:oos")
+    _bulk_pending(eng_id, host="otherchurch.acme-church.example", path_id="b", priority=90, queue="wi:oos")
 
     res = state_manager.fetch_work_items_by_priority(eng_id, limit=10, agent="auto")
     claimed_hosts = {c["host"] for c in res["claimed"]}
-    assert claimed_hosts == {"mychurch.acme-portal.example"}
+    assert claimed_hosts == {"mychurch.acme-church.example"}
 
 
 def test_fetch_by_type_never_claims_out_of_scope_host(client, isolate_settings) -> None:
@@ -387,18 +387,18 @@ def test_fetch_by_type_never_claims_out_of_scope_host(client, isolate_settings) 
     _write_engagement(
         isolate_settings["engagements_dir"],
         key=key,
-        scope_hosts=["mychurch.acme-portal.example"],
+        scope_hosts=["mychurch.acme-church.example"],
     )
     eng_id, base = _register(client, key)
-    _bulk_pending(eng_id, host="mychurch.acme-portal.example", path_id="a", priority=10, queue="wi:in")
-    _bulk_pending(eng_id, host="otherchurch.acme-portal.example", path_id="b", priority=90, queue="wi:oos")
+    _bulk_pending(eng_id, host="mychurch.acme-church.example", path_id="a", priority=10, queue="wi:in")
+    _bulk_pending(eng_id, host="otherchurch.acme-church.example", path_id="b", priority=90, queue="wi:oos")
 
     res = state_manager.fetch_work_items(eng_id, type_val="api", limit=10, agent="vulnerability-analyst")
     claimed_hosts = {c["host"] for c in res["claimed"]}
-    assert "mychurch.acme-portal.example" in claimed_hosts
-    assert "otherchurch.acme-portal.example" not in claimed_hosts
+    assert "mychurch.acme-church.example" in claimed_hosts
+    assert "otherchurch.acme-church.example" not in claimed_hosts
     # The out-of-scope row is neither claimed nor consumed — it stays pending.
-    assert _pending_hosts(client, base) == {"otherchurch.acme-portal.example"}
+    assert _pending_hosts(client, base) == {"otherchurch.acme-church.example"}
 
 
 def test_fetch_by_unit_skips_out_of_scope_candidate(client, isolate_settings) -> None:

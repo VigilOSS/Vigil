@@ -12,6 +12,7 @@ from app import db as db_module
 from app.services import state_manager
 
 ENGAGEMENT_KEY = "2026-05-29-120000-notes-mode"
+AUTHOR_AGENT_ID = "NOTES-MODE-FIXTURE-AUTHOR"
 
 
 def _seed(client, isolate_settings) -> None:
@@ -23,6 +24,15 @@ def _seed(client, isolate_settings) -> None:
     )
     (engagement_dir / "findings.md").write_text("# Findings\n", encoding="utf-8")
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    dispatch = client.post(
+        f"{_base()}/dispatches",
+        json={
+            "agent_id": AUTHOR_AGENT_ID,
+            "agent_role": "vulnerability-analyst",
+            "task": "Record notes-mode fixture findings",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
 
 
 def _finding_payload() -> dict:
@@ -38,6 +48,7 @@ def _finding_payload() -> dict:
         "summary": "IDOR",
         "evidence_ref": "findings.md",
         "source_name": "test",
+        "provenance": {"agent_id": AUTHOR_AGENT_ID},
         "notes": "PROVEN by run 13691",
         "details": {
             "cvss_score": 7.5,
@@ -336,7 +347,7 @@ def test_an_append_that_would_cross_the_cap_is_refused_loudly(client, isolate_se
 
     assert refused.status_code == 400, refused.text
     detail = refused.json()["detail"]
-    assert "past the" in detail and "--notes-rotate" in detail
+    assert "past the" in detail and "--notes-replace" in detail
 
 
 def test_a_row_already_over_the_cap_can_be_rewritten_whole(client, isolate_settings):

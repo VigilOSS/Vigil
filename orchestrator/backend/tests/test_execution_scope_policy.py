@@ -257,6 +257,10 @@ def test_execution_policy_checks_denied_tools_in_every_shell_pipeline_stage(
         ["sh", "-c", "printf ready\nnuclei -u https://example.test -ni"],
         ["sudo", "-n", "nuclei", "-u", "https://example.test", "-ni"],
         ["env", "-i", "MODE=quiet", "nuclei", "-u", "https://example.test", "-ni"],
+        ["env", "-S", "nuclei -u https://example.test -ni"],
+        ["env", "-Snuclei -u https://example.test -ni"],
+        ["env", "--split-string", "nuclei -u https://example.test -ni"],
+        ["env", "--split-string=nuclei -u https://example.test -ni"],
         ["timeout", "--signal=TERM", "10s", "nuclei", "-u", "https://example.test", "-ni"],
         ["timeout", "--", "10s", "nuclei", "-u", "https://example.test", "-ni"],
         [
@@ -288,6 +292,10 @@ def test_execution_policy_checks_denied_tools_in_every_shell_pipeline_stage(
         "newline",
         "sudo",
         "env",
+        "env-split-short",
+        "env-split-short-attached",
+        "env-split-long",
+        "env-split-long-attached",
         "timeout",
         "timeout-end-options",
         "sudo-preserve-env",
@@ -315,6 +323,25 @@ def test_execution_policy_denies_inner_tool_behind_shell_and_launcher_wrappers(
         scope.enforce_execution_policy(
             command,
             tool_name=command[0],
+            engagement_dir=eng,
+        )
+
+
+def test_execution_policy_refuses_ambiguous_env_split_with_a_denylist(
+    tmp_path: Path,
+) -> None:
+    eng = _engagement(
+        tmp_path,
+        {
+            "hosts": ["example.test"],
+            "tool_policy": {"denied_tools": ["nuclei"]},
+        },
+    )
+
+    with pytest.raises(scope.ScopePolicyError, match="cannot be inspected reliably"):
+        scope.enforce_execution_policy(
+            ["env", "-S", "$TOOL -u https://example.test"],
+            tool_name="env",
             engagement_dir=eng,
         )
 
@@ -452,7 +479,7 @@ def test_off_limits_paths_inside_a_target_list_are_not_read_or_refused(
 
 
 # ---------------------------------------------------------------------------
-# `target_facing` — the rate-governance signal
+# `target_facing` — a positive rate-governance signal
 # ---------------------------------------------------------------------------
 
 
@@ -467,7 +494,7 @@ def test_off_limits_paths_inside_a_target_list_are_not_read_or_refused(
         (["cat", "/engagements/eng-key/scans/out.txt"], False),
     ],
 )
-def test_target_facing_marks_runs_that_put_traffic_on_the_wire(
+def test_target_facing_marks_recognized_positive_signals(
     tmp_path: Path, command: list[str], expected: bool
 ) -> None:
     eng = _engagement(tmp_path, {"hosts": ["example.test"]})
@@ -499,6 +526,277 @@ def test_target_facing_honours_a_declared_tool_its_argv_hides(
     )
 
     assert result["target_facing"] is True
+
+
+def test_container_script_path_for_another_engagement_is_not_rebased(
+    tmp_path: Path,
+) -> None:
+    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
+    script = eng / "probe.py"
+    script.write_text(
+        'import requests\nrequests.get("https://example.test/health")\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(scope.ScopePolicyError, match="other-engagement"):
+        scope.execution_script_path(
+            "/engagements/other-engagement/probe.py", eng
+        )
+
+
+def test_container_script_path_for_current_engagement_resolves_exact_file(
+    tmp_path: Path,
+) -> None:
+    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
+    script = eng / "probe.py"
+    script.write_text(
+        'import requests\nrequests.get("https://example.test/health")\n',
+        encoding="utf-8",
+    )
+
+    assert scope.execution_script_path(
+        "/engagements/eng-key/probe.py", eng
+    ) == script.resolve()
+
+
+@pytest.mark.parametrize(
+    ("interpreter", "script_name", "program"),
+    [
+        ("python3", "probe.py", '# requests.get("https://example.test")\nprint("ok")'),
+        ("node", "probe.js", '// fetch("https://example.test")\nconsole.log("ok")'),
+    ],
+    ids=["python-comment", "node-comment"],
+)
+def test_inert_script_text_is_not_target_facing(
+    tmp_path: Path, interpreter: str, script_name: str, program: str
+) -> None:
+    eng = _engagement(tmp_path, {"engagement_type": "code", "hosts": []})
+    (eng / script_name).write_text(program, encoding="utf-8")
+
+    result = scope.enforce_execution_policy(
+        [interpreter, script_name], tool_name=interpreter, engagement_dir=eng
+    )
+
+    assert result["target_facing"] is False
+
+
+def test_relative_script_inspection_uses_the_process_working_directory(
+    tmp_path: Path,
+) -> None:
+    eng = _engagement(tmp_path, {"engagement_type": "code", "hosts": []})
+    (eng / "probe.py").write_text(
+        'import requests\nrequests.get("https://example.test")\n',
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "probe.py").write_text("print('offline')\n", encoding="utf-8")
+
+    assert scope.execution_script_path(
+        "probe.py", eng, execution_cwd=outside
+    ) is None
+
+
+def test_normalized_container_script_escape_is_not_inspected(
+    tmp_path: Path,
+) -> None:
+    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
+
+    with pytest.raises(scope.ScopePolicyError, match="escapes current engagement"):
+        scope.execution_script_path(
+            "/engagements/eng-key/../other-engagement/probe.py", eng
+        )
+
+
+def test_host_lane_refuses_container_namespace_script_path(tmp_path: Path) -> None:
+    eng = _engagement(tmp_path, {"hosts": ["example.test"]})
+
+    with pytest.raises(scope.ScopePolicyError, match="cannot be executed by host-exec"):
+        scope.execution_script_path(
+            "/engagements/eng-key/probe.py", eng, container_paths=False
+        )
+
+
+def test_target_facing_run_requires_nonempty_canonical_host_scope(
+    tmp_path: Path,
+) -> None:
+    eng = _engagement(tmp_path, {"engagement_type": "web", "hosts": []})
+
+    with pytest.raises(scope.ScopePolicyError, match="non-empty.*hosts"):
+        scope.enforce_execution_policy(
+            ["curl", "https://example.test/"],
+            tool_name="curl",
+            engagement_dir=eng,
+        )
+
+
+def test_code_only_research_network_access_is_not_refused(
+    tmp_path: Path,
+) -> None:
+    eng = _engagement(tmp_path, {"engagement_type": "code", "hosts": []})
+
+    result = scope.enforce_execution_policy(
+        ["curl", "https://docs.python.org/3/"],
+        tool_name="curl",
+        engagement_dir=eng,
+    )
+
+    assert result == {"target_facing": True}
+
+
+def test_code_only_declared_target_contact_warns_without_refusing(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    eng = _engagement(
+        tmp_path,
+        {
+            "engagement_type": "code",
+            "hosts": ["app.example.test"],
+            "code_target_contact_policy": "warn-do-not-contact",
+        },
+    )
+
+    result = scope.enforce_execution_policy(
+        ["curl", "https://app.example.test/health"],
+        tool_name="curl",
+        engagement_dir=eng,
+    )
+
+    assert result == {
+        "target_facing": True,
+        "code_target_warning": "app.example.test",
+    }
+    warning = capsys.readouterr().err
+    assert "CODE engagement" in warning
+    assert "app.example.test" in warning
+    assert "advisory" in warning.lower()
+    assert "continuing" in warning.lower()
+
+
+def test_code_only_research_host_does_not_trigger_declared_target_warning(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    eng = _engagement(
+        tmp_path,
+        {"engagement_type": "code", "hosts": ["app.example.test"]},
+    )
+
+    result = scope.enforce_execution_policy(
+        ["curl", "https://docs.python.org/3/"],
+        tool_name="curl",
+        engagement_dir=eng,
+    )
+
+    assert result == {"target_facing": True}
+    assert "CODE engagement" not in capsys.readouterr().err
+
+
+def test_code_browser_warns_when_a_later_navigation_reaches_declared_target(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    eng = _engagement(
+        tmp_path,
+        {"engagement_type": "both", "hosts": ["app.example.test"]},
+    )
+    plan = json.dumps(
+        {
+            "url": "https://docs.python.org/3/",
+            "steps": [
+                {"action": "navigate", "url": "https://app.example.test/account"}
+            ],
+        }
+    )
+
+    result = scope.enforce_execution_policy(
+        [
+            "python3",
+            "-c",
+            "# browser driver",
+            plan,
+            "https://docs.python.org/3/",
+            "https://app.example.test/account",
+        ],
+        tool_name="browser",
+        engagement_dir=eng,
+        execution_phase="code-hunt",
+    )
+
+    assert result["code_target_warning"] == "app.example.test"
+    assert "execution is continuing" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["node", "-e", "fetch('https://example.test')"],
+        ["node", "--eval", "fetch('https://example.test')"],
+        ["node", "-p", "fetch('https://example.test')"],
+        ["ruby", "-e", "Net::HTTP.get(URI('https://example.test'))"],
+        ["perl", "-e", "LWP::UserAgent->new->get('https://example.test')"],
+        ["php", "-r", "curl_init('https://example.test');"],
+    ],
+    ids=["node-e", "node-eval", "node-print", "ruby-e", "perl-e", "php-r"],
+)
+def test_inline_interpreter_program_is_never_resolved_as_a_script_path(
+    tmp_path: Path,
+    command: list[str],
+) -> None:
+    eng = _engagement(tmp_path, {"engagement_type": "code", "hosts": []})
+
+    result = scope.enforce_execution_policy(
+        command,
+        tool_name=command[0],
+        engagement_dir=eng,
+    )
+
+    assert result == {"target_facing": False}
+
+
+def test_interpreter_option_value_does_not_hide_foreign_engagement_script(
+    tmp_path: Path,
+) -> None:
+    eng = _engagement(tmp_path, {"engagement_type": "web", "hosts": ["example.test"]})
+
+    with pytest.raises(scope.ScopePolicyError, match="other-engagement"):
+        scope.enforce_execution_policy(
+            [
+                "python3",
+                "-W",
+                "ignore",
+                "/engagements/other-engagement/scripts/probe.py",
+            ],
+            tool_name="python3",
+            engagement_dir=eng,
+        )
+
+
+def test_readable_script_does_not_claim_target_facing_completeness(
+    tmp_path: Path,
+) -> None:
+    eng = _engagement(tmp_path, {"engagement_type": "code", "hosts": []})
+    script = eng / "probe.sh"
+    script.write_text("#!/bin/sh\ncurl https://example.test/\n", encoding="utf-8")
+
+    result = scope.enforce_execution_policy(
+        ["bash", "probe.sh"],
+        tool_name="bash",
+        engagement_dir=eng,
+    )
+
+    assert result["target_facing"] is False
+
+
+def test_offline_run_does_not_require_host_scope(tmp_path: Path) -> None:
+    eng = _engagement(tmp_path, {"engagement_type": "code", "hosts": []})
+
+    result = scope.enforce_execution_policy(
+        ["jq", ".", "results.json"], tool_name="jq", engagement_dir=eng
+    )
+
+    assert result["target_facing"] is False
 
 
 def test_execution_policy_notes_bound_and_hash_a_long_refusal() -> None:

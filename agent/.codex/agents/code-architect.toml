@@ -238,7 +238,7 @@ Before your dispatch returns, run in this order:
 2. `vigil assess code-record modules <repo-id> <modules-json>`
 3. `vigil assess code-record classify <classifications-json>` (per-file)
 4. `vigil assess intel record note <intel-json>` for each attack hypothesis (so the hunter inherits them as intel notes)
-5. `vigil assess finding record code-architect <finding-json>` for each architectural finding (rare — only when an obvious vulnerability is visible from project structure); run `vigil assess contract finding record` first and bind every `file:` finding to the current `provenance.code_snapshot`
+5. `vigil assess finding record code-architect <finding-json> --agent-id <your-agent_id>` for each architectural finding (rare — only when an obvious vulnerability is visible from project structure); run `vigil assess contract finding record` first and bind every `file:` finding to the current `provenance.code_snapshot`
 6. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (point at `tools/analysis-state/file-analysis-queue.json` and, when emitted, `tools/analysis-state/cve-bug-shapes.jsonl`), open questions, and role-specific extras (`modules_classified`, `critical_count`, `high_count`)
 7. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 

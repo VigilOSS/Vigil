@@ -31,7 +31,7 @@ Assertions:
     for why the allowlists are a hard fail for new drift but tolerate the
     current (acknowledged) doc debt.
 
-(c) Flag coverage for the highest-drift-risk verbs. The load-bearing
+(c) Curated flag coverage for the highest-drift-risk verbs. The load-bearing
     operator-facing flags on ``finding verify`` / ``eval-capture`` /
     ``scaffold-probe`` / ``check-phase-readiness`` must (1) still be real
     registered flags on that verb and (2) appear somewhere in the corpus.
@@ -39,7 +39,17 @@ Assertions:
     docs side. Internal/advanced knobs are intentionally excluded (see the
     EXPECTED_FLAGS comment).
 
-(d) No file claims ``vigil oob client logs`` / ``vigil logs oob`` *returns
+(d) Reverse flag lint. Every long ``--flag`` written against a
+    ``vigil assess`` verb is one that verb actually registers. Each literal
+    invocation is tokenized and walked down the live argparse tree the way
+    argparse resolves argv, so the parser tree is the only source of truth and
+    there is no second flag list to drift. Two corpora feed it: the markdown /
+    TOML prose of (a)-(c), and the **Python string literals** of the backend
+    services, the assess CLI and the installable CLI — the error and advisory
+    messages an operator reads at the moment a command has already failed,
+    where a wrong flag costs the most and is least likely to be questioned.
+
+(e) No file claims ``vigil oob client logs`` / ``vigil logs oob`` *returns
     correlated hits*. Correlation is exclusively ``vigil oob poll`` (it reads
     recorded probes from the backend and matches callbacks to nonces); the log
     tails are raw listener/FRP output for infra debugging only. This guard
@@ -57,10 +67,12 @@ Implementation notes:
 from __future__ import annotations
 
 import argparse
+import ast
 import importlib
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -122,7 +134,7 @@ def _long_flags(parser: argparse.ArgumentParser) -> set[str]:
     return flags
 
 
-def _load_assess_registries() -> dict[str, set[str]]:
+def _load_assess_registries() -> dict[str, Any]:
     """Return assess verb sets keyed by group from agent/scripts/assess CLI."""
     cli = importlib.import_module("assess.cli")
     root = _capture_root_parser(cli.main)
@@ -139,8 +151,10 @@ def _load_assess_registries() -> dict[str, set[str]]:
         "assess": assess_verbs,
         "kali": kali_verbs,
         "kali_job": kali_job_verbs,
-        # Parsers retained so flag coverage can introspect specific verbs.
+        # Parsers retained so flag coverage can introspect specific verbs, and
+        # the root so the reverse flag lint can walk the tree from the top.
         "_top_parsers": top,
+        "_root_parser": root,
     }
 
 
@@ -263,7 +277,7 @@ _OOB_CLIENT_RE = re.compile(r"vigil oob client ([a-z][a-z0-9-]*)")
 
 
 @pytest.fixture(scope="module")
-def assess_registries() -> dict[str, set[str]]:
+def assess_registries() -> dict[str, Any]:
     return _load_assess_registries()
 
 
@@ -677,7 +691,510 @@ def test_expected_flags_are_documented(corpus_texts):
 
 
 # --------------------------------------------------------------------------
-# (d) logs tail is not correlation.
+# (d) Reverse flag lint — every `--flag` an operator is told to run exists.
+# --------------------------------------------------------------------------
+# _EXPECTED_FLAGS above is a curated allowlist: it proves a handful of
+# load-bearing flags still exist, but it says nothing about the thousands of
+# other `vigil assess` invocations the repo hands an operator. A prompt that
+# names a flag its verb never registered dies with argparse exit 2
+# mid-engagement, and the verb-level checks cannot see it because the verb
+# itself is real. This section walks the other direction: for EVERY literal
+# invocation, resolve the verb against the live argparse tree and assert each
+# long flag written against it is registered somewhere on that path.
+#
+# It runs over two corpora, sharing one tokenizer and one resolver:
+#   * the markdown/TOML prose of (a)-(c) — what an operator reads BEFORE
+#     running a command, and
+#   * the Python string literals of `orchestrator/backend`, `src/vigil_cli` and
+#     `agent/scripts` — what they read WHEN one fails. Runtime guidance is the
+#     harsher surface of the two: the reader has just been refused, is being
+#     handed the way out, and is least able to sanity-check it. Three backend
+#     messages pointed at `finding link --target-finding <slug>`, a flag
+#     `finding link` has never registered, and nothing caught it because the
+#     corpus globbed only `.md` and `.toml`.
+#
+# The parser tree is the only source of truth here — there is deliberately no
+# second hand-maintained flag list to drift.
+
+# One shell token: a single-quoted run, a double-quoted run, or a bare run. The
+# quoted alternatives only engage when a token STARTS with the quote, so a prose
+# apostrophe ("don't") stays inside a single bare token.
+_TOKEN_RE = re.compile(r"(?:[^\s'\"]+|'[^']*'|\"[^\"]*\")+")
+# The well-formed long flag at the head of a token, ignoring trailing markdown
+# punctuation (``--json,``) and any ``=value`` suffix. A bare ``--`` and a
+# markdown ``---`` rule do not match, so neither is mistaken for a flag.
+_FLAG_HEAD_RE = re.compile(r"^(--[A-Za-z0-9][A-Za-z0-9-]*)")
+# Tokens that end the invocation: a shell operator, a redirect, or the bare
+# ``--`` after which every argument belongs to a wrapped tool
+# (``kali exec -- nmap -sV``) rather than to the vigil verb. A token opening a
+# trailing ``# ...`` comment ends it too, and is handled alongside these.
+_COMMAND_TERMINATORS = frozenset(
+    {"|", "||", "&&", ";", "&", ">", ">>", "2>", "2>&1", "--"}
+)
+# Quotes that can open an embedded command span and therefore close it; see
+# ``_command_tokens``.
+_SPAN_QUOTES = "'\""
+# Sentence punctuation immediately after an option name (``--emit-prompt,``) —
+# the mark that the surrounding prose has resumed.
+_TRAILING_PROSE_RE = re.compile(r"^[,.;:]")
+_ASSESS_INVOCATION_RE = re.compile(r"vigil assess(?=[ \t]|$)")
+_LINE_CONTINUATION_RE = re.compile(r"\\\n[ \t]*")
+# A command never runs past this many characters; bounding the lookahead keeps
+# the continuation join linear in corpus size rather than quadratic.
+_INVOCATION_LOOKAHEAD = 4000
+
+
+def _long_flag_actions(parser: argparse.ArgumentParser) -> dict[str, argparse.Action]:
+    """Map every registered long flag on one parser to its action."""
+    actions: dict[str, argparse.Action] = {}
+    for action in parser._actions:  # noqa: SLF001
+        for opt in action.option_strings:
+            if opt.startswith("--") and opt != "--help":
+                actions[opt] = action
+    return actions
+
+
+def _has_remainder_positional(parser: argparse.ArgumentParser) -> bool:
+    """True when the verb forwards its tail to a hand-rolled sub-CLI.
+
+    ``code-dispatch`` collects everything after its action into an
+    ``argparse.REMAINDER`` positional and parses the flags itself, so its real
+    flag surface is invisible to argparse introspection."""
+    return any(
+        action.nargs == argparse.REMAINDER
+        for action in parser._actions  # noqa: SLF001
+        if not action.option_strings
+    )
+
+
+def _command_tokens(text: str, *, closer: str = "") -> list[str]:
+    """Tokenize one invocation, honouring quoted runs.
+
+    Backslash continuations are joined first so a multi-line bash block is one
+    command. The result is then cut at the first newline and at the first
+    backtick: a fenced block never contains a backtick, while an inline
+    ``vigil assess ...`` span ends at one, so the same cut handles both forms
+    without needing to know which produced the line.
+
+    ``closer`` is the quote that OPENED the span, when one did — a runtime
+    message often names a command mid-sentence (``... so 'vigil assess
+    work-buffer stats' actually decrements as probes land``). A quote cannot be
+    cut unconditionally the way a backtick can, because a real command quotes
+    its own argument values, so it ends the span only when the same character
+    started it.
+
+    Tokens also stop after an option written with trailing sentence punctuation
+    (``--emit-prompt, or rerun with --force``): no shell spells an option that
+    way, so the words after it are narration, not arguments to the verb."""
+    joined = _LINE_CONTINUATION_RE.sub(" ", text[:_INVOCATION_LOOKAHEAD])
+    line = joined.split("\n", 1)[0].split("`", 1)[0]
+    if closer:
+        line = line.split(closer, 1)[0]
+    tokens: list[str] = []
+    for match in _TOKEN_RE.finditer(line):
+        token = match.group(0)
+        tokens.append(token)
+        flag = _FLAG_HEAD_RE.match(token)
+        if flag is not None and _TRAILING_PROSE_RE.match(token[flag.end():]):
+            break
+    return tokens
+
+
+def _extract_invocations(
+    rel: str, text: str, *, first_line: int = 1
+) -> list[tuple[str, int, list[str]]]:
+    """Every literal ``vigil assess ...`` invocation in one block of text, as
+    ``(path, line number, tokens following ``vigil assess``)``.
+
+    ``first_line`` is the line the block itself begins on, so an invocation
+    inside a Python string literal reports its line in the module rather than an
+    offset inside the literal."""
+    found: list[tuple[str, int, list[str]]] = []
+    for match in _ASSESS_INVOCATION_RE.finditer(text):
+        start = match.start()
+        opener = text[start - 1] if start else ""
+        tokens = _command_tokens(
+            text[match.end():], closer=opener if opener in _SPAN_QUOTES else ""
+        )
+        if tokens:
+            found.append((rel, first_line + text.count("\n", 0, start), tokens))
+    return found
+
+
+def _resolve_invocation_flags(
+    root: argparse.ArgumentParser, tokens: list[str]
+) -> tuple[int, tuple[str, str] | None]:
+    """Return ``(flags resolved, first dangling ``(verb path, flag)`` or None)``.
+
+    Walks the subparser tree the way argparse resolves argv, carrying the flag
+    set of every parser on the path: argparse matches an option string anywhere
+    in argv against the whole parser chain, so ``finding list --engagement-dir X``
+    is a legitimate spelling of a root-level flag.
+
+    At most one dangling flag per invocation. Once a flag is unresolvable the
+    rest of the line cannot be attributed with confidence — the unknown flag may
+    have swallowed the value that would otherwise have named the next subparser —
+    so reporting stops there instead of cascading.
+
+    The resolved count is what keeps the lint honest: it is the number of flags
+    this walk actually checked against a real parser, so a regression that makes
+    every invocation bail early shows up as a collapsed count rather than as a
+    silently green suite."""
+    parser = root
+    path: list[str] = []
+    known: dict[str, argparse.Action] = dict(_long_flag_actions(root))
+    resolved = 0
+    index = 0
+    while index < len(tokens):
+        if _has_remainder_positional(parser):
+            # The verb hand-parses its own argv behind an argparse.REMAINDER
+            # positional (`code-dispatch fetch 10 worker --repo-id 3`). Those
+            # flags are real, but they are not argparse options on this parser
+            # and cannot be resolved here.
+            return resolved, None
+        token = tokens[index]
+        if token in _COMMAND_TERMINATORS or token.startswith("#"):
+            # A shell operator, the wrapped-tool boundary, or the start of a
+            # trailing `# ...` comment — nothing after it is an argument to this
+            # verb.
+            return resolved, None
+        flag = _FLAG_HEAD_RE.match(token)
+        if flag is not None:
+            if _PLACEHOLDER.match(token[flag.end():]):
+                # A placeholder interrupts the option NAME itself
+                # (``--dry-run{threshold_arg}``). The spelling argparse would
+                # receive is not knowable here, so neither this token nor
+                # anything after it can be attributed.
+                return resolved, None
+            name = flag.group(1)
+            if name == "--help":
+                # argparse registers it on every parser; the flag-set helpers
+                # deliberately omit it, so resolve it here instead.
+                index += 1
+                continue
+            action = known.get(name)
+            if action is None:
+                return resolved, (" ".join(path), name)
+            resolved += 1
+            index += 1
+            # Step over the option's value so it cannot be read as a subverb.
+            if "=" not in token and action.nargs != 0:
+                if index < len(tokens) and not tokens[index].startswith("-"):
+                    index += 1
+            continue
+        if token.startswith("-"):
+            # A short flag, or an option value that itself starts with a dash
+            # (``--extra-args -sV``). Neither is resolvable here, and whatever
+            # follows can no longer be attributed, so stop.
+            return resolved, None
+        choices = _subparser_choices(parser)
+        if not choices:
+            # A leaf verb: every remaining bare token is a positional value.
+            index += 1
+            continue
+        if token in choices:
+            parser = choices[token]
+            known.update(_long_flag_actions(parser))
+            path.append(token)
+            index += 1
+            continue
+        if _PLACEHOLDER.search(token):
+            # ``vigil assess kali <tool> --timeout 60`` is prose about a verb
+            # family, not a literal invocation — the real flags live on whichever
+            # subparser the placeholder stands in for.
+            return resolved, None
+        # A literal token that is not a registered subverb. The verb-level
+        # docs->CLI assertions own that failure; do not double-report it, and do
+        # not attribute the rest of the line to the parent group.
+        return resolved, None
+    return resolved, None
+
+
+# The markdown corpus covers the prose an operator reads BEFORE running a
+# command. This second corpus covers what they read at the moment one fails:
+# the error and advisory strings the backend services, the assess CLI and the
+# installable CLI build at runtime. That is the higher-stakes surface — a wrong
+# flag in an error message is handed to an agent that has just been refused,
+# needs the remedy, and has no reason to doubt it.
+_PYTHON_GLOBS = (
+    "orchestrator/backend/**/*.py",
+    "src/vigil_cli/**/*.py",
+    "agent/scripts/**/*.py",
+)
+
+
+def _python_files() -> list[Path]:
+    """Every first-party Python module whose strings can reach an operator.
+
+    Two structural exclusions. There is deliberately no per-string allowlist:
+    a second hand-maintained list would drift exactly like the flag list this
+    section exists to replace.
+
+    - **Dot-prefixed path components.** ``orchestrator/backend/.venv`` alone
+      carries ~900 third-party modules and ``.claude/`` holds whole extra
+      checkouts. Neither is this repo's source, and whether either exists
+      depends on the machine — which would make the count anchors below
+      environment-dependent rather than a real corpus floor.
+    - **``tests/`` directories.** A test module is fixtures and assertions, not
+      operator guidance. It mirrors product strings (so one real defect would be
+      reported twice, the second time at a line nobody ships) and it
+      deliberately carries invocations that must NOT work —
+      ``test_scaffold_probe.py`` asserts ``"vigil assess artifact register" not
+      in error``. Linting the suite's own negative fixtures would fail this
+      check on correct code.
+    """
+    files: list[Path] = []
+    for pattern in _PYTHON_GLOBS:
+        files += sorted(_REPO_ROOT.glob(pattern))
+    return [
+        path
+        for path in files
+        if not any(
+            part.startswith(".") or part == "tests"
+            for part in path.relative_to(_REPO_ROOT).parts
+        )
+    ]
+
+
+# An f-string interpolation is a runtime VALUE, never part of the command's
+# syntax. Rendering it as ``{}`` keeps the invocation a single well-formed token
+# stream and reuses the placeholder handling the markdown corpus already needs:
+# ``{}`` can never be read as a flag, and where a subverb belongs it stops the
+# walk rather than guessing which subparser the value would have named.
+_PY_INTERPOLATION = "{}"
+
+
+def _fold_python_string(node: ast.AST) -> str | None:
+    """Fold the static string syntax Python itself joins before execution."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _fold_python_string(node.left)
+        right = _fold_python_string(node.right)
+        return left + right if left is not None and right is not None else None
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for part in node.values:
+            if isinstance(part, ast.FormattedValue):
+                folded = _fold_python_string(part.value)
+                parts.append(folded if folded is not None else _PY_INTERPOLATION)
+                continue
+            folded = _fold_python_string(part)
+            if folded is None:
+                return None
+            parts.append(folded)
+        return "".join(parts)
+    return None
+
+
+def _python_string_literals(path: Path) -> list[tuple[int, str]]:
+    """``(line, text)`` for every string literal in one module.
+
+    Literals only: a ``# vigil assess ...`` comment is a note to the next
+    maintainer, not text any running command prints.
+
+    The walk is manual because ``ast.walk`` would yield an f-string AND each of
+    its literal fragments — reporting one defect from two places, and splitting
+    a command apart at every interpolation it contains."""
+    literals: list[tuple[int, str]] = []
+    stack: list[ast.AST] = [ast.parse(path.read_text(encoding="utf-8"))]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.JoinedStr, ast.BinOp)):
+            folded = _fold_python_string(node)
+            if folded is not None:
+                literals.append((node.lineno, folded))
+                continue
+        if isinstance(node, ast.JoinedStr):
+            continue
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            literals.append((node.lineno, node.value))
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+    return sorted(literals, key=lambda item: item[0])
+
+
+def test_command_tokenizer_keeps_equals_quoted_value_in_one_token() -> None:
+    tokens = _command_tokens(
+        ' finding update VA-001 --summary="text containing --not-a-flag" --notes ok'
+    )
+
+    assert tokens == [
+        "finding",
+        "update",
+        "VA-001",
+        '--summary="text containing --not-a-flag"',
+        "--notes",
+        "ok",
+    ]
+
+
+def test_python_literals_fold_concatenation_and_constant_nested_fstring(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "commands.py"
+    path.write_text(
+        "A = 'vigil assess finding ' + 'list --concat-flag'\n"
+        "B = f\"vigil assess finding list {f'--nested-flag'}\"\n",
+        encoding="utf-8",
+    )
+
+    assert [text for _line, text in _python_string_literals(path)] == [
+        "vigil assess finding list --concat-flag",
+        "vigil assess finding list --nested-flag",
+    ]
+
+
+@pytest.fixture(scope="module")
+def assess_invocations(doc_files) -> list[tuple[str, int, list[str]]]:
+    """Every literal ``vigil assess ...`` invocation in the markdown/TOML
+    corpus, as ``(relative path, line number, tokens following
+    ``vigil assess``)``."""
+    found: list[tuple[str, int, list[str]]] = []
+    for path in doc_files:
+        rel = path.relative_to(_REPO_ROOT).as_posix()
+        found += _extract_invocations(
+            rel, _strip_frontmatter(path.read_text(encoding="utf-8"))
+        )
+    return found
+
+
+@pytest.fixture(scope="module")
+def python_files() -> list[Path]:
+    files = _python_files()
+    # Same anchor role as ``doc_files``: a glob that silently stops matching
+    # would make the runtime-string checks vacuous rather than red. The corpus
+    # is ~320 modules; keep a generous floor that still catches a collapse.
+    assert len(files) >= 250, (
+        f"python corpus shrank to {len(files)} modules — a glob in "
+        "_python_files likely stopped matching; the runtime-string flag lint "
+        "would silently weaken."
+    )
+    return files
+
+
+@pytest.fixture(scope="module")
+def python_assess_invocations(python_files) -> list[tuple[str, int, list[str]]]:
+    """Every literal ``vigil assess ...`` invocation written in a Python string
+    literal, in the same shape as ``assess_invocations``."""
+    found: list[tuple[str, int, list[str]]] = []
+    for path in python_files:
+        rel = path.relative_to(_REPO_ROOT).as_posix()
+        for lineno, text in _python_string_literals(path):
+            found += _extract_invocations(rel, text, first_line=lineno)
+    return found
+
+
+def _scan_invocations(
+    root: argparse.ArgumentParser,
+    invocations: list[tuple[str, int, list[str]]],
+) -> tuple[int, dict[tuple[str, str, str], str]]:
+    """Return ``(flags resolved, {(source path, verb, flag): "path:line"})``."""
+    resolved = 0
+    found: dict[tuple[str, str, str], str] = {}
+    for rel, lineno, tokens in invocations:
+        count, hit = _resolve_invocation_flags(root, tokens)
+        resolved += count
+        if hit is not None:
+            found.setdefault((rel, hit[0], hit[1]), f"{rel}:{lineno}")
+    return resolved, found
+
+
+def test_assess_invocation_scan_is_non_trivial(assess_registries, assess_invocations):
+    """Guard against a silently weakened lint.
+
+    Two ways this check could go vacuous: the extractor stops matching
+    invocations, or the resolver starts bailing out of every invocation before it
+    reaches a flag. Both are invisible in a green suite, so both are anchored
+    here — the second on the count of flags actually checked against a real
+    parser, which is the quantity the assertion below depends on."""
+    assert len(assess_invocations) >= 2000, (
+        f"only {len(assess_invocations)} `vigil assess` invocations extracted — "
+        "the tokenizer or the corpus glob regressed, and the reverse flag lint "
+        "would silently weaken."
+    )
+    resolved, _ = _scan_invocations(assess_registries["_root_parser"], assess_invocations)
+    assert resolved >= 2000, (
+        f"only {resolved} documented flags resolved against the live parser tree "
+        "— the walk is bailing out early and the reverse flag lint is no longer "
+        "checking what it claims to."
+    )
+
+
+def test_documented_assess_flags_are_registered(assess_registries, assess_invocations):
+    """docs -> CLI at the flag level. Every long flag written against a
+    ``vigil assess`` verb in the corpus is one that verb actually registers.
+
+    This is the check whose absence let ``--verification-state`` /
+    ``--verification-disposition``, ``fetch --slug``, ``agent list --json`` and
+    ``kali nikto --ssl`` ship: every verb involved was real, so the verb-level
+    assertions passed while the flags died at argparse exit 2 — or, for a filter
+    flag, came back as a silently empty result."""
+    root = assess_registries["_root_parser"]
+    _resolved, located = _scan_invocations(root, assess_invocations)
+    dangling = sorted(located)
+    assert not dangling, (
+        "Prompt/doc text names `--flag`s that are not registered on the verb they "
+        "are written against. An operator copy-pasting one gets argparse exit 2. "
+        "Fix the prose, or register the flag on the command module:\n  "
+        + "\n  ".join(
+            f"{located[entry]}: vigil assess {entry[1]} {entry[2]}".replace("  ", " ")
+            for entry in dangling
+        )
+    )
+
+
+def test_python_assess_invocation_scan_is_non_trivial(
+    assess_registries, python_assess_invocations
+):
+    """The ``doc_files`` anchor above, for the runtime-string corpus.
+
+    The extractor here has one extra way to go quiet: ``ast`` finds no string
+    literals (a parse that silently yields nothing, or a walk that stops
+    descending). Anchoring both the invocation count and the number of flags
+    actually checked against a real parser makes either failure loud."""
+    assert len(python_assess_invocations) >= 700, (
+        f"only {len(python_assess_invocations)} `vigil assess` invocations "
+        "extracted from Python string literals — the literal walk, the "
+        "tokenizer or the corpus glob regressed."
+    )
+    resolved, _ = _scan_invocations(
+        assess_registries["_root_parser"], python_assess_invocations
+    )
+    assert resolved >= 500, (
+        f"only {resolved} runtime-string flags resolved against the live parser "
+        "tree — the walk is bailing out early and this check is no longer "
+        "checking what it claims to."
+    )
+
+
+def test_runtime_string_assess_flags_are_registered(
+    assess_registries, python_assess_invocations
+):
+    """runtime strings -> CLI at the flag level.
+
+    Same assertion as the markdown direction, against the surface that matters
+    most: a command an operator is told to run *by a failure*. Three backend
+    messages sent the operator to ``finding link --target-finding <slug>`` — a
+    flag ``finding link`` has never registered — so being refused a sibling
+    link handed you an argparse exit 2 as the remedy."""
+    root = assess_registries["_root_parser"]
+    _resolved, located = _scan_invocations(root, python_assess_invocations)
+    dangling = sorted(located)
+    assert not dangling, (
+        "Runtime error/advisory strings name `--flag`s that are not registered "
+        "on the verb they are written against. An operator copy-pasting one "
+        "gets argparse exit 2 at the moment they were told how to recover. "
+        "Fix the string, or register the flag on the command module:\n  "
+        + "\n  ".join(
+            f"{located[entry]}: vigil assess {entry[1]} {entry[2]}".replace("  ", " ")
+            for entry in dangling
+        )
+    )
+
+
+# --------------------------------------------------------------------------
+# (e) logs tail is not correlation.
 # --------------------------------------------------------------------------
 # A logs tail is named with one of these tokens.
 _LOGS_VERB_RE = re.compile(r"vigil oob client logs|vigil logs oob")

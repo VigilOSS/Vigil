@@ -24,7 +24,6 @@ PROOF_EVIDENCE_KINDS = frozenset(
     }
 )
 EVIDENCE_HEALTH_VALUES = frozenset({"healthy", "missing", "stale", "tombstoned"})
-REDACTION_STATUSES = frozenset({"raw", "redacted"})
 TERMINAL_VERIFICATION_STATUSES = frozenset(
     {"confirmed", "downgraded", "false_positive"}
 )
@@ -49,6 +48,9 @@ _COMMAND_OUTPUT_DEGRADED_CLEANUP_STATUSES = frozenset(
     {"deferred", "pending", "warning"}
 )
 _COMMAND_OUTPUT_DEGRADED_INTEGRITY_STATUSES = frozenset({"pending", "warning"})
+_ARTIFACT_SNAPSHOT_EVIDENCE_KINDS = frozenset(
+    {"artifact", "source_observation", "http_exchange", "browser_action", "oob_event"}
+)
 
 
 def _invalid(name: str, value: str, allowed: frozenset[str]) -> HTTPException:
@@ -84,6 +86,8 @@ def _receipt_row(
 
 def _serialize_receipt(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     record = dict(row)
+    legacy_status = str(record.pop("redaction_status", "raw") or "raw")
+    legacy_parent_id = record.pop("derivative_of_receipt_id", None)
     artifact_present = record.pop("artifact_present", None)
     integrity_status = str(record.pop("artifact_integrity_status", "") or "")
     artifact_sha256 = str(record.pop("artifact_current_sha256", "") or "")
@@ -127,11 +131,13 @@ def _serialize_receipt(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         and record["evidence_health"] == "healthy"
     ):
         record["evidence_health"] = "stale"
-    record["raw_receipt_id"] = (
-        int(record["derivative_of_receipt_id"])
-        if record.get("derivative_of_receipt_id") is not None
-        else int(record["id"])
-    )
+    if legacy_status != "raw" or legacy_parent_id is not None:
+        record["legacy_derivative_provenance"] = {
+            "source_receipt_id": (
+                int(legacy_parent_id) if legacy_parent_id is not None else None
+            ),
+            "exact_bytes_are_historical_derivative": True,
+        }
     record.pop("recorded_health", None)
     return record
 
@@ -328,12 +334,82 @@ def _apply_command_output_health(
     return records
 
 
+def _apply_artifact_snapshot_health(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    artifact_ids = sorted(
+        {
+            int(record["artifact_id"])
+            for record in records
+            if record.get("evidence_kind") in _ARTIFACT_SNAPSHOT_EVIDENCE_KINDS
+            and record.get("artifact_id") is not None
+            and record.get("evidence_health") == "healthy"
+        }
+    )
+    if not artifact_ids:
+        return records
+    placeholders = ",".join("?" for _ in artifact_ids)
+    rows = connection.execute(
+        f"""
+        SELECT artifacts.id, artifacts.relative_path, artifacts.size_bytes,
+               artifacts.verified_device, artifacts.verified_inode,
+               engagements.engagement_root
+        FROM assessment_artifacts AS artifacts
+        JOIN engagements ON engagements.id = artifacts.engagement_id
+        WHERE artifacts.engagement_id = ?
+          AND artifacts.id IN ({placeholders})
+        """,
+        (engagement_id, *artifact_ids),
+    ).fetchall()
+    artifacts = {int(row["id"]): dict(row) for row in rows}
+    for record in records:
+        artifact_id = record.get("artifact_id")
+        if (
+            record.get("evidence_kind") not in _ARTIFACT_SNAPSHOT_EVIDENCE_KINDS
+            or artifact_id is None
+            or record.get("evidence_health") != "healthy"
+        ):
+            continue
+        artifact = artifacts.get(int(artifact_id))
+        if artifact is None:
+            record["evidence_health"] = "stale"
+            continue
+        record["evidence_health"] = artifact_index.registered_snapshot_evidence_health(
+            Path(str(artifact["engagement_root"])).expanduser().resolve(),
+            str(artifact["relative_path"]),
+            expected_size=int(artifact["size_bytes"] or 0),
+            expected_sha256=str(record["evidence_sha256"]),
+            verified_device=(
+                int(artifact["verified_device"])
+                if artifact["verified_device"] is not None
+                else None
+            ),
+            verified_inode=(
+                int(artifact["verified_inode"])
+                if artifact["verified_inode"] is not None
+                else None
+            ),
+        )
+    return records
+
+
+def _apply_live_evidence_health(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    records = _apply_artifact_snapshot_health(connection, engagement_id, records)
+    return _apply_command_output_health(connection, engagement_id, records)
+
+
 def _serialize_receipts(
     connection: sqlite3.Connection,
     engagement_id: int,
     rows: Iterable[sqlite3.Row | dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    return _apply_command_output_health(
+    return _apply_live_evidence_health(
         connection, engagement_id, [_serialize_receipt(row) for row in rows]
     )
 
@@ -396,24 +472,15 @@ def create_proof_receipt(
     command_run_id: int | None,
     evidence_sha256: str,
     evidence_health: str,
-    redaction_status: str,
-    derivative_of_receipt_id: int | None,
     tombstone_reason: str,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     evidence_kind = str(evidence_kind or "").strip().lower()
-    redaction_status = str(redaction_status or "raw").strip().lower()
     evidence_health = str(evidence_health or "healthy").strip().lower()
     if evidence_kind not in PROOF_EVIDENCE_KINDS:
         raise _invalid("evidence_kind", evidence_kind, PROOF_EVIDENCE_KINDS)
-    if redaction_status not in REDACTION_STATUSES:
-        raise _invalid("redaction_status", redaction_status, REDACTION_STATUSES)
     if evidence_health not in EVIDENCE_HEALTH_VALUES:
         raise _invalid("evidence_health", evidence_health, EVIDENCE_HEALTH_VALUES)
-    if redaction_status == "raw" and derivative_of_receipt_id is not None:
-        raise HTTPException(status_code=400, detail="raw receipt cannot have a derivative parent")
-    if redaction_status == "redacted" and derivative_of_receipt_id is None:
-        raise HTTPException(status_code=400, detail="redacted receipt requires derivative_of_receipt_id")
     if evidence_kind == "command" and command_run_id is None:
         raise HTTPException(
             status_code=400,
@@ -536,17 +603,6 @@ def create_proof_receipt(
                     ),
                 )
 
-        parent = None
-        if derivative_of_receipt_id is not None:
-            parent = _receipt_row(connection, engagement.id, derivative_of_receipt_id)
-            if str(parent["redaction_status"]) != "raw":
-                raise HTTPException(status_code=400, detail="derivative parent must be a raw receipt")
-            if int(parent["producer_dispatch_id"]) != int(run["producer_dispatch_id"]):
-                raise HTTPException(
-                    status_code=400,
-                    detail="raw and redacted receipts must belong to the same producer dispatch",
-                )
-
         if not resolved_sha256:
             canonical = json.dumps(
                 {
@@ -574,9 +630,8 @@ def create_proof_receipt(
                 engagement_id, run_id, producer_dispatch_id, evidence_kind,
                 expected_result, observed_result, artifact_id,
                 source_read_id, command_run_id, artifact_relative_path,
-                evidence_sha256, recorded_health,
-                redaction_status, derivative_of_receipt_id, tombstone_reason
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                evidence_sha256, recorded_health, tombstone_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 engagement.id,
@@ -591,8 +646,6 @@ def create_proof_receipt(
                 artifact_path,
                 resolved_sha256,
                 evidence_health,
-                redaction_status,
-                derivative_of_receipt_id,
                 str(tombstone_reason or ""),
             ),
         )
@@ -757,7 +810,7 @@ def list_run_proof_receipts(
                 offset,
             ),
         ).fetchall()
-        serialized = _apply_command_output_health(
+        serialized = _apply_live_evidence_health(
             connection,
             engagement.id,
             [_serialize_run_receipt(row) for row in rows],
@@ -1093,7 +1146,8 @@ def proof_evidence_health_issues_for_finding(
                     "evidence_health": receipt["evidence_health"],
                 }
             )
-        parent_id = receipt.get("derivative_of_receipt_id")
+        legacy = receipt.get("legacy_derivative_provenance")
+        parent_id = legacy.get("source_receipt_id") if isinstance(legacy, dict) else None
         if parent_id is None:
             continue
         raw = _serialize_receipts(
@@ -1239,7 +1293,11 @@ def _verification_receipts(
             engagement_id,
             receipt_id,
         )
-        if receipt["redaction_status"] == "redacted":
+        legacy = receipt.get("legacy_derivative_provenance")
+        legacy_parent_id = (
+            legacy.get("source_receipt_id") if isinstance(legacy, dict) else None
+        )
+        if legacy_parent_id is not None:
             raw = _serialize_receipts(
                 connection,
                 engagement_id,
@@ -1247,7 +1305,7 @@ def _verification_receipts(
                     _receipt_row(
                         connection,
                         engagement_id,
-                        int(receipt["derivative_of_receipt_id"]),
+                        int(legacy_parent_id),
                     )
                 ],
             )[0]

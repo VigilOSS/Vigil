@@ -240,6 +240,63 @@ def test_seq_updates_entry_in_place(tmp_path, monkeypatch, capsys):
     assert replies[1]["created_at"] == "2026-07-16T00:00:00Z"  # original stamp preserved
 
 
+def test_sent_reply_cannot_be_edited_in_place(tmp_path, monkeypatch):
+    sent = _reply(
+        1,
+        body="bytes actually sent",
+        ask="q1",
+        sent=True,
+        sent_at="2026-07-16T01:00:00Z",
+    )
+    fake = _FakeClient(_finding(replies=[sent]))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        ["record-reply", "VA-047", "--seq", "1", "--body", "rewritten"],
+        str(tmp_path),
+    )
+
+    with pytest.raises(AssessError, match="immutable"):
+        record_reply.run(args)
+
+    assert fake.patches == []
+
+
+def test_correction_appends_new_version_linked_to_sent_reply(
+    tmp_path, monkeypatch, capsys
+):
+    sent = _reply(
+        1,
+        body="bytes actually sent",
+        ask="q1",
+        sent=True,
+        sent_at="2026-07-16T01:00:00Z",
+    )
+    fake = _FakeClient(_finding(replies=[sent]))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(
+        [
+            "record-reply",
+            "VA-047",
+            "--corrects",
+            "1",
+            "--in-response-to",
+            "Correction to reply 1",
+            "--body",
+            "Corrected bytes",
+        ],
+        str(tmp_path),
+    )
+
+    record_reply.run(args)
+    capsys.readouterr()
+
+    replies = _patched_replies(fake)
+    assert replies[0] == sent
+    assert replies[1]["seq"] == 2
+    assert replies[1]["corrects_seq"] == 1
+    assert replies[1]["event_type"] == "correction"
+
+
 # -- sent marking + submission_status coupling --------------------------------
 
 def test_sent_marks_entry_and_never_writes_submission_status(tmp_path, monkeypatch, capsys):

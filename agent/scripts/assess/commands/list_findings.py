@@ -8,6 +8,11 @@ from urllib.parse import quote, urlencode
 
 from assess.lib.client import AssessmentClient, AssessError
 from assess.lib.config import load_config
+from assess.lib.contracts import (
+    FINDING_SEVERITIES,
+    FINDING_WORKFLOW_STATUSES,
+    VERIFICATION_STATUSES,
+)
 from assess.lib.finding_render import blocked_reason_summary, warn_untrusted_data
 from assess.lib.list_output import (
     RemovedOptionAction,
@@ -57,9 +62,20 @@ def register(subparsers) -> None:
             "  vigil assess finding list --limit 100 --offset 100"
         ),
     )
-    p.add_argument("--severity")
-    p.add_argument("--workflow-status", "--status", dest="workflow_status")
-    p.add_argument("--verification-status")
+    p.add_argument("--severity", choices=FINDING_SEVERITIES)
+    p.add_argument(
+        "--workflow-status", "--status", dest="workflow_status",
+        choices=FINDING_WORKFLOW_STATUSES,
+    )
+    p.add_argument(
+        "--verification-status",
+        choices=VERIFICATION_STATUSES,
+        help=(
+            "One-axis verification state. The confirmed-finding set is "
+            "--verification-status confirmed; the retired two-axis value "
+            "`verified` does not exist on either side of the contract."
+        ),
+    )
     p.add_argument("--source-name")
     p.add_argument("--slug")
     p.add_argument("--root-cause", dest="root_cause_slug", help="Show the root finding and linked siblings")

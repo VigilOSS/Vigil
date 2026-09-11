@@ -213,7 +213,7 @@ and, if found, the precedent disclosure it was compared against. See the "Four V
 `steps_to_reproduce` is written from what you actually ran, with concrete values, and each step
 carries the `command-run` id behind it in `repro_runs` — **a step with no run id behind it was
 imagined, not executed.** The report-writer cannot run probes, so an unrecorded reproduction is one
-it can only infer; redaction of those concrete values is its job at submission time, not yours.
+it can only infer; those concrete values remain verbatim through submission.
 
 ## Related
 

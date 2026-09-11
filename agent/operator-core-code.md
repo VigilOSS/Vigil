@@ -390,18 +390,34 @@ Code Analysis: [x] Ingest  [x] Classify+Map  [>] Hunt  [ ] Verify+Variant  [ ] F
 
 ### Running Alongside Web Testing
 When source code is obtained mid-engagement (exposed .git, source maps, backup download):
-1. Download/reconstruct source to `$DIR/source/<name>/`
-2. Run `vigil assess code-ingest "$DIR/source/<name>"`
-3. Use the ingest result's repo ID and sealed snapshot path with
+1. Explicitly enable the code track with `vigil engagement add-track <engagement-key> code`.
+   Ingestion never changes engagement type or authorization as a side effect.
+2. Download/reconstruct source to `$DIR/source/<name>/`
+3. Run `vigil assess code-ingest "$DIR/source/<name>"`
+4. Use the ingest result's repo ID and sealed snapshot path with
    `vigil assess code-index build --repo-id <repo-id> <snapshot-path>`, then run
    `vigil assess code-index sync` (the script bootstraps bundled tree-sitter packages through `uv`
    on first run)
-4. Code analysis phases run in parallel with ongoing web testing
-5. Findings land in the same `assessment_findings` table
+5. Code analysis phases run in parallel with ongoing web testing
+6. Findings land in the same `assessment_findings` table
+
+When a standalone code engagement gains an authorized live target, explicitly run
+`vigil engagement add-track <engagement-key> web`, then add each authorization root with
+`vigil engagement add-host <engagement-key> <host>` before the first probe. The new web track starts
+at recon while the existing code phase is preserved.
+
+Until that web track is active and authorized, CODE-phase specialists follow the declared-target
+advisory in `shared-constraints-code.md`: ordinary research network access remains available, while
+recognized contact with a host declared in `scope.json` produces a warning and must be rerouted to
+the web workflow.
 
 ### Cross-Linking
-- Code findings use `canonical_location = "file:..."` to distinguish from web findings
-- `assessment_attack_chains` link code findings to web findings when the same endpoint is affected
+- Code findings carry structured source identity; a bare `file:` prefix is display syntax, not
+  sufficient proof of source provenance.
+- Live confirmation enriches the same finding and preserves its source location as the canonical
+  binding. A materially different behavior is a variant; it is not a duplicate finding.
+- `assessment_attack_chains` connect distinct defects; they do not split one source defect into a
+  second web finding merely because live proof was added.
 - Code surfaces inform exploit-developer dispatches during web testing
 
 ## Operator Boundary -- Orchestration, Not Authorship

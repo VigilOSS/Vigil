@@ -16,6 +16,34 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 from urllib.parse import urlsplit
 
+try:
+    from vigil_cli.scope_entries import (
+        _warned_scope_keys,
+        classify_scope_entry,
+        ip_literal as _canonical_ip_literal,
+        is_dns_label as _canonical_is_dns_label,
+        normalize_host as _canonical_normalize_host,
+        normalize_host_for_match as _canonical_normalize_host_for_match,
+        parse_cidr as _canonical_parse_cidr,
+        to_a_label as _canonical_to_a_label,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "vigil_cli":
+        raise
+    source_root = Path(__file__).resolve().parents[4] / "src"
+    if str(source_root) not in sys.path:
+        sys.path.insert(0, str(source_root))
+    from vigil_cli.scope_entries import (
+        _warned_scope_keys,
+        classify_scope_entry,
+        ip_literal as _canonical_ip_literal,
+        is_dns_label as _canonical_is_dns_label,
+        normalize_host as _canonical_normalize_host,
+        normalize_host_for_match as _canonical_normalize_host_for_match,
+        parse_cidr as _canonical_parse_cidr,
+        to_a_label as _canonical_to_a_label,
+    )
+
 # ---------------------------------------------------------------------------
 # Vendor-SaaS heuristics
 # ---------------------------------------------------------------------------
@@ -84,16 +112,13 @@ def host_is_vendor_saas(host: str | None) -> str | None:
 
 
 
-_DNS_LABEL_RE = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$", re.IGNORECASE)
-
-_warned_scope_keys: set[str] = set()
-
 _SHELL_BINARIES = frozenset({"sh", "bash", "dash", "zsh"})
 
 # Executables that put requests on the wire against whatever they are pointed at.
 # This is a TOOL classifier, NOT a destination filter. Execution lanes consume
-# it to decide whether to print cross-lane target-traffic context. It admits
-# nothing, refuses nothing, and makes no request-rate claim.
+# it for target-traffic context and to require that target-facing activity has
+# an explicit authorization-root set. It never decides whether a named
+# destination is in scope and makes no request-rate claim.
 #
 # ``browser`` is not an executable — it is the tool name ``kali browser``
 # declares. Its argv is ``python3 -c <driver> <json-plan>``, so neither the
@@ -178,9 +203,7 @@ def _is_dns_label(token: str) -> bool:
     They are admitted only on the explicitly-authored scope path, never from
     free-text token parsing, so log noise can't silently widen scope.
     """
-    if not token:
-        return False
-    return bool(_DNS_LABEL_RE.match(token))
+    return _canonical_is_dns_label(token)
 
 
 def _parse_cidr(token: str) -> ipaddress.IPv4Network | ipaddress.IPv6Network | None:
@@ -192,12 +215,7 @@ def _parse_cidr(token: str) -> ipaddress.IPv4Network | ipaddress.IPv6Network | N
     Parsing it as a network instead lets ``entry_matches_host`` admit every
     address in range.
     """
-    if "/" not in token:
-        return None
-    try:
-        return ipaddress.ip_network(token, strict=False)
-    except ValueError:
-        return None
+    return _canonical_parse_cidr(token)
 
 
 def _warn_scope(key: str, message: str) -> None:
@@ -217,22 +235,12 @@ def _to_a_label(host: str) -> str:
     back to the input on encode failure preserves IP literals and other
     non-IDNA strings.
     """
-    if not host:
-        return ""
-    cleaned = host.strip().rstrip(".").lower()
-    if not cleaned:
-        return ""
-    try:
-        return cleaned.encode("idna").decode("ascii").lower()
-    except (UnicodeError, UnicodeDecodeError):
-        return cleaned
+    return _canonical_to_a_label(host)
 
 
 def _normalize_host_for_match(host: str) -> str:
     """Return a normalized host suitable for scope matching (lowercase, no trailing dot, A-label)."""
-    if not host:
-        return ""
-    return _to_a_label(host)
+    return _canonical_normalize_host_for_match(host)
 
 
 def normalize_scope_payload(scope: dict[str, Any]) -> tuple[dict[str, Any], bool]:
@@ -582,61 +590,6 @@ def rate_caps_for_dir(engagement_dir: str) -> tuple[float | None, dict[str, str]
     return rl, required_headers(scope)
 
 
-def classify_scope_entry(raw: str) -> dict[str, str] | None:
-    stripped = raw.strip()
-    if not stripped:
-        return None
-
-    if stripped.startswith("*.") and len(stripped) > 2:
-        host = _to_a_label(stripped[2:])
-        if not host:
-            return None
-        return {
-            "scope_entry": stripped,
-            "entry_kind": "wildcard",
-            "host": host,
-        }
-
-    network = _parse_cidr(stripped)
-    if network is not None:
-        return {
-            "scope_entry": stripped,
-            "entry_kind": "cidr",
-            "host": str(network),
-        }
-
-    if "://" in stripped:
-        try:
-            split = urlsplit(stripped)
-        except ValueError:
-            return None
-        host = _to_a_label(split.hostname or "")
-        if not host:
-            return None
-        path = (split.path or "").strip("/")
-        if path:
-            _warn_scope(
-                stripped,
-                f"scope: entry '{stripped}' carries a path; scope is matched at host "
-                f"granularity, so this admits the whole host '{host}'. The path boundary "
-                "is not enforced — narrow the engagement in-band if it matters.",
-            )
-        return {
-            "scope_entry": stripped,
-            "entry_kind": "url",
-            "host": host,
-        }
-
-    host = host_from_token(stripped, allow_single_label=True)
-    if not host:
-        return None
-    return {
-        "scope_entry": stripped,
-        "entry_kind": "bare_host",
-        "host": _to_a_label(host) or host,
-    }
-
-
 def host_from_token(raw: str, *, allow_single_label: bool = False) -> str:
     """Extract a lowercased host from a URL, host:port, or line token.
 
@@ -691,35 +644,15 @@ def _host_from_bracketed_authority(raw: str) -> str:
 
 
 def _validated_host(raw: str, *, allow_single_label: bool = False) -> str:
-    host = raw.strip().strip("[]").rstrip(".").lower()
-    if not host:
-        return ""
-    ip_literal = _ip_literal(host)
-    if ip_literal:
-        return ip_literal
-    return host if looks_like_host(host, allow_single_label=allow_single_label) else ""
+    return _canonical_normalize_host(raw, allow_single_label=allow_single_label)
 
 
 def _ip_literal(host: str) -> str:
-    try:
-        return str(ipaddress.ip_address(host))
-    except ValueError:
-        return ""
+    return _canonical_ip_literal(host)
 
 
 def looks_like_host(host: str, *, allow_single_label: bool = False) -> bool:
-    if not host:
-        return False
-    if _ip_literal(host):
-        return True
-    if host == "localhost":
-        return True
-    if "." in host:
-        return True
-    if allow_single_label and _is_dns_label(host):
-        return True
-    parts = host.split(".")
-    return len(parts) == 4 and all(part.isdigit() and 0 <= int(part) <= 255 for part in parts)
+    return bool(_canonical_normalize_host(host, allow_single_label=allow_single_label))
 
 
 def entry_matches_host(entry: dict[str, str], host: str) -> bool:
@@ -926,6 +859,75 @@ _LAUNCHERS = frozenset(
 )
 
 
+def _expand_env_split_argv(argv: list[str]) -> tuple[list[str], bool]:
+    """Expand GNU ``env -S/--split-string`` into the argv it launches.
+
+    ``env -S`` is itself a command-line parser: its value is split and inserted
+    back into env's argument stream. Treating that value as ordinary option
+    data hides the real executable from the denied-tool boundary. We accept the
+    shell-like quoting supported by the ordinary cases and mark GNU-specific
+    expansion syntax ambiguous so a configured denylist can fail closed.
+    """
+    current = [str(value) for value in argv]
+    ambiguous = False
+    for _ in range(16):
+        index = 1
+        split_index: int | None = None
+        split_value = ""
+        consumed = 1
+        while index < len(current):
+            token = current[index]
+            if token == "--":
+                break
+            if "=" in token and token.split("=", 1)[0].isidentifier():
+                index += 1
+                continue
+            if token in {"-S", "--split-string"}:
+                if index + 1 >= len(current):
+                    return current, True
+                split_index = index
+                split_value = current[index + 1]
+                consumed = 2
+                break
+            if token.startswith("--split-string="):
+                split_index = index
+                split_value = token.split("=", 1)[1]
+                break
+            if token.startswith("-S") and len(token) > 2:
+                split_index = index
+                split_value = token[2:]
+                break
+            if token in {"-C", "--chdir", "-u", "--unset"}:
+                if index + 1 >= len(current):
+                    return current, True
+                index += 2
+                continue
+            if any(
+                token.startswith(option + "=")
+                for option in {"--chdir", "--unset"}
+            ) or (len(token) > 2 and token[:2] in {"-C", "-u"}):
+                index += 1
+                continue
+            if token in {"-0", "--null", "-i", "--ignore-environment"}:
+                index += 1
+                continue
+            break
+        if split_index is None:
+            return current, ambiguous
+        if any(character in split_value for character in ("$", "\\", "#")):
+            ambiguous = True
+        try:
+            expanded = shlex.split(split_value, posix=True)
+        except ValueError:
+            return current, True
+        current = [
+            *current[:split_index],
+            *expanded,
+            *current[split_index + consumed :],
+        ]
+    return current, True
+
+
 def _launcher_inner_index(argv: list[str], launcher: str) -> tuple[int | None, bool]:
     """Locate a transparent launcher's child argv without guessing option values."""
     index = 1
@@ -1050,6 +1052,20 @@ def _launcher_inner_index(argv: list[str], launcher: str) -> tuple[int | None, b
     return (index if index < len(argv) else None), index >= len(argv)
 
 
+def _launcher_child_argv(
+    argv: list[str], launcher: str
+) -> tuple[list[str] | None, bool]:
+    """Return the effective child argv behind one transparent launcher."""
+    effective = [str(value) for value in argv]
+    ambiguous = False
+    if launcher == "env":
+        effective, ambiguous = _expand_env_split_argv(effective)
+    inner_index, parse_ambiguous = _launcher_inner_index(effective, launcher)
+    if inner_index is None:
+        return None, ambiguous or parse_ambiguous
+    return effective[inner_index:], ambiguous or parse_ambiguous
+
+
 def _argv_tool_analysis(argv: list[str], *, depth: int = 0) -> tuple[set[str], bool]:
     if depth > 16:
         return set(), True
@@ -1085,15 +1101,290 @@ def _argv_tool_analysis(argv: list[str], *, depth: int = 0) -> tuple[set[str], b
             ambiguous = ambiguous or nested_ambiguous
         return tools, ambiguous
     if head in _LAUNCHERS:
-        inner_index, ambiguous = _launcher_inner_index(command, head)
-        if inner_index is None:
+        child_argv, ambiguous = _launcher_child_argv(command, head)
+        if child_argv is None:
             return tools, ambiguous
         nested_tools, nested_ambiguous = _argv_tool_analysis(
-            command[inner_index:], depth=depth + 1
+            child_argv, depth=depth + 1
         )
         tools.update(nested_tools)
         return tools, ambiguous or nested_ambiguous
     return tools, False
+
+
+def execution_script_path(
+    raw_path: str | Path,
+    engagement_dir: str | Path,
+    *,
+    execution_cwd: str | Path | None = None,
+    container_paths: bool = True,
+) -> Path | None:
+    """Resolve a script only when its executed file is engagement-owned.
+
+    Kali paths use ``/engagements/<key>/...`` while host execution may select a
+    different working directory. The classifier must inspect the same file the
+    process would execute. Explicit foreign-engagement paths and container-path
+    escapes are refused as a cross-engagement evidence boundary; unrelated
+    outside paths are merely uninspectable and do not become an HTTP veto.
+    """
+    root = Path(engagement_dir).expanduser().resolve()
+    raw = Path(raw_path)
+    if raw.is_absolute() and len(raw.parts) >= 2 and raw.parts[1] == "engagements":
+        if not container_paths:
+            raise ScopePolicyError(
+                f"container-namespace script path '{raw}' cannot be executed by "
+                "host-exec; use the host path selected by --cwd"
+            )
+        if len(raw.parts) < 4:
+            return None
+        if raw.parts[2] != root.name:
+            raise ScopePolicyError(
+                f"container script path engagement '{raw.parts[2]}' does not match "
+                f"current engagement '{root.name}'"
+            )
+        candidate = root.joinpath(*raw.parts[3:]).resolve()
+        if not candidate.is_relative_to(root):
+            raise ScopePolicyError(
+                f"container script path '{raw}' escapes current engagement "
+                f"'{root.name}'"
+            )
+    elif raw.is_absolute():
+        candidate = raw.expanduser().resolve()
+    else:
+        base = (
+            Path(execution_cwd).expanduser().resolve()
+            if execution_cwd is not None
+            else root
+        )
+        candidate = (base / raw).resolve()
+    if not candidate.is_relative_to(root):
+        try:
+            sibling_name = candidate.relative_to(root.parent).parts[0]
+        except (IndexError, ValueError):
+            sibling_name = ""
+        sibling = root.parent / sibling_name if sibling_name else None
+        if (
+            sibling is not None
+            and sibling != root
+            and (sibling / "scope.json").is_file()
+        ):
+            raise ScopePolicyError(
+                f"script path '{raw}' resolves into engagement '{sibling_name}', "
+                f"not current engagement '{root.name}'"
+            )
+        return None
+    try:
+        is_file = candidate.is_file()
+    except OSError:
+        # A classifier mistake must never turn arbitrary program text into an
+        # unbounded filesystem operation (for example Node ``-e`` source long
+        # enough to exceed NAME_MAX). Unknown/unusable paths are simply not
+        # inspectable; explicit engagement-boundary violations were handled
+        # above before this stat.
+        return None
+    if not is_file:
+        return None
+    return candidate
+
+
+_SCRIPT_FILE_EXECUTORS = _SHELL_BINARIES | {
+    "node", "nodejs", "perl", "php", "python", "python3", "ruby",
+}
+_INTERPRETER_INLINE_SOURCE_FLAGS: dict[str, frozenset[str]] = {
+    "bash": frozenset({"-c"}),
+    "dash": frozenset({"-c"}),
+    "node": frozenset({"-e", "--eval", "-p", "--print"}),
+    "nodejs": frozenset({"-e", "--eval", "-p", "--print"}),
+    "perl": frozenset({"-e", "-E"}),
+    "php": frozenset({"-r", "--run"}),
+    "python": frozenset({"-c"}),
+    "python3": frozenset({"-c"}),
+    "ruby": frozenset({"-e"}),
+    "sh": frozenset({"-c"}),
+    "zsh": frozenset({"-c"}),
+}
+
+# Options whose following word configures the interpreter rather than naming
+# the executed file. This is the one argv-shape table shared by evidence-path
+# isolation and required-header inspection. Unknown options make the result
+# unknown instead of guessing that their value is a script path.
+_INTERPRETER_VALUE_OPTIONS: dict[str, frozenset[str]] = {
+    "bash": frozenset({"-O", "+O", "-o", "+o", "--init-file", "--rcfile"}),
+    "dash": frozenset({"-o", "+o"}),
+    "node": frozenset(
+        {
+            "-C", "--conditions", "--diagnostic-dir", "--env-file",
+            "--env-file-if-exists", "--experimental-loader",
+            "--experimental-sea-config", "--icu-data-dir", "--import",
+            "--inspect-port", "--loader", "--openssl-config",
+            "--redirect-warnings", "-r", "--require", "--title",
+        }
+    ),
+    "nodejs": frozenset(
+        {
+            "-C", "--conditions", "--diagnostic-dir", "--env-file",
+            "--env-file-if-exists", "--experimental-loader",
+            "--experimental-sea-config", "--icu-data-dir", "--import",
+            "--inspect-port", "--loader", "--openssl-config",
+            "--redirect-warnings", "-r", "--require", "--title",
+        }
+    ),
+    "perl": frozenset({"-F", "-I", "-M", "-m"}),
+    "php": frozenset(
+        {
+            "-c", "--php-ini", "-d", "--define", "-S", "--server",
+            "-t", "--docroot", "-z", "--zend-extension",
+        }
+    ),
+    "python": frozenset({"-W", "-X", "--check-hash-based-pycs"}),
+    "python3": frozenset({"-W", "-X", "--check-hash-based-pycs"}),
+    "ruby": frozenset(
+        {
+            "-C", "-E", "-F", "-I", "-K", "-r", "--encoding",
+            "--external-encoding", "--internal-encoding",
+        }
+    ),
+    "sh": frozenset({"-o", "+o"}),
+    "zsh": frozenset({"-o", "+o"}),
+}
+
+_INTERPRETER_MODE_OPTIONS: dict[str, frozenset[str]] = {
+    "python": frozenset({"-m"}),
+    "python3": frozenset({"-m"}),
+    "ruby": frozenset({"-S"}),
+}
+
+_INTERPRETER_FILE_OPTIONS: dict[str, frozenset[str]] = {
+    "php": frozenset({"-f", "--file"}),
+}
+
+_INTERPRETER_FLAG_OPTIONS: dict[str, frozenset[str]] = {
+    "bash": frozenset(
+        {
+            "--debugger", "--help", "--login", "--noediting", "--noprofile",
+            "--norc", "--posix", "--pretty-print", "--restricted", "--verbose",
+            "--version",
+        }
+    ),
+    "dash": frozenset(),
+    "node": frozenset(),
+    "nodejs": frozenset(),
+    "perl": frozenset(),
+    "php": frozenset({"-n", "--no-php-ini", "-q", "--no-header"}),
+    "python": frozenset(),
+    "python3": frozenset(),
+    "ruby": frozenset(),
+    "sh": frozenset(),
+    "zsh": frozenset(),
+}
+
+
+def _option_has_attached_value(token: str, options: frozenset[str]) -> bool:
+    for option in options:
+        if option.startswith("--") and token.startswith(option + "="):
+            return True
+        if option.startswith("-") and not option.startswith("--"):
+            if token.startswith(option) and len(token) > len(option):
+                return True
+    return False
+
+
+def execution_script_argv(argv: list[str]) -> str:
+    """Return the selected script-file argument for a known interpreter.
+
+    The result is positive-only. Inline source, module modes, stdin, a missing
+    option value, or an option whose arity is not in the shared table returns
+    ``""`` rather than treating source/config text as a path. That keeps both
+    cross-engagement evidence isolation and required-header inspection on the
+    exact same conservative argv interpretation.
+    """
+    effective = _unwrap_launcher_argv(argv)
+    if not effective:
+        return ""
+    head = Path(str(effective[0])).name.lower()
+    if head not in _SCRIPT_FILE_EXECUTORS:
+        return ""
+
+    inline_flags = _INTERPRETER_INLINE_SOURCE_FLAGS[head]
+    value_options = _INTERPRETER_VALUE_OPTIONS[head]
+    mode_options = _INTERPRETER_MODE_OPTIONS.get(head, frozenset())
+    file_options = _INTERPRETER_FILE_OPTIONS.get(head, frozenset())
+    flag_options = _INTERPRETER_FLAG_OPTIONS[head]
+    index = 1
+    while index < len(effective):
+        token = str(effective[index])
+        if token == "--":
+            return str(effective[index + 1]) if index + 1 < len(effective) else ""
+        if token == "-":
+            return ""
+        if token in inline_flags or _option_has_attached_value(token, inline_flags):
+            return ""
+        if token in mode_options or _option_has_attached_value(token, mode_options):
+            return ""
+        if token in file_options:
+            return str(effective[index + 1]) if index + 1 < len(effective) else ""
+        if any(
+            token.startswith(option + "=")
+            for option in file_options
+            if option.startswith("--")
+        ):
+            return token.split("=", 1)[1]
+        if token in value_options:
+            if index + 1 >= len(effective):
+                return ""
+            index += 2
+            continue
+        if _option_has_attached_value(token, value_options):
+            index += 1
+            continue
+        if token in flag_options:
+            index += 1
+            continue
+        if head in _SHELL_BINARIES and token.startswith(("-", "+")):
+            # POSIX shell single-letter flags may be clustered. Any cluster
+            # containing ``c`` is inline source; the rest consume no argv word.
+            if not token.startswith("--") and "c" in token[1:]:
+                return ""
+            if not token.startswith("--"):
+                index += 1
+                continue
+        if token.startswith("-"):
+            return ""
+        return token
+    return ""
+
+
+def _script_execution_tools(
+    argv: list[str],
+    engagement_dir: Path,
+    *,
+    execution_cwd: Path | None = None,
+    container_paths: bool = True,
+) -> set[str]:
+    """Find denied tool names in a readable engagement-owned shell script."""
+    effective = _unwrap_launcher_argv(argv)
+    if not effective:
+        return set()
+    head = Path(str(effective[0])).name.lower()
+    if head not in _SHELL_BINARIES:
+        return set()
+    script = execution_script_argv(argv)
+    if not script:
+        return set()
+    path = execution_script_path(
+        script,
+        engagement_dir,
+        execution_cwd=execution_cwd,
+        container_paths=container_paths,
+    )
+    if path is None:
+        return set()
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return set()
+    tools, _ambiguous = _shell_tool_analysis(text)
+    return tools
 
 
 def _shell_command_segments(script: str) -> tuple[list[list[str]], bool]:
@@ -1165,10 +1456,10 @@ def _unwrap_launcher_argv(cmd: list[str]) -> list[str]:
         head = Path(current[0]).name.lower()
         if head not in _LAUNCHERS:
             return current
-        inner_index, ambiguous = _launcher_inner_index(current, head)
-        if ambiguous or inner_index is None:
+        child_argv, ambiguous = _launcher_child_argv(current, head)
+        if ambiguous or child_argv is None:
             return current
-        current = current[inner_index:]
+        current = child_argv
     return current
 
 
@@ -1268,7 +1559,11 @@ def enforce_execution_policy(
     *,
     tool_name: str,
     engagement_dir: str | Path,
+    execution_cwd: str | Path | None = None,
+    container_paths: bool = True,
     require_declared_tool: bool = False,
+    target_host: str = "",
+    execution_phase: str = "",
 ) -> dict[str, Any]:
     """Apply engagement-wide tool policy before any process starts.
 
@@ -1282,13 +1577,20 @@ def enforce_execution_policy(
     fetch.
 
     What is enforced is the engagement policy that does not require guessing a
-    destination: the ``denied_tools`` list and the declared-vs-actual tool
-    check. ``off_limits_paths`` is operator guidance, never an execution veto.
+    destination: the ``denied_tools`` list, the declared-vs-actual tool check,
+    and a non-empty canonical host set for target-facing web work.
+    ``off_limits_paths`` is operator guidance, never an execution veto.
 
-    The return value is audit-ready. ``target_facing`` tells the caller's rate
-    governance whether this run will put traffic on the wire — true when the
-    declared or observed tool is target-facing, or when the argv asks for an
-    http(s) URL.
+    The return value is audit-ready. ``target_facing`` is a positive static
+    signal for the caller's cross-lane rate advisory and the non-empty-host
+    gate — true when a declared/directly observed tool or argv URL is
+    recognizable as target-facing. In a CODE-only engagement, a positively
+    identified declared target emits an advisory and is returned as
+    ``code_target_warning``; it never refuses the command. Readable program text is not promoted into
+    this gate: static syntax does not establish that code executes. False means
+    "not recognized", not proof of no network activity; dynamic code, custom
+    clients, raw sockets, and native binaries require a runtime isolation
+    boundary rather than another lexical rule.
     """
     eng_dir = Path(engagement_dir).expanduser().resolve()
     try:
@@ -1297,7 +1599,28 @@ def enforce_execution_policy(
         raise ScopePolicyError(f"cannot load scope policy before execution: {exc}") from exc
 
     normalized_tool = Path(str(tool_name or (cmd[0] if cmd else ""))).name.strip().lower()
-    observed_tools, _ = _argv_tool_analysis([str(token) for token in cmd])
+    observed_tools, argv_ambiguous = _argv_tool_analysis([str(token) for token in cmd])
+    positive_tools = set(observed_tools)
+    positive_tools.add(normalized_tool)
+    script_argv = execution_script_argv([str(token) for token in cmd])
+    if script_argv:
+        execution_script_path(
+            script_argv,
+            eng_dir,
+            execution_cwd=execution_cwd,
+            container_paths=container_paths,
+        )
+    script_tools = _script_execution_tools(
+        [str(token) for token in cmd],
+        eng_dir,
+        execution_cwd=(
+            Path(execution_cwd).expanduser().resolve()
+            if execution_cwd is not None
+            else None
+        ),
+        container_paths=container_paths,
+    )
+    observed_tools.update(script_tools)
     policy_tools = set(observed_tools)
     policy_tools.add(normalized_tool)
     if require_declared_tool and normalized_tool not in observed_tools:
@@ -1314,6 +1637,11 @@ def enforce_execution_policy(
         raise ScopePolicyError(
             f"tool '{blocked_tool}' is denied by engagement scope policy"
         )
+    if denied and argv_ambiguous:
+        raise ScopePolicyError(
+            "command shape cannot be inspected reliably against engagement "
+            "scope policy denied_tools"
+        )
 
     request_urls = _request_urls([str(token) for token in cmd])
 
@@ -1322,10 +1650,44 @@ def enforce_execution_policy(
     # ``python3 -c <driver> <json-plan>``) still receives the cross-lane
     # advisory. The declared name is supplied by the caller, not guessed from
     # argv.
-    return {
-        "target_facing": bool(policy_tools & _TARGET_FACING_TOOLS)
-        or bool(request_urls),
-    }
+    target_facing = bool(positive_tools & _TARGET_FACING_TOOLS) or bool(request_urls)
+    engagement_type = str(scope_doc.get("engagement_type", "")).strip().lower()
+    declared_hosts: list[dict[str, str]] = []
+    if target_facing:
+        try:
+            declared_hosts = scope_entries(scope_doc)
+        except SystemExit as exc:
+            raise ScopePolicyError(str(exc)) from exc
+        if not declared_hosts and engagement_type != "code":
+            recovery = f"Run `vigil engagement add-host {eng_dir.name} <host>`"
+            raise ScopePolicyError(
+                "target-facing execution requires a non-empty, valid scope.json "
+                f"`hosts` list. {recovery} before retrying; execution cannot create "
+                "or infer authorization from its argv."
+            )
+
+    result: dict[str, Any] = {"target_facing": target_facing}
+    code_lane = engagement_type == "code" or (
+        engagement_type == "both"
+        and str(execution_phase or "").strip().lower().startswith("code-")
+    )
+    if code_lane and declared_hosts:
+        deny_entries = out_of_scope_entries(scope_doc)
+        candidates = [str(target_host or "").strip(), *request_urls]
+        for candidate in candidates:
+            host = host_from_token(candidate, allow_single_label=True)
+            if not host or not host_admitted(host, declared_hosts, deny_entries):
+                continue
+            result["code_target_warning"] = host
+            print(
+                "WARNING: CODE engagement command appears to contact declared "
+                f"target '{host}'. CODE workflow is for source analysis; use "
+                "research-only network access or explicitly add the web track "
+                "before live target work. This is advisory; execution is continuing.",
+                file=sys.stderr,
+            )
+            break
+    return result
 
 
 def filter_recon_targets(

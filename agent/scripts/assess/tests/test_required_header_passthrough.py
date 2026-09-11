@@ -17,7 +17,7 @@ def test_kali_exec_warns_and_runs_when_required_header_cannot_be_injected(
             {
                 "engagement_type": "web",
                 "hosts": ["app.example.com"],
-                "required_headers": {"X-Bug-Bounty": "vigiloss"},
+                "required_headers": {"X-Bug-Bounty": "researcher"},
             }
         ),
         encoding="utf-8",

@@ -318,6 +318,14 @@ def test_code_coverage_contract_documents_gate_flags():
     assert "--require-transition-ready" in blob
 
 
+def test_code_dispatch_action_pointer_resolves_to_parent_contract():
+    contract = contracts.get_contract("code-dispatch done")
+
+    assert contract is not None
+    assert contract.name == "code-dispatch"
+    assert any("disposition" in invocation for invocation in contract.preferred_invocations)
+
+
 # The discovery / navigation / core-query commands a specialist reaches for.
 # These are phase-agnostic utilities but MUST stay discoverable via
 # `list-commands` (the catalog is the commands analogue of list-skills /

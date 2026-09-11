@@ -5,9 +5,9 @@ Backend + runtime are stubbed the same way the other assess CLI suites do
 (``load_config`` + a fake non-context-managed client closed in a ``finally``; see
 test_http_cmd.py). These pin: the list view renders EVERY stored identity with
 metadata, the host/include-dead filters map to the exact backend query params,
-raw cookie VALUES never leak into the list view (names only), and a
-``--probe --identity`` run persists the classified verdict (while an
-active-identity probe stays read-only).
+``--json`` hands back the ``/credentials`` response verbatim (live values
+included), and a ``--probe --identity`` run persists the classified verdict
+(while an active-identity probe stays read-only).
 """
 from __future__ import annotations
 
@@ -116,16 +116,6 @@ def test_list_renders_every_identity_with_metadata(tmp_path, monkeypatch, capsys
     assert fake.closed is True
 
 
-def test_list_does_not_leak_raw_cookie_values(tmp_path, monkeypatch, capsys):
-    fake = _FakeClient(listing=_LISTING)
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["auth", "list"], str(tmp_path))
-    args.func(args)
-    out = capsys.readouterr().out
-    assert "SECRET-VALUE-AAA" not in out
-    assert "SECRET-VALUE-BBB" not in out
-
-
 def test_list_host_filter_maps_to_query_param(tmp_path, monkeypatch, capsys):
     fake = _FakeClient(listing=_LISTING)
     _install(monkeypatch, tmp_path, fake)
@@ -148,25 +138,25 @@ def test_list_include_dead_maps_to_query_param(tmp_path, monkeypatch, capsys):
     assert _query_of(fake.gets[0])["include_dead"] == ["true"]
 
 
-def test_list_json_emits_redacted_listing(tmp_path, monkeypatch, capsys):
+def test_list_json_emits_the_credentials_response_verbatim(tmp_path, monkeypatch, capsys):
+    """--json is the LLM ingestion form: the backend response, unprojected.
+
+    The cookie a request will carry is the only thing that distinguishes two
+    sessions of the same account, so the JSON form hands back live values and
+    the caller reads the identity it is about to replay as."""
     fake = _FakeClient(listing=_LISTING)
     _install(monkeypatch, tmp_path, fake)
     args = _parse(["auth", "list", "--json"], str(tmp_path))
     args.func(args)
-    out = capsys.readouterr().out
-    parsed = json.loads(out)
-    # Every identity is still enumerated with its metadata + cookie NAMES.
-    assert set(parsed["identities"]) == {"cap-aaaa", "cap-bbbb"}
-    assert parsed["identities"]["cap-aaaa"]["cookie_names"] == ["MRHSession"]
-    assert sorted(parsed["identities"]["cap-bbbb"]["cookie_names"]) == ["MRHSession", "csrf"]
-    assert parsed["identities"]["cap-aaaa"]["host_cookies"][0]["cookie_names"] == ["MRHSession"]
-    # But no live cookie VALUE anywhere in the JSON — the safe list view must not
-    # leak session material into stdout/logs/LLM context.
-    assert "SECRET-VALUE-AAA" not in out
-    assert "SECRET-VALUE-BBB" not in out
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed == _LISTING
+    assert parsed["identities"]["cap-aaaa"]["cookies"] == {"MRHSession": "SECRET-VALUE-AAA"}
+    assert parsed["identities"]["cap-aaaa"]["host_cookies"][0]["cookies"] == {
+        "MRHSession": "SECRET-VALUE-AAA"
+    }
 
 
-def test_list_json_redacts_header_and_token_values(tmp_path, monkeypatch, capsys):
+def test_list_json_emits_header_and_token_values(tmp_path, monkeypatch, capsys):
     listing = {
         "active_identity": "cap-jwt",
         "identities": {
@@ -182,11 +172,11 @@ def test_list_json_redacts_header_and_token_values(tmp_path, monkeypatch, capsys
     _install(monkeypatch, tmp_path, fake)
     args = _parse(["auth", "list", "--json"], str(tmp_path))
     args.func(args)
-    out = capsys.readouterr().out
-    parsed = json.loads(out)
-    assert parsed["identities"]["cap-jwt"]["header_names"] == ["Authorization"]
-    assert parsed["identities"]["cap-jwt"]["token_names"] == ["access_token"]
-    assert "SECRET-BEARER-XYZ" not in out
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["identities"]["cap-jwt"]["headers"] == {
+        "Authorization": "Bearer SECRET-BEARER-XYZ"
+    }
+    assert parsed["identities"]["cap-jwt"]["tokens"] == {"access_token": "SECRET-BEARER-XYZ"}
 
 
 def test_last_auth_probe_filters_for_the_requested_identity_server_side() -> None:

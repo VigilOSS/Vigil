@@ -302,11 +302,11 @@ def _append_notes(existing: str, incoming: str, *, max_length: int | None = None
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
                 f"finding notes would grow to {len(appended)} characters, past the "
-                f"{max_length}-character cap (stored: {len(existing)}). Rotate the "
-                "accumulated notes into the transition ledger with "
-                "`vigil assess finding update <slug> --notes-rotate --notes '<summary>' "
-                "--expected-row-version <n>`, or replace them with "
-                "`--notes-replace`."
+                f"{max_length}-character cap (stored: {len(existing)}). Rewrite them "
+                "down to a summary with `vigil assess finding update <slug> "
+                "--notes-replace --notes '<summary>' --expected-row-version <n>`; the "
+                "prior text is kept verbatim on the transition ledger, readable with "
+                "`vigil assess finding history <slug>`."
             ),
         )
     return appended

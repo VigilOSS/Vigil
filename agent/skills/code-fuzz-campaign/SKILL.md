@@ -595,7 +595,7 @@ tools/fuzz-state/
 True findings from Stage 6 are recorded via:
 ```bash
 vigil assess contract finding record
-vigil assess finding record code-fuzz-engineer <finding-json>
+vigil assess finding record code-fuzz-engineer <finding-json> --agent-id <your-agent_id>
 ```
 
 Finding prefix: `CF` (code-fuzz). Location format: `file:<path>:<line>`.

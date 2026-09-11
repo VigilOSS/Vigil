@@ -46,6 +46,20 @@ produced them. The backend now derives the work-item row in the **same transacti
 observation/coverage-item write, so that lag window no longer exists. `dns-discovery` still leaves data
 on disk with no exporter — that is orthogonal to the work-buffer fold.
 
+### Operator API/CLI contract pointers
+
+This is an ownership map, not a second schema. Use `vigil assess contract <verb>` for the executable
+CLI contract and the named request model/service for payload and persistence truth.
+
+| Operator action | CLI owner | API/model owner | Storage/service owner |
+|---|---|---|---|
+| Dispatch start, validation-only dry run, and identity attribution | `agent/scripts/assess/commands/agent.py`; `lib/instruction_identity.py` | `api/assessment.py:DispatchCreate` | `services/state_manager/dispatches.py`; `assessment_dispatches` |
+| Finding create/update/verify and author repair | `commands/record_finding.py`, `update_finding.py`, `verify_finding.py`, `repair_finding_author.py` | `api/assessment.py` finding request models | `services/state_manager/findings.py`; `assessment_findings` and audit events |
+| Intel record, create/update outcome, filtering, and point reads | `commands/record_intel.py`, `list_intel.py`, `get_intel.py` | `api/intel_schemas.py`; `api/intel.py` | `services/intel.py`; `intel_*` tables and search index |
+| Artifact register, targeted refresh, search, and finding unlink | `commands/artifact.py` | `api/artifact_index.py` | `services/artifact_index.py`; `assessment_artifacts` (proof receipts remain independent and immutable) |
+| Resume orientation and count/truncation truth | `commands/resume_brief.py` | `api/assessment.py` resume route | `services/assessment_memory.py` projections over canonical backend tables |
+| Code repository ingestion | `commands/code_ingest.py` | `api/code_analysis.py` | `services/code_analysis.py`; `code_repos`/`code_files` (legacy `scope.json` repo keys are read-only compatibility input) |
+
 ---
 
 ## 2. Ingestion — tool → backend model → table

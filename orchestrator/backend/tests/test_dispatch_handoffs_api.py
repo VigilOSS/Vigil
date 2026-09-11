@@ -12,6 +12,7 @@ from pathlib import Path
 
 ENGAGEMENT_KEY = "2026-04-28-130000-handoffs"
 BASE = f"/engagements/{ENGAGEMENT_KEY}/assessment"
+SEED_AUTHOR_AGENT_ID = "HANDOFF-FINDING-AUTHOR"
 
 
 def _write_engagement(engagements_dir: Path, key: str = ENGAGEMENT_KEY) -> Path:
@@ -39,6 +40,11 @@ def _seed(client, isolate_settings) -> None:
     (eng / "findings.md").write_text("# Findings\n", encoding="utf-8")
     response = client.get(f"/engagements/{ENGAGEMENT_KEY}")
     assert response.status_code == 200, response.text
+    _register_dispatch(
+        client,
+        agent_id=SEED_AUTHOR_AGENT_ID,
+        agent_role="vulnerability-analyst",
+    )
     for slug in ("VA-001", "VA-002"):
         finding = client.post(
             f"{BASE}/findings",
@@ -52,6 +58,7 @@ def _seed(client, isolate_settings) -> None:
                 "summary": "Seed finding for handoff references",
                 "evidence_ref": "findings.md",
                 "source_name": "vulnerability-analyst",
+                "provenance": {"agent_id": SEED_AUTHOR_AGENT_ID},
             },
         )
         assert finding.status_code == 201, finding.text

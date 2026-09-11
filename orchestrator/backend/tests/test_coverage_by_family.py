@@ -21,12 +21,22 @@ BASE = f"/engagements/{ENGAGEMENT_KEY}/assessment"
 
 DEEP_HOST = "app.example.com"
 THIN_HOST = "thin.example.com"
+AUTHOR_AGENT_ID = "COVERAGE-FAMILY-AUTHOR"
 
 
 def _seed(client, isolate_settings) -> int:
     write_engagement(isolate_settings["engagements_dir"], key=ENGAGEMENT_KEY)
     response = client.get(f"/engagements/{ENGAGEMENT_KEY}")
     assert response.status_code == 200, response.text
+    dispatch = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": AUTHOR_AGENT_ID,
+            "agent_role": "vulnerability-analyst",
+            "task": "Record coverage-family fixture findings",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
     return int(response.json()["id"])
 
 
@@ -94,6 +104,7 @@ def _create_finding(client, slug: str) -> int:
             "summary": "SQL injection",
             "evidence_ref": "findings.md",
             "source_name": "vulnerability-analyst",
+            "provenance": {"agent_id": AUTHOR_AGENT_ID},
             "details": {"evidence": "Replayable request.", "impact": "DB read."},
         },
     )
@@ -119,6 +130,7 @@ def _create_finding_distinct(client, slug: str, *, root_cause_key: str,
             "summary": "SQL injection",
             "evidence_ref": "findings.md",
             "source_name": "vulnerability-analyst",
+            "provenance": {"agent_id": AUTHOR_AGENT_ID},
             "details": {"evidence": "Replayable request.", "impact": "DB read."},
         },
     )

@@ -16,9 +16,9 @@ from . import docker
 from .oob_tenants import OobTenantRoute, legacy_tenant_route, load_tenant_route
 from .paths import default_runtime_container
 
-DEFAULT_FRP_HOST = "oob-relay.example.com"
+DEFAULT_FRP_HOST = ""
 DEFAULT_FRP_PORT = 7000
-DEFAULT_OOB_DOMAIN = "oob.example.com"
+DEFAULT_OOB_DOMAIN = ""
 # Server-side resources hardcoded in the OOB profile. Globally unique on frps:
 # any other client holding these blocks our registration with port already used /
 # router config conflict. Stays in sync with _render_runtime_files() below.
@@ -46,16 +46,19 @@ class OobOptions:
 
 
 def oob_options(install_root: Path) -> OobOptions:
-    """Resolve OOB options from env vars, then config, then built-in defaults."""
+    """Resolve OOB options without silently selecting third-party infrastructure."""
     token = os.environ.get("VIGIL_FRP_TOKEN") or config_module.get_config_value("oob.frp_token") or ""
     host = os.environ.get("VIGIL_FRP_HOST") or config_module.get_config_value("oob.frp_host", DEFAULT_FRP_HOST) or DEFAULT_FRP_HOST
     port = int(os.environ.get("VIGIL_FRP_PORT") or config_module.get_config_value("oob.frp_port", str(DEFAULT_FRP_PORT)) or DEFAULT_FRP_PORT)
-    configured_domain = config_module.get_config_value("oob.domain", DEFAULT_OOB_DOMAIN) or DEFAULT_OOB_DOMAIN
+    configured_domain = (
+        os.environ.get("VIGIL_OOB_DOMAIN")
+        or config_module.get_config_value("oob.domain", DEFAULT_OOB_DOMAIN)
+        or DEFAULT_OOB_DOMAIN
+    )
     route = load_tenant_route(install_root)
-    if route is None:
-        domain = os.environ.get("VIGIL_OOB_DOMAIN") or configured_domain
-        route = legacy_tenant_route(install_root, base_domain=domain)
-    else:
+    if route is None and configured_domain:
+        route = legacy_tenant_route(install_root, base_domain=configured_domain)
+    elif route is not None:
         external_domain = os.environ.get("VIGIL_OOB_DOMAIN")
         external_value = external_domain.strip().rstrip(".").lower() if external_domain else ""
         if external_value and external_value not in {route.base_domain, route.oob_domain}:
@@ -69,10 +72,10 @@ def oob_options(install_root: Path) -> OobOptions:
         frp_host=host,
         frp_port=port,
         frp_token=token,
-        oob_domain=route.oob_domain,
-        tenant_prefix=route.tenant_prefix,
-        dns_remote_port=route.dns_remote_port,
-        reverse_remote_port=route.reverse_remote_port,
+        oob_domain=route.oob_domain if route is not None else "",
+        tenant_prefix=route.tenant_prefix if route is not None else "legacy",
+        dns_remote_port=route.dns_remote_port if route is not None else OOB_UDP_REMOTE_PORT,
+        reverse_remote_port=route.reverse_remote_port if route is not None else OOB_TCP_REMOTE_PORT,
         tenant_route=route,
     )
 
@@ -83,6 +86,12 @@ def start_oob(
     runner: docker.Runner = docker.run_command,
     frpc_ready_timeout: float = FRPC_READY_TIMEOUT_SECONDS,
 ) -> None:
+    if not options.frp_host or not options.oob_domain:
+        raise SystemExit(
+            "OOB infrastructure is not configured. Set it with "
+            "`vigil config set oob.frp_host <host>` and "
+            "`vigil config set oob.domain <domain>`, then retry."
+        )
     _require_runtime(options.container_name, runner=runner)
     if not options.frp_token:
         raise SystemExit("Missing OOB FRP token. Set it with `vigil config set oob.frp_token <token>`.")

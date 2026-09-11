@@ -7,14 +7,14 @@ architecture: the finding is the source of truth (its ``details.replies`` thread
 and the ``.md`` is a disposable render — a re-render loses nothing that was written
 back to the finding (``record-reply``). Like ``export submission``, this command
 assembles and presents but never rewrites authored text: there is no automatic
-credential redaction, because masking is an authoring decision the report-writer
-makes and stores in the reply entry, so every later render reproduces it.
+credential transformation. Credentials, tokens, PII, and other captured evidence
+remain verbatim in the durable reply entry, so every later render reproduces it.
 
 A reply is NOT a submission: there is no Title / VRT / CVSS / Summary. The layout is
 
     <reply body — leads with the new proof, answers the specific ask>   ← the ONLY
                                                                           pasteable block
-    <optional NEW-evidence proof prose, authored + masked>
+    <optional NEW-evidence proof prose, authored with exact values>
 
     ---
 
@@ -23,7 +23,7 @@ A reply is NOT a submission: there is no Title / VRT / CVSS / Summary. The layou
     **New-evidence attachment:** <engagement-relative artifact path (internal reference)>
     **Prior replies (most recent first):** <every prior reply, body inlined and fenced>
     **Parent finding proof ...:** <the finding's structured proof + linked runs to author NEW
-                                    evidence FROM (mask + weave; never paste raw)>
+                                    evidence FROM with exact values>
     **Hygiene warnings ...:** <FLAGGED internal-identifier leaks to strip before sending>
 
 The single ``---`` is the never-paste line (the reply analog of export-submission's
@@ -54,12 +54,12 @@ from assess.lib.finding_render import (
     _fence_for,
     collect_internal_ids,
     detail_value,
-    details_object,
     engagement_relative,
     hygiene_warnings,
     nonempty,
     poc_lines,
 )
+from assess.lib.reply_versions import reply_seq, reply_versions
 # ``export-reply`` reuses export-submission's finding-links → command-run resolution
 # so the reply's THREAD HISTORY surfaces the same explicitly-linked, non-retired
 # reproducing runs the submission does (author NEW evidence from them) — one helper, so
@@ -129,24 +129,11 @@ def register(subparsers) -> None:
     p.set_defaults(func=run)
 
 
-def _replies(finding: dict) -> list[dict]:
-    """The finding's ``details.replies`` thread as a list of entry dicts."""
-    raw = details_object(finding).get("replies")
-    if not isinstance(raw, list):
-        return []
-    return [entry for entry in raw if isinstance(entry, dict)]
-
-
-def _seq_of(entry: dict) -> int:
-    value = entry.get("seq")
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
-
-
 def _resolve_platform(explicit: str, replies: list[dict], finding: dict) -> str:
     if explicit:
         return explicit
     if replies:
-        latest = max(replies, key=_seq_of)
+        latest = max(replies, key=reply_seq)
         platform = nonempty(latest.get("platform"))
         if platform in _PLATFORMS:
             return platform
@@ -158,13 +145,13 @@ def _resolve_platform(explicit: str, replies: list[dict], finding: dict) -> str:
 
 def _prior_replies(replies: list[dict], current_seq: int) -> list[dict]:
     """Replies chronologically before ``current_seq``, most recent first."""
-    prior = [entry for entry in replies if _seq_of(entry) < current_seq]
-    return sorted(prior, key=_seq_of, reverse=True)
+    prior = [entry for entry in replies if reply_seq(entry) < current_seq]
+    return sorted(prior, key=reply_seq, reverse=True)
 
 
 def _prior_reply_line(entry: dict) -> str:
     """The ``- Reply N (<stamp>) — answered "<ask>"`` header for one prior reply."""
-    seq = _seq_of(entry)
+    seq = reply_seq(entry)
     sent_status = nonempty(entry.get("sent_status")) or "draft"
     sent_at = nonempty(entry.get("sent_at"))
     stamp = f"sent {sent_at}" if sent_status == "sent" and sent_at else sent_status
@@ -210,8 +197,8 @@ def _thread_history_lines(
 
     Carries the ask this reply answers, the internal pointer to this reply's NEW
     evidence artifact, the FULL prior thread (every reply's body, fenced), the parent
-    finding's structured proof + linked runs to author NEW evidence FROM (masked +
-    woven, never pasted raw), and the FLAGGED hygiene warnings.
+    finding's structured proof + linked runs to author NEW evidence FROM with exact
+    values, and the FLAGGED hygiene warnings.
     """
     lines = [
         "---",
@@ -256,7 +243,7 @@ def _thread_history_lines(
     if evidence_ref:
         proof += [f"- **Evidence reference:** {evidence_ref}", ""]
     lines += [
-        "**Parent finding proof to author NEW evidence FROM (mask + weave; do NOT paste raw):**",
+        "**Parent finding proof to author NEW evidence FROM with exact values:**",
         "",
     ]
     lines += proof or ["(no structured proof recorded on the parent finding)", ""]
@@ -345,12 +332,12 @@ def run(args) -> None:
         if not isinstance(finding, dict):
             raise AssessError(f"export-reply: unexpected response fetching finding {slug!r}")
 
-        replies = _replies(finding)
-        max_seq = max((_seq_of(entry) for entry in replies), default=0)
+        replies = reply_versions(finding, operation="export-reply")
+        max_seq = max((reply_seq(entry) for entry in replies), default=0)
         seq = args.seq if args.seq is not None else max_seq + 1
         platform = _resolve_platform(nonempty(args.platform), replies, finding)
 
-        existing = next((entry for entry in replies if _seq_of(entry) == seq), None)
+        existing = next((entry for entry in replies if reply_seq(entry) == seq), None)
         if existing is not None:
             # Re-render a recorded entry from its durable fields; flags only refine
             # the ask / threading, never the authored body. Platform is refined only
@@ -459,7 +446,6 @@ def run(args) -> None:
                             "path": reply_rel,
                             "kind": "reply",
                             "media_type": "text/markdown",
-                            "sensitive": False,
                             "producer_agent_id": None,
                             "producer_agent_role": None,
                             "producer_command_run_id": None,

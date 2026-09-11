@@ -178,7 +178,9 @@ class _Proc:
 def engagement(tmp_path, monkeypatch):
     eng_dir = tmp_path / "engagements" / "2026-08-25-truth"
     eng_dir.mkdir(parents=True, exist_ok=True)
-    (eng_dir / "scope.json").write_text(json.dumps({"hostname": "example.com"}))
+    (eng_dir / "scope.json").write_text(
+        json.dumps({"hostname": "example.com", "hosts": ["example.com"]})
+    )
     monkeypatch.setenv("ENGAGEMENT_DIR", str(eng_dir))
     monkeypatch.setenv("AGENT_NAME", "vulnerability-analyst")
     monkeypatch.delenv("VIGIL_NO_RESOLVE_PIN", raising=False)

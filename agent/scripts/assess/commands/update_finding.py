@@ -101,12 +101,22 @@ def register(subparsers) -> None:
         ),
     )
     p.add_argument("--provenance-inline", help="Inline JSON object for provenance")
-    p.add_argument(
+    notes_modes = p.add_mutually_exclusive_group()
+    notes_modes.add_argument(
         "--notes-replace",
         dest="notes_replace",
         action="store_true",
         help="Overwrite the notes field instead of appending. Use to scrub stale or "
              "contradicted internal text (notes is append-only by default). Pair with --notes.",
+    )
+    notes_modes.add_argument(
+        "--notes-rotate",
+        dest="notes_rotate",
+        action="store_true",
+        help=(
+            "Replace working notes while preserving the prior bytes in the audit "
+            "ledger. Pair with --notes and --expected-row-version."
+        ),
     )
     p.add_argument(
         "--details-replace",
@@ -162,6 +172,7 @@ _CONTENT_FLAGS = (
     ("details_inline", "--details-inline"),
     ("provenance_inline", "--provenance-inline"),
     ("notes_replace", "--notes-replace"),
+    ("notes_rotate", "--notes-rotate"),
     ("details_replace", "--details-replace"),
     ("evidence_type", "--evidence-type"),
 )
@@ -302,10 +313,11 @@ def run(args) -> None:
         sys.exit(1)
     if (
         getattr(args, "notes_replace", False)
+        or getattr(args, "notes_rotate", False)
         or getattr(args, "details_replace", False)
     ) and getattr(args, "expected_row_version", None) is None:
         print(
-            "finding update: --notes-replace and --details-replace require "
+            "finding update: --notes-replace, --notes-rotate, and --details-replace require "
             "--expected-row-version so a concurrent writer cannot be erased.",
             file=sys.stderr,
         )
@@ -361,7 +373,13 @@ def run(args) -> None:
             "summary": args.summary,
             "evidence_ref": args.evidence_ref,
             "notes": args.notes,
-            "notes_mode": "replace" if getattr(args, "notes_replace", False) else None,
+            "notes_mode": (
+                "rotate"
+                if getattr(args, "notes_rotate", False)
+                else "replace"
+                if getattr(args, "notes_replace", False)
+                else None
+            ),
             "source_name": args.source_name,
             "details": details,
             "details_mode": "replace" if getattr(args, "details_replace", False) else None,
@@ -448,10 +466,11 @@ def run(args) -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
-        if "notes" in payload and payload.get("notes_mode") not in {"append", "replace"}:
+        if "notes" in payload and payload.get("notes_mode") not in {"append", "replace", "rotate"}:
             print(
                 "finding update: a payload file containing notes must set notes_mode to "
-                "'replace' (cumulative working document) or 'append' (deliberate checkpoint).",
+                "'replace' (cumulative working document), 'rotate' (ledger-preserved "
+                "reset), or 'append' (deliberate checkpoint).",
                 file=sys.stderr,
             )
             sys.exit(1)

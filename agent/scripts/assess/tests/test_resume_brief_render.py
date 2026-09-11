@@ -519,3 +519,27 @@ def test_render_markdown_labels_bounded_knowledge_drift_as_advisory():
     assert "RESUME.md" in rendered
     assert "showing 2 of 12" in rendered
     assert "hard blocker" not in rendered.lower()
+
+
+def test_render_markdown_reports_returned_and_lower_bound_totals() -> None:
+    brief = {
+        "command_runs": [{"id": 1, "tool_name": "curl"}],
+        "command_runs_page": {
+            "returned_count": 1,
+            "total_count": 10,
+            "total_is_lower_bound": True,
+            "truncated": True,
+        },
+        "artifacts": [{"id": 2, "kind": "note", "relative_path": "notes/a.md"}],
+        "artifacts_page": {
+            "returned_count": 1,
+            "total_count": 3,
+            "total_is_lower_bound": False,
+            "truncated": True,
+        },
+    }
+
+    rendered = resume_brief._render_markdown(brief)
+
+    assert "showing 1 of at least 10 command runs" in rendered
+    assert "showing 1 of 3 artifacts" in rendered

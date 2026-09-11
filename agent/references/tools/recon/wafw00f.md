@@ -27,13 +27,14 @@ Run all target-facing wafw00f probes via `vigil assess kali wafw00f` — the typ
 Flag reference (used inside `vigil assess kali wafw00f`):
 
 **Single target:** `vigil assess kali wafw00f https://target --technique DISCOVERY --intent "WAF identification" --probe-kind fingerprint --phase recon --timeout 300`
-**Verbose:** pass `-v` via `--extra-args`
-**Test all WAFs (not just first match):** `-a` (via `--extra-args`)
-**Multi-host batch from file:** `--input-list /engagements/$ENGAGEMENT_KEY/scans/live_hosts.txt` (typed flag)
+**Test all WAFs (not just first match):** `-a` (typed flag)
+**Multi-host batch from file:** `-i /engagements/$ENGAGEMENT_KEY/scans/live_hosts.txt` (typed flag; mutually exclusive with the positional target)
+**Output (CSV):** `-o /engagements/$ENGAGEMENT_KEY/scans/wafw00f_results.csv` (typed flag)
+**Proxy:** `--proxy http://127.0.0.1:8080` (typed flag)
+**Do not follow redirects:** `--noredirect` (typed flag)
 **List all detectable WAFs:** `vigil assess kali exec --technique HEALTH --intent "wafw00f list WAFs" --probe-kind fingerprint --phase recon --timeout 30 -- wafw00f -l`
 **Custom headers:** `--extra-args "-H 'Cookie: session=abc'"`
-**Proxy:** `--extra-args "-p http://127.0.0.1:8080"`
-**Output (CSV):** `-o /engagements/$ENGAGEMENT_KEY/scans/wafw00f_results.csv` (via `--extra-args`)
+**Verbose:** `--extra-args=-v` — a single-token passthrough must use the `=` form, or argparse reads its leading dash as a flag of its own and reports "expected one argument".
 
 Note: wafw00f outputs CSV format with `-o`. It does not support `-f json`. For JSON,
 parse CSV output or capture stdout.
@@ -41,8 +42,8 @@ parse CSV output or capture stdout.
 ## Multi-host batch invocation (canonical)
 
 ```bash
-vigil assess kali wafw00f --input-list /engagements/$ENGAGEMENT_KEY/scans/live_hosts.txt \
-  --extra-args "-a -o /engagements/$ENGAGEMENT_KEY/scans/wafw00f_results.csv" \
+vigil assess kali wafw00f -i /engagements/$ENGAGEMENT_KEY/scans/live_hosts.txt -a \
+  -o /engagements/$ENGAGEMENT_KEY/scans/wafw00f_results.csv \
   --technique RECON --intent "WAF tier sweep across in-scope live hosts" \
   --probe-kind fingerprint --phase recon --timeout 1200
 ```

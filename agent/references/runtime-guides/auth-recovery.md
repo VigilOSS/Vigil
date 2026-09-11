@@ -6,8 +6,8 @@ Recovery branch:
 
 1. **Detect.** Scan recent dispatch handoffs and command-run output for the failure shape, and check the identity's own liveness state directly:
    ```bash
-   vigil assess agent list --limit 5 --json \
-     | jq -r '.[] | select(.handoff.runtime_issues // [] | tostring | test("401|403|expired|invalid_token|redirect.*login"; "i")) | .agent_id'
+   vigil assess agent list --limit 5 \
+     | jq -r 'select(.handoff.runtime_issues // [] | tostring | test("401|403|expired|invalid_token|redirect.*login"; "i")) | .agent_id'
    vigil assess command-run list --q "401\|403\|session\|expired" --show-matches --limit 10
    vigil assess auth list --host <host> --include-dead --json
    ```

@@ -163,7 +163,7 @@ instructions: |2
   command-run audit row as it runs, so coverage state is captured automatically —
   there is no separate probe-run recording step for you to run here. In order:
 
-  1. `vigil assess finding record recon-specialist <finding-json>` per finding
+  1. `vigil assess finding record recon-specialist <finding-json> --agent-id <your-agent_id>` per finding
   2. `vigil assess intel record <type> <intel-json>` per intel row
   3. `vigil assess record-surface <type> <target> <source> [--rationale TEXT]` per surface candidate
   4. `vigil assess agent handoff --from-json <path>` — summary, the **completeness verdict** (percent + missing coverage), coverage gaps, next steps, runtime issues, working artifacts, and recon extras (`live_host_count`, `egress_block_pct`, `wildcard_subs_resolved`, the recon-job `job_id` + stage states you assessed)

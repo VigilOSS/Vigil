@@ -137,7 +137,7 @@ def test_default_port_reads_the_target_scheme_not_a_proxy_url():
 
 
 def test_inlined_session_token_never_becomes_a_hostname():
-    cookie = "Acme-session." + "A" * 300 + ".example"
+    cookie = "planner-session." + "A" * 300 + ".example"
     cmd = ["bash", "-c", f"curl -b {cookie} https://real.example.com/x"]
     host, _path, _port = _extract_target_anchor("curl", cmd)
     assert host == "real.example.com"
@@ -232,7 +232,7 @@ def test_plausible_hosts_are_accepted(host):
     [
         "",
         "A" * 254,
-        "Acme-session." + "A" * 300 + ".example",
+        "planner-session." + "A" * 300 + ".example",
         "has space.example.com",
         "under_score.example.com",
         "-leadinghyphen.example.com",

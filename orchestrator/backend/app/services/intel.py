@@ -714,6 +714,7 @@ def record_note(
             values=values,
         )
         record = _row_to_dict(row)
+        record["write_outcome"] = "created" if existing is None else "updated"
         key, body = _intel_search_body("note", record)
         _upsert_search_index(
             connection,
@@ -1908,6 +1909,8 @@ def intel_search(
     q: str,
     *,
     entity_type: str = "",
+    lead_status: str | None = None,
+    provenance: str = "",
     limit: int = 50,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
@@ -1934,6 +1937,31 @@ def intel_search(
     if entity_type:
         where.append("idx.entity_type = ?")
         params.append(entity_type)
+    if lead_status is not None:
+        _validate_lead_status(lead_status)
+        where.append(
+            "idx.entity_type = 'note' AND EXISTS ("
+            "SELECT 1 FROM intel_notes lead "
+            "WHERE lead.id = idx.source_id "
+            "AND lead.engagement_id = idx.engagement_id "
+            "AND lead.lead_status = ?)"
+        )
+        params.append(lead_status)
+    if provenance:
+        escaped_provenance = (
+            provenance.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        provenance_case = " ".join(
+            f"WHEN '{known_type}' THEN (SELECT provenance_json FROM {table} record "
+            "WHERE record.id = idx.source_id "
+            "AND record.engagement_id = idx.engagement_id)"
+            for known_type, table in _ENTITY_TO_TABLE.items()
+        )
+        where.append(
+            f"(CASE idx.entity_type {provenance_case} ELSE '' END) "
+            "LIKE ? ESCAPE '\\'"
+        )
+        params.append(f"%{escaped_provenance}%")
     params.extend([int(limit), int(offset)])
     query = (
         f"SELECT idx.entity_type, idx.source_id, idx.key, idx.body, idx.source_name, {select_rank} "

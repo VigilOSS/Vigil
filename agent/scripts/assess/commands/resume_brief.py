@@ -339,11 +339,13 @@ def _render_markdown(brief: dict) -> str:
         )
     if not brief.get("command_runs"):
         lines.append("- none")
+    _render_page_truth(lines, brief.get("command_runs_page"), "command runs")
     lines.extend(["", "## Artifacts"])
     for row in brief.get("artifacts") or []:
         lines.append(f"- #{row.get('id')} {row.get('kind')} present={row.get('present')} {row.get('relative_path')}")
     if not brief.get("artifacts"):
         lines.append("- none")
+    _render_page_truth(lines, brief.get("artifacts_page"), "artifacts")
     _render_knowledge_drift(lines, brief.get("knowledge_drift") or {})
     intel = brief.get("intel") or {}
     if intel:
@@ -384,6 +386,15 @@ def _render_markdown(brief: dict) -> str:
             entity = f" [{row.get('entity_kind')} {row.get('entity_id')}]"
         lines.append(f"- {row.get('reason')}{entity}: `{row.get('command')}`")
     return "\n".join(lines)
+
+
+def _render_page_truth(lines: list[str], page: object, noun: str) -> None:
+    if not isinstance(page, dict) or not page.get("truncated"):
+        return
+    returned = int(page.get("returned_count") or 0)
+    total = int(page.get("total_count") or returned)
+    qualifier = "at least " if page.get("total_is_lower_bound") else ""
+    lines.append(f"- … showing {returned} of {qualifier}{total} {noun}")
 
 
 def _render_knowledge_drift(lines: list, drift: dict) -> None:

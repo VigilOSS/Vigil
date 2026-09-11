@@ -19,19 +19,14 @@ BACKEND FINDING IS THE SOURCE OF TRUTH. The submission is rendered FROM the
 finding's fields; the report-writer writes final content back to the finding
 (``finding update``), so a re-render at publish time reproduces the authored
 content exactly. Content typed only into ``submission.md`` is NOT durable — the
-next render replaces the file. PII masking is the report-writer's job, performed
-once while authoring: the MASKED evidence is stored in the finding and reaches
-the copy-paste body, while the raw tool output stays in ``scans/`` and is never
-rendered here.
+next render replaces the file. Credentials, tokens, PII, and other captured
+evidence remain verbatim in the durable finding and the operator-visible render.
 
 NOTHING IS REWRITTEN ON THE WAY OUT. This command assembles and presents; it
-never edits authored text. There is deliberately NO automatic credential
-redaction: a masking pass cannot tell the operator's own session cookie (mask)
-from a credential the target disclosed (that IS the finding's proof), and one
-that rewrites the render makes the last step before filing the least trustworthy
-one — a report-writer cannot QA a document that changes under it. Masking
-decisions belong to the report-writer, who has the context to make them, and are
-stored in the finding so every later render reproduces them.
+never edits authored text. A transformation pass cannot tell the operator's own
+session cookie from a credential the target disclosed, and either may be needed
+to reproduce the proof. Every later render therefore reproduces the exact values
+stored in the finding.
 
 The same rule governs everything else here. Steps render VERBATIM as list items —
 no imposed ``N.`` counter, and nothing strips an enumerator the author wrote, so
@@ -59,7 +54,7 @@ command references them by path; it does not read their bytes):
     FROM it. It carries, in order: the finding metadata (CWE / OWASP / location /
     auth context / references) to weave into the body; any internal-identifier
     hygiene warnings to strip; the structured proof (``poc_code`` /
-    ``poc_request`` / ``poc_response`` / ``evidence_ref``) to mask and weave into
+    ``poc_request`` / ``poc_response`` / ``evidence_ref``) to weave into
     Evidence; and the explicitly linked command runs to author Evidence from. The
     section is present in BOTH draft and final — it sits below the never-paste
     line, so keeping it in both avoids any draft/final structural divergence.
@@ -69,7 +64,7 @@ the finding's authored ``details.evidence`` prose (``[NEEDS: evidence]`` in a dr
 when absent; final export rejects the finding until it is authored). The raw
 structured proof and the linked command runs are
 deliberately NOT rendered into Evidence: a real submission carries hand-annotated
-proof (genuine third-party PII partial-masked, self-owned/synthetic data in full),
+proof (including exact credentials, tokens, PII, and synthetic data),
 so the tool surfaces them ONCE, as reference under the single
 OPERATOR DETAILS section (mirrored by the ``linked_command_runs`` array in the
 context JSON), for the report-writer to author Evidence FROM. Linked runs are
@@ -698,7 +693,7 @@ def _evidence_body(evidence_text: str, draft: bool) -> list[str]:
 
     The structured proof (``poc_*`` / ``evidence_ref``) and the linked command runs
     are deliberately NOT here — they live in the single OPERATOR DETAILS reference
-    section below the second divider, which the report-writer masks and weaves into
+    section below the second divider, which the report-writer preserves and weaves into
     this authored prose. Draft mode marks an absent evidence body with
     ``[NEEDS: evidence]``; final mode leaves it empty, because ``details.evidence``
     is authored prose; the final export gate requires it, while the separate
@@ -942,7 +937,7 @@ def _operator_details_block(
     ONE section consolidates everything the operator never pastes and the
     report-writer authors the body FROM: the finding metadata to weave in, any
     internal-identifier hygiene warnings to strip, prose advisories to weigh, the
-    structured proof (``poc_*`` / ``evidence_ref``) to mask into Evidence, and the
+    structured proof (``poc_*`` / ``evidence_ref``) to preserve in Evidence, and the
     explicitly linked command runs to author Evidence from. It renders in BOTH
     draft and final (it sits below the never-paste line) so the structure never
     diverges between modes. The finding slug is deliberately never emitted here —
@@ -984,7 +979,10 @@ def _operator_details_block(
     raw_ref = _nonempty(resolved["durable_evidence"].get("raw_ref"))
     if raw_ref and raw_ref != resolved["evidence_ref"]:
         proof_lines += [f"- **Evidence reference (as authored):** {raw_ref}", ""]
-    lines += ["**Structured proof** (mask + weave into the Evidence section above; do NOT paste raw):", ""]
+    lines += [
+        "**Structured proof** (weave exact values into the Evidence section above):",
+        "",
+    ]
     if proof_lines:
         lines += proof_lines
     elif draft:
@@ -1688,7 +1686,6 @@ def run(args) -> None:
                             "path": submission_rel,
                             "kind": "submission",
                             "media_type": "text/markdown",
-                            "sensitive": False,
                             "producer_agent_id": None,
                             "producer_agent_role": None,
                             "producer_command_run_id": None,

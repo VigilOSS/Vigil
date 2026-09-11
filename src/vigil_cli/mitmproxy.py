@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+import shutil
 import socket
+import tempfile
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import docker
 from . import image_freshness
+from . import scope_entries
 from .paths import container_host_url, resolve_orchestrator_base_url
 
 _PORT_WAIT_ATTEMPTS = 30
@@ -27,6 +32,53 @@ class MitmproxyOptions:
     image: str = "vigil-proxy:latest"
     container_name: str = _CONTAINER_NAME
     volume_name: str = "mitmproxy-ca"
+
+
+def _scope_entries_source() -> Path:
+    module_path = getattr(scope_entries, "__file__", None)
+    if not module_path:
+        raise SystemExit("canonical vigil_cli scope parser source is unavailable")
+    source = Path(module_path).resolve()
+    if not source.is_file():
+        raise SystemExit(f"canonical vigil_cli scope parser source is missing: {source}")
+    return source
+
+
+def _ignore_build_artifacts(_directory: str, names: list[str]) -> list[str]:
+    return [name for name in names if image_freshness.is_excluded_input(name)]
+
+
+@contextmanager
+def _proxy_build_context(install_root: Path) -> Iterator[Path]:
+    """Stage the proxy's exact image inputs without exposing install state.
+
+    The install root contains engagements and environment files that are not
+    image inputs. Docker receives only the addon, its assess package, the
+    Dockerfile, and the canonical scope-entry parser owned by ``vigil_cli``.
+    """
+    agent_root = install_root / "agent"
+    dockerfile = agent_root / "docker" / "mitmproxy" / "Dockerfile"
+    assess_source = agent_root / "scripts" / "assess"
+    addon_source = agent_root / "scripts" / "proxy_addon.py"
+    required = (dockerfile, assess_source, addon_source)
+    missing = [str(path) for path in required if not path.exists()]
+    if missing:
+        raise SystemExit(f"mitmproxy image input missing: {', '.join(missing)}")
+
+    with tempfile.TemporaryDirectory(prefix="vigil-proxy-build-") as temporary:
+        context = Path(temporary)
+        shutil.copy2(dockerfile, context / "Dockerfile")
+        shutil.copytree(
+            assess_source,
+            context / "scripts" / "assess",
+            ignore=_ignore_build_artifacts,
+        )
+        (context / "scripts").mkdir(exist_ok=True)
+        shutil.copy2(addon_source, context / "scripts" / "proxy_addon.py")
+        canonical_destination = context / "vigil_cli" / "scope_entries.py"
+        canonical_destination.parent.mkdir()
+        shutil.copy2(_scope_entries_source(), canonical_destination)
+        yield context
 
 
 def build_image(
@@ -63,28 +115,30 @@ def build_image(
         print(f"mitmproxy\timage current (up to date with source)\t{image}")
         return
     print(f"mitmproxy\tbuilding\timage={image}")
-    argv = [
-        "docker",
-        "build",
-        *(["--no-cache"] if force else []),
-        "-t",
-        image,
-        # Stamp the input digest so the NEXT freshness check has something to
-        # compare against. An unstamped image can never be proven current, so
-        # every later `vigil up` would rebuild it again.
-        "--label",
-        image_freshness.inputs_label_arg(inputs, root=install_root),
-        "-f",
-        str(dockerfile),
-        str(install_root / "agent"),
-    ]
-    docker.require_success(build_runner(argv), argv)
+    with _proxy_build_context(install_root) as build_context:
+        argv = [
+            "docker",
+            "build",
+            *(["--no-cache"] if force else []),
+            "-t",
+            image,
+            # Stamp the input digest so the NEXT freshness check has something to
+            # compare against. An unstamped image can never be proven current, so
+            # every later `vigil up` would rebuild it again.
+            "--label",
+            image_freshness.inputs_label_arg(inputs, root=install_root),
+            "-f",
+            str(build_context / "Dockerfile"),
+            str(build_context),
+        ]
+        docker.require_success(build_runner(argv), argv)
     print(f"mitmproxy\timage built\t{image}")
 
 
 def mitmproxy_image_inputs(install_root: Path) -> list[Path]:
     """Every source path copied into the proxy image (see the mitmproxy
-    Dockerfile: it COPYs `scripts/assess` wholesale plus `proxy_addon.py`).
+    Dockerfile: it COPYs `scripts/assess` wholesale, `proxy_addon.py`, and the
+    canonical scope-entry parser from the installed ``vigil_cli`` package).
 
     The whole `assess` package is genuinely baked in, so the directory is the
     honest input. Build artifacts inside it (`__pycache__`, `.pyc`, tool caches)
@@ -95,6 +149,7 @@ def mitmproxy_image_inputs(install_root: Path) -> list[Path]:
         install_root / "agent" / "docker" / "mitmproxy" / "Dockerfile",
         install_root / "agent" / "scripts" / "assess",
         install_root / "agent" / "scripts" / "proxy_addon.py",
+        _scope_entries_source(),
     ]
 
 

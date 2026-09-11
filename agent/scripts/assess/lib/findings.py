@@ -19,6 +19,7 @@ _AGENT_PREFIX_MAP = {
     "code-vuln-verifier": "VF",
     "surface-collector": "SC",
     "code-fuzz-engineer": "CF",
+    "alert-triage-specialist": "AT",
 }
 
 _LEGACY_FINDING_PREFIX = "FINDING" + "-"

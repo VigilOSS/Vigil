@@ -329,7 +329,8 @@ def set_root_cause_link(
                 detail=(
                     "merged or false-positive findings cannot be linked as siblings; "
                     f"record the relation with `vigil assess finding link {finding_slug} "
-                    f"--target-finding {root_cause_slug} --link-kind {DUPLICATE_LINK_KIND}`"
+                    f"--link-kind {DUPLICATE_LINK_KIND} --target-kind finding "
+                    f"--target-ref {root_cause_slug}`"
                 ),
             )
         if _is_suppressed_workflow_status(_row_workflow_status(root)):
@@ -338,7 +339,8 @@ def set_root_cause_link(
                 detail=(
                     "merged or false-positive findings cannot be root causes; "
                     f"record the duplication with `vigil assess finding link {finding_slug} "
-                    f"--target-finding {root_cause_slug} --link-kind {DUPLICATE_LINK_KIND}`"
+                    f"--link-kind {DUPLICATE_LINK_KIND} --target-kind finding "
+                    f"--target-ref {root_cause_slug}`"
                 ),
             )
         root_parent = connection.execute(

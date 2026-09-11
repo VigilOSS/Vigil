@@ -1,0 +1,24 @@
+name: Feature request
+description: Propose an operator-visible capability or correctness improvement
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What coverage, precision, state, or operator workflow problem does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe observable success, not a file-by-file implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence and constraints
+      description: Include synthetic examples, compatibility, safety, and validation expectations.

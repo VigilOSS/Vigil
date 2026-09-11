@@ -255,7 +255,7 @@ def test_match_is_case_insensitive_on_recorded_nonce():
 
 def test_short_nonce_does_not_match_domain_suffix():
     # Regression: a nonce must match only the leftmost label, never the OOB
-    # domain suffix. "eng" is a substring of "example-operatoreng" — matching the full
+    # domain suffix. "eng" is a substring of "example-team" — matching the full
     # FQDN would mis-correlate every callback to this probe.
     log = "[abc123.oob.example.com] Received DNS interaction from 203.0.113.9\n"
     interactions = oob.parse_interactsh_log(log)
@@ -484,6 +484,7 @@ def test_oob_mint_cli_binds_nonce_under_running_client(monkeypatch, tmp_path, ca
     from vigil_cli import main as main_module
 
     install_root = tmp_path
+    monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.com")
     key = "2026-05-30-120000-shop"
     _seed_engagement_dir(install_root, key)
 
@@ -614,6 +615,7 @@ def test_oob_poll_cli_correlates_matched_and_unmatched(monkeypatch, tmp_path, ca
     from vigil_cli.docker import DockerResult
 
     install_root = tmp_path
+    monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.com")
     key = "2026-05-30-120000-poll"
     _seed_engagement_dir(install_root, key)
 
@@ -669,6 +671,7 @@ def test_oob_poll_cli_does_not_post_probe_owned_by_another_client(
     from vigil_cli.docker import DockerResult
 
     key = "2026-05-30-120000-poll"
+    monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.com")
     _seed_engagement_dir(tmp_path, key)
     log = (
         "[knownnonce01.client-b] Received DNS interaction (A) "
@@ -813,7 +816,7 @@ def test_oob_status_ok_when_registered_and_resolving(monkeypatch):
     scenario = {
         "server": True, "frpc": True, "running": ["ssrf-a"], "configured": ["ssrf-a"],
         "logs": {"ssrf-a": "[\x1b[34mINF\x1b[0m] d8pd8i7t25d84i8rsjagzqzcnyzbeuf8d.oob.example.com\n"},
-        "dig": "18.223.115.81\n",
+        "dig": "198.51.100.81\n",
     }
     payload = oob.oob_status(oob_domain="oob.example.com", runner=_status_runner(scenario))
     assert payload["health"] == "ok"
@@ -848,7 +851,7 @@ def test_oob_status_recovers_from_one_transient_dns_and_registration_miss(monkey
         if command.startswith("dig"):
             calls["dig"] += 1
             if calls["dig"] == 2:
-                scenario["dig"] = "18.223.115.81\n"
+                scenario["dig"] = "198.51.100.81\n"
         return base_runner(argv, **kwargs)
 
     payload = oob.oob_status(
@@ -876,7 +879,7 @@ def test_oob_status_degrades_when_dns_resolves_but_edge_http_redirects(monkeypat
                 "[INF] client-id.tenant.oob.example.com\n"
             )
         },
-        "dig": "3.129.117.120\n",
+        "dig": "203.0.113.120\n",
         "http": "HTTP/1.1 308 Permanent Redirect\nServer: Caddy\n",
     }
 

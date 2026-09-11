@@ -236,7 +236,7 @@ Confirm readiness with `vigil oob status --json`, then **mint a nonce-tagged cal
 ```bash
 # Mint one nonce per injection point; record the correlation context.
 vigil oob mint --client <name> --technique cmdi --target-url "https://target/convert" --param filename --probe-kind dns
-# → host  <prefix>-<token>.<client-id>.oob.example.com   (= $OOB_HOST)
+# → host  <prefix>-<token>.<client-id>.<configured-oob-domain>   (= $OOB_HOST)
 ```
 
 Embed the EXACT host mint prints (`$OOB_HOST` — the nonce bound under the client id; never hand-build a bare `<nonce>.oob...` host) in the payload and fire it through the kali exec wrapper:

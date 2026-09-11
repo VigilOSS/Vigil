@@ -1016,7 +1016,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                         f"finding {slug} (severity={row['severity']}) is verification_status="
                         f"'unreviewed' and must be graded before the final report. Grade it with "
                         f"`vigil assess finding verify {slug} --status confirmed|downgraded|disputed "
-                        f"--reason-text ...` (records a verification verdict)."
+                        f"--reason ...` (records a verification verdict)."
                     ),
                 }
             )
@@ -1054,7 +1054,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                         f"finding {slug} was withdrawn from the program but is still "
                         "workflow_status='reported', so the report still claims it. "
                         f"Move the workflow axis too: `vigil assess finding update {slug} "
-                        "--status draft --reason-text 'withdrawn from program'`."
+                        "--status draft --reason 'withdrawn from program'`."
                     ),
                 }
             )
@@ -1082,8 +1082,10 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                     "detail": (
                         f"finding {slug} notes are {len(str(row['notes'] or ''))} characters, "
                         f"past the {FINDING_NOTES_MAX_LENGTH}-character append cap, so the "
-                        "next checkpoint append will be refused. Bank them with "
-                        f"`vigil assess finding update {slug} --notes-rotate`."
+                        "next checkpoint append will be refused. Rewrite them down to "
+                        f"a summary with `vigil assess finding update {slug} "
+                        "--notes-replace --notes '<summary>' --expected-row-version <n>` "
+                        "— the prior text is kept on the transition ledger."
                     ),
                 }
             )

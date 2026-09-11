@@ -80,7 +80,7 @@ class (deserialization / user-enumeration respectively) — see "Related".
 - [OWASP WSTG — Testing for XML Injection (includes XXE)](https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/07-Testing_for_XML_Injection)
 - [PortSwigger — XXE injection](https://portswigger.net/web-security/xxe)
 - [YesWeHack — XML external entity: the ultimate Bug Bounty guide](https://www.yeswehack.com/learn-bug-bounty/xml-external-entity-guide-xxe)
-- [PayloadsAllTheThings XXE](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/XXE%20Injection)
+- [PayloadsAllTheThings XXE](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/3ac27901c711bdf3f5b65a7b1d1820a1f65bd09a/XXE%20Injection)
 
 ## Related
 

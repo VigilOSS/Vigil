@@ -193,7 +193,7 @@ cat > /tmp/cwe_<item-id>.json <<'JSON'
 JSON
 
 vigil assess code-dispatch done <item-id> <agent-name> <lease-token> <clean|finding|suspicious|skipped> /tmp/cwe_<item-id>.json ["notes"] [--skip-reason <reason>]
-vigil assess finding record code-vuln-hunter <finding-json>
+vigil assess finding record code-vuln-hunter <finding-json> --agent-id <your-agent_id>
 vigil assess code-dispatch requeue-triggers <triggers-json>   # if analysis returned cross_file_triggers
 vigil assess code-dispatch reset-stale 10   # before fetching the next batch
 ```

@@ -35,7 +35,8 @@ from assess.lib.client import (
 )
 from assess.lib.config import load_config
 from assess.lib.contracts import SUBMISSION_STATUSES
-from assess.lib.finding_render import details_object, nonempty
+from assess.lib.finding_render import nonempty
+from assess.lib.reply_versions import reply_seq, reply_versions
 
 _PLATFORMS = ("bugcrowd", "hackerone", "direct")
 _DEFAULT_PLATFORM = "direct"
@@ -82,6 +83,16 @@ def register(subparsers) -> None:
         default=None,
         help="Optional threading pointer: the prior reply seq this one answers.",
     )
+    p.add_argument(
+        "--corrects",
+        dest="corrects_seq",
+        type=int,
+        default=None,
+        help=(
+            "Append a new correction version linked to this sent reply seq. "
+            "Sent reply bytes are never edited in place."
+        ),
+    )
     p.add_argument("--body", dest="body", default=None, help="Authored reply prose — exactly what we send.")
     p.add_argument(
         "--body-file",
@@ -98,8 +109,8 @@ def register(subparsers) -> None:
         dest="new_evidence",
         default=None,
         help=(
-            "Optional NEW proof authored for THIS reply (masked per submission-format.md "
-            "PII rules). Pass an empty value (--new-evidence '') to clear it."
+            "Optional NEW proof authored for THIS reply with exact captured values. "
+            "Pass an empty value (--new-evidence '') to clear it."
         ),
     )
     p.add_argument(
@@ -136,18 +147,6 @@ def register(subparsers) -> None:
     p.set_defaults(func=run)
 
 
-def _replies(finding: dict) -> list[dict]:
-    raw = details_object(finding).get("replies")
-    if not isinstance(raw, list):
-        return []
-    return [entry for entry in raw if isinstance(entry, dict)]
-
-
-def _seq_of(entry: dict) -> int:
-    value = entry.get("seq")
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
-
-
 def _resolve_body(args, engagement_dir: str) -> str | None:
     """The reply body from --body-file (preferred) or --body, or None when neither is set."""
     if args.body_file:
@@ -163,7 +162,7 @@ def _resolve_body(args, engagement_dir: str) -> str | None:
 
 def _default_platform(replies: list[dict]) -> str:
     if replies:
-        platform = nonempty(max(replies, key=_seq_of).get("platform"))
+        platform = nonempty(max(replies, key=reply_seq).get("platform"))
         if platform in _PLATFORMS:
             return platform
     return _DEFAULT_PLATFORM
@@ -191,13 +190,28 @@ def run(args) -> None:
                 "refusing an unguarded reply write."
             )
 
-        replies = _replies(finding)
-        max_seq = max((_seq_of(entry) for entry in replies), default=0)
+        replies = reply_versions(finding, operation="record-reply")
+        max_seq = max((reply_seq(entry) for entry in replies), default=0)
         seq_explicit = args.seq is not None
         seq = args.seq if seq_explicit else max_seq + 1
 
-        index = next((i for i, entry in enumerate(replies) if _seq_of(entry) == seq), None)
+        index = next(
+            (i for i, entry in enumerate(replies) if reply_seq(entry) == seq),
+            None,
+        )
         now = _utcnow_iso()
+
+        if args.corrects_seq is not None:
+            if seq_explicit:
+                raise AssessError("record-reply: --corrects cannot be combined with --seq")
+            corrected = next(
+                (entry for entry in replies if reply_seq(entry) == args.corrects_seq),
+                None,
+            )
+            if corrected is None or corrected.get("sent_status") != "sent":
+                raise AssessError(
+                    "record-reply: --corrects must name an existing sent reply"
+                )
 
         if index is not None:
             # In-place UPDATE of an existing entry. Only legitimate when the operator
@@ -210,6 +224,21 @@ def run(args) -> None:
                     f"{slug!r}; pass an explicit --seq to update it in place, or fix the thread."
                 )
             entry = dict(replies[index])
+            content_change = any(
+                (
+                    nonempty(args.platform),
+                    nonempty(args.in_response_to),
+                    args.reply_to is not None,
+                    body is not None,
+                    args.new_evidence is not None,
+                    args.new_evidence_ref is not None,
+                )
+            )
+            if entry.get("sent_status") == "sent" and content_change:
+                raise AssessError(
+                    "record-reply: sent reply bytes are immutable; append a linked "
+                    "correction with --corrects <seq>"
+                )
             if nonempty(args.platform):
                 entry["platform"] = args.platform
             if nonempty(args.in_response_to):
@@ -256,6 +285,9 @@ def run(args) -> None:
                 "sent_at": now if args.sent else None,
                 "author": nonempty(args.source_name) or "report-writer",
             }
+            if args.corrects_seq is not None:
+                entry["corrects_seq"] = args.corrects_seq
+                entry["event_type"] = "correction"
             replies.append(entry)
 
         # Read-modify-write: PATCH the FULL array so the shallow details merge swaps the

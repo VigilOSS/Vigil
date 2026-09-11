@@ -30,7 +30,7 @@ from tests.test_engagements_api import write_engagement
 ENGAGEMENT_KEY = "2026-05-30-120100-oob"
 ASSESSMENT_BASE = f"/engagements/{ENGAGEMENT_KEY}/assessment"
 CLIENT_NAME = "ssrf-a"
-CLIENT_PAYLOAD_HOST = "client-a.oob.example.com"
+CLIENT_PAYLOAD_HOST = "client-a.oob.security.example"
 
 
 def _seed_engagement(client, isolate_settings) -> None:
@@ -47,7 +47,7 @@ def _mint_probe(client, *, nonce="abc123def456ghij", **overrides) -> dict:
         "technique": "ssrf",
         "probe_kind": "blind-ssrf",
         "request_hash": "deadbeef",
-        "oob_domain": "oob.example.com",
+        "oob_domain": "oob.security.example",
         "client_name": CLIENT_NAME,
         "client_payload_host": CLIENT_PAYLOAD_HOST,
     }
@@ -102,11 +102,11 @@ def test_record_probe_persists_minting_client_binding(client, isolate_settings):
     probe = _mint_probe(
         client,
         client_name="ssrf-a",
-        client_payload_host="client-a.oob.example.com",
+        client_payload_host="client-a.oob.security.example",
     )
 
     assert probe["client_name"] == "ssrf-a"
-    assert probe["client_payload_host"] == "client-a.oob.example.com"
+    assert probe["client_payload_host"] == "client-a.oob.security.example"
 
 
 def test_record_probe_is_idempotent_on_nonce(client, isolate_settings):
@@ -155,7 +155,7 @@ def test_correlate_interaction_matches_and_flips_status(client, isolate_settings
             "protocol": "dns",
             "remote_address": "203.0.113.9",
             "query_type": "A",
-            "raw_request": "[abc123def456ghij.oob.example.com] Received DNS interaction (A) from 203.0.113.9",
+            "raw_request": "[abc123def456ghij.oob.security.example] Received DNS interaction (A) from 203.0.113.9",
             "observed_at": "2026-05-30 12:00:00",
             "client_name": CLIENT_NAME,
             "client_payload_host": CLIENT_PAYLOAD_HOST,
@@ -219,7 +219,7 @@ def test_correlate_rejects_callback_from_wrong_client(client, isolate_settings):
     probe = _mint_probe(
         client,
         client_name="ssrf-a",
-        client_payload_host="client-a.oob.example.com",
+        client_payload_host="client-a.oob.security.example",
     )
 
     response = client.post(
@@ -227,7 +227,7 @@ def test_correlate_rejects_callback_from_wrong_client(client, isolate_settings):
         json={
             "nonce": probe["nonce"],
             "client_name": "ssrf-b",
-            "client_payload_host": "client-b.oob.example.com",
+            "client_payload_host": "client-b.oob.security.example",
             "protocol": "dns",
             "remote_address": "203.0.113.50",
         },

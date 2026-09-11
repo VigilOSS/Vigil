@@ -131,6 +131,21 @@ def test_status_write_check_json_and_text_expose_probe_result(
     assert "database-write\tok\twrite rolled back" in capsys.readouterr().out
 
 
+def test_status_missing_code_phase_names_supported_repair_command(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from vigil_cli.status import print_status
+
+    payload = _minimal_status({"status": "not_requested"})
+    payload["legacy_both_missing_code_phase"] = ["legacy-both"]
+
+    print_status(payload)
+
+    output = capsys.readouterr().out
+    assert "vigil engagement repair-tracks legacy-both" in output
+    assert "set code_phase=ingest" not in output
+
+
 def test_status_write_check_cli_requests_probe_and_fails_nonzero_on_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

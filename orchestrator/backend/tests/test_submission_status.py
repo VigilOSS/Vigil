@@ -45,6 +45,7 @@ from app.services.state_manager._common import (  # noqa: E402
 )
 
 ENGAGEMENT_KEY = "2026-06-30-120000-submission"
+AUTHOR_AGENT_ID = "SUBMISSION-FIXTURE-AUTHOR"
 
 # The canonical vocabulary, written out literally here so the test pins the exact
 # contract independently of either package's constant.
@@ -80,6 +81,15 @@ def _seed(client, isolate_settings) -> None:
     )
     (engagement_dir / "findings.md").write_text("# Findings\n", encoding="utf-8")
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    dispatch = client.post(
+        f"{_base()}/dispatches",
+        json={
+            "agent_id": AUTHOR_AGENT_ID,
+            "agent_role": "vulnerability-analyst",
+            "task": "Record submission-status fixture findings",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
 
 
 def _base() -> str:
@@ -99,7 +109,10 @@ def _finding_payload(slug: str = "VA-001", **over) -> dict:
         "evidence_ref": "findings.md",
         "source_name": "vulnerability-analyst",
         "details": {"evidence": "Replayable request.", "impact": "PII disclosure."},
-        "provenance": {"agent_name": "vulnerability-analyst"},
+        "provenance": {
+            "agent_id": AUTHOR_AGENT_ID,
+            "agent_name": "vulnerability-analyst",
+        },
     }
     payload.update(over)
     return payload

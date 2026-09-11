@@ -74,6 +74,16 @@ def _uncovered_paths(gate):
 
 
 def _create_file_finding(client, key, slug, location, repo_id):
+    author_id = f"coverage-author-{slug.lower()}"
+    dispatch = client.post(
+        f"/engagements/{key}/assessment/dispatches",
+        json={
+            "agent_id": author_id,
+            "agent_role": "code-vuln-hunter",
+            "task": f"record {slug}",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
     response = client.post(
         f"/engagements/{key}/assessment/findings",
         json={
@@ -92,6 +102,7 @@ def _create_file_finding(client, key, slug, location, repo_id):
             "source_name": "code-vuln-hunter",
             "details": {"evidence": "x"},
             "provenance": {
+                "agent_id": author_id,
                 "agent_name": "code-vuln-hunter",
                 "code_snapshot": _finding_code_snapshot(client, key, int(repo_id)),
             },

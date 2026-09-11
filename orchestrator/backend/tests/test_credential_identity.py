@@ -11,10 +11,22 @@ from app.services import state_manager
 from tests.test_engagements_api import write_engagement
 
 
+AUTHOR_AGENT_ID = "CREDENTIAL-IDENTITY-AUTHOR"
+
+
 def _seed(client, isolate_settings, key: str) -> int:
     write_engagement(isolate_settings["engagements_dir"], key=key)
     response = client.get(f"/engagements/{key}")
     assert response.status_code == 200, response.text
+    dispatch = client.post(
+        f"/engagements/{key}/assessment/dispatches",
+        json={
+            "agent_id": AUTHOR_AGENT_ID,
+            "agent_role": "vulnerability-analyst",
+            "task": "Record credential-identity fixture findings",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
     return int(response.json()["id"])
 
 
@@ -29,6 +41,7 @@ def test_credential_records_identity(client, isolate_settings):
             "principal": "user_a@rock.example.com",
             "secret": "s3cr3t",
             "identity": "user_a",
+            "provenance": {"agent_id": AUTHOR_AGENT_ID},
         },
     )
     assert resp.status_code == 201, resp.text
@@ -51,6 +64,6 @@ def test_credential_identity_defaults_empty(client, isolate_settings):
         source_name="",
         status_value="discovered",
         notes="",
-        provenance={},
+        provenance={"agent_id": AUTHOR_AGENT_ID},
     )
     assert record["identity"] == ""

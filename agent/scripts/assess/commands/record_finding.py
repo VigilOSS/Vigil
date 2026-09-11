@@ -64,6 +64,19 @@ def register(subparsers) -> None:
              "`finding update <slug> --status draft --reason \"...\"` instead.",
     )
     p.add_argument(
+        "--agent-id",
+        dest="agent_id",
+        default="",
+        help="Dispatch agent_id of the agent AUTHORING this finding (e.g. HUNT-RUN-1), copied "
+             "verbatim from your Runtime Identity block. Stored as provenance.agent_id, the "
+             "finding's durable author identity: terminal verification (confirmed / downgraded / "
+             "false_positive) is REFUSED unless it resolves to a dispatch that is not the "
+             "verifier's. The positional agent_name is a role, not a dispatch id, so it cannot "
+             "stand in. Required for a new finding and checked against this engagement's "
+             "dispatches. It may be omitted with --update because the stored author is preserved; "
+             "historical rows with missing or invalid authors must first use finding bind-author.",
+    )
+    p.add_argument(
         "--quiet",
         action="store_true",
         help="Suppress non-error warnings and duplicate advisories; the canonical slug remains on stdout.",
@@ -107,7 +120,13 @@ def _require_atomic_candidate_response(
     return response
 
 
-def _normalize_payload(payload: dict, *, agent_name: str, candidate_slug: str) -> dict:
+def _normalize_payload(
+    payload: dict,
+    *,
+    agent_name: str,
+    candidate_slug: str,
+    dispatch_agent_id: str = "",
+) -> dict:
     normalized = dict(payload)
     normalized["slug"] = candidate_slug
     normalized.setdefault("source_name", agent_name)
@@ -132,6 +151,13 @@ def _normalize_payload(payload: dict, *, agent_name: str, candidate_slug: str) -
     if not isinstance(provenance, dict):
         provenance = {}
     provenance.setdefault("agent_name", agent_name)
+    # agent_name is a ROLE; provenance.agent_id is the authoring DISPATCH, which is
+    # what the backend resolves to decide whether a later verifier is independent.
+    # Only an explicit carrier can supply it — inferring the dispatch from the role
+    # would mis-attribute authorship whenever parallel lanes share a role, and a
+    # wrong author is worse than a missing one.
+    if dispatch_agent_id:
+        provenance.setdefault("agent_id", dispatch_agent_id)
     normalized["provenance"] = provenance
 
     normalized.setdefault("links", [])
@@ -292,7 +318,9 @@ def _refuse_clobber(existing: dict) -> None:
     sys.exit(1)
 
 
-def _resolve_update_target(update_slug: str, json_slug: str, *, base_url: str, engagement_key: str) -> str:
+def _resolve_update_target(
+    update_slug: str, json_slug: str, *, base_url: str, engagement_key: str
+) -> dict:
     """Resolve ``--update <slug>`` to the target slug, validating operator intent.
 
     --update is the explicit opt-in to MODIFY an existing finding (I-21): it must
@@ -322,7 +350,72 @@ def _resolve_update_target(update_slug: str, json_slug: str, *, base_url: str, e
             file=sys.stderr,
         )
         sys.exit(1)
-    return update_slug
+    return existing
+
+
+def _require_authoring_dispatch(
+    payload: dict,
+    *,
+    existing: dict | None,
+    base_url: str,
+    engagement_key: str,
+) -> None:
+    """Fail before POST unless the immutable author is a real dispatch."""
+
+    provenance = payload.get("provenance")
+    incoming = (
+        str(provenance.get("agent_id") or "").strip()
+        if isinstance(provenance, dict)
+        else ""
+    )
+    if existing is None:
+        author = incoming
+        if not author:
+            print(
+                "finding record: REFUSED — new findings require provenance.agent_id. "
+                "Pass --agent-id <your Runtime Identity agent_id>; the role name cannot "
+                "identify one dispatch.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    else:
+        stored_provenance = existing.get("provenance")
+        author = (
+            str(stored_provenance.get("agent_id") or "").strip()
+            if isinstance(stored_provenance, dict)
+            else ""
+        )
+        if not author:
+            slug = str(existing.get("slug") or "this finding")
+            print(
+                f"finding record: REFUSED — {slug} is a historical finding with no author. "
+                "Run `vigil assess finding bind-author` once before re-recording it.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if incoming and incoming != author:
+            print(
+                "finding record: REFUSED — provenance.agent_id is immutable after "
+                f"creation (stored {author!r}, received {incoming!r}).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    with AssessmentClient(base_url, engagement_key) as client:
+        try:
+            dispatch = client.get(f"dispatches/{author}")
+        except AssessError as exc:
+            if "HTTP 404" not in str(exc):
+                raise
+            dispatch = None
+    if not isinstance(dispatch, dict) or dispatch.get("agent_id") != author:
+        print(
+            f"finding record: REFUSED — provenance.agent_id {author!r} does not resolve "
+            "to a dispatch in this engagement. Run `vigil assess finding bind-author` "
+            "once to repair this invalid historical binding.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def _guard_finding_clobber(payload: dict, *, candidate_slug: str, base_url: str, engagement_key: str) -> None:
@@ -422,23 +515,36 @@ def run(args) -> None:
     lock_path = finding_lock_path(eng_dir)
     with file_lock(lock_path):
         candidate_slug = payload.get("slug", "")
+        existing_update = None
         if update_slug:
             # --update names the EXACT existing finding to modify; it is the
             # explicit opt-in past the clobber guard. The slug becomes the target
             # so the backend matches by slug rather than by a net-new collision.
-            candidate_slug = _resolve_update_target(
+            existing_update = _resolve_update_target(
                 update_slug,
                 candidate_slug,
                 base_url=cfg.base_url,
                 engagement_key=cfg.engagement_key,
             )
+            candidate_slug = str(existing_update["slug"])
         elif not candidate_slug:
             candidate_slug = next_finding_id(cfg.base_url, cfg.engagement_key, agent_name)
 
-        payload = _normalize_payload(payload, agent_name=agent_name, candidate_slug=candidate_slug)
+        payload = _normalize_payload(
+            payload,
+            agent_name=agent_name,
+            candidate_slug=candidate_slug,
+            dispatch_agent_id=(getattr(args, "agent_id", "") or "").strip(),
+        )
         validation_errors = collect_validation_errors(payload, _FINDING_SCHEMA)
         if validation_errors:
             _report_validation_errors(payload, validation_errors)
+        _require_authoring_dispatch(
+            payload,
+            existing=existing_update,
+            base_url=cfg.base_url,
+            engagement_key=cfg.engagement_key,
+        )
 
         _normalize_evidence_ref(
             payload,

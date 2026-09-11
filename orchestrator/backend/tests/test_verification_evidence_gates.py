@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+
+from app import db as db_module
+
 from tests.proof_fixtures import post_artifact_backed_source_observation
 from tests.test_engagements_api import write_engagement
 
@@ -40,6 +44,40 @@ def _finding(client, slug: str, **overrides) -> dict:
     response = client.post(f"{BASE}/findings", json=payload)
     assert response.status_code == 201, response.text
     return response.json()["finding"]
+
+
+def _legacy_authorless_finding(slug: str) -> dict:
+    with db_module.get_connection() as connection:
+        engagement = connection.execute(
+            "SELECT id FROM engagements WHERE key = ?", (ENGAGEMENT_KEY,)
+        ).fetchone()
+        assert engagement is not None
+        cursor = connection.execute(
+            """
+            INSERT INTO assessment_findings (
+                engagement_id, slug, title, severity, status, verification_status,
+                defect_family, root_cause_key, canonical_location, source_name,
+                summary, details_json, provenance_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(engagement["id"]),
+                slug,
+                f"{slug} legacy authorless finding",
+                "medium",
+                "active",
+                "unreviewed",
+                "access-control",
+                f"root-{slug}",
+                f"https://example.test/{slug}",
+                "renamed-hunter-label",
+                "Imported from a database created before author provenance.",
+                json.dumps({"evidence": "legacy", "impact": "data disclosure"}),
+                "{}",
+            ),
+        )
+        finding_id = int(cursor.lastrowid)
+    return {"id": finding_id, "row_version": 1}
 
 
 def _receipt(client, agent_id: str, suffix: str, *, kind: str = "source_observation") -> dict:
@@ -115,12 +153,7 @@ def test_terminal_verification_cannot_invent_missing_author_identity(
     client, isolate_settings
 ) -> None:
     _seed(client, isolate_settings)
-    _finding(
-        client,
-        "VA-003",
-        source_name="renamed-hunter-label",
-        provenance={},
-    )
+    _legacy_authorless_finding("VA-003")
 
     # Missing historical attribution does not make the record unreadable.
     readable = client.get(f"{BASE}/findings/VA-003")
@@ -152,7 +185,7 @@ def test_relocation_cannot_retrofit_missing_author_identity(
     client, isolate_settings
 ) -> None:
     _seed(client, isolate_settings)
-    finding = _finding(client, "VA-004", provenance={})
+    finding = _legacy_authorless_finding("VA-004")
 
     response = client.put(
         f"{BASE}/findings/VA-004/canonical-location",
@@ -176,7 +209,7 @@ def test_merge_cannot_replace_unknown_target_author_with_source_author(
     client, isolate_settings
 ) -> None:
     _seed(client, isolate_settings)
-    _finding(client, "VA-005", provenance={})
+    _legacy_authorless_finding("VA-005")
     _finding(
         client,
         "VA-006",

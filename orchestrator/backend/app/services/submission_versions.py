@@ -491,7 +491,6 @@ def _read_attachment(
             "media_type": str(record.get("media_type") or "application/octet-stream"),
             "size_bytes": len(data),
             "sha256": digest,
-            "sensitive": bool(record.get("sensitive")),
         },
         data,
     )
@@ -1066,20 +1065,11 @@ def _complete_version(engagement_id: int, row: Mapping[str, Any]) -> dict[str, A
                     "fresh final workspace"
                 ),
             )
-        attachment_sources = sources.get("attachments")
-        package_sensitive = bool(
-            isinstance(attachment_sources, list)
-            and any(
-                isinstance(attachment, dict) and bool(attachment.get("sensitive"))
-                for attachment in attachment_sources
-            )
-        )
         artifact = artifact_index.register_artifact(
             engagement_id,
             path=str(row["relative_path"]),
             kind="submission-version",
             media_type=str(row["media_type"]),
-            sensitive=package_sensitive,
             related_finding_slug=str(finding["slug"]),
         )
         if (

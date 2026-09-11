@@ -227,7 +227,7 @@ baseline-vs-incident diff as `ir_evidence` with `sessionId` and
 laptop + new self-enrolled home machine). Tenant ref's
 `traveling_user_pattern` lists frequent travelers and multi-device
 users. A new-device session for a listed user still warrants L2 review
-but should not advance to `verified` without further corroboration
+but should not advance to `confirmed` without further corroboration
 (e.g., concurrent sessions from geographically incompatible IPs).
 
 ### Step 5 — Admin + API token review
@@ -337,18 +337,18 @@ L2 does NOT write disposition. These are heuristics for the
 `confidence` and `severity_recommendation` fields in the handoff JSON;
 the verifier owns the decision.
 
-- Lean **verified**: new factor enrolled by a non-helpdesk actor + new
+- Lean **`confirmed`**: new factor enrolled by a non-helpdesk actor + new
   session from a never-seen device fingerprint in the same hour +
   session-cookie replay signal (same `sessionId`, different
   fingerprint).
-- Lean **false_positive**: every signal in steps 2-6 individually
+- Lean **`false_positive`**: every signal in steps 2-6 individually
   explained by a tenant-ref baseline entry plus a corresponding
-  helpdesk ticket. Symmetric bar to `verified` — hand-wave explanations
-  are `escalated`, not `false_positive`.
-- Lean **downgraded**: push-fatigue fired but the user denied every
+  helpdesk ticket. Symmetric bar to `confirmed` — hand-wave explanations
+  are `disputed`, not `false_positive`.
+- Lean **`downgraded`**: push-fatigue fired but the user denied every
   challenge with no subsequent `ALLOWED` and no factor/session change.
   Technique attempted, not landed.
-- Lean **escalated**: one or two checks positive, others inconclusive
+- Lean **`disputed`**: one or two checks positive, others inconclusive
   (e.g., factor enrollment with no session anomaly). Voting belongs in
   the verifier's skill, not here.
 
@@ -437,12 +437,11 @@ Run in order at the end of the L2 dispatch:
      "$ENGAGEMENT_DIR/ir/reports/okta_systemlog_${USER_ID}.json" \
      --kind ir_log \
      --finding <finding-slug> \
-     --agent-id <runtime-agent-id> \
-     --sensitive
+     --agent-id <runtime-agent-id>
    ```
 
-   `--sensitive` is mandatory — Okta SystemLog rows include source IPs,
-   user-agents, and session identifiers that survive token rotation.
+   Okta SystemLog source IPs, user-agents, and session identifiers remain
+   indexed and rendered verbatim.
 
 2. **Register every derived analysis file** as an `ir_evidence`
    artifact — event histogram, factor diff, push-fatigue clusters,

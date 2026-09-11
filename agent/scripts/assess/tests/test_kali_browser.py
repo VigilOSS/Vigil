@@ -329,10 +329,10 @@ def test_run_threads_required_headers_into_driver_argv(tmp_path, monkeypatch):
     # Browser execution cannot consume CLI -H flags, so the verb threads them in
     # as a JSON execution-plan field installed before Playwright navigation.
     eng_dir = tmp_path / "eng"
-    _write_scope(eng_dir, required_headers={"X-Bug-Bounty": "vigiloss"})
+    _write_scope(eng_dir, required_headers={"X-Bug-Bounty": "researcher"})
     cap = _capture_run(monkeypatch, _browser_args(engagement_dir=str(eng_dir)))
     config = json.loads(cap["cmd"][3])
-    assert config["required_headers"] == {"X-Bug-Bounty": "vigiloss"}
+    assert config["required_headers"] == {"X-Bug-Bounty": "researcher"}
     # Playwright request routing installs attribution before navigation.
     assert "context.route" in kb._BROWSER_DRIVER
     assert "route.continue_" in kb._BROWSER_DRIVER
@@ -361,10 +361,10 @@ def test_run_required_headers_drop_malformed_pairs(tmp_path, monkeypatch):
     eng_dir = tmp_path / "eng"
     _write_scope(
         eng_dir,
-        required_headers={"X-Bug-Bounty": "vigiloss", "X-Bad": 5, "": "blank"},
+        required_headers={"X-Bug-Bounty": "researcher", "X-Bad": 5, "": "blank"},
     )
     cap = _capture_run(monkeypatch, _browser_args(engagement_dir=str(eng_dir)))
-    assert json.loads(cap["cmd"][3])["required_headers"] == {"X-Bug-Bounty": "vigiloss"}
+    assert json.loads(cap["cmd"][3])["required_headers"] == {"X-Bug-Bounty": "researcher"}
 
 
 # --------------------------------------------------------------------------- #
@@ -385,13 +385,13 @@ def test_parse_header_args_skips_malformed():
 
 def test_run_merges_operator_headers_into_driver_argv(tmp_path, monkeypatch):
     eng_dir = tmp_path / "eng"
-    _write_scope(eng_dir, required_headers={"X-Bug-Bounty": "vigiloss"})
+    _write_scope(eng_dir, required_headers={"X-Bug-Bounty": "researcher"})
     cap = _capture_run(
         monkeypatch,
         _browser_args(engagement_dir=str(eng_dir), extra_headers=["X-Debug: 1"]),
     )
     config = json.loads(cap["cmd"][3])
-    assert config["required_headers"] == {"X-Bug-Bounty": "vigiloss"}
+    assert config["required_headers"] == {"X-Bug-Bounty": "researcher"}
     assert config["operator_headers"] == {"X-Debug": "1"}
 
 
@@ -399,7 +399,7 @@ def test_run_required_header_wins_over_operator_same_name(tmp_path, monkeypatch)
     # An operator --header must NEVER strip/override a program attribution header
     # of the same name — required headers win the merge.
     eng_dir = tmp_path / "eng"
-    _write_scope(eng_dir, required_headers={"X-Bug-Bounty": "vigiloss"})
+    _write_scope(eng_dir, required_headers={"X-Bug-Bounty": "researcher"})
     cap = _capture_run(
         monkeypatch,
         _browser_args(
@@ -407,7 +407,7 @@ def test_run_required_header_wins_over_operator_same_name(tmp_path, monkeypatch)
         ),
     )
     config = json.loads(cap["cmd"][3])
-    assert config["required_headers"]["X-Bug-Bounty"] == "vigiloss"
+    assert config["required_headers"]["X-Bug-Bounty"] == "researcher"
     assert "X-Bug-Bounty" not in config["operator_headers"]
 
 
@@ -415,7 +415,7 @@ def test_run_required_header_wins_case_insensitive_operator_collision(
     tmp_path, monkeypatch
 ):
     eng_dir = tmp_path / "eng"
-    _write_scope(eng_dir, required_headers={"X-Bug-Bounty": "vigiloss"})
+    _write_scope(eng_dir, required_headers={"X-Bug-Bounty": "researcher"})
     cap = _capture_run(
         monkeypatch,
         _browser_args(
@@ -423,7 +423,7 @@ def test_run_required_header_wins_case_insensitive_operator_collision(
         ),
     )
     config = json.loads(cap["cmd"][3])
-    assert config["required_headers"] == {"X-Bug-Bounty": "vigiloss"}
+    assert config["required_headers"] == {"X-Bug-Bounty": "researcher"}
     assert not any(
         name.lower() == "x-bug-bounty" for name in config["operator_headers"]
     )
@@ -578,6 +578,40 @@ def test_run_threads_steps_and_capture_options(tmp_path, monkeypatch):
     assert "no_fire_regex" not in config
 
 
+def test_run_exposes_declared_navigation_urls_as_policy_anchors(tmp_path, monkeypatch):
+    """Every explicit navigation must remain visible to shared scope policy.
+
+    The browser driver consumes a JSON plan, but the generic execution-policy
+    parser deliberately does not mine program/data blobs for URL-shaped text.
+    Plain trailing argv anchors let it warn on declared CODE targets without
+    making the parser browser-specific or blocking the navigation.
+    """
+    steps_file = tmp_path / "steps.json"
+    steps_file.write_text(
+        json.dumps(
+            [
+                {"action": "navigate", "url": "https://app.example.test/account"},
+                {"action": "click", "selector": "#continue"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    cap = _capture_run(
+        monkeypatch,
+        _browser_args(
+            url="https://docs.python.org/3/",
+            steps_file=str(steps_file),
+            phase="code-hunt",
+        ),
+    )
+
+    assert cap["cmd"][4:] == [
+        "https://docs.python.org/3/",
+        "https://app.example.test/account",
+    ]
+
+
 def test_run_threads_scope_entries_for_attribution_routing(tmp_path, monkeypatch):
     # Attribution is a SCOPE decision, so the normalized allow/deny entries travel
     # in the execution plan and the driver answers per request host.
@@ -586,7 +620,7 @@ def test_run_threads_scope_entries_for_attribution_routing(tmp_path, monkeypatch
         eng_dir,
         hosts=["*.example.com", "10.0.0.0/24"],
         out_of_scope=["blog.example.com"],
-        required_headers={"X-HackerOne": "vigiloss"},
+        required_headers={"X-HackerOne": "researcher"},
     )
     cap = _capture_run(monkeypatch, _browser_args(engagement_dir=str(eng_dir)))
     config = json.loads(cap["cmd"][3])
@@ -630,7 +664,7 @@ def test_run_refuses_mandated_attribution_with_an_unresolvable_boundary(tmp_path
     # declares no host, so no request could be attributed. Refuse before
     # navigating rather than send unattributed in-scope traffic.
     eng_dir = tmp_path / "eng"
-    _write_scope(eng_dir, hosts=[], required_headers={"X-HackerOne": "vigiloss"})
+    _write_scope(eng_dir, hosts=[], required_headers={"X-HackerOne": "researcher"})
     with pytest.raises(AssessError, match="cannot resolve the scope boundary"):
         kb.run(_browser_args(engagement_dir=str(eng_dir)))
 
@@ -646,7 +680,7 @@ def test_run_without_mandated_headers_tolerates_an_empty_scope(tmp_path, monkeyp
 
 def test_run_attribution_scope_all_names_the_leak_on_stderr(tmp_path, monkeypatch, capsys):
     eng_dir = tmp_path / "eng"
-    _write_scope(eng_dir, required_headers={"X-HackerOne": "vigiloss"})
+    _write_scope(eng_dir, required_headers={"X-HackerOne": "researcher"})
     cap = _capture_run(
         monkeypatch,
         _browser_args(engagement_dir=str(eng_dir), attribution_scope="all"),
@@ -660,7 +694,7 @@ def test_run_attribution_scope_all_bypasses_the_boundary_refusal(tmp_path, monke
     # 'all' answers the boundary question by fiat, so it is the documented way
     # past the refusal rather than a dead end.
     eng_dir = tmp_path / "eng"
-    _write_scope(eng_dir, hosts=[], required_headers={"X-HackerOne": "vigiloss"})
+    _write_scope(eng_dir, hosts=[], required_headers={"X-HackerOne": "researcher"})
     cap = _capture_run(
         monkeypatch,
         _browser_args(engagement_dir=str(eng_dir), attribution_scope="all"),
@@ -1073,7 +1107,7 @@ def test_target_not_declared_in_scope_hosts_warns_before_navigating(tmp_path, mo
     # self-attributing, so no injection warning fires either. The omission must
     # be loud at dispatch, not buried in `omitted_attribution_origins`.
     eng_dir = tmp_path / "eng"
-    _write_scope(eng_dir, hosts=["api.example.com"], required_headers={"X-Bug-Bounty": "vigiloss"})
+    _write_scope(eng_dir, hosts=["api.example.com"], required_headers={"X-Bug-Bounty": "researcher"})
     cap = _capture_run(
         monkeypatch,
         _browser_args(url="https://app.example.com/dash", engagement_dir=str(eng_dir)),
@@ -1089,7 +1123,7 @@ def test_target_not_declared_in_scope_hosts_warns_before_navigating(tmp_path, mo
 
 def test_declared_target_navigates_without_the_warning(tmp_path, monkeypatch, capsys):
     eng_dir = tmp_path / "eng"
-    _write_scope(eng_dir, hosts=["*.example.com"], required_headers={"X-Bug-Bounty": "vigiloss"})
+    _write_scope(eng_dir, hosts=["*.example.com"], required_headers={"X-Bug-Bounty": "researcher"})
     _capture_run(
         monkeypatch,
         _browser_args(url="https://app.example.com/dash", engagement_dir=str(eng_dir)),
@@ -1100,7 +1134,7 @@ def test_declared_target_navigates_without_the_warning(tmp_path, monkeypatch, ca
 def test_attribution_scope_all_suppresses_the_unattributed_warning(tmp_path, monkeypatch, capsys):
     # `all` attributes every origin, so nothing is left unattributed to warn about.
     eng_dir = tmp_path / "eng"
-    _write_scope(eng_dir, hosts=["api.example.com"], required_headers={"X-Bug-Bounty": "vigiloss"})
+    _write_scope(eng_dir, hosts=["api.example.com"], required_headers={"X-Bug-Bounty": "researcher"})
     _capture_run(
         monkeypatch,
         _browser_args(
@@ -1117,7 +1151,7 @@ def test_declared_navigate_steps_are_checked_too(tmp_path, monkeypatch, capsys):
     # check must cover the same hosts or a multi-step workflow leaks an
     # unattributed leg.
     eng_dir = tmp_path / "eng"
-    _write_scope(eng_dir, hosts=["app.example.com"], required_headers={"X-Bug-Bounty": "vigiloss"})
+    _write_scope(eng_dir, hosts=["app.example.com"], required_headers={"X-Bug-Bounty": "researcher"})
     steps = tmp_path / "steps.json"
     steps.write_text(
         json.dumps([{"action": "navigate", "url": "https://admin.example.com/panel"}]),

@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 BASE_TMPL = "/engagements/{key}/assessment"
+AUTHOR_AGENT_ID = "W3-ADVERSARIAL-AUTHOR"
 
 def _write_engagement(engagements_dir: Path, *, key: str, engagement_type: str) -> Path:
     eng = engagements_dir / key
@@ -38,7 +39,17 @@ def _write_engagement(engagements_dir: Path, *, key: str, engagement_type: str) 
 def _register(client, key: str) -> str:
     response = client.get(f"/engagements/{key}")
     assert response.status_code == 200, response.text
-    return BASE_TMPL.format(key=key)
+    base = BASE_TMPL.format(key=key)
+    dispatch = client.post(
+        f"{base}/dispatches",
+        json={
+            "agent_id": AUTHOR_AGENT_ID,
+            "agent_role": "vulnerability-analyst",
+            "task": "Record adversarial W3 fixture findings",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
+    return base
 
 def _ingest_routes(client, base: str, *, host: str, paths: list[str]) -> None:
     for path in paths:
@@ -151,6 +162,7 @@ def test_adversarial_unreviewed_critical_blocks(client, isolate_settings):
             "canonical_location": "https://api.example.com/x",
             "summary": "needs a grade",
             "source_name": "vulnerability-analyst",
+            "provenance": {"agent_id": AUTHOR_AGENT_ID},
         },
     )
     assert resp.status_code == 201, resp.text
@@ -176,6 +188,7 @@ def test_adversarial_unreviewed_high_blocks(client, isolate_settings):
             "canonical_location": "https://api.example.com/x",
             "summary": "needs a grade",
             "source_name": "vulnerability-analyst",
+            "provenance": {"agent_id": AUTHOR_AGENT_ID},
         },
     )
     assert resp.status_code == 201, resp.text
@@ -204,6 +217,7 @@ def test_adversarial_code_engagement_not_blocked(client, isolate_settings):
             "canonical_location": "https://api.example.com/x",
             "summary": "needs a grade",
             "source_name": "vulnerability-analyst",
+            "provenance": {"agent_id": AUTHOR_AGENT_ID},
         },
     )
     assert resp.status_code == 201, resp.text
@@ -232,6 +246,7 @@ def test_adversarial_blue_engagement_not_blocked(client, isolate_settings):
             "canonical_location": "https://api.example.com/x",
             "summary": "needs a grade",
             "source_name": "vulnerability-analyst",
+            "provenance": {"agent_id": AUTHOR_AGENT_ID},
         },
     )
     assert resp.status_code == 201, resp.text
@@ -260,6 +275,7 @@ def test_pending_runtime_proof_clears_unreviewed_but_not_reportable(client, isol
             "canonical_location": "https://api.example.com/x",
             "summary": "needs verification",
             "source_name": "vulnerability-analyst",
+            "provenance": {"agent_id": AUTHOR_AGENT_ID},
         },
     )
     assert resp.status_code == 201, resp.text

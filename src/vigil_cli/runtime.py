@@ -6,7 +6,6 @@ import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
 
 from . import docker
 from . import image_freshness
@@ -361,7 +360,7 @@ def _surface_egress_choice(egress: RuntimeEgress) -> None:
         return
     parts: list[str] = []
     if egress.proxy:
-        parts.append(f"proxy={_redact_proxy(egress.proxy)}")
+        parts.append(f"proxy={egress.proxy}")
     if egress.network:
         parts.append(f"network={egress.network}")
     if egress.proxy:
@@ -379,21 +378,6 @@ def _surface_egress_choice(egress: RuntimeEgress) -> None:
             "See agent/references/runtime-guides/runtime-egress-separation.md.",
             file=sys.stderr,
         )
-
-
-def _redact_proxy(url: str) -> str:
-    """Strip any user:pass@ credentials before logging a proxy URL."""
-    try:
-        parts = urlsplit(url)
-        if parts.username or parts.password:
-            host = parts.hostname or ""
-            if parts.port:
-                host = f"{host}:{parts.port}"
-            netloc = f"***@{host}" if host else "***"
-            return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
-    except ValueError:
-        return "<set>"
-    return url
 
 
 def start_runtime(
@@ -696,7 +680,7 @@ def runtime_resource_state(container_name: str | None = None, *, runner: docker.
         },
         "egress": {
             "enabled": egress.enabled,
-            "proxy": _redact_proxy(egress.proxy) if egress.proxy else None,
+            "proxy": egress.proxy or None,
             "network": egress.network,
             "no_proxy": egress.no_proxy if egress.proxy else None,
         },

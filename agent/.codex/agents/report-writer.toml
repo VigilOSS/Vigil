@@ -133,11 +133,15 @@ A single submission does not need the full report-generation machinery (attack-c
 
 Skip: `agent/skills/report-generation/SKILL.md` full procedure, `vigil assess fetch attack-chains`, `vigil assess fetch summary`, and executive summary machinery — none of those apply to a single-finding submission. The SKILL.md "Submission Status Lifecycle" section IS needed for the `--submission-status` lifecycle after the operator submits — load that section (referenced from the SKILL) without pulling the entire report generation flow.
 
-After staging the submission file, the operator sets the initial submission status:
+After staging the submission file, the operator sets the initial submission status. The first move
+off `none` must name the report — the backend rejects a submission transition with no
+`--submission-ref`:
 
 ```bash
 vigil assess finding update <slug> \
   --submission-status submitted \
+  --submission-platform <bugcrowd|hackerone|direct> \
+  --submission-ref <program report id> \
   --reason "Staged and submitted to program"
 ```
 
@@ -192,7 +196,7 @@ render format is `agent/references/submission-format.md` "Structure".
 |---|---|---|
 | Summary | `summary` | Impact-first paragraph — bug class, endpoint, and auth context folded in |
 | Steps to Reproduce | `details.steps_to_reproduce` | One string carrying your own `1.`/`2.`/… numbering — the renderer adds none. Edit the specialist's recorded steps against the "Reproduction runs" argv in OPERATOR DETAILS (`details.repro_runs`) — renumber, reword, merge, or drop freely; every command, argv, and response value must still trace to a run — see the fabrication boundary in Closing Sequence step 1 |
-| Evidence | `details.evidence` | Annotated proof; genuine third-party PII partial-masked, self-owned/synthetic data shown in full (submission-format.md "PII redaction") |
+| Evidence | `details.evidence` | Annotated proof with captured values preserved verbatim (submission-format.md "Evidence fidelity") |
 | Attack Scenario (optional) | `details.attack_scenario` | Realistic adversary + starting access + action, ending at first compromise — no scope counts (those belong to Impact) |
 | Impact | `details.impact` | Consequence + blast radius, quantified — don't re-describe the actor or steps |
 | Remediation | `details.remediation` | One or two precise sentences naming the control |
@@ -247,7 +251,7 @@ explicit opt-in.
 
 1. **Read before writing** — `vigil assess fetch findings/<slug>`: the ask, every existing reply, and the current `submission_status`, so you don't repeat or contradict the thread.
 2. **Scaffold** — `vigil assess export reply <slug> --in-response-to "<ask>" --platform <p> --draft`.
-3. **Author, then write back** — `vigil assess record-reply <slug> --seq N --in-response-to "<ask>" --platform <p> --body "<authored>" [--new-evidence "<masked>" --new-evidence-ref scans/<file>]`, per `agent/references/reply-format.md` for voice and budgets; mask PII the same as a submission's Evidence.
+3. **Author, then write back** — `vigil assess record-reply <slug> --seq N --in-response-to "<ask>" --platform <p> --body "<authored>" [--new-evidence "<exact evidence>" --new-evidence-ref scans/<file>]`, per `agent/references/reply-format.md` for voice and budgets; preserve evidence values verbatim.
 4. **Re-render + checklist** — `vigil assess export reply <slug> --seq N --overwrite`, then the pre-send checklist in `agent/references/reply-format.md`; fix at the source (step 3) and re-render.
 5. **Blind-triage gate (conditional)** — re-run `agent/skills/blind-triage/SKILL.md` Pass 2 only when `new_evidence` changes the finding's claimed severity or impact.
 6. **After the operator sends it** — `vigil assess record-reply <slug> --seq N --sent` (fold in `--set-submission-status submitted` when the reply answers `needs_info`).

@@ -171,4 +171,9 @@ def run(args) -> None:
             }
         )
 
-    print(f"Recorded intel {intel_type} id={record_id}")
+    if intel_type == "note" and response.get("write_outcome") in {"created", "updated"}:
+        outcome = str(response["write_outcome"])
+        qualifier = "new" if outcome == "created" else "existing"
+        print(f"Recorded intel note id={record_id}: {outcome} {qualifier} note")
+    else:
+        print(f"Recorded intel {intel_type} id={record_id}")

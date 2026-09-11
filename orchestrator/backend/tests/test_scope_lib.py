@@ -34,6 +34,35 @@ def _load_scope_module():
 scope = _load_scope_module()
 
 
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "bad host.example",
+        "-bad.example",
+        "bad-.example",
+        "bad..example",
+        "foo*.example",
+        "*.*.example",
+        "10.0.0.0/999",
+        "999.999.999.999",
+        "example.com/path",
+        "https://",
+        "https://bad_.example/path",
+        "[2001:db8::1",
+    ],
+)
+def test_scope_reader_rejects_the_same_malformed_entries_as_mutation(entry):
+    assert scope.classify_scope_entry(entry) is None
+
+
+def test_scope_mutation_and_reader_share_one_entry_validation_owner():
+    from vigil_cli import engagements
+    from vigil_cli import scope_entries as canonical
+
+    assert engagements.canonicalize_scope_entry is canonical.canonicalize_scope_entry
+    assert scope.classify_scope_entry is canonical.classify_scope_entry
+
+
 
 
 def test_cidr_entry_is_classified_as_network_not_single_host():
@@ -168,57 +197,57 @@ def test_pathless_url_entry_does_not_warn(capsys):
 
 def test_out_of_scope_entries_parses_bare_host_and_wildcard():
     deny = scope.out_of_scope_entries(
-        {"out_of_scope": ["appointments.acme-regional.example", "*.mobile.acme-net.example"]}
+        {"out_of_scope": ["appointments.acme-telco.example", "*.mobile.acme-telco.example"]}
     )
     kinds = {(e["scope_entry"], e["entry_kind"]) for e in deny}
-    assert ("appointments.acme-regional.example", "bare_host") in kinds
-    assert ("*.mobile.acme-net.example", "wildcard") in kinds
+    assert ("appointments.acme-telco.example", "bare_host") in kinds
+    assert ("*.mobile.acme-telco.example", "wildcard") in kinds
 
 
 def test_host_admitted_wildcard_with_bare_host_carve_out():
-    allow = scope.scope_entries({"hosts": ["*.acme-regional.example"]})
-    deny = scope.out_of_scope_entries({"out_of_scope": ["appointments.acme-regional.example"]})
+    allow = scope.scope_entries({"hosts": ["*.acme-telco.example"]})
+    deny = scope.out_of_scope_entries({"out_of_scope": ["appointments.acme-telco.example"]})
     # In-scope subdomain still admitted...
-    assert scope.host_admitted("app.acme-regional.example", allow, deny)
+    assert scope.host_admitted("app.acme-telco.example", allow, deny)
     # ...but the explicit OOS carve-out is rejected even though the wildcard
     # would otherwise cover it.
-    assert scope.host_in_scope("appointments.acme-regional.example", allow)
-    assert not scope.host_admitted("appointments.acme-regional.example", allow, deny)
+    assert scope.host_in_scope("appointments.acme-telco.example", allow)
+    assert not scope.host_admitted("appointments.acme-telco.example", allow, deny)
 
 
 def test_host_admitted_wildcard_carve_out_rejects_subtree():
-    allow = scope.scope_entries({"hosts": ["*.mobile.acme.example"]})
-    deny = scope.out_of_scope_entries({"out_of_scope": ["*.mobile.acme-net.example"]})
+    allow = scope.scope_entries({"hosts": ["*.acme-telco.example"]})
+    deny = scope.out_of_scope_entries({"out_of_scope": ["*.mobile.acme-telco.example"]})
     # OOS wildcard rejects the carved-out subtree...
-    assert not scope.host_admitted("x.mobile.acme-net.example", allow, deny)
-    assert not scope.host_admitted("mobile.acme-net.example", allow, deny)
+    assert not scope.host_admitted("x.mobile.acme-telco.example", allow, deny)
+    assert not scope.host_admitted("mobile.acme-telco.example", allow, deny)
     # ...while a sibling under the in-scope wildcard is still admitted.
-    assert scope.host_admitted("mobile.acme.example", allow, deny)
+    assert scope.host_admitted("api.acme-telco.example", allow, deny)
 
 
 def test_host_admitted_rejects_host_not_in_allowlist():
-    allow = scope.scope_entries({"hosts": ["*.acme-regional.example"]})
-    deny = scope.out_of_scope_entries({"out_of_scope": ["appointments.acme-regional.example"]})
+    allow = scope.scope_entries({"hosts": ["*.acme-telco.example"]})
+    deny = scope.out_of_scope_entries({"out_of_scope": ["appointments.acme-telco.example"]})
     assert not scope.host_admitted("evil.example.com", allow, deny)
 
 
 def test_host_admitted_absent_out_of_scope_matches_legacy_behavior():
-    allow = scope.scope_entries({"hosts": ["*.acme-regional.example"]})
+    allow = scope.scope_entries({"hosts": ["*.acme-telco.example"]})
     # Absent and empty out_of_scope both yield an empty denylist, so admission
     # is identical to plain host_in_scope.
-    deny_absent = scope.out_of_scope_entries({"hosts": ["*.acme-regional.example"]})
+    deny_absent = scope.out_of_scope_entries({"hosts": ["*.acme-telco.example"]})
     deny_empty = scope.out_of_scope_entries({"out_of_scope": []})
     assert deny_absent == []
     assert deny_empty == []
     for deny in (deny_absent, deny_empty):
-        assert scope.host_admitted("app.acme-regional.example", allow, deny)
-        assert scope.host_admitted("appointments.acme-regional.example", allow, deny)
+        assert scope.host_admitted("app.acme-telco.example", allow, deny)
+        assert scope.host_admitted("appointments.acme-telco.example", allow, deny)
         assert not scope.host_admitted("evil.example.com", allow, deny)
 
 
 def test_out_of_scope_non_list_raises_system_exit():
     with pytest.raises(SystemExit):
-        scope.out_of_scope_entries({"out_of_scope": "appointments.acme-regional.example"})
+        scope.out_of_scope_entries({"out_of_scope": "appointments.acme-telco.example"})
 
 
 def test_scope_enforcement_defaults_to_enforce_and_only_explicit_bypass_disables_it():

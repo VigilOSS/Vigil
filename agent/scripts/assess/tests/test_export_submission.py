@@ -2019,7 +2019,7 @@ def test_a2_operational_header_renders_from_fields(tmp_path, monkeypatch, capsys
     a triager and puts the engagement's layout in text the operator pastes. The
     proof pointer stays under OPERATOR DETAILS.
     """
-    _write_scope(tmp_path, {"X-Bug-Bounty": "vigiloss"})
+    _write_scope(tmp_path, {"X-Bug-Bounty": "researcher"})
     finding = _finding(
         evidence_ref="scans/va-003-poc.sh",
         details=_complete_details(
@@ -2040,7 +2040,7 @@ def test_a2_operational_header_renders_from_fields(tmp_path, monkeypatch, capsys
     assert "**Asset:** https://app.example.com/api/orders/1001" in header
     assert "**Run:** bash scans/va-003-poc.sh" in header
     assert "**Pass if:** HTTP 200 returns another member's order record" in header
-    assert "**Deconfliction:** X-Bug-Bounty: vigiloss" in header
+    assert "**Deconfliction:** X-Bug-Bounty: researcher" in header
     # No derived proof pointer in the pasteable block; it lives below the line.
     # The artifact path appears in the header ONLY inside the authored Run command —
     # the author put it there, so it stays; nothing derives a second copy from
@@ -2055,7 +2055,7 @@ def test_a2_operational_header_renders_from_fields(tmp_path, monkeypatch, capsys
 def test_a2_operational_header_survives_overwrite(tmp_path, monkeypatch, capsys):
     """The overlay is rebuilt from fields on `--overwrite`, so re-rendering never
     wipes it (the A2 defect being fixed)."""
-    _write_scope(tmp_path, {"X-Bug-Bounty": "vigiloss"})
+    _write_scope(tmp_path, {"X-Bug-Bounty": "researcher"})
     finding = _finding(
         evidence_ref="scans/va-003-poc.sh",
         details=_complete_details(run="bash scans/va-003-poc.sh", pass_if="HTTP 200 leak"),
@@ -2076,7 +2076,7 @@ def test_a2_operational_header_survives_overwrite(tmp_path, monkeypatch, capsys)
         "**Asset:** https://app.example.com/api/orders/1001",
         "**Run:** bash scans/va-003-poc.sh",
         "**Pass if:** HTTP 200 leak",
-        "**Deconfliction:** X-Bug-Bounty: vigiloss",
+        "**Deconfliction:** X-Bug-Bounty: researcher",
     ):
         assert line in header
 
@@ -2107,7 +2107,7 @@ def test_final_render_keeps_every_details_section(tmp_path, monkeypatch, capsys)
     structured-proof block at exit 0 with no warning. A section that was never
     rendered reads exactly like a section nobody wrote.
     """
-    _write_scope(tmp_path, {"X-Bug-Bounty": "vigiloss"})
+    _write_scope(tmp_path, {"X-Bug-Bounty": "researcher"})
     details = _complete_details(
         steps_to_reproduce=[
             'curl -s https://app.example.com/orders/1001 -H "Cookie: session=abc123def456"',
@@ -2133,7 +2133,7 @@ def test_final_render_keeps_every_details_section(tmp_path, monkeypatch, capsys)
         "**Run:** bash scans/va-047-poc.sh",
         "**Pass if:** HTTP 200 returns another member's order record",
         "**Asset:** https://app.example.com/api/orders/1001",
-        "**Deconfliction:** X-Bug-Bounty: vigiloss",
+        "**Deconfliction:** X-Bug-Bounty: researcher",
         "- CWE: CWE-639",
         "- OWASP: A01:2021 Broken Access Control",
         "**PoC Request:**",

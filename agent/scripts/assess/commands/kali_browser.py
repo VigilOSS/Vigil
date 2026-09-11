@@ -719,7 +719,17 @@ def run(args) -> None:
         "max_body_bytes": max_body_bytes,
     }
     print(f"browser: Playwright workflow {url} -> screenshot={screenshot} dom={dom_out}", file=sys.stderr)
-    cmd = ["python3", "-c", _BROWSER_DRIVER, json.dumps(config, sort_keys=True, separators=(",", ":"))]
+    # Keep each explicit navigation as a plain argv token in addition to the
+    # driver plan. Shared execution policy intentionally does not mine JSON or
+    # inline program text for URLs, so these inert trailing arguments are the
+    # generic anchors used for CODE target advisories and audit attribution.
+    cmd = [
+        "python3",
+        "-c",
+        _BROWSER_DRIVER,
+        json.dumps(config, sort_keys=True, separators=(",", ":")),
+        *navigation_urls,
+    ]
     kwargs = kali_args_to_kwargs(args)
     # The browser prepares identity inside its execution plan. Shared CLI-tool
     # injection cannot reach Chromium and would only duplicate/warn.

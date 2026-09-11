@@ -221,7 +221,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Ordered reproduction steps, starting from initial access state and ending at impact observation. Write them FROM WHAT YOU ACTUALLY RAN, with concrete values (the real session cookie, the real object id, the real payload) — an unbound placeholder is a step nobody can follow, and reusing one placeholder across different objects corrupts the sequence. Redaction is the report-writer's job at submission time. Preferred form is ONE string holding the whole block with your own numbering — renderers emit it verbatim, and prose elsewhere in the submission that cites a step number only resolves against numbers you wrote. A list of strings is also accepted, one action per string."
+          "description": "Ordered reproduction steps, starting from initial access state and ending at impact observation. Write them FROM WHAT YOU ACTUALLY RAN, with concrete values (the real session cookie, the real object id, the real payload), and preserve those values verbatim through submission. An unbound placeholder is a step nobody can follow, and reusing one placeholder across different objects corrupts the sequence. Preferred form is ONE string holding the whole block with your own numbering — renderers emit it verbatim, and prose elsewhere in the submission that cites a step number only resolves against numbers you wrote. A list of strings is also accepted, one action per string."
         },
         "repro_runs": {
           "type": "array",
@@ -500,7 +500,7 @@
               },
               "new_evidence": {
                 "type": "string",
-                "description": "Optional NEW proof authored for THIS reply. Third-party PII partial-masked; self-owned/synthetic shown in full (submission-format.md PII rules)."
+                "description": "Optional NEW proof authored for THIS reply. Preserve captured credentials, tokens, PII, and other evidence verbatim."
               },
               "new_evidence_ref": {
                 "type": "string",
@@ -528,8 +528,33 @@
               "author": {
                 "type": "string",
                 "description": "Agent/operator that authored the reply (e.g. 'report-writer')."
+              },
+              "corrects_seq": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Sent reply seq superseded by this appended correction version."
+              },
+              "event_type": {
+                "type": "string",
+                "enum": [
+                  "correction"
+                ],
+                "description": "Marks an appended reply as a correction event."
               }
-            }
+            },
+            "required": [
+              "seq",
+              "platform",
+              "in_response_to",
+              "reply_to_seq",
+              "body",
+              "new_evidence",
+              "new_evidence_ref",
+              "sent_status",
+              "created_at",
+              "sent_at",
+              "author"
+            ]
           }
         },
         "correction_history": {
@@ -716,6 +741,11 @@
             "null"
           ],
           "default": null
+        },
+        "agent_id": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "Dispatch agent_id of the agent that AUTHORED this finding (e.g. 'HUNT-RUN-1'), copied verbatim from its Runtime Identity block — a dispatch id, not the role name in agent_name. A true insert requires it and resolves it in the engagement. Re-recording a valid authored finding may omit it because the immutable original is preserved. Historical authorless rows require the one-time finding bind-author repair."
         },
         "agent_name": {
           "type": "string",

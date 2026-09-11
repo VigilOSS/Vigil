@@ -10,7 +10,7 @@ When dispatched with `mode=root_cause_review`, do not run new probes. Inspect th
 
 Inputs to consult:
 
-- `vigil assess finding list --status active --verification-state verified --json` — confirmed-finding set
+- `vigil assess finding list --status active --verification-status confirmed --json` — confirmed-finding set
 - `vigil assess finding list --root-cause <slug> --json` — the root-cause grouping for a candidate root slug
 - For each finding: read parsed `details` for `poc_request` / `poc_response` / `chain_required` / `evidence_type`
 

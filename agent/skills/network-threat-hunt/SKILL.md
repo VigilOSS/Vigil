@@ -80,7 +80,7 @@ IOCs do not enter this engagement's evidence tree.
 
 - `vigil assess resume-brief` — hydrate engagement state first on
   continuation.
-- `vigil assess finding record <agent-name> <finding-json>` — draft or
+- `vigil assess finding record <agent-name> <finding-json> --agent-id <your-agent_id>` — draft or
   update findings.
 - `vigil assess host-exec` — wrap every host command (tshark, dig,
   whois, python entropy, RITA, Zeek).
@@ -428,7 +428,7 @@ Mirrored in `_template-network.md`; populate on every engagement.
 The L2 disposition feeds the verifier's five-check. Pick from
 `triage.md` rule 3 vocabulary only.
 
-- `verified` — beaconing signature (Step 2, CV < 0.05) **and**
+- `confirmed` — beaconing signature (Step 2, CV < 0.05) **and**
   unusual JA3 (Step 4, outside baseline) **and** DNS or destination
   flagged by TI feeds (Step 3 / IOC enrichment). All three signals
   independently corroborated.
@@ -439,7 +439,7 @@ The L2 disposition feeds the verifier's five-check. Pick from
 - `downgraded` — single beaconing signature without payload-size
   anomaly, or unusual JA3 without DNS/TI corroboration. Keep the
   finding open at lower severity; do not close.
-- `escalated` — partial signal that needs endpoint corroboration.
+- `disputed` — partial signal that needs endpoint corroboration.
   Chain to `agent/skills/edr-alert-triage/SKILL.md` with the
   implicated `src_ip` → `src_host` mapping; record the EDR finding
   slug as a sibling in `details.cross_skill_correlation_ids[]`.

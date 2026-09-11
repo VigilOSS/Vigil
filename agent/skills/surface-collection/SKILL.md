@@ -347,7 +347,7 @@ vigil assess record-surface <type> <target> <source> \
 **Record findings** when triage produces decisive evidence (e.g., an API key with a
 non-empty value visible in a URL parameter):
 ```bash
-vigil assess finding record surface-collector <finding-json-file>
+vigil assess finding record surface-collector <finding-json-file> --agent-id <your-agent_id>
 ```
 
 ### Step 8: Stats and Priority Manifest

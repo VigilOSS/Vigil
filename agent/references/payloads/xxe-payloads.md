@@ -2,6 +2,8 @@
 description: File read, OOB/blind XXE, DoS, context-specific (SOAP, SVG, DOCX)
 skill: xxe-testing
 source: PayloadsAllTheThings — XXE Injection
+source_revision: 3ac27901c711bdf3f5b65a7b1d1820a1f65bd09a
+source_license: MIT; see THIRD_PARTY_NOTICES.md
 ---
 
 # XXE (XML External Entity) Payloads

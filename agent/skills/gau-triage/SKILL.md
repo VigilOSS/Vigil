@@ -93,7 +93,7 @@ For each reproducible high-confidence trufflehog or JS-extracted endpoint where 
 ```bash
 # Inspect required fields, then write the finding draft.
 vigil assess contract finding record
-vigil assess finding record gau-triage <path-to-finding-json>
+vigil assess finding record gau-triage <path-to-finding-json> --agent-id <your-agent_id>
 ```
 
 ## Key Rules

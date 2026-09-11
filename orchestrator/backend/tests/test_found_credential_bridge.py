@@ -18,17 +18,58 @@ from __future__ import annotations
 import base64
 import json
 
+import pytest
+from fastapi import HTTPException
+
 from app import db
 from app.services import credentials as credential_store
 from app.services import state_manager
 from tests.test_engagements_api import write_engagement
 
 
+AUTHOR_DISPATCH = "CREDENTIAL-HUNT-1"
+
+
 def _seed(client, isolate_settings, key: str) -> int:
     write_engagement(isolate_settings["engagements_dir"], key=key)
     response = client.get(f"/engagements/{key}")
     assert response.status_code == 200, response.text
+    dispatch = client.post(
+        f"/engagements/{key}/assessment/dispatches",
+        json={
+            "agent_id": AUTHOR_DISPATCH,
+            "agent_role": "vulnerability-analyst",
+            "task": "find exposed credentials",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
     return int(response.json()["id"])
+
+
+def _author_provenance(**extra) -> dict:
+    return {"agent_id": AUTHOR_DISPATCH, **extra}
+
+
+def test_discovered_credential_without_author_refuses_before_persisting(
+    client, isolate_settings
+) -> None:
+    key = "2026-07-03-000000-disc-missing-author"
+    eng_id = _seed(client, isolate_settings, key)
+
+    with pytest.raises(HTTPException, match="provenance.agent_id"):
+        state_manager.record_credential(
+            eng_id,
+            credential_key="unattributed-secret",
+            kind="password",
+            principal="admin@target.example",
+            secret="hunter2",
+            source_name="vulnerability-analyst",
+            status_value="discovered",
+            notes="",
+            provenance={},
+        )
+
+    assert state_manager.list_credentials(eng_id) == []
 
 
 def _make_jwt(payload: dict) -> str:
@@ -71,7 +112,7 @@ def test_discovered_password_flags_finding_no_mint(client, isolate_settings):
         source_name="exploit-developer",
         status_value="discovered",
         notes="",
-        provenance={"source": "response-body"},
+        provenance=_author_provenance(source="response-body"),
     )
 
     # Intel row recorded; a plain password is NOT a session -> no minted identity.
@@ -106,7 +147,7 @@ def test_discovered_session_cookie_mints_identity(client, isolate_settings):
         source_name="vulnerability-analyst",
         status_value="discovered",
         notes="",
-        provenance={},
+        provenance=_author_provenance(),
     )
 
     # A replayable identity was minted and cross-linked onto the credential row.
@@ -141,7 +182,7 @@ def test_discovered_identity_is_opt_in_not_default_resolved(client, isolate_sett
         source_name="vulnerability-analyst",
         status_value="discovered",
         notes="",
-        provenance={},
+        provenance=_author_provenance(),
     )
     minted = record["identity"]
     assert minted
@@ -172,7 +213,7 @@ def test_discovered_bearer_jwt_mints_identity(client, isolate_settings):
         source_name="exploit-developer",
         status_value="discovered",
         notes="",
-        provenance={},
+        provenance=_author_provenance(),
     )
 
     minted = record["identity"]
@@ -200,7 +241,7 @@ def test_rerecording_same_credential_no_duplicate(client, isolate_settings):
             source_name="vulnerability-analyst",
             status_value="discovered",
             notes="",
-            provenance={},
+            provenance=_author_provenance(),
         )
 
     # Re-recording the same discovered credential neither duplicates the finding

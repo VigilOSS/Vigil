@@ -19,12 +19,22 @@ ENGAGEMENT_KEY = "2026-04-17-120100-surfaces"
 ASSESSMENT_BASE = f"/engagements/{ENGAGEMENT_KEY}/assessment"
 OTHER_ENGAGEMENT_KEY = "2026-04-17-120200-surfaces-other"
 OTHER_ASSESSMENT_BASE = f"/engagements/{OTHER_ENGAGEMENT_KEY}/assessment"
+AUTHOR_AGENT_ID = "SURFACE-FIXTURE-AUTHOR"
 
 
 def _seed_engagement(client, isolate_settings) -> None:
     write_engagement(isolate_settings["engagements_dir"], key=ENGAGEMENT_KEY)
     response = client.get(f"/engagements/{ENGAGEMENT_KEY}")
     assert response.status_code == 200, response.text
+    dispatch = client.post(
+        f"{ASSESSMENT_BASE}/dispatches",
+        json={
+            "agent_id": AUTHOR_AGENT_ID,
+            "agent_role": "vulnerability-analyst",
+            "task": "Record surface-linked fixture findings",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
 
 
 def _seed_other_engagement(client, isolate_settings) -> None:
@@ -435,6 +445,7 @@ def test_partially_covered_surface_linked_to_active_finding_blocks(client, isola
         "summary": "IDOR",
         "evidence_ref": "findings.md",
         "source_name": "test",
+        "provenance": {"agent_id": AUTHOR_AGENT_ID},
     }
     resp = client.post(f"{ASSESSMENT_BASE}/findings", json=finding)
     assert resp.status_code in {200, 201}, resp.text

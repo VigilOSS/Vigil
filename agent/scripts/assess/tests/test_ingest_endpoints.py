@@ -420,7 +420,7 @@ def test_ingest_endpoints_scope_filter_excludes_out_of_scope_hosts(
     tmp_path, monkeypatch, capsys
 ):
     """gau/wayback historical URLs routinely surface reachable-but-out-of-scope
-    hosts (e.g. *.acme-bank.example subdomains the program excluded). ingest-endpoints
+    hosts (e.g. excluded `*.acme-bank.example` subdomains). ingest-endpoints
     must admit ONLY scope.json-allowlisted hosts and record the rest as skipped
     (terminal_reason out-of-scope) via `work-items/bulk`, never POSTing a
     request-observation for them (so no service/surface is created for an

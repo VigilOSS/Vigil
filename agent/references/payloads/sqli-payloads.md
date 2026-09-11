@@ -2,6 +2,8 @@
 description: UNION, blind, error-based, time-based, WAF bypass, auth bypass per DB type
 skill: sqli-testing
 source: PayloadsAllTheThings — SQL Injection
+source_revision: 3ac27901c711bdf3f5b65a7b1d1820a1f65bd09a
+source_license: MIT; see THIRD_PARTY_NOTICES.md
 ---
 
 # SQL Injection Payloads

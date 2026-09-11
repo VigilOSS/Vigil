@@ -105,7 +105,7 @@ the runtime — cross-check before it reaches the handoff.
 
 Before your dispatch returns, run in this order:
 
-1. `vigil assess finding record code-fuzz-engineer <finding-json>` for each confirmed crash finding.
+1. `vigil assess finding record code-fuzz-engineer <finding-json> --agent-id <your-agent_id>` for each confirmed crash finding.
 2. After terminal execution and crash triage, run `vigil assess contract code-record fuzz-campaign`, then `vigil assess code-record fuzz-campaign <receipt-json>` once per assigned target; failed outcomes remain non-covering evidence.
 3. `vigil assess agent handoff --from-json <path>` with coverage gaps, next steps, runtime issues, harness/crash/campaign artifacts, open questions, and role extras (`crash_count`, `harnesses_written`, `campaigns_run`, `false_positive_count`). Use the Runtime Identity block's exact identity.
 4. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).

@@ -38,6 +38,7 @@ INTEL_ENTITY_TYPES = {
 }
 _CLI_TYPE_BY_ENTITY = {value: key for key, value in INTEL_ENTITY_TYPES.items()}
 _MAX_SEARCH_LIMIT = 500
+_LEAD_STATUSES = ("open", "in_progress", "resolved", "ruled_out")
 _IDENTIFYING_FIELDS = (
     "component",
     "name",
@@ -69,6 +70,16 @@ def register(subparsers) -> None:
     )
     p.add_argument("intel_type", nargs="?", default=None, help=f"Optional intel type ({types_list})")
     p.add_argument("--q", dest="q", default="", help="FTS search query (uses /intel/search)")
+    p.add_argument(
+        "--lead-status",
+        choices=_LEAD_STATUSES,
+        help="Filter note leads by lifecycle status (uses /intel/search)",
+    )
+    p.add_argument(
+        "--provenance",
+        default="",
+        help="Filter by a literal substring in the stored provenance object",
+    )
     p.add_argument("--limit", type=int, default=50, help="Maximum rows to print (default: 50)")
     p.add_argument("--offset", type=int, default=0, help="Result offset for pagination")
     p.add_argument(
@@ -153,6 +164,10 @@ def _continuation_command(args, offset: int) -> str:
         parts.append(shlex.quote(str(args.intel_type)))
     if args.q:
         parts.extend(("--q", shlex.quote(str(args.q))))
+    if getattr(args, "lead_status", None):
+        parts.extend(("--lead-status", shlex.quote(str(args.lead_status))))
+    if getattr(args, "provenance", ""):
+        parts.extend(("--provenance", shlex.quote(str(args.provenance))))
     parts.extend(("--limit", str(int(args.limit)), "--offset", str(offset)))
     return " ".join(parts)
 
@@ -161,13 +176,20 @@ def run(args) -> None:
     limit = int(args.limit)
     offset = int(getattr(args, "offset", 0))
     cfg = load_config(args.engagement_dir)
+    lead_status = getattr(args, "lead_status", None)
+    provenance = str(getattr(args, "provenance", "") or "")
+    search_mode = bool(args.q or lead_status or provenance)
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        if args.q:
+        if search_mode:
             # FTS search across intel tables.
             request_limit, used_lookahead = lookahead_limit(
                 limit, maximum=_MAX_SEARCH_LIMIT
             )
             params = {"q": args.q, "limit": request_limit, "offset": offset}
+            if lead_status:
+                params["lead_status"] = lead_status
+            if provenance:
+                params["provenance"] = provenance
             if args.intel_type:
                 if args.intel_type not in INTEL_TYPES:
                     print(
@@ -196,12 +218,12 @@ def run(args) -> None:
             result = client.get_engagement("intel/summary")
 
     if not isinstance(result, list):
-        if not args.q and not args.intel_type and isinstance(result, dict):
+        if not search_mode and not args.intel_type and isinstance(result, dict):
             print(json.dumps(result, indent=2, ensure_ascii=False))
             return
         raise AssessError("intel list: expected a JSON array from the backend")
 
-    if args.q or args.intel_type:
+    if search_mode or args.intel_type:
         page = page_from_backend(
             result,
             limit=limit,
@@ -224,7 +246,7 @@ def run(args) -> None:
         warn_untrusted_data()
 
     if args.as_json:
-        if args.q:
+        if search_mode:
             output = [_compact_search_json_row(row) for row in result]
         else:
             output = [_compact_type_json_row(row, args.intel_type) for row in result]
@@ -237,6 +259,6 @@ def run(args) -> None:
 
     for row in result:
         if isinstance(row, dict):
-            print(_format_search_row(row) if args.q else _format_row(row))
+            print(_format_search_row(row) if search_mode else _format_row(row))
         else:
             print(row)

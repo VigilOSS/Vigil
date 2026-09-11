@@ -736,7 +736,7 @@ def test_run_writes_empty_json_artifact_when_arjun_finds_nothing(
 
 # --------------------------------------------------------------------------
 # ingest-arjun row matching + non-destructive enrichment (regression bugs found
-# on the live acme-agency.example run: host-blind matching + curated-priority downgrade)
+# during a live run: host-blind matching + curated-priority downgrade)
 # --------------------------------------------------------------------------
 # `_match_existing_row` now matches over the backend-fetched work-item ROW DICTS
 # (pre-sorted by id) instead of an SQLite connection — the work buffer moved to

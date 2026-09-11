@@ -1,13 +1,31 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "vigil"
-version = "0.2.0"
+version = "0.3.0"
 description = "Universal CLI for Vigil installs, engagements, runtime, and orchestrator operations"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "third_party/licenses/*"]
+authors = [{name = "Vigil OSS Maintainers"}]
 requires-python = ">=3.11"
 dependencies = []
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Security",
+]
+
+[project.urls]
+Homepage = "https://github.com/vigil-oss/vigil"
+Issues = "https://github.com/vigil-oss/vigil/issues"
+Source = "https://github.com/vigil-oss/vigil"
 
 [project.scripts]
 vigil = "vigil_cli.main:main"
@@ -17,6 +35,12 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+vigil_cli = [
+    "bench/factory/families/*/*",
+    "bench/factory/families/*/skeleton/*",
+]
 
 [tool.mypy]
 # Bench `skeleton/` files are container-runtime sidecars: they import runtime-only

@@ -35,11 +35,11 @@ from assess.lib.code_structural_identity import (
     structural_input_digest,
 )
 from assess.lib.config import load_config, resolve_engagement_dir
+from assess.lib.parser_boundary import ParserBoundaryCancelled, index_file
 from assess.lib.treesitter_index import (
     SUPPORTED_LANGUAGES,
     STREAMING_FALLBACK_BASELINE_UNAVAILABLE,
     StreamingSecurityScanner,
-    index_file,
     language_for_file,
 )
 
@@ -1219,6 +1219,11 @@ def run(args) -> None:
                         str(absolute),
                         language,
                         source=captured.materialized,
+                        result_validator=lambda result: _validate_analysis_artifact(
+                            result,
+                            rel_path=rel_path,
+                            source_size=captured.size,
+                        ),
                     )
                 elif supported and scanner is not None:
                     indexed = scanner.finish(degradation_reason="tree_sitter_resource_limit")
@@ -1359,6 +1364,9 @@ def run(args) -> None:
                 _fsync_generation_tree(final_dir)
         _fsync_directory_chain(identity_parent, durable_anchor)
         aggregate = _publish_aggregate(out_base, repo_id, manifest_path, manifest)
+    except (KeyboardInterrupt, ParserBoundaryCancelled):
+        _remove_tree(stage)
+        raise
     except Exception as exc:  # noqa: BLE001 - parser failures must abort atomic publication
         _remove_tree(stage)
         print(f"Structural index build failed: {exc}", file=sys.stderr)

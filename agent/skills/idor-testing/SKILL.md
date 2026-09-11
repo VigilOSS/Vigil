@@ -263,7 +263,7 @@ cross-object impact out-of-band:
 
 ```bash
 vigil oob mint --client <name> --technique idor --probe-kind blind-write
-# → host  <nonce>.<client-id>.oob.example.com   (= $OOB_HOST)
+# → host  <nonce>.<client-id>.<configured-oob-domain>   (= $OOB_HOST)
 # mint binds the nonce under the client's id; inject that EXACT host ($OOB_HOST) where the
 # victim's object would surface it (webhook URL, email, etc.) — never hand-build a bare
 # <nonce>.oob... host. Then correlate on the same client:

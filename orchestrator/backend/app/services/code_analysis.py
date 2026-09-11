@@ -36,7 +36,7 @@ from .variant_scopes import (
 )
 
 STRUCTURAL_INPUT_IDENTITY_SCHEMA = "structural-input-identity/v1"
-STRUCTURAL_INDEX_SCHEMA = "structural-index/v5"
+STRUCTURAL_INDEX_SCHEMA = "structural-index/v6"
 VARIANT_INPUT_IDENTITY_SCHEMA = "variant-input-identity/v1"
 MAX_VARIANT_RECEIPT_PAGE = 500
 DEFAULT_VARIANT_RECEIPT_PAGE = 100
@@ -55,6 +55,7 @@ _CANONICAL_STRUCTURAL_LANGUAGES = frozenset(
     {
         "",
         "c",
+        "c++",
         "cpp",
         "python",
         "javascript",
@@ -481,6 +482,7 @@ def _hydrate_code_file(row: Any) -> dict[str, Any]:
 
 def _hydrate_code_analysis_result(row: Any) -> dict[str, Any]:
     payload = dict(row)
+    payload["supersedes"] = payload.pop("supersedes_result_id", None)
     payload["audit_metadata"] = _json_decode(payload.get("audit_metadata_json"), {})
     payload["cwe_coverage"] = _json_decode(payload.get("cwe_coverage_json"), [])
     payload["cross_file_triggers"] = _json_decode(payload.get("cross_file_triggers_json"), [])
@@ -493,7 +495,12 @@ def _analysis_result_row(connection, result_id: int) -> Any:
         SELECT
             results.*,
             findings.status AS finding_workflow_status,
-            findings.verification_status AS finding_verification_status
+            findings.verification_status AS finding_verification_status,
+            (
+                SELECT replacement.id
+                FROM code_analysis_results AS replacement
+                WHERE replacement.supersedes_result_id = results.id
+            ) AS replaced_by_result_id
         FROM code_analysis_results AS results
         LEFT JOIN assessment_findings AS findings
           ON findings.engagement_id = results.engagement_id
@@ -628,6 +635,15 @@ def _require_queue_status(
     }
     if not invalid:
         return
+    if len(invalid) == 1:
+        item_id, row_status = next(iter(invalid.items()))
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Cannot {action} queue item {item_id} unless it is "
+                f"{expected_status}; current status is {row_status or 'unknown'}"
+            ),
+        )
     details = ", ".join(
         f"{item_id}={row_status or 'unknown'}"
         for item_id, row_status in sorted(invalid.items())
@@ -1059,6 +1075,16 @@ def _valid_claimed_result_receipt_sql(
     """
 
 
+def _result_not_replaced_sql(result_alias: str) -> str:
+    return f"""
+        NOT EXISTS (
+            SELECT 1
+            FROM code_analysis_results AS replacement_result
+            WHERE replacement_result.supersedes_result_id = {result_alias}.id
+        )
+    """
+
+
 def _successful_terminal_review_row_sql(
     queue_alias: str,
     *,
@@ -1070,7 +1096,10 @@ def _successful_terminal_review_row_sql(
     def result_is_current(result_alias: str) -> str:
         if include_superseded_results:
             return "1 = 1"
-        return f"{result_alias}.superseded_at IS NULL"
+        return (
+            f"{result_alias}.superseded_at IS NULL "
+            f"AND ({_result_not_replaced_sql(result_alias)})"
+        )
 
     return f"""
         {queue_alias}.status = 'done'
@@ -1215,6 +1244,7 @@ def _current_result_receipt_sql(
         )
     return f"""
         {result_alias}.superseded_at IS NULL
+        AND ({_result_not_replaced_sql(result_alias)})
         AND {result_alias}.engagement_id = {queue_alias}.engagement_id
         AND {result_alias}.queue_item_id = {queue_alias}.id
         AND {result_alias}.file_id = {queue_alias}.file_id
@@ -2514,7 +2544,8 @@ def list_code_files(
     search: str | None = None,
     limit: int | None = None,
     offset: int = 0,
-) -> list[dict[str, Any]]:
+    include_header_snippet: bool = False,
+) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     clauses = ["files.engagement_id = ?", "repos.active_generation > 0"]
     params: list[Any] = [engagement.id]
@@ -2534,12 +2565,15 @@ def list_code_files(
         clauses.append("files.file_path LIKE ? ESCAPE '\\'")
         escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         params.append(f"%{escaped}%")
-    query = f"""
-        SELECT files.*
+    from_where = f"""
         FROM code_files AS files
         JOIN code_repos AS repos
           ON repos.id = files.repo_id AND repos.engagement_id = files.engagement_id
         WHERE {' AND '.join(clauses)}
+    """
+    query = f"""
+        SELECT files.*
+        {from_where}
         ORDER BY files.analysis_priority DESC, files.id ASC
     """
     if limit is not None:
@@ -2547,12 +2581,80 @@ def list_code_files(
         if offset > 0:
             query += f" OFFSET {int(offset)}"
     with get_connection() as connection:
+        total = int(
+            connection.execute(
+                f"SELECT COUNT(*) {from_where}", tuple(params)
+            ).fetchone()[0]
+        )
         rows = connection.execute(query, tuple(params)).fetchall()
+        file_ids = [int(row["id"]) for row in rows]
+        queue_rows_by_file: dict[int, list[dict[str, Any]]] = {
+            file_id: [] for file_id in file_ids
+        }
+        active_generation_by_file: dict[int, int] = {}
+        if file_ids:
+            placeholders = ",".join("?" for _ in file_ids)
+            queue_rows = connection.execute(
+                f"""
+                SELECT queue.*, repos.active_generation
+                FROM code_analysis_queue AS queue
+                JOIN code_files AS files
+                  ON files.id = queue.file_id
+                 AND files.engagement_id = queue.engagement_id
+                JOIN code_repos AS repos
+                  ON repos.id = files.repo_id
+                 AND repos.engagement_id = files.engagement_id
+                WHERE queue.engagement_id = ?
+                  AND queue.file_id IN ({placeholders})
+                ORDER BY queue.id DESC
+                """,
+                (engagement.id, *file_ids),
+            ).fetchall()
+            for queue_row in queue_rows:
+                file_id = int(queue_row["file_id"])
+                queue_rows_by_file[file_id].append(dict(queue_row))
+                active_generation_by_file[file_id] = int(
+                    queue_row["active_generation"]
+                )
         parent_finding_cache: dict[int, list[str]] = {}
         records: list[dict[str, Any]] = []
         for row in rows:
             file_row = dict(row)
             payload = _hydrate_code_file(file_row)
+            if not include_header_snippet:
+                payload.pop("header_snippet", None)
+            file_id = int(file_row["id"])
+            attempts = queue_rows_by_file.get(file_id, [])
+            active_generation = active_generation_by_file.get(file_id)
+            current = next(
+                (
+                    attempt
+                    for attempt in attempts
+                    if int(attempt["repo_generation"]) == active_generation
+                ),
+                None,
+            )
+            current_attempt = None
+            if current is not None:
+                current_attempt = {
+                    "id": int(current["id"]),
+                    "status": str(current["status"]),
+                    "priority": int(current["priority"]),
+                    "queue_mode": str(current.get("queue_mode") or "initial"),
+                    "batch_theme": str(current.get("batch_theme") or ""),
+                    "repo_generation": int(current["repo_generation"]),
+                    "agent_name": str(current.get("assigned_agent") or ""),
+                    "lease_token": str(current.get("lease_token") or ""),
+                }
+            payload["queue"] = {
+                "state": (
+                    "current"
+                    if current_attempt is not None
+                    else ("historical_only" if attempts else "none")
+                ),
+                "current_attempt": current_attempt,
+                "historical_attempts": len(attempts) - (1 if current else 0),
+            }
             payload["variant_check_status"] = _current_variant_check_status(
                 connection,
                 engagement.id,
@@ -2560,7 +2662,13 @@ def list_code_files(
                 parent_finding_cache=parent_finding_cache,
             )
             records.append(payload)
-        return records
+        return {
+            "total": total,
+            "offset": offset,
+            "count": len(records),
+            "has_more": offset + len(records) < total,
+            "items": records,
+        }
 
 
 def get_code_file(engagement_id: int, file_id: int) -> dict[str, Any]:
@@ -3648,6 +3756,34 @@ def bulk_create_queue_items(
                 )
                 continue
 
+            requested_predecessor = item.get("supersedes")
+            expected_predecessor = None
+            if normalized_mode == "reanalysis":
+                if requested_predecessor is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            f"reanalysis for file {file_id} requires supersedes with "
+                            "the exact predecessor queue row ID"
+                        ),
+                    )
+                if active is not None and str(active.get("queue_mode")) == "reanalysis":
+                    expected_predecessor = active.get("reanalysis_of_queue_item_id")
+                elif latest is not None:
+                    expected_predecessor = latest.get("id")
+                if (
+                    expected_predecessor is not None
+                    and int(requested_predecessor) != int(expected_predecessor)
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=(
+                            f"reanalysis supersedes={requested_predecessor} does not match "
+                            f"the current predecessor queue row {expected_predecessor} "
+                            f"for file {file_id}"
+                        ),
+                    )
+
             if active is not None:
                 active_status = str(active["status"])
                 active_mode = str(active.get("queue_mode") or "initial")
@@ -3775,7 +3911,11 @@ def bulk_create_queue_items(
                 )
                 continue
 
-            predecessor_id = None if latest is None else int(latest["id"])
+            predecessor_id = (
+                None
+                if normalized_mode == "initial"
+                else int(requested_predecessor)
+            )
             cursor = connection.execute(
                 """
                 INSERT INTO code_analysis_queue (
@@ -4100,6 +4240,10 @@ def _compute_coverage_integrity(
         SELECT COUNT(*) FROM code_analysis_results
         WHERE engagement_id = ? AND queue_item_id = ? AND file_id = ?
           AND superseded_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM code_analysis_results AS replacement
+              WHERE replacement.supersedes_result_id = code_analysis_results.id
+          )
         """,
         (engagement_id, queue_item_id, file_id),
     ).fetchone()[0] or 0
@@ -4109,6 +4253,10 @@ def _compute_coverage_integrity(
         SELECT COUNT(DISTINCT function_name) FROM code_analysis_results
         WHERE engagement_id = ? AND queue_item_id = ? AND file_id = ?
           AND function_name != '' AND superseded_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM code_analysis_results AS replacement
+              WHERE replacement.supersedes_result_id = code_analysis_results.id
+          )
         """,
         (engagement_id, queue_item_id, file_id),
     ).fetchone()[0] or 0
@@ -4125,28 +4273,29 @@ def _compute_coverage_integrity(
         default=0.0,
     )
 
-    warnings: list[str] = []
+    authoritative_blockers: list[str] = []
+    advisories: list[str] = []
 
     if actual_result_count == 0 and max_claimed_functions > 0:
-        warnings.append(
+        authoritative_blockers.append(
             f"functions_analyzed={max_claimed_functions} claimed but 0 analysis-result rows recorded"
         )
 
     if distinct_functions_analyzed > 0 and max_claimed_functions > 0:
         ratio = distinct_functions_analyzed / max_claimed_functions
         if ratio < 0.3:
-            warnings.append(
+            advisories.append(
                 f"functions_analyzed={max_claimed_functions} claimed but only "
                 f"{distinct_functions_analyzed} distinct function results recorded (ratio={ratio:.2f})"
             )
 
     if total_functions > 0 and max_claimed_functions > total_functions:
-        warnings.append(
+        advisories.append(
             f"functions_analyzed={max_claimed_functions} exceeds file total_functions={total_functions}"
         )
 
     if total_functions > 0 and max_effort >= 60 and actual_result_count == 0:
-        warnings.append(
+        authoritative_blockers.append(
             f"effort={max_effort:.0f} claimed for file with {total_functions} functions "
             f"but 0 analysis-result rows"
         )
@@ -4157,8 +4306,10 @@ def _compute_coverage_integrity(
         "max_claimed_functions_analyzed": max_claimed_functions,
         "total_functions_on_file": total_functions,
         "max_effort": max_effort,
-        "warnings": warnings,
-        "plausible": len(warnings) == 0,
+        "authoritative_blockers": authoritative_blockers,
+        "advisories": advisories,
+        "warnings": [*authoritative_blockers, *advisories],
+        "plausible": not authoritative_blockers,
     }
 
 
@@ -4405,6 +4556,10 @@ def complete_queue_items(
             WHERE engagement_id = ? AND queue_item_id = ? AND file_id = ?
               AND lease_token = ? AND disposition IN ('finding', 'suspicious')
               AND superseded_at IS NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM code_analysis_results AS replacement
+                  WHERE replacement.supersedes_result_id = code_analysis_results.id
+              )
             ORDER BY disposition
             """,
             (
@@ -4439,6 +4594,10 @@ def complete_queue_items(
                 WHERE engagement_id = ? AND queue_item_id = ? AND file_id = ?
                   AND lease_token = ? AND disposition = 'finding'
                   AND superseded_at IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM code_analysis_results AS replacement
+                      WHERE replacement.supersedes_result_id = code_analysis_results.id
+                  )
                 ORDER BY id
                 """,
                 (
@@ -4462,6 +4621,10 @@ def complete_queue_items(
                 FROM code_analysis_results
                 WHERE engagement_id = ? AND queue_item_id = ? AND file_id = ?
                   AND lease_token = ? AND disposition = ? AND superseded_at IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM code_analysis_results AS replacement
+                      WHERE replacement.supersedes_result_id = code_analysis_results.id
+                  )
                   AND (trim(evidence) != '' OR trim(evidence_ref) != '')
                 LIMIT 1
                 """,
@@ -5141,41 +5304,102 @@ def create_analysis_result(
                 )
             return hydrated
 
-        cursor = connection.execute(
-            """
+        supersedes = result.get("supersedes")
+        if supersedes is not None:
+            superseded_result = connection.execute(
+                """
+                SELECT original.*,
+                       replacement.id AS replaced_by_result_id
+                FROM code_analysis_results AS original
+                LEFT JOIN code_analysis_results AS replacement
+                  ON replacement.supersedes_result_id = original.id
+                WHERE original.engagement_id = ? AND original.id = ?
+                """,
+                (engagement.id, int(supersedes)),
+            ).fetchone()
+            if superseded_result is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="supersedes analysis result was not found in this engagement",
+                )
+            if superseded_result["replaced_by_result_id"] is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="supersedes analysis result is already replaced",
+                )
+            if superseded_result["superseded_at"] is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="supersedes analysis result is not current for this source generation",
+                )
+            expected_identity = (
+                int(queue_item_id),
+                int(file_row["id"]),
+                lease_token,
+                str(result.get("function_name", "")),
+                int(queue_row.get("repo_generation", 0) or 0),
+            )
+            actual_identity = (
+                int(superseded_result["queue_item_id"]),
+                int(superseded_result["file_id"]),
+                str(superseded_result["lease_token"]),
+                str(superseded_result["function_name"]),
+                int(superseded_result["repo_generation"]),
+            )
+            if actual_identity != expected_identity:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "supersedes must identify a current result with the same "
+                        "queue item, lease token, file, function, and repository generation"
+                    ),
+                )
+
+        try:
+            cursor = connection.execute(
+                """
             INSERT INTO code_analysis_results (
                 engagement_id, queue_item_id, file_id,
                 agent_name, function_name, hypothesis, evidence, evidence_ref,
                 disposition, confidence, finding_slug, cwe_id,
                 slot_type, notes, audit_metadata_json,
                 cwe_coverage_json, cross_file_triggers_json,
-                lease_token, repo_generation, result_fingerprint
+                lease_token, repo_generation, result_fingerprint,
+                supersedes_result_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                engagement.id,
-                queue_item_id,
-                int(file_row["id"]),
-                agent_name,
-                result.get("function_name", ""),
-                result.get("hypothesis", ""),
-                result.get("evidence", ""),
-                result.get("evidence_ref", ""),
-                disposition,
-                result.get("confidence", "medium"),
-                result.get("finding_slug", ""),
-                result.get("cwe_id", ""),
-                result.get("slot_type", ""),
-                result.get("notes", ""),
-                _json_text(result.get("audit_metadata")),
-                _json_list_text(result.get("cwe_coverage")),
-                _json_list_text(normalized_cross_file_triggers),
-                lease_token,
-                int(queue_row.get("repo_generation", 0) or 0),
-                result_fingerprint,
-            ),
-        )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    engagement.id,
+                    queue_item_id,
+                    int(file_row["id"]),
+                    agent_name,
+                    result.get("function_name", ""),
+                    result.get("hypothesis", ""),
+                    result.get("evidence", ""),
+                    result.get("evidence_ref", ""),
+                    disposition,
+                    result.get("confidence", "medium"),
+                    result.get("finding_slug", ""),
+                    result.get("cwe_id", ""),
+                    result.get("slot_type", ""),
+                    result.get("notes", ""),
+                    _json_text(result.get("audit_metadata")),
+                    _json_list_text(result.get("cwe_coverage")),
+                    _json_list_text(normalized_cross_file_triggers),
+                    lease_token,
+                    int(queue_row.get("repo_generation", 0) or 0),
+                    result_fingerprint,
+                    supersedes,
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            if supersedes is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="supersedes analysis result was concurrently replaced",
+                ) from exc
+            raise
         row = _analysis_result_row(connection, int(cursor.lastrowid))
         assert row is not None
         run_candidate = None
@@ -5208,6 +5432,9 @@ def list_analysis_results(
     engagement_id: int,
     *,
     file_id: int | None = None,
+    queue_item_id: int | None = None,
+    lease_token: str | None = None,
+    function_name: str | None = None,
     disposition: str | None = None,
     include_superseded: bool = False,
 ) -> list[dict[str, Any]]:
@@ -5217,6 +5444,15 @@ def list_analysis_results(
     if file_id is not None:
         clauses.append("results.file_id = ?")
         params.append(file_id)
+    if queue_item_id is not None:
+        clauses.append("results.queue_item_id = ?")
+        params.append(queue_item_id)
+    if lease_token is not None:
+        clauses.append("results.lease_token = ?")
+        params.append(lease_token)
+    if function_name is not None:
+        clauses.append("results.function_name = ?")
+        params.append(function_name)
     if disposition is not None:
         clauses.append("results.disposition = ?")
         params.append(disposition)
@@ -5235,7 +5471,12 @@ def list_analysis_results(
             results.*,
             findings.status AS finding_workflow_status,
             findings.verification_status AS finding_verification_status,
-            files.file_path AS file_path
+            files.file_path AS file_path,
+            (
+                SELECT replacement.id
+                FROM code_analysis_results AS replacement
+                WHERE replacement.supersedes_result_id = results.id
+            ) AS replaced_by_result_id
         FROM code_analysis_results AS results
         LEFT JOIN assessment_findings AS findings
           ON findings.engagement_id = results.engagement_id
@@ -7582,6 +7823,7 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
             warnings.append(f"{item.get('file_path', 'unknown file')}: {warning}")
     warnings = list(dict.fromkeys(warnings))
     payload = {
+        "track": "code",
         "target_phase": target_phase,
         "transition_ready": not blockers,
         "blockers": blockers,
@@ -7626,6 +7868,25 @@ SLOT_VULN_CLASSES: dict[str, dict[str, list[str]]] = {
 
 
 NATIVE_LANGUAGES = frozenset({"c", "c++", "cpp"})
+STRUCTURALLY_ANALYZED_LANGUAGES = frozenset(
+    {
+        "c",
+        "c++",
+        "cpp",
+        "python",
+        "javascript",
+        "typescript",
+        "go",
+        "java",
+        "ruby",
+        "php",
+        "shell",
+        "lua",
+        "html",
+        "css",
+        "dockerfile",
+    }
+)
 
 ROLE_CONTEXT_VULN_CLASSES: tuple[tuple[tuple[str, ...], dict[str, list[str]]], ...] = (
     (("crypto", "cipher", "tls", "ssl", "digest", "hmac", "jwt", "x509"), {"all": ["crypto-misuse"]}),
@@ -7668,7 +7929,7 @@ def _applicable_families_for_file(
 
     families: set[str] = (
         {"algorithmic-dos", "error-handling"}
-        if is_native
+        if lang_lower in STRUCTURALLY_ANALYZED_LANGUAGES
         else set()
     )
     for slot in slot_types:

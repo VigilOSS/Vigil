@@ -27,8 +27,8 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 def test_preset_expands_to_program_header():
     from vigil_cli.engagements import resolve_required_headers
 
-    assert resolve_required_headers("bugcrowd", "vigiloss", []) == {"X-Bug-Bounty": "vigiloss"}
-    assert resolve_required_headers("hackerone", "alex", []) == {"X-HackerOne": "alex"}
+    assert resolve_required_headers("bugcrowd", "acme-researcher", []) == {"X-Bug-Bounty": "acme-researcher"}
+    assert resolve_required_headers("hackerone", "acme-researcher", []) == {"X-HackerOne": "acme-researcher"}
 
 
 def test_custom_headers_and_override():
@@ -39,7 +39,7 @@ def test_custom_headers_and_override():
         "X-B": "two words",
     }
     # A later --header overrides an earlier preset of the same name.
-    assert resolve_required_headers("bugcrowd", "alex", ["X-Bug-Bounty: override"]) == {
+    assert resolve_required_headers("bugcrowd", "acme-researcher", ["X-Bug-Bounty: override"]) == {
         "X-Bug-Bounty": "override"
     }
 
@@ -54,8 +54,8 @@ def test_none_is_empty():
     "program,researcher,headers,needle",
     [
         ("bugcrowd", None, [], "requires --researcher"),
-        ("zzz", "alex", [], "unknown --program"),
-        (None, "alex", [], "only meaningful together with --program"),
+        ("zzz", "acme-researcher", [], "unknown --program"),
+        (None, "acme-researcher", [], "only meaningful together with --program"),
         (None, None, ["malformed"], "malformed"),
         (None, None, [": v"], "empty header name"),
     ],
@@ -77,8 +77,8 @@ def test_out_of_scope_normalizes_and_dedups():
     from vigil_cli.engagements import resolve_out_of_scope
 
     assert resolve_out_of_scope(
-        ["appointments.acme-regional.example", "*.mobile.acme-net.example", "Dup.com", "dup.com"]
-    ) == ["appointments.acme-regional.example", "*.mobile.acme-net.example", "dup.com"]
+        ["appointments.example.com", "*.MOBILE.example.com", "Dup.com", "dup.com"]
+    ) == ["appointments.example.com", "*.mobile.example.com", "dup.com"]
     assert resolve_out_of_scope(None) == []
 
 
@@ -100,8 +100,8 @@ def _web_opts(**kw):
     base = dict(
         install_root=Path("/tmp"),
         engagement_type="web",
-        target="https://t.com",
-        hosts=["*.t.com"],
+        target="https://target.example",
+        hosts=["*.target.example"],
     )
     base.update(kw)
     return CreateEngagementOptions(**base)
@@ -111,10 +111,10 @@ def test_plan_wires_scope_for_web():
     from vigil_cli.engagements import plan_engagement
 
     plan = plan_engagement(
-        _web_opts(required_headers={"X-Bug-Bounty": "alex"}, out_of_scope=["a.t.com"])
+        _web_opts(required_headers={"X-Bug-Bounty": "acme-researcher"}, out_of_scope=["a.target.example"])
     )
-    assert plan.scope["required_headers"] == {"X-Bug-Bounty": "alex"}
-    assert plan.scope["out_of_scope"] == ["a.t.com"]
+    assert plan.scope["required_headers"] == {"X-Bug-Bounty": "acme-researcher"}
+    assert plan.scope["out_of_scope"] == ["a.target.example"]
 
 
 def test_plan_omits_keys_when_unused():
@@ -132,10 +132,28 @@ def test_plan_rejects_headers_on_code_engagement():
         install_root=Path("/tmp"),
         engagement_type="code",
         name="proj",
-        required_headers={"X-Bug-Bounty": "alex"},
+        required_headers={"X-Bug-Bounty": "acme-researcher"},
     )
     with pytest.raises(SystemExit):
         plan_engagement(opts)
+
+
+@pytest.mark.parametrize("engagement_type", ["code", "both", "android"])
+def test_new_scope_does_not_write_legacy_repository_keys(engagement_type):
+    from vigil_cli.engagements import CreateEngagementOptions, plan_engagement
+
+    opts = CreateEngagementOptions(
+        install_root=Path("/tmp"),
+        engagement_type=engagement_type,
+        target="https://target.example" if engagement_type == "both" else None,
+        name="project",
+        repos=["/src/project"],
+    )
+
+    plan = plan_engagement(opts)
+
+    assert "repos" not in plan.scope
+    assert "source_repos" not in plan.scope
 
 
 # --------------------------------------------------------------------------- #
@@ -151,7 +169,7 @@ def _make_engagement(tmp_path: Path) -> Path:
     eng = root / "eng1"
     eng.mkdir()
     (eng / "scope.json").write_text(
-        json.dumps({"engagement_type": "web", "hosts": ["*.t.com"], "status": "in_progress"})
+        json.dumps({"engagement_type": "web", "hosts": ["*.target.example"], "status": "in_progress"})
     )
     return eng
 
@@ -160,8 +178,8 @@ def test_set_and_unset_header_roundtrip(tmp_path):
     from vigil_cli.engagements import set_engagement_header, unset_engagement_header
 
     eng = _make_engagement(tmp_path)
-    assert set_engagement_header(tmp_path, "eng1", "X-Bug-Bounty: alex") == {"X-Bug-Bounty": "alex"}
-    assert json.loads((eng / "scope.json").read_text())["required_headers"] == {"X-Bug-Bounty": "alex"}
+    assert set_engagement_header(tmp_path, "eng1", "X-Bug-Bounty: acme-researcher") == {"X-Bug-Bounty": "acme-researcher"}
+    assert json.loads((eng / "scope.json").read_text())["required_headers"] == {"X-Bug-Bounty": "acme-researcher"}
     # Removing the last header drops the key entirely.
     assert unset_engagement_header(tmp_path, "eng1", "X-Bug-Bounty") == {}
     assert "required_headers" not in json.loads((eng / "scope.json").read_text())
@@ -171,10 +189,271 @@ def test_add_and_remove_oos_roundtrip(tmp_path):
     from vigil_cli.engagements import add_out_of_scope, remove_out_of_scope
 
     eng = _make_engagement(tmp_path)
-    merged = add_out_of_scope(tmp_path, "eng1", ["a.t.com", "*.m.t.com", "a.t.com"])
-    assert merged == ["a.t.com", "*.m.t.com"]
-    assert json.loads((eng / "scope.json").read_text())["out_of_scope"] == ["a.t.com", "*.m.t.com"]
-    assert remove_out_of_scope(tmp_path, "eng1", "a.t.com") == ["*.m.t.com"]
+    merged = add_out_of_scope(tmp_path, "eng1", ["a.target.example", "*.m.target.example", "a.target.example"])
+    assert merged == ["a.target.example", "*.m.target.example"]
+    assert json.loads((eng / "scope.json").read_text())["out_of_scope"] == ["a.target.example", "*.m.target.example"]
+    assert remove_out_of_scope(tmp_path, "eng1", "a.target.example") == ["*.m.target.example"]
+
+
+def test_add_track_preserves_existing_phase_and_initializes_only_new_track(tmp_path):
+    from vigil_cli import engagements
+
+    assert hasattr(engagements, "add_engagement_track"), "explicit add-track operation is missing"
+    add_engagement_track = engagements.add_engagement_track
+    engagements_root = engagements.engagements_root
+
+    root = engagements_root(tmp_path)
+    root.mkdir(parents=True, exist_ok=True)
+    code = root / "code1"
+    code.mkdir()
+    (code / "scope.json").write_text(
+        json.dumps({"engagement_type": "code", "current_phase": "hunt", "status": "in_progress"})
+    )
+    web = root / "web1"
+    web.mkdir()
+    (web / "scope.json").write_text(
+        json.dumps({"engagement_type": "web", "current_phase": "complete", "status": "completed"})
+    )
+
+    assert add_engagement_track(tmp_path, "code1", "web") == {
+        "engagement_type": "both",
+        "current_phase": "recon",
+        "code_phase": "hunt",
+    }
+    assert add_engagement_track(tmp_path, "web1", "code") == {
+        "engagement_type": "both",
+        "current_phase": "complete",
+        "code_phase": "ingest",
+    }
+    updated_web = json.loads((web / "scope.json").read_text())
+    assert updated_web["status"] == "in_progress"
+    assert updated_web["code_target_contact_policy"] == (
+        "warn-do-not-contact-declared-hosts"
+    )
+    assert updated_web["track_transitions"][0]["actor"] == "operator"
+
+
+def test_add_track_is_idempotent_but_rejects_unrelated_transitions(tmp_path):
+    from vigil_cli import engagements
+
+    assert hasattr(engagements, "add_engagement_track"), "explicit add-track operation is missing"
+    add_engagement_track = engagements.add_engagement_track
+    engagements_root = engagements.engagements_root
+
+    root = engagements_root(tmp_path)
+    root.mkdir(parents=True, exist_ok=True)
+    eng = root / "both1"
+    eng.mkdir()
+    (eng / "scope.json").write_text(
+        json.dumps(
+            {
+                "engagement_type": "both",
+                "current_phase": "collect",
+                "code_phase": "hunt",
+                "status": "in_progress",
+            }
+        )
+    )
+
+    assert add_engagement_track(tmp_path, "both1", "code")["code_phase"] == "hunt"
+    with pytest.raises(SystemExit, match="cannot add"):
+        add_engagement_track(tmp_path, "both1", "android")
+
+
+def test_repair_track_state_requires_explicit_both_legacy_shape(tmp_path):
+    from vigil_cli import engagements
+
+    assert hasattr(engagements, "repair_engagement_tracks"), "supported track repair is missing"
+    repair_engagement_tracks = engagements.repair_engagement_tracks
+    engagements_root = engagements.engagements_root
+
+    root = engagements_root(tmp_path)
+    root.mkdir(parents=True, exist_ok=True)
+    legacy = root / "legacy"
+    legacy.mkdir()
+    (legacy / "scope.json").write_text(
+        json.dumps({"engagement_type": "both", "current_phase": "verify", "status": "in_progress"})
+    )
+
+    repaired = repair_engagement_tracks(tmp_path, "legacy")
+    assert repaired == {
+        "engagement_type": "both",
+        "current_phase": "verify",
+        "code_phase": "ingest",
+    }
+    with pytest.raises(SystemExit, match="already has"):
+        repair_engagement_tracks(tmp_path, "legacy")
+
+
+def test_add_host_and_set_rate_limit_use_canonical_scope_state(tmp_path):
+    from vigil_cli import engagements
+
+    assert hasattr(engagements, "add_engagement_hosts"), "canonical add-host is missing"
+    assert hasattr(engagements, "set_engagement_rate_limit"), "canonical set-rate-limit is missing"
+    add_engagement_hosts = engagements.add_engagement_hosts
+    set_engagement_rate_limit = engagements.set_engagement_rate_limit
+
+    eng = _make_engagement(tmp_path)
+    hosts = add_engagement_hosts(tmp_path, "eng1", ["API.TARGET.EXAMPLE", "*.target.example"])
+    assert hosts == ["*.target.example", "api.target.example"]
+    assert set_engagement_rate_limit(tmp_path, "eng1", 5.9) == 5.9
+    scope = json.loads((eng / "scope.json").read_text())
+    assert scope["hosts"] == hosts
+    assert scope["rate_limit"] == 5.9
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "bad host.example",
+        "-bad.example",
+        "bad-.example",
+        "bad..example",
+        "foo*.example",
+        "*.*.example",
+        "10.0.0.0/999",
+        "999.999.999.999",
+        "example.com/path",
+        "https://",
+        "https://bad_.example/path",
+        "[2001:db8::1",
+    ],
+)
+def test_add_host_rejects_malformed_scope_entries_without_mutating_file(
+    tmp_path, entry
+):
+    from vigil_cli.engagements import add_engagement_hosts
+
+    engagement = _make_engagement(tmp_path)
+    scope_path = engagement / "scope.json"
+    before = scope_path.read_bytes()
+
+    with pytest.raises(SystemExit, match="invalid host entry"):
+        add_engagement_hosts(tmp_path, "eng1", [entry])
+
+    assert scope_path.read_bytes() == before
+
+
+def test_add_host_canonicalizes_supported_host_wildcard_ip_cidr_and_url(tmp_path):
+    from vigil_cli.engagements import add_engagement_hosts
+
+    engagement = _make_engagement(tmp_path)
+
+    hosts = add_engagement_hosts(
+        tmp_path,
+        "eng1",
+        [
+            "API.Target.Example.",
+            "*.BÜCHER.example",
+            "10.0.0.5",
+            "10.0.0.9/24",
+            "[2001:db8::1]",
+            "https://Portal.Example:443/path?q=1",
+        ],
+    )
+
+    assert hosts == [
+        "*.target.example",
+        "api.target.example",
+        "*.xn--bcher-kva.example",
+        "10.0.0.5",
+        "10.0.0.0/24",
+        "2001:db8::1",
+        "https://portal.example:443/path?q=1",
+    ]
+    assert json.loads((engagement / "scope.json").read_text())["hosts"] == hosts
+
+
+def test_http_scope_mutation_supports_android_but_not_code(tmp_path):
+    from vigil_cli import engagements
+
+    assert hasattr(engagements, "add_engagement_hosts"), "canonical add-host is missing"
+    add_engagement_hosts = engagements.add_engagement_hosts
+    engagements_root = engagements.engagements_root
+
+    root = engagements_root(tmp_path)
+    root.mkdir(parents=True, exist_ok=True)
+    android = root / "android1"
+    android.mkdir()
+    (android / "scope.json").write_text(
+        json.dumps({"engagement_type": "android", "status": "in_progress"})
+    )
+    assert add_engagement_hosts(tmp_path, "android1", ["api.mobile.example"] ) == [
+        "api.mobile.example"
+    ]
+
+    code = root / "code1"
+    code.mkdir()
+    (code / "scope.json").write_text(
+        json.dumps({"engagement_type": "code", "status": "in_progress"})
+    )
+    with pytest.raises(SystemExit, match="HTTP-target"):
+        add_engagement_hosts(tmp_path, "code1", ["api.example"])
+
+
+@pytest.mark.parametrize(
+    ("argv", "helper", "expected"),
+    [
+        (["engagement", "add-track", "eng1", "code"], "add_engagement_track", ("eng1", "code")),
+        (["engagement", "repair-tracks", "eng1"], "repair_engagement_tracks", ("eng1",)),
+        (
+            ["engagement", "add-host", "eng1", "a.example", "*.b.example"],
+            "add_engagement_hosts",
+            ("eng1", ["a.example", "*.b.example"]),
+        ),
+        (
+            ["engagement", "set-rate-limit", "eng1", "5"],
+            "set_engagement_rate_limit",
+            ("eng1", 5.0),
+        ),
+    ],
+)
+def test_cli_exposes_canonical_scope_mutations(
+    monkeypatch, tmp_path, capsys, argv, helper, expected
+):
+    from vigil_cli import main
+
+    called = []
+
+    def fake(*args, **_kwargs):
+        called.append(args[1:])
+        return {"ok": True}
+
+    monkeypatch.setattr(main, helper, fake, raising=False)
+    monkeypatch.setattr(main, "resolve_install_root", lambda *_args: tmp_path)
+    monkeypatch.setattr(
+        main, "_verify_backend_install_root", lambda *_args: True, raising=False
+    )
+    monkeypatch.setattr(main, "request_proxy_reload", lambda *_args: None)
+
+    main.main(argv)
+
+    assert called == [expected]
+    assert json.loads(capsys.readouterr().out) == {"ok": True}
+
+
+def test_scope_mutation_reports_retryable_backend_sync_partial(
+    monkeypatch, tmp_path
+):
+    from vigil_cli import main
+
+    monkeypatch.setattr(
+        main,
+        "add_engagement_track",
+        lambda *_args: {"engagement_type": "both"},
+    )
+    monkeypatch.setattr(main, "resolve_install_root", lambda *_args: tmp_path)
+    monkeypatch.setattr(main, "_verify_backend_install_root", lambda *_args: False)
+    monkeypatch.setattr(
+        main,
+        "request_proxy_reload",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("proxy reload must wait for backend coherence")
+        ),
+    )
+
+    with pytest.raises(SystemExit, match="committed.*backend.*sync"):
+        main.main(["engagement", "add-track", "eng1", "code"])
 
 
 def test_scope_management_waits_for_shared_scope_json_lock(tmp_path):
@@ -215,7 +494,7 @@ def test_management_rejects_non_http_engagement(tmp_path):
     eng.mkdir()
     (eng / "scope.json").write_text(json.dumps({"engagement_type": "code", "status": "in_progress"}))
     with pytest.raises(SystemExit):
-        set_engagement_header(tmp_path, "codeproj", "X-Bug-Bounty: alex")
+        set_engagement_header(tmp_path, "codeproj", "X-Bug-Bounty: acme-researcher")
 
 
 def test_unset_missing_header_errors(tmp_path):
@@ -240,16 +519,16 @@ def test_cli_dry_run_json_wires_scope(capsys):
             [
                 "engagement", "create", "https://acme-telco.example",
                 "--hosts", "*.acme-telco.example",
-                "--program", "bugcrowd", "--researcher", "vigiloss",
-                "--out-of-scope", "appointments.acme-regional.example",
+                "--program", "bugcrowd", "--researcher", "acme-researcher",
+                "--out-of-scope", "appointments.example.com",
                 "--dry-run", "--json",
             ]
         )
     except SystemExit as exc:  # tolerate either a normal return or sys.exit(0)
         assert exc.code in (0, None)
     payload = json.loads(capsys.readouterr().out)
-    assert payload["scope"]["required_headers"] == {"X-Bug-Bounty": "vigiloss"}
-    assert payload["scope"]["out_of_scope"] == ["appointments.acme-regional.example"]
+    assert payload["scope"]["required_headers"] == {"X-Bug-Bounty": "acme-researcher"}
+    assert payload["scope"]["out_of_scope"] == ["appointments.example.com"]
 
 
 # --------------------------------------------------------------------------- #
@@ -265,7 +544,7 @@ def _interactive_scope(monkeypatch, capsys, answers, extra_argv=()):
     monkeypatch.setattr(main.sys.stdin, "isatty", lambda: True)
     it = iter(answers)
     monkeypatch.setattr(main, "_read_line", lambda: next(it))
-    argv = ["engagement", "create", "https://t.com", "--hosts", "*.t.com",
+    argv = ["engagement", "create", "https://target.example", "--hosts", "*.target.example",
             "--dry-run", "--json", *extra_argv]
     try:
         main.main(argv)
@@ -277,15 +556,15 @@ def _interactive_scope(monkeypatch, capsys, answers, extra_argv=()):
 def test_interactive_preset_header_and_oos_are_asked(monkeypatch, capsys):
     scope = _interactive_scope(
         monkeypatch, capsys,
-        ["bugcrowd", "vigiloss", "appointments.acme-regional.example *.mobile.acme-net.example"],
+        ["bugcrowd", "acme-researcher", "appointments.example.com *.mobile.example.com"],
     )
-    assert scope["required_headers"] == {"X-Bug-Bounty": "vigiloss"}
-    assert scope["out_of_scope"] == ["appointments.acme-regional.example", "*.mobile.acme-net.example"]
+    assert scope["required_headers"] == {"X-Bug-Bounty": "acme-researcher"}
+    assert scope["out_of_scope"] == ["appointments.example.com", "*.mobile.example.com"]
 
 
 def test_interactive_custom_header(monkeypatch, capsys):
-    scope = _interactive_scope(monkeypatch, capsys, ["custom", "X-HackerOne: alex", ""])
-    assert scope["required_headers"] == {"X-HackerOne": "alex"}
+    scope = _interactive_scope(monkeypatch, capsys, ["custom", "X-HackerOne: acme-researcher", ""])
+    assert scope["required_headers"] == {"X-HackerOne": "acme-researcher"}
     assert "out_of_scope" not in scope
 
 
@@ -300,10 +579,10 @@ def test_interactive_skipped_when_flags_present(monkeypatch, capsys):
     # suppress both prompts.
     scope = _interactive_scope(
         monkeypatch, capsys, [],
-        extra_argv=["--program", "bugcrowd", "--researcher", "alex", "--out-of-scope", "a.t.com"],
+        extra_argv=["--program", "bugcrowd", "--researcher", "acme-researcher", "--out-of-scope", "a.target.example"],
     )
-    assert scope["required_headers"] == {"X-Bug-Bounty": "alex"}
-    assert scope["out_of_scope"] == ["a.t.com"]
+    assert scope["required_headers"] == {"X-Bug-Bounty": "acme-researcher"}
+    assert scope["out_of_scope"] == ["a.target.example"]
 
 
 def test_interactive_header_via_flag_still_asks_oos(monkeypatch, capsys):
@@ -311,11 +590,11 @@ def test_interactive_header_via_flag_still_asks_oos(monkeypatch, capsys):
     # omitted, so the OOS prompt still fires. Only one answer is scripted — a
     # header prompt firing would consume it and break the assertion.
     scope = _interactive_scope(
-        monkeypatch, capsys, ["carved.t.com"],
-        extra_argv=["--program", "bugcrowd", "--researcher", "alex"],
+        monkeypatch, capsys, ["carved.target.example"],
+        extra_argv=["--program", "bugcrowd", "--researcher", "acme-researcher"],
     )
-    assert scope["required_headers"] == {"X-Bug-Bounty": "alex"}
-    assert scope["out_of_scope"] == ["carved.t.com"]
+    assert scope["required_headers"] == {"X-Bug-Bounty": "acme-researcher"}
+    assert scope["out_of_scope"] == ["carved.target.example"]
 
 
 def _drive_create(monkeypatch, answers, confirm, tmp_path, extra_argv=()):
@@ -337,7 +616,7 @@ def _drive_create(monkeypatch, answers, confirm, tmp_path, extra_argv=()):
     monkeypatch.setattr(main, "create_engagement", fake_create)
     raised = None
     try:
-        main.main(["engagement", "create", "https://t.com", "--hosts", "*.t.com", *extra_argv])
+        main.main(["engagement", "create", "https://target.example", "--hosts", "*.target.example", *extra_argv])
     except SystemExit as exc:
         raised = exc
     return captured.get("options"), raised
@@ -345,20 +624,20 @@ def _drive_create(monkeypatch, answers, confirm, tmp_path, extra_argv=()):
 
 def test_interactive_confirm_yes_creates_with_resolved_scope(monkeypatch, capsys, tmp_path):
     options, raised = _drive_create(
-        monkeypatch, ["bugcrowd", "vigiloss", "appointments.t.com"], True, tmp_path
+        monkeypatch, ["bugcrowd", "acme-researcher", "appointments.target.example"], True, tmp_path
     )
     assert raised is None
-    assert options.required_headers == {"X-Bug-Bounty": "vigiloss"}
-    assert options.out_of_scope == ["appointments.t.com"]
+    assert options.required_headers == {"X-Bug-Bounty": "acme-researcher"}
+    assert options.out_of_scope == ["appointments.target.example"]
     # The summary actually rendered the header + OOS for confirmation.
     err = capsys.readouterr().err
-    assert "X-Bug-Bounty: vigiloss" in err
+    assert "X-Bug-Bounty: acme-researcher" in err
     assert "out-of-scope:" in err
 
 
 def test_interactive_confirm_no_aborts_without_creating(monkeypatch, capsys, tmp_path):
     options, raised = _drive_create(
-        monkeypatch, ["bugcrowd", "vigiloss", ""], False, tmp_path
+        monkeypatch, ["bugcrowd", "acme-researcher", ""], False, tmp_path
     )
     assert isinstance(raised, SystemExit)
     assert "aborted" in str(raised.code)

@@ -35,6 +35,20 @@ not a prototype. Every change should leave the codebase clearer than it found it
   because `url` is a high-weight key). When correctness forces a reshape, you change *how* the
   improvement lands (e.g. curated whole-keys + a capped weak-signal tier), not *whether* it lands. A
   simpler mechanism that misroutes or misses signal is not an acceptable trade for less code.
+- **Never hide Vigil's data from Vigil's operator.** Credentials, tokens, cookies, `Authorization`
+  headers, proxy URLs and raw argv render verbatim — in the frontend, in CLI and `--json` output, in
+  agent-readable stdout, and in exports. Do not add masking, redaction, `[masked]`/`***`
+  substitution, secret-shaped regexes, reveal toggles, redaction profiles, or
+  length/prefix/shape projections (`Bearer (length=40)`). Vigil runs on the operator's machine,
+  against authorized targets, with the engagement's own credentials; there is no adversary on the
+  operator's side of that boundary, so such a control has no true positive to find and only its
+  false positives are observable — a previous masker silently truncated whole command lines out of
+  the audit view. [ADR 0019](docs/adr/0019-vigil-does-not-defend-against-its-own-operator.md) is the
+  authority, and it carves out the four controls that *do* have a real adversary and must not be
+  removed by citing it: benchmark anti-cheat, scope/ROE enforcement, proof and evidence integrity,
+  and the untrusted-target-text boundary (ADR 0018). Before adding any control that withholds data,
+  name the adversary it excludes; if the answer is "the operator, from their own data", it is
+  theater and the evidence cost is the only real effect.
 
 # Explaining work (breakdowns & planning)
 
@@ -395,7 +409,7 @@ so edits land in the right place and do not create drift.
   examples, and handoff semantics live.
 - Put payload-shape and lifecycle truth in CLI helpers when possible. Prompts should reference
   helper commands such as `vigil assess contract`, `finding record`, `finding verify`
-  (`--disposition false_positive` for a kill), and `finding update` (`--status draft` to reopen)
+  (`--status false_positive` for a kill), and `finding update` (`--status draft` to reopen)
   rather than duplicating raw schema details.
 - Treat generated artifacts as drift detectors, not authoring targets. If you edit a generated
   prompt directly, the next render will overwrite it.

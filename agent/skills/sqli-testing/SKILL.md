@@ -117,7 +117,7 @@ Mint a unique callback host per injection point and let the correlator bind the 
 ```bash
 vigil oob mint --client <name> --technique sqli --target-url "https://target/item?id=1" --param id --probe-kind dns
 # -> nonce  <prefix>-<token>
-#    dns    <prefix>-<token>.<client-id>.oob.example.com   (= $OOB_HOST above)
+#    dns    <prefix>-<token>.<client-id>.<configured-oob-domain>   (= $OOB_HOST above)
 ```
 
 Substitute the EXACT host `vigil oob mint --client <name>` prints (`$OOB_HOST` — the nonce bound under the client id; never hand-build a bare `<nonce>.oob...` host) for `$OOB_HOST` in the payloads above (xp_dirtree is the single most reliable vector — not disabled by default, no sysadmin needed), deliver via the kali exec wrapper, then:

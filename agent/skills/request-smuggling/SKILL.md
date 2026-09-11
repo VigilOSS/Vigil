@@ -21,7 +21,7 @@ vuln_class: request-smuggling
 - HTTP Request Smuggler (Burp extension)
 - Custom scripts for precise byte-level control
 - `vigil assess anomaly-score` — desync triage (§2/§3): replay each TE/CL obfuscation variant, record its status/length/timing, and let it rank the variant whose response broke from the pack (the desync candidate) instead of staring at near-identical responses.
-- `vigil oob mint` / `vigil oob poll` — for the cache-poisoning exploitation path (§6): `mint` binds the nonce under a running client's interactsh id and prints the exact host (`$OOB_HOST`, of shape `<nonce>.<client-id>.oob.example.com`) so `poll` can correlate it — pass `--client <name>` when several clients run. Smuggle a prefix whose poisoned response redirects/loads from the exact host mint prints, then `poll` to prove a *different* user's connection followed it. Replaces reading the raw listener log. Readiness: `vigil oob status --json`.
+- `vigil oob mint` / `vigil oob poll` — for the cache-poisoning exploitation path (§6): `mint` binds the nonce under a running client's interactsh id and prints the exact host (`$OOB_HOST`, of shape `<nonce>.<client-id>.<configured-oob-domain>`) so `poll` can correlate it — pass `--client <name>` when several clients run. Smuggle a prefix whose poisoned response redirects/loads from the exact host mint prints, then `poll` to prove a *different* user's connection followed it. Replaces reading the raw listener log. Readiness: `vigil oob status --json`.
 
 ## Methodology
 
@@ -100,7 +100,7 @@ The top-ranked record names the obfuscation that broke from the aligned-parser b
 ```bash
 vigil oob mint --client <name> --technique request-smuggling --target-url https://target/ \
   --param smuggled-prefix --probe-kind cache-poison
-# → host  <nonce>.<client-id>.oob.example.com   (= $OOB_HOST)
+# → host  <nonce>.<client-id>.<configured-oob-domain>   (= $OOB_HOST)
 # Smuggle the prefix so the cached response points at the exact host mint printed ($OOB_HOST),
 # then poll — a matched hit from another connection = cross-user cache poisoning.
 vigil oob poll --client <name>

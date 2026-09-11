@@ -206,6 +206,7 @@ class QueueItemRecord(BaseModel):
     batch_theme: str = Field(default="", max_length=256)
     slot_types: list[CodeSlotType] = Field(default_factory=list)
     guidance_hypotheses: list[str] = Field(default_factory=list)
+    supersedes: StrictPositiveId | None = None
 
 
 class QueueItemsBulkCreateRequest(BaseModel):
@@ -213,13 +214,23 @@ class QueueItemsBulkCreateRequest(BaseModel):
 
     mode: Literal["initial", "reanalysis"] = "initial"
     reason: str = Field(default="", max_length=2000)
-    items: list[QueueItemRecord]
+    items: list[QueueItemRecord] = Field(min_length=1, max_length=200)
 
     @model_validator(mode="after")
     def require_reanalysis_reason(self) -> QueueItemsBulkCreateRequest:
         self.reason = self.reason.strip()
         if self.mode == "reanalysis" and not self.reason:
             raise ValueError("reason is required when mode=reanalysis")
+        if self.mode == "reanalysis" and any(
+            item.supersedes is None for item in self.items
+        ):
+            raise ValueError(
+                "every reanalysis item requires supersedes with the exact predecessor queue row ID"
+            )
+        if self.mode == "initial" and any(
+            item.supersedes is not None for item in self.items
+        ):
+            raise ValueError("initial queue items must not set supersedes")
         return self
 
 
@@ -284,6 +295,8 @@ class QueueHeartbeatRequest(BaseModel):
 
 
 class AnalysisResultRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     queue_item_id: StrictPositiveId
     file_id: StrictPositiveId | None = None
     agent_name: str = Field(min_length=1, max_length=128)
@@ -303,6 +316,7 @@ class AnalysisResultRecord(BaseModel):
     cross_file_triggers: list[dict[str, Any]] = Field(default_factory=list)
     assessment_run_id: StrictPositiveId | None = None
     assessment_source_id: StrictPositiveId | None = None
+    supersedes: StrictPositiveId | None = None
 
 
 class RequeueItemRecord(BaseModel):
@@ -858,7 +872,8 @@ def list_files(
     search: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=10000),
     offset: int = Query(default=0, ge=0),
-) -> list[dict[str, Any]]:
+    include_header_snippet: bool = Query(default=False),
+) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
     return code_analysis.list_code_files(
         engagement.id,
@@ -869,6 +884,7 @@ def list_files(
         search=search,
         limit=limit,
         offset=offset,
+        include_header_snippet=include_header_snippet,
     )
 
 
@@ -1250,6 +1266,9 @@ async def create_analysis_result(engagement_key: str, request: AnalysisResultRec
 def list_analysis_results(
     engagement_key: str,
     file_id: int | None = Query(default=None),
+    queue_item_id: int | None = Query(default=None, ge=1),
+    lease_token: str | None = Query(default=None, min_length=1, max_length=128),
+    function_name: str | None = Query(default=None, max_length=512),
     disposition: str | None = Query(default=None),
     include_superseded: bool = Query(default=False),
 ) -> list[dict[str, Any]]:
@@ -1257,6 +1276,9 @@ def list_analysis_results(
     return code_analysis.list_analysis_results(
         engagement.id,
         file_id=file_id,
+        queue_item_id=queue_item_id,
+        lease_token=lease_token,
+        function_name=function_name,
         disposition=disposition,
         include_superseded=include_superseded,
     )

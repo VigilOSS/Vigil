@@ -232,7 +232,6 @@ export type SubmissionAttachment = {
   size_bytes: number;
   sha256: string;
   present: boolean;
-  sensitive: boolean;
 };
 
 export type SubmissionAttachmentPage = {
@@ -584,6 +583,9 @@ export type AssessmentRun = {
   requested_reasoning?: string;
   actual_reasoning?: string;
   client_name?: string;
+  requested_client?: string;
+  launcher_effective_client?: string;
+  provider_observed_client?: string;
   source_revision?: string;
   operator_instruction_path?: string;
   operator_instruction_sha256?: string;
@@ -612,7 +614,6 @@ export type Artifact = {
   name: string;
   relative_path: string;
   media_type: string;
-  sensitive: boolean;
   exists: boolean;
 };
 
@@ -1414,7 +1415,6 @@ export type HttpFlow = {
   response_body_artifact_path: string | null;
   request_headers: Record<string, string>;
   response_headers: Record<string, string>;
-  redaction_status: string;
   host_mismatch: boolean;
   url_authority: string;
   host_header: string;
@@ -1450,16 +1450,12 @@ export type CapturePolicy = {
   max_body_bytes: number;
   content_type_allow: string[];
   content_type_deny: string[];
-  redaction_profile: "none";
-  redaction_warning: string;
   retention: "until_engagement_deletion";
 };
 
 // PUT /capture-policy takes an all-optional partial (extra=forbid server-side),
 // so keep the update payload strictly to known keys.
-export type CapturePolicyUpdate = Partial<
-  Omit<CapturePolicy, "retention" | "redaction_warning">
->;
+export type CapturePolicyUpdate = Partial<Omit<CapturePolicy, "retention">>;
 
 function httpFlowParams(filters: HttpFlowFilters): URLSearchParams {
   const query = new URLSearchParams();
@@ -1714,19 +1710,31 @@ export type CodeAnalysisResult = {
   created_at: string;
 };
 
+export type CodeFilePage = {
+  total: number;
+  offset: number;
+  count: number;
+  has_more: boolean;
+  items: CodeFile[];
+};
+
 // ── Code analysis API functions ─────────────────────────
 
 export function listCodeRepos(engagementKey: string) {
   return request<CodeRepo[]>(`/engagements/${engagementKey}/assessment/code/repos`);
 }
 
-export function listCodeFiles(engagementKey: string, params?: { repo_id?: number; classification?: string; limit?: number }) {
+export function listCodeFiles(
+  engagementKey: string,
+  params?: { repo_id?: number; classification?: string; limit?: number; offset?: number },
+) {
   const query = new URLSearchParams();
   if (params?.repo_id != null) query.set("repo_id", String(params.repo_id));
   if (params?.classification) query.set("classification", params.classification);
   if (params?.limit != null) query.set("limit", String(params.limit));
+  if (params?.offset != null) query.set("offset", String(params.offset));
   const qs = query.toString();
-  return request<CodeFile[]>(`/engagements/${engagementKey}/assessment/code/files${qs ? `?${qs}` : ""}`);
+  return request<CodeFilePage>(`/engagements/${engagementKey}/assessment/code/files${qs ? `?${qs}` : ""}`);
 }
 
 export function listCodeModules(engagementKey: string, repoId?: number) {

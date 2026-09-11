@@ -69,6 +69,7 @@ def test_phase_composition(client, isolate_settings, phase, expect_keys):
     eng_id = _seed(client, isolate_settings)
     payload = state_manager.phase_readiness(eng_id, phase)
     assert payload["phase"] == phase
+    assert payload["track"] == "web"
     assert "ready" in payload
     assert "require_stage" in payload
     for key in expect_keys:

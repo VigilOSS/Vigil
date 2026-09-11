@@ -400,8 +400,8 @@ def test_capture_policy_default_off_and_put(client, isolate_settings):
     assert body["capture_response_bodies"] is False
     assert body["max_body_bytes"] == 102400
     assert body["content_type_allow"] == []
-    assert body["redaction_profile"] == "none"
-    assert body["redaction_warning"] == ""
+    assert "redaction_profile" not in body
+    assert "redaction_warning" not in body
     assert body["retention"] == "until_engagement_deletion"
 
     unsupported = client.put(policy_url, json={"redaction_profile": "default"})
@@ -428,7 +428,7 @@ def test_capture_policy_default_off_and_put(client, isolate_settings):
     assert mirror["max_body_bytes"] == 4096
 
 
-def test_capture_policy_surfaces_unsupported_legacy_redaction_without_claiming_it(
+def test_capture_policy_does_not_expose_retired_legacy_withholding_metadata(
     client, isolate_settings
 ):
     from app import db as db_module
@@ -448,8 +448,8 @@ def test_capture_policy_surfaces_unsupported_legacy_redaction_without_claiming_i
     response = client.get(policy_url)
 
     assert response.status_code == 200
-    assert response.json()["redaction_profile"] == "none"
-    assert "legacy-default" in response.json()["redaction_warning"]
+    assert "redaction_profile" not in response.json()
+    assert "redaction_warning" not in response.json()
 
 
 def test_http_flow_capture_status_additive_migration_preserves_legacy_rows(

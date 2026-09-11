@@ -250,14 +250,26 @@ def test_seq_flag_rerenders_existing_entry(tmp_path, monkeypatch, capsys):
     assert "[NEEDS: reply body]" not in body
 
 
-def test_reply_output_renders_authored_body_verbatim(tmp_path, monkeypatch, capsys):
-    """No masking pass runs on the way out — the authored body is what renders.
+def test_export_refuses_duplicate_sequence_instead_of_choosing_ambiguous_bytes(
+    tmp_path, monkeypatch
+):
+    replies = [
+        _reply(1, body="authentic reply bytes", ask="q1"),
+        _reply(1, body="forged competing bytes", ask="q1"),
+    ]
+    fake = _FakeClient(_finding(replies=replies))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["reply", "VA-047", "--seq", "1"], str(tmp_path))
 
-    Masking is the report-writer's decision, made once while authoring and stored
-    in the reply entry. A render that rewrote it could not tell a credential we
-    hold from one the target disclosed (which is often the proof), and silently
-    corrupted the reply at the last step before sending.
-    """
+    with pytest.raises(AssessError, match="duplicate reply seq 1"):
+        export_reply.run(args)
+
+    assert not _reply_path(tmp_path, 1).exists()
+    assert fake.posts == []
+
+
+def test_reply_output_renders_authored_body_verbatim(tmp_path, monkeypatch, capsys):
+    """The exact authored body is durable and is what every render returns."""
     token = "eyJhbGciOiJIUzI1NiJ9.session-under-test.signature"
     replies = [
         _reply(

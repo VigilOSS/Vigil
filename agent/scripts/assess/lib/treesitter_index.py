@@ -791,6 +791,39 @@ def _node_character_range(node: Any, source: bytes) -> tuple[int, int, int, int]
     )
 
 
+def _public_node_span(node: Any, source: bytes) -> dict[str, int]:
+    start_line, start_column, end_line, end_column = _node_character_range(
+        node, source
+    )
+    return {
+        "start_byte": int(node.start_byte),
+        "end_byte": int(node.end_byte),
+        "start_line": start_line,
+        "start_column": start_column,
+        "end_line": end_line,
+        "end_column": end_column,
+    }
+
+
+def _attach_callable_spans(
+    parsed: dict[str, Any],
+    *,
+    callable_node: Any,
+    source: bytes,
+) -> None:
+    parsed["source_span"] = _public_node_span(callable_node, source)
+    body = callable_node.child_by_field_name("body")
+    if body is None:
+        return
+    parsed["body_span"] = _public_node_span(body, source)
+    (
+        parsed["_body_start_line"],
+        parsed["_body_start_column"],
+        parsed["_body_end_line"],
+        parsed["_body_end_column"],
+    ) = _node_character_range(body, source)
+
+
 def _parse_cpp_callable(
     *,
     container: Any,
@@ -828,6 +861,8 @@ def _parse_cpp_callable(
     }
     body = container.child_by_field_name("body")
     if body is not None:
+        parsed["source_span"] = _public_node_span(container, source)
+        parsed["body_span"] = _public_node_span(body, source)
         (
             parsed["_body_start_line"],
             parsed["_body_start_column"],
@@ -850,6 +885,111 @@ def _parse_cpp_callable(
     if initializer_ranges:
         parsed["_initializer_ranges"] = initializer_ranges
     return parsed
+
+
+_JAVASCRIPT_CALLABLE_TYPES = frozenset(
+    {
+        "arrow_function",
+        "function_declaration",
+        "function_expression",
+        "generator_function",
+        "generator_function_declaration",
+        "method_definition",
+    }
+)
+
+
+def _walk_named_nodes(node: Any):
+    yield node
+    for child in node.named_children:
+        yield from _walk_named_nodes(child)
+
+
+def _normalized_javascript_target(value: str) -> str:
+    return value.replace(".prototype.", ".").removesuffix(".prototype")
+
+
+def _javascript_define_property_name(node: Any, source: bytes) -> str | None:
+    current = node.parent
+    while current is not None:
+        if current.type == "call_expression":
+            callee = current.child_by_field_name("function")
+            if callee is None or _node_text(callee, source) != "Object.defineProperty":
+                return None
+            arguments = current.child_by_field_name("arguments")
+            values = list(arguments.named_children) if arguments is not None else []
+            if len(values) < 3:
+                return None
+            target = _normalized_javascript_target(_node_text(values[0], source))
+            property_node = values[1]
+            property_name = _node_text(property_node, source).strip("'\"`")
+            if not target or not property_name:
+                return None
+            return f"{target}.{property_name}"
+        current = current.parent
+    return None
+
+
+def _javascript_callable_name(node: Any, source: bytes) -> str:
+    explicit_name = node.child_by_field_name("name")
+    if explicit_name is not None:
+        return _node_text(explicit_name, source)
+
+    define_property_name = _javascript_define_property_name(node, source)
+    if define_property_name:
+        return define_property_name
+
+    parent = node.parent
+    if parent is not None and parent.type == "variable_declarator":
+        name = parent.child_by_field_name("name")
+        if name is not None:
+            return _node_text(name, source)
+    if parent is not None and parent.type == "assignment_expression":
+        left = parent.child_by_field_name("left")
+        if left is not None:
+            return _normalized_javascript_target(_node_text(left, source))
+    if parent is not None and parent.type in {"pair", "public_field_definition"}:
+        key = parent.child_by_field_name("key") or parent.child_by_field_name("name")
+        if key is not None:
+            return _node_text(key, source).strip("'\"`")
+
+    line, column, _end_line, _end_column = _node_character_range(node, source)
+    return f"<anonymous@{line}:{column}>"
+
+
+def _parse_javascript_callable(node: Any, source: bytes) -> dict[str, Any]:
+    name = _javascript_callable_name(node, source)
+    parameters = node.child_by_field_name("parameters")
+    single_parameter = node.child_by_field_name("parameter")
+    parsed = {
+        "name": name.rsplit(".", 1)[-1],
+        "qualified_name": name,
+        "line_start": node.start_point[0] + 1,
+        "line_end": node.end_point[0] + 1,
+        "params": (
+            _extract_params(parameters, source)
+            if parameters is not None
+            else ([_node_text(single_parameter, source)] if single_parameter is not None else [])
+        ),
+        "modifiers": [],
+        "annotations": [],
+        "is_entry_point": False,
+        "_start_byte": node.start_byte,
+        "_end_byte": node.end_byte,
+    }
+    _attach_callable_spans(parsed, callable_node=node, source=source)
+    return parsed
+
+
+def _extract_javascript_callables(
+    tree: Any,
+    source: bytes,
+) -> list[dict[str, Any]]:
+    return [
+        _parse_javascript_callable(node, source)
+        for node in _walk_named_nodes(tree.root_node)
+        if node.type in _JAVASCRIPT_CALLABLE_TYPES
+    ]
 
 
 def _extract_cpp_declarations(
@@ -919,6 +1059,8 @@ def _extract_functions_ts(tree: Any, language: str, source: bytes) -> list[dict[
 
     if query_language == "cpp":
         functions.extend(_extract_cpp_declarations(tree, language, source))
+    elif query_language in {"javascript", "typescript"}:
+        functions = _extract_javascript_callables(tree, source)
 
     return functions
 
@@ -1020,7 +1162,7 @@ def _parse_function_node(node: Any, language: str, source: bytes) -> dict[str, A
     if not name:
         return None
 
-    return {
+    parsed = {
         "name": name,
         "qualified_name": name,
         "line_start": start_line,
@@ -1030,6 +1172,10 @@ def _parse_function_node(node: Any, language: str, source: bytes) -> dict[str, A
         "annotations": annotations,
         "is_entry_point": False,
     }
+    parsed["_start_byte"] = node.start_byte
+    parsed["_end_byte"] = node.end_byte
+    _attach_callable_spans(parsed, callable_node=node, source=source)
+    return parsed
 
 
 def _extract_params(params_node: Any, source: bytes) -> list[str]:
@@ -1783,34 +1929,6 @@ def _remove_internal_structural_fields(
             "_start_byte",
         ):
             cls.pop(field_name, None)
-
-
-# ---------------------------------------------------------------------------
-# Arrow function detection for JS/TS (assigned to variable)
-# ---------------------------------------------------------------------------
-
-_ARROW_RE = re.compile(
-    r"(?:const|let|var)\s+([a-zA-Z_$]\w*)\s*=\s*(?:async\s+)?\(.*?\)\s*=>"
-)
-
-
-def _detect_arrow_functions(source_lines: list[str]) -> list[dict[str, Any]]:
-    """Detect arrow functions assigned to named variables (JS/TS)."""
-    arrows: list[dict[str, Any]] = []
-    for idx, line in enumerate(source_lines):
-        m = _ARROW_RE.search(line)
-        if m:
-            arrows.append({
-                "name": m.group(1),
-                "qualified_name": m.group(1),
-                "line_start": idx + 1,
-                "line_end": idx + 1,  # approximate; refined below if possible
-                "params": [],
-                "modifiers": [],
-                "annotations": [],
-                "is_entry_point": False,
-            })
-    return arrows
 
 
 # ---------------------------------------------------------------------------
@@ -3028,6 +3146,8 @@ def index_file(
                 source_size=len(source),
                 analysis_mode="lightweight_regex",
             )
+        except MemoryError:
+            raise
         except Exception as exc:  # noqa: BLE001
             warnings.warn(
                 f"lightweight extractor for '{language}' on {file_path} failed: {exc}; "
@@ -3094,6 +3214,8 @@ def index_file(
 
     try:
         tree = parser.parse(source)
+    except MemoryError:
+        raise
     except Exception as exc:  # noqa: BLE001 - retain bounded signal coverage
         warnings.warn(
             f"tree-sitter parse for '{language}' on {file_path} failed: {exc}; "
@@ -3113,6 +3235,18 @@ def index_file(
             source,
             degradation_reason="tree_sitter_parse_failed",
         )
+    if bool(getattr(tree.root_node, "has_error", False)):
+        warnings.warn(
+            f"tree-sitter parse for '{language}' on {file_path} contains error nodes; "
+            "using bounded streaming security fallback instead of claiming complete structure.",
+            stacklevel=2,
+        )
+        return _fallback_from_bytes(
+            file_path,
+            language,
+            source,
+            degradation_reason="tree_sitter_syntax_error",
+        )
 
     try:
         functions = _extract_functions_ts(tree, parse_lang, source)
@@ -3120,13 +3254,6 @@ def index_file(
         imports = _extract_imports_ts(tree, parse_lang, source)
 
         effective_lang = "typescript" if parse_lang == "tsx" else language
-        if effective_lang in ("javascript", "typescript"):
-            arrows = _detect_arrow_functions(source_lines)
-            existing_names = {(f["name"], f["line_start"]) for f in functions}
-            for arrow in arrows:
-                if (arrow["name"], arrow["line_start"]) not in existing_names:
-                    functions.append(arrow)
-
         _enrich_qualified_names(functions, classes, effective_lang)
         if effective_lang == "cpp":
             functions = _deduplicate_cpp_functions(functions)
@@ -3148,6 +3275,8 @@ def index_file(
             source=source,
         )
         _remove_internal_structural_fields(functions, classes)
+    except MemoryError:
+        raise
     except Exception as exc:  # noqa: BLE001 - retain bounded signal coverage
         warnings.warn(
             f"tree-sitter extraction for '{language}' on {file_path} failed: {exc}; "

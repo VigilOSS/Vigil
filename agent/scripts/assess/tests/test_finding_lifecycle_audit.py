@@ -358,7 +358,9 @@ class _RecordClient:
     def __exit__(self, *_exc) -> bool:
         return False
 
-    def get(self, _endpoint: str):
+    def get(self, endpoint: str):
+        if endpoint == "dispatches/FINDING-AUTHOR-1":
+            return {"agent_id": "FINDING-AUTHOR-1"}
         return []
 
     def post(self, endpoint: str, payload: dict):
@@ -425,6 +427,7 @@ def _run_record_with_advisory(tmp_path, monkeypatch, *, quiet: bool) -> None:
             update_slug="",
             allow_remint=False,
             quiet=quiet,
+            agent_id="FINDING-AUTHOR-1",
         )
     )
 

@@ -59,7 +59,6 @@ class _FakeClient:
             "max_body_bytes": 102400,
             "content_type_allow": [],
             "content_type_deny": [],
-            "redaction_profile": "none",
             "retention": "until_engagement_deletion",
         }
         merged.update(payload)
@@ -122,7 +121,6 @@ _FLOW_ROW = {
     "request_headers": {"Content-Type": "application/json"},
     "response_headers": {"Content-Type": "application/json"},
     "host_mismatch": False,
-    "redaction_status": "none",
     "timing_ms": 55,
     "started_at": "2026-07-01T00:00:00Z",
 }
@@ -300,7 +298,6 @@ def test_policy_set_partial_update_only_sends_provided_fields(tmp_path, monkeypa
             "--max-body-bytes", "262144",
             "--content-type-allow", "application/json,text/html",
             "--content-type-allow", "application/xml",
-            "--redaction-profile", "none",
         ],
         str(tmp_path),
     )
@@ -313,19 +310,18 @@ def test_policy_set_partial_update_only_sends_provided_fields(tmp_path, monkeypa
     assert payload["capture_request_bodies"] is True
     assert payload["max_body_bytes"] == 262144
     assert payload["content_type_allow"] == ["application/json", "text/html", "application/xml"]
-    assert payload["redaction_profile"] == "none"
     # Untouched fields are NOT sent (partial update).
     assert "capture_response_bodies" not in payload
     assert "content_type_deny" not in payload
 
 
-def test_policy_set_rejects_unimplemented_redaction_profile(tmp_path, monkeypatch):
+def test_policy_set_rejects_retired_operator_data_withholding_option(tmp_path, monkeypatch):
     fake = _FakeClient()
     _install(monkeypatch, tmp_path, fake)
 
     with pytest.raises(SystemExit):
         _parse(
-            ["http", "policy", "set", "--redaction-profile", "default"],
+            ["http", "policy", "set", "--redaction-profile", "none"],
             str(tmp_path),
         )
 

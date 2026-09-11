@@ -670,32 +670,32 @@ def test_out_of_scope_carveout_not_counted_under_in_scope_wildcard(monkeypatch, 
     eng.mkdir()
     _write_scope(
         eng,
-        hosts=["*.acme-regional.example"],
-        out_of_scope=["appointments.acme-regional.example", "*.mobile.acme-regional.example"],
+        hosts=["*.acme-telco.example"],
+        out_of_scope=["appointments.acme-telco.example", "*.mobile.acme-telco.example"],
     )
     # Work items under one in-scope subdomain and one OOS carve-out.
     work_items = [
-        _work_item(queue_key="w:1", url="https://api.acme-regional.example/v1", url_path="/v1", status="pending"),
-        _work_item(queue_key="w:2", url="https://appointments.acme-regional.example/book", url_path="/book", status="pending"),
+        _work_item(queue_key="w:1", url="https://api.acme-telco.example/v1", url_path="/v1", status="pending"),
+        _work_item(queue_key="w:2", url="https://appointments.acme-telco.example/book", url_path="/book", status="pending"),
     ]
 
     services = [
-        {"endpoint": "api.acme-regional.example", "state": "up"},          # in scope
-        {"endpoint": "appointments.acme-regional.example", "state": "up"}, # OOS exact carve-out
-        {"endpoint": "x.mobile.acme-regional.example", "state": "up"},     # OOS wildcard carve-out
+        {"endpoint": "api.acme-telco.example", "state": "up"},          # in scope
+        {"endpoint": "appointments.acme-telco.example", "state": "up"}, # OOS exact carve-out
+        {"endpoint": "x.mobile.acme-telco.example", "state": "up"},     # OOS wildcard carve-out
     ]
     surfaces = [
-        {"target_descriptor": "https://api.acme-regional.example/v1"},
-        {"target_descriptor": "https://appointments.acme-regional.example/book"},
+        {"target_descriptor": "https://api.acme-telco.example/v1"},
+        {"target_descriptor": "https://appointments.acme-telco.example/book"},
     ]
 
     _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="enum", work_items=work_items)
     report = json.loads(capsys.readouterr().out)
     entry = report["entries"][0]
-    # Only api.acme-regional.example counts; both carve-outs are excluded.
+    # Only api.acme-telco.example counts; both carve-outs are excluded.
     assert entry["total_services"] == 1
     assert entry["live_hosts"] == 1
-    assert entry["live_host_samples"] == ["api.acme-regional.example"]
+    assert entry["live_host_samples"] == ["api.acme-telco.example"]
     assert entry["surfaces_count"] == 1
     # Work queue: only the in-scope subdomain's pending item is aggregated.
     assert entry["work_queued"]["pending"] == 1

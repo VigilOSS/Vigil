@@ -29,6 +29,48 @@ class _MalformedIntelResponseClient:
         raise AssertionError("a malformed write response must not emit a success event")
 
 
+class _SuccessfulNoteClient:
+    def __init__(self, *_args):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def post_engagement(self, _endpoint: str, _payload: dict) -> dict:
+        return {"id": 7, "title": "Durable note", "write_outcome": "updated"}
+
+    def post_event(self, _payload: dict) -> dict:
+        return {}
+
+
+def test_intel_note_record_reports_create_or_update_outcome(tmp_path, monkeypatch, capsys):
+    payload_file = tmp_path / "note.json"
+    payload_file.write_text(json.dumps({"title": "Durable note"}), encoding="utf-8")
+    monkeypatch.setattr(record_intel, "AssessmentClient", _SuccessfulNoteClient)
+    monkeypatch.setattr(
+        record_intel,
+        "load_config",
+        lambda _directory: SimpleNamespace(
+            base_url="http://backend",
+            engagement_key="eng",
+        ),
+    )
+
+    record_intel.run(
+        SimpleNamespace(
+            intel_type="note",
+            json_file=str(payload_file),
+            dry_run=False,
+            engagement_dir=str(tmp_path),
+        )
+    )
+
+    assert "updated existing note" in capsys.readouterr().out
+
+
 def test_intel_record_rejects_object_without_canonical_record_identity(
     tmp_path, monkeypatch, capsys
 ):

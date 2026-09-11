@@ -531,9 +531,10 @@ def _require_audit_receipt(
             and _sha256(row.get("evidence_sha256"))
             and row.get("evidence_health")
             in {"healthy", "missing", "stale", "tombstoned"}
-            and row.get("redaction_status") in {"raw", "redacted"}
-            and _optional_positive_int(row.get("derivative_of_receipt_id"))
-            and _positive_int(row.get("raw_receipt_id"))
+            and (
+                row.get("legacy_derivative_provenance") is None
+                or isinstance(row.get("legacy_derivative_provenance"), dict)
+            )
             and isinstance(row.get("tombstone_reason"), str)
             and _nonempty_string(row.get("created_at"))
         )

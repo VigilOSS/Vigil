@@ -7,7 +7,7 @@ category: Disclosure & Reporting Formats
 # HackerOne Submission Template
 
 HackerOne-specific scaffold for `vigil assess export submission <slug> --platform hackerone`.
-Shared rules (voice, section budgets, PII redaction, PoC authoring, de-harnessing, the
+Shared rules (voice, section budgets, evidence fidelity, PoC authoring, de-harnessing, the
 pre-submission checklist, and the finding-is-source-of-truth flow — author each section, write it
 back to the finding, re-render) live in `agent/references/submission-format.md` — this
 file only adds what HackerOne needs in place of Bugcrowd's VRT: a CWE weakness, and how HackerOne
@@ -54,8 +54,8 @@ by a `**Exploit flow**` marker + a 3-5 item ordered list of plain sentences, no 
 ### Evidence
 [AUTHORED, and only proof the steps cannot show — root cause, negative controls, post-exploitation
 boundaries, minimum privilege, load-bearing environment facts. From the OPERATOR DETAILS section's structured proof + linked runs + a targeted
-`command-run list` search, third-party PII partial-masked only (self-owned/synthetic data shown
-in full — see submission-format.md "PII redaction"), truncated to the proof lines, annotated with
+`command-run list` search, all captured values preserved verbatim (see submission-format.md
+"Evidence fidelity"), truncated to the proof lines, annotated with
 <-- proof markers. Stored back on the finding as `details.evidence`; the raw output stays in `scans/`.]
 
 ### Attack Scenario

@@ -498,6 +498,15 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "type": "object",
                         "additionalProperties": False,
                         "properties": {
+                            # The finding's durable author identity. The backend
+                            # requires it on a true insert and resolves it to an
+                            # engagement-local dispatch. Re-records preserve the
+                            # immutable stored author when the field is omitted.
+                            "agent_id": {
+                                "type": "string",
+                                "maxLength": 256,
+                                "description": "Dispatch agent_id of the agent that AUTHORED this finding (e.g. 'HUNT-RUN-1'), copied verbatim from its Runtime Identity block — a dispatch id, not the role name in agent_name. A true insert requires it and resolves it in the engagement. Re-recording a valid authored finding may omit it because the immutable original is preserved. Historical authorless rows require the one-time finding bind-author repair.",
+                            },
                             "agent_name": {
                                 "type": "string",
                                 "description": "Agent that produced this finding (e.g. 'vulnerability-analyst'). Mirror of source_name.",
@@ -822,8 +831,8 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "description": "Optional engagement-owned artifact path supporting the disposition. A finding or suspicious closeout requires non-empty inline evidence or this artifact reference on a current result for the active lease.",
                     },
                     "disposition": {
-                        "enum": ["finding", "suspicious", "clean", "needs_context"],
-                        "description": "Analysis result. finding: confirmed vulnerability. suspicious: needs variant analysis or deeper context. clean: no vulnerability. needs_context: blocked on missing code.",
+                        "enum": ["finding", "suspicious", "clean", "needs_context", "skipped"],
+                        "description": "Analysis result. finding: confirmed vulnerability. suspicious: needs variant analysis or deeper context. clean: no vulnerability. needs_context: blocked on missing code. skipped: deliberately not analyzed, with the reason retained in notes.",
                     },
                     "confidence": {
                         "enum": ["high", "medium", "low"],
@@ -836,7 +845,10 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "description": "Specific CWE ID (for example, CWE-122, CWE-190). Must be specific, not generic (CWE-119).",
                     },
                     "slot_type": {
-                        "description": "Shannon slot type classification of the vulnerability (for example, BUFFER-WRITE, FORMAT-STRING, INTEGER-OVERFLOW, USE-AFTER-FREE, CMD-INJECTION).",
+                        "description": "Untrusted-input class this vulnerability is reached through, named from the same nine slot types the file classification uses: NETWORK-INPUT, URL-COMPONENT, CMD-ARGUMENT, FILE-CONTENT, ENV-VARIABLE, CALLBACK-DATA, PROTOCOL-FIELD, SERIALIZED-DATA, EXEC-POLICY (see agent/skills/code-architecture-mapping/SKILL.md Step 10 for the canonical table). Unlike the file-level slot_types list, this field is deliberately free text and is not validated: prefer a value from that list, but record a more precise one when the nine do not describe the reached input. It is a label only - it never gates coverage or family derivation, which read the file-level slot_types.",
+                    },
+                    "supersedes": {
+                        "description": "Optional analysis-result row ID explicitly replaced by this correction. The original must be current and have the same queue item, lease token, file, function, and repository generation.",
                     },
                     "notes": {
                         "description": "Additional notes, context expansion requests, or follow-up recommendations.",

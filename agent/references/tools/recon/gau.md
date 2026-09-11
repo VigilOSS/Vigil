@@ -44,7 +44,7 @@ gau makes **zero requests to the target** — it queries third-party archives
   crawl must remain on exact seeds; passive breadth is not a reason to make the
   active crawler follow sibling hosts.
   - For roots where the program carves out specific OOS subdomains (e.g.
-    `*.acme-regional.example` in scope but `appointments.acme-regional.example` out), still feed
+    `*.acme-telco.example` in scope but `appointments.acme-telco.example` out), still feed
     the root to gau for breadth; the carve-out is enforced when the active phase
     consumes the corpus, not here.
 

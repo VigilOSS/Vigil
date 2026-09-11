@@ -8,7 +8,9 @@ than inferring support from launcher-file presence.
 from __future__ import annotations
 
 import json
+import io
 import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -99,6 +101,102 @@ def _write_agent_sources(agent_root: Path) -> None:
 
     (agent_root / "AGENTS.md").write_text("# Canonical operator instructions\n")
     (agent_root / "CLAUDE.md").write_text("# Canonical Claude instructions\n")
+
+
+def test_claude_settings_materialize_absolute_hooks_for_bare_engagement_sessions(
+    tmp_path: Path,
+) -> None:
+    agent_root = tmp_path / "agent root 'with spaces'"
+    claude_dir = tmp_path / "engagement" / ".claude"
+    hooks_dir = agent_root / "scripts" / "hooks"
+    hooks_dir.mkdir(parents=True)
+    marker = tmp_path / "hook-ran"
+    for name in ("post-tool-log.sh", "scope-check.sh"):
+        hook = hooks_dir / name
+        hook.write_text(
+            "#!/usr/bin/env bash\n"
+            "cat >/dev/null\n"
+            f"printf '%s' {name!r} >{str(marker)!r}\n"
+        )
+        hook.chmod(0o755)
+
+    source = {
+        "hooks": {
+            "PostToolUse": [
+                {
+                    "matcher": matcher,
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": (
+                                "bash -c 'try environment and relative fallbacks; "
+                                f"then run {script}'"
+                            ),
+                        }
+                    ],
+                }
+                for matcher, script in (
+                    ("Bash", "post-tool-log.sh"),
+                    ("Agent", "post-tool-log.sh"),
+                    ("Write", "post-tool-log.sh"),
+                )
+            ],
+            "PreToolUse": [
+                {
+                    "matcher": "Bash",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "bash relative/scope-check.sh",
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+    source_dir = agent_root / ".claude"
+    source_dir.mkdir()
+    (source_dir / "settings.json").write_text(json.dumps(source))
+
+    client_rosters.ensure_claude_settings(agent_root, claude_dir)
+
+    settings = json.loads((claude_dir / "settings.json").read_text())
+    assert [item["matcher"] for item in settings["hooks"]["PostToolUse"]] == [
+        "Bash",
+        "Write",
+    ]
+    commands = [
+        hook["command"]
+        for phase in settings["hooks"].values()
+        for item in phase
+        for hook in item["hooks"]
+    ]
+    assert all("VIGIL_AGENT_ROOT" not in command for command in commands)
+    assert all("scripts/hooks" in command for command in commands)
+    assert {
+        shlex.split(command)[1]
+        for command in commands
+    } == {
+        str(hooks_dir / "post-tool-log.sh"),
+        str(hooks_dir / "scope-check.sh"),
+    }
+
+    env = os.environ.copy()
+    env.pop("VIGIL_AGENT_ROOT", None)
+    for command in commands:
+        marker.unlink(missing_ok=True)
+        result = subprocess.run(
+            command,
+            cwd=claude_dir.parent,
+            env=env,
+            shell=True,
+            input="{}",
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert marker.is_file()
 
 
 def _build_entrypoint_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -1114,3 +1212,27 @@ def test_start_engagement_dispatches_to_exact_client_launcher(
         "cwd": engagement_dir,
         "execv": (str(launcher), [str(launcher), "--model", "test"]),
     }
+    assert engagements.os.environ["VIGIL_REQUESTED_CLIENT"] == client
+
+
+def test_noninteractive_selection_fails_before_starting_fzf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    row = engagements.EngagementRow(
+        key="eng-1",
+        path=tmp_path,
+        target="https://example.test",
+        status="in_progress",
+        current_phase="recon",
+        created_at="2026-09-11T00:00:00Z",
+    )
+    monkeypatch.setattr(engagements.sys, "stdin", io.StringIO(""))
+    monkeypatch.setattr(engagements.shutil, "which", lambda _name: "/usr/bin/fzf")
+    monkeypatch.setattr(
+        engagements.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("fzf must not start without a TTY"),
+    )
+
+    with pytest.raises(SystemExit, match="non-interactive"):
+        engagements._select_engagement([row])

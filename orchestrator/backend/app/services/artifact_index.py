@@ -252,7 +252,8 @@ def _file_payload(
 
 def _serialize_artifact(row, *, compact: bool = False) -> dict[str, Any]:
     data = dict(row)
-    for key in ("sensitive", "present", "scratch"):
+    data.pop("sensitive", None)
+    for key in ("present", "scratch"):
         data[key] = bool(data.get(key))
     indexed_text = str(data.get("indexed_text") or "")
     indexed_bytes = len(indexed_text.encode("utf-8"))
@@ -318,7 +319,6 @@ def _store_artifact(
     kind: str,
     media_type: str,
     file_data: dict[str, Any],
-    sensitive: bool,
     producer_agent_id: str | None,
     producer_agent_role: str | None,
     producer_command_run_id: int | None,
@@ -340,13 +340,13 @@ def _store_artifact(
             """
             INSERT INTO assessment_artifacts (
                 engagement_id, relative_path, kind, media_type, size_bytes, sha256,
-                preview_text, indexed_text, sensitive, present, producer_agent_id,
+                preview_text, indexed_text, present, producer_agent_id,
                 verified_device, verified_inode, integrity_status,
                 producer_agent_role, producer_command_run_id, related_finding_slug,
                 related_chain_key, related_surface_id, related_request_variant_id,
                 created_at, updated_at, last_indexed_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(engagement_id, relative_path) DO UPDATE SET
                 -- Bind the RAW caller-supplied kind/media_type here, not
                 -- excluded.* — excluded.kind carries the _guess_kind() result,
@@ -385,11 +385,6 @@ def _store_artifact(
                       AND excluded.verified_device IS NULL)
                       OR excluded.present = 0
                     THEN assessment_artifacts.indexed_text ELSE excluded.indexed_text END,
-                sensitive = CASE
-                    WHEN assessment_artifacts.verified_device IS NOT NULL
-                     AND excluded.verified_device IS NULL
-                    THEN assessment_artifacts.sensitive
-                    ELSE excluded.sensitive OR assessment_artifacts.sensitive END,
                 present = CASE
                     WHEN assessment_artifacts.verified_device IS NOT NULL
                      AND excluded.verified_device IS NULL
@@ -467,7 +462,6 @@ def _store_artifact(
                 str(file_data["sha256"]),
                 str(file_data["preview_text"]),
                 str(file_data["indexed_text"]),
-                1 if sensitive else 0,
                 1 if file_data["present"] else 0,
                 producer_agent_id,
                 verified_device,
@@ -520,7 +514,6 @@ def register_artifact(
     path: str,
     kind: str = "",
     media_type: str = "",
-    sensitive: bool = False,
     producer_agent_id: str | None = None,
     producer_agent_role: str | None = None,
     producer_command_run_id: int | None = None,
@@ -571,7 +564,6 @@ def register_artifact(
         kind=kind,
         media_type=media_type,
         file_data=file_data,
-        sensitive=sensitive,
         producer_agent_id=producer_agent_id,
         producer_agent_role=producer_agent_role,
         producer_command_run_id=producer_command_run_id,
@@ -835,7 +827,6 @@ def register_verified_command_output(
             "preview_text": preview_text,
             "indexed_text": indexed_text,
         },
-        sensitive=False,
         producer_agent_id=None,
         producer_agent_role=producer_agent_role,
         producer_command_run_id=int(producer_command_run_id),
@@ -899,7 +890,9 @@ def reserve_suppressed_command_output(
         )
 
 
-def refresh_artifacts(engagement_id: int) -> dict[str, Any]:
+def refresh_artifacts(
+    engagement_id: int, *, artifact_id: int | None = None
+) -> dict[str, Any]:
     """Refresh on-disk presence/hash metadata for existing artifact rows only.
 
     This intentionally does not walk directories or discover new files. It keeps
@@ -909,10 +902,21 @@ def refresh_artifacts(engagement_id: int) -> dict[str, Any]:
     _engagement, root = _engagement_root(engagement_id)
     now = _utcnow_iso()
     with get_connection() as connection:
-        rows = connection.execute(
-            "SELECT * FROM assessment_artifacts WHERE engagement_id = ?",
-            (engagement_id,),
-        ).fetchall()
+        if artifact_id is None:
+            rows = connection.execute(
+                "SELECT * FROM assessment_artifacts WHERE engagement_id = ?",
+                (engagement_id,),
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                "SELECT * FROM assessment_artifacts WHERE engagement_id = ? AND id = ?",
+                (engagement_id, artifact_id),
+            ).fetchall()
+            if not rows:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"artifact id={artifact_id} not found",
+                )
         present = 0
         missing = 0
         for row in rows:
@@ -1006,6 +1010,38 @@ def refresh_artifacts(engagement_id: int) -> dict[str, Any]:
         "present": present,
         "missing": missing,
     }
+
+
+def clear_finding_link(engagement_id: int, *, artifact_id: int) -> dict[str, Any]:
+    """Clear only the artifact/finding association, preserving artifact bytes and proof."""
+    _engagement_root(engagement_id)
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM assessment_artifacts WHERE engagement_id = ? AND id = ?",
+            (engagement_id, artifact_id),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"artifact id={artifact_id} not found",
+            )
+        connection.execute(
+            "UPDATE assessment_artifacts SET related_finding_slug = NULL, updated_at = ? "
+            "WHERE engagement_id = ? AND id = ?",
+            (_utcnow_iso(), engagement_id, artifact_id),
+        )
+        connection.execute(
+            "UPDATE assessment_findings SET evidence_artifact_id = NULL "
+            "WHERE engagement_id = ? AND evidence_artifact_id = ?",
+            (engagement_id, artifact_id),
+        )
+        connection.commit()
+        updated = connection.execute(
+            "SELECT * FROM assessment_artifacts WHERE engagement_id = ? AND id = ?",
+            (engagement_id, artifact_id),
+        ).fetchone()
+    assert updated is not None
+    return _serialize_artifact(updated)
 
 
 # Characters that can only appear in a COMPOSITE or prose reference, never in

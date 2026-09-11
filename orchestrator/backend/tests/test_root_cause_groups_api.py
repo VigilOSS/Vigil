@@ -6,6 +6,7 @@ from tests.proof_fixtures import post_artifact_backed_source_observation
 
 
 ENGAGEMENT_KEY = "2026-05-05-170700-root-cause"
+AUTHOR_AGENT_ID = "ROOT-CAUSE-FIXTURE-AUTHOR"
 
 
 def _write_engagement(engagements_dir: Path) -> None:
@@ -22,6 +23,15 @@ def _seed(client, isolate_settings) -> None:
     _write_engagement(isolate_settings["engagements_dir"])
     response = client.get(f"/engagements/{ENGAGEMENT_KEY}")
     assert response.status_code == 200, response.text
+    dispatch = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/dispatches",
+        json={
+            "agent_id": AUTHOR_AGENT_ID,
+            "agent_role": "vulnerability-analyst",
+            "task": "Record root-cause fixture findings",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
 
 
 def _finding(slug: str, title: str, *, root_key: str, severity: str = "high") -> dict:
@@ -43,6 +53,7 @@ def _finding(slug: str, title: str, *, root_key: str, severity: str = "high") ->
         "summary": title,
         "evidence_ref": "findings.md",
         "source_name": "test",
+        "provenance": {"agent_id": AUTHOR_AGENT_ID},
         "details": {
             "cvss_score": cvss_score,
             "cvss_vector": cvss_vector,

@@ -119,7 +119,7 @@ _MANIFEST_CT = re.compile(r"application/manifest\+json", re.IGNORECASE)
 # reset, account activation/unlock, signup/registration, account recovery,
 # email verification — fell through the original auth set
 # (`login|signin|sso|...`) and landed `type='unknown'`. Confirmed real examples:
-# acme-agency-example's camelCase `/efi/security/forgotPassword`,
+# The nested route fixtures's camelCase `/efi/security/forgotPassword`,
 # `/efi/security/activateUserAccount`, `/efi/security/unlockUserAccount`,
 # `/efi/signup`; acme's hyphenated `/forgot-password`. These rescue to
 # `auth_entry` (floor 40) alongside the base auth keywords.
@@ -133,7 +133,7 @@ _MANIFEST_CT = re.compile(r"application/manifest\+json", re.IGNORECASE)
 # `/unlockable-content`, `/recovery-stories`, `/account-benefits` all fail
 # because the keyword is not followed by a `/`, `?`, `#`, or end-of-path.
 #
-# The `/security/` route-segment hint (acme-agency-example groups auth-management under a
+# The `/security/` route-segment hint (the nested route fixtures groups auth-management under a
 # `/security/` path prefix) is covered IMPLICITLY by these verb-anchored rules:
 # `/efi/security/forgotPassword` matches the `forgot-?password` keyword on its
 # own segment, while `/efi/security/dashboard` does NOT match any auth verb and
@@ -164,7 +164,7 @@ _LEXICAL_ROUTE_RULES: tuple[tuple["re.Pattern[str]", str], ...] = (
         # (`forgot-password`, `activate-account`) both match. The
         # `activate`/`unlock` variants accept an optional trailing
         # `(-?user)?-?account` so `/activate`, `/activate-account`, and
-        # acme-agency-example's `/activateUserAccount` all fire, while
+        # the nested route fixtures's `/activateUserAccount` all fire, while
         # `/activate-your-warranty-online` (no boundary after `activate`) does
         # not.
         re.compile(

@@ -60,6 +60,20 @@ def _seed_engagement(client, isolate_settings, key: str = ENGAGEMENT_KEY) -> Non
 
 
 def _create_finding(client, slug: str, *, key: str = ENGAGEMENT_KEY) -> dict:
+    dispatch_path = f"/engagements/{key}/assessment/dispatches/test-agent"
+    existing_dispatch = client.get(dispatch_path)
+    if existing_dispatch.status_code == 404:
+        dispatch = client.post(
+            f"/engagements/{key}/assessment/dispatches",
+            json={
+                "agent_id": "test-agent",
+                "agent_role": "finding-author",
+                "task": "Author merge-integrity fixtures.",
+            },
+        )
+        assert dispatch.status_code == 201, dispatch.text
+    else:
+        assert existing_dispatch.status_code == 200, existing_dispatch.text
     response = client.post(
         f"/engagements/{key}/assessment/findings",
         json={

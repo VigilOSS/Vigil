@@ -2,6 +2,8 @@
 description: Introspection, batching, field suggestion, injection in variables
 skill: graphql-testing
 source: PayloadsAllTheThings — GraphQL Injection
+source_revision: 3ac27901c711bdf3f5b65a7b1d1820a1f65bd09a
+source_license: MIT; see THIRD_PARTY_NOTICES.md
 ---
 
 # GraphQL Injection Payloads

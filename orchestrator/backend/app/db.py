@@ -970,6 +970,9 @@ def _migrate_dispatch_schema(
         "requested_reasoning": "TEXT",
         "actual_reasoning": "TEXT NOT NULL DEFAULT 'unknown'",
         "client_name": "TEXT NOT NULL DEFAULT 'unknown'",
+        "requested_client": "TEXT NOT NULL DEFAULT 'unknown'",
+        "launcher_effective_client": "TEXT NOT NULL DEFAULT 'unknown'",
+        "provider_observed_client": "TEXT NOT NULL DEFAULT 'unknown'",
         "source_revision": "TEXT NOT NULL DEFAULT 'unknown'",
         "operator_instruction_path": "TEXT",
         "operator_instruction_sha256": "TEXT",
@@ -3765,6 +3768,7 @@ def _create_code_analysis_tables(connection: sqlite3.Connection) -> None:
                 lease_token TEXT NOT NULL DEFAULT '',
                 repo_generation INTEGER NOT NULL DEFAULT 0,
                 result_fingerprint TEXT NOT NULL DEFAULT '',
+                supersedes_result_id INTEGER UNIQUE REFERENCES code_analysis_results(id) ON DELETE RESTRICT,
                 superseded_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
@@ -4199,6 +4203,7 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         "repo_generation": "INTEGER NOT NULL DEFAULT 0",
         "evidence_ref": "TEXT NOT NULL DEFAULT ''",
         "result_fingerprint": "TEXT NOT NULL DEFAULT ''",
+        "supersedes_result_id": "INTEGER REFERENCES code_analysis_results(id) ON DELETE RESTRICT",
         "superseded_at": "TEXT",
     }.items():
         if result_columns and col_name not in result_columns:
@@ -4209,6 +4214,15 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_code_analysis_results_idempotent "
         "ON code_analysis_results(queue_item_id, lease_token, result_fingerprint) "
         "WHERE queue_item_id IS NOT NULL AND lease_token != '' AND result_fingerprint != ''"
+    )
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_code_analysis_results_supersedes "
+        "ON code_analysis_results(supersedes_result_id) "
+        "WHERE supersedes_result_id IS NOT NULL"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_code_analysis_results_lease_function "
+        "ON code_analysis_results(queue_item_id, lease_token, function_name)"
     )
 
     # Migrate code_files: add structural metadata columns from tree-sitter index
@@ -4606,6 +4620,9 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
                 requested_reasoning TEXT,
                 actual_reasoning TEXT NOT NULL DEFAULT 'unknown',
                 client_name TEXT NOT NULL DEFAULT 'unknown',
+                requested_client TEXT NOT NULL DEFAULT 'unknown',
+                launcher_effective_client TEXT NOT NULL DEFAULT 'unknown',
+                provider_observed_client TEXT NOT NULL DEFAULT 'unknown',
                 source_revision TEXT NOT NULL DEFAULT 'unknown',
                 operator_instruction_path TEXT,
                 operator_instruction_sha256 TEXT,
@@ -4660,6 +4677,9 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
         )
     provenance_columns = {
         "client_name": "TEXT NOT NULL DEFAULT 'unknown'",
+        "requested_client": "TEXT NOT NULL DEFAULT 'unknown'",
+        "launcher_effective_client": "TEXT NOT NULL DEFAULT 'unknown'",
+        "provider_observed_client": "TEXT NOT NULL DEFAULT 'unknown'",
         "source_revision": "TEXT NOT NULL DEFAULT 'unknown'",
         "operator_instruction_path": "TEXT",
         "operator_instruction_sha256": "TEXT",

@@ -1,7 +1,7 @@
 ---
 name: gf-patterns:ssrf
 description: URL-fetch parameter patterns that signal server-side request forgery surfaces
-origin: 1ndianl33t/Gf-Patterns (+ local overlay)
+origin: 1ndianl33t/Gf-Patterns@f686f06ae647726578920084c894100d702496cc (+ local overlay)
 bucket: ssrf
 skill: ssrf-testing
 weight: 40
@@ -84,7 +84,7 @@ alone. See `redirect.md` and `DRIFT.md` → "Fix 4" for the full rationale.
 
 - [1ndianl33t/Gf-Patterns](https://github.com/1ndianl33t/Gf-Patterns) — canonical community pattern set
 - [tomnomnom/gf](https://github.com/tomnomnom/gf) — tool
-- [PayloadsAllTheThings SSRF](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Server%20Side%20Request%20Forgery)
+- [PayloadsAllTheThings SSRF](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/3ac27901c711bdf3f5b65a7b1d1820a1f65bd09a/Server%20Side%20Request%20Forgery)
 
 ## Related
 

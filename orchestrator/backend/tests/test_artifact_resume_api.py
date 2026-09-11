@@ -208,6 +208,29 @@ def test_artifact_register_search_and_get(client, isolate_settings) -> None:
     assert by_finding.json()[0]["relative_path"] == "notes/VA-047-note.md"
 
 
+def test_artifact_contract_has_no_operator_data_suppression_flag(
+    client, isolate_settings
+) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    (eng / "notes").mkdir(parents=True, exist_ok=True)
+    (eng / "notes" / "literal-token.md").write_text(
+        "Authorization: Bearer literal-operator-token", encoding="utf-8"
+    )
+    registered = client.post(
+        f"{BASE}/artifacts", json={"path": "notes/literal-token.md"}
+    )
+    assert registered.status_code == 201, registered.text
+    assert "sensitive" not in registered.json()
+    assert "Authorization: Bearer literal-operator-token" in registered.json()["indexed_text"]
+
+    retired = client.post(
+        f"{BASE}/artifacts",
+        json={"path": "notes/literal-token.md", "sensitive": True},
+    )
+    assert retired.status_code == 422, retired.text
+
+
 def test_artifact_search_indexes_text_beyond_legacy_16k_boundary(
     client, isolate_settings
 ) -> None:
@@ -363,6 +386,37 @@ def test_artifact_refresh_updates_missing_registered_files(client, isolate_setti
         blocker["kind"] == "finding_evidence_missing_artifact" and blocker["slug"] == "VA-047"
         for blocker in readiness_after.json()["blockers"]
     )
+
+
+def test_artifact_refresh_can_target_one_id_and_clear_its_finding_link(
+    client, isolate_settings
+) -> None:
+    eng = _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    (eng / "notes").mkdir(parents=True, exist_ok=True)
+    (eng / "notes" / "linked.md").write_text("old linked", encoding="utf-8")
+    (eng / "notes" / "other.md").write_text("old other", encoding="utf-8")
+    linked = _register_note(
+        client, "notes/linked.md", related_finding_slug="VA-047"
+    )
+    _register_note(client, "notes/other.md")
+    (eng / "notes" / "linked.md").write_text("new linked", encoding="utf-8")
+    (eng / "notes" / "other.md").write_text("new other", encoding="utf-8")
+
+    refreshed = client.post(f"{BASE}/artifacts/{linked['id']}/refresh")
+
+    assert refreshed.status_code == 200, refreshed.text
+    assert refreshed.json() == {"refreshed": 1, "present": 1, "missing": 0}
+    assert client.get(f"{BASE}/artifacts/{linked['id']}").json()["content"] == "new linked"
+    untouched = client.get(
+        f"{BASE}/artifacts/search", params={"q": "new other"}
+    )
+    assert untouched.status_code == 200, untouched.text
+    assert untouched.json() == []
+
+    cleared = client.delete(f"{BASE}/artifacts/{linked['id']}/finding-link")
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["related_finding_slug"] is None
 
 
 def test_artifact_register_preserves_existing_legacy_finding_slug(client, isolate_settings) -> None:
@@ -1542,6 +1596,7 @@ def test_composite_evidence_ref_records_the_finding_but_mints_no_artifact_row(
         ("VA-051", "scans/a.out; scans/b.out"),
         ("VA-052", "command-runs 56052/56054/56061"),
     ):
+        author_id = _author_finding(client, slug)
         created = client.post(
             f"{BASE}/findings",
             json={
@@ -1554,6 +1609,7 @@ def test_composite_evidence_ref_records_the_finding_but_mints_no_artifact_row(
                 "summary": "Recording must still succeed with a composite ref.",
                 "evidence_ref": ref,
                 "source_name": "vulnerability-analyst",
+                "provenance": {"agent_id": author_id},
                 "details": {"evidence": "prose", "impact": "n/a"},
             },
         )

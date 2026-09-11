@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import stat
 import tempfile
@@ -134,7 +135,12 @@ def ensure_opencode_agents_link(agent_root: Path, opencode_dir: Path) -> None:
     )
 
 
-def ensure_claude_settings(agent_root: Path, claude_dir: Path) -> None:
+def ensure_claude_settings(
+    agent_root: Path,
+    claude_dir: Path,
+    *,
+    rendered_agent_root: Path | None = None,
+) -> None:
     """Copy generated Claude settings into an engagement cwd when present.
 
     Engagement directories get their own settings.json copy so Claude can load
@@ -146,7 +152,38 @@ def ensure_claude_settings(agent_root: Path, claude_dir: Path) -> None:
         return
     claude_dir.mkdir(parents=True, exist_ok=True)
     settings_dest = claude_dir / "settings.json"
-    settings_text = settings_src.read_text(encoding="utf-8")
+    settings = json.loads(settings_src.read_text(encoding="utf-8"))
+    hooks = settings.get("hooks", {})
+    post_hooks = hooks.get("PostToolUse")
+    if isinstance(post_hooks, list):
+        hooks["PostToolUse"] = [
+            item
+            for item in post_hooks
+            if not (isinstance(item, dict) and item.get("matcher") == "Agent")
+        ]
+    for phase_hooks in hooks.values():
+        if not isinstance(phase_hooks, list):
+            continue
+        for phase_hook in phase_hooks:
+            if not isinstance(phase_hook, dict):
+                continue
+            commands = phase_hook.get("hooks")
+            if not isinstance(commands, list):
+                continue
+            for command in commands:
+                if not isinstance(command, dict):
+                    continue
+                command_text = command.get("command")
+                if not isinstance(command_text, str):
+                    continue
+                for script_name in ("post-tool-log.sh", "scope-check.sh"):
+                    if script_name in command_text:
+                        target = (
+                            rendered_agent_root or agent_root
+                        ) / "scripts" / "hooks" / script_name
+                        command["command"] = shlex.join(["bash", str(target)])
+                        break
+    settings_text = json.dumps(settings, indent=2) + "\n"
     if settings_dest.is_symlink():
         settings_dest.unlink()
     elif settings_dest.exists() and not settings_dest.is_file():
@@ -211,7 +248,12 @@ def _goose_hook_command(agent_root: Path, target: Path, *, env_prefix: str = "")
     return f"{env_prefix} {base}" if env_prefix else base
 
 
-def ensure_goose_standard_hooks(agent_root: Path, eng_dir: Path) -> None:
+def ensure_goose_standard_hooks(
+    agent_root: Path,
+    eng_dir: Path,
+    *,
+    rendered_agent_root: Path | None = None,
+) -> None:
     """Write the standard Goose hooks plugin (scope-check + activity-log) into an engagement.
 
     Mirrors ``ensure_opencode_plugin``: Goose hooks invoke shell scripts directly, so
@@ -223,6 +265,8 @@ def ensure_goose_standard_hooks(agent_root: Path, eng_dir: Path) -> None:
     exactly like the Claude/Codex/OpenCode guard layers on the standard hooks.
     """
     hooks_src = agent_root / "scripts" / "hooks"
+    command_agent_root = rendered_agent_root or agent_root
+    command_hooks_src = command_agent_root / "scripts" / "hooks"
     if not (hooks_src / "goose-hook-adapter.sh").is_file():
         return
     # Goose v1.38.0's tool names are BARE — `shell`, `write`, `edit`, `tree`, `read_image`
@@ -240,7 +284,9 @@ def ensure_goose_standard_hooks(agent_root: Path, eng_dir: Path) -> None:
                     "matcher": matcher,
                     "hooks": [{
                         "type": "command",
-                        "command": _goose_hook_command(agent_root, hooks_src / "scope-check.sh"),
+                        "command": _goose_hook_command(
+                            command_agent_root, command_hooks_src / "scope-check.sh"
+                        ),
                         "timeout": 30,
                     }],
                 }
@@ -250,7 +296,9 @@ def ensure_goose_standard_hooks(agent_root: Path, eng_dir: Path) -> None:
                     "matcher": matcher,
                     "hooks": [{
                         "type": "command",
-                        "command": _goose_hook_command(agent_root, hooks_src / "post-tool-log.sh"),
+                        "command": _goose_hook_command(
+                            command_agent_root, command_hooks_src / "post-tool-log.sh"
+                        ),
                         "timeout": 30,
                     }],
                 }
@@ -469,7 +517,10 @@ def _rosters_for_plan(agent_root: Path, plan: _EngagementClientPlan) -> tuple[_P
 
 
 def repair_engagement_client_rosters(
-    install_root: Path, *, refresh_physical_client_rosters: bool = False
+    install_root: Path,
+    *,
+    refresh_physical_client_rosters: bool = False,
+    rendered_install_root: Path | None = None,
 ) -> ClientRosterRepairResult:
     """Backfill generated client rosters for existing engagement workdirs.
 
@@ -479,6 +530,7 @@ def repair_engagement_client_rosters(
     in place without deleting unknown entries.
     """
     agent_root = install_root / "agent"
+    rendered_agent_root = (rendered_install_root or install_root) / "agent"
     engagements_root = agent_root / "engagements"
     if not engagements_root.is_dir():
         return ClientRosterRepairResult()
@@ -541,7 +593,11 @@ def repair_engagement_client_rosters(
             ensure_codex_agents_link(agent_root, eng_dir / ".codex")
         if plan.claude_needed:
             claude_dir = eng_dir / ".claude"
-            ensure_claude_settings(agent_root, claude_dir)
+            ensure_claude_settings(
+                agent_root,
+                claude_dir,
+                rendered_agent_root=rendered_agent_root,
+            )
             ensure_claude_agents_link(agent_root, claude_dir)
         if plan.opencode_needed:
             opencode_dir = eng_dir / ".opencode"
@@ -549,7 +605,11 @@ def repair_engagement_client_rosters(
             ensure_opencode_agents_link(agent_root, opencode_dir)
         if plan.goose_needed:
             ensure_goose_recipes_link(agent_root, eng_dir / ".goose")
-            ensure_goose_standard_hooks(agent_root, eng_dir)
+            ensure_goose_standard_hooks(
+                agent_root,
+                eng_dir,
+                rendered_agent_root=rendered_agent_root,
+            )
 
     added: list[str] = []
     updated: list[str] = []

@@ -25,7 +25,7 @@ If none of these match, skip nikto entirely. The reactive nuclei sweep already c
 
 ```bash
 vigil assess kali nikto \
-  --host www.example.com --ssl \
+  --host www.example.com -ssl \
   -Tuning x60 -Pause 2 -maxtime 300 \
   -Format json -output /engagements/$ENGAGEMENT_KEY/scans/nikto_www.json \
   --technique INFO-DISCLOSURE --intent "nikto on legacy IIS/7.5 fingerprint" \
@@ -91,7 +91,7 @@ Combine modes by adding the digits (e.g. `-evasion 124` for modes 1, 2, and 4). 
 
 ```bash
 vigil assess kali nikto \
-  --host www.example.com --ssl \
+  --host www.example.com -ssl \
   -Tuning x60 -Pause 2 -maxtime 300 \
   --technique INFO-DISCLOSURE --intent "cautious-tier nikto, x60 production-safe" \
   --probe-kind payload --phase recon --timeout 600

@@ -2,6 +2,8 @@
 description: Java (ysoserial), PHP, Python (pickle), Node.js, .NET
 skill: deserialization-testing
 source: PayloadsAllTheThings — Insecure Deserialization
+source_revision: 3ac27901c711bdf3f5b65a7b1d1820a1f65bd09a
+source_license: MIT; see THIRD_PARTY_NOTICES.md
 ---
 
 # Insecure Deserialization Payloads

@@ -101,7 +101,7 @@ FINDING_DETAIL_CORE_PROPERTIES: dict[str, dict[str, Any]] = {
     "steps_to_reproduce": {
         "type": ["string", "array"],
         "items": {"type": "string"},
-        "description": "Ordered reproduction steps, starting from initial access state and ending at impact observation. Write them FROM WHAT YOU ACTUALLY RAN, with concrete values (the real session cookie, the real object id, the real payload) — an unbound placeholder is a step nobody can follow, and reusing one placeholder across different objects corrupts the sequence. Redaction is the report-writer's job at submission time. Preferred form is ONE string holding the whole block with your own numbering — renderers emit it verbatim, and prose elsewhere in the submission that cites a step number only resolves against numbers you wrote. A list of strings is also accepted, one action per string.",
+        "description": "Ordered reproduction steps, starting from initial access state and ending at impact observation. Write them FROM WHAT YOU ACTUALLY RAN, with concrete values (the real session cookie, the real object id, the real payload), and preserve those values verbatim through submission. An unbound placeholder is a step nobody can follow, and reusing one placeholder across different objects corrupts the sequence. Preferred form is ONE string holding the whole block with your own numbering — renderers emit it verbatim, and prose elsewhere in the submission that cites a step number only resolves against numbers you wrote. A list of strings is also accepted, one action per string.",
     },
     # The anti-inference device for ``steps_to_reproduce``: the audit rows that
     # actually produced the reproduction. Without it, "write accurate steps" is an
@@ -352,7 +352,7 @@ FINDING_DETAIL_CORE_PROPERTIES: dict[str, dict[str, Any]] = {
                 },
                 "new_evidence": {
                     "type": "string",
-                    "description": "Optional NEW proof authored for THIS reply. Third-party PII partial-masked; self-owned/synthetic shown in full (submission-format.md PII rules).",
+                    "description": "Optional NEW proof authored for THIS reply. Preserve captured credentials, tokens, PII, and other evidence verbatim.",
                 },
                 "new_evidence_ref": {
                     "type": "string",
@@ -375,7 +375,30 @@ FINDING_DETAIL_CORE_PROPERTIES: dict[str, dict[str, Any]] = {
                     "type": "string",
                     "description": "Agent/operator that authored the reply (e.g. 'report-writer').",
                 },
+                "corrects_seq": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Sent reply seq superseded by this appended correction version.",
+                },
+                "event_type": {
+                    "type": "string",
+                    "enum": ["correction"],
+                    "description": "Marks an appended reply as a correction event.",
+                },
             },
+            "required": [
+                "seq",
+                "platform",
+                "in_response_to",
+                "reply_to_seq",
+                "body",
+                "new_evidence",
+                "new_evidence_ref",
+                "sent_status",
+                "created_at",
+                "sent_at",
+                "author",
+            ],
         },
     },
     "correction_history": {
@@ -593,10 +616,116 @@ def _validate_schema_value(value: Any, schema: dict[str, Any], *, path: str) -> 
             _invalid(f"{path}.{key}", "is required")
 
 
+def _validate_reply_sequence_identity(
+    value: Any, *, path: str, status_code: int
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise HTTPException(
+            status_code=status_code,
+            detail=f"{path} must be an array",
+        )
+    rows: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for index, row in enumerate(value):
+        row_path = f"{path}[{index}]"
+        if not isinstance(row, dict):
+            raise HTTPException(
+                status_code=status_code,
+                detail=f"{row_path} must be an object",
+            )
+        if "seq" not in row:
+            raise HTTPException(
+                status_code=status_code,
+                detail=f"{row_path}.seq is required",
+            )
+        seq = row.get("seq")
+        if not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
+            raise HTTPException(
+                status_code=status_code,
+                detail=f"{row_path}.seq must be a positive integer",
+            )
+        if seq in seen:
+            raise HTTPException(
+                status_code=status_code,
+                detail=f"{path} contains duplicate reply seq {seq}",
+            )
+        seen.add(seq)
+        rows.append(row)
+    return rows
+
+
+def _validate_reply_versions(
+    value: Any,
+    *,
+    existing_value: Any = None,
+    path: str = "details.replies",
+) -> None:
+    rows = _validate_reply_sequence_identity(
+        value, path=path, status_code=status.HTTP_400_BAD_REQUEST
+    )
+    existing_rows = existing_value if isinstance(existing_value, list) else []
+    item_schema = FINDING_DETAIL_PROPERTIES["replies"]["items"]
+    prior_by_seq: dict[int, dict[str, Any]] = {}
+    for index, row in enumerate(rows):
+        if index < len(existing_rows) and row == existing_rows[index]:
+            prior_by_seq[row["seq"]] = row
+            continue
+        row_path = f"{path}[{index}]"
+        _validate_schema_value(row, item_schema, path=row_path)
+        sent_status = row["sent_status"]
+        sent_at = row["sent_at"]
+        if sent_status == "sent" and (
+            not isinstance(sent_at, str) or not sent_at.strip()
+        ):
+            _invalid(row_path, "sent replies require a nonempty sent_at")
+        if sent_status == "draft" and sent_at is not None:
+            _invalid(row_path, "draft replies require sent_at=null")
+        has_pointer = "corrects_seq" in row
+        has_event = "event_type" in row
+        if has_pointer != has_event or (has_event and row["event_type"] != "correction"):
+            _invalid(
+                row_path,
+                "correction replies require event_type='correction' and corrects_seq",
+            )
+        reply_to_seq = row["reply_to_seq"]
+        if reply_to_seq is not None and reply_to_seq not in prior_by_seq:
+            _invalid(row_path, "reply_to_seq must reference a prior reply")
+        if has_pointer:
+            corrected = prior_by_seq.get(row["corrects_seq"])
+            if corrected is None or corrected.get("sent_status") != "sent":
+                _invalid(
+                    row_path,
+                    "correction must reference an existing sent reply",
+                )
+        prior_by_seq[row["seq"]] = row
+
+
+def validate_stored_reply_sequence_identity(
+    details: dict[str, Any], *, finding_slug: str
+) -> None:
+    """Fail read projections when reply identity cannot select one exact version."""
+
+    if "replies" not in details:
+        return
+    try:
+        _validate_reply_sequence_identity(
+            details["replies"],
+            path="details.replies",
+            status_code=status.HTTP_409_CONFLICT,
+        )
+    except HTTPException as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"finding {finding_slug!r} has a corrupt reply thread: {exc.detail}",
+        ) from exc
+
+
 def validate_finding_details(
     details: dict[str, Any] | None,
     *,
     already_stored_keys: frozenset[str] | set[str] = frozenset(),
+    existing_details: dict[str, Any] | None = None,
+    effective_details: dict[str, Any] | None = None,
 ) -> None:
     """Validate the details keys a write AUTHORS against the canonical vocabulary.
 
@@ -627,5 +756,16 @@ def validate_finding_details(
                 ),
             )
         if value is None:
+            continue
+        if key == "replies":
+            effective_value = (
+                effective_details.get(key, value)
+                if effective_details is not None
+                else value
+            )
+            _validate_reply_versions(
+                effective_value,
+                existing_value=(existing_details or {}).get(key),
+            )
             continue
         _validate_schema_value(value, schema, path=f"details.{key}")

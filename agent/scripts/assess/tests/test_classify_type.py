@@ -253,7 +253,7 @@ def test_api_route_wins_over_lexical_auth() -> None:
 # Cross-corpus pocket of high-value AUTH-MANAGEMENT routes (password reset,
 # account activation/unlock, signup/registration, email verification) that the
 # original auth set (`login|signin|sso|...`) did not cover, so they landed
-# `type='unknown'`. Confirmed real examples: acme-agency-example's camelCase
+# `type='unknown'`. Confirmed corpus examples: the nested route fixtures's camelCase
 # `/efi/security/forgotPassword`, `/efi/security/activateUserAccount`,
 # `/efi/security/unlockUserAccount`, `/efi/signup`; acme's hyphenated
 # `/forgot-password`. These are prime ATO surfaces and must be rescued to
@@ -268,7 +268,7 @@ def test_api_route_wins_over_lexical_auth() -> None:
         # password reset / forgot — hyphenated and camelCase-lowercased
         "/forgot-password",
         "/forgotpassword",
-        "/efi/security/forgotPassword",  # acme-agency-example camelCase + /security/ prefix
+        "/efi/security/forgotPassword",  # public-sector camelCase + /security/ prefix
         "/reset-password",
         "/resetpassword",
         "/efi/security/resetPassword",
@@ -277,10 +277,10 @@ def test_api_route_wins_over_lexical_auth() -> None:
         # account activation / unlock
         "/activate",
         "/activate-account",
-        "/efi/security/activateUserAccount",  # acme-agency-example camelCase
+        "/efi/security/activateUserAccount",  # public-sector camelCase
         "/unlock",
         "/unlock-account",
-        "/efi/security/unlockUserAccount",  # acme-agency-example camelCase
+        "/efi/security/unlockUserAccount",  # public-sector camelCase
         # account recovery
         "/recover",
         "/recovery",
@@ -288,7 +288,7 @@ def test_api_route_wins_over_lexical_auth() -> None:
         # signup / registration
         "/signup",
         "/sign-up",
-        "/efi/signup",  # acme-agency-example
+        "/efi/signup",  # nested route fixtures
         "/register",
         "/registration",
         # email verification

@@ -88,8 +88,8 @@ promoted finding's narrative fields) — not a precondition of this checkpoint.
 |-------|-------|
 | Finding | `status=active`, `verification_status=unreviewed`, severity per `agent/rules/triage.md` §2, `details.timeline[]` (UTC ISO-8601 with `source_file` and `command_run_id` citations per `agent/rules/ir-evidence.md` rule 3), `details.iocs[]`, `details.mitre_techniques[]`, `details.confidence`, `details.severity_rationale` |
 | Intel rows | `vigil assess intel record <type>` for each new IOC; `<type>` ∈ `{domain, email, dns-record, cve, breach-record, note}` |
-| Finding↔intel links | `assessment_finding_links` rows created automatically by `intel record --finding <slug>` |
-| Artifacts | Every raw pull registered under `ir/reports/`; every derived analysis under `ir/evidence/`; PII-bearing exports marked `--sensitive` |
+| Finding↔intel links | `vigil assess finding link <slug> --intel <intel-id>` (repeatable) after each `intel record`; `cve` rows can instead carry `linked_finding_slug` in the record payload |
+| Artifacts | Every raw pull registered under `ir/reports/`; every derived analysis under `ir/evidence/`; PII-bearing exports indexed verbatim |
 | Handoff JSON | `disposition=null` (L2 NEVER sets disposition), `evidence_refs[]` (artifact IDs), `coverage_gaps[]`, `mitre_techniques[]`, `tenant_ref_paths_consulted[]`, `cross_platform_correlation_notes` when `platforms.length > 1` |
 
 ## Telemetry Pull Discipline
@@ -164,8 +164,8 @@ paragraph documents:
   mapping, missing logs
 
 Per `agent/rules/triage.md` §14, the verifier flags a missing cross-source
-timeline as a `coverage_gaps` entry — that gap blocks `verified` disposition
-on the multi-platform finding.
+timeline as a `coverage_gaps` entry — that gap blocks a `confirmed` verification
+status on the multi-platform finding.
 
 ## IOC Enrichment
 
@@ -178,8 +178,9 @@ inline for small dispatches; hand off in parallel to `osint-analyst` when:
   enrichment" section)
 - Dispatch budget is tight and parallelism saves wall-clock time
 
-Linking is automatic via `intel record --finding <slug>`; verify with
-`vigil assess fetch finding-links --slug <slug>`.
+`intel record` does NOT link — attach each recorded row explicitly with
+`vigil assess finding link <slug> --intel <intel-id>` (repeatable), and verify with
+`vigil assess finding get <slug>` (`details.related_intel_ids`).
 
 ## Required Behavior
 
@@ -189,7 +190,7 @@ Linking is automatic via `intel record --finding <slug>`; verify with
   criteria (`high`/`medium`/`low`) are canonical in `agent/shared-constraints-blue.md`
   §8 (in your Load First)
 - Severity follows the MITRE technique and proved impact, not the alert's `severity_hint`. A `high` finding must satisfy the `high` row of `agent/rules/triage.md` §2
-- Cross-tenant artifacts NEVER enter the engagement evidence tree. Cross-tenant indicators surface as redacted `intel-note` cross-tenant claims
+- Cross-tenant artifacts NEVER enter the engagement evidence tree. Cross-tenant indicators surface as scope-boundary `intel-note` claims without copying the out-of-scope raw row
 - Stay read-only. WRITE-class actions (containment, account state mutations, mailbox-rule deletions) belong to L4 via `vigil blue propose-contain` and operator-approved execution. An L2 dispatch that runs a WRITE has destroyed evidence
 - Leave `verification_status=unreviewed`. If you want to change it, you have crossed into L3's lane — record the evidence ladder and stop
 
@@ -208,14 +209,13 @@ Before your dispatch returns, run in this order:
      --kind <ir_log|ir_evidence|timeline|ioc_dump> \
      --finding <finding-slug> \
      --agent-id <id> \
-     --command-run-id <id> \
-     [--sensitive]
+     --command-run-id <id>
    ```
 
    Register each durable output explicitly so the backend records the correct
    producer, command-run, and finding linkage.
 
-   Mark `--sensitive` on PII-bearing exports (mailbox content, full sign-in history, IAM principal listings).
+   PII-bearing exports are indexed and rendered verbatim.
 
 2. **Mark transient working notes as scratch.**
 
@@ -225,7 +225,7 @@ Before your dispatch returns, run in this order:
 
 3. **Promote the L1 draft finding.** `vigil assess finding update <slug> --status active --details-inline '{"timeline":[...],"iocs":[...],"mitre_techniques":[...],"confidence":"...","severity_rationale":"..."}'`. `verification_status` stays `unreviewed`; `finding verify` owns that transition.
 
-4. **Record intel rows for every IOC** via `vigil assess intel record <type> <intel-json> --finding <slug>`. The link to the finding is created automatically.
+4. **Record intel rows for every IOC** via `vigil assess intel record <type> <intel-json>`, then attach each returned row id to the finding with `vigil assess finding link <slug> --intel <intel-id>` — `intel record` never links on its own.
 
 5. **Record activity entries** for state-changing events:
    ```bash
@@ -270,9 +270,9 @@ The following turn an L2 finding into a guess the verifier cannot evaluate:
 ## Re-Investigation Mode
 
 When the operator dispatches L2 with `mode=re_investigate` after an L3
-`escalated` disposition or an operator-initiated re-pull:
+`disputed` verification status or an operator-initiated re-pull:
 
-- The dispatch carries the L3 handoff's `escalated` reasons and the gaps the
+- The dispatch carries the L3 handoff's `disputed` reasons and the gaps the
   verifier could not close
 - Re-pull only the rungs the L3 handoff named as insufficient — not the full ladder
 - `details.timeline[]` is **appended** (not replaced); prior rungs stay so the

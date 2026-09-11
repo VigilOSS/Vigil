@@ -33,12 +33,12 @@ earliest proof.
 
 DNS and the frp server are outside the local CLI:
 
-- Delegate the OOB zone with an NS record such as `oob NS oob-relay.example.com`. The NS
+- Delegate the OOB zone with an NS record such as `oob NS <frp-host>`. The NS
   value MUST be the frp host's NAME, never a raw IP — a hostname lets the delegation track
   the frp host's address automatically (its A record is kept current by the EC2→Route53
   dynamic-DNS Lambda). A literal-IP NS silently breaks every interactsh client with
   `no address found for host` once the frp host's IP changes.
-- Keep wildcard HTTP routing for the frp HTTP domain, such as `*.rp.example.com`.
+- Keep wildcard HTTP routing for the frp HTTP domain, such as `*.<frp-http-domain>`.
 - Allow the frps bind port, OOB DNS UDP 53, HTTP/HTTPS, and any listener ports on the server
   security group.
 
@@ -49,20 +49,21 @@ Store the frp token in `vigil config`, not tracked docs — secrets in version c
 Configure once per workstation or install:
 
 ```bash
-vigil config set oob.frp_host oob-relay.example.com
+vigil config set oob.frp_host <frp-host>
 vigil config set oob.frp_port 7000
-vigil config set oob.domain oob.example.com
+vigil config set oob.domain <configured-oob-domain>
 vigil config set oob.frp_token <token>
 ```
 
-Fresh installs persist an isolated tenant domain and FRP port block under
-`.runtime-data/oob/tenant-routing.json`. Inspect that authoritative allocation with
+After both endpoints are configured, installation persists an isolated tenant domain and FRP port
+block under `.runtime-data/oob/tenant-routing.json`. Inspect that authoritative allocation with
 `vigil oob routing --format all`; apply its DNS/Caddy output to the shared edge before relying on callbacks.
 Existing single-tenant installs retain their legacy domain and ports until an explicitly
 coordinated migration. See README "Per-tenant OOB routing and upgrade behavior" for the deployment
 contract.
 
-Defaults exist for host, port, and base OOB domain, but `oob.frp_token` is required. Environment
+There is no built-in host or domain. The port defaults to `7000`, while `oob.frp_host`,
+`oob.domain`, and `oob.frp_token` are required. Environment
 variables override config where allowed; a persisted tenant route rejects a conflicting ambient
 OOB domain so callback correlation cannot move silently:
 

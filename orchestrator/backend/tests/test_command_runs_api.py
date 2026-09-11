@@ -1839,7 +1839,6 @@ def test_generic_upsert_cannot_rebind_verified_snapshot_metadata_or_provenance(
             "preview_text": "attacker",
             "indexed_text": "attacker",
         },
-        sensitive=True,
         producer_agent_id="attacker-agent",
         producer_agent_role="attacker-role",
         producer_command_run_id=int(other_run["id"]),

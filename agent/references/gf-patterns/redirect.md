@@ -1,7 +1,7 @@
 ---
 name: gf-patterns:redirect
 description: Return-URL parameter patterns that signal open-redirect and OAuth redirect surfaces
-origin: 1ndianl33t/Gf-Patterns (+ local overlay)
+origin: 1ndianl33t/Gf-Patterns@f686f06ae647726578920084c894100d702496cc (+ local overlay)
 bucket: redirect
 skill: open-redirect-testing
 weight: 25
@@ -78,7 +78,7 @@ None — redirect is keyed entirely off parameter names.
 
 - [1ndianl33t/Gf-Patterns](https://github.com/1ndianl33t/Gf-Patterns) — canonical community pattern set
 - [tomnomnom/gf](https://github.com/tomnomnom/gf) — tool
-- [PayloadsAllTheThings Open Redirect](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Open%20Redirect)
+- [PayloadsAllTheThings Open Redirect](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/3ac27901c711bdf3f5b65a7b1d1820a1f65bd09a/Open%20Redirect)
 
 ## Related
 

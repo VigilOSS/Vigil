@@ -26,7 +26,7 @@ def _msg(**kwargs):
 
     defaults = dict(
         sender="Acme Bank Security <security@acme-bank.example>",
-        recipients=("researcher@example.com",),
+        recipients=("tester@researcher.example",),
         subject="Your verification code",
         body="Your Acme Bank verification code is 482915. It expires in 10 minutes.",
         received_at=datetime(2026, 6, 22, 12, 0, 0, tzinfo=UTC),
@@ -71,7 +71,7 @@ def test_filter_messages_by_mailbox_and_domain_from():
 
     kept = filter_messages(
         [on_target, wrong_mailbox, wrong_sender],
-        mailbox_address="researcher@example.com",
+        mailbox_address="tester@researcher.example",
         from_filter="@acme-bank.example",
     )
     assert kept == [on_target]
@@ -82,7 +82,7 @@ def test_filter_messages_can_narrow_rewritten_relay_sender_by_subject():
 
     acme = _msg(
         sender="Mail Forwarder <mail-forwarder@wearehackerone.com>",
-        recipients=("researcher+pc1@example.com",),
+        recipients=("researcher+pc1@security.example",),
         subject="Your Acme Planner verification code",
     )
     unrelated = _msg(
@@ -93,7 +93,7 @@ def test_filter_messages_can_narrow_rewritten_relay_sender_by_subject():
 
     kept = filter_messages(
         [acme, unrelated],
-        mailbox_address="researcher+pc1@example.com",
+        mailbox_address="researcher+pc1@security.example",
         subject_filter="acme planner",
     )
 
@@ -110,7 +110,7 @@ def test_filter_messages_orders_newest_first_and_respects_since():
 
     kept = filter_messages(
         [older, recent, too_old],
-        mailbox_address="researcher@example.com",
+        mailbox_address="tester@researcher.example",
         since=now - timedelta(minutes=3),
     )
     assert kept == [recent, older]
@@ -139,7 +139,7 @@ def test_email_cli_json_extracts_code(monkeypatch, capsys):
     monkeypatch.setattr(email_module, "read_messages", fake_read)
 
     # JSON path prints and returns normally (no SystemExit).
-    main(["email", "researcher@example.com", "--from", "@acme-bank.example", "--json"])
+    main(["email", "tester@researcher.example", "--from", "@acme-bank.example", "--json"])
 
     out = capsys.readouterr().out
     import json as _json
@@ -157,7 +157,7 @@ def test_email_cli_no_matches_exits_nonzero(monkeypatch, capsys):
     monkeypatch.setattr(email_module, "read_messages", lambda **_: [])
 
     with pytest.raises(SystemExit) as exc:
-        main(["email", "researcher@example.com"])
+        main(["email", "tester@researcher.example"])
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "no messages" in err
@@ -169,7 +169,7 @@ def test_filter_messages_deduplicates_aggregate_and_account_views():
     received = datetime(2026, 8, 24, 23, 41, 29, tzinfo=UTC)
     aggregate = _msg(
         sender="Acme Planner <mail-forwarder@wearehackerone.com>",
-        recipients=("researcher@example.com",),
+        recipients=("researcher@security.example",),
         subject="Acme Planner Groups People CSV Export Download Link.",
         body="Your CSV export is ready.",
         received_at=received,
@@ -182,13 +182,13 @@ def test_filter_messages_deduplicates_aggregate_and_account_views():
         subject=aggregate.subject,
         body=aggregate.body,
         received_at=received,
-        account="Example Operator",
+        account="Security Research",
         mailbox="INBOX",
     )
 
     kept = filter_messages(
         [aggregate, account_view],
-        mailbox_address="researcher@example.com",
+        mailbox_address="researcher@security.example",
     )
 
     assert kept == [aggregate]
@@ -199,7 +199,7 @@ def test_extract_links_decodes_hidden_html_href_from_raw_mime_source():
 
     raw_source = """\
 From: Acme Planner <mail-forwarder@wearehackerone.com>
-To: researcher@example.com
+To: researcher@security.example
 MIME-Version: 1.0
 Content-Type: text/html; charset=UTF-8
 Content-Transfer-Encoding: quoted-printable
@@ -235,7 +235,7 @@ def test_email_cli_waits_for_delayed_message_without_moving_cutoff(monkeypatch, 
     main(
         [
             "email",
-            "researcher@example.com",
+            "tester@researcher.example",
             "--wait-seconds",
             "5",
             "--poll-seconds",
@@ -270,7 +270,7 @@ def test_email_cli_wait_retries_transient_mail_app_error(monkeypatch, capsys):
     main(
         [
             "email",
-            "researcher@example.com",
+            "tester@researcher.example",
             "--wait-seconds",
             "5",
             "--poll-seconds",
@@ -303,7 +303,7 @@ def test_email_cli_links_reads_message_source_only_when_requested(monkeypatch, c
 
     monkeypatch.setattr(email_module, "read_messages", fake_read)
 
-    main(["email", "researcher@example.com", "--links", "--json"])
+    main(["email", "tester@researcher.example", "--links", "--json"])
 
     payload = json.loads(capsys.readouterr().out)
     assert captured["include_source"] is True
@@ -336,7 +336,7 @@ def test_email_cli_passes_subject_filter(monkeypatch, capsys):
     main(
         [
             "email",
-            "researcher@example.com",
+            "tester@researcher.example",
             "--subject",
             "acme planner",
             "--json",
@@ -565,7 +565,7 @@ def _run_jxa_scan(
 def _inbox_account(minutes: list[int], *, ids: list[str] | None = None) -> list[dict]:
     return [
         {
-            "name": "example-operatoreng",
+            "name": "example-team",
             "mailboxes": [{"name": "INBOX", "minutes": minutes, "ids": ids}],
         }
     ]
@@ -606,7 +606,7 @@ def test_jxa_oldest_first_mailbox_walks_the_newest_end_first():
     # ...and because the window stopped the scan short, the zero-beyond-this is
     # explicitly NOT authoritative.
     assert result.complete is False
-    assert result.truncated == ["example-operatoreng/INBOX"]
+    assert result.truncated == ["example-team/INBOX"]
 
 
 @requires_node
@@ -633,7 +633,7 @@ def test_jxa_round_robin_paging_reaches_spam_before_the_window_closes():
     result = _run_jxa_scan(
         accounts=[
             {
-                "name": "example-operatoreng",
+                "name": "example-team",
                 "mailboxes": [
                     {"name": "INBOX", "minutes": [60 + i for i in range(200)]},
                     {"name": "Spam", "minutes": [1]},
@@ -650,7 +650,7 @@ def test_jxa_round_robin_paging_reaches_spam_before_the_window_closes():
     assert result.mailboxes == ["Spam"]
     # The Inbox is the folder that ran out of window, and it is named as such.
     assert result.complete is False
-    assert result.truncated == ["example-operatoreng/INBOX"]
+    assert result.truncated == ["example-team/INBOX"]
     scanned = {(m["mailbox"], m["complete"]) for m in result.coverage["mailboxes"]}
     assert ("Spam", True) in scanned
 
@@ -669,7 +669,7 @@ def test_jxa_candidate_limit_bounds_the_scan_and_is_reported_honestly():
     assert bounded.examined == 500
     assert bounded.minutes == [1]  # the newest end is reached first
     assert bounded.complete is False
-    assert bounded.truncated == ["example-operatoreng/INBOX"]
+    assert bounded.truncated == ["example-team/INBOX"]
     assert any("candidate window" in err for err in bounded.scan_errors)
     # The harness counts every dateReceived() call; the only touches beyond the
     # examined window are the two endpoint probes used for direction detection.
@@ -712,7 +712,7 @@ def test_jxa_message_id_dedup_collapses_duplicate_folder_views():
     result = _run_jxa_scan(
         accounts=[
             {
-                "name": "example-operatoreng",
+                "name": "example-team",
                 "mailboxes": [
                     {"name": "INBOX", "minutes": [1], "ids": ["otp@fixture.invalid"]},
                     {"name": "All Mail", "minutes": [1], "ids": ["otp@fixture.invalid"]},
@@ -863,7 +863,7 @@ def test_email_cli_accepts_a_duration_for_within(monkeypatch, capsys):
         email_module, "read_messages", lambda **_: [_msg(received_at=datetime.now(UTC))]
     )
 
-    main(["email", "researcher@example.com", "--within", "10m", "--json"])
+    main(["email", "tester@researcher.example", "--within", "10m", "--json"])
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["within_minutes"] == 10
@@ -873,7 +873,7 @@ def test_email_cli_rejects_a_malformed_within_naming_the_accepted_forms(capsys):
     from vigil_cli.main import main
 
     with pytest.raises(SystemExit) as exc:
-        main(["email", "researcher@example.com", "--within", "10x"])
+        main(["email", "tester@researcher.example", "--within", "10x"])
 
     assert exc.value.code == 2
     err = capsys.readouterr().err
@@ -913,7 +913,7 @@ def test_email_cli_json_timeout_is_an_error_and_exits_nonzero(monkeypatch, capsy
     monkeypatch.setattr(email_module, "read_messages", fake_read)
 
     with pytest.raises(SystemExit) as exc:
-        main(["email", "researcher@example.com", "--json"])
+        main(["email", "tester@researcher.example", "--json"])
 
     assert exc.value.code == 1
     payload = json.loads(capsys.readouterr().out)
@@ -934,7 +934,7 @@ def test_email_cli_text_timeout_exits_nonzero_with_the_error(monkeypatch, capsys
     monkeypatch.setattr(email_module, "read_messages", fake_read)
 
     with pytest.raises(SystemExit) as exc:
-        main(["email", "researcher@example.com"])
+        main(["email", "tester@researcher.example"])
 
     assert exc.value.code != 0
     assert "timed out" in str(exc.value)
@@ -960,7 +960,7 @@ def test_email_cli_json_truncated_scan_is_reported_as_truncated(monkeypatch, cap
     )
 
     with pytest.raises(SystemExit) as exc:
-        main(["email", "researcher@example.com", "--json"])
+        main(["email", "tester@researcher.example", "--json"])
 
     assert exc.value.code == 1
     payload = json.loads(capsys.readouterr().out)
@@ -978,7 +978,7 @@ def test_email_cli_json_status_is_ok_on_an_authoritative_match(monkeypatch, caps
         email_module, "read_messages", lambda **_: [_msg(received_at=datetime.now(UTC))]
     )
 
-    main(["email", "researcher@example.com", "--json"])
+    main(["email", "tester@researcher.example", "--json"])
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "ok"
@@ -996,30 +996,30 @@ def test_email_cli_json_status_is_ok_on_an_authoritative_match(monkeypatch, caps
 def test_filter_messages_matches_plus_addressed_recipient():
     from vigil_cli.email import filter_messages
 
-    tagged = _msg(recipients=("researcher@example.com",))
+    tagged = _msg(recipients=("tester+lane2@researcher.example",))
 
-    assert filter_messages([tagged], mailbox_address="researcher@example.com") == [tagged]
+    assert filter_messages([tagged], mailbox_address="tester@researcher.example") == [tagged]
     # The tagged form still resolves to itself.
     assert filter_messages(
-        [tagged], mailbox_address="researcher@example.com"
+        [tagged], mailbox_address="tester+lane2@researcher.example"
     ) == [tagged]
 
 
 def test_filter_messages_plus_query_does_not_match_a_sibling_alias():
     from vigil_cli.email import filter_messages
 
-    lane1 = _msg(recipients=("researcher@example.com",))
+    lane1 = _msg(recipients=("tester+lane1@researcher.example",))
 
-    assert filter_messages([lane1], mailbox_address="researcher@example.com") == []
+    assert filter_messages([lane1], mailbox_address="tester+lane2@researcher.example") == []
     # ...and not a different base localpart that merely shares the domain.
-    assert filter_messages([lane1], mailbox_address="researcher@example.com") == []
+    assert filter_messages([lane1], mailbox_address="other@researcher.example") == []
 
 
 def test_filter_messages_mailbox_accepts_the_documented_bare_domain_form():
     """The docstring always promised `acme-bank.example`; only `@acme-bank.example` used to work."""
     from vigil_cli.email import filter_messages
 
-    message = _msg(recipients=("researcher@example.com",))
+    message = _msg(recipients=("tester+lane1@researcher.example",))
 
     assert filter_messages([message], mailbox_address="researcher.example") == [message]
     assert filter_messages([message], mailbox_address="@researcher.example") == [message]
@@ -1030,13 +1030,13 @@ def test_subaddress_aliases_names_the_siblings_a_tagged_query_missed():
     from vigil_cli.email import subaddress_aliases
 
     messages = [
-        _msg(recipients=("researcher@example.com",)),
-        _msg(recipients=("researcher@example.com", "researcher@example.com")),
+        _msg(recipients=("tester+lane1@researcher.example",)),
+        _msg(recipients=("tester@researcher.example", "other@researcher.example")),
     ]
 
-    assert subaddress_aliases(messages, "researcher@example.com") == [
-        "researcher@example.com",
-        "researcher@example.com",
+    assert subaddress_aliases(messages, "tester+lane2@researcher.example") == [
+        "tester+lane1@researcher.example",
+        "tester@researcher.example",
     ]
     # A domain filter has no base address to compare aliases against.
     assert subaddress_aliases(messages, "@researcher.example") == []
@@ -1051,7 +1051,7 @@ def test_email_cli_zero_for_a_tagged_query_names_the_aliases_it_saw(monkeypatch,
         "read_messages",
         lambda **_: [
             _msg(
-                recipients=("researcher@example.com",),
+                recipients=("tester+lane1@researcher.example",),
                 received_at=datetime.now(UTC),
             )
         ],
@@ -1059,10 +1059,10 @@ def test_email_cli_zero_for_a_tagged_query_names_the_aliases_it_saw(monkeypatch,
 
     # An authoritative zero is a real measurement, so the JSON path returns 0;
     # what it must not do is stay silent about why the zero happened.
-    main(["email", "researcher@example.com", "--json"])
+    main(["email", "tester+lane2@researcher.example", "--json"])
 
     captured = capsys.readouterr()
-    assert "researcher@example.com" in captured.err
+    assert "tester+lane1@researcher.example" in captured.err
     payload = json.loads(captured.out)
     assert payload["count"] == 0
-    assert payload["subaddress_aliases"] == ["researcher@example.com"]
+    assert payload["subaddress_aliases"] == ["tester+lane1@researcher.example"]

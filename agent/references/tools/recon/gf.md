@@ -27,8 +27,12 @@ vigil assess kali gf --list
 
 ## Install layout
 
-`gf` is a Go tool installed from `github.com/tomnomnom/gf`. The runtime image preloads it
-plus community patterns from `github.com/1ndianl33t/Gf-Patterns` into `/root/.gf/`.
+`gf` is installed from
+`github.com/tomnomnom/gf@dcd4c361f9f5ba302294ed38b8ce278e8ba69006`. The runtime image
+preloads community patterns from
+`github.com/1ndianl33t/Gf-Patterns@f686f06ae647726578920084c894100d702496cc` into `/root/.gf/`.
+Both upstreams are MIT-licensed; copyright notices and exact license text are retained in
+`THIRD_PARTY_NOTICES.md`.
 
 Pattern discovery order (first match wins):
 1. `$GF_DIR` (if set)

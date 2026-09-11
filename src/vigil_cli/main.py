@@ -25,6 +25,9 @@ from .docker import run_command as docker_run_command
 from .engagements import (
     PROGRAM_HEADER_PRESETS,
     CreateEngagementOptions,
+    _verify_backend_install_root,
+    add_engagement_hosts,
+    add_engagement_track,
     add_out_of_scope,
     clear_active_engagement,
     create_engagement,
@@ -35,6 +38,7 @@ from .engagements import (
     plan_engagement,
     print_shell_cd_init,
     remove_out_of_scope,
+    repair_engagement_tracks,
     resolve_current_engagement,
     resolve_engagement_path,
     resolve_out_of_scope,
@@ -42,6 +46,7 @@ from .engagements import (
     resolve_required_headers,
     set_active_engagement,
     set_engagement_header,
+    set_engagement_rate_limit,
     start_engagement,
     unset_engagement_header,
 )
@@ -128,9 +133,18 @@ def _print_post_install(result: InstallResult) -> None:
     print(
         "Two-layer model: `vigil install`/`update` upgraded the WORKING ROOT "
         "(code/prompts/skills/scripts). `uv tool upgrade vigil` upgrades only the CLI "
-        "binary. `vigil status` warns when the working root falls behind its source."
+        "binary. `vigil status` warns when the working root differs from its source."
     )
     print()
+
+
+def _print_install_dry_run(result: InstallResult) -> None:
+    action = "update" if result.is_upgrade else "install"
+    print(
+        f"[vigil] dry-run: planned {action} of working root "
+        f"{result.install_root}; no changes made",
+        file=sys.stderr,
+    )
 
 
 def _oob_poll_record_limit(raw: str) -> int:
@@ -397,7 +411,7 @@ def main(argv: list[str] | None = None) -> None:
         default=[],
         metavar="NAME: VALUE",
         help="Required request header injected into every in-scope HTTP probe; "
-             "repeatable. e.g. --header \"X-Bug-Bounty: vigiloss\"",
+             "repeatable. e.g. --header \"X-Bug-Bounty: acme-researcher\"",
     )
     create_p.add_argument(
         "--out-of-scope",
@@ -462,6 +476,27 @@ def main(argv: list[str] | None = None) -> None:
     )
     remove_oos_p.add_argument("key")
     remove_oos_p.add_argument("entry")
+    add_track_p = engagement_sub.add_parser(
+        "add-track",
+        help="Explicitly add a web or code track and upgrade the engagement to both",
+    )
+    add_track_p.add_argument("key")
+    add_track_p.add_argument("track", choices=("web", "code"))
+    repair_tracks_p = engagement_sub.add_parser(
+        "repair-tracks",
+        help="Repair a legacy both engagement that is missing code_phase",
+    )
+    repair_tracks_p.add_argument("key")
+    add_host_p = engagement_sub.add_parser(
+        "add-host", help="Add authorization root(s) to canonical scope.json"
+    )
+    add_host_p.add_argument("key")
+    add_host_p.add_argument("entries", nargs="+", metavar="HOST|*.WILDCARD|CIDR")
+    set_rate_p = engagement_sub.add_parser(
+        "set-rate-limit", help="Set the canonical HTTP request-rate ceiling"
+    )
+    set_rate_p.add_argument("key")
+    set_rate_p.add_argument("value", type=float, metavar="REQ_PER_SEC")
     path_p = engagement_sub.add_parser("path")
     path_p.add_argument("key", nargs="?")
     path_p.add_argument("--select", action="store_true")
@@ -612,7 +647,10 @@ def main(argv: list[str] | None = None) -> None:
         "--from",
         dest="from_filter",
         default=None,
-        help="only messages FROM this address or domain (e.g. security@acme-bank.example or @acme-bank.example)",
+        help=(
+            "only messages FROM this address or domain "
+            "(e.g. security@acme-bank.example or @acme-bank.example)"
+        ),
     )
     email_p.add_argument(
         "--subject",
@@ -754,7 +792,7 @@ def main(argv: list[str] | None = None) -> None:
                     "HTTP method the exported args will be used with. Pass a "
                     "state-changing verb (POST/PUT/PATCH/DELETE) to also emit the "
                     "identity's opt-in CSRF double-submit header, matching what "
-                    "`vigil assess kali --identity` injects. Safe methods omit it."
+                    "`vigil assess kali <tool> --identity` injects. Safe methods omit it."
                 ),
             )
     auth_import = auth_sub.add_parser(
@@ -1065,10 +1103,20 @@ def main(argv: list[str] | None = None) -> None:
     assess_p.add_argument("assess_args", nargs=argparse.REMAINDER)
 
     args = parser.parse_args(raw_argv)
-    install_root = resolve_install_root(getattr(args, "install_dir", None) or args.root)
+    sync_command = args.command in {"install", "update", "up"}
+    install_value = getattr(args, "install_dir", None) or args.root
+    install_root = (
+        resolve_install_root(install_value, preserve_path=True)
+        if sync_command
+        else resolve_install_root(install_value)
+    )
 
     if args.command in {"install", "update"}:
-        source_root = resolve_source_root(args.source, install_root=install_root)
+        source_root = resolve_source_root(
+            args.source,
+            install_root=install_root,
+            preserve_path=True,
+        )
         result = install_from_source(
             InstallOptions(
                 source_root=source_root,
@@ -1085,7 +1133,9 @@ def main(argv: list[str] | None = None) -> None:
         if not args.dry_run:
             config_module.set_config_value("install.root", str(result.install_root))
         print(result.install_root)
-        if not args.dry_run:
+        if args.dry_run:
+            _print_install_dry_run(result)
+        else:
             _print_post_install(result)
     elif args.command == "doctor":
         print_doctor(collect_doctor_checks(install_root, runner=docker_run_command))
@@ -1131,6 +1181,11 @@ def main(argv: list[str] | None = None) -> None:
         run_up(
             UpOptions(
                 install_root=install_root,
+                source_root=(
+                    Path(os.path.abspath(Path(args.source).expanduser()))
+                    if args.source
+                    else None
+                ),
                 no_build=args.no_build,
                 runtime_restart_timeout=args.runtime_restart_timeout,
                 yes_restart_runtime=args.yes_restart_runtime,
@@ -1205,9 +1260,13 @@ def _warn_if_install_stale(install_root: Path) -> None:
         return
     installed = str(staleness.get("installed_sha") or "unstamped")[:12]
     current = str(staleness.get("current_source_sha") or "unknown")[:12]
+    if staleness.get("reason") == "source_content_changed_without_revision":
+        detail = f"source files changed without a new revision at {current}"
+    else:
+        detail = f"installed {installed}, source {current}"
     print(
         f"[vigil] WARN: install root {install_root} is {state} "
-        f"(installed {installed}, source {current}); "
+        f"({detail}); "
         "run `vigil install` to sync it.",
         file=sys.stderr,
         flush=True,  # execvpe replaces this process without flushing Python buffers
@@ -1384,6 +1443,26 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
     elif command == "remove-oos":
         entries = remove_out_of_scope(install_root, args.key, args.entry)
         print(f"[vigil] {args.key} out_of_scope: {json.dumps(entries)}", file=sys.stderr)
+    elif command in {"add-track", "repair-tracks", "add-host", "set-rate-limit"}:
+        mutation_result: object
+        if command == "add-track":
+            mutation_result = add_engagement_track(install_root, args.key, args.track)
+        elif command == "repair-tracks":
+            mutation_result = repair_engagement_tracks(install_root, args.key)
+        elif command == "add-host":
+            mutation_result = add_engagement_hosts(install_root, args.key, args.entries)
+        else:
+            mutation_result = set_engagement_rate_limit(install_root, args.key, args.value)
+        eng_dir = install_root / "agent" / "engagements" / args.key
+        if not _verify_backend_install_root(install_root, eng_dir):
+            raise SystemExit(
+                f"scope mutation committed at {eng_dir / 'scope.json'}, but backend "
+                "sync was not confirmed. Start or restart the orchestrator against "
+                f"`vigil --root {install_root}`, then run `vigil status`; the local "
+                "scope change remains durable."
+            )
+        request_proxy_reload(eng_dir.parent)
+        print(json.dumps(mutation_result, indent=2, sort_keys=True))
     elif command == "path":
         print(_resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select))
     elif command == "current":
@@ -1509,7 +1588,7 @@ def _engagement_create(args: argparse.Namespace, install_root: Path) -> None:
                     )
                     asked = True
                 elif header_choice == "custom":
-                    args.header.append(_ask_required('Header (e.g. "X-Bug-Bounty: vigiloss")'))
+                    args.header.append(_ask_required('Header (e.g. "X-Bug-Bounty: acme-researcher")'))
                     asked = True
             if not args.out_of_scope:
                 oos_raw = _ask_optional(

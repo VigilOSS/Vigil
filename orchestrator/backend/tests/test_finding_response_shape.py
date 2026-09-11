@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 
 ENGAGEMENT_KEY = "2026-08-20-finding-shape"
+AUTHOR_AGENT_ID = "FINDING-SHAPE-AUTHOR"
 
 
 def _base() -> str:
@@ -31,6 +32,15 @@ def _seed(client, isolate_settings) -> None:
     )
     (engagement_dir / "findings.md").write_text("# Findings\n", encoding="utf-8")
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    dispatch = client.post(
+        f"{_base()}/dispatches",
+        json={
+            "agent_id": AUTHOR_AGENT_ID,
+            "agent_role": "vulnerability-analyst",
+            "task": "Record finding-shape fixture rows",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
 
 
 def _payload(slug: str, **over) -> dict:
@@ -54,7 +64,10 @@ def _payload(slug: str, **over) -> dict:
             "steps_to_reproduce": ["GET /api/users/2 as an anonymous caller."],
             "remediation": "Enforce object-level authorization.",
         },
-        "provenance": {"agent_name": "vulnerability-analyst"},
+        "provenance": {
+            "agent_id": AUTHOR_AGENT_ID,
+            "agent_name": "vulnerability-analyst",
+        },
     }
     payload.update(over)
     return payload

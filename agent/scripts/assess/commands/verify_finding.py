@@ -12,7 +12,7 @@ from assess.lib.client import (
     require_finding_write_response,
 )
 from assess.lib.config import load_config
-from assess.lib.contracts import render_contract_epilog
+from assess.lib.contracts import VERIFICATION_TRANSITION_STATUSES, render_contract_epilog
 from assess.lib.json_inputs import parse_json_argument, parse_optional_inline_json
 from assess.lib.schema_validation import collect_patch_validation_errors, load_schema
 
@@ -46,7 +46,7 @@ def register(subparsers) -> None:
     p.add_argument(
         "--status",
         dest="verification_status",
-        choices=("confirmed", "downgraded", "pending_runtime_proof", "blocked", "false_positive", "disputed"),
+        choices=VERIFICATION_TRANSITION_STATUSES,
         help=(
             "Verification status when building the payload from flags. 'blocked' "
             "requires a block_reason (pass via --details-inline '{\"block_reason\": \"...\"}' "
@@ -89,7 +89,7 @@ def register(subparsers) -> None:
     p.set_defaults(func=run)
 
 
-_KNOWN_STATUSES = frozenset({"confirmed", "downgraded", "pending_runtime_proof", "blocked", "false_positive", "disputed"})
+_KNOWN_STATUSES = frozenset(VERIFICATION_TRANSITION_STATUSES)
 
 _CONTENT_FLAGS = (
     ("verification_status", "--status"),

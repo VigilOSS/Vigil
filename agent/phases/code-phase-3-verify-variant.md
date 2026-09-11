@@ -178,7 +178,7 @@ contradicts a Phase 2 finding (e.g., discovers a guard the original hunter misse
 #### Handling spot-check findings
 
 If the verifier's clean-file spot-check discovers a missed vulnerability:
-1. Record the finding via `vigil assess finding record code-vuln-verifier <finding-json>`
+1. Record the finding via `vigil assess finding record code-vuln-verifier <finding-json> --agent-id <your-agent_id>`
 2. Dispatch the file back to Phase 2B with a CWE directive targeting the missed class
 3. After re-analysis completes, re-check the effort matrix for the affected file
 
@@ -201,7 +201,7 @@ vigil assess finding update <slug> --reason "<why the prior verdict no longer ho
 # must be promoted explicitly; a confirmed-but-draft finding blocks fuzz and completion.
 vigil assess finding update <slug> --reason "Verification retained this finding" --status active
 # Record variant findings (new findings)
-vigil assess finding record code-variant-hunter <variant-finding-json>
+vigil assess finding record code-variant-hunter <variant-finding-json> --agent-id <your-agent_id>
 # Record one durable completion receipt for every current admitted file, including quick non-matches.
 # Set dispatch_id to variant_dispatch_id and repeat the exact registered parent_finding_slugs set.
 vigil assess contract code-record variant-check

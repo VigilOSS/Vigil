@@ -1,0 +1,42 @@
+name: Bug report
+description: Report a reproducible Vigil defect without private engagement data
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials, customer data, or unauthorized target information. Use private vulnerability reporting for security issues.
+  - type: input
+    id: version
+    attributes:
+      label: Vigil revision/version
+      placeholder: commit ID or version
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Observed behavior
+      description: Include the exact non-sensitive error and exit status.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Use synthetic targets and sanitized fixtures only.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python, Docker, client, and relevant configuration without secrets.
+    validations:
+      required: true

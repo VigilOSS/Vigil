@@ -1,4 +1,6 @@
 **/__pycache__/*
+.DS_Store
+**/.DS_Store
 **/.pytest_cache/
 **/.venv/
 **/node_modules/
@@ -21,8 +23,21 @@ workspace/
 opencode-home/
 agent/engagements/*
 !agent/engagements/.gitkeep
+
+# Tenant references and engagement analysis are operator-local data. Only
+# fictional templates belong in the distributable source tree.
+agent/references/tenants/*
+!agent/references/tenants/_template-*.md
+tools/analysis-state/
+
+# Preserve the synthetic classifier contract, not the real-target labeling
+# corpus used to derive it.
+docs/research/classify-surface-2026-06/*
+!docs/research/classify-surface-2026-06/README.md
+!docs/research/classify-surface-2026-06/IMPLEMENTATION-SPEC.md
 CLAUDE-REVIEW.md
 CODEX-FINDINGS.md
+docs/plans/_session-handoff-*.md
 
 # Build artifacts (note: `**/*.egg-info/` is already covered above; `**/build/`
 # catches build/ at any path including the repo root)

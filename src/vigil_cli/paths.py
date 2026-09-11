@@ -41,19 +41,33 @@ def find_repo_root(start: Path | None = None) -> Path | None:
     return None
 
 
-def resolve_install_root(value: str | Path | None = None) -> Path:
+def _resolved_or_preserved(path: Path, *, preserve_path: bool) -> Path:
+    expanded = path.expanduser()
+    if preserve_path:
+        return Path(os.path.abspath(expanded))
+    return expanded.resolve()
+
+
+def resolve_install_root(
+    value: str | Path | None = None, *, preserve_path: bool = False
+) -> Path:
     if value:
-        return Path(value).expanduser().resolve()
+        return _resolved_or_preserved(Path(value), preserve_path=preserve_path)
     env_value = os.environ.get("VIGIL_INSTALL_DIR") or os.environ.get("VIGIL_DIR")
     if env_value:
-        return Path(env_value).expanduser().resolve()
+        return _resolved_or_preserved(Path(env_value), preserve_path=preserve_path)
     config_value = get_config_value("install.root")
     if config_value:
-        return Path(config_value).expanduser().resolve()
-    return DEFAULT_INSTALL_ROOT.expanduser().resolve()
+        return _resolved_or_preserved(Path(config_value), preserve_path=preserve_path)
+    return _resolved_or_preserved(DEFAULT_INSTALL_ROOT, preserve_path=preserve_path)
 
 
-def resolve_source_root(value: str | Path | None = None, *, install_root: Path | None = None) -> Path:
+def resolve_source_root(
+    value: str | Path | None = None,
+    *,
+    install_root: Path | None = None,
+    preserve_path: bool = False,
+) -> Path:
     candidates: list[Path] = []
     if value:
         candidates.append(Path(value).expanduser())
@@ -71,17 +85,17 @@ def resolve_source_root(value: str | Path | None = None, *, install_root: Path |
         candidates.append(cwd_discovered)
 
     for candidate in candidates:
-        resolved = candidate.resolve()
-        if looks_like_repo_root(resolved):
-            return resolved
+        if looks_like_repo_root(candidate):
+            return _resolved_or_preserved(candidate, preserve_path=preserve_path)
 
     cached = _ensure_cached_source()
     if cached is not None:
         return cached
     if install_root is not None:
-        resolved_install_root = install_root.expanduser().resolve()
-        if looks_like_repo_root(resolved_install_root):
-            return resolved_install_root
+        if looks_like_repo_root(install_root):
+            return _resolved_or_preserved(
+                install_root, preserve_path=preserve_path
+            )
 
     raise SystemExit(
         "Cannot locate Vigil source files. Run from a source checkout, "

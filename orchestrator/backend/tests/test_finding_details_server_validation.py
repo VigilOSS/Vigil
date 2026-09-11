@@ -138,7 +138,6 @@ def test_a_key_already_stored_on_the_record_can_always_be_rewritten(seeded) -> N
     repaired = seeded.patch(
         f"{_base()}/findings/VA-001", json={"details": {"legacy_lane_key": "corrected"}}
     )
-
     assert repaired.status_code == 200, repaired.text
     assert (
         seeded.get(f"{_base()}/findings/VA-001").json()["details"]["legacy_lane_key"]
@@ -151,6 +150,293 @@ def test_a_key_already_stored_on_the_record_can_always_be_rewritten(seeded) -> N
         ).status_code
         == 400
     )
+
+
+def test_backend_preserves_sent_reply_bytes_and_accepts_linked_correction(seeded) -> None:
+    sent = {
+        "seq": 1,
+        "platform": "hackerone",
+        "in_response_to": "question",
+        "reply_to_seq": None,
+        "body": "bytes actually sent",
+        "new_evidence": "",
+        "new_evidence_ref": "",
+        "sent_status": "sent",
+        "created_at": "2026-09-11T00:00:00Z",
+        "sent_at": "2026-09-11T00:01:00Z",
+        "author": "report-writer",
+    }
+    stored = seeded.patch(
+        f"{_base()}/findings/VA-001", json={"details": {"replies": [sent]}}
+    )
+    assert stored.status_code == 200, stored.text
+
+    rewritten = seeded.patch(
+        f"{_base()}/findings/VA-001",
+        json={"details": {"replies": [{**sent, "body": "rewritten"}]}},
+    )
+    assert rewritten.status_code == 409, rewritten.text
+    assert "immutable" in rewritten.json()["detail"]
+
+    correction = {
+        **sent,
+        "seq": 2,
+        "body": "corrected bytes",
+        "sent_status": "draft",
+        "sent_at": None,
+        "corrects_seq": 1,
+        "event_type": "correction",
+    }
+    appended = seeded.patch(
+        f"{_base()}/findings/VA-001",
+        json={"details": {"replies": [sent, correction]}},
+    )
+    assert appended.status_code == 200, appended.text
+
+
+def test_backend_refuses_details_replace_that_drops_a_sent_reply(seeded) -> None:
+    sent = {
+        "seq": 1,
+        "platform": "hackerone",
+        "in_response_to": "question",
+        "reply_to_seq": None,
+        "body": "immutable reply bytes",
+        "new_evidence": "",
+        "new_evidence_ref": "",
+        "sent_status": "sent",
+        "created_at": "2026-09-11T00:00:00Z",
+        "sent_at": "2026-09-11T00:01:00Z",
+        "author": "report-writer",
+    }
+    recorded = seeded.patch(
+        f"{_base()}/findings/VA-001",
+        json={"details": {"replies": [sent]}},
+    )
+    assert recorded.status_code == 200, recorded.text
+
+    refused = seeded.patch(
+        f"{_base()}/findings/VA-001",
+        json={
+            "details": {"impact": "replacement details"},
+            "details_mode": "replace",
+            "expected_row_version": recorded.json()["finding"]["row_version"],
+        },
+    )
+
+    assert refused.status_code == 409, refused.text
+    assert "sent reply seq 1 is immutable" in refused.json()["detail"]
+    fetched = seeded.get(f"{_base()}/findings/VA-001")
+    assert fetched.status_code == 200, fetched.text
+    assert fetched.json()["details"]["replies"] == [sent]
+
+
+def test_backend_rejects_duplicate_reply_sequence_before_persistence(seeded) -> None:
+    first = {
+        "seq": 1,
+        "platform": "hackerone",
+        "in_response_to": "question",
+        "reply_to_seq": None,
+        "body": "authentic reply bytes",
+        "new_evidence": "",
+        "new_evidence_ref": "",
+        "sent_status": "draft",
+        "created_at": "2026-09-11T00:00:00Z",
+        "sent_at": None,
+        "author": "report-writer",
+    }
+    forged = {**first, "body": "forged competing bytes"}
+
+    refused = seeded.patch(
+        f"{_base()}/findings/VA-001",
+        json={"details": {"replies": [first, forged]}},
+    )
+
+    assert refused.status_code == 400, refused.text
+    assert "duplicate reply seq 1" in refused.json()["detail"]
+    assert "replies" not in seeded.get(f"{_base()}/findings/VA-001").json()["details"]
+
+
+def test_finding_get_and_list_refuse_legacy_duplicate_reply_sequences(seeded) -> None:
+    first = {
+        "seq": 1,
+        "platform": "hackerone",
+        "in_response_to": "question",
+        "reply_to_seq": None,
+        "body": "authentic reply bytes",
+        "new_evidence": "",
+        "new_evidence_ref": "",
+        "sent_status": "sent",
+        "created_at": "2026-09-11T00:00:00Z",
+        "sent_at": "2026-09-11T00:01:00Z",
+        "author": "report-writer",
+    }
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_findings SET details_json = ? WHERE slug = ?",
+            (
+                json.dumps({"replies": [first, {**first, "body": "ambiguous bytes"}]}),
+                "VA-001",
+            ),
+        )
+
+    fetched = seeded.get(f"{_base()}/findings/VA-001")
+    listed = seeded.get(f"{_base()}/findings")
+
+    assert fetched.status_code == 409, fetched.text
+    assert "duplicate reply seq 1" in fetched.json()["detail"]
+    assert listed.status_code == 409, listed.text
+    assert "duplicate reply seq 1" in listed.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_detail"),
+    [
+        (lambda row: {key: value for key, value in row.items() if key != "seq"}, "seq is required"),
+        (
+            lambda row: {
+                key: value for key, value in row.items() if key != "author"
+            },
+            "author is required",
+        ),
+        (
+            lambda row: {**row, "sent_status": "sent", "sent_at": None},
+            "sent replies require a nonempty sent_at",
+        ),
+        (
+            lambda row: {
+                **row,
+                "sent_status": "draft",
+                "sent_at": "2026-09-11T00:01:00Z",
+            },
+            "draft replies require sent_at=null",
+        ),
+        (
+            lambda row: {**row, "corrects_seq": 1},
+            "correction replies require event_type='correction' and corrects_seq",
+        ),
+        (
+            lambda row: {**row, "event_type": "correction"},
+            "correction replies require event_type='correction' and corrects_seq",
+        ),
+    ],
+    ids=[
+        "missing-seq",
+        "missing-author",
+        "sent-without-timestamp",
+        "draft-with-timestamp",
+        "correction-without-event",
+        "correction-without-pointer",
+    ],
+)
+def test_backend_requires_complete_reply_version_rows(
+    seeded, mutation, expected_detail
+) -> None:
+    row = {
+        "seq": 1,
+        "platform": "hackerone",
+        "in_response_to": "question",
+        "reply_to_seq": None,
+        "body": "reply bytes",
+        "new_evidence": "",
+        "new_evidence_ref": "",
+        "sent_status": "draft",
+        "created_at": "2026-09-11T00:00:00Z",
+        "sent_at": None,
+        "author": "report-writer",
+    }
+
+    refused = seeded.patch(
+        f"{_base()}/findings/VA-001",
+        json={"details": {"replies": [mutation(row)]}},
+    )
+
+    assert refused.status_code == 400, refused.text
+    assert expected_detail in refused.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("reference_fields", "expected_detail"),
+    [
+        (
+            {"corrects_seq": 999, "event_type": "correction"},
+            "correction must reference an existing sent reply",
+        ),
+        (
+            {"reply_to_seq": 999},
+            "reply_to_seq must reference a prior reply",
+        ),
+    ],
+    ids=["dangling-correction", "dangling-thread-pointer"],
+)
+def test_backend_rejects_dangling_reply_references_on_create(
+    seeded, reference_fields, expected_detail
+) -> None:
+    row = {
+        "seq": 1,
+        "platform": "hackerone",
+        "in_response_to": "question",
+        "reply_to_seq": None,
+        "body": "reply bytes",
+        "new_evidence": "",
+        "new_evidence_ref": "",
+        "sent_status": "draft",
+        "created_at": "2026-09-11T00:00:00Z",
+        "sent_at": None,
+        "author": "report-writer",
+        **reference_fields,
+    }
+
+    refused = seeded.post(
+        f"{_base()}/findings",
+        json=_payload(
+            "VA-002",
+            root_cause_key="distinct-reply-thread",
+            canonical_location="https://app.example/api/replies",
+            details={"replies": [row]},
+        ),
+    )
+
+    assert refused.status_code == 400, refused.text
+    assert expected_detail in refused.json()["detail"]
+
+
+def test_backend_allows_unchanged_incomplete_legacy_reply_when_appending(seeded) -> None:
+    legacy_sent = {
+        "seq": 1,
+        "platform": "hackerone",
+        "in_response_to": "question",
+        "reply_to_seq": None,
+        "body": "legacy sent bytes",
+        "new_evidence": "",
+        "new_evidence_ref": "",
+        "sent_status": "sent",
+        "created_at": "2026-09-11T00:00:00Z",
+        "sent_at": "2026-09-11T00:01:00Z",
+    }
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_findings SET details_json = ? WHERE slug = ?",
+            (json.dumps({"replies": [legacy_sent]}), "VA-001"),
+        )
+    appended = {
+        **legacy_sent,
+        "seq": 2,
+        "body": "new draft bytes",
+        "sent_status": "draft",
+        "sent_at": None,
+        "author": "report-writer",
+    }
+
+    response = seeded.patch(
+        f"{_base()}/findings/VA-001",
+        json={"details": {"replies": [legacy_sent, appended]}},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["finding"]["details"]["replies"] == [
+        legacy_sent,
+        appended,
+    ]
 
 
 def test_kill_check_is_bounded_at_the_verify_door(seeded) -> None:

@@ -720,7 +720,8 @@ def filter_messages(
     """Keep messages addressed to ``mailbox_address`` and matching the filters.
 
     ``mailbox_address`` and ``from_filter`` accept either a full address
-    (``security@acme-bank.example``) or a bare domain (``@acme-bank.example`` / ``acme-bank.example``).
+    (``security@acme-bank.example``) or a bare domain
+    (``@acme-bank.example`` / ``acme-bank.example``).
     Results are returned newest-first.
     """
     # Both filters go through the same normalizer: `mailbox_address` used to use

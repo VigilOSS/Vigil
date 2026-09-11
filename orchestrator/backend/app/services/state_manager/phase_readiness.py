@@ -331,6 +331,7 @@ def phase_readiness(engagement_id: int, phase: str) -> dict[str, Any]:
     normalized = _normalize_phase(phase)
     engagement = _engagement_or_404(engagement_id)
     out: dict[str, Any] = {
+        "track": "web",
         "phase": normalized,
         "engagement_key": getattr(engagement, "engagement_key", ""),
         "require_stage": PHASE_REQUIRE_STAGE.get(normalized),

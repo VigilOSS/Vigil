@@ -129,7 +129,7 @@ declare it in `#### Coverage Gaps` so the operator can decide whether to re-disp
 
 Before your dispatch returns, run in this order:
 
-1. `vigil assess finding record source-analyzer <finding-json>` for each finding (already required)
+1. `vigil assess finding record source-analyzer <finding-json> --agent-id <your-agent_id>` for each finding (already required)
 2. `vigil assess intel record <type> <intel-json>` for each intel row (tech-component for fingerprints, note for prose, etc.)
 3. `vigil assess record-surface <type> <target> <source> [--rationale TEXT]` for each surface candidate
 4. `vigil assess ingest endpoints source-analysis` for newly extracted requestable endpoints

@@ -8,9 +8,9 @@
 Several unrelated failures had the same root cause: a check returned its clean
 value when it had measured nothing. Examples included a WAF page classified as
 live, a challenge detector returning false on the blocking response, a lease
-reported as rate governance, and an index silently covering only a prefix. The
-source cases are preserved in the
-[robustness plan](../history/2026-09-08-operator-robustness-plan-source.md#3-the-problem-this-plan-is-really-about).
+reported as rate governance, and an index silently covering only a prefix. The private source cases
+are excluded from the public repository; the invariant and its executable regressions are retained
+here.
 
 ## Decision
 

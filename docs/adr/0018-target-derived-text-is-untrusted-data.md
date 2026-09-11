@@ -1,6 +1,10 @@
 # ADR 0018 — Target-derived text is untrusted data
 
-- Status: Accepted
+- Status: Accepted.
+  **Superseded-in-part by [ADR 0019](0019-vigil-does-not-defend-against-its-own-operator.md):**
+  the closing Consequences bullet below anticipated UI masking and export redaction as
+  separate presentation choices; they are not available choices. The untrusted-data
+  boundary itself — label and delimit, never delete or rewrite — stands unchanged.
 - Date: 2026-09-08
 
 ## Context
@@ -11,9 +15,9 @@ crafted for an agent. If later renderers present the text as ordinary prompt
 prose, faithful evidence preservation becomes an instruction-injection path.
 This affects offensive and blue-team workflows alike.
 
-OpenHands wraps repository-supplied persistent memory in an explicit untrusted
-content boundary; its design and budget are summarized in the
-[memory report](../plans/research-operator-robustness/agent-memory-main-report.md#openhands-m).
+The public research synthesis requires summaries to
+[preserve source evidence](../plans/research-operator-robustness/agent-memory-main-report.md#preserve-source-evidence)
+and treats target-derived content as evidence rather than authority.
 OWASP separately documents agent-memory poisoning and defensive controls
 ([Agent Memory Guard](https://owasp.org/www-project-agent-memory-guard/)).
 
@@ -34,7 +38,11 @@ escaping in HTML or structured formats.
 - Raw evidence remains auditable and hash-stable.
 - Target text cannot become policy merely because it was quoted into a handoff,
   resume brief or finding view.
-- UI masking and export redaction remain separate, explicit presentation choices.
+- ~~UI masking and export redaction remain separate, explicit presentation choices.~~
+  Superseded by ADR 0019: Vigil does not mask or redact its own data on any path an
+  operator or an operator-dispatched agent reads. Labelling and delimiting untrusted
+  target text — this ADR's own mechanism — is unaffected, because it adds a boundary
+  rather than withholding a value.
 
 ## Alternatives considered
 

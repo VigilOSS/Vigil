@@ -30,12 +30,22 @@ from tests.test_engagements_api import write_engagement
 
 ENGAGEMENT_KEY = "2026-05-20-090000-covharness"
 ASSESSMENT_BASE = f"/engagements/{ENGAGEMENT_KEY}/assessment"
+AUTHOR_AGENT_ID = "COVERAGE-READINESS-AUTHOR"
 
 
 def _seed(client, isolate_settings) -> int:
     write_engagement(isolate_settings["engagements_dir"], key=ENGAGEMENT_KEY)
     response = client.get(f"/engagements/{ENGAGEMENT_KEY}")
     assert response.status_code == 200, response.text
+    dispatch = client.post(
+        f"{ASSESSMENT_BASE}/dispatches",
+        json={
+            "agent_id": AUTHOR_AGENT_ID,
+            "agent_role": "vulnerability-analyst",
+            "task": "Record coverage-readiness fixture findings",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
     return int(response.json()["id"])
 
 
@@ -71,6 +81,7 @@ def _create_active_finding(client, *, slug: str, canonical_location: str) -> Non
             "summary": "IDOR",
             "evidence_ref": "findings.md",
             "source_name": "test",
+            "provenance": {"agent_id": AUTHOR_AGENT_ID},
         },
     )
     assert response.status_code in {200, 201}, response.text
@@ -210,6 +221,7 @@ def test_discovered_surface_not_finding_linked_is_advisory(client, isolate_setti
     engagement_id = _seed(client, isolate_settings)
     surface = _create_surface(client, target_descriptor="https://example.test/api/users/{id}")
     gate = state_manager.coverage_readiness(engagement_id)
+    assert gate["track"] == "web"
     assert gate["ready"] is True
     assert gate["blocker_count"] == 0
     assert gate["unresolved_surfaces"] == []

@@ -56,7 +56,9 @@ At engagement start, before any procedural section below (Core Loop, Phase Index
 - **`"code"`** — STOP reading this file's web core loop. Load `agent/operator-core-code.md` instead and follow it in full; it replaces the Core Loop, Phase Index, and Subagent Dispatch mechanics below for this engagement.
 - **`"web"` (or unset — the default)** — continue in this file as normal.
 - **`"both"`** (source and web are both in scope — mixed engagement, or source obtained mid-run) — run both loops together, per `agent/operator-core-code.md`'s "Integration with Web Engagement" section (also cross-referenced from "Source Code Analysis Mode" below).
+- **`"android"`** — continue with this core's orchestration and submission closeout, but begin from the APK/package artifact rather than web recon: dispatch `vulnerability-analyst` with `agent/skills/android-app-security/SKILL.md` and the declared artifact/package path. Static work is not target-facing. Add live API hosts explicitly with `vigil engagement add-host <key> <host>` before any dynamic network probe; never infer authorization from endpoints found inside the app.
 - **`"blue"`** — STOP. This is a red-team prompt and must never run the red core loop against a blue engagement. Blue engagements render their own operator prompt from `agent/operator-core-blue.md` into the engagement dir at `vigil blue engage` time; if you are reading THIS file inside a blue engagement, that render is missing or stale. Re-render it with `agent/scripts/render-operator-prompts.sh repo <engagement-dir> --type blue` and load that `AGENTS.md` instead.
+- **Any other non-empty value** — STOP and report the unsupported `engagement_type`; do not fall through to web behavior.
 
 Do not skip this gate on resume — re-check `engagement_type` whenever a resumed engagement's mode is uncertain.
 
@@ -123,6 +125,9 @@ option when available; otherwise pass each value as one shell-quoted argument, n
 shell command string. A bounded read is not absence evidence: if output reports truncation, a partial
 result, `has_more`, or a continuation offset, page/range-read to EOF or use its point-read command
 before concluding that a record or field does not exist.
+When a client reports that it read only a bounded number of prompt bytes, run
+`vigil assess prompt-census --read-bytes <n>` to make the missed/partial Load-First ranges visible;
+the census is advisory and never gates dispatch or phase progress.
 
 On a macOS host, stock `timeout(1)` is absent. A host-side `timeout: command not found` therefore
 proves nothing about the tool or target. Prefer a Vigil command's own `--timeout`; for an audited
@@ -187,7 +192,12 @@ vigil assess transition-phase <next-phase>
 ```
 The helper validates preconditions (scope coverage, work-buffer state, verification completeness,
 report readiness) and refuses the transition when blockers exist. Pass `--force` to override
-when the operator has reviewed and accepted the gap. Raw `jq` phase edits bypass these checks.
+when the operator has reviewed and accepted the gap. Two classes of blocker do not yield to it:
+blockers reported as non-overrideable (source identity, unavailable readiness) on any edge, and
+**`--track code` into `complete`**, which cannot be forced at all — a completed code scan asserts
+zero durable debt in its terminal seal, so the way through is to resolve each blocker
+(`vigil assess code-coverage --require-transition-ready complete` re-checks the same contract) or
+to leave the engagement in its current phase. Raw `jq` phase edits bypass these checks.
 
 ## Core Loop
 
@@ -543,7 +553,7 @@ Each item below is scoped to the dispatch's actual outcome — a recon / collect
 - [ ] **Outcome demonstrated:** Did the agent show the exploitation step, not just the vulnerability? Captured credentials must be replayed. Leaked tokens must be used. File read primitives must read a meaningful file. If the agent stopped at "vulnerability exists," send it back with the specific next step.
 - [ ] **Proof is submission-ready:** Would a Bugcrowd/HackerOne triager accept this as demonstrated impact? Run the executable final gate documented by `vigil assess contract export submission`; inline PoC is authoring material, not a substitute for its durable-proof requirement. If the proof requires the triager to imagine the next step, the agent's work is not done.
 - [ ] **Finding story authored, not just disposed.** For confirmed/downgraded findings, the verifier wrote the report-ready `evidence` / `impact` / `remediation`, the justified CVSS vector, AND `steps_to_reproduce` into `details` (per `agent/references/finding-fp-and-severity-gate.md` + the Four Validation Gates Gate 3). The report-writer formats this story; it does not re-derive it.
-- [ ] **Reproduction is followable by a stranger.** Read `details.steps_to_reproduce` as someone with no access to this engagement: could they follow it and see the outcome? Every value is concrete (a real session cookie, a real object id, the real payload) — an unbound `<PLACEHOLDER>`, or one placeholder reused across different objects, means the steps were sanitized while being written and are unfollowable by construction. Redaction is the report-writer's job at submission time, not the specialist's. Then check `details.repro_runs`: the command-run ids behind those steps, in step order. **A step with no run id behind it was imagined, not executed** — that is the check the prose cannot give you, because an inferred reproduction reads exactly like a real one. Send the finding back for the runs rather than letting the report-writer reconstruct them from handoffs.
+- [ ] **Reproduction is followable by a stranger.** Read `details.steps_to_reproduce` as someone with no access to this engagement: could they follow it and see the outcome? Every value is concrete (a real session cookie, a real object id, the real payload) — an unbound `<PLACEHOLDER>`, or one placeholder reused across different objects, means the steps were sanitized while being written and are unfollowable by construction. Preserve those values verbatim through submission. Then check `details.repro_runs`: the command-run ids behind those steps, in step order. **A step with no run id behind it was imagined, not executed** — that is the check the prose cannot give you, because an inferred reproduction reads exactly like a real one. Send the finding back for the runs rather than letting the report-writer reconstruct them from handoffs.
 
 **When the dispatch reports "no results" as the headline outcome** (a tool ran and produced nothing, on any dispatch type including recon):
 
@@ -609,7 +619,7 @@ own test credentials — including the way `--identity` expands them into a `Coo
 command's `resolved_argv` that `command-run` then stores and returns — are the intended
 inject-and-audit mechanism, not a leak. Never treat them as a finding, redact them from local
 state, or pause/refuse authenticated dispatch because auth material shows up in command metadata.
-Redaction is the report-writer's job at submission time; the only standing limit is on the
+Do not redact operator-owned evidence at submission time; the only standing limit is on the
 *target's* data (don't bulk-pull real user records). Specialists carry the full statement in
 `agent/shared-constraints.md` ("Credentials and Local State Are Self-Owned").
 
@@ -724,7 +734,7 @@ interpretation.
 
 Command reference for the RECORD FINDINGS / RECORD SURFACES steps in the Core Loop (steps 8-9) — read alongside those, not instead of them; they own the timing and the recording exceptions, this owns the exact commands and schema pointers.
 
-Use `vigil assess finding record <agent-name> <finding-json-file>` for findings (the prefix table and severity↔CVSS band table are canonical in `agent/shared-specialist-core.md` "Finding IDs and the `finding record` Contract"; the payload schema and dedup rules live in `agent/shared-constraints.md` §4). For the canonical field list and examples, run `vigil assess contract finding record`. Use the lifecycle helpers — `finding verify --status <status>` for verification outcomes (terminal outcomes require independent proof receipts; `false_positive` also requires a completed structured counter-check), `finding update --status draft` to reopen a previously confirmed or false-positive finding, and `finding update` for non-verification metadata — instead of raw `post` / `patch`.
+Use `vigil assess finding record <agent-name> <finding-json-file> --agent-id <your-agent_id>` for findings (`--agent-id` is the recording agent's dispatch id, without which no finding can ever reach a terminal verification status — the prefix table and severity↔CVSS band table are canonical in `agent/shared-specialist-core.md` "Finding IDs and the `finding record` Contract"; the payload schema and dedup rules live in `agent/shared-constraints.md` §4). For the canonical field list and examples, run `vigil assess contract finding record`. Use the lifecycle helpers — `finding verify --status <status>` for verification outcomes (terminal outcomes require independent proof receipts; `false_positive` also requires a completed structured counter-check), `finding update --status draft` to reopen a previously confirmed or false-positive finding, and `finding update` for non-verification metadata — instead of raw `post` / `patch`.
 
 Use `vigil assess intel record <type> <json-file>` for `#### Intelligence` rows (intel types and dedup keys in §13). report-writer uses `vigil assess finding report --mode <final|draft> --json`, which returns grouped root-cause findings with sequential `001~N` report IDs.
 

@@ -22,7 +22,7 @@ import shlex
 import pytest
 from assess.lib import kali, kali_output
 
-HDR = {"X-Bug-Bounty": "vigiloss"}
+HDR = {"X-Bug-Bounty": "researcher"}
 
 
 def _subcommands(script: str) -> list[list[str]]:
@@ -60,12 +60,12 @@ def test_shell_two_curls_both_receive_header() -> None:
     assert len(subs) == 2
     for tokens in subs:
         assert tokens[0] == "curl"
-        assert _has_header(tokens, "X-Bug-Bounty", "vigiloss")
+        assert _has_header(tokens, "X-Bug-Bounty", "researcher")
 
 
 def test_shell_header_already_present_no_double_inject() -> None:
     # Single curl that already carries the header → idempotent no-op, untouched.
-    script = "curl -H 'X-Bug-Bounty: vigiloss' http://a.example.com"
+    script = "curl -H 'X-Bug-Bounty: researcher' http://a.example.com"
     cmd = ["sh", "-c", script]
     status = kali_output._apply_required_headers(cmd, "curl", dict(HDR))
 
@@ -79,7 +79,7 @@ def test_shell_mixed_only_missing_curl_gets_header() -> None:
     cmd = [
         "sh",
         "-c",
-        "curl -H 'X-Bug-Bounty: vigiloss' http://a.example.com ; curl http://b.example.com",
+        "curl -H 'X-Bug-Bounty: researcher' http://a.example.com ; curl http://b.example.com",
     ]
     status = kali_output._apply_required_headers(cmd, "curl", dict(HDR))
 
@@ -90,7 +90,7 @@ def test_shell_mixed_only_missing_curl_gets_header() -> None:
     for tokens in subs:
         # exactly one header on each, never duplicated
         assert sum(1 for t in tokens if t in ("-H", "--header")) == 1
-        assert _has_header(tokens, "X-Bug-Bounty", "vigiloss")
+        assert _has_header(tokens, "X-Bug-Bounty", "researcher")
 
 
 def test_shell_non_curl_unknown_wrapper_warns_not_blocks() -> None:
@@ -114,7 +114,7 @@ def test_shell_wget_gets_header_flag() -> None:
     assert status == "injected"
     tokens = _subcommands(cmd[2])[0]
     assert tokens[0] == "wget"
-    assert _has_header(tokens, "X-Bug-Bounty", "vigiloss")
+    assert _has_header(tokens, "X-Bug-Bounty", "researcher")
     # wget's flag is --header, not -H
     assert "--header" in tokens
 
@@ -130,7 +130,7 @@ def test_shell_pipeline_injects_httpx_not_passive_gau() -> None:
     gau_stage = next(s for s in subs if s and s[0] == "gau")
     httpx_stage = next(s for s in subs if s and s[0] == "httpx")
     assert "-H" not in gau_stage and "--header" not in gau_stage
-    assert _has_header(httpx_stage, "X-Bug-Bounty", "vigiloss")
+    assert _has_header(httpx_stage, "X-Bug-Bounty", "researcher")
 
 
 def test_bash_c_and_abs_path_variants() -> None:
@@ -138,7 +138,7 @@ def test_bash_c_and_abs_path_variants() -> None:
         cmd = [head, "-c", "curl http://a.example.com"]
         status = kali_output._apply_required_headers(cmd, "curl", dict(HDR))
         assert status == "injected", head
-        assert _has_header(_subcommands(cmd[2])[0], "X-Bug-Bounty", "vigiloss")
+        assert _has_header(_subcommands(cmd[2])[0], "X-Bug-Bounty", "researcher")
 
 
 def test_shell_combined_c_flag_bundles_inject_header() -> None:
@@ -155,7 +155,7 @@ def test_shell_combined_c_flag_bundles_inject_header() -> None:
         assert len(subs) == 2
         for tokens in subs:
             assert tokens[0] == "curl"
-            assert _has_header(tokens, "X-Bug-Bounty", "vigiloss"), (head, flag, tokens)
+            assert _has_header(tokens, "X-Bug-Bounty", "researcher"), (head, flag, tokens)
 
 
 def test_shell_control_flow_heads_inject_header() -> None:
@@ -173,7 +173,7 @@ def test_shell_control_flow_heads_inject_header() -> None:
         status = kali_output._apply_required_headers(cmd, "curl", dict(HDR))
         assert status == "injected", (script, status)
         seg = next(s for s in _subcommands(cmd[2]) if "curl" in s)
-        assert _has_header(seg, "X-Bug-Bounty", "vigiloss"), (script, seg)
+        assert _has_header(seg, "X-Bug-Bounty", "researcher"), (script, seg)
 
 
 # --------------------------------------------------------------------------- #
@@ -227,7 +227,7 @@ def test_direct_curl_argv_still_injected() -> None:
     cmd = ["curl", "http://a.example.com"]
     status = kali_output._apply_required_headers(cmd, "curl", dict(HDR))
     assert status == "injected"
-    assert cmd[-2:] == ["-H", "X-Bug-Bounty: vigiloss"]
+    assert cmd[-2:] == ["-H", "X-Bug-Bounty: researcher"]
 
 
 def test_direct_non_injectable_still_warns() -> None:
@@ -252,43 +252,43 @@ def test_direct_whatweb_injects_header_flag() -> None:
     cmd = ["whatweb", "https://example.com"]
     status = kali_output._apply_required_headers(cmd, "whatweb", dict(HDR))
     assert status == "injected"
-    assert cmd[-2:] == ["--header", "X-Bug-Bounty: vigiloss"]
+    assert cmd[-2:] == ["--header", "X-Bug-Bounty: researcher"]
 
 
 def test_direct_nikto_injects_add_header_flag() -> None:
     cmd = ["nikto", "-h", "example.com"]
     status = kali_output._apply_required_headers(cmd, "nikto", dict(HDR))
     assert status == "injected"
-    assert cmd[-2:] == ["-Add-header", "X-Bug-Bounty: vigiloss"]
+    assert cmd[-2:] == ["-Add-header", "X-Bug-Bounty: researcher"]
 
 
 def test_direct_arjun_injects_headers_flag() -> None:
     cmd = ["arjun", "-u", "https://example.com"]
     status = kali_output._apply_required_headers(cmd, "arjun", dict(HDR))
     assert status == "injected"
-    assert cmd[-2:] == ["--headers", "X-Bug-Bounty: vigiloss"]
+    assert cmd[-2:] == ["--headers", "X-Bug-Bounty: researcher"]
 
 
 def test_direct_arjun_multiple_headers_newline_joined_single_flag() -> None:
     # arjun's --headers is store-once and newline-separated, so multiple required
     # headers ride a SINGLE --headers value joined by newlines, never two flags
     # (a second --headers would clobber the first under argparse store).
-    headers = {"X-Bug-Bounty": "vigiloss", "X-HackerOne": "h1user"}
+    headers = {"X-Bug-Bounty": "researcher", "X-HackerOne": "h1user"}
     cmd = ["arjun", "-u", "https://example.com"]
     status = kali_output._apply_required_headers(cmd, "arjun", dict(headers))
     assert status == "injected"
     assert cmd.count("--headers") == 1
     flag_idx = cmd.index("--headers")
-    assert cmd[flag_idx + 1] == "X-Bug-Bounty: vigiloss\nX-HackerOne: h1user"
+    assert cmd[flag_idx + 1] == "X-Bug-Bounty: researcher\nX-HackerOne: h1user"
 
 
 def test_direct_whatweb_two_headers_two_flags() -> None:
-    headers = {"X-Bug-Bounty": "vigiloss", "X-HackerOne": "h1user"}
+    headers = {"X-Bug-Bounty": "researcher", "X-HackerOne": "h1user"}
     cmd = ["whatweb", "https://example.com"]
     status = kali_output._apply_required_headers(cmd, "whatweb", dict(headers))
     assert status == "injected"
     assert cmd.count("--header") == 2
-    assert "X-Bug-Bounty: vigiloss" in cmd
+    assert "X-Bug-Bounty: researcher" in cmd
     assert "X-HackerOne: h1user" in cmd
 
 
@@ -317,13 +317,13 @@ def test_direct_arjun_merges_into_existing_headers_block() -> None:
     assert status == "injected"
     assert cmd.count("--headers") == 1
     flag_idx = cmd.index("--headers")
-    assert cmd[flag_idx + 1] == "Authorization: Bearer t\nX-Bug-Bounty: vigiloss"
+    assert cmd[flag_idx + 1] == "Authorization: Bearer t\nX-Bug-Bounty: researcher"
 
 
 def test_direct_arjun_existing_marker_in_block_is_noop() -> None:
     cmd = [
         "arjun", "-u", "https://example.com",
-        "--headers", "Authorization: Bearer t\nX-Bug-Bounty: vigiloss",
+        "--headers", "Authorization: Bearer t\nX-Bug-Bounty: researcher",
     ]
     status = kali_output._apply_required_headers(cmd, "arjun", dict(HDR))
     assert status == "noop"

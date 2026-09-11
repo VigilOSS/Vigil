@@ -33,7 +33,7 @@ CAPTCHA / proof-of-human gate — stop and ask the operator.
 ## Primary tool: headed stealth Playwright Chromium
 
 **Headed real Chromium + stealth beats headless and beats curl for bot-defended
-sites** (verified 2026-06-22 against Akamai-fronted www.acme-bank.example): a headless or
+sites** (illustrated with fictional `www.acme-bank.example`): a headless or
 MITM-proxied automated browser hit Akamai Bot Manager at the login step; a
 HEADED Chromium on a residential IP with stealth hardening passed and reached the
 authenticated dashboard.

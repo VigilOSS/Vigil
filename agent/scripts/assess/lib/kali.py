@@ -27,6 +27,8 @@ without touching the rest of the suite.
 """
 from __future__ import annotations
 
+import ast
+import io
 import os
 import re
 import resource
@@ -34,6 +36,7 @@ import signal
 import subprocess
 import sys
 import time
+import tokenize
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -77,7 +80,6 @@ from .kali_audit import (
 )
 from .kali_cli import (
     ScopedErrorParser,
-    _anchor_list_path,
     add_passthrough_args_flag,
     add_required_kali_flags,
     count_list_targets,
@@ -238,7 +240,7 @@ def _emit_probe_run(
 
     Emission rules (each derived from durable run state, never a blind default):
       * WEB-ONLY GUARD: skip unless engagement_type ∈ {web, both} — no
-        cross-track bleed onto code/blue (R-H2 doctrine).
+        cross-track bleed onto code/blue engagements that have no declared HTTP host scope.
       * Only for a REAL test (probe_kind ∈ payload/exploit/baseline/replay);
         fingerprint/cleanup never emit.
       * attack_family = TECHNIQUE_TO_CLASS[technique]; if None (operational
@@ -1264,15 +1266,84 @@ def required_header_env_pairs(headers: dict[str, str]) -> list[tuple[str, str]]:
     return pairs
 
 
-def _script_references_required_headers(text: str, headers: dict[str, str]) -> list[str]:
-    """Required header names the script never mentions, by name or by env var.
+def _is_python_interpreter(head: str) -> bool:
+    return head in {"python", "python3"}
 
-    A substring scan also matches the name inside a comment. That is a deliberate
-    false-negative-toward-permissive trade — the check exists to catch the script
-    that forgot the header entirely, not to prove every request carries it — and
-    it is why this is recorded as ``verified_in_script`` rather than as proof.
-    """
-    lowered = text.lower()
+
+def _script_without_comments(text: str, script_head: str) -> str:
+    """Remove comment text while preserving strings that may carry headers."""
+    if _is_python_interpreter(script_head):
+        try:
+            tokens = tokenize.generate_tokens(io.StringIO(text).readline)
+            return " ".join(
+                token.string
+                for token in tokens
+                if token.type not in {tokenize.COMMENT, tokenize.ENCODING}
+            )
+        except (IndentationError, tokenize.TokenError):
+            return text
+
+    slash_comments = script_head in {"node", "nodejs", "php"}
+    hash_comments = script_head in _SHELL_BINARIES | {"perl", "php", "ruby"}
+    rendered: list[str] = []
+    index = 0
+    quote = ""
+    line_comment = False
+    block_comment = False
+    while index < len(text):
+        char = text[index]
+        following = text[index : index + 2]
+        if line_comment:
+            if char == "\n":
+                line_comment = False
+                rendered.append(char)
+            index += 1
+            continue
+        if block_comment:
+            if following == "*/":
+                block_comment = False
+                index += 2
+            else:
+                if char == "\n":
+                    rendered.append(char)
+                index += 1
+            continue
+        if quote:
+            rendered.append(char)
+            if char == "\\" and index + 1 < len(text):
+                rendered.append(text[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if slash_comments and following == "//":
+            line_comment = True
+            index += 2
+            continue
+        if slash_comments and following == "/*":
+            block_comment = True
+            index += 2
+            continue
+        if hash_comments and char == "#":
+            line_comment = True
+            index += 1
+            continue
+        rendered.append(char)
+        if char in {"'", '"'} or (
+            script_head in {"node", "nodejs"} and char == "`"
+        ):
+            quote = char
+        index += 1
+    return "".join(rendered)
+
+
+def _script_references_required_headers(
+    text: str, headers: dict[str, str], *, script_head: str
+) -> list[str]:
+    """Required header names absent from non-comment script text."""
+    lowered = _script_without_comments(text, script_head).lower()
     if _REQUIRED_HEADER_ENV_ALL.lower() in lowered:
         return []
     missing: list[str] = []
@@ -1284,17 +1355,251 @@ def _script_references_required_headers(text: str, headers: dict[str, str]) -> l
     return missing
 
 
+_SCRIPT_HTTP_LIBRARY_RE = re.compile(
+    r"(?:\brequests\.(?:request|get|post|put|patch|delete|head|options)\s*\("
+    r"|\burllib\.request\b|\baxios\s*[.(]|\bfetch\s*\("
+    r"|\bNet::HTTP\b|\bcurl_init\s*\(|\bLWP::UserAgent\b)",
+    re.IGNORECASE,
+)
+
+
+def _python_program_request_urls(program: str) -> tuple[list[str], bool]:
+    """Return literal request URLs and whether recognized calls remain dynamic."""
+    try:
+        tree = ast.parse(program)
+    except (SyntaxError, ValueError):
+        return [], False
+
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".", 1)[0]
+                aliases[bound] = alias.name if alias.asname else bound
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+
+    def dotted_name(node: ast.AST) -> str | None:
+        if isinstance(node, ast.Name):
+            return aliases.get(node.id, node.id)
+        if isinstance(node, ast.Attribute):
+            owner = dotted_name(node.value)
+            return f"{owner}.{node.attr}" if owner else None
+        if isinstance(node, ast.Call):
+            return dotted_name(node.func)
+        return None
+
+    request_methods = {
+        "delete", "get", "head", "options", "patch", "post", "put",
+        "request", "urlopen",
+    }
+    http_roots = {"aiohttp", "http", "httpx", "requests", "urllib", "urllib3"}
+    request_urls: list[str] = []
+    dynamic = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        called = dotted_name(node.func)
+        if not called:
+            continue
+        parts = called.split(".")
+        if parts[0] in http_roots and parts[-1].lower() in request_methods:
+            literal_url = False
+            for argument in [
+                *node.args,
+                *(keyword.value for keyword in node.keywords),
+            ]:
+                if isinstance(argument, ast.Constant) and isinstance(
+                    argument.value, str
+                ):
+                    value = argument.value.strip()
+                    if value.startswith(("http://", "https://")):
+                        request_urls.append(value)
+                        literal_url = True
+                elif isinstance(argument, ast.JoinedStr):
+                    dynamic = True
+            if not literal_url:
+                dynamic = True
+    return request_urls, dynamic
+
+
+def _mask_non_python_literals_and_comments(head: str, program: str) -> str:
+    """Blank inert text while retaining executable call names and punctuation."""
+    slash_comments = head in {"node", "nodejs", "php"}
+    hash_comments = head in {"perl", "php", "ruby"}
+    backtick_strings = head in {"node", "nodejs"}
+    masked: list[str] = []
+    index = 0
+    quote = ""
+    line_comment = False
+    block_comment = False
+    while index < len(program):
+        char = program[index]
+        following = program[index : index + 2]
+        if line_comment:
+            if char == "\n":
+                line_comment = False
+                masked.append(char)
+            else:
+                masked.append(" ")
+            index += 1
+            continue
+        if block_comment:
+            if following == "*/":
+                masked.extend((" ", " "))
+                block_comment = False
+                index += 2
+            else:
+                masked.append("\n" if char == "\n" else " ")
+                index += 1
+            continue
+        if quote:
+            if char == "\\" and index + 1 < len(program):
+                masked.extend((" ", " "))
+                index += 2
+                continue
+            masked.append(" ")
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if slash_comments and following == "//":
+            masked.extend((" ", " "))
+            line_comment = True
+            index += 2
+            continue
+        if slash_comments and following == "/*":
+            masked.extend((" ", " "))
+            block_comment = True
+            index += 2
+            continue
+        if hash_comments and char == "#":
+            masked.append(" ")
+            line_comment = True
+            index += 1
+            continue
+        if char in {"'", '"'} or (backtick_strings and char == "`"):
+            quote = char
+            masked.append(" ")
+            index += 1
+            continue
+        masked.append(char)
+        index += 1
+    return "".join(masked)
+
+
+def _script_program_requests_http(head: str, program: str) -> bool:
+    if _is_python_interpreter(head):
+        request_urls, dynamic = _python_program_request_urls(program)
+        return bool(request_urls) or dynamic
+    executable_text = _mask_non_python_literals_and_comments(head, program)
+    return bool(_SCRIPT_HTTP_LIBRARY_RE.search(executable_text))
+
+
+_NON_PYTHON_LITERAL_REQUEST_RES: dict[str, tuple[re.Pattern[str], ...]] = {
+    "node": (
+        re.compile(
+            r"\bfetch\s*\(\s*(?P<quote>['\"])(?P<url>https?://[^'\"]+)(?P=quote)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\baxios\.(?:request|get|post|put|patch|delete|head|options)\s*"
+            r"\(\s*(?P<quote>['\"])(?P<url>https?://[^'\"]+)(?P=quote)",
+            re.IGNORECASE,
+        ),
+    ),
+    "ruby": (
+        re.compile(
+            r"\bNet::HTTP\.(?:get|get_response|post_form)\s*\(\s*"
+            r"(?:URI(?:\.parse)?\s*\(\s*)?(?P<quote>['\"])"
+            r"(?P<url>https?://[^'\"]+)(?P=quote)",
+            re.IGNORECASE,
+        ),
+    ),
+    "perl": (
+        re.compile(
+            r"\bLWP::UserAgent\b[^;\n]*?->(?:get|post|request)\s*\(\s*"
+            r"(?P<quote>['\"])(?P<url>https?://[^'\"]+)(?P=quote)",
+            re.IGNORECASE,
+        ),
+    ),
+    "php": (
+        re.compile(
+            r"\bcurl_init\s*\(\s*(?P<quote>['\"])"
+            r"(?P<url>https?://[^'\"]+)(?P=quote)",
+            re.IGNORECASE,
+        ),
+    ),
+}
+_NON_PYTHON_LITERAL_REQUEST_RES["nodejs"] = _NON_PYTHON_LITERAL_REQUEST_RES[
+    "node"
+]
+
+
+def _script_request_urls(text: str, script_head: str) -> tuple[list[str], bool]:
+    """Return statically attributable request URLs and a dynamic-call marker."""
+    if script_head in _SHELL_BINARIES:
+        urls = scope_lib._request_urls([script_head, "-c", text])
+        return urls, any("$" in value or "{" in value for value in urls)
+    if _is_python_interpreter(script_head):
+        return _python_program_request_urls(text)
+
+    masked = _mask_non_python_literals_and_comments(script_head, text)
+    urls: list[str] = []
+    for pattern in _NON_PYTHON_LITERAL_REQUEST_RES.get(script_head, ()):
+        for match in pattern.finditer(text):
+            if masked[match.start()].isspace():
+                continue
+            urls.append(match.group("url"))
+    dynamic = _script_program_requests_http(script_head, text) and not urls
+    return urls, dynamic
+
+
+def _script_target_classification(
+    text: str, engagement_dir: Path, *, script_head: str
+) -> str:
+    """Classify whether literal script URLs reach a declared authorization root.
+
+    This is deliberately a narrow lexical predicate for the ROE attribution
+    header gate, not an outbound firewall. A dynamic URL cannot prove that the
+    request targets an authorization root, while a literal admitted URL can.
+    """
+    try:
+        scope = scope_lib.load_scope(str(engagement_dir))
+        allow = scope_lib.scope_entries(scope)
+        deny = scope_lib.out_of_scope_entries(scope)
+    except (OSError, ValueError, SystemExit):
+        return "unknown_dynamic_target"
+    request_urls, dynamic = _script_request_urls(text, script_head)
+    for raw_url in request_urls:
+        if "$" in raw_url or "{" in raw_url:
+            dynamic = True
+            continue
+        host = scope_lib.host_from_token(raw_url.rstrip(").,;"))
+        if host and scope_lib.host_admitted(host, allow, deny):
+            return "in_scope"
+    return "unknown_dynamic_target" if dynamic else "not_applicable_no_in_scope_url"
+
+
 def _verify_required_headers_in_script(
-    cmd: list[str], *, engagement_dir: Path, headers: dict[str, str], tool_name: str
+    cmd: list[str],
+    *,
+    engagement_dir: Path,
+    headers: dict[str, str],
+    tool_name: str,
+    execution_cwd: Path | None = None,
+    container_paths: bool = True,
 ) -> str:
     """Resolve a ``warned`` required-header outcome against the script it runs.
 
-    Returns ``"verified_in_script"`` when the script references every required
-    header, ``"warned"`` when there is no script to inspect (an unknown tool —
-    the pre-existing warn-and-continue stands, because refusing every
-    unclassifiable binary would be a new dead end), and RAISES otherwise: a
-    probe that cannot carry the program's mandatory deconfliction header should
-    not be fired at a production target.
+    Returns ``"referenced_in_script"`` when the script references every required
+    header. A missing header refuses only when lexical inspection finds a
+    literal request form for a declared authorization root. Unreadable, dynamic, offline, and
+    literal out-of-scope scripts proceed with an honest unknown/not-applicable
+    status because this check is attribution, not an outbound firewall.
     """
     script = interpreter_script_argv(cmd)
     header_names = ", ".join(sorted(headers))
@@ -1306,35 +1611,47 @@ def _verify_required_headers_in_script(
         )
         return "warned"
     root = Path(engagement_dir).resolve()
-    path = Path(_anchor_list_path(script, str(root))).resolve()
-    readable = path.is_relative_to(root) and path.is_file()
-    if readable:
+    path = scope_lib.execution_script_path(
+        script,
+        root,
+        execution_cwd=execution_cwd,
+        container_paths=container_paths,
+    )
+    readable = path is not None
+    if path is not None:
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             readable = False
     if not readable:
-        raise scope_lib.ScopePolicyError(
-            f"this run executes the script '{script}', which Vigil cannot read "
-            f"inside the engagement, so it cannot confirm the program-required "
-            f"header(s) {header_names} ride its requests — and an appended -H "
-            "would become the script's $1 rather than reach them. Move the "
-            "script under the engagement directory, or inline the requests as "
-            "`bash -c '<the curl commands>'` where the headers are injected for "
-            "you."
+        print(
+            f"warning: script '{script}' is not readable beneath the engagement; "
+            "required-header applicability is unknown, so the attribution-only "
+            "gate is not claiming that it targets a declared authorization root.",
+            file=sys.stderr,
         )
-    missing = _script_references_required_headers(text, headers)
+        return "unknown_script_unreadable"
+    effective = scope_lib._unwrap_launcher_argv([str(token) for token in cmd])
+    script_head = os.path.basename(effective[0]).lower() if effective else ""
+    target_classification = _script_target_classification(
+        text, root, script_head=script_head
+    )
+    if target_classification != "in_scope":
+        return target_classification
+    missing = _script_references_required_headers(
+        text, headers, script_head=script_head
+    )
     if missing:
         raise scope_lib.ScopePolicyError(
             f"the script '{script}' never references the program-required "
-            f"attribution header(s) {', '.join(sorted(missing))}, so its requests "
-            "would reach a production target unattributed — the one thing ROE "
-            "makes mandatory on every request. Add them to each request in the "
+            f"attribution header(s) {', '.join(sorted(missing))}, while it contains "
+            "a literal request form for a declared target. ROE makes attribution "
+            "mandatory on every request. Add the headers to each request in the "
             f"script (the values are exported as ${_REQUIRED_HEADER_ENV_ALL} and "
             f"${_REQUIRED_HEADER_ENV_PREFIX}<NAME> for this run), or inline the "
             "requests as `bash -c '<the curl commands>'` where Vigil injects them."
         )
-    return "verified_in_script"
+    return "referenced_in_script"
 
 
 def prepare_execution_command(
@@ -1342,6 +1659,8 @@ def prepare_execution_command(
     *,
     tool_name: str,
     engagement_dir: Path,
+    execution_cwd: Path | None = None,
+    container_paths: bool = True,
     identity: str | None = None,
     identity_scope: str = "",
     identity_target: str = "",
@@ -1353,8 +1672,9 @@ def prepare_execution_command(
     """Apply shared identity, attribution, and OOB preparation for sync/jobs.
 
     Returns the audit ``auth_context``. Program-required attribution headers are
-    injected when the tool supports them; an unsupported shape emits a warning
-    and still runs.
+    injected when the tool supports them. A readable script with a literal
+    in-scope request but no header reference is refused; an uninspectable or
+    dynamic shape remains warning/unknown and proceeds without a false claim.
 
     ``identity_target`` names the tool whose header convention the argv actually
     follows, for the case where the derived tool name is not one Vigil knows
@@ -1368,8 +1688,10 @@ def prepare_execution_command(
     ``report`` is an optional out-dict for facts the caller needs but that do not
     belong in the return value: currently ``required_header_status``, one of
     ``none_required`` / the ``_apply_required_headers`` vocabulary /
-    ``verified_in_script``. It is an out-parameter rather than a widened return
-    type because the string return is a contract several callers monkeypatch.
+    ``referenced_in_script`` / ``not_applicable_no_in_scope_url`` /
+    ``unknown_dynamic_target`` / ``unknown_script_unreadable``. It is an
+    out-parameter rather than a widened return type because the string return is
+    a contract several callers monkeypatch.
     """
     _apply_nuclei_oob_safety(cmd, explicit_oob=nuclei_oob_explicit)
     multi_arm = curl_multi_arm_warning(cmd)
@@ -1389,6 +1711,8 @@ def prepare_execution_command(
                 engagement_dir=engagement_dir,
                 headers=required,
                 tool_name=tool_name,
+                execution_cwd=execution_cwd,
+                container_paths=container_paths,
             )
     if report is not None:
         report["required_header_status"] = header_status
@@ -1661,7 +1985,10 @@ def kali_exec(
             cmd,
             tool_name=derived_tool_name,
             engagement_dir=eng_dir,
+            target_host=_extract_target_anchor(derived_tool_name, cmd)[0],
+            execution_phase=phase,
         )
+        execution_policy.update(prepare_report)
     except scope_lib.ScopePolicyError as exc:
         _audit_execution_policy_refusal(
             cfg=cfg,

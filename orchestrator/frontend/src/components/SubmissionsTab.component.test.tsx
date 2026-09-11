@@ -79,7 +79,6 @@ const detail = {
       size_bytes: 18,
       sha256: "c".repeat(64),
       present: true,
-      sensitive: false,
     },
   ],
   eligible_attachments_page: {

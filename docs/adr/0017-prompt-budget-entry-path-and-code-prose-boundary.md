@@ -10,14 +10,10 @@ canonical operator prompt; specialist wrappers embed their role prompt and then
 load shared constraints and skills. Copying another full prompt into an
 engagement creates a competing authority and undetectable drift.
 
-Prompt size is also a correctness constraint. In the retained evidence, a large
-prompt could be partially delivered without an error. Independent long-context
-results held task/workspace fixed and found 8/10 strict passes with a short
-context versus 3/10 for both relevant-long and irrelevant-long contexts
-([CertiK study summary](../plans/research-operator-robustness/agent-memory-main-report.md#63-context-bloat-harms-and-conflict-harms-more-than-size)). A separate study found
-that repository instructions were followed better than generic repository
-overviews, while adding context increased inference cost by over 20%
-([CTXbench summary](../plans/research-operator-robustness/agent-memory-main-report.md#index-alone-is-necessary-but-not-sufficient-v)).
+Prompt size is also a correctness constraint: a large prompt can be partially
+delivered without an error, and unfocused standing context competes with the
+instructions needed for the current task. The public research synthesis therefore
+uses a [bounded index with focused records](../plans/research-operator-robustness/agent-memory-main-report.md#bounded-index-focused-records) rather than an unbounded repository overview.
 
 ## Decision
 

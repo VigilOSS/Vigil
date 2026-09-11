@@ -13,7 +13,6 @@ class ArtifactEntry:
     name: str
     relative_path: str
     media_type: str
-    sensitive: bool
     exists: bool
 
 
@@ -24,21 +23,20 @@ class ArtifactContent:
 
 
 ARTIFACT_SPECS = {
-    "scope.json": ("scope.json", "application/json", False),
-    "findings.md": ("findings.md", "text/markdown", False),
-    "report.md": ("report.md", "text/markdown", False),
-    "surfaces.jsonl": ("surfaces.jsonl", "text/plain", False),
-    "engagement.json": ("engagement.json", "application/json", False),
+    "scope.json": ("scope.json", "application/json"),
+    "findings.md": ("findings.md", "text/markdown"),
+    "report.md": ("report.md", "text/markdown"),
+    "surfaces.jsonl": ("surfaces.jsonl", "text/plain"),
+    "engagement.json": ("engagement.json", "application/json"),
 }
 
 
 def _artifact_entry(engagement_root: Path, name: str) -> ArtifactEntry:
-    relative_path, media_type, sensitive = ARTIFACT_SPECS[name]
+    relative_path, media_type = ARTIFACT_SPECS[name]
     return ArtifactEntry(
         name=name,
         relative_path=relative_path,
         media_type=media_type,
-        sensitive=sensitive,
         exists=(engagement_root / relative_path).exists(),
     )
 

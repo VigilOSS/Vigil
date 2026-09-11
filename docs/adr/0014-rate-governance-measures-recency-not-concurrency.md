@@ -8,12 +8,11 @@
 The retired aggregate lease summed declared request rates for simultaneously
 running commands. In practice, an ordinary `curl` reservation consumed the
 whole cap, so it behaved as a global mutex. More importantly, it measured the
-wrong event: the observed 2026-07-24 block followed two lanes alternating 93
-requests over 29 minutes, not concurrent requests. The preserved corpus showed
-the same distinction: simultaneous-run overlap was 20.0% versus 36.0% of active
-multi-agent windows for PCO, and 1.8% versus 46.2% for CrowdStrike. The complete
-measurement and its limitations are retained in the
-[robustness source](../history/2026-09-08-operator-robustness-plan-source.md#42-what-the-rate-gate-actually-measures--the-decisive-measurement).
+wrong event: an observed target block followed two lanes alternating requests
+over time, not concurrent requests. Independent web and blue workflows showed
+the same failure shape: simultaneous-command overlap substantially undercounted
+periods when several lanes were actively generating traffic. The private source
+records are excluded; the public decision retains only the behavioral conclusion.
 
 ## Decision
 
@@ -37,7 +36,7 @@ rate/control behavior. That implementation remains visible in the Phase 2 plan.
 
 ## Alternatives considered
 
-- **Make the lease mandatory.** Rejected because the measured incident stayed
-  far below the configured rate and rarely had simultaneous commands.
+- **Make the lease mandatory.** Rejected because the observed workload stayed
+  below the configured rate and rarely had simultaneous commands.
 - **Choose the recorded cooldown defaults now.** Rejected because a false long
   latch can erase useful evidence; the defaults require build-time review.

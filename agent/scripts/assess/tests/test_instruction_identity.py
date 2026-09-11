@@ -70,6 +70,9 @@ def test_dispatch_instruction_identity_hashes_exact_installed_files(
 
     assert identity == {
         "client_name": "codex",
+        "requested_client": "unknown",
+        "launcher_effective_client": "codex",
+        "provider_observed_client": "unknown",
         "source_revision": "a" * 40,
         "operator_instruction_path": "agent/AGENTS.md",
         "operator_instruction_sha256": _sha256(operator_bytes),
@@ -81,6 +84,38 @@ def test_dispatch_instruction_identity_hashes_exact_installed_files(
         "instructions_stale": False,
     }
     assert warnings == []
+
+
+def test_dispatch_instruction_identity_keeps_request_launcher_and_provider_facts_separate(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_root, agent_root, engagement_dir = _fixture_tree(tmp_path)
+    operator_bytes = b"operator\n"
+    specialist_bytes = b"specialist\n"
+    (agent_root / "AGENTS.md").write_bytes(operator_bytes)
+    (source_root / "agent" / "AGENTS.md").write_bytes(operator_bytes)
+    (agent_root / ".codex" / "agents" / "recon-specialist.toml").write_bytes(
+        specialist_bytes
+    )
+    (
+        source_root / "agent" / ".codex" / "agents" / "recon-specialist.toml"
+    ).write_bytes(specialist_bytes)
+    (engagement_dir / "scope.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("VIGIL_REQUESTED_CLIENT", "claude")
+    monkeypatch.setenv("VIGIL_CLIENT_NAME", "codex")
+
+    identity, warnings = build_dispatch_instruction_identity(
+        agent_root=agent_root,
+        engagement_dir=engagement_dir,
+        agent_role="recon-specialist",
+    )
+
+    assert identity["requested_client"] == "claude"
+    assert identity["launcher_effective_client"] == "codex"
+    assert identity["client_name"] == "codex"  # compatible legacy projection
+    assert identity["provider_observed_client"] == "unknown"
+    assert not any("client identity is unavailable" in warning for warning in warnings)
 
 
 def test_dispatch_instruction_identity_uses_blue_operator_and_reports_staleness(

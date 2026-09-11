@@ -126,7 +126,7 @@ Deserialization RCE is almost always blind — the gadget executes but stdout ne
 ```bash
 vigil oob status --json
 vigil oob mint --client <name> --technique deserialization --target-url "https://target/api" --param session --probe-kind dns
-# → host  <prefix>-<token>.<client-id>.oob.example.com   (= $OOB_HOST)
+# → host  <prefix>-<token>.<client-id>.<configured-oob-domain>   (= $OOB_HOST)
 ```
 
 Feed the EXACT host mint prints (`$OOB_HOST` — the nonce bound under the client id; never hand-build a bare `<nonce>.oob...` host) as the command when generating the chain, then deliver via the kali exec wrapper:

@@ -8,6 +8,7 @@ their own files. UNIQUE(engagement_id, agent_id) enforcement → 409 on dup.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 from app import db as db_module
@@ -15,6 +16,7 @@ from app import db as db_module
 
 ENGAGEMENT_KEY = "2026-04-28-120000-dispatches"
 BASE = f"/engagements/{ENGAGEMENT_KEY}/assessment"
+SEED_AUTHOR_AGENT_ID = "DISPATCH-FINDING-AUTHOR"
 
 
 def _write_engagement(engagements_dir: Path, key: str = ENGAGEMENT_KEY) -> Path:
@@ -43,6 +45,16 @@ def _seed(client, isolate_settings) -> int:
     response = client.get(f"/engagements/{ENGAGEMENT_KEY}")
     assert response.status_code == 200, response.text
     engagement_id = int(response.json()["id"])
+    author = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": SEED_AUTHOR_AGENT_ID,
+            "agent_role": "fixture-finding-author",
+            "task": "Record dispatch API fixture findings",
+            "dispatched_at": "2020-01-01T00:00:00Z",
+        },
+    )
+    assert author.status_code == 201, author.text
     for slug in ("VA-001", "VA-002"):
         finding = client.post(
             f"{BASE}/findings",
@@ -56,6 +68,7 @@ def _seed(client, isolate_settings) -> int:
                 "summary": "Seed finding for dispatch references",
                 "evidence_ref": "findings.md",
                 "source_name": "vulnerability-analyst",
+                "provenance": {"agent_id": SEED_AUTHOR_AGENT_ID},
             },
         )
         assert finding.status_code == 201, finding.text
@@ -117,7 +130,7 @@ def test_dispatch_post_get_list_patch(client, isolate_settings) -> None:
     resp = client.get(f"{BASE}/dispatches")
     assert resp.status_code == 200
     rows = resp.json()
-    assert len(rows) == 1
+    assert len(rows) == 2
     assert rows[0]["agent_id"] == "AG-001"
 
     # Filter by role
@@ -173,6 +186,98 @@ def test_dispatch_404_on_missing(client, isolate_settings) -> None:
     assert resp.status_code == 404
     resp = client.patch(f"{BASE}/dispatches/never-existed", json={"status": "completed"})
     assert resp.status_code == 404
+
+
+def test_dispatch_terminal_update_uses_atomic_compare_and_swap(
+    client, isolate_settings, monkeypatch
+) -> None:
+    """A stale in-progress read must not overwrite a terminal dispatch winner."""
+    from app.services import state_manager
+
+    engagement_id = _seed(client, isolate_settings)
+    created = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": "AG-RACE",
+            "agent_role": "vulnerability-analyst",
+            "task": "Finish concurrently with timeout reconciliation",
+        },
+    ).json()
+
+    with db_module.get_connection() as connection:
+        stale_in_progress = connection.execute(
+            "SELECT * FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
+            (engagement_id, created["agent_id"]),
+        ).fetchone()
+        connection.execute(
+            """
+            UPDATE assessment_dispatches
+            SET status = ?, completed_at = ?
+            WHERE engagement_id = ? AND agent_id = ?
+            """,
+            (
+                "completed",
+                "2026-04-28T12:59:59Z",
+                engagement_id,
+                created["agent_id"],
+            ),
+        )
+
+    real_get_connection = state_manager._common.get_connection
+
+    class _SingleRowCursor:
+        def fetchone(self):
+            return stale_in_progress
+
+    class _StaleReadConnection:
+        def __init__(self, connection) -> None:
+            self._connection = connection
+            self._served_stale = False
+
+        def execute(self, sql, params=()):
+            if (
+                not self._served_stale
+                and "FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?"
+                in sql
+            ):
+                self._served_stale = True
+                return _SingleRowCursor()
+            return self._connection.execute(sql, params)
+
+    @contextmanager
+    def stale_read_connection():
+        with real_get_connection() as connection:
+            yield _StaleReadConnection(connection)
+
+    monkeypatch.setattr(
+        state_manager._common, "get_connection", stale_read_connection
+    )
+    response = client.patch(
+        f"{BASE}/dispatches/{created['agent_id']}",
+        json={
+            "status": "aborted",
+            "completed_at": "2026-04-28T13:00:00Z",
+            "finding_slugs": ["VA-001"],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "completed"
+    assert response.json()["completed_at"] == "2026-04-28T12:59:59Z"
+
+    activity = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/activity-entries", params={"q": "agent done"}
+    ).json()["items"]
+    assert len(activity) == 1
+    assert activity[0]["result"] == "completed"
+    assert activity[0]["metadata"]["finding_slugs"] == []
+
+    monkeypatch.setattr(
+        state_manager._common, "get_connection", real_get_connection
+    )
+    current = client.get(f"{BASE}/dispatches/{created['agent_id']}").json()
+    assert current["status"] == "completed"
+    assert current["completed_at"] == "2026-04-28T12:59:59Z"
 
 
 def test_dispatch_list_filters(client, isolate_settings) -> None:
@@ -335,7 +440,7 @@ def test_dispatch_requested_actual_fields_post_get_list(client, isolate_settings
         assert fetched[key] == posted[key]
 
     listed = client.get(f"{BASE}/dispatches").json()
-    assert len(listed) == 1
+    assert len(listed) == 2
     for key in (
         "requested_model",
         "actual_model",

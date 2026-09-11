@@ -38,7 +38,7 @@ prompt by `vigil assess agent render-handoff <agent-id>`.
 | `coverage_gaps` | object[] | optional | Each entry: `{area, reason, recommended_followup}`. |
 | `next_steps` | object[] | optional | Each entry: `{action, target, recommended_agent, rationale}`. |
 | `runtime_issues` | object[] | optional | Each entry: `{kind, tool_or_target, detail, severity}`. |
-| `working_artifacts` | object[] | optional | Each entry: `{path, description, kind}`. `path` is engagement-relative (e.g. `scans/sans_acme-saas.txt`); the renderer checks each on disk. |
+| `working_artifacts` | object[] | optional | Each entry: `{path, description, kind}`. `path` is engagement-relative (e.g. `scans/sans_acme_social.txt`); the renderer checks each on disk. |
 | `open_questions` | string[] | optional | Free-text questions the operator/human must answer (vendor-SaaS in/out, scope ambiguity, missing credential, etc.). |
 | `recommended_next_agent` | string | optional | The role you'd hand off to (`vulnerability-analyst`, `exploit-developer`, `report-writer`, ...). |
 | `handoff_status` | enum | optional | `checkpointed` / `ready` / `blocked` / `superseded`. Defaults to `checkpointed`; set `ready` or `blocked` in the final handoff so the operator can run `vigil assess agent close <agent_id>`. A `ready` or `blocked` handoff whose dispatch stays `in-progress` past the resume-brief threshold surfaces as a `stale_dispatch_ready_handoff` report-readiness blocker. |
@@ -55,7 +55,7 @@ One paragraph, ≤2000 chars, plain prose. Describe what was done and the headli
 outcome so the operator can decide the next dispatch quickly — name the hosts,
 the count of priority surfaces produced, and any blockers that shape the next
 phase. Example: "Phase 1 recon completed against 14 live hosts under
-saas.acme.example; five priority surfaces (one admin panel, two upload endpoints,
+acme-social.example; five priority surfaces (one admin panel, two upload endpoints,
 two GraphQL introspection-open) recorded; nuclei surfaced two medium CVE
 matches pending exploit-developer validation."
 
@@ -113,7 +113,7 @@ dispatch needs to know that before it tries the same approach.
 ### `working_artifacts`
 
 A list of objects — `{path, description, kind}`. Each entry is a file the next
-agent might consume. `path` is engagement-relative (`scans/sans_acme-saas.txt`,
+agent might consume. `path` is engagement-relative (`scans/sans_acme_social.txt`,
 `tools/exploit-state/EX-001-payload.sql`, `downloads/app.bundle.js`). `kind` is
 `data` / `script` / `payload` / `exploit_state` / `scan_output` / `download`.
 The renderer checks each path on disk and tags missing files as
@@ -164,22 +164,22 @@ without reading the audit pipeline.
   "agent_id": "recon_a3f9",
   "agent_role": "recon-specialist",
   "phase": "recon",
-  "summary": "Phase 1 recon completed against 14 live hosts under saas.acme.example; five priority surfaces recorded; nuclei flagged two medium CVE matches pending validation.",
+  "summary": "Phase 1 recon completed against 14 live hosts under acme-social.example; five priority surfaces recorded; nuclei flagged two medium CVE matches pending validation.",
   "confidence": "medium",
   "finding_slugs": ["RE-001"],
   "coverage_gaps": [
-    {"area": "non-web triage on saas.acme.example:9001", "reason": "service banner unidentifiable; nmap version probe inconclusive", "recommended_followup": "manual netcat banner grab + protocol fingerprint"}
+    {"area": "non-web triage on api.acme-social.example:9001", "reason": "service banner unidentifiable; nmap version probe inconclusive", "recommended_followup": "manual netcat banner grab + protocol fingerprint"}
   ],
   "next_steps": [
-    {"action": "validate CVE-2024-12345", "target": "saas.acme.example", "recommended_agent": "exploit-developer", "rationale": "version-match only; needs live confirmation before promotion to finding"}
+    {"action": "validate CVE-2024-12345", "target": "app.acme-social.example", "recommended_agent": "exploit-developer", "rationale": "version-match only; needs live confirmation before promotion to finding"}
   ],
   "runtime_issues": [
     {"kind": "tool_failed", "tool_or_target": "puredns", "detail": "massdns binary not found in runtime image", "severity": "warning"}
   ],
   "working_artifacts": [
-    {"path": "scans/sans_acme-saas.txt", "description": "Per-host SAN extracts (cross-host collision input)", "kind": "data"}
+    {"path": "scans/sans_acme_social.txt", "description": "Per-host SAN extracts (cross-host collision input)", "kind": "data"}
   ],
-  "open_questions": ["Is saas.acme.example in scope? CNAME points at vendor SaaS."],
+  "open_questions": ["Is sso-vendor.acme-social.example in scope? CNAME points at vendor SaaS."],
   "recommended_next_agent": "vulnerability-analyst",
   "handoff_status": "ready",
   "extras": {"live_host_count": 14, "wildcard_subs_resolved": 86, "egress_block_pct": 12}
@@ -193,12 +193,12 @@ without reading the audit pipeline.
   "agent_id": "source_b2c1",
   "agent_role": "source-analyzer",
   "phase": "recon",
-  "summary": "Extracted 142 routes and 4 secrets from saas.acme.example bundles; APP_VERSION=2.18.4 captured for osint-analyst version triangulation.",
+  "summary": "Extracted 142 routes and 4 secrets from app.acme-social.example bundles; APP_VERSION=2.18.4 captured for osint-analyst version triangulation.",
   "confidence": "high",
   "finding_slugs": ["SA-001", "SA-002"],
   "coverage_gaps": [],
   "next_steps": [
-    {"action": "ingest 142 new routes into work buffer", "target": "saas.acme.example", "recommended_agent": "surface-collector", "rationale": "extracted routes are the Phase 2 input"}
+    {"action": "ingest 142 new routes into work buffer", "target": "app.acme-social.example", "recommended_agent": "surface-collector", "rationale": "extracted routes are the Phase 2 input"}
   ],
   "runtime_issues": [],
   "working_artifacts": [
@@ -244,10 +244,10 @@ without reading the audit pipeline.
   "finding_slugs": ["VA-001", "VA-002", "VA-003", "VA-004"],
   "coverage_gaps": [],
   "next_steps": [
-    {"action": "verify VA-001 IDOR severity", "target": "saas.acme.example/api/users/{id}", "recommended_agent": "vulnerability-analyst", "rationale": "Phase 4 review mode"}
+    {"action": "verify VA-001 IDOR severity", "target": "app.acme-social.example/api/users/{id}", "recommended_agent": "vulnerability-analyst", "rationale": "Phase 4 review mode"}
   ],
   "runtime_issues": [
-    {"kind": "fuzzer_needed", "tool_or_target": "saas.acme.example/search?q=", "detail": "reflected-XSS hint without payload diversity — needs 100+ payload sweep", "severity": "info"}
+    {"kind": "fuzzer_needed", "tool_or_target": "app.acme-social.example/search?q=", "detail": "reflected-XSS hint without payload diversity — needs 100+ payload sweep", "severity": "info"}
   ],
   "working_artifacts": [],
   "open_questions": [],
@@ -263,7 +263,7 @@ without reading the audit pipeline.
   "agent_id": "exp_g8h3",
   "agent_role": "exploit-developer",
   "phase": "exploit",
-  "summary": "Chained EX-001 (auth-bypass) → EX-002 (RCE) into authenticated webshell on saas.acme.example; full chain recorded; one credential captured.",
+  "summary": "Chained EX-001 (auth-bypass) → EX-002 (RCE) into authenticated webshell on app.acme-social.example; full chain recorded; one credential captured.",
   "confidence": "high",
   "finding_slugs": ["EX-001", "EX-002"],
   "coverage_gaps": [],
@@ -293,7 +293,7 @@ without reading the audit pipeline.
   "finding_slugs": ["FZ-001"],
   "coverage_gaps": [],
   "next_steps": [
-    {"action": "validate the 6 anomalous non-XSS responses", "target": "saas.acme.example/search?q=", "recommended_agent": "vulnerability-analyst", "rationale": "anomalies need analysis before promotion"}
+    {"action": "validate the 6 anomalous non-XSS responses", "target": "app.acme-social.example/search?q=", "recommended_agent": "vulnerability-analyst", "rationale": "anomalies need analysis before promotion"}
   ],
   "runtime_issues": [],
   "working_artifacts": [
@@ -317,7 +317,7 @@ without reading the audit pipeline.
   "finding_slugs": [],
   "coverage_gaps": [],
   "next_steps": [
-    {"action": "validate CVE-2024-12345 against live saas.acme.example", "target": "saas.acme.example", "recommended_agent": "exploit-developer", "rationale": "high-value version-only match; backported patches commonly invalidate"}
+    {"action": "validate CVE-2024-12345 against live app.acme-social.example", "target": "app.acme-social.example", "recommended_agent": "exploit-developer", "rationale": "high-value version-only match; backported patches commonly invalidate"}
   ],
   "runtime_issues": [],
   "working_artifacts": [],
@@ -529,7 +529,7 @@ reading `vigil assess agent render-handoff` see whatever step you were on.
 
 ```json
 {
-  "agent_id": "recon_acme-saas_001",
+  "agent_id": "recon_acme_social_001",
   "agent_role": "recon-specialist",
   "phase": "recon-pivot",
   "summary": "Recon in progress: wafw00f / nmap / httpx complete. Cloudflare CDN, ports 80/443 only, Webflow tech stack identified.",

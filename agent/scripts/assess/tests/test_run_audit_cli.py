@@ -165,9 +165,6 @@ def _audit_receipt(receipt_id: int = 71, *, kind: str = "command") -> dict:
         "artifact_relative_path": "evidence/event.json" if kind != "command" else "",
         "evidence_sha256": SHA,
         "evidence_health": "healthy",
-        "redaction_status": "raw",
-        "derivative_of_receipt_id": None,
-        "raw_receipt_id": receipt_id,
         "tombstone_reason": "",
         "created_at": "2026-09-09T12:00:00+00:00",
         "command": {

@@ -25,7 +25,7 @@ from assess.lib import kali
 from assess.lib.kali_runtime_exec import _build_docker_exec
 from assess.lib.scope import ScopePolicyError
 
-_HANDLE = {"X-HackerOne": "vigiloss"}
+_HANDLE = {"X-HackerOne": "acme-researcher"}
 
 
 def _engagement(tmp_path, *, required=None):
@@ -33,6 +33,7 @@ def _engagement(tmp_path, *, required=None):
         json.dumps(
             {
                 "hostname": "app.example.com",
+                "hosts": ["app.example.com"],
                 "engagement_type": "web",
                 **({"required_headers": required} if required else {}),
             }
@@ -56,17 +57,17 @@ def _script(tmp_path, body: str, name: str = "probe.sh"):
 
 def test_script_referencing_the_header_runs_and_records_verification(tmp_path):
     eng = _engagement(tmp_path, required=_HANDLE)
-    _script(eng, '#!/bin/bash\ncurl -H "X-HackerOne: vigiloss" https://app.example.com/a\n')
+    _script(eng, '#!/bin/bash\ncurl -H "X-HackerOne: acme-researcher" https://app.example.com/a\n')
     report: dict = {}
 
     kali.prepare_execution_command(
-        ["bash", "/engagements/eng/scripts/probe.sh"],
+        ["bash", f"/engagements/{eng.name}/scripts/probe.sh"],
         tool_name="bash",
         engagement_dir=eng,
         report=report,
     )
 
-    assert report["required_header_status"] == "verified_in_script"
+    assert report["required_header_status"] == "referenced_in_script"
 
 
 def test_script_referencing_only_the_env_carrier_is_accepted(tmp_path):
@@ -83,7 +84,7 @@ def test_script_referencing_only_the_env_carrier_is_accepted(tmp_path):
         report=report,
     )
 
-    assert report["required_header_status"] == "verified_in_script"
+    assert report["required_header_status"] == "referenced_in_script"
 
 
 def test_script_without_the_header_refuses_before_any_traffic(tmp_path):
@@ -100,15 +101,88 @@ def test_script_without_the_header_refuses_before_any_traffic(tmp_path):
     assert "VIGIL_REQUIRED_HEADERS" in message  # the remedy, not just the refusal
 
 
-def test_unreadable_or_out_of_engagement_script_refuses_distinctly(tmp_path):
+def test_header_name_in_comment_does_not_satisfy_script_check(tmp_path):
     eng = _engagement(tmp_path, required=_HANDLE)
+    _script(
+        eng,
+        "#!/bin/bash\n# X-HackerOne is required\ncurl https://app.example.com/a\n",
+    )
 
-    with pytest.raises(ScopePolicyError) as excinfo:
+    with pytest.raises(ScopePolicyError, match="X-HackerOne"):
         kali.prepare_execution_command(
-            ["bash", "/etc/probe.sh"], tool_name="bash", engagement_dir=eng
+            ["bash", "scripts/probe.sh"], tool_name="bash", engagement_dir=eng
         )
 
-    assert "cannot read" in str(excinfo.value)
+
+def test_unreadable_or_out_of_engagement_script_proceeds_as_unknown(tmp_path):
+    eng = _engagement(tmp_path, required=_HANDLE)
+    report: dict = {}
+
+    kali.prepare_execution_command(
+        ["bash", "/etc/probe.sh"],
+        tool_name="bash",
+        engagement_dir=eng,
+        report=report,
+    )
+
+    assert report["required_header_status"] == "unknown_script_unreadable"
+
+
+def test_foreign_container_script_is_refused_not_rebased_for_header_inspection(tmp_path):
+    eng = _engagement(tmp_path, required=_HANDLE)
+    _script(eng, "#!/bin/bash\ncurl https://app.example.com/a\n")
+    with pytest.raises(ScopePolicyError, match="other"):
+        kali.prepare_execution_command(
+            ["bash", "/engagements/other/scripts/probe.sh"],
+            tool_name="bash",
+            engagement_dir=eng,
+        )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "#!/bin/bash\nprintf 'offline analysis only\\n'\n",
+        "#!/bin/bash\ncurl https://outside.example.net/a\n",
+        "#!/bin/bash\ncurl \"https://$TARGET/a\"\n",
+    ],
+)
+def test_script_without_lexically_established_in_scope_request_is_not_refused(
+    tmp_path, body
+):
+    eng = _engagement(tmp_path, required=_HANDLE)
+    _script(eng, body)
+    report: dict = {}
+
+    kali.prepare_execution_command(
+        ["bash", "scripts/probe.sh"],
+        tool_name="bash",
+        engagement_dir=eng,
+        report=report,
+    )
+
+    assert report["required_header_status"] in {
+        "not_applicable_no_in_scope_url",
+        "unknown_dynamic_target",
+    }
+
+
+def test_header_reference_does_not_turn_an_offline_script_into_target_proof(tmp_path):
+    eng = _engagement(tmp_path, required=_HANDLE)
+    _script(
+        eng,
+        '#!/bin/bash\nprintf "%s\\n" "$VIGIL_REQUIRED_HEADERS" > report.txt\n',
+    )
+    report: dict = {}
+
+    kali.prepare_execution_command(
+        ["bash", "scripts/probe.sh"],
+        tool_name="bash",
+        engagement_dir=eng,
+        report=report,
+    )
+
+    assert report["required_header_status"] == "not_applicable_no_in_scope_url"
 
 
 def test_python_script_is_held_to_the_same_rule(tmp_path):
@@ -118,6 +192,77 @@ def test_python_script_is_held_to_the_same_rule(tmp_path):
     with pytest.raises(ScopePolicyError):
         kali.prepare_execution_command(
             ["python3", "scripts/probe.py"], tool_name="python3", engagement_dir=eng
+        )
+
+
+@pytest.mark.parametrize(
+    ("name", "body"),
+    [
+        ("probe.sh", "#!/bin/sh\n# curl https://app.example.com/a\nprintf 'offline\\n'\n"),
+        ("probe.sh", "#!/bin/sh\nprintf '%s\\n' 'curl https://app.example.com/a'\n"),
+        ("probe.py", '# requests.get("https://app.example.com/a")\nprint("offline")\n'),
+        ("probe.py", 'print(\'requests.get("https://app.example.com/a")\')\n'),
+        ("probe.js", 'console.log(\'fetch("https://app.example.com/a")\');\n'),
+        ("probe.rb", "puts 'Net::HTTP.get(URI(\"https://app.example.com/a\"))'\n"),
+        ("probe.pl", "print 'LWP::UserAgent->new->get(\"https://app.example.com/a\")';\n"),
+        ("probe.php", 'echo \'curl_init("https://app.example.com/a")\';\n'),
+    ],
+    ids=[
+        "shell-comment",
+        "shell-string",
+        "python-comment",
+        "python-string",
+        "node-string",
+        "ruby-string",
+        "perl-string",
+        "php-string",
+    ],
+)
+def test_inert_script_request_text_does_not_trigger_required_header_refusal(
+    tmp_path, name: str, body: str
+) -> None:
+    eng = _engagement(tmp_path, required=_HANDLE)
+    _script(eng, body, name)
+    interpreter = {
+        ".js": "node",
+        ".php": "php",
+        ".pl": "perl",
+        ".py": "python3",
+        ".rb": "ruby",
+        ".sh": "bash",
+    }[name[name.rfind(".") :]]
+    report: dict = {}
+
+    kali.prepare_execution_command(
+        [interpreter, f"scripts/{name}"],
+        tool_name=interpreter,
+        engagement_dir=eng,
+        report=report,
+    )
+
+    assert report["required_header_status"] == "not_applicable_no_in_scope_url"
+
+
+@pytest.mark.parametrize(
+    ("interpreter", "name", "body"),
+    [
+        ("node", "probe.js", 'fetch("https://app.example.com/a");\n'),
+        ("ruby", "probe.rb", 'Net::HTTP.get(URI("https://app.example.com/a"))\n'),
+        ("perl", "probe.pl", "LWP::UserAgent->new->get('https://app.example.com/a');\n"),
+        ("php", "probe.php", 'curl_init("https://app.example.com/a");\n'),
+    ],
+)
+def test_supported_script_literal_request_still_requires_header(
+    tmp_path, interpreter: str, name: str, body: str
+) -> None:
+    eng = _engagement(tmp_path, required=_HANDLE)
+    _script(eng, body, name)
+
+    with pytest.raises(ScopePolicyError, match="X-HackerOne"):
+        kali.prepare_execution_command(
+            [interpreter, f"scripts/{name}"],
+            tool_name=interpreter,
+            engagement_dir=eng,
         )
 
 
@@ -148,7 +293,86 @@ def test_a_c_body_still_injects_and_is_never_refused(tmp_path):
     )
 
     assert report["required_header_status"] == "injected"
-    assert "X-HackerOne: vigiloss" in cmd[2]
+    assert "X-HackerOne: acme-researcher" in cmd[2]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["node", "-e", "fetch('https://app.example.com/a')"],
+        ["node", "--eval", "fetch('https://app.example.com/a')"],
+        ["node", "-p", "fetch('https://app.example.com/a')"],
+        ["ruby", "-e", "Net::HTTP.get(URI('https://app.example.com/a'))"],
+        ["perl", "-e", "LWP::UserAgent->new->get('https://app.example.com/a')"],
+        ["php", "-r", "curl_init('https://app.example.com/a');"],
+    ],
+    ids=["node-e", "node-eval", "node-print", "ruby-e", "perl-e", "php-r"],
+)
+def test_inline_interpreter_program_is_not_mistaken_for_a_script_file(
+    tmp_path, command
+) -> None:
+    eng = _engagement(tmp_path, required=_HANDLE)
+    report: dict = {}
+
+    kali.prepare_execution_command(
+        command,
+        tool_name=command[0],
+        engagement_dir=eng,
+        report=report,
+    )
+
+    assert report["required_header_status"] == "warned"
+
+
+def test_long_inline_interpreter_program_never_reaches_filesystem_path_lookup(
+    tmp_path,
+) -> None:
+    eng = _engagement(tmp_path, required=_HANDLE)
+    report: dict = {}
+
+    kali.prepare_execution_command(
+        ["node", "-e", "fetch('https://app.example.com/a');" + ("x" * 10_000)],
+        tool_name="node",
+        engagement_dir=eng,
+        report=report,
+    )
+
+    assert report["required_header_status"] == "warned"
+
+
+@pytest.mark.parametrize(
+    ("command", "script_name", "body"),
+    [
+        (
+            ["python3", "-W", "ignore", "scripts/probe.py"],
+            "probe.py",
+            "import requests\nrequests.get('https://app.example.com/a')\n",
+        ),
+        (
+            ["node", "--require", "module", "scripts/probe.js"],
+            "probe.js",
+            "fetch('https://app.example.com/a');\n",
+        ),
+        (
+            ["bash", "-O", "extglob", "scripts/probe.sh"],
+            "probe.sh",
+            "curl https://app.example.com/a\n",
+        ),
+    ],
+    ids=["python-warning", "node-require", "bash-shell-option"],
+)
+def test_interpreter_option_values_are_skipped_before_the_script_file(
+    tmp_path, command, script_name, body
+) -> None:
+    eng = _engagement(tmp_path, required=_HANDLE)
+    _script(eng, body, script_name)
+
+    with pytest.raises(ScopePolicyError, match="X-HackerOne"):
+        kali.prepare_execution_command(
+            command,
+            tool_name=command[0],
+            engagement_dir=eng,
+        )
 
 
 def test_a_passive_tool_is_skipped_not_refused(tmp_path):
@@ -166,8 +390,8 @@ def test_a_passive_tool_is_skipped_not_refused(tmp_path):
 
 def test_required_headers_are_exported_for_the_script_to_read(tmp_path):
     pairs = kali.required_header_env_pairs(_HANDLE)
-    assert ("VIGIL_REQUIRED_HEADERS", "X-HackerOne: vigiloss") in pairs
-    assert ("VIGIL_REQUIRED_HEADER_X_HACKERONE", "vigiloss") in pairs
+    assert ("VIGIL_REQUIRED_HEADERS", "X-HackerOne: acme-researcher") in pairs
+    assert ("VIGIL_REQUIRED_HEADER_X_HACKERONE", "acme-researcher") in pairs
 
 
 # --------------------------------------------------------------------------- #

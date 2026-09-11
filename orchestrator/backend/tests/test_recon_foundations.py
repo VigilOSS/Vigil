@@ -118,9 +118,12 @@ def test_wildcard_candidates_returns_distinct_sorted_parents():
         "x.review.acme-media.example",
         "y.review.acme-media.example",
         "z.media.acme-media.example",
-        "acme-media.example",  # 2-label apex → no deeper parent
+        "acme-media.example",  # apex → no deeper parent
     ]
-    assert wildcard_parent_candidates(hosts) == ["media.acme-media.example", "review.acme-media.example"]
+    assert wildcard_parent_candidates(hosts) == [
+        "media.acme-media.example",
+        "review.acme-media.example",
+    ]
 
 
 def test_wildcard_candidates_handles_noise_and_dedup():

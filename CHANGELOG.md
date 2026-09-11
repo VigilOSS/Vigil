@@ -9,6 +9,106 @@ have.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-12
+
+### Added
+
+- **A continuous, explicit source-to-live workflow.** Structural index v6 records stable callable
+  identities and spans for bundled JavaScript, coverage distinguishes facts/advice/blockers, leases
+  and corrected results name their superseded rows, code-file listings are paginated envelopes, and
+  each dispatch receives an engagement-contained scratch directory. Web/code track activation,
+  legacy phase repair, host/rate mutations, and ambiguous proxy ownership are explicit and audited.
+- **Repairable provenance and truthful client identity.** New findings require a valid author;
+  legacy authorless records have a one-time audited binding command. Dispatches keep requested,
+  launcher-effective, and provider-observed client facts separate, with the unavailable provider
+  observation represented as `unknown` rather than guessed from model variables.
+- **Public-source release foundations.** Apache-2.0 licensing, security/contribution/community
+  policy, package metadata, synthetic methodology/fixtures, and dependency-license evidence are in
+  place. Destructive history rewriting and public cutover remain owner-only gates.
+- **Bounded parser and million-file qualification.** Exact structural parsers now run in a
+  resource-capped child process with typed failure outcomes and complete streaming fallback. A
+  virtual million-file regression drives production listing through interrupted and complete
+  paginated scans, composes 200 exact selectors distributed across the inventory, and proves one
+  maximum-size queue commit plus idempotent cancellation retry without allocating a million-file
+  tree.
+- **Prompt census and canonical blind-triage packets.** `vigil assess prompt-census` measures
+  expected prompt structure and bytes without pinning authored wording. `vigil assess export
+  triage-packet` assembles exact canonical inputs into a content-addressed, symlink-safe packet with
+  a digest manifest and an explicit no-process-isolation declaration.
+- **Executable benchmark reliability controls.** Timeout reconciliation closes paginated live
+  state while preserving partial evidence; a focused profile preflights offline Nuclei, reuses
+  collection, and accepts evidence-linked deadlines; typed payload transport verifies and streams
+  the exact bytes that are sent.
+
+### Changed
+
+- **Benchmark outcome and contamination are independent axes.** `clean`, `answer_key_exposed`,
+  `confirmed_read`, and `telemetry_incomplete` are typed states; every non-clean attempt receives
+  zero qualifying credit while retaining its diagnostic progress and execution outcome. Requested,
+  launcher-effective, and provider-observed model/reasoning identities are also separate; pricing
+  fallbacks never become provider evidence.
+- **Sent replies are append-only.** Drafts remain editable, but a sent reply's bytes are immutable;
+  a correction creates a linked version. Resume/list/note/artifact commands now report totals,
+  truncation, replacement, refresh, and unlink behavior explicitly instead of requiring inference.
+- **New engagement scope stops writing legacy repository fields.** Repository intent remains in the
+  engagement manifest and code-ingest contract; existing `scope.json` `repos`/`source_repos` values
+  remain readable for compatibility.
+
+### Fixed
+
+- **Fresh installs no longer inherit owner-specific OOB defaults.** `oob.frp_host` and
+  `oob.domain` must be configured explicitly. Starting without either value now fails with the
+  exact `vigil config set oob.frp_host <host>` and `vigil config set oob.domain <domain>` commands
+  needed to finish setup.
+- **A CLI-recorded finding could never reach `confirmed`.** The backend refuses every terminal
+  verification it cannot attribute to an author dispatch distinct from the verifier's, but the
+  generated finding schema forbade `provenance.agent_id` — the only field that carries that
+  attribution — so `finding record` could not supply it and every CLI-authored finding was stuck at
+  `unreviewed`. The schema now admits the key and `finding record` requires `--agent-id`; the backend
+  refuses missing or invalid authors. The independence check itself is unchanged: an unresolvable
+  author and an author that is the verifier are both still refused.
+- **An unknown finding filter value returned an empty list instead of an error.**
+  `finding list --verification-status verified` (the retired two-axis spelling) answered `[]` with
+  exit 0, which reads as "no confirmed findings" while confirmed findings sit in the table.
+  `severity`, `workflow_status`, and `verification_status` filters are now validated against their
+  enums and answer an unknown value with a 400 naming the vocabulary. The dead `verified` /
+  `escalated` / `pending` disposition words were swept out of the prompt corpus in the same change.
+- **A resumed run inherited proof it could not stand behind.** The resume proof repair covered run
+  candidates only; obligations and source reads still copied their parent's receipt bindings
+  verbatim, so a child inherited decayed proof, raised a `proof_*` blocker it could not clear, and
+  held at `partial` forever. One predicate now governs all three: a resumed run inherits only
+  receipts that are healthy at resume time, a closed obligation or terminal candidate whose proof
+  was dropped reopens, and the child's own event row records the dropped receipt ids plus the
+  parent conclusion they supported. Parent records stay immutable. Two parent source reads that
+  differed only by a proof binding now collapse to one row in the child instead of aborting the
+  whole resume on the read-fingerprint unique index.
+- **Documented `vigil assess` flags that no parser registered.** `--verification-state`,
+  `--verification-disposition`, `finding link --root`, `agent list --json`, `kali nikto --ssl`,
+  `kali wafw00f --input-list`, and `post credentials --status` were written across the prompt
+  corpus and died at argparse exit 2. A new lint in `orchestrator/backend/tests/test_skill_cli_sync.py`
+  resolves every literal `vigil assess` invocation in the corpus against the live argparse tree, so
+  a flag that no verb registers now fails the build.
+
+### Removed
+
+- **Credential and secret masking from Vigil's own operator surfaces.** The Runs tab rendered the
+  audit trail through a secret-shaped regex pass behind a "Reveal values" toggle; `auth list --json`
+  projected the credential store to names only; `auth status` reported `Bearer (length=40)` and
+  20-character prefixes; `runtime resources` stripped proxy userinfo; and `vigil auth status`
+  reduced cookies and headers to a count. All of it is gone, along with every constant, helper,
+  reveal control, and call site. Vigil runs on the operator's machine, against authorized targets,
+  with the engagement's own credentials — a control that withholds that data from the operator has
+  no adversary to exclude, so only its false positives are observable, and one of them silently
+  truncated whole command lines out of the audit view. See
+  [ADR 0019](docs/adr/0019-vigil-does-not-defend-against-its-own-operator.md), which also names the
+  four controls that keep a real adversary and are untouched: benchmark anti-cheat, scope/ROE
+  enforcement, proof and evidence integrity, and the untrusted-target-text boundary.
+- **The remaining operator-data suppression controls.** HTTP capture no longer exposes a redaction
+  profile or status; proof receipts no longer create transformed derivatives; artifact registration
+  no longer carries a sensitivity switch; and submission, reply, CLI, API, and frontend surfaces keep
+  exact captured values. Legacy database columns remain read-only migration history, with historical
+  proof-derivative relationships still enforced by integrity checks rather than silently discarded.
+
 ## [0.2.0] - 2026-08-26
 
 ### Added

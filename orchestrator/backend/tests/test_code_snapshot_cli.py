@@ -31,6 +31,12 @@ def _load_command(filename: str, name: str):
     return module
 
 
+def test_code_index_routes_exact_parsing_through_process_boundary() -> None:
+    module = _load_command("code_index.py", "test_code_index_parser_boundary")
+
+    assert module.index_file.__module__ == "assess.lib.parser_boundary"
+
+
 def _ingest_args(repo: Path, engagement: Path, *, dry_run: bool = False) -> SimpleNamespace:
     return SimpleNamespace(
         repo_path=str(repo),
@@ -54,6 +60,18 @@ def _lsp_publish_response(payload: dict[str, object]) -> dict[str, object]:
         "active_generation": payload["repo_generation"],
         "source_manifest_digest": payload["source_manifest_digest"],
         "lsp_config": payload["lsp_config"],
+    }
+
+
+def _file_page(rows: list[dict], *, offset: int = 0, total: int | None = None) -> dict:
+    count = len(rows)
+    page_total = offset + count if total is None else total
+    return {
+        "total": page_total,
+        "offset": offset,
+        "count": count,
+        "has_more": offset + count < page_total,
+        "items": rows,
     }
 
 
@@ -1443,12 +1461,12 @@ def test_code_ingest_closes_capture_spool_on_record_build_failure(
     assert all(spool.closed for spool in captured_spools)
 
 
-def test_code_index_build_emits_generation_scoped_v5_and_preserves_v4_history(
+def test_code_index_build_emits_generation_scoped_v6_and_preserves_v4_history(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     request: pytest.FixtureRequest,
 ) -> None:
-    module = _load_command("code_index.py", "test_sealed_code_index_v5")
+    module = _load_command("code_index.py", "test_sealed_code_index_v6")
     server_digest = "d" * 64
     raw = b"print('sealed')\n"
     notes = b"# Security notes\n"
@@ -1519,7 +1537,7 @@ def test_code_index_build_emits_generation_scoped_v5_and_preserves_v4_history(
                     "source_manifest_digest": server_digest,
                 }
             if endpoint == "code/files?limit=5000&offset=0&repo_id=7":
-                return [dict(row) for row in backend_rows]
+                return _file_page([dict(row) for row in backend_rows])
             raise AssertionError(endpoint)
 
         def __enter__(self):
@@ -1538,8 +1556,12 @@ def test_code_index_build_emits_generation_scoped_v5_and_preserves_v4_history(
     monkeypatch.setitem(sys.modules, "tree_sitter", SimpleNamespace())
     parsed: list[bytes | None] = []
     parser_fails = False
+    parser_cancelled = False
 
-    def fake_index(path, language, source=None):
+    def fake_index(path, language, source=None, *, result_validator=None):
+        assert callable(result_validator)
+        if parser_cancelled:
+            raise KeyboardInterrupt
         if parser_fails:
             raise RuntimeError("parser interrupted before aggregate archival")
         parsed.append(source)
@@ -1586,6 +1608,12 @@ def test_code_index_build_emits_generation_scoped_v5_and_preserves_v4_history(
         engagement_dir=str(tmp_path),
     )
 
+    parser_cancelled = True
+    with pytest.raises(KeyboardInterrupt):
+        module.run(args)
+    parser_cancelled = False
+    assert not list(output.rglob(f".{input_digest}.stage-*"))
+
     parser_fails = True
     with pytest.raises(SystemExit) as excinfo:
         module.run(args)
@@ -1596,7 +1624,7 @@ def test_code_index_build_emits_generation_scoped_v5_and_preserves_v4_history(
     assert not [
         path
         for path in (output / "structural-index").rglob("manifest.json")
-        if "v5" in path.parts
+        if "v6" in path.parts
     ]
 
     identity_parent = (
@@ -1604,7 +1632,7 @@ def test_code_index_build_emits_generation_scoped_v5_and_preserves_v4_history(
         / "structural-index"
         / "7"
         / "4"
-        / "v5"
+        / "v6"
         / server_digest
     )
     final_dir = identity_parent / input_digest
@@ -1696,7 +1724,7 @@ def test_code_index_build_emits_generation_scoped_v5_and_preserves_v4_history(
         assert not [
             path
             for path in (output / "structural-index").rglob("manifest.json")
-            if "v5" in path.parts
+            if "v6" in path.parts
         ]
         monkeypatch.setattr(module.os, "fsync", real_os_fsync)
         monkeypatch.setattr(module, "_fsync_directory_strict", real_fsync_directory)
@@ -1852,11 +1880,11 @@ def test_code_index_build_emits_generation_scoped_v5_and_preserves_v4_history(
     manifests = [
         path
         for path in (output / "structural-index").rglob("manifest.json")
-        if "v5" in path.parts
+        if "v6" in path.parts
     ]
     assert len(manifests) == 1
-    v5_manifest_bytes = manifests[0].read_bytes()
-    tampered = json.loads(v5_manifest_bytes)
+    v6_manifest_bytes = manifests[0].read_bytes()
+    tampered = json.loads(v6_manifest_bytes)
     tampered["total_functions"] = int(tampered["total_functions"]) + 1
     os.chmod(manifests[0], 0o644)
     manifests[0].write_text(json.dumps(tampered), encoding="utf-8")
@@ -1872,7 +1900,7 @@ def test_code_index_build_emits_generation_scoped_v5_and_preserves_v4_history(
     assert archive_path.stat().st_mtime_ns == archive_stat.st_mtime_ns
 
     os.chmod(manifests[0], 0o644)
-    manifests[0].write_bytes(v5_manifest_bytes)
+    manifests[0].write_bytes(v6_manifest_bytes)
     os.chmod(manifests[0], 0o444)
     module.run(args)
     durability_events.clear()
@@ -1918,12 +1946,12 @@ def test_code_index_build_emits_generation_scoped_v5_and_preserves_v4_history(
     assert manifests[0].relative_to(output / "structural-index").parts == (
         "7",
         "4",
-        "v5",
+        "v6",
         server_digest,
         input_digest,
         "manifest.json",
     )
-    assert built["schema"] == "structural-index/v5"
+    assert built["schema"] == "structural-index/v6"
     assert built["repo_id"] == 7
     assert built["repo_generation"] == 4
     assert built["source_manifest_digest"] == server_digest
@@ -1943,7 +1971,7 @@ def test_code_index_build_emits_generation_scoped_v5_and_preserves_v4_history(
     assert unsupported["unavailable_dimensions"]
     assert unsupported["total_functions"] == 0
     assert unsupported["source_sha256"] == hashlib.sha256(notes).hexdigest()
-    assert f"/7/4/v5/{server_digest}/{built['structural_input_digest']}/" in (
+    assert f"/7/4/v6/{server_digest}/{built['structural_input_digest']}/" in (
         f"/{manifests[0].relative_to(output / 'structural-index')}/"
     )
     aggregate = json.loads(aggregate_path.read_text(encoding="utf-8"))
@@ -1955,7 +1983,7 @@ def test_code_index_build_emits_generation_scoped_v5_and_preserves_v4_history(
     class SyncClient:
         def get(self, endpoint: str):
             assert endpoint == "code/files?limit=5000&offset=0&repo_id=7"
-            return [
+            return _file_page([
                 {
                     "id": file_id,
                     "repo_id": 7,
@@ -1967,7 +1995,7 @@ def test_code_index_build_emits_generation_scoped_v5_and_preserves_v4_history(
                     (("main.py", raw, "python"), ("notes.md", notes, "markdown")),
                     start=11,
                 )
-            ]
+            ])
 
     sync_manifest = {**built, "_resolved_manifest_path": str(manifests[0])}
     prepared = sync_module._prepare_repo_payload(
@@ -1982,7 +2010,7 @@ def test_code_index_build_emits_generation_scoped_v5_and_preserves_v4_history(
         sync_manifest,
         output / "structural-index",
     )
-    assert prepared["structural_index_schema"] == "structural-index/v5"
+    assert prepared["structural_index_schema"] == "structural-index/v6"
     unsupported_update = next(item for item in prepared["updates"] if item["file_id"] == 12)
     assert unsupported_update["structural_analysis_status"] == "unsupported"
     assert unsupported_update["structural_analysis_mode"] == "none"
@@ -2021,7 +2049,7 @@ def test_code_index_language_correction_creates_a_new_immutable_identity_and_onl
                     "source_manifest_digest": server_digest,
                 }
             if endpoint == "code/files?limit=5000&offset=0&repo_id=7":
-                return [
+                return _file_page([
                     {
                         "id": 11,
                         "repo_id": 7,
@@ -2029,7 +2057,7 @@ def test_code_index_language_correction_creates_a_new_immutable_identity_and_onl
                         "file_hash": source_sha,
                         "language": current_language,
                     }
-                ]
+                ])
             raise AssertionError(endpoint)
 
         def __enter__(self):
@@ -2040,7 +2068,7 @@ def test_code_index_language_correction_creates_a_new_immutable_identity_and_onl
 
     parsed_languages: list[str] = []
 
-    def fake_index(_path, language, source=None):
+    def fake_index(_path, language, source=None, **_kwargs):
         parsed_languages.append(language)
         return {
             "language": language,
@@ -2194,7 +2222,7 @@ def test_code_index_explicit_unknown_backend_language_never_falls_back_to_filena
                     "source_manifest_digest": "d" * 64,
                 }
             if endpoint == "code/files?limit=5000&offset=0&repo_id=7":
-                return [
+                return _file_page([
                     {
                         "id": 11,
                         "repo_id": 7,
@@ -2202,7 +2230,7 @@ def test_code_index_explicit_unknown_backend_language_never_falls_back_to_filena
                         "file_hash": source_sha,
                         "language": "",
                     }
-                ]
+                ])
             raise AssertionError(endpoint)
 
         def __enter__(self):
@@ -2300,8 +2328,8 @@ def test_code_index_build_rejects_untrusted_backend_inventory(
                 }
             if endpoint == "code/files?limit=5000&offset=0&repo_id=7":
                 if failure == "incomplete":
-                    return []
-                return [
+                    return _file_page([])
+                return _file_page([
                     {
                         "id": 11,
                         "repo_id": 7,
@@ -2311,7 +2339,7 @@ def test_code_index_build_rejects_untrusted_backend_inventory(
                         "file_hash": "a" * 64 if failure == "hash" else source_sha,
                         "language": "brainfuck" if failure == "unknown-language" else "c",
                     }
-                ]
+                ])
             raise AssertionError(endpoint)
 
         def __enter__(self):
@@ -2326,7 +2354,7 @@ def test_code_index_build_rejects_untrusted_backend_inventory(
         "load_config",
         lambda *_: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
     )
-    def fake_index(path, language, source=None):
+    def fake_index(path, language, source=None, **_kwargs):
         if failure != "generation":
             pytest.fail("untrusted inventory reached the parser")
         return module._unsupported_index(path, language, source_size=len(source))
@@ -2417,7 +2445,7 @@ def test_code_index_build_rejects_an_ancestor_swapped_after_validation(
                     "source_manifest_digest": "d" * 64,
                 }
             if endpoint == "code/files?limit=5000&offset=0&repo_id=7":
-                return [
+                return _file_page([
                     {
                         "id": 11,
                         "repo_id": 7,
@@ -2425,7 +2453,7 @@ def test_code_index_build_rejects_an_ancestor_swapped_after_validation(
                         "file_hash": hashlib.sha256(raw).hexdigest(),
                         "language": "python",
                     }
-                ]
+                ])
             raise AssertionError(endpoint)
 
         def __enter__(self):
@@ -2658,7 +2686,7 @@ def test_code_index_publish_rejects_corrupt_known_v3_summary_without_archiving(
         / "structural-index"
         / "7"
         / "4"
-        / "v5"
+        / "v6"
         / ("d" * 64)
         / ("e" * 64)
         / "manifest.json"
@@ -2711,7 +2739,7 @@ def test_code_index_publish_rejects_duplicate_legacy_v3_object_keys(
         / "structural-index"
         / "7"
         / "4"
-        / "v5"
+        / "v6"
         / ("d" * 64)
         / ("e" * 64)
         / "manifest.json"
@@ -2769,7 +2797,7 @@ def test_code_index_publish_rejects_fifo_collision_without_blocking(
         / "structural-index"
         / "7"
         / "4"
-        / "v5"
+        / "v6"
         / ("d" * 64)
         / ("e" * 64)
         / "manifest.json"
@@ -2826,7 +2854,7 @@ def test_code_index_publish_rejects_unsafe_lock_nodes_without_blocking(
         / "structural-index"
         / "7"
         / "4"
-        / "v5"
+        / "v6"
         / ("d" * 64)
         / ("e" * 64)
         / "manifest.json"
@@ -2873,7 +2901,7 @@ def test_code_index_retry_rejects_retained_v5_fifo_without_blocking(
         structural_root
         / "7"
         / "4"
-        / "v5"
+        / "v6"
         / ("d" * 64)
         / ("e" * 64)
     )
@@ -2929,7 +2957,7 @@ def test_code_index_retry_rejects_retained_v5_manifest_shape_drift(
         structural_root
         / "7"
         / "4"
-        / "v5"
+        / "v6"
         / ("d" * 64)
         / ("e" * 64)
     )
@@ -2937,7 +2965,7 @@ def test_code_index_retry_rejects_retained_v5_manifest_shape_drift(
     files_dir.mkdir(parents=True)
     request.addfinalizer(lambda: _restore_tree_writable(structural_root))
     expected = {
-        "schema": "structural-index/v5",
+        "schema": "structural-index/v6",
         "indexed_at": "2026-08-05T17:00:00Z",
         "files": {},
     }
@@ -2946,7 +2974,7 @@ def test_code_index_retry_rejects_retained_v5_manifest_shape_drift(
         manifest_bytes = json.dumps(existing).encode("utf-8")
     else:
         manifest_bytes = (
-            b'{"schema":"attacker-schema","schema":"structural-index/v5",'
+            b'{"schema":"attacker-schema","schema":"structural-index/v6",'
             b'"indexed_at":"2026-08-05T16:00:00Z","files":{}}'
         )
     manifest_path = final_dir / "manifest.json"
@@ -2983,7 +3011,7 @@ def test_code_index_publish_rejects_group_writable_legacy_archive_directory(
         / "structural-index"
         / "7"
         / "4"
-        / "v5"
+        / "v6"
         / ("d" * 64)
         / ("e" * 64)
         / "manifest.json"
@@ -3039,7 +3067,7 @@ def test_code_index_publish_fails_closed_on_unreadable_legacy_aggregate(
     ("legacy_kind", "expected_error"),
     [
         ("aggregate", "structural index aggregate must use structural-index-aggregate/v4"),
-        ("manifest", "repo 7 manifest is not structural-index/v5"),
+        ("manifest", "repo 7 manifest is not structural-index/v6"),
     ],
 )
 def test_code_index_sync_rejects_legacy_contracts_before_backend_access(
@@ -3128,7 +3156,7 @@ def test_code_index_sync_rejects_source_path_traversal(tmp_path: Path) -> None:
     }
     index_file.write_text(json.dumps(index_payload), encoding="utf-8")
     manifest = {
-        "schema": "structural-index/v5",
+        "schema": "structural-index/v6",
         "repo_id": 7,
         "repo_key": "demo-repo",
         "repo_generation": 4,
@@ -3152,14 +3180,14 @@ def test_code_index_sync_rejects_source_path_traversal(tmp_path: Path) -> None:
     class FakeClient:
         def get(self, endpoint: str):
             assert endpoint == "code/files?limit=5000&offset=0&repo_id=7"
-            return [
+            return _file_page([
                 {
                     "id": 11,
                     "repo_id": 7,
                     "file_path": "../escaped.py",
                     "file_hash": source_sha,
                 }
-            ]
+            ])
 
     backend_repo = {
         "id": 7,
@@ -3197,7 +3225,7 @@ def test_code_index_sync_validates_all_files_before_bound_cas_post(
     )
     index_root = tmp_path / "structural-index"
     index_file = (
-        index_root / "7" / "4" / "v5" / digest / input_digest / "files" / "main.json"
+        index_root / "7" / "4" / "v6" / digest / input_digest / "files" / "main.json"
     )
     index_file.parent.mkdir(parents=True)
     index_payload = {
@@ -3239,7 +3267,7 @@ def test_code_index_sync_validates_all_files_before_bound_cas_post(
     index_file.write_text(json.dumps(index_payload), encoding="utf-8")
     index_sha = hashlib.sha256(index_file.read_bytes()).hexdigest()
     manifest = {
-        "schema": "structural-index/v5",
+        "schema": "structural-index/v6",
         "repo_id": 7,
         "repo_key": "demo-repo",
         "repo_generation": 4,
@@ -3330,7 +3358,7 @@ def test_code_index_sync_validates_all_files_before_bound_cas_post(
                             "language": "python",
                         }
                     )
-                return rows
+                return _file_page(rows)
             raise AssertionError(endpoint)
 
         def post(self, endpoint: str, payload: dict):
@@ -3378,7 +3406,7 @@ def test_code_index_sync_validates_all_files_before_bound_cas_post(
                 "repo_id": 7,
                 "repo_generation": 4,
                 "source_manifest_digest": digest,
-                "structural_index_schema": "structural-index/v5",
+                "structural_index_schema": "structural-index/v6",
                 "structural_input_digest": input_digest,
                 "structural_index_manifest_path": str(manifest_path.resolve()),
                 "degraded_files": 0,
@@ -3479,7 +3507,7 @@ def test_code_index_sync_ancestor_swap_fails_before_any_post(
     )
     index_root = tmp_path / "structural-index"
     artifact_path = (
-        index_root / "7" / "4" / "v5" / digest / input_digest / "files" / "main.json"
+        index_root / "7" / "4" / "v6" / digest / input_digest / "files" / "main.json"
     )
     artifact_path.parent.mkdir(parents=True)
     artifact = {
@@ -3523,7 +3551,7 @@ def test_code_index_sync_ancestor_swap_fails_before_any_post(
     manifest_path = artifact_path.parent.parent / "manifest.json"
     index_rel = str(artifact_path.relative_to(index_root))
     manifest = {
-        "schema": "structural-index/v5",
+        "schema": "structural-index/v6",
         "repo_id": 7,
         "repo_key": "demo-repo",
         "repo_generation": 4,
@@ -3597,7 +3625,7 @@ def test_code_index_sync_ancestor_swap_fails_before_any_post(
                     }
                 ]
             if endpoint == "code/files?limit=5000&offset=0&repo_id=7":
-                return [dict(backend_row)]
+                return _file_page([dict(backend_row)])
             raise AssertionError(endpoint)
 
         def post(self, endpoint: str, payload: dict):
@@ -3693,7 +3721,7 @@ def test_code_index_sync_uses_observed_signal_counts_when_artifact_lists_are_cap
     )
     index_root = tmp_path / "structural-index"
     artifact_path = (
-        index_root / "7" / "4" / "v5" / digest / input_digest / "files" / "main.json"
+        index_root / "7" / "4" / "v6" / digest / input_digest / "files" / "main.json"
     )
     artifact_path.parent.mkdir(parents=True)
     artifact = {
@@ -3736,7 +3764,7 @@ def test_code_index_sync_uses_observed_signal_counts_when_artifact_lists_are_cap
     artifact_path.write_bytes(artifact_bytes)
     index_rel = str(artifact_path.relative_to(index_root))
     manifest = {
-        "schema": "structural-index/v5",
+        "schema": "structural-index/v6",
         "repo_id": 7,
         "repo_key": "demo-repo",
         "repo_generation": 4,
@@ -3769,7 +3797,7 @@ def test_code_index_sync_uses_observed_signal_counts_when_artifact_lists_are_cap
     class FakeClient:
         def get(self, endpoint: str):
             assert endpoint == "code/files?limit=5000&offset=0&repo_id=7"
-            return [dict(backend_row)]
+            return _file_page([dict(backend_row)])
 
     payload = module._prepare_repo_payload(
         FakeClient(),
@@ -4305,7 +4333,7 @@ def test_code_index_large_file_fallback_scans_every_byte_and_surfaces_debt(
                     "source_manifest_digest": server_digest,
                 }
             if endpoint == "code/files?limit=5000&offset=0&repo_id=7":
-                return [
+                return _file_page([
                     {
                         "id": 11,
                         "repo_id": 7,
@@ -4313,7 +4341,7 @@ def test_code_index_large_file_fallback_scans_every_byte_and_surfaces_debt(
                         "file_hash": hashlib.sha256(raw).hexdigest(),
                         "language": "python",
                     }
-                ]
+                ])
             raise AssertionError(endpoint)
 
         def __enter__(self):
@@ -4417,6 +4445,100 @@ def test_tree_sitter_failure_paths_emit_streaming_signal_debt(
     assert indexed["bytes_scanned"] == len(b"value = request.args['cmd']\neval(value)\n")
     assert indexed["security_sources"][0]["line"] == 1
     assert indexed["security_sinks"][0]["line"] == 2
+
+
+def test_tree_sitter_error_nodes_never_advertise_structural_completeness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from assess.lib import treesitter_index as module
+
+    class ErrorTreeParser:
+        def parse(self, _source):
+            return SimpleNamespace(root_node=SimpleNamespace(has_error=True))
+
+    monkeypatch.setattr(module, "_TS_AVAILABLE", True)
+    monkeypatch.setattr(module, "_get_parser", lambda _language: ErrorTreeParser())
+    monkeypatch.setattr(module, "_extract_functions_ts", lambda *_args: [])
+    monkeypatch.setattr(module, "_extract_classes_ts", lambda *_args: [])
+    monkeypatch.setattr(module, "_extract_imports_ts", lambda *_args: [])
+
+    source = b"const broken = (value) => { eval(value);\n"
+    indexed = module.index_file("bundle.js", "javascript", source=source)
+
+    assert indexed["structural_index_available"] is False
+    assert indexed["analysis_status"] == "degraded"
+    assert indexed["analysis_mode"] == "streaming_security_fallback"
+    assert indexed["degradation_reason"] == "tree_sitter_syntax_error"
+    assert indexed["bytes_scanned"] == len(source)
+    assert indexed["security_sinks"]
+
+
+def test_javascript_complete_index_never_augments_ast_with_line_regex_callables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from assess.lib import treesitter_index as module
+
+    class Parser:
+        def parse(self, _source):
+            return SimpleNamespace(
+                root_node=SimpleNamespace(has_error=False, named_children=[])
+            )
+
+    monkeypatch.setattr(module, "_TS_AVAILABLE", True)
+    monkeypatch.setattr(module, "_get_parser", lambda _language: Parser())
+    monkeypatch.setattr(module, "_extract_functions_ts", lambda *_args: [])
+    monkeypatch.setattr(module, "_extract_classes_ts", lambda *_args: [])
+    monkeypatch.setattr(module, "_extract_imports_ts", lambda *_args: [])
+    assert not hasattr(module, "_detect_arrow_functions")
+    monkeypatch.setattr(module, "_detect_entry_points", lambda *_args: [])
+    monkeypatch.setattr(module, "_detect_top_level_entry_points", lambda *_args: [])
+    monkeypatch.setattr(module, "_detect_sinks", lambda *_args: [])
+    monkeypatch.setattr(module, "_detect_call_sites", lambda *_args: [])
+    monkeypatch.setattr(module, "_detect_exports", lambda *_args: [])
+
+    indexed = module.index_file(
+        "bundle.js",
+        "javascript",
+        source=b"const parsedByAst = value => value;\n",
+    )
+
+    assert indexed["analysis_status"] == "complete"
+    assert indexed["functions"] == []
+
+
+def test_javascript_index_extracts_every_common_assigned_callable_with_exact_spans() -> None:
+    from assess.lib.treesitter_index import index_file
+
+    source = (
+        b"const first=(x)=>{return eval(x)}; const second = y => fetch(y);\n"
+        b"Portal.prototype.open = function(url){ return fetch(url); };\n"
+        b'Object.defineProperty(Portal.prototype, "render", '
+        b"{value: function(html){ node.innerHTML=html; }});\n"
+        b"items.map(x => eval(x));\n"
+    )
+
+    indexed = index_file("bundle.js", "javascript", source=source)
+
+    functions = {item["qualified_name"]: item for item in indexed["functions"]}
+    assert {"first", "second", "Portal.open", "Portal.render"} <= set(functions)
+    assert any(name.startswith("<anonymous@4:") for name in functions)
+    for function in functions.values():
+        assert function["source_span"]["end_byte"] > function["source_span"]["start_byte"]
+        assert function["body_span"]["end_byte"] > function["body_span"]["start_byte"]
+
+
+def test_javascript_sink_attribution_uses_callable_body_span_on_minified_lines() -> None:
+    from assess.lib.treesitter_index import index_file
+
+    indexed = index_file(
+        "bundle.js",
+        "javascript",
+        source=b"const evaluate=x=>eval(x); const retrieve=url=>fetch(url);\n",
+    )
+
+    sinks = {(item["kind"], item["function"]) for item in indexed["security_sinks"]}
+    assert sinks == {("eval_exec", "evaluate"), ("url_fetch", "retrieve")}
+    assert indexed["signal_counts"]["security_sinks"] == 2
 
 
 def test_lightweight_extractor_failure_emits_streaming_signal_debt(

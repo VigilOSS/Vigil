@@ -34,6 +34,7 @@ def _rerecord(writer, client, base, engagement_id, **payload):
 @pytest.mark.parametrize("writer", ["api", "service"])
 def test_omitted_body_preserves_saved_note(client, note_api, writer):
     created = _record(client, note_api, body_markdown="Authored archivisttoken content.")
+    assert created["write_outcome"] == "created"
 
     if writer == "api":
         updated = _record(client, note_api, source_agent="editor")
@@ -43,6 +44,7 @@ def test_omitted_body_preserves_saved_note(client, note_api, writer):
         )
 
     assert updated["id"] == created["id"]
+    assert updated["write_outcome"] == "updated"
     assert updated["body_markdown"] == created["body_markdown"]
     listing = client.get(f"{note_api}/notes")
     assert listing.status_code == 200, listing.text

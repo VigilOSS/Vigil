@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Collection
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -18,7 +19,9 @@ from ._common import (
     FINDING_NOTES_MAX_LENGTH,
     ROOT_CAUSE_LINK_KIND,
     SEVERITY_RANK,
+    VERIFICATION_STATUSES,
     WORKFLOW_STATUS_RANK,
+    WORKFLOW_STATUSES,
     SubmissionStatus,
     VerificationStatus,
     WorkflowStatus,
@@ -40,7 +43,10 @@ from ._common import (
     _stronger_severity,
 )
 from .cvss import CvssVectorError, base_score
-from .finding_details import validate_finding_details
+from .finding_details import (
+    validate_finding_details,
+    validate_stored_reply_sequence_identity,
+)
 from .links import (
     _active_finding_link,
     _invalidate_relationship_verification,
@@ -249,6 +255,60 @@ def _finding_provenance(record: dict[str, Any]) -> dict[str, Any]:
     return _json_object(record.get("provenance_json", "{}"))
 
 
+def _require_record_author_dispatch(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    *,
+    existing: dict[str, Any] | sqlite3.Row | None,
+    provenance: dict[str, Any] | None,
+) -> str:
+    """Return the immutable, engagement-local author for a record write."""
+
+    incoming_author = (provenance or {}).get("agent_id")
+    incoming_author = (
+        incoming_author.strip() if isinstance(incoming_author, str) else ""
+    )
+    if existing is None:
+        if not incoming_author:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "new findings require provenance.agent_id naming the authoring "
+                    "dispatch; pass finding record --agent-id <Runtime Identity agent_id>"
+                ),
+            )
+        if _resolve_dispatch_id(connection, engagement_id, incoming_author) is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"provenance.agent_id '{incoming_author}' does not resolve to a "
+                    "dispatch in this engagement"
+                ),
+            )
+        return incoming_author
+
+    stored_value = _finding_provenance(dict(existing)).get("agent_id")
+    stored_author = stored_value.strip() if isinstance(stored_value, str) else ""
+    if not stored_author:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "this historical finding has no provenance.agent_id; repair it once "
+                "with `vigil assess finding bind-author` before re-recording it"
+            ),
+        )
+    if _resolve_dispatch_id(connection, engagement_id, stored_author) is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"stored provenance.agent_id '{stored_author}' does not resolve to a "
+                "dispatch in this engagement; repair it once with "
+                "`vigil assess finding bind-author` before re-recording it"
+            ),
+        )
+    return stored_author
+
+
 def _provenance_update_preserving_author(
     existing_provenance_json: Any,
     incoming: dict[str, Any] | None,
@@ -350,6 +410,9 @@ def _serialize_finding_with_code_snapshot_status(
     repo_states: dict[int, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     record = _serialize_finding_record(finding)
+    validate_stored_reply_sequence_identity(
+        record["details"], finding_slug=str(record.get("slug") or "")
+    )
     record["code_snapshot_status"] = finding_code_snapshot_status(
         connection, engagement_id, record, repo_states=repo_states
     )
@@ -723,8 +786,8 @@ def _duplicate_advisories(
                     f"{sibling_slug} is already submission_status="
                     f"'{row['submission_status']}' and matches on "
                     f"{', '.join(reasons)}. If this is the same defect, link it: "
-                    f"`vigil assess finding link <slug> --target-finding {sibling_slug} "
-                    f"--link-kind {DUPLICATE_LINK_KIND}`."
+                    f"`vigil assess finding link <slug> --link-kind {DUPLICATE_LINK_KIND} "
+                    f"--target-kind finding --target-ref {sibling_slug}`."
                 ),
             }
         )
@@ -888,7 +951,7 @@ def _verification_material_details_changed(
     details: dict[str, Any] | None,
     details_mode: str,
 ) -> bool:
-    if details is None:
+    if details is None or details_mode == "append":
         return False
     before = _json_object(existing_details_json)
     after = _json_object(
@@ -896,6 +959,20 @@ def _verification_material_details_changed(
     )
     return any(
         (key in before) != (key in after) or before.get(key) != after.get(key)
+        for key in _VERIFICATION_MATERIAL_DETAIL_KEYS
+    )
+
+
+def _merge_replaces_verification_material_details(
+    existing_details_json: str,
+    merged_details: dict[str, Any],
+) -> bool:
+    """Report only changed or removed dependencies, never additive detail."""
+
+    existing = _json_object(existing_details_json)
+    return any(
+        key in existing
+        and (key not in merged_details or existing[key] != merged_details[key])
         for key in _VERIFICATION_MATERIAL_DETAIL_KEYS
     )
 
@@ -928,6 +1005,48 @@ def _resolved_notes(
     return _common._append_notes(
         existing_notes, incoming, max_length=FINDING_NOTES_MAX_LENGTH
     )
+
+
+def _validate_sent_reply_immutability(
+    existing_details: dict[str, Any], effective_details: dict[str, Any]
+) -> None:
+    """Keep externally sent reply records immutable; corrections append."""
+    before = existing_details.get("replies")
+    after = effective_details.get("replies")
+    before_rows = before if isinstance(before, list) else []
+    after_rows = after if isinstance(after, list) else []
+    after_by_seq = {
+        row.get("seq"): row
+        for row in after_rows
+        if isinstance(row, dict) and type(row.get("seq")) is int
+    }
+    sent_by_seq = {
+        row.get("seq"): row
+        for row in before_rows
+        if isinstance(row, dict)
+        and type(row.get("seq")) is int
+        and row.get("sent_status") == "sent"
+    }
+    for seq, sent in sent_by_seq.items():
+        if after_by_seq.get(seq) != sent:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"sent reply seq {seq} is immutable; append a correction "
+                    "version that references it"
+                ),
+            )
+    for row in after_rows:
+        if not isinstance(row, dict) or "corrects_seq" not in row:
+            continue
+        if (
+            row.get("event_type") != "correction"
+            or row.get("corrects_seq") not in sent_by_seq
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="a correction must reference an existing sent reply",
+            )
 
 
 def _infer_transition_action(before: dict[str, str] | None, after: dict[str, str]) -> str:
@@ -1450,6 +1569,15 @@ def create_finding(
             auth_context=auth_context,
             title=title,
         )
+        if code_snapshot_write_mode == "record":
+            record_author = _require_record_author_dispatch(
+                connection,
+                engagement.id,
+                existing=existing,
+                provenance=provenance,
+            )
+            if existing is None:
+                provenance = {**(provenance or {}), "agent_id": record_author}
         provenance_for_storage = dict(provenance or {})
         if existing is not None:
             # ``provenance.agent_id`` names the finding's original author for
@@ -1594,12 +1722,22 @@ def create_finding(
         # onto records that `finding update` then refused to maintain. Scoped to
         # the keys this write AUTHORS, and permissive for keys already stored, so
         # closing the door cannot strand what came through it.
+        existing_details = (
+            _json_object(existing["details_json"]) if existing is not None else {}
+        )
         validate_finding_details(
             authored_details,
-            already_stored_keys=frozenset(
-                _json_object(existing["details_json"]) if existing is not None else {}
-            ),
+            already_stored_keys=frozenset(existing_details),
+            existing_details=existing_details,
+            effective_details=effective_details,
         )
+        if (
+            existing is not None
+            and existing_details.get("replies") != effective_details.get("replies")
+        ):
+            _validate_sent_reply_immutability(
+                existing_details, effective_details
+            )
         _validate_submission_identity(
             incoming_status=incoming_submission_status,
             explicit_override=explicit_submission_override,
@@ -1992,6 +2130,10 @@ def create_finding(
                 counter_check=verification_counter_check,
                 severity_variance=verification_severity_variance,
                 normal_severity_band=verification_normal_severity_band,
+            )
+        else:
+            verification_evidence["proof_receipts"] = proof_receipts_for_finding(
+                connection, engagement.id, int(finding["id"])
             )
         if run_candidate is not None:
             promoted_run_candidate = run_accounting.promote_run_candidate_with_connection(
@@ -2857,6 +2999,118 @@ def relocate_finding(
     return {"finding": record, "transition": transition}
 
 
+def repair_finding_author(
+    engagement_id: int,
+    *,
+    slug: str,
+    agent_id: str,
+    actor: str,
+    reason: str,
+    expected_row_version: int,
+) -> dict[str, Any]:
+    """Repair missing or unresolvable legacy author provenance exactly once."""
+
+    engagement = _engagement_or_404(engagement_id)
+    agent_id = str(agent_id).strip()
+    actor = str(actor).strip()
+    reason = str(reason).strip()
+    if not actor:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="author repair actor must contain non-whitespace text",
+        )
+    if not reason:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="author repair reason must contain non-whitespace text",
+        )
+    with _common.get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        slug = _resolve_existing_finding_slug(connection, engagement.id, slug)
+        existing = connection.execute(
+            "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+            (engagement.id, slug),
+        ).fetchone()
+        if int(existing["row_version"]) != expected_row_version:
+            _raise_stale_finding_conflict()
+        provenance = _json_object(existing["provenance_json"])
+        stored_author = str(provenance.get("agent_id") or "").strip()
+        stored_dispatch = (
+            _resolve_dispatch_id(connection, engagement.id, stored_author)
+            if stored_author
+            else None
+        )
+        if stored_dispatch is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"finding already has immutable provenance.agent_id {stored_author!r}; "
+                    "author repair cannot rewrite it"
+                ),
+            )
+        dispatch = connection.execute(
+            """
+            SELECT id, agent_id, agent_role
+            FROM assessment_dispatches
+            WHERE engagement_id = ? AND agent_id = ?
+            """,
+            (engagement.id, agent_id),
+        ).fetchone()
+        if dispatch is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"author repair agent_id {agent_id!r} does not resolve to a dispatch "
+                    "in this engagement"
+                ),
+            )
+        before_state = _finding_state_snapshot(existing)
+        before_content = _finding_content_snapshot(existing)
+        provenance["agent_id"] = agent_id
+        cursor = connection.execute(
+            """
+            UPDATE assessment_findings
+            SET provenance_json = ?, row_version = row_version + 1,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND row_version = ?
+            """,
+            (_json_text(provenance), int(existing["id"]), expected_row_version),
+        )
+        if cursor.rowcount != 1:
+            _raise_stale_finding_conflict()
+        row = connection.execute(
+            "SELECT * FROM assessment_findings WHERE id = ?", (int(existing["id"]),)
+        ).fetchone()
+        assert row is not None
+        transition = _record_finding_transition(
+            connection,
+            engagement_id=engagement.id,
+            finding_id=int(row["id"]),
+            actor=actor,
+            action="author_provenance_repaired",
+            before=before_state,
+            after=_finding_state_snapshot(row),
+            reason_code="missing_author_repair",
+            reason_text=reason,
+            artifact_ref="",
+            metadata={
+                "old_agent_id": stored_author or None,
+                "new_agent_id": agent_id,
+                "repair_kind": (
+                    "unresolvable_author" if stored_author else "missing_author"
+                ),
+                "dispatch_id": int(dispatch["id"]),
+                "dispatch_role": str(dispatch["agent_role"] or ""),
+            },
+            before_content=before_content,
+            after_content=_finding_content_snapshot(row),
+        )
+        record = _serialize_finding_with_code_snapshot_status(
+            connection, engagement.id, row
+        )
+    return {"finding": record, "transition": transition}
+
+
 def _merge_details_precedence(winner: dict[str, Any], loser: dict[str, Any]) -> str:
     """Merge two ``details_json`` payloads so the WINNING side survives on key
     conflict while still inheriting keys the winner lacks from the loser.
@@ -2944,27 +3198,44 @@ def merge_findings(
         target_binding = _code_snapshot_binding(target_provenance, strict=False)
         source_is_file = is_file_finding(str(source["canonical_location"]))
         target_is_file = is_file_finding(str(target["canonical_location"]))
-        if source_is_file != target_is_file:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    "cannot merge findings across the file/non-file "
-                    "canonical-location category boundary"
-                ),
+        cross_track_merge = source_is_file != target_is_file
+        canonical_location = str(target["canonical_location"])
+        if cross_track_merge:
+            file_row = source if source_is_file else target
+            file_binding = source_binding if source_is_file else target_binding
+            live_provenance = target_provenance if source_is_file else source_provenance
+            live_binding = target_binding if source_is_file else source_binding
+            if file_binding is None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "cannot merge a file and live finding without a structured "
+                        "code snapshot identity on the file finding"
+                    ),
+                )
+            if (
+                CODE_SNAPSHOT_PROVENANCE_KEY in live_provenance
+                and live_binding != file_binding
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="cannot merge findings bound to different code snapshots",
+                )
+            canonical_location = str(file_row["canonical_location"])
+        else:
+            either_has_binding = (
+                CODE_SNAPSHOT_PROVENANCE_KEY in source_provenance
+                or CODE_SNAPSHOT_PROVENANCE_KEY in target_provenance
             )
-        either_has_binding = (
-            CODE_SNAPSHOT_PROVENANCE_KEY in source_provenance
-            or CODE_SNAPSHOT_PROVENANCE_KEY in target_provenance
-        )
-        if either_has_binding and (
-            source_binding is None
-            or target_binding is None
-            or source_binding != target_binding
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="cannot merge findings bound to different code snapshots",
-            )
+            if either_has_binding and (
+                source_binding is None
+                or target_binding is None
+                or source_binding != target_binding
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="cannot merge findings bound to different code snapshots",
+                )
         merged_children = connection.execute(
             """
             SELECT slug
@@ -3127,6 +3398,67 @@ def merge_findings(
             "reason": reason,
             "source_name": source_name,
         }
+        merged_severity = _stronger_severity(
+            str(target["severity"]), str(source["severity"])
+        )
+        merged_workflow = (
+            target_workflow
+            if source_workflow == "false_positive"
+            and target_workflow != "false_positive"
+            else _coalesce_workflow_status(target_workflow, source_workflow)
+        )
+        merged_source_name = str(target["source_name"])
+        if str(source["source_name"]):
+            if source_stronger:
+                merged_source_name = str(source["source_name"])
+        merged_summary = str(target["summary"])
+        if not merged_summary or (source_stronger and str(source["summary"])):
+            merged_summary = str(source["summary"])
+        merged_evidence_ref = str(target["evidence_ref"])
+        if not merged_evidence_ref or (
+            source_stronger and str(source["evidence_ref"])
+        ):
+            merged_evidence_ref = str(source["evidence_ref"])
+
+        # A merge may add an independent evidence link without changing the
+        # claim a verifier adjudicated. Keep a terminal verdict in that case.
+        # If the canonical merge replaces any material input to that verdict,
+        # force another review and make the exact invalidating axes auditable.
+        replaced_verification_dependencies: list[str] = []
+        if merged_severity != str(target["severity"]):
+            replaced_verification_dependencies.append("severity")
+        if merged_workflow != target_workflow:
+            replaced_verification_dependencies.append("workflow_status")
+        if canonical_location != str(target["canonical_location"]):
+            replaced_verification_dependencies.append("canonical_location")
+        if merged_source_name != str(target["source_name"]):
+            replaced_verification_dependencies.append("source_name")
+        if merged_summary != str(target["summary"]):
+            replaced_verification_dependencies.append("summary")
+        if (
+            str(target["evidence_ref"])
+            and merged_evidence_ref != str(target["evidence_ref"])
+        ):
+            replaced_verification_dependencies.append("evidence_ref")
+        if _merge_replaces_verification_material_details(
+            str(target["details_json"]), merged_details_obj
+        ):
+            replaced_verification_dependencies.append("details")
+        if any(
+            key != "merge"
+            and key in merged_provenance_payload
+            and merged_provenance_payload[key] != value
+            for key, value in target_provenance.items()
+        ):
+            replaced_verification_dependencies.append("provenance")
+        verification_invalidated = bool(replaced_verification_dependencies) and (
+            _row_verification_status(target) in TERMINAL_VERIFICATION_STATUSES
+        )
+        merged_verification_status = (
+            "unreviewed"
+            if verification_invalidated
+            else _row_verification_status(target)
+        )
         source_links = connection.execute(
             "SELECT * FROM assessment_finding_links "
             "WHERE engagement_id = ? AND finding_id = ? AND retired_at IS NULL",
@@ -3156,22 +3488,11 @@ def merge_findings(
             UPDATE assessment_findings
             SET severity = ?,
                 status = ?,
-                verification_status = 'unreviewed',
-                source_name = CASE
-                    WHEN ? = '' THEN source_name
-                    WHEN ? = 1 THEN ?
-                    ELSE source_name
-                END,
-                summary = CASE
-                    WHEN summary = '' THEN ?
-                    WHEN ? = 1 AND ? != '' THEN ?
-                    ELSE summary
-                END,
-                evidence_ref = CASE
-                    WHEN evidence_ref = '' THEN ?
-                    WHEN ? = 1 AND ? != '' THEN ?
-                    ELSE evidence_ref
-                END,
+                verification_status = ?,
+                canonical_location = ?,
+                source_name = ?,
+                summary = ?,
+                evidence_ref = ?,
                 notes = ?,
                 details_json = ?,
                 provenance_json = ?,
@@ -3181,23 +3502,13 @@ def merge_findings(
             WHERE id = ? AND row_version = ?
             """,
             (
-                _stronger_severity(target["severity"], source["severity"]),
-                (
-                    target_workflow
-                    if source_workflow == "false_positive" and target_workflow != "false_positive"
-                    else _coalesce_workflow_status(target_workflow, source_workflow)
-                ),
-                source["source_name"],
-                1 if source_stronger else 0,
-                source["source_name"],
-                source["summary"],
-                1 if source_stronger else 0,
-                source["summary"],
-                source["summary"],
-                source["evidence_ref"],
-                1 if source_stronger else 0,
-                source["evidence_ref"],
-                source["evidence_ref"],
+                merged_severity,
+                merged_workflow,
+                merged_verification_status,
+                canonical_location,
+                merged_source_name,
+                merged_summary,
+                merged_evidence_ref,
                 merged_notes,
                 merged_details,
                 _json_text(merged_provenance_payload),
@@ -3282,13 +3593,31 @@ def merge_findings(
                 engagement_id=engagement.id,
                 finding_id=int(target["id"]),
                 actor=source_name,
-                action="operator_override",
+                action=(
+                    "verification_invalidated"
+                    if verification_invalidated
+                    else "operator_override"
+                ),
                 before=target_before,
                 after=target_after,
-                reason_code="merge",
-                reason_text=f"Merged {source_slug} into {target_slug}: {reason}",
+                reason_code=(
+                    "merge_replaced_verification_dependency"
+                    if verification_invalidated
+                    else "merge"
+                ),
+                reason_text=(
+                    f"Merged {source_slug} into {target_slug} and invalidated "
+                    "verification because the merge replaced: "
+                    f"{', '.join(replaced_verification_dependencies)}. {reason}"
+                    if verification_invalidated
+                    else f"Merged {source_slug} into {target_slug}: {reason}"
+                ),
                 artifact_ref="",
-                metadata={"source_slug": source_slug},
+                metadata={
+                    "source_slug": source_slug,
+                    "verification_invalidated": verification_invalidated,
+                    "replaced_dependencies": replaced_verification_dependencies,
+                },
                 before_content=target_before_content,
                 after_content=target_after_content,
             )
@@ -3300,6 +3629,32 @@ def merge_findings(
         # only when the merge carried a pre-existing defect into the canonical.
         "warnings": merge_warnings,
     }
+
+def _validated_enum_filter(
+    field: str, value: str | None, allowed: Collection[Any]
+) -> str | None:
+    """Reject a filter value that names nothing in its enum.
+
+    A SQL equality filter on an unknown value is indistinguishable from a genuine
+    empty result: `--verification-status verified` (the retired two-axis spelling)
+    returned `[]` and exit 0, which an agent reads as "no confirmed findings to
+    exploit" while confirmed findings sit in the table. Fail the query instead, and
+    name the vocabulary so the caller can correct itself in one step.
+    """
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if not normalized:
+        return None
+    if normalized not in allowed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"invalid {field} filter {value!r}; allowed: "
+                + ", ".join(sorted(str(item) for item in allowed))
+            ),
+        )
+    return normalized
 
 def list_findings(
     engagement_id: int,
@@ -3316,16 +3671,23 @@ def list_findings(
     offset: int = 0,
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
+    severity = _validated_enum_filter("severity", severity, SEVERITY_RANK)
+    workflow_status = _validated_enum_filter(
+        "workflow_status", workflow_status, WORKFLOW_STATUSES
+    )
+    verification_status = _validated_enum_filter(
+        "verification_status", verification_status, VERIFICATION_STATUSES
+    )
     where = ["findings.engagement_id = ?"]
     params: list[Any] = [engagement.id]
     if severity:
-        where.append("LOWER(findings.severity) = LOWER(?)")
+        where.append("LOWER(findings.severity) = ?")
         params.append(severity)
     if workflow_status:
-        where.append("LOWER(findings.status) = LOWER(?)")
+        where.append("LOWER(findings.status) = ?")
         params.append(workflow_status)
     if verification_status:
-        where.append("LOWER(findings.verification_status) = LOWER(?)")
+        where.append("LOWER(findings.verification_status) = ?")
         params.append(verification_status)
     if auth_context:
         # Server-side drill-down for the coverage ledger: an operator pivots

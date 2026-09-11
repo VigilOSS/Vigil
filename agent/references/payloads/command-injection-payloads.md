@@ -2,6 +2,8 @@
 description: Blind detection, filter bypass, Linux/Windows, argument injection
 skill: command-injection
 source: PayloadsAllTheThings — Command Injection
+source_revision: 3ac27901c711bdf3f5b65a7b1d1820a1f65bd09a
+source_license: MIT; see THIRD_PARTY_NOTICES.md
 ---
 
 # OS Command Injection Payloads

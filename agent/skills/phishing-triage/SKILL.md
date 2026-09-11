@@ -157,12 +157,11 @@ vigil assess artifact register \
   "$ENGAGEMENT_DIR/ir/evidence/email-${MSG_ID:0:12}.eml" \
   --kind ir_evidence \
   --finding <finding-slug> \
-  --agent-id <runtime-agent-id> \
-  --sensitive
+  --agent-id <runtime-agent-id>
 ```
 
-`--sensitive` is mandatory — `.eml` carries PII in subjects,
-recipients, and embedded reply chains.
+`.eml` PII in subjects, recipients, and embedded reply chains remains indexed
+and rendered verbatim.
 
 **Evidence collected.**
 
@@ -294,7 +293,7 @@ dkim_consistent, dmarc_consistent}, notes}`. Register as
 
 - Sender rotated DKIM selector. Header `dkim=fail` with selector A;
   live DNS shows selector A retired and selector B published. Record
-  both selectors; recommend `downgraded`, not `verified`.
+  both selectors; recommend `downgraded`, not `confirmed`.
 - SPF macros (`%{i}` / `%{s}`). `dig` returns the macro text, not the
   expansion. Resolve manually if it gates disposition.
 - `v=spf1 ?all` (neutral) — non-decision; not phish signal. `v=spf1
@@ -308,7 +307,7 @@ dkim_consistent, dmarc_consistent}, notes}`. Register as
 
 **Purpose.** Identify the payload — URL clicked or attachment opened.
 The most disposition-driving step: a malicious payload moves the
-finding toward `verified`; a known-benign payload moves it toward
+finding toward `confirmed`; a known-benign payload moves it toward
 `false_positive`.
 
 **Action (URLs).** Extract via `jq -r '((.body[]?.content // "") |
@@ -433,7 +432,7 @@ against the dnstwist output.
 Non-empty result = sender domain is a registered permutation of the
 impersonated domain — strong BEC signal.
 
-**BEC indicators that drive `escalated` disposition:**
+**BEC indicators that drive a `disputed` disposition:**
 
 | Indicator | Why |
 |-----------|-----|
@@ -453,7 +452,7 @@ impersonated domain — strong BEC signal.
 **Common false positives.**
 
 - Legitimate vendor changing payment terms — authenticated sender, on
-  tenant allowlist. Still `escalated`; next step is out-of-band voice
+  tenant allowlist. Still `disputed`; next step is out-of-band voice
   verification on a number from the customer's vendor records (NOT
   from the email).
 - Internal `Reply-To` divergence (CEO assistant routing to a
@@ -583,14 +582,14 @@ based on the six steps; the verifier confirms or overturns.
 
 | Evidence shape | Recommended disposition | Rationale |
 |----------------|-------------------------|-----------|
-| DMARC fail (Step 3) + URL flagged adversarial by urlscan (Step 4) + recipient clicked OR inbox-rule created post-delivery (Step 6) | `verified` | Three independent signals corroborate adversarial intent and user impact |
-| DMARC fail + URL flagged + no click + no post-delivery rule + delivered to ≥1 user | `verified` (impact `medium`) | Adversarial intent confirmed; impact bounded to delivery without interaction |
+| DMARC fail (Step 3) + URL flagged adversarial by urlscan (Step 4) + recipient clicked OR inbox-rule created post-delivery (Step 6) | `confirmed` | Three independent signals corroborate adversarial intent and user impact |
+| DMARC fail + URL flagged + no click + no post-delivery rule + delivered to ≥1 user | `confirmed` (impact `medium`) | Adversarial intent confirmed; impact bounded to delivery without interaction |
 | DMARC fail + adversarial URL but `DeliveryAction == "Blocked"` / `Quarantine` (Step 6) | `downgraded` | Threat real, blast radius zero; IOCs still record to intel |
 | Sender on tenant allowlist + no malicious URL (Step 4 clean) + no payload + Step 5 BEC checklist all-negative | `false_positive` | Tenant-ref-documented benign pattern with multi-step corroboration |
-| Reply-To divergent + homoglyph match in dnstwist + wire/invoice keywords + no payload | `escalated` | Pure BEC pattern; requires out-of-band caller verification — not an automatic verdict |
+| Reply-To divergent + homoglyph match in dnstwist + wire/invoice keywords + no payload | `disputed` | Pure BEC pattern; requires out-of-band caller verification — not an automatic verdict |
 | Mailing-list rewriting (Step 2 FP) + tenant-ref `sender_domain_allowlist` hit | `false_positive` | Documented benign DMARC-fail pattern |
 | Step 1 evidence missing (only screenshot, not raw `.eml`) | (do not dispose; return `blocked`) | Chain of custody cannot be established; the verifier rejects on intake |
-| Step 3 verdict misalignment (header says pass, live DNS says fail — or vice versa) | `escalated` | Possible header replay or sender-side DNS compromise; needs verifier judgment |
+| Step 3 verdict misalignment (header says pass, live DNS says fail — or vice versa) | `disputed` | Possible header replay or sender-side DNS compromise; needs verifier judgment |
 
 Record the recommendation in `details.disposition_recommendation`
 on the finding; the verifier reads it but is not bound by it.
@@ -619,7 +618,7 @@ vigil assess log \
   "alert_external_id": "...",
   "platform": "m365|gws",
   "skill_loaded": "phishing-triage",
-  "disposition": "verified|false_positive|downgraded|escalated|pending",
+  "disposition": "confirmed|false_positive|downgraded|disputed|pending_runtime_proof",
   "confidence": "high|medium|low",
   "mitre_techniques": ["T1566.002"],
   "sender_auth_state": {"spf":"fail","dkim":"pass","dmarc":"fail"},
@@ -645,7 +644,7 @@ The specialist returns this JSON from the dispatch:
 {
   "finding_slug": "...",
   "skill_used": "phishing-triage",
-  "disposition_recommendation": "verified|false_positive|downgraded|escalated|pending",
+  "disposition_recommendation": "confirmed|false_positive|downgraded|disputed|pending_runtime_proof",
   "evidence_refs": ["<artifact-id-eml>", "<artifact-id-parsed>", "<artifact-id-urlscan>"],
   "intel_ids": [<intel-id-1>, <intel-id-2>],
   "mitre_techniques": ["T1566.002", "T1078.004"],
@@ -672,7 +671,7 @@ Run these four steps in order before returning the handoff JSON:
 
 1. **Register every durable artifact** via
    `vigil assess artifact register <path> --kind <ir_evidence|ioc_dump>
-   --finding <slug> --agent-id <runtime-agent-id> --sensitive`.
+   --finding <slug> --agent-id <runtime-agent-id>`.
    Durables: raw `.eml`, parsed JSON, headers JSON, DNS-verify JSON,
    urlscan JSON + screenshot, attachments + SHA256SUMS, oletools /
    pdfid outputs, VT responses, BEC-check JSON, dnstwist JSON,
@@ -722,7 +721,7 @@ Run these four steps in order before returning the handoff JSON:
    - `google-workspaces` for GWS-tenant phish that surfaced a
      sign-in / token event needing the GWS audit pivot
    - `incident-containment` (L4) — only via `verifier`'s
-     `verified` disposition; this skill never routes directly to L4
+     `confirmed` verification status; this skill never routes directly to L4
 
 ## Common Failure Modes
 
@@ -731,7 +730,7 @@ Run these four steps in order before returning the handoff JSON:
 - **Trusting `Authentication-Results` blindly.** A sophisticated
   adversary can replay the header from a legitimate prior message.
   Step 3's live DNS recheck is the verifier's reproduction signal —
-  skipping it leaves `verified` findings that cannot withstand the
+  skipping it leaves `confirmed` findings that cannot withstand the
   symmetric-evidence bar.
 - **urlscan without `"visibility": "private"`.** Leaks lookalike
   domains and recipient-tailored URLs to the public feed —

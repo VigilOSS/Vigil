@@ -338,6 +338,89 @@ def test_fresh_install_accepts_ambient_value_as_its_persisted_base_domain(
     assert options.oob_domain.endswith(".custom.example.test")
 
 
+def test_install_reads_relative_config_from_caller_context_before_pinning_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli.install import InstallOptions, install_from_source
+    from vigil_cli.oob_tenants import load_tenant_route
+
+    caller_root = tmp_path / "caller"
+    config_path = caller_root / "config" / "vigil.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "oob.domain": "oob.example.test",
+                "oob.tenant": "caller-configured-tenant",
+            }
+        ),
+        encoding="utf-8",
+    )
+    source_root = tmp_path / "source"
+    (source_root / "agent").mkdir(parents=True)
+    (source_root / "agent/README").write_text("managed", encoding="utf-8")
+    install_root = tmp_path / "install"
+    monkeypatch.chdir(caller_root)
+    monkeypatch.setenv("VIGIL_CONFIG", "config/vigil.json")
+
+    install_from_source(
+        InstallOptions(
+            source_root=source_root,
+            install_root=install_root,
+            verify_docker_image=False,
+        )
+    )
+
+    route = load_tenant_route(install_root)
+    assert route is not None
+    assert route.tenant_name == "caller-configured-tenant"
+    registry_path = config_path.with_name("oob-allocations.json")
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    assert registry["allocations"][route.install_id]["install_root"] == str(
+        install_root
+    )
+    assert Path.cwd() == caller_root
+
+
+def test_fresh_install_without_oob_configuration_does_not_persist_owner_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli.install import InstallOptions, install_from_source
+    from vigil_cli.oob import oob_options, start_oob
+    from vigil_cli.oob_tenants import load_tenant_route
+
+    source_root = tmp_path / "source"
+    install_root = tmp_path / "fresh"
+    (source_root / "agent").mkdir(parents=True)
+    (source_root / "agent/README").write_text("managed", encoding="utf-8")
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
+    monkeypatch.delenv("VIGIL_FRP_HOST", raising=False)
+
+    install_from_source(
+        InstallOptions(
+            source_root=source_root,
+            install_root=install_root,
+            verify_docker_image=False,
+        )
+    )
+
+    assert load_tenant_route(install_root) is None
+    options = oob_options(install_root)
+    assert options.frp_host == ""
+    assert options.oob_domain == ""
+
+    calls: list[list[str]] = []
+
+    def runner(argv, **_):
+        calls.append(list(argv))
+        raise AssertionError("unconfigured OOB must fail before Docker access")
+
+    with pytest.raises(SystemExit, match=r"config set oob\.frp_host.*config set oob\.domain"):
+        start_oob(options, runner=runner)
+    assert calls == []
+
+
 def test_fresh_install_allocates_route_but_upgrade_pins_legacy_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -346,6 +429,7 @@ def test_fresh_install_allocates_route_but_upgrade_pins_legacy_route(
 
     source_root = tmp_path / "source"
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.test")
     (source_root / "agent").mkdir(parents=True)
     (source_root / "agent/README").write_text("managed", encoding="utf-8")
     fresh_root = tmp_path / "fresh-tenant"
@@ -485,6 +569,7 @@ def test_oob_start_refuses_route_switch_while_unverifiable_client_is_running(
         start_oob(
             OobOptions(
                 install_root=tmp_path,
+                frp_host="frp.example.test",
                 frp_token="secret",
                 tenant_prefix="tenant-new",
                 oob_domain="tenant-new.oob.example.test",
@@ -746,6 +831,7 @@ def test_oob_start_admits_constrained_pre_wave2_legacy_client_ownership(
     start_oob(
         OobOptions(
             install_root=tmp_path,
+            frp_host="frp.example.test",
             frp_token="secret",
             tenant_prefix="legacy",
             oob_domain="oob.example.test",

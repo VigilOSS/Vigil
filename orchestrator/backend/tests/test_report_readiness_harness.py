@@ -28,6 +28,18 @@ ENGAGEMENT_KEY = "2026-05-20-090000-harness"
 BASE = f"/engagements/{ENGAGEMENT_KEY}/assessment"
 
 
+def _ensure_dispatch(client, agent_id: str, role: str) -> None:
+    existing = client.get(f"{BASE}/dispatches/{agent_id}")
+    if existing.status_code == 200:
+        return
+    assert existing.status_code == 404, existing.text
+    dispatch = client.post(
+        f"{BASE}/dispatches",
+        json={"agent_id": agent_id, "agent_role": role, "task": role},
+    )
+    assert dispatch.status_code == 201, dispatch.text
+
+
 def _write_engagement(engagements_dir: Path) -> Path:
     eng = engagements_dir / ENGAGEMENT_KEY
     (eng / "sessions").mkdir(parents=True, exist_ok=True)
@@ -89,20 +101,13 @@ def _reportable_finding(
         },
     }
     payload.update(overrides)
+    _ensure_dispatch(client, "HUNT-1", "vulnerability-analyst")
     response = client.post(f"{BASE}/findings", json=payload)
     assert response.status_code == 201, response.text
     if verification_status == "unreviewed":
         return
 
-    for agent_id, role in (
-        ("HUNT-1", "vulnerability-analyst"),
-        ("VERIFY-1", "code-vuln-verifier"),
-    ):
-        dispatch = client.post(
-            f"{BASE}/dispatches",
-            json={"agent_id": agent_id, "agent_role": role, "task": role},
-        )
-        assert dispatch.status_code == 201, dispatch.text
+    _ensure_dispatch(client, "VERIFY-1", "code-vuln-verifier")
     run = client.post(
         f"{BASE}/assessment-runs",
         json={
@@ -364,15 +369,8 @@ def test_same_status_reverification_repairs_legacy_severity_variance(
         for row in _readiness(client)["blockers"]
     )
 
-    for agent_id, role in (
-        ("HUNT-1", "vulnerability-analyst"),
-        ("VERIFY-1", "code-vuln-verifier"),
-    ):
-        dispatch = client.post(
-            f"{BASE}/dispatches",
-            json={"agent_id": agent_id, "agent_role": role, "task": role},
-        )
-        assert dispatch.status_code == 201, dispatch.text
+    _ensure_dispatch(client, "HUNT-1", "vulnerability-analyst")
+    _ensure_dispatch(client, "VERIFY-1", "code-vuln-verifier")
     run = client.post(
         f"{BASE}/assessment-runs",
         json={

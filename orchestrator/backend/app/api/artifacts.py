@@ -12,7 +12,6 @@ class ArtifactResponse(BaseModel):
     name: str
     relative_path: str
     media_type: str
-    sensitive: bool
     exists: bool
 
 
@@ -25,7 +24,6 @@ def _artifact_response_payload(artifact) -> dict:
         "name": artifact.name,
         "relative_path": artifact.relative_path,
         "media_type": artifact.media_type,
-        "sensitive": artifact.sensitive,
         "exists": artifact.exists,
     }
 

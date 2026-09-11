@@ -58,7 +58,7 @@ When the parser resolves entities but the result is not reflected, an external-D
 ```bash
 vigil oob status --json   # confirm readiness
 vigil oob mint --client <name> --technique xxe --target-url "https://target/api/import" --param body --probe-kind http
-# -> dns   <prefix>-<token>.<client-id>.oob.example.com   (= $OOB_HOST below)
+# -> dns   <prefix>-<token>.<client-id>.<configured-oob-domain>   (= $OOB_HOST below)
 ```
 
 - [ ] Parameter entity + external DTD (point at the minted host `$OOB_HOST`, served from your kali-side DTD):

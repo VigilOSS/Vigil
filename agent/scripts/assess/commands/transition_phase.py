@@ -69,7 +69,11 @@ def register(subparsers) -> None:
     p.add_argument(
         "--force",
         action="store_true",
-        help="Override ordinary blockers; integrity blockers remain non-overrideable",
+        help=(
+            "Override ordinary blockers. Integrity blockers remain non-overrideable "
+            "on every edge, and `--track code` + `complete` cannot be forced at all: "
+            "a completed code scan asserts zero durable debt."
+        ),
     )
     p.add_argument(
         "--reason",
@@ -107,6 +111,17 @@ def run(args) -> None:
     engagement_type = scope.get("engagement_type", "web")
     track = _phase_track(engagement_type, target_phase, getattr(args, "track", "auto"))
 
+    if engagement_type == "both" and track == "code":
+        raw_code_phase = scope.get("code_phase")
+        if not isinstance(raw_code_phase, str) or not raw_code_phase.strip():
+            print(
+                "transition-phase: both-track engagement is missing `code_phase`; "
+                "refusing to assume ingest. Run `vigil engagement repair-tracks "
+                f"{cfg.engagement_key}` to record the legacy-state repair first.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
     if track == "code":
         order = CODE_TRANSITION_ORDER
         phases = CODE_PHASES
@@ -117,7 +132,7 @@ def run(args) -> None:
         order = WEB_TRANSITION_ORDER
         phases = WEB_PHASES
     phase_key = "code_phase" if engagement_type == "both" and track == "code" else "current_phase"
-    current_phase = scope.get(phase_key, "ingest" if phase_key == "code_phase" else "")
+    current_phase = scope.get(phase_key, "")
 
     if target_phase not in order:
         print(
@@ -195,6 +210,10 @@ def run(args) -> None:
         sys.exit(1)
 
     if hard and track == "code" and target_phase == "complete":
+        # The one edge --force cannot open. A completed code scan asserts zero
+        # durable debt in its terminal seal, so an override here would make the
+        # seal claim coverage that was never achieved. Ordinary intermediate-phase
+        # blockers stay overrideable; this edge does not.
         print(
             "transition-phase: code cannot be forced to complete while durable "
             f"debt remains ({len(hard)} blocker(s)):",
@@ -205,6 +224,15 @@ def run(args) -> None:
                 f"  - [{blocker['kind']}] {blocker['detail']}",
                 file=sys.stderr,
             )
+        print(
+            "transition-phase: --force does not apply to this edge. Resolve each "
+            "blocker above and re-run; `vigil assess code-coverage "
+            "--require-transition-ready complete` re-checks the same backend "
+            "contract and names what is still outstanding. If the remaining work "
+            "is genuinely out of scope, leave the engagement in its current phase "
+            "— `complete` is not the state for a scan with open debt.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     if hard and not args.force:
@@ -229,8 +257,17 @@ def run(args) -> None:
 
     def update(latest_scope):
         latest_scope[phase_key] = target_phase
-        if track == "blue" and target_phase == "complete":
-            latest_scope["status"] = "completed"
+        if engagement_type == "both":
+            latest_scope["status"] = (
+                "completed"
+                if latest_scope.get("current_phase") == "complete"
+                and latest_scope.get("code_phase") == "complete"
+                else "in_progress"
+            )
+        else:
+            latest_scope["status"] = (
+                "completed" if target_phase == "complete" else "in_progress"
+            )
 
     mutate_scope(engagement_dir, update)
 

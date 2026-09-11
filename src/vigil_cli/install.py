@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import platform
 import os
-import shutil
+import stat
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -13,44 +11,31 @@ from . import docker
 from . import config as config_module
 from .client_rosters import ClientRosterRepairResult, repair_engagement_client_rosters
 from .image_freshness import is_excluded_input
-from .oob import DEFAULT_OOB_DOMAIN
-from .oob_tenants import initialize_tenant_route
+from .install_manifest import (
+    INSTALL_META_FILENAME,
+    MANAGED_PRESERVE_REL_PATHS,
+    ROOT_MANAGED_NAMES,
+    install_source_content_sha256,
+    validate_install_destination,
+)
+from .install_fs import (
+    PinnedDirectory,
+    atomic_write_bytes,
+    copy_regular_file,
+    ensure_directory,
+    entry_stat,
+    open_child_directory,
+    open_pinned_directory,
+    remove_entry,
+    unsafe_path,
+)
+from .oob_tenants import OOB_ALLOCATION_REGISTRY_FILENAME, initialize_tenant_route
 from .runtime import build_runtime
-from .status import INSTALL_META_FILENAME, write_install_meta
+from .status import write_install_meta
 
 if TYPE_CHECKING:
     from .engagements import ClientEntrypointRepairResult
 
-
-def _rmtree(path: Path) -> None:
-    """shutil.rmtree with a single retry on macOS for Spotlight/Finder races."""
-    try:
-        shutil.rmtree(path)
-    except OSError:
-        if platform.system() == "Darwin":
-            time.sleep(0.5)
-            shutil.rmtree(path)
-        else:
-            raise
-
-ROOT_MANAGED_NAMES = {
-    "README.md",
-    "CODE-MAP.md",
-    "TODOs",
-    "agent",
-    "orchestrator",
-    "docker",
-    "pyproject.toml",
-    "src",
-}
-
-ROOT_PRESERVE_NAMES = {
-    ".env",
-    ".orchestrator.env",
-    ".runtime-data",
-    ".git",
-    ".jj",
-}
 
 # Directories/files only a PRIOR Vigil install or run leaves behind. Source-tree
 # directory names ("agent", "orchestrator", ".claude", ".codex") are NOT a
@@ -61,7 +46,7 @@ ROOT_PRESERVE_NAMES = {
 # installs then collided at the FRP/OOB edge.
 PRIOR_INSTALL_MARKERS = (
     INSTALL_META_FILENAME,  # stamped by every install_from_source
-    ".runtime-data",  # created by _ensure_install_dirs on every install
+    ".runtime-data",  # created by the descriptor-relative installer sync
 )
 
 LEGACY_INSTALLER_NAME = "install" ".sh"
@@ -93,13 +78,6 @@ class InstallResult:
     image_built: bool
     client_roster_repair: ClientRosterRepairResult | None = None
     client_entrypoint_repair: ClientEntrypointRepairResult | None = None
-
-
-def _is_excluded(path: Path) -> bool:
-    """Build artifacts and caches are never copied into an install — and are
-    never image build inputs either. `image_freshness` owns that single
-    judgement so the copier and the freshness digest cannot drift apart."""
-    return is_excluded_input(path.name)
 
 
 def _has_engagement_directories(install_root: Path) -> bool:
@@ -137,199 +115,523 @@ def _has_preserved_descendant(child_name: str, preserve_rel_paths: set[Path]) ->
     return any(path == child or (path.parts and path.parts[0] == child_name) for path in preserve_rel_paths)
 
 
-def _sync_dir(src: Path, dest: Path, *, preserve_rel_paths: set[Path]) -> None:
-    dest.mkdir(parents=True, exist_ok=True)
+def _reject_symlink(path: Path) -> None:
+    if path.is_symlink():
+        raise OSError(f"unsafe symbolic link in install-managed tree: {path}")
 
-    src_names = {item.name for item in src.iterdir()}
-    for child in list(dest.iterdir()):
-        if _has_preserved_descendant(child.name, preserve_rel_paths):
-            remaining = {
-                Path(*path.parts[1:])
-                for path in preserve_rel_paths
-                if path.parts and path.parts[0] == child.name and len(path.parts) > 1
-            }
-            if remaining and child.is_dir() and (src / child.name).is_dir():
-                _sync_dir(src / child.name, child, preserve_rel_paths=remaining)
-            continue
-        if child.name not in src_names and not _is_excluded(child):
-            if child.is_dir():
-                _rmtree(child)
-            else:
-                child.unlink(missing_ok=True)
 
-    for child in src.iterdir():
-        if _is_excluded(child):
+def _child_preserve_paths(name: str, paths: set[Path]) -> set[Path]:
+    return {
+        Path(*path.parts[1:])
+        for path in paths
+        if path.parts and path.parts[0] == name and len(path.parts) > 1
+    }
+
+
+def _sync_dir_fds(
+    source_fd: int,
+    destination_fd: int,
+    *,
+    source_display: Path,
+    destination_display: Path,
+    preserve_rel_paths: set[Path],
+) -> None:
+    source_names = set(os.listdir(source_fd))
+    for name in os.listdir(destination_fd):
+        if _has_preserved_descendant(name, preserve_rel_paths):
+            remaining = _child_preserve_paths(name, preserve_rel_paths)
+            source_meta = entry_stat(source_fd, name)
+            destination_meta = entry_stat(destination_fd, name)
+            if (
+                remaining
+                and source_meta is not None
+                and stat.S_ISDIR(source_meta.st_mode)
+                and destination_meta is not None
+                and stat.S_ISDIR(destination_meta.st_mode)
+            ):
+                source_child = open_child_directory(
+                    source_fd, name, source_display / name
+                )
+                destination_child = open_child_directory(
+                    destination_fd, name, destination_display / name
+                )
+                try:
+                    _sync_dir_fds(
+                        source_child,
+                        destination_child,
+                        source_display=source_display / name,
+                        destination_display=destination_display / name,
+                        preserve_rel_paths=remaining,
+                    )
+                finally:
+                    os.close(source_child)
+                    os.close(destination_child)
             continue
-        rel = Path(child.name)
-        if rel in preserve_rel_paths:
+        if name not in source_names and not is_excluded_input(name):
+            remove_entry(destination_fd, name, destination_display / name)
+
+    for name in source_names:
+        if is_excluded_input(name) or Path(name) in preserve_rel_paths:
             continue
-        target = dest / child.name
-        child_preserve = {
-            Path(*path.parts[1:])
-            for path in preserve_rel_paths
-            if path.parts and path.parts[0] == child.name and len(path.parts) > 1
-        }
-        if child.is_dir():
-            _sync_dir(child, target, preserve_rel_paths=child_preserve)
+        source_meta = entry_stat(source_fd, name)
+        if source_meta is None:
+            raise OSError(f"install source changed while copying: {source_display / name}")
+        if stat.S_ISLNK(source_meta.st_mode):
+            raise unsafe_path(source_display / name)
+        destination_path = destination_display / name
+        _reject_symlink(destination_path)
+        child_preserve = _child_preserve_paths(name, preserve_rel_paths)
+        if stat.S_ISDIR(source_meta.st_mode):
+            destination_child = ensure_directory(
+                destination_fd, name, destination_path
+            )
+            source_child = open_child_directory(source_fd, name, source_display / name)
+            try:
+                _sync_dir_fds(
+                    source_child,
+                    destination_child,
+                    source_display=source_display / name,
+                    destination_display=destination_path,
+                    preserve_rel_paths=child_preserve,
+                )
+            finally:
+                os.close(source_child)
+                os.close(destination_child)
+        elif stat.S_ISREG(source_meta.st_mode):
+            copy_regular_file(
+                source_fd,
+                name,
+                destination_fd,
+                name,
+                source_display=source_display / name,
+                destination_display=destination_path,
+            )
         else:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(child, target)
+            raise unsafe_path(source_display / name, "non-regular file")
+
+
+def _prune_missing_source_tree(
+    destination_fd: int,
+    *,
+    destination_display: Path,
+    preserve_rel_paths: set[Path],
+) -> None:
+    """Remove managed descendants absent with their source root, retaining state."""
+
+    for name in os.listdir(destination_fd):
+        if _has_preserved_descendant(name, preserve_rel_paths):
+            remaining = _child_preserve_paths(name, preserve_rel_paths)
+            if not remaining:
+                continue
+            destination_path = destination_display / name
+            metadata = entry_stat(destination_fd, name)
+            if metadata is None:
+                continue
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise unsafe_path(destination_path, "non-directory preserved path")
+            child_fd = open_child_directory(destination_fd, name, destination_path)
+            try:
+                _prune_missing_source_tree(
+                    child_fd,
+                    destination_display=destination_path,
+                    preserve_rel_paths=remaining,
+                )
+            finally:
+                os.close(child_fd)
+            continue
+        if not is_excluded_input(name):
+            remove_entry(destination_fd, name, destination_display / name)
+
+
+def _ensure_directory_chain(root_fd: int, root: Path, parts: tuple[str, ...]) -> None:
+    descriptor = os.dup(root_fd)
+    try:
+        display = root
+        for part in parts:
+            display /= part
+            child = ensure_directory(descriptor, part, display)
+            os.close(descriptor)
+            descriptor = child
+    finally:
+        os.close(descriptor)
+
+
+def _sync_managed_roots(
+    source_fd: int,
+    destination_fd: int,
+    *,
+    source_root: Path,
+    destination_root: Path,
+) -> None:
+    for name in ROOT_MANAGED_NAMES:
+        source_meta = entry_stat(source_fd, name)
+        destination_path = destination_root / name
+        if source_meta is None:
+            if name in {"agent", "orchestrator"}:
+                destination_meta = entry_stat(destination_fd, name)
+                if destination_meta is not None:
+                    if not stat.S_ISDIR(destination_meta.st_mode):
+                        raise unsafe_path(
+                            destination_path, "non-directory required path"
+                        )
+                    destination_child = open_child_directory(
+                        destination_fd, name, destination_path
+                    )
+                    preserve = {
+                        Path(*path.parts[1:])
+                        for path in MANAGED_PRESERVE_REL_PATHS
+                        if path.parts and path.parts[0] == name
+                    }
+                    try:
+                        _prune_missing_source_tree(
+                            destination_child,
+                            destination_display=destination_path,
+                            preserve_rel_paths=preserve,
+                        )
+                    finally:
+                        os.close(destination_child)
+                continue
+            remove_entry(destination_fd, name, destination_path)
+            continue
+        if stat.S_ISLNK(source_meta.st_mode):
+            raise unsafe_path(source_root / name)
+        _reject_symlink(destination_path)
+        if stat.S_ISDIR(source_meta.st_mode):
+            destination_child = ensure_directory(destination_fd, name, destination_path)
+            source_child = open_child_directory(source_fd, name, source_root / name)
+            preserve = {
+                Path(*path.parts[1:])
+                for path in MANAGED_PRESERVE_REL_PATHS
+                if path.parts and path.parts[0] == name
+            }
+            try:
+                _sync_dir_fds(
+                    source_child,
+                    destination_child,
+                    source_display=source_root / name,
+                    destination_display=destination_path,
+                    preserve_rel_paths=preserve,
+                )
+            finally:
+                os.close(source_child)
+                os.close(destination_child)
+        elif stat.S_ISREG(source_meta.st_mode):
+            copy_regular_file(
+                source_fd,
+                name,
+                destination_fd,
+                name,
+                source_display=source_root / name,
+                destination_display=destination_path,
+            )
+        else:
+            raise unsafe_path(source_root / name, "non-regular file")
+
+
+def _sync_client_entrypoints_fds(
+    source_fd: int,
+    destination_fd: int,
+    *,
+    source_root: Path,
+    destination_root: Path,
+) -> None:
+    agent_meta = entry_stat(source_fd, "agent")
+    agent_fd = (
+        open_child_directory(source_fd, "agent", source_root / "agent")
+        if agent_meta is not None and stat.S_ISDIR(agent_meta.st_mode)
+        else None
+    )
+    try:
+        agents_meta = entry_stat(agent_fd, "AGENTS.md") if agent_fd is not None else None
+        if agents_meta is None:
+            remove_entry(destination_fd, "AGENTS.md", destination_root / "AGENTS.md")
+        elif stat.S_ISREG(agents_meta.st_mode):
+            atomic_write_bytes(
+                destination_fd,
+                "AGENTS.md",
+                _ROOT_OPERATOR_POINTER.encode(),
+                mode=0o644,
+                display=destination_root / "AGENTS.md",
+            )
+        else:
+            raise unsafe_path(source_root / "agent" / "AGENTS.md")
+
+        claude_meta = entry_stat(agent_fd, "CLAUDE.md") if agent_fd is not None else None
+        if claude_meta is None:
+            remove_entry(destination_fd, "CLAUDE.md", destination_root / "CLAUDE.md")
+        elif stat.S_ISREG(claude_meta.st_mode):
+            assert agent_fd is not None
+            copy_regular_file(
+                agent_fd,
+                "CLAUDE.md",
+                destination_fd,
+                "CLAUDE.md",
+                source_display=source_root / "agent" / "CLAUDE.md",
+                destination_display=destination_root / "CLAUDE.md",
+            )
+        else:
+            raise unsafe_path(source_root / "agent" / "CLAUDE.md")
+
+        for dirname in (".codex", ".claude"):
+            source_meta = entry_stat(agent_fd, dirname) if agent_fd is not None else None
+            destination_path = destination_root / dirname
+            if source_meta is None:
+                remove_entry(destination_fd, dirname, destination_path)
+                continue
+            if not stat.S_ISDIR(source_meta.st_mode):
+                raise unsafe_path(source_root / "agent" / dirname)
+            assert agent_fd is not None
+            source_child = open_child_directory(
+                agent_fd, dirname, source_root / "agent" / dirname
+            )
+            destination_child = ensure_directory(
+                destination_fd, dirname, destination_path
+            )
+            try:
+                _sync_dir_fds(
+                    source_child,
+                    destination_child,
+                    source_display=source_root / "agent" / dirname,
+                    destination_display=destination_path,
+                    preserve_rel_paths=set(),
+                )
+            finally:
+                os.close(source_child)
+                os.close(destination_child)
+    finally:
+        if agent_fd is not None:
+            os.close(agent_fd)
+
+
+def _sync_install_files(source_root: Path, install_root: Path) -> PinnedDirectory:
+    source_pin = open_pinned_directory(source_root)
+    assert source_pin is not None
+    with source_pin:
+        destination_pin = open_pinned_directory(install_root, create=True)
+        assert destination_pin is not None
+        try:
+            same_tree = (
+                os.fstat(source_pin.fd).st_dev,
+                os.fstat(source_pin.fd).st_ino,
+            ) == (
+                os.fstat(destination_pin.fd).st_dev,
+                os.fstat(destination_pin.fd).st_ino,
+            )
+            if not same_tree:
+                remove_entry(
+                    destination_pin.fd,
+                    LEGACY_INSTALLER_NAME,
+                    install_root / LEGACY_INSTALLER_NAME,
+                )
+                _sync_managed_roots(
+                    source_pin.fd,
+                    destination_pin.fd,
+                    source_root=source_root,
+                    destination_root=install_root,
+                )
+                _sync_client_entrypoints_fds(
+                    source_pin.fd,
+                    destination_pin.fd,
+                    source_root=source_root,
+                    destination_root=install_root,
+                )
+            _ensure_directory_chain(
+                destination_pin.fd, install_root, (".runtime-data", "logs")
+            )
+            _ensure_directory_chain(
+                destination_pin.fd, install_root, (".runtime-data", "pids")
+            )
+            _ensure_directory_chain(
+                destination_pin.fd, install_root, ("agent", "engagements")
+            )
+            _ensure_directory_chain(
+                destination_pin.fd,
+                install_root,
+                ("orchestrator", "backend", "data"),
+            )
+            destination_pin.require_attached()
+            return destination_pin
+        except BaseException:
+            destination_pin.close()
+            raise
 
 
 def install_from_source(options: InstallOptions, *, runner: docker.Runner = docker.run_command) -> InstallResult:
-    source_root = options.source_root.resolve()
-    install_root = options.install_root.expanduser().resolve()
-    if options.dry_run:
-        return InstallResult(install_root=install_root, is_upgrade=False, image_built=False)
+    source_path = options.source_root.expanduser()
+    install_path = options.install_root.expanduser()
 
-    # Computed BEFORE any directory is created below — `_ensure_install_dirs`
-    # creates `.runtime-data`, which would otherwise make every install look
-    # like an upgrade to itself.
+    # Validate the complete managed source and every existing destination path
+    # before the first write. Besides making the stamp's manifest available to
+    # status, this prevents a pre-created link from redirecting copy or repair
+    # work outside the requested working root.
+    install_source_content_sha256(source_path)
+    validate_install_destination(install_path)
+    # Keep the validated path itself instead of resolving it through a link that
+    # could be swapped in after preflight. The recursive copier repeats its
+    # no-symlink checks while walking.
+    source_root = Path(os.path.abspath(source_path))
+    install_root = Path(os.path.abspath(install_path))
+
+    # Computed before the descriptor-relative sync creates `.runtime-data`,
+    # which would otherwise make every install look like an upgrade to itself.
     is_upgrade = has_prior_install_state(install_root)
-
-    install_root.mkdir(parents=True, exist_ok=True)
-    if source_root == install_root:
-        _ensure_install_dirs(install_root)
-    else:
-        for stale_root_file in (LEGACY_INSTALLER_NAME,):
-            (install_root / stale_root_file).unlink(missing_ok=True)
-
-        for child in list(install_root.iterdir()):
-            if child.name in ROOT_PRESERVE_NAMES:
-                continue
-            if child.name in ROOT_MANAGED_NAMES and not (source_root / child.name).exists():
-                if child.is_dir():
-                    _rmtree(child)
-                else:
-                    child.unlink(missing_ok=True)
-
-        for name in ROOT_MANAGED_NAMES:
-            src = source_root / name
-            if not src.exists() or _is_excluded(src):
-                continue
-            dest = install_root / name
-            if src.is_dir():
-                preserve: set[Path] = set()
-                if name == "agent":
-                    preserve.add(Path("engagements"))
-                elif name == "orchestrator":
-                    preserve.add(Path("backend") / "data")
-                _sync_dir(src, dest, preserve_rel_paths=preserve)
-            else:
-                shutil.copy2(src, dest)
-        _copy_client_entrypoints(source_root, install_root)
-        _ensure_install_dirs(install_root)
-
-    client_roster_repair = repair_engagement_client_rosters(
-        install_root,
-        refresh_physical_client_rosters=options.refresh_physical_client_rosters,
-    )
-    if client_roster_repair.physical_roster_paths:
-        print(
-            "[vigil] client-roster repair: "
-            f"scanned={client_roster_repair.scanned_engagement_count} "
-            f"physical={len(client_roster_repair.physical_roster_paths)} "
-            f"refreshed={len(client_roster_repair.refreshed_physical_roster_paths)} "
-            f"files_added={client_roster_repair.files_added} "
-            f"files_updated={client_roster_repair.files_updated} "
-            f"files_unchanged={client_roster_repair.files_unchanged} "
-            f"extras_preserved={client_roster_repair.extra_files_preserved}",
-            file=sys.stderr,
+    if options.dry_run:
+        return InstallResult(
+            install_root=install_root,
+            is_upgrade=is_upgrade,
+            image_built=False,
         )
-        refreshed_paths = set(client_roster_repair.refreshed_physical_roster_paths)
-        for path in client_roster_repair.physical_roster_paths[:20]:
-            if path in refreshed_paths:
-                print(f"[vigil] client-roster refreshed path={path}", file=sys.stderr)
-            else:
+
+    # Relative config paths belong to the caller's cwd, not the descriptor-pinned
+    # install cwd used by post-sync filesystem phases. Capture one config snapshot
+    # and its registry location before entering that scope.
+    caller_config_path = config_module.config_path()
+    caller_config = config_module.load_config(caller_config_path)
+    configured_oob_domain = (
+        os.environ.get("VIGIL_OOB_DOMAIN") or caller_config.get("oob.domain") or ""
+    )
+    configured_oob_tenant = caller_config.get("oob.tenant") or install_root.name
+    oob_registry_path = caller_config_path.with_name(
+        OOB_ALLOCATION_REGISTRY_FILENAME
+    )
+
+    destination_boundary = _sync_install_files(source_root, install_root)
+    try:
+        destination_boundary.require_attached()
+        with destination_boundary.working_directory() as phase_root:
+            client_roster_repair = repair_engagement_client_rosters(
+                phase_root,
+                refresh_physical_client_rosters=options.refresh_physical_client_rosters,
+                rendered_install_root=install_root,
+            )
+            destination_boundary.require_attached()
+            if client_roster_repair.physical_roster_paths:
                 print(
-                    "[vigil] warning: preserved physical client roster "
-                    f"path={path}; rerun with --refresh-physical-client-rosters "
-                    "to add or refresh canonical generated files in place",
+                    "[vigil] client-roster repair: "
+                    f"scanned={client_roster_repair.scanned_engagement_count} "
+                    f"physical={len(client_roster_repair.physical_roster_paths)} "
+                    f"refreshed={len(client_roster_repair.refreshed_physical_roster_paths)} "
+                    f"files_added={client_roster_repair.files_added} "
+                    f"files_updated={client_roster_repair.files_updated} "
+                    f"files_unchanged={client_roster_repair.files_unchanged} "
+                    f"extras_preserved={client_roster_repair.extra_files_preserved}",
                     file=sys.stderr,
                 )
-        hidden_physical_count = len(client_roster_repair.physical_roster_paths) - 20
-        if hidden_physical_count > 0:
-            print(
-                "[vigil] warning: client-roster repair has "
-                f"{hidden_physical_count} additional physical paths",
-                file=sys.stderr,
-            )
-    # Import lazily: engagements consumes the roster helpers above, while the
-    # installer owns when existing workdirs are reconciled after their generated
-    # sources have been refreshed.
-    from .engagements import repair_engagement_client_entrypoints
+                refreshed_paths = set(
+                    client_roster_repair.refreshed_physical_roster_paths
+                )
+                for path in client_roster_repair.physical_roster_paths[:20]:
+                    if path in refreshed_paths:
+                        print(
+                            f"[vigil] client-roster refreshed path={path}",
+                            file=sys.stderr,
+                        )
+                    else:
+                        print(
+                            "[vigil] warning: preserved physical client roster "
+                            f"path={path}; rerun with --refresh-physical-client-rosters "
+                            "to add or refresh canonical generated files in place",
+                            file=sys.stderr,
+                        )
+                hidden_physical_count = (
+                    len(client_roster_repair.physical_roster_paths) - 20
+                )
+                if hidden_physical_count > 0:
+                    print(
+                        "[vigil] warning: client-roster repair has "
+                        f"{hidden_physical_count} additional physical paths",
+                        file=sys.stderr,
+                    )
 
-    client_entrypoint_repair = repair_engagement_client_entrypoints(
-        install_root,
-        ambiguous_permissions_as_skip=options.repair_ambiguous_client_permissions_as_skip,
-    )
-    if client_entrypoint_repair.scanned_count:
-        print(
-            "[vigil] client-entrypoint repair: "
-            f"scanned={client_entrypoint_repair.scanned_count} "
-            f"reconciled={client_entrypoint_repair.reconciled_count} "
-            f"skipped={client_entrypoint_repair.skipped_count} "
-            f"permission_overrides={len(client_entrypoint_repair.permission_overrides)}",
-            file=sys.stderr,
-        )
-        for engagement_key in client_entrypoint_repair.permission_overrides[:20]:
-            print(
-                "[vigil] warning: client-entrypoint repair applied explicit "
-                "permission_mode=skip override "
-                f"engagement={engagement_key}",
-                file=sys.stderr,
-            )
-        hidden_override_count = len(client_entrypoint_repair.permission_overrides) - 20
-        if hidden_override_count > 0:
-            print(
-                "[vigil] warning: client-entrypoint repair applied explicit "
-                f"permission override to {hidden_override_count} additional engagements",
-                file=sys.stderr,
-            )
-        for skip in client_entrypoint_repair.skipped[:20]:
-            evidence = f" evidence={','.join(skip.evidence)}" if skip.evidence else ""
-            print(
-                "[vigil] warning: client-entrypoint repair skipped "
-                f"engagement={skip.engagement_key} reason={skip.reason}{evidence}",
-                file=sys.stderr,
-            )
-        hidden_skip_count = client_entrypoint_repair.skipped_count - 20
-        if hidden_skip_count > 0:
-            print(
-                "[vigil] warning: client-entrypoint repair skipped "
-                f"{hidden_skip_count} additional engagements",
-                file=sys.stderr,
-            )
-    initialize_tenant_route(
-        install_root,
-        is_upgrade=is_upgrade,
-        tenant_name=config_module.get_config_value("oob.tenant") or install_root.name,
-        base_domain=(
-            os.environ.get("VIGIL_OOB_DOMAIN")
-            or config_module.get_config_value("oob.domain", DEFAULT_OOB_DOMAIN)
-            or DEFAULT_OOB_DOMAIN
-        ),
-    )
+            # Import lazily: engagements consumes the roster helpers above, while the
+            # installer owns when existing workdirs are reconciled after their generated
+            # sources have been refreshed.
+            from .engagements import repair_engagement_client_entrypoints
 
-    # Stamp the synced source commit HERE, in the function that performs the
-    # sync, so every caller leaves the same record. Stamping from the CLI
-    # dispatch table instead is what let `vigil up` sync the working root without
-    # re-stamping it: the recorded sha stayed pinned at the last explicit
-    # `vigil install`, so `vigil status` reported a permanent false "stale" and
-    # real install drift became invisible.
-    write_install_meta(install_root, source_root)
+            destination_boundary.require_attached()
+            client_entrypoint_repair = repair_engagement_client_entrypoints(
+                phase_root,
+                ambiguous_permissions_as_skip=options.repair_ambiguous_client_permissions_as_skip,
+                rendered_install_root=install_root,
+            )
+            destination_boundary.require_attached()
+            if client_entrypoint_repair.scanned_count:
+                print(
+                    "[vigil] client-entrypoint repair: "
+                    f"scanned={client_entrypoint_repair.scanned_count} "
+                    f"reconciled={client_entrypoint_repair.reconciled_count} "
+                    f"skipped={client_entrypoint_repair.skipped_count} "
+                    f"permission_overrides={len(client_entrypoint_repair.permission_overrides)}",
+                    file=sys.stderr,
+                )
+                for engagement_key in client_entrypoint_repair.permission_overrides[
+                    :20
+                ]:
+                    print(
+                        "[vigil] warning: client-entrypoint repair applied explicit "
+                        "permission_mode=skip override "
+                        f"engagement={engagement_key}",
+                        file=sys.stderr,
+                    )
+                hidden_override_count = (
+                    len(client_entrypoint_repair.permission_overrides) - 20
+                )
+                if hidden_override_count > 0:
+                    print(
+                        "[vigil] warning: client-entrypoint repair applied explicit "
+                        f"permission override to {hidden_override_count} additional engagements",
+                        file=sys.stderr,
+                    )
+                for skip in client_entrypoint_repair.skipped[:20]:
+                    evidence = (
+                        f" evidence={','.join(skip.evidence)}" if skip.evidence else ""
+                    )
+                    print(
+                        "[vigil] warning: client-entrypoint repair skipped "
+                        f"engagement={skip.engagement_key} reason={skip.reason}{evidence}",
+                        file=sys.stderr,
+                    )
+                hidden_skip_count = client_entrypoint_repair.skipped_count - 20
+                if hidden_skip_count > 0:
+                    print(
+                        "[vigil] warning: client-entrypoint repair skipped "
+                        f"{hidden_skip_count} additional engagements",
+                        file=sys.stderr,
+                    )
 
-    image_built = False
-    if options.verify_docker_image:
-        image = "vigil:latest"
-        if options.force_image or not docker.image_exists(image, runner=runner):
-            # Build via build_runtime so the install-built image carries the
-            # com.vigil.runtime-inputs-sha256 label. A bare `docker build` here
-            # leaves the image unstamped, and the next upgrade's build-state
-            # check then reports `unknown` for an image Vigil itself built —
-            # unable to give the stale/current verdict until a manual rebuild.
-            build_runtime(install_root, runner=runner)
-            image_built = True
+            if configured_oob_domain:
+                destination_boundary.require_attached()
+                initialize_tenant_route(
+                    phase_root,
+                    is_upgrade=is_upgrade,
+                    tenant_name=configured_oob_tenant,
+                    base_domain=configured_oob_domain,
+                    registry_path=oob_registry_path,
+                    canonical_install_root=install_root,
+                    preserve_install_path=True,
+                )
+                destination_boundary.require_attached()
+
+            # Stamp in the sync owner so install, update, and up cannot diverge.
+            destination_boundary.require_attached()
+            write_install_meta(
+                phase_root,
+                source_root,
+                install_fd=destination_boundary.fd,
+            )
+            destination_boundary.require_attached()
+
+            image_built = False
+            if options.verify_docker_image:
+                image = "vigil:latest"
+                if options.force_image or not docker.image_exists(image, runner=runner):
+                    # build_runtime owns the runtime-input label contract.
+                    destination_boundary.require_attached()
+                    build_runtime(phase_root, runner=runner)
+                    destination_boundary.require_attached()
+                    image_built = True
+    finally:
+        destination_boundary.close()
     return InstallResult(
         install_root=install_root,
         is_upgrade=is_upgrade,
@@ -337,29 +639,3 @@ def install_from_source(options: InstallOptions, *, runner: docker.Runner = dock
         client_roster_repair=client_roster_repair,
         client_entrypoint_repair=client_entrypoint_repair,
     )
-
-
-def _ensure_install_dirs(install_root: Path) -> None:
-    (install_root / ".runtime-data" / "logs").mkdir(parents=True, exist_ok=True)
-    (install_root / ".runtime-data" / "pids").mkdir(parents=True, exist_ok=True)
-    (install_root / "agent" / "engagements").mkdir(parents=True, exist_ok=True)
-    (install_root / "orchestrator" / "backend" / "data").mkdir(parents=True, exist_ok=True)
-
-
-def _copy_client_entrypoints(source_root: Path, install_root: Path) -> None:
-    agent_entrypoint = source_root / "agent" / "AGENTS.md"
-    if agent_entrypoint.exists():
-        (install_root / "AGENTS.md").write_text(
-            _ROOT_OPERATOR_POINTER,
-            encoding="utf-8",
-        )
-    claude_entrypoint = source_root / "agent" / "CLAUDE.md"
-    if claude_entrypoint.exists():
-        shutil.copy2(claude_entrypoint, install_root / "CLAUDE.md")
-    for dirname in (".codex", ".claude"):
-        src = source_root / "agent" / dirname
-        dest = install_root / dirname
-        if src.exists():
-            if dest.exists():
-                _rmtree(dest)
-            shutil.copytree(src, dest)

@@ -1,7 +1,7 @@
 ---
 name: gf-patterns:interestingparams
 description: Credential and session-token parameter patterns that signal secret-handling surfaces
-origin: 1ndianl33t/Gf-Patterns (+ local overlay)
+origin: 1ndianl33t/Gf-Patterns@f686f06ae647726578920084c894100d702496cc (+ local overlay)
 bucket: interestingparams
 weight: 15
 ---

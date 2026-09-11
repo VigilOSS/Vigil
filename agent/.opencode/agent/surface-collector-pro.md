@@ -114,7 +114,7 @@ backup file the same as any other URL. Your job is to surface the signal classes
 Phase 4 priority:
 
 - **Leaked secrets in parameters** — query-string values that look like live credentials become
-  finding candidates when non-empty and non-placeholder; empty/redacted values become intelligence
+  finding candidates when non-empty and non-placeholder; empty values become intelligence
   instead.
 - **Admin, debug, and management paths** — anything that gates privileged functionality rises to
   the top of the priority stack for vulnerability-analyst.
@@ -168,7 +168,7 @@ For any collection source you could NOT complete, declare it in `#### Coverage G
 
 ### Closing verbs
 
-1. `vigil assess finding record surface-collector <finding-json>` for each finding (already required)
+1. `vigil assess finding record surface-collector <finding-json> --agent-id <your-agent_id>` for each finding (already required)
 2. `vigil assess intel record <type> <intel-json>` for each intel row
 3. `vigil assess record-surface <type> <target> <source> [--rationale TEXT]` for each surface candidate (priority signals carry on the surface row's `priority_*` fields, not in markdown)
 4. `vigil assess ingest endpoints katana|recon|source-analysis` for each raw URL ingestion source not already handled by `vigil assess gau endpoints`

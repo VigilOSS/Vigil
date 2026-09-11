@@ -111,7 +111,7 @@ Apply the decision tree:
 
 - `type=Root` — instant high severity. Cross-check the break-glass
   ticket index in the tenant ref; if no ticket covers the window,
-  `verified`-direction and route to L3 immediately. Absence of a
+  `confirmed`-direction and route to L3 immediately. Absence of a
   ticket IS the finding.
 - `type=IAMUser` with `accessKeyId` — long-term key path. Run
   `aws iam list-access-keys --user-name <u>` and
@@ -546,7 +546,7 @@ The verifier owns disposition; the heuristics below are L2's
 first-pass recommendation. The verifier may overturn after the
 five-check protocol runs.
 
-- **`verified`** — long-term key used from a new ASN AND a privesc
+- **`confirmed`** — long-term key used from a new ASN AND a privesc
   API call in the same session; OR a root sign-in without a
   break-glass ticket; OR a new role chain whose federated source
   identity is unknown to the IdP skill that owns it; OR a
@@ -567,7 +567,7 @@ five-check protocol runs.
   Severity drops by one tier (`high` → `medium`, `medium` → `low`);
   the finding remains live in case Step 6's network pivot or
   Step 7's GuardDuty pull surfaces the next escalation step.
-- **`escalated`** — new role chain terminates at an unknown
+- **`disputed`** — new role chain terminates at an unknown
   federated source identity (need IdP skill to resolve before
   disposition can land); contested coverage in Step 2's Athena pull
   (the look-back boundary still has anomalous events at T-30d); a
@@ -575,7 +575,7 @@ five-check protocol runs.
   view (the two independent controls disagree on what happened).
 
 A finding L2 cannot disposition without an IdP-side pull is
-`escalated`, never `verified-pending`. Voting in
+`disputed`, never a `verified`/`pending` invention. Voting in
 `alert-fp-verification` resolves escalations; L2 marks and routes.
 
 ## Activity Log Convention
@@ -590,7 +590,7 @@ the per-platform narrative.
   "alert_external_id": "<SIEM-or-GuardDuty-finding-id>",
   "platform": "aws",
   "skill_loaded": "aws-cloudtrail-investigation",
-  "disposition": "verified|false_positive|downgraded|escalated",
+  "disposition": "confirmed|false_positive|downgraded|disputed",
   "confidence": "low|medium|high",
   "confidence_rationale": "<one-line citation>",
   "mitre_techniques": ["T1078.004", "T1098.001"],
@@ -634,7 +634,7 @@ L2 dispatch closes with a handoff JSON at
   "platform": "aws",
   "aws_account_id": "<12-digit>",
   "principal_arn": "<arn>",
-  "disposition_recommendation": "verified|false_positive|downgraded|escalated",
+  "disposition_recommendation": "confirmed|false_positive|downgraded|disputed",
   "confidence": "low|medium|high",
   "confidence_rationale": "<one-line>",
   "mitre_techniques": ["T1078.004", "..."],
@@ -659,8 +659,8 @@ L2 dispatch closes with a handoff JSON at
 ```
 
 `cross_source_timeline_path` is required on multi-platform findings
-(`triage.md` rule 14); a handoff without the timeline blocks
-`verified` disposition at the verifier.
+(`triage.md` rule 14); a handoff without the timeline blocks a
+`confirmed` verification status at the verifier.
 
 ## Closing Sequence
 

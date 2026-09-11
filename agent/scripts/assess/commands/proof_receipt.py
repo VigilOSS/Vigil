@@ -19,7 +19,6 @@ _EVIDENCE_KINDS = (
     "source_observation",
 )
 _EVIDENCE_HEALTH = ("healthy", "missing", "stale", "tombstoned")
-_REDACTION_STATUSES = ("raw", "redacted")
 _MAX_LIST_LIMIT = 1000
 
 
@@ -42,10 +41,6 @@ def register(subparsers) -> None:
     create.add_argument(
         "--evidence-health", default="healthy", choices=_EVIDENCE_HEALTH
     )
-    create.add_argument(
-        "--redaction-status", default="raw", choices=_REDACTION_STATUSES
-    )
-    create.add_argument("--derivative-of-receipt-id", type=int)
     create.add_argument("--tombstone-reason", default="")
     create.set_defaults(func=_run_create)
 
@@ -104,14 +99,9 @@ def _require_receipt(
             and len(evidence_sha256) == 64
             and all(character in "0123456789abcdef" for character in evidence_sha256)
             and receipt.get("evidence_health") in _EVIDENCE_HEALTH
-            and receipt.get("redaction_status") in _REDACTION_STATUSES
-            and _optional_positive_int(receipt.get("derivative_of_receipt_id"))
-            and _positive_int(receipt.get("raw_receipt_id"))
-            and receipt.get("raw_receipt_id")
-            == (
-                receipt.get("derivative_of_receipt_id")
-                if receipt.get("derivative_of_receipt_id") is not None
-                else receipt.get("id")
+            and (
+                receipt.get("legacy_derivative_provenance") is None
+                or isinstance(receipt.get("legacy_derivative_provenance"), dict)
             )
             and isinstance(receipt.get("tombstone_reason"), str)
             and isinstance(receipt.get("created_at"), str)
@@ -149,8 +139,6 @@ def _run_create(args) -> None:
         "command_run_id": args.command_run_id,
         "evidence_sha256": str(args.evidence_sha256),
         "evidence_health": str(args.evidence_health),
-        "redaction_status": str(args.redaction_status),
-        "derivative_of_receipt_id": args.derivative_of_receipt_id,
         "tombstone_reason": str(args.tombstone_reason),
     }
     with _client(args) as client:
@@ -163,8 +151,6 @@ def _run_create(args) -> None:
         "artifact_id": payload["artifact_id"],
         "source_read_id": payload["source_read_id"],
         "command_run_id": payload["command_run_id"],
-        "redaction_status": payload["redaction_status"],
-        "derivative_of_receipt_id": payload["derivative_of_receipt_id"],
         "tombstone_reason": payload["tombstone_reason"],
     }
     if payload["artifact_id"] is None or payload["evidence_health"] != "healthy":

@@ -22,7 +22,6 @@ from assess.lib.code_snapshot import (
     validate_repo_key,
 )
 from assess.lib.config import load_config
-from assess.lib.scope import mutate_scope
 from assess.lib.trusted_exec import (
     git_command,
     trusted_environment,
@@ -1584,38 +1583,6 @@ def run(args) -> None:
             f"projection: {exc}",
             file=sys.stderr,
         )
-
-    # Update scope.json with source_repos entry so operator-core-code.md can discover it
-    eng_dir = getattr(cfg, 'engagement_dir', None)
-    if eng_dir:
-        scope_path = os.path.join(eng_dir, 'scope.json')
-        if os.path.isfile(scope_path):
-            try:
-                def update(scope):
-                    source_repos = scope.get('source_repos', [])
-                    repo_entry = {
-                        'repo_id': repo_id,
-                        'name': repo_name,
-                        'path': str(snapshot.source_path),
-                        'source_origin_path': str(Path(repo_path).resolve()),
-                        'language': args.language or '',
-                        'repo_generation': repo_generation,
-                        'snapshot_digest': snapshot.snapshot_digest,
-                        'source_manifest_digest': committed_digest,
-                    }
-                    existing_index = next(
-                        (i for i, row in enumerate(source_repos) if row.get('repo_id') == repo_id),
-                        None,
-                    )
-                    if existing_index is None:
-                        source_repos.append(repo_entry)
-                    else:
-                        source_repos[existing_index] = repo_entry
-                    scope['source_repos'] = source_repos
-
-                mutate_scope(eng_dir, update)
-            except (json.JSONDecodeError, OSError, SystemExit) as e:
-                print(f"Warning: could not update scope.json with source_repos: {e}", file=sys.stderr)
 
     # Print summary
     print("\n=== Code Ingest Summary ===")

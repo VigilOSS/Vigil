@@ -215,7 +215,7 @@ vigil assess kali nuclei \
   --probe-kind payload --phase consume-test --timeout 600
 ```
 
-If nuclei flags a candidate, load `agent/skills/http-smuggling/SKILL.md` for the manual confirmation and exploit path — desync is a verification-intensive class that needs hand-crafted packet construction.
+If nuclei flags a candidate, load `agent/skills/request-smuggling/SKILL.md` for the manual confirmation and exploit path — desync is a verification-intensive class that needs hand-crafted packet construction.
 
 ## Methodology Checklist
 

@@ -79,10 +79,10 @@ The active egress choice is surfaced in two auditable places:
 
 * **At start** — `vigil runtime start` prints a one-line stderr note
   (`[vigil] runtime egress separation ACTIVE: proxy=… network=… no_proxy=…`,
-  credentials redacted) plus the raw-socket WARN when a proxy is set. Silent on
-  the default path.
+  the proxy URL exactly as configured) plus the raw-socket WARN when a proxy is
+  set. Silent on the default path.
 * **On demand** — `vigil runtime resources` (and `--json`) prints an `egress`
-  row: `enabled`, the redacted `proxy`, the `network`, and the effective
+  row: `enabled`, the configured `proxy`, the `network`, and the effective
   `no_proxy`. `enabled=false` reads `(shares host/browser egress IP)`.
 
 To confirm the runtime's real egress IP differs from the browser's, exec a check

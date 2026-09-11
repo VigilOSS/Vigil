@@ -307,7 +307,6 @@ class HttpFlowIngestRequest(BaseModel):
     response_body_artifact_path: str | None = Field(default=None, max_length=1024)
     request_headers: dict[str, Any] = Field(default_factory=dict)
     response_headers: dict[str, Any] = Field(default_factory=dict)
-    redaction_status: str = Field(default="none", max_length=64)
     host_mismatch: bool = False
     url_authority: str = Field(default="", max_length=512)
     host_header: str = Field(default="", max_length=512)
@@ -332,9 +331,6 @@ class CapturePolicyUpdateRequest(BaseModel):
     max_body_bytes: int | None = Field(default=None, ge=0, le=1_073_741_824)
     content_type_allow: list[str] | None = None
     content_type_deny: list[str] | None = None
-    # Raw evidence is preserved; automatic redaction awaits the Phase 3D design
-    # decision. Keep the stored compatibility column truthful in the meantime.
-    redaction_profile: Literal["none"] | None = None
 
 
 class ProbeRunRecordRequest(BaseModel):
@@ -549,7 +545,6 @@ class ArtifactRegisterRequest(BaseModel):
     path: str = Field(min_length=1, max_length=2048)
     kind: str = Field(default="", max_length=128)
     media_type: str = Field(default="", max_length=128)
-    sensitive: bool = False
     producer_agent_id: str | None = Field(default=None, max_length=256)
     producer_agent_role: str | None = Field(default=None, max_length=128)
     producer_command_run_id: int | None = Field(default=None, ge=1)
@@ -730,7 +725,11 @@ class CredentialRecordRequest(BaseModel):
     credential_key: str = Field(min_length=1, max_length=256)
     kind: str = Field(min_length=1, max_length=64)
     principal: str = Field(min_length=1, max_length=256)
-    secret: str = Field(default="", max_length=8192, description="Literal secret value (password, token, key material). Redact if policy prohibits storage; record 'REDACTED' and describe in notes.")
+    secret: str = Field(
+        default="",
+        max_length=8192,
+        description="Literal secret value (password, token, or key material), preserved verbatim.",
+    )
     source_name: str = Field(default="", max_length=128)
     status: str = Field(default="discovered", min_length=1, max_length=64)
     notes: str = Field(default="", max_length=4096)
@@ -1377,8 +1376,6 @@ class ProofReceiptRequest(BaseModel):
     command_run_id: int | None = Field(default=None, ge=1)
     evidence_sha256: str = Field(default="", max_length=64)
     evidence_health: Literal["healthy", "missing", "stale", "tombstoned"] = "healthy"
-    redaction_status: Literal["raw", "redacted"] = "raw"
-    derivative_of_receipt_id: int | None = Field(default=None, ge=1)
     tombstone_reason: str = Field(default="", max_length=1024)
 
 
@@ -1865,7 +1862,6 @@ async def register_artifact(engagement_key: str, request: ArtifactRegisterReques
             path=request.path,
             kind=request.kind,
             media_type=request.media_type,
-            sensitive=request.sensitive,
             producer_agent_id=request.producer_agent_id,
             producer_agent_role=request.producer_agent_role,
             producer_command_run_id=request.producer_command_run_id,
@@ -1909,6 +1905,42 @@ async def refresh_artifacts(engagement_key: str) -> dict[str, Any]:
     )
     await _broadcast(engagement.key, "artifact_refresh", result)
     return result
+
+
+@router.post("/artifacts/{artifact_id}/refresh")
+async def refresh_one_artifact(
+    engagement_key: str, artifact_id: int
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(
+        lambda: get_engagement_or_404(engagement_key)
+    )
+    result = await anyio.to_thread.run_sync(
+        functools.partial(
+            artifact_index.refresh_artifacts,
+            engagement.id,
+            artifact_id=artifact_id,
+        )
+    )
+    await _broadcast(engagement.key, "artifact_refresh", result)
+    return result
+
+
+@router.delete("/artifacts/{artifact_id}/finding-link")
+async def clear_artifact_finding_link(
+    engagement_key: str, artifact_id: int
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(
+        lambda: get_engagement_or_404(engagement_key)
+    )
+    row = await anyio.to_thread.run_sync(
+        functools.partial(
+            artifact_index.clear_finding_link,
+            engagement.id,
+            artifact_id=artifact_id,
+        )
+    )
+    await _broadcast(engagement.key, "artifact", row)
+    return row
 
 
 @router.get("/artifacts/search")
@@ -2606,8 +2638,6 @@ async def create_proof_receipt(
             command_run_id=request.command_run_id,
             evidence_sha256=request.evidence_sha256,
             evidence_health=request.evidence_health,
-            redaction_status=request.redaction_status,
-            derivative_of_receipt_id=request.derivative_of_receipt_id,
             tombstone_reason=request.tombstone_reason,
         )
     )
@@ -3872,6 +3902,48 @@ class FindingRelocateRequest(BaseModel):
         return value.strip()
 
 
+class FindingAuthorRepairRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    agent_id: str = Field(min_length=1, max_length=256)
+    actor: str = Field(min_length=1, max_length=128)
+    reason: str = Field(min_length=1, max_length=4096)
+    expected_row_version: int = Field(ge=1)
+
+
+@router.put("/findings/{finding_slug}/author")
+async def repair_finding_author(
+    engagement_key: str,
+    finding_slug: str,
+    request: FindingAuthorRepairRequest,
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            state_manager.repair_finding_author,
+            engagement.id,
+            slug=finding_slug,
+            agent_id=request.agent_id,
+            actor=request.actor,
+            reason=request.reason,
+            expected_row_version=request.expected_row_version,
+        )
+    )
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_assessment_mutation,
+            engagement.id,
+            title="finding-author-repair",
+            action=f"finding={finding_slug} agent_id={request.agent_id}",
+            actor_name=request.actor,
+            result=request.reason,
+            metadata={"finding_slug": finding_slug, "agent_id": request.agent_id},
+        )
+    )
+    await _broadcast(engagement.key, "finding_patch", record)
+    return record
+
+
 @router.put("/findings/{finding_slug}/canonical-location")
 async def relocate_finding(
     engagement_key: str,
@@ -4219,6 +4291,11 @@ class DispatchCreate(BaseModel):
     client_name: Literal["claude", "codex", "goose", "kimi", "opencode", "unknown"] = (
         "unknown"
     )
+    requested_client: Literal["claude", "codex", "goose", "kimi", "opencode", "unknown"] = "unknown"
+    launcher_effective_client: Literal["claude", "codex", "goose", "kimi", "opencode", "unknown"] = "unknown"
+    # Provider observation is deliberately closed to caller attestation until a
+    # supported client exposes a stable, client-owned signal at this boundary.
+    provider_observed_client: Literal["unknown"] = "unknown"
     source_revision: str = Field(default="unknown", max_length=128)
     operator_instruction_path: str | None = Field(default=None, max_length=1024)
     operator_instruction_sha256: str | None = Field(
@@ -4246,6 +4323,15 @@ class DispatchCreate(BaseModel):
 
     @model_validator(mode="after")
     def _validate_instruction_identity(self) -> DispatchCreate:
+        if self.launcher_effective_client == "unknown" and self.client_name != "unknown":
+            self.launcher_effective_client = self.client_name
+        elif self.client_name == "unknown" and self.launcher_effective_client != "unknown":
+            self.client_name = self.launcher_effective_client
+        elif self.client_name != self.launcher_effective_client:
+            raise ValueError(
+                "client_name is a compatibility projection and must equal "
+                "launcher_effective_client"
+            )
         if self.instruction_identity_status == "verified":
             complete = all(
                 (
@@ -4591,6 +4677,9 @@ async def create_dispatch(engagement_key: str, request: DispatchCreate) -> dict[
             requested_reasoning=request.requested_reasoning,
             actual_reasoning="unknown",
             client_name=request.client_name,
+            requested_client=request.requested_client,
+            launcher_effective_client=request.launcher_effective_client,
+            provider_observed_client=request.provider_observed_client,
             source_revision=request.source_revision,
             operator_instruction_path=request.operator_instruction_path,
             operator_instruction_sha256=request.operator_instruction_sha256,
@@ -4673,10 +4762,10 @@ async def patch_dispatch(
             title="agent done",
             action=f"agent_id={agent_id}",
             actor_name=agent_id,
-            result=request.status or "",
+            result=str(record.get("status") or ""),
             metadata={
                 "agent_id": agent_id,
-                "finding_slugs": request.finding_slugs or [],
+                "finding_slugs": record.get("finding_slugs") or [],
             },
         )
     )

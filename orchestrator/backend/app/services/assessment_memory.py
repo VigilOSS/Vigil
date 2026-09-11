@@ -834,14 +834,40 @@ def build_resume_brief(
             include_output=False,
         )
     )
-    command_matches = _since_filter(command_matches_all, since=since, field="created_at")[:10]
+    command_filtered = _since_filter(
+        command_matches_all, since=since, field="created_at"
+    )
+    command_matches = command_filtered[:10]
     artifacts_all = artifact_index.search_artifacts(
         engagement_id,
         query=q,
         finding=canonical_finding or finding,
         limit=10 if not since else 30,
     )
-    artifacts = _since_filter(artifacts_all, since=since, field="updated_at")[:10]
+    artifacts_filtered = _since_filter(
+        artifacts_all, since=since, field="updated_at"
+    )
+    artifacts = artifacts_filtered[:10]
+    command_fetch_limit = 10 if not since else 30
+    artifact_fetch_limit = 10 if not since else 30
+    command_page = {
+        "returned_count": len(command_matches),
+        "total_count": len(command_filtered),
+        "total_is_lower_bound": len(command_matches_all) >= command_fetch_limit,
+        "truncated": (
+            len(command_matches) < len(command_filtered)
+            or len(command_matches_all) >= command_fetch_limit
+        ),
+    }
+    artifact_page = {
+        "returned_count": len(artifacts),
+        "total_count": len(artifacts_filtered),
+        "total_is_lower_bound": len(artifacts_all) >= artifact_fetch_limit,
+        "truncated": (
+            len(artifacts) < len(artifacts_filtered)
+            or len(artifacts_all) >= artifact_fetch_limit
+        ),
+    }
     open_high_cves = _since_filter(
         intel.list_open_high_cves(engagement_id), since=since, field="updated_at"
     )[:10]
@@ -892,7 +918,9 @@ def build_resume_brief(
         "recent_decisions": _recent_decisions(engagement_id, since=since),
         "dispatches": dispatch_picture,
         "command_runs": command_matches,
+        "command_runs_page": command_page,
         "artifacts": artifacts,
+        "artifacts_page": artifact_page,
         "intel": intel_section,
         "knowledge_drift": knowledge_drift,
         "recommended_next_actions": _recommended_actions(

@@ -281,7 +281,7 @@ def test_agent_start_code_role_renders_backend_derived_source_identity(
                 "repo_path": "/sealed/example/source",
                 "active_generation": 3,
                 "source_manifest_digest": digest,
-                "structural_index_schema": "structural-index/v5",
+                "structural_index_schema": "structural-index/v6",
                 "structural_index_manifest_path": "/sealed/example/index/manifest.json",
                 "lsp_config": {
                     "ctags": {
@@ -327,7 +327,7 @@ def test_agent_start_code_role_renders_backend_derived_source_identity(
     assert "repo_generation: 3" in output
     assert f"source_manifest_digest: {digest}" in output
     assert "snapshot_path: /sealed/example/source" in output
-    assert "structural_index_schema: structural-index/v5" in output
+    assert "structural_index_schema: structural-index/v6" in output
     assert "structural_index_manifest_path: /sealed/example/index/manifest.json" in output
     assert "ctags_path: /sealed/example/ctags/tags" in output
     assert "pass it the Runtime Identity and Code Source Identity blocks above" in output
@@ -399,6 +399,51 @@ def test_agent_start_parses_explicit_budget_and_prompt_emission() -> None:
     assert args.rate_budget == "maximum 2 requests/second; stop after 100 requests"
     assert args.no_target_traffic is False
     assert args.emit_prompt is True
+
+
+def test_agent_start_dry_run_validates_without_persisting(
+    monkeypatch, capsys, tmp_path
+) -> None:
+    args = SimpleNamespace(
+        agent_id="analyst-1",
+        agent_role="vulnerability-analyst",
+        dry_run=True,
+        emit_prompt=False,
+        allow_duplicate=True,
+        code_repo_id=None,
+        rate_budget="maximum 2 requests/second",
+        no_target_traffic=False,
+    )
+
+    class _ReadOnlyClient(_DispatchClient):
+        def record_dispatch(self, payload: dict) -> dict:
+            pytest.fail("dry-run must not persist a dispatch")
+
+    monkeypatch.setattr(
+        agent.dispatch,
+        "_build_register_payload",
+        lambda _args: {
+            "agent_id": "analyst-1",
+            "agent_role": "vulnerability-analyst",
+            "status": "in-progress",
+        },
+    )
+    monkeypatch.setattr(
+        agent.dispatch,
+        "_client_for",
+        lambda _args: (
+            _ReadOnlyClient(),
+            SimpleNamespace(
+                engagement_dir=str(tmp_path), agent_root=str(tmp_path / "agent")
+            ),
+        ),
+    )
+    monkeypatch.setattr(agent, "_attach_dispatch_provenance", lambda *_args: [])
+    monkeypatch.setattr(agent, "_warn_missing_native_wrapper", lambda *_args: None)
+
+    agent._start(args)
+
+    assert '"dry_run": true' in capsys.readouterr().out
 
 
 def test_agent_start_from_json_accepts_and_strips_cli_only_rate_budget(
@@ -743,7 +788,7 @@ def test_agent_start_code_role_requires_repo_selection_before_recording(
             "repo_path": f"/sealed/repo-{repo_id}/source",
             "active_generation": 1,
             "source_manifest_digest": digest,
-            "structural_index_schema": "structural-index/v5",
+            "structural_index_schema": "structural-index/v6",
             "structural_index_manifest_path": f"/sealed/repo-{repo_id}/manifest.json",
             "lsp_config": {},
         }

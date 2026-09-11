@@ -56,11 +56,13 @@ engagement. It is the decisive gate.
 - **Zero engagement context.** The reviewer is given **only**: (a) the program
   brief facts (in-scope assets, the triage bar, the severity-band policy), and
   (b) the submission `.md` itself. Nothing else.
-- **Hard isolation.** The reviewer reads **ONLY the submission `.md`**. It must
-  **NOT** read any repo file, run any `vigil` / CLI / `curl` command, query
-  the work buffer, or pull in any other engagement artifact. If a claim is not proven
-  *inside the submission bytes*, it is unproven for triage purposes — that is the
-  reviewer judging exactly what an external triager can see.
+- **Reviewer input discipline.** Build the content-addressed input with
+  `vigil assess export triage-packet <slug>` and give the reviewer only that packet.
+  Packet generation records `process_isolation_enforced=false`: it proves which bytes
+  were packaged but does not control the reviewer's process. The reviewer reads only the
+  packaged submission, program brief, and rubric; it does not query other engagement state.
+  If a claim is not proven inside the submission bytes, it is unproven for triage purposes —
+  that is the reviewer judging exactly what an external triager can see.
 
 **The dispatch prompt must, verbatim, give the blind reviewer:**
 

@@ -7,6 +7,7 @@ import sys
 from typing import Any
 
 from assess.lib.client import AssessmentClient
+from assess.lib.code_structural_identity import parse_code_file_page
 from assess.lib.config import load_config
 
 
@@ -85,19 +86,31 @@ def run(args) -> None:
 def _fetch_code_files(cfg, *, repo_id: int | None = None) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     offset = 0
+    expected_total: int | None = None
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         while True:
             endpoint = f"code/files?limit={_PAGE_SIZE}&offset={offset}"
             if repo_id is not None:
                 endpoint += f"&repo_id={int(repo_id)}"
             page = client.get(endpoint)
-            if not isinstance(page, list):
+            try:
+                items, total, has_more = parse_code_file_page(
+                    page,
+                    expected_offset=offset,
+                    context="code-size-summary response",
+                )
+            except ValueError:
                 print("code-size-summary: unexpected backend response", file=sys.stderr)
                 sys.exit(1)
-            rows.extend(row for row in page if isinstance(row, dict))
-            if len(page) < _PAGE_SIZE:
+            if expected_total is None:
+                expected_total = total
+            elif total != expected_total:
+                print("code-size-summary: backend total changed while paging", file=sys.stderr)
+                sys.exit(1)
+            rows.extend(items)
+            if not has_more:
                 return rows
-            offset += _PAGE_SIZE
+            offset += len(items)
 
 
 def summarize_code_size(

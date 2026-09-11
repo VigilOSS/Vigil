@@ -384,7 +384,6 @@ def _normalize_capture_policy(raw) -> dict:
         "content_type_deny": _ct_list("content_type_deny"),
         # No capture-time redactor exists. Never label raw body bytes as if an
         # unknown historical/requested profile had transformed them.
-        "redaction_profile": "none",
     }
 
 
@@ -828,8 +827,8 @@ class CaseCollector:
         if not hostname:
             return None
         hostname = hostname.lower()
-        best: tuple[int, int, str, EngagementEntry] | None = None
-        runners_up: list[EngagementEntry] = []
+        candidates: list[tuple[int, int, EngagementEntry]] = []
+        matched_scope = False
         with self._registry_lock:
             for entry in self.registry.values():
                 best_pattern_score: int | None = None
@@ -841,58 +840,66 @@ class CaseCollector:
                         best_pattern_score = score
                 if best_pattern_score is None:
                     continue
-                # Tiebreakers after best-pattern score: scope_priority, then updated_at desc.
-                key = (best_pattern_score, entry.scope_priority, entry.updated_at)
-                if best is None or key > (best[0], best[1], best[2]):
-                    if best is not None:
-                        runners_up.append(best[3])
-                    best = (best_pattern_score, entry.scope_priority, entry.updated_at, entry)
-                else:
-                    runners_up.append(entry)
-        if best is None:
+                matched_scope = True
+                if (
+                    entry.scope_enforcement != "bypass"
+                    and _out_of_scope_covers(
+                        entry.out_of_scope_patterns,
+                        hostname,
+                        resolved_ip,
+                        defer_unresolved_cidr=defer_unresolved_cidr,
+                    )
+                ):
+                    suppress_key = (hostname, entry.key)
+                    if suppress_key not in self._routed_log_seen:
+                        self._routed_log_seen.add(suppress_key)
+                        ctx.log.info(
+                            f"proxy_addon: suppressed {hostname} — matches out_of_scope "
+                            f"carve-out for engagement {entry.key}"
+                        )
+                    continue
+                candidates.append((best_pattern_score, entry.scope_priority, entry))
+        if not candidates:
+            # A declared owner excluded the host. Do not let the global bypass
+            # claim traffic that an explicit carve-out refused.
+            if matched_scope:
+                return None
             chosen = self._active_global_bypass_entry()
             if chosen is None:
                 return None
+            best_rank = (0, chosen.scope_priority)
+            runners_up: list[EngagementEntry] = []
         else:
-            chosen = best[3]
-        # Out-of-scope carve-out: a host admitted by an in-scope wildcard but
-        # covered by ANY of the engagement's out_of_scope entries must not be
-        # captured or routed under normal enforcement. The explicit global
-        # bypass overrides target allow/deny admission.
-        # ``_out_of_scope_covers`` understands literal/``*.`` host patterns,
-        # URL-form entries (reduced to their host) and CIDR entries (matched
-        # against ``resolved_ip`` when the flow carries the server IP), and
-        # FAILS CLOSED on any entry it cannot evaluate with certainty so an
-        # unparseable carve-out never silently admits an out-of-scope host.
-        if (
-            chosen.scope_enforcement != "bypass"
-            and _out_of_scope_covers(
-                chosen.out_of_scope_patterns,
-                hostname,
-                resolved_ip,
-                defer_unresolved_cidr=defer_unresolved_cidr,
-            )
-        ):
-            suppress_key = (hostname, chosen.key)
-            if suppress_key not in self._routed_log_seen:
-                self._routed_log_seen.add(suppress_key)
-                ctx.log.info(
-                    f"proxy_addon: suppressed {hostname} — matches out_of_scope "
-                    f"carve-out for engagement {chosen.key}"
-                )
-            return None
+            best_rank = max((score, priority) for score, priority, _entry in candidates)
+            tied = [
+                entry
+                for score, priority, entry in candidates
+                if (score, priority) == best_rank
+            ]
+            if len(tied) > 1:
+                if hostname not in self._ambiguity_log_seen:
+                    self._ambiguity_log_seen.add(hostname)
+                    keys = ", ".join(sorted(entry.key for entry in tied))
+                    ctx.log.warn(
+                        f"proxy_addon: ambiguous scope ownership for {hostname} — "
+                        f"equal score={best_rank[0]} and priority={best_rank[1]} "
+                        f"across [{keys}]; leaving flow unattributed until "
+                        "scope_priority or scope roots disambiguate it"
+                    )
+                return None
+            chosen = tied[0]
+            runners_up = [entry for _score, _priority, entry in candidates if entry is not chosen]
         log_key = (hostname, chosen.key)
         if log_key not in self._routed_log_seen:
             self._routed_log_seen.add(log_key)
             ctx.log.info(
                 f"proxy_addon: routed {hostname} → engagement {chosen.key}"
             )
-            if runners_up and hostname not in self._ambiguity_log_seen:
-                self._ambiguity_log_seen.add(hostname)
+            if runners_up:
                 other_keys = ", ".join(sorted({e.key for e in runners_up}))
                 ctx.log.info(
                     f"proxy_addon: scope overlap for {hostname} — chose {chosen.key} over [{other_keys}] "
-                    f"(score={best[0]}, priority={best[1]})"
+                    f"(score={best_rank[0]}, priority={best_rank[1]})"
                 )
         return chosen
 
@@ -1222,7 +1229,7 @@ class CaseCollector:
 
         Derived purely from the flow (presence of an Authorization header or
         cookies) — "authenticated" vs "anonymous". Named-identity labeling
-        happens at probe time via ``vigil assess kali --identity``, so the proxy
+        happens at probe time via ``vigil assess kali <tool> --identity``, so the proxy
         does not need a per-request lookup into the credential store.
         """
         has_authorization = bool(
@@ -1272,9 +1279,14 @@ class CaseCollector:
         try:
             with urlopen(request, timeout=10) as response:
                 response.read()
+            # Names, not counts: the store is append-only and multi-identity, so
+            # "3 cookies" does not tell an operator tailing this log WHICH session
+            # just landed for this host. Values live in `vigil assess auth list
+            # --json`; one log line per captured flow stays scannable.
             ctx.log.info(
-                f"proxy_addon: captured credentials for {entry.key} "
-                f"({len(cookies)} cookies, {len(headers)} headers from {host})"
+                f"proxy_addon: captured credentials for {entry.key} from {host} "
+                f"(cookies: {', '.join(sorted(cookies)) or '-'}; "
+                f"headers: {', '.join(sorted(headers)) or '-'})"
             )
         except Exception as exc:
             ctx.log.error(
@@ -1900,7 +1912,6 @@ class CaseCollector:
                 "response_body_artifact_path": resp_path,
                 "request_headers": dict(req.headers),
                 "response_headers": dict(resp.headers) if resp else {},
-                "redaction_status": policy.get("redaction_profile") or "none",
                 "host_mismatch": host_mismatch,
                 "url_authority": url_authority,
                 "host_header": host_header,

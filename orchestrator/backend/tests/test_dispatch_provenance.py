@@ -50,6 +50,9 @@ def test_dispatch_instruction_provenance_round_trips_without_legacy_aliases(
         "requested_model": "gpt-requested",
         "requested_reasoning": "high",
         "client_name": "codex",
+        "requested_client": "claude",
+        "launcher_effective_client": "codex",
+        "provider_observed_client": "unknown",
         "source_revision": "a" * 40,
         "operator_instruction_path": "agent/AGENTS.md",
         "operator_instruction_sha256": "b" * 64,
@@ -74,6 +77,24 @@ def test_dispatch_instruction_provenance_round_trips_without_legacy_aliases(
     assert listed.status_code == 200, listed.text
     assert fetched.json() == created.json()
     assert listed.json() == [created.json()]
+
+
+def test_dispatch_rejects_caller_claimed_provider_observation(
+    client,
+    isolate_settings,
+) -> None:
+    _seed(client, isolate_settings["engagements_dir"])
+
+    response = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": "FORGED-PROVIDER",
+            "agent_role": "recon-specialist",
+            "provider_observed_client": "codex",
+        },
+    )
+
+    assert response.status_code == 422, response.text
 
 
 def test_dispatch_api_rejects_caller_attested_actual_identity(

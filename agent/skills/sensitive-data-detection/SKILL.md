@@ -300,9 +300,8 @@ When PII or sensitive data is detected, report as:
 ```
 
 Record the detected value as evidence — it is self-owned local working state (see
-`agent/shared-constraints.md`, "Credentials and Local State Are Self-Owned"). Masking third-party
-PII for a *published* report is the report-writer's job at submission time
-(`agent/references/submission-format.md`), not yours.
+`agent/shared-constraints.md`, "Credentials and Local State Are Self-Owned"). Published reports
+preserve those exact values (`agent/references/submission-format.md`).
 
 ## Priority Order
 

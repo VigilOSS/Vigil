@@ -22,6 +22,7 @@ _CODE_SNAPSHOT = {
 }
 
 _ENGAGEMENT_KEY = "2026-08-04-finding-provenance"
+_DEFAULT_AUTHOR_AGENT_ID = "snapshot-fixture-author"
 
 
 def _write_code_engagement(engagements_dir: Path) -> None:
@@ -56,6 +57,7 @@ def _write_code_engagement(engagements_dir: Path) -> None:
 def _seed_repo(client, isolate_settings, *, quality: str = "verified") -> dict[str, object]:
     _write_code_engagement(isolate_settings["engagements_dir"])
     assert client.get("/engagements").status_code == 200
+    _dispatch(client, _DEFAULT_AUTHOR_AGENT_ID)
     with db_module.get_connection() as connection:
         engagement_id = int(
             connection.execute(
@@ -84,7 +86,7 @@ def _finding_payload(
     *,
     location: str = "file:src/parser.c:41",
     severity: str = "info",
-    author_agent_id: str | None = None,
+    author_agent_id: str | None = _DEFAULT_AUTHOR_AGENT_ID,
 ) -> dict[str, object]:
     provenance: dict[str, object] = {"agent_name": "code-vuln-hunter"}
     if author_agent_id is not None:
@@ -517,8 +519,8 @@ def test_same_slug_rerecord_cannot_remove_legacy_file_snapshot_gating(
         "VA-025", None, location="https://example.com/api/parser/25"
     )
     rerecorded = _record(client, replay)
-    assert rerecorded.status_code == 409, rerecorded.text
-    assert "category" in rerecorded.json()["detail"].lower()
+    assert rerecorded.status_code == 400, rerecorded.text
+    assert "bind-author" in rerecorded.json()["detail"].lower()
 
     fetched = client.get(
         f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/VA-025"
@@ -661,20 +663,23 @@ def test_merge_rejects_bound_and_unbound_non_file_findings(client, isolate_setti
     assert "code snapshot" in merged.json()["detail"].lower()
 
 
-def test_merge_rejects_file_and_non_file_findings_with_the_same_binding(
-    client, isolate_settings
+@pytest.mark.parametrize("live_has_binding", [False, True])
+def test_merge_cross_track_keeps_structured_source_location_and_both_evidence_refs(
+    client, isolate_settings, live_has_binding
 ) -> None:
     binding = _seed_repo(client, isolate_settings)
-    assert _record(
-        client,
-        _finding_payload("VA-023", binding, location="file:src/parser.c:23"),
-    ).status_code == 201
-    assert _record(
-        client,
-        _finding_payload(
-            "VA-024", binding, location="https://example.com/api/parser/24"
-        ),
-    ).status_code == 201
+    source_payload = _finding_payload(
+        "VA-023", binding, location="file:src/parser.c:23"
+    )
+    source_payload["evidence_ref"] = "evidence/static-parser.json"
+    assert _record(client, source_payload).status_code == 201
+    live_payload = _finding_payload(
+        "VA-024",
+        binding if live_has_binding else None,
+        location="https://example.com/api/parser/24",
+    )
+    live_payload["evidence_ref"] = "evidence/live-parser.json"
+    assert _record(client, live_payload).status_code == 201
 
     merged = client.post(
         f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/merge",
@@ -685,8 +690,316 @@ def test_merge_rejects_file_and_non_file_findings_with_the_same_binding(
         },
     )
 
+    assert merged.status_code == 200, merged.text
+    target = merged.json()["target"]
+    assert target["canonical_location"] == "file:src/parser.c:23"
+    assert target["provenance"]["code_snapshot"] == binding
+    assert target["code_snapshot_status"] == "current"
+    with db_module.get_connection() as connection:
+        evidence_refs = {
+            str(row["target_ref"])
+            for row in connection.execute(
+                """
+                SELECT target_ref
+                FROM assessment_finding_links
+                WHERE engagement_id = (SELECT id FROM engagements WHERE key = ?)
+                  AND finding_id = (SELECT id FROM assessment_findings WHERE slug = 'VA-024')
+                  AND link_kind = 'evidence'
+                  AND retired_at IS NULL
+                """,
+                (_ENGAGEMENT_KEY,),
+            ).fetchall()
+        }
+    assert evidence_refs == {
+        "evidence/static-parser.json",
+        "evidence/live-parser.json",
+    }
+
+
+def test_cross_track_merge_preserves_confirmed_target_when_evidence_is_only_additive(
+    client, isolate_settings
+) -> None:
+    binding = _seed_repo(client, isolate_settings)
+    _dispatch(client, "merge-target-author")
+    target_payload = _finding_payload(
+        "VA-060",
+        binding,
+        location="file:src/parser.c:60",
+        severity="high",
+        author_agent_id="merge-target-author",
+    )
+    target_payload["evidence_ref"] = "evidence/static-confirmed.json"
+    assert _record(client, target_payload).status_code == 201
+    _dispatch(client, "merge-target-verifier", role="code-vuln-verifier")
+    proof_receipt_id = _verification_receipt(
+        client, "merge-target-verifier", "VA-060"
+    )
+    confirmed = _verify(
+        client,
+        "VA-060",
+        {
+            "verification_status": "confirmed",
+            "reason_text": "Independent review confirmed the source defect.",
+            "source_name": "code-vuln-verifier",
+            "provenance": {"code_snapshot": binding},
+            "proof_receipt_ids": [proof_receipt_id],
+        },
+    )
+    assert confirmed.status_code == 200, confirmed.text
+
+    _dispatch(client, "merge-live-author")
+    live_payload = _finding_payload(
+        "VA-061",
+        None,
+        location="https://example.com/api/parser/60",
+        severity="high",
+        author_agent_id="merge-live-author",
+    )
+    live_payload["evidence_ref"] = "evidence/live-confirmation.json"
+    recorded_live = _record(client, live_payload)
+    assert recorded_live.status_code == 201, recorded_live.text
+    merged = client.post(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/merge",
+        json={
+            "source_slug": "VA-061",
+            "target_slug": "VA-060",
+            "reason": "Live confirmation independently proves the same source defect.",
+        },
+    )
+
+    assert merged.status_code == 200, merged.text
+    target = merged.json()["target"]
+    assert target["verification_status"] == "confirmed"
+    assert target["canonical_location"] == "file:src/parser.c:60"
+    with db_module.get_connection() as connection:
+        receipt_links = connection.execute(
+            """
+            SELECT proof_receipt_id
+            FROM assessment_finding_proof_receipts
+            WHERE finding_id = (
+                SELECT id FROM assessment_findings WHERE slug = 'VA-060'
+            ) AND relation = 'verification'
+            """
+        ).fetchall()
+        evidence_refs = {
+            str(row["target_ref"])
+            for row in connection.execute(
+                """
+                SELECT target_ref
+                FROM assessment_finding_links
+                WHERE finding_id = (
+                    SELECT id FROM assessment_findings WHERE slug = 'VA-060'
+                ) AND link_kind = 'evidence' AND retired_at IS NULL
+                """
+            ).fetchall()
+        }
+    assert [int(row["proof_receipt_id"]) for row in receipt_links] == [proof_receipt_id]
+    assert evidence_refs == {
+        "evidence/static-confirmed.json",
+        "evidence/live-confirmation.json",
+    }
+
+
+def test_cross_track_merge_preserves_confirmation_when_source_adds_material_detail(
+    client, isolate_settings
+) -> None:
+    binding = _seed_repo(client, isolate_settings)
+    _dispatch(client, "merge-material-target-author")
+    target_payload = _finding_payload(
+        "VA-064",
+        binding,
+        location="file:src/parser.c:64",
+        severity="high",
+        author_agent_id="merge-material-target-author",
+    )
+    target_payload["evidence_ref"] = "evidence/static-material.json"
+    assert "cwe_id" not in target_payload["details"]
+    assert _record(client, target_payload).status_code == 201
+    _dispatch(
+        client, "merge-material-target-verifier", role="code-vuln-verifier"
+    )
+    proof_receipt_id = _verification_receipt(
+        client, "merge-material-target-verifier", "VA-064"
+    )
+    confirmed = _verify(
+        client,
+        "VA-064",
+        {
+            "verification_status": "confirmed",
+            "reason_text": "Independent review confirmed the source defect.",
+            "source_name": "code-vuln-verifier",
+            "provenance": {"code_snapshot": binding},
+            "proof_receipt_ids": [proof_receipt_id],
+        },
+    )
+    assert confirmed.status_code == 200, confirmed.text
+
+    _dispatch(client, "merge-material-live-author")
+    live_payload = _finding_payload(
+        "VA-065",
+        None,
+        location="https://example.com/api/parser/64",
+        severity="high",
+        author_agent_id="merge-material-live-author",
+    )
+    live_payload["evidence_ref"] = "evidence/live-material.json"
+    live_payload["details"]["cwe_id"] = "CWE-120"
+    recorded_live = _record(client, live_payload)
+    assert recorded_live.status_code == 201, recorded_live.text
+    merged = client.post(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/merge",
+        json={
+            "source_slug": "VA-065",
+            "target_slug": "VA-064",
+            "reason": "Runtime proof adds evidence without replacing reviewed facts.",
+        },
+    )
+
+    assert merged.status_code == 200, merged.text
+    target = merged.json()["target"]
+    assert target["verification_status"] == "confirmed"
+    assert target["details"]["cwe_id"] == "CWE-120"
+    with db_module.get_connection() as connection:
+        receipt_links = connection.execute(
+            """
+            SELECT proof_receipt_id
+            FROM assessment_finding_proof_receipts
+            WHERE finding_id = (
+                SELECT id FROM assessment_findings WHERE slug = 'VA-064'
+            ) AND relation = 'verification'
+            """
+        ).fetchall()
+        evidence_refs = {
+            str(row["target_ref"])
+            for row in connection.execute(
+                """
+                SELECT target_ref
+                FROM assessment_finding_links
+                WHERE finding_id = (
+                    SELECT id FROM assessment_findings WHERE slug = 'VA-064'
+                ) AND link_kind = 'evidence' AND retired_at IS NULL
+                """
+            ).fetchall()
+        }
+    assert [int(row["proof_receipt_id"]) for row in receipt_links] == [proof_receipt_id]
+    assert evidence_refs == {
+        "evidence/static-material.json",
+        "evidence/live-material.json",
+    }
+
+
+def test_cross_track_merge_invalidates_confirmation_when_claim_dependencies_are_replaced(
+    client, isolate_settings
+) -> None:
+    binding = _seed_repo(client, isolate_settings)
+    _dispatch(client, "merge-destructive-author")
+    target_payload = _finding_payload(
+        "VA-062",
+        binding,
+        location="file:src/parser.c:62",
+        severity="high",
+        author_agent_id="merge-destructive-author",
+    )
+    target_payload["summary"] = "The source parser has a confirmed bounded-copy defect."
+    target_payload["evidence_ref"] = "evidence/original-proof.json"
+    assert _record(client, target_payload).status_code == 201
+    _dispatch(client, "merge-destructive-verifier", role="code-vuln-verifier")
+    proof_receipt_id = _verification_receipt(
+        client, "merge-destructive-verifier", "VA-062"
+    )
+    confirmed = _verify(
+        client,
+        "VA-062",
+        {
+            "verification_status": "confirmed",
+            "reason_text": "Independent review confirmed the original claim.",
+            "source_name": "code-vuln-verifier",
+            "provenance": {"code_snapshot": binding},
+            "proof_receipt_ids": [proof_receipt_id],
+        },
+    )
+    assert confirmed.status_code == 200, confirmed.text
+
+    _dispatch(client, "merge-replacement-author")
+    replacement = _finding_payload(
+        "VA-063",
+        None,
+        location="https://example.com/api/parser/62",
+        severity="critical",
+        author_agent_id="merge-replacement-author",
+    )
+    replacement["workflow_status"] = "exploited"
+    replacement["summary"] = "A different stronger runtime claim replaces the reviewed summary."
+    replacement["evidence_ref"] = "evidence/replacement-proof.json"
+    replacement["details"]["cvss_score"] = 9.8
+    replacement["details"]["cvss_vector"] = (
+        "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+    )
+    recorded_replacement = _record(client, replacement)
+    assert recorded_replacement.status_code == 201, recorded_replacement.text
+    merged = client.post(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/merge",
+        json={
+            "source_slug": "VA-063",
+            "target_slug": "VA-062",
+            "reason": "Runtime evidence materially replaced the reviewed claim.",
+        },
+    )
+
+    assert merged.status_code == 200, merged.text
+    assert merged.json()["target"]["verification_status"] == "unreviewed"
+    transitions = client.get(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/VA-062/transitions"
+    ).json()
+    assert transitions[0]["action"] == "verification_invalidated"
+    assert transitions[0]["reason_code"] == "merge_replaced_verification_dependency"
+    metadata = json.loads(transitions[0]["metadata_json"])
+    assert metadata["verification_invalidated"] is True
+    assert set(metadata["replaced_dependencies"]) >= {
+        "severity",
+        "workflow_status",
+        "summary",
+        "evidence_ref",
+        "details",
+    }
+
+
+def test_merge_cross_track_rejects_bare_file_prefix_without_source_identity(
+    client, isolate_settings
+) -> None:
+    _seed_repo(client, isolate_settings)
+    assert _record(
+        client,
+        _finding_payload("VA-026", None, location="https://example.com/legacy"),
+    ).status_code == 201
+    with db_module.get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE assessment_findings
+            SET canonical_location = 'file:src/legacy.c:26', provenance_json = '{}'
+            WHERE engagement_id = (SELECT id FROM engagements WHERE key = ?)
+              AND slug = 'VA-026'
+            """,
+            (_ENGAGEMENT_KEY,),
+        )
+    assert _record(
+        client,
+        _finding_payload(
+            "VA-027", None, location="https://example.com/api/parser/27"
+        ),
+    ).status_code == 201
+
+    merged = client.post(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/merge",
+        json={
+            "source_slug": "VA-026",
+            "target_slug": "VA-027",
+            "reason": "A bare file prefix is not source identity.",
+        },
+    )
+
     assert merged.status_code == 409, merged.text
-    assert "category" in merged.json()["detail"].lower()
+    assert "structured code snapshot" in merged.json()["detail"].lower()
 
 
 def test_report_readiness_blocks_active_stale_and_unbound_file_findings_at_any_severity(
@@ -1162,6 +1475,7 @@ def test_a_binding_copied_verbatim_from_another_finding_is_distinguishable(
 
     laundered = _finding_payload("VA-052", None, location="file:src/other.c:52")
     laundered["provenance"] = {
+        "agent_id": _DEFAULT_AUTHOR_AGENT_ID,
         "agent_name": "code-vuln-hunter",
         "code_snapshot": stolen["code_snapshot"],
         "code_snapshot_attestation": stolen["code_snapshot_attestation"],
@@ -1178,22 +1492,21 @@ def test_a_binding_copied_verbatim_from_another_finding_is_distinguishable(
     assert _attestation_status(client, "VA-051") == "attested"
 
 
-def test_a_binding_asserted_outside_audited_work_reads_as_unattested(
+def test_a_binding_asserted_by_an_unknown_dispatch_is_rejected_at_creation(
     client, isolate_settings
 ) -> None:
-    """A claimed agent_id that names no dispatch resolves to None rather than
-    being believed — a claim with nothing behind it says so."""
+    """A claimed author with no dispatch can no longer create a finding."""
     binding = _seed_repo(client, isolate_settings)
     payload = _finding_payload("VA-053", binding, location="file:src/parser.c:53")
     payload["provenance"] = {**payload["provenance"], "agent_id": "never-dispatched"}
 
-    assert _record(client, payload).status_code == 201
+    refused = _record(client, payload)
 
-    stamped = _attestation(client, "VA-053")
-    assert stamped["agent_id"] == "never-dispatched"
-    assert stamped["dispatch_id"] is None
-    assert stamped["command_run_id"] is None
-    assert _attestation_status(client, "VA-053") == "unattested"
+    assert refused.status_code == 400, refused.text
+    assert "does not resolve to a dispatch" in refused.json()["detail"]
+    assert client.get(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/VA-053"
+    ).status_code == 404
 
 
 def test_an_unattested_reportable_finding_is_an_advisory_never_a_blocker(
@@ -1204,6 +1517,32 @@ def test_an_unattested_reportable_finding_is_an_advisory_never_a_blocker(
         "VA-054", binding, location="file:src/parser.c:54", severity="high"
     )
     assert _record(client, payload).status_code == 201
+    with db_module.get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE assessment_findings
+            SET provenance_json = ?
+            WHERE engagement_id = (SELECT id FROM engagements WHERE key = ?)
+              AND slug = 'VA-054'
+            """,
+            (
+                json.dumps(
+                    {
+                        "agent_id": _DEFAULT_AUTHOR_AGENT_ID,
+                        "agent_name": "code-vuln-hunter",
+                        "code_snapshot": binding,
+                        "code_snapshot_attestation": {
+                            "finding_slug": "VA-054",
+                            "write_mode": "record",
+                            "agent_id": "never-dispatched",
+                            "dispatch_id": None,
+                            "command_run_id": None,
+                        },
+                    }
+                ),
+                _ENGAGEMENT_KEY,
+            ),
+        )
 
     readiness = client.get(
         f"/engagements/{_ENGAGEMENT_KEY}/assessment/report-readiness"

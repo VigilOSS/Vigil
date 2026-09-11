@@ -104,7 +104,7 @@ that did not exist yet, a fixture nobody had built, a role that could not be gra
 product "not provisioned for this user." Premises expire; the record does not.
 Re-derive the premise before accepting the block, and re-read the standing block list
 (`vigil assess list-blocked-techniques`, plus `vigil assess finding list
---verification-disposition blocked`) whenever a new identity, credential, or access
+--verification-status blocked`) whenever a new identity, credential, or access
 grant lands — tie the re-check to that state change, or to phase entry, never to a
 feeling that the block is probably still good. A single stale "not provisioned for this
 user" sentence can hide an entire product's surface for the rest of the engagement once
@@ -335,8 +335,8 @@ produces lower-quality evidence than the equivalent tool run.
 
 **The VDP overrides this.** Bug-bounty programs frequently mark
 brute-force, automated-scanner-only, and excessive-traffic findings as
-out-of-scope. When the VDP forbids brute-force (Acme Bank, many financial
-programs) or rejects scanner-only evidence ("Reports based only on
+out-of-scope. When a VDP forbids brute-force (as many financial programs do)
+or rejects scanner-only evidence ("Reports based only on
 automated tool/scanner results... will not be accepted"), do not run
 `ffuf` / `arjun` / `puredns` / generic-template `nuclei` regardless of
 what's "more efficient" — fall back to surgical `curl` against

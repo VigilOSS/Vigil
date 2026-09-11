@@ -33,14 +33,14 @@ agent must separate the three layers cleanly:
 
 | Layer | Example | Allowed in |
 |---|---|---|
-| **Fact** | `2026-04-22T06:02:22Z delivery from IP 80.94.92.234, subject "Re: Commercial Deposit Rates", destinations payments@bank.example` | Evidence files, timelines, raw citations |
-| **Attribution** | "The attacker sent this email" — supported by: IP matches the persistent attacker node across 15 days, IP is not in the user's baseline, action occurred during an active attacker session window | Evidence files with explicit reasoning |
-| **Interpretation** | "The attacker was attempting bank account manipulation" — supported by: subject is a reply into a financial thread, content unknown without body inspection, classification is SUSPICIOUS until body/recipient confirmation | Report sections, clearly marked as inference |
+| **Fact** | `2030-01-02T03:04:05Z delivery from IP 198.51.100.42, subject "Re: Invoice status", destination payments@example.invalid` | Evidence files, timelines, raw citations |
+| **Attribution** | "The attacker sent this email" — supported by: IP matches the persistent attacker node across the synthetic incident window, IP is not in the user's baseline, action occurred during an active attacker session window | Evidence files with explicit reasoning |
+| **Interpretation** | "The attacker was attempting payment manipulation" — supported by: subject is a reply into a financial thread, content unknown without body inspection, classification is SUSPICIOUS until body/recipient confirmation | Report sections, clearly marked as inference |
 
-Keep these layers separate. "The attacker sent a fraudulent email to CFG Bank" packs
+Keep these layers separate. "The attacker sent a fraudulent payment email" packs
 a fact, an attribution, and an interpretation into one sentence — and the interpretation
-(fraudulent) is unverified. Better: "IP 80.94.92.234 sent a reply on the existing
-'Commercial Deposit Rates' thread to payments@bank.example at 06:02:22Z. Content
+(fraudulent) is unverified. Better: "IP 198.51.100.42 sent a reply on the existing
+'Invoice status' thread to payments@example.invalid at 03:04:05Z. Content
 classification requires body inspection and recipient confirmation."
 
 ## 3. Every claim cites source file, timestamp, IP, actor, and eventName
@@ -66,7 +66,7 @@ strengthens an attribution when combined with other signals (same IP, same sessi
 same actor) but does not establish causation alone.
 
 Use temporal proximity correctly:
-- "The blocked_sender_change at 08:40:10Z from 80.94.92.234 preceded the first Stripe
+- "The blocked_sender_change at 08:40:10Z from 198.51.100.42 preceded the first payment-provider
   outbound by ~22 hours, consistent with notification suppression before fraud" — good,
   states the timing relationship and the hypothesis it supports
 - "The attacker blocked Stripe notifications to prepare for the fraud email" — bad,
@@ -185,13 +185,14 @@ conclusion changed.
 
 The `actor.email` field in an audit event identifies the authenticated session, not the
 person at the keyboard. In a BEC investigation, the attacker operates as the victim's
-authenticated identity. The entire point of the investigation is to separate "financegg@
-performed action X" (system fact) from "the attacker performed action X using
-financegg@'s stolen session" (attributed conclusion).
+authenticated identity. The entire point of the investigation is to separate
+"finance-user@example.invalid performed action X" (system fact) from "the attacker
+performed action X using that user's stolen session" (attributed conclusion).
 
-Attribute to the session, not the mailbox owner: "a delivery event from financegg@'s
-session, IP 80.94.92.234 (attacker node), sent [subject] to [recipients]" — not
-"financegg@ sent the fraud email" (which implies the owner acted).
+Attribute to the session, not the mailbox owner: "a delivery event from
+finance-user@example.invalid's session, IP 198.51.100.42 (attacker node), sent [subject]
+to [recipients]" — not "finance-user@example.invalid sent the fraud email" (which
+implies the owner acted).
 
 ## 13. Evidence files are derived analysis, not raw data
 

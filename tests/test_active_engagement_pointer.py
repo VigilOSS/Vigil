@@ -122,7 +122,7 @@ def test_stale_invalid_pointer_skipped(install, tmp_path, monkeypatch, capsys):
 def test_stale_env_loses_to_cwd_behavioral(install, monkeypatch, capsys):
     root = engagements.engagements_root(install)
     stale = _make_engagement(root, "acme-telco")
-    here = _make_engagement(root, "Acme")
+    here = _make_engagement(root, "acme-planner")
     monkeypatch.setenv("ENGAGEMENT_DIR", str(stale))
     monkeypatch.chdir(here)
     assert engagements.resolve_current_engagement() == (here.resolve(), "cwd")

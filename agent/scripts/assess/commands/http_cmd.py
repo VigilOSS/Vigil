@@ -203,16 +203,6 @@ def register(subparsers) -> None:
         metavar="CTYPE",
         help="Content-type denylist entry (repeatable; comma-separated accepted).",
     )
-    sp_policy_set.add_argument(
-        "--redaction-profile",
-        dest="redaction_profile",
-        choices=("none",),
-        default=None,
-        help=(
-            "Effective redaction profile. Only 'none' is supported while raw evidence "
-            "preservation and Phase 3D redaction design remain authoritative."
-        ),
-    )
     sp_policy_set.set_defaults(func=_run_policy_set)
 
 
@@ -455,7 +445,7 @@ def _flow_text(row: dict) -> str:
         f"auth_context: {row.get('auth_context') or '-'}",
         f"request_content_type: {row.get('request_content_type') or '-'}",
         f"response_content_type: {row.get('response_content_type') or '-'}",
-        f"host_mismatch: {bool(row.get('host_mismatch'))}  redaction_status: {row.get('redaction_status') or '-'}",
+        f"host_mismatch: {bool(row.get('host_mismatch'))}",
         f"timing_ms: {row.get('timing_ms') if row.get('timing_ms') is not None else '-'}  started_at: {row.get('started_at') or '-'}",
     ]
 
@@ -566,7 +556,6 @@ def _render_policy(policy: dict) -> str:
         "max_body_bytes",
         "content_type_allow",
         "content_type_deny",
-        "redaction_profile",
     )
     lines = ["# Capture Policy"]
     for key in keys:
@@ -603,14 +592,11 @@ def _run_policy_set(args) -> None:
         payload["content_type_allow"] = _flatten_ctypes(args.content_type_allow)
     if args.content_type_deny is not None:
         payload["content_type_deny"] = _flatten_ctypes(args.content_type_deny)
-    if args.redaction_profile is not None:
-        payload["redaction_profile"] = args.redaction_profile
-
     if not payload:
         print(
             "http policy set: pass at least one field to update "
             "(--enabled/--no-enabled, --capture-request-bodies, --capture-response-bodies, "
-            "--max-body-bytes, --content-type-allow, --content-type-deny, --redaction-profile)",
+            "--max-body-bytes, --content-type-allow, --content-type-deny)",
             file=sys.stderr,
         )
         sys.exit(1)

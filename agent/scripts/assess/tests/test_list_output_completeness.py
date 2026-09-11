@@ -103,6 +103,23 @@ def test_finding_list_rejects_removed_unbounded_all_flag(
     assert "--limit/--offset" in error
 
 
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [("--severity", "urgent"), ("--workflow-status", "verified")],
+)
+def test_finding_list_rejects_values_outside_backend_vocabularies(
+    flag: str,
+    value: str,
+) -> None:
+    parser = argparse.ArgumentParser()
+    list_findings.register(parser.add_subparsers(dest="action"))
+
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args(["list", flag, value])
+
+    assert exc_info.value.code == 2
+
+
 def test_intel_type_list_is_bounded_at_the_api_and_compacts_json_rows(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

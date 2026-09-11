@@ -2137,6 +2137,7 @@ def coverage_readiness(engagement_id: int) -> dict[str, Any]:
 
     if not surfaces:
         return {
+            "track": "web",
             "ready": True,
             "blocker_count": 0,
             "unresolved_surfaces": [],
@@ -2201,6 +2202,7 @@ def coverage_readiness(engagement_id: int) -> dict[str, Any]:
     )
 
     return {
+        "track": "web",
         "ready": blocker_count == 0,
         "blocker_count": blocker_count,
         "unresolved_surfaces": unresolved_blocking,
@@ -2957,8 +2959,8 @@ def _host_matches_deny_pattern(host: str, pattern: str) -> bool:
     The asymmetry is the point. The denylist WINS, so an over-broad deny
     silently ERASES coverage obligations while an over-broad allow only adds
     them. Apex-expanding a literal carve-out is what dropped 155 of 176
-    deep-required app units on 2026-07-24: the single ``acme-planner.example``
-    carve-out swallowed every explicitly in-scope ``*.acme-planner.example``
+    deep-required app units in a prior run: a single literal apex carve-out
+    swallowed every explicitly in-scope wildcard product host
     product host, leaving only the non-product hosts behind.
     """
     apex = _scope_pattern_apex(pattern)

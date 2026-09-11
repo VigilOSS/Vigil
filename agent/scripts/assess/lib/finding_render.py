@@ -398,8 +398,8 @@ def poc_lines(finding: dict) -> list[str]:
     """Render poc_code / poc_request / poc_response, reusing the shared fencing.
 
     Emits the ``**PoC Code:**`` / ``**PoC Request:**`` / ``**PoC Response:**``
-    blocks a submission or reply surfaces as structured reference proof (never
-    pasted raw — masked + woven into authored Evidence). Fences are chosen with
+    blocks a submission or reply surfaces as exact structured reference proof to
+    weave into authored Evidence. Fences are chosen with
     :func:`_fence_for` so a backtick run inside any part cannot close the block
     early.
     """

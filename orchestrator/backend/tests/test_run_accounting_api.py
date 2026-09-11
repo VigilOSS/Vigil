@@ -29,6 +29,9 @@ def _seed(client, isolate_settings) -> None:
             "requested_model": "gpt-5.6-sol",
             "requested_reasoning": "xhigh",
             "client_name": "codex",
+            "requested_client": "claude",
+            "launcher_effective_client": "codex",
+            "provider_observed_client": "unknown",
             "source_revision": "revision-123",
             "operator_instruction_path": "AGENTS.md",
             "operator_instruction_sha256": "a" * 64,
@@ -39,6 +42,19 @@ def _seed(client, isolate_settings) -> None:
         },
     )
     assert response.status_code == 201, response.text
+
+
+def _observe_provider_client(client, value: str) -> None:
+    engagement_id = client.get(f"/engagements/{ENGAGEMENT_KEY}").json()["id"]
+    with db_module.get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE assessment_dispatches
+            SET provider_observed_client = ?
+            WHERE engagement_id = ? AND agent_id = 'HUNT-RUN-1'
+            """,
+            (value, engagement_id),
+        )
 
 
 def _inventory_commitment(target_key: str, sources: list[dict]) -> dict:
@@ -365,6 +381,7 @@ def test_terminal_seal_freezes_dispatch_and_instruction_provenance(
     client, isolate_settings
 ) -> None:
     _seed(client, isolate_settings)
+    _observe_provider_client(client, "opencode")
     engagement_id = client.get(f"/engagements/{ENGAGEMENT_KEY}").json()["id"]
     state_manager.update_dispatch(
         engagement_id,
@@ -389,6 +406,9 @@ def test_terminal_seal_freezes_dispatch_and_instruction_provenance(
         "requested_reasoning": "xhigh",
         "actual_reasoning": "high",
         "client_name": "codex",
+        "requested_client": "claude",
+        "launcher_effective_client": "codex",
+        "provider_observed_client": "opencode",
         "source_revision": "revision-123",
         "operator_instruction_path": "AGENTS.md",
         "operator_instruction_sha256": "a" * 64,
@@ -407,6 +427,30 @@ def test_terminal_seal_freezes_dispatch_and_instruction_provenance(
     reread = client.get(f"{BASE}/assessment-runs/{run['id']}")
     assert reread.status_code == 200, reread.text
     assert reread.json()["seal"]["dispatch_provenance"] == provenance
+
+
+def test_live_run_projection_preserves_distinct_client_identities(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    _observe_provider_client(client, "opencode")
+
+    run = _create_scan(client, run_uuid="client-identity-projection")
+    expected = {
+        "client_name": "codex",
+        "requested_client": "claude",
+        "launcher_effective_client": "codex",
+        "provider_observed_client": "opencode",
+    }
+    assert {key: run[key] for key in expected} == expected
+
+    fetched = client.get(f"{BASE}/assessment-runs/{run['id']}")
+    listed = client.get(f"{BASE}/assessment-runs")
+    assert fetched.status_code == 200, fetched.text
+    assert listed.status_code == 200, listed.text
+    assert {key: fetched.json()[key] for key in expected} == expected
+    listed_run = next(row for row in listed.json() if row["id"] == run["id"])
+    assert {key: listed_run[key] for key in expected} == expected
 
 
 def test_run_dispatch_listing_includes_producer_and_linked_reader(
@@ -1902,6 +1946,7 @@ def test_finding_record_can_atomically_promote_its_underlying_run_candidate(
             "summary": "This finding belongs to a different file.",
             "source_name": "HUNT-RUN-1",
             "provenance": {
+                "agent_id": "HUNT-RUN-1",
                 "code_snapshot": {
                     "repo_id": repo_id,
                     "repo_generation": 4,
@@ -1929,6 +1974,7 @@ def test_finding_record_can_atomically_promote_its_underlying_run_candidate(
             "summary": "The parser trusts an attacker-controlled length.",
             "source_name": "HUNT-RUN-1",
             "provenance": {
+                "agent_id": "HUNT-RUN-1",
                 "code_snapshot": {
                     "repo_id": repo_id,
                     "repo_generation": 4,
@@ -3017,6 +3063,557 @@ def test_resumed_proof_run_replaces_unhealthy_parent_evidence_without_erasing_it
         parent_receipt.json()["id"],
         child_receipt.json()["id"],
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Resume recovery: a resumed run inherits only proof that is still healthy.
+#
+# Every copy path the resume walks — source reads, obligations, candidates —
+# follows one rule: an unhealthy binding is not inherited, a closed disposition
+# that rested on one reopens, and the child's own event history names what was
+# dropped. Each rule below is pinned from both sides: the unhealthy case proves
+# the child is repairable, the healthy case proves the rule does not fire on
+# evidence that still holds (a predicate that always fired would erase recovery
+# state with a green suite, because unresolvable ids default to stale).
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _recovery_parent_run(client, *, run_uuid: str) -> dict:
+    """Return a proof run to be sealed and then resumed from."""
+
+    parent = client.post(
+        f"{BASE}/assessment-runs",
+        json={
+            "run_uuid": run_uuid,
+            "run_kind": "shared",
+            "producer_dispatch_agent_id": "HUNT-RUN-1",
+        },
+    )
+    assert parent.status_code == 201, parent.text
+    return parent.json()
+
+
+def _recovery_receipt(client, run: dict, *, slug: str, observed: str) -> int:
+    """Return a healthy command-backed proof receipt id owned by ``run``."""
+
+    command = client.post(
+        f"{BASE}/command-runs",
+        json={
+            "run_uuid": f"{slug}-command",
+            "agent_name": "HUNT-RUN-1",
+            "command": f"capture {slug}",
+            "tool_name": "reviewer",
+            "phase": "verify",
+            "status": "completed",
+            "return_code": 0,
+            "started_at": "2026-09-11T12:00:00Z",
+            "completed_at": "2026-09-11T12:00:01Z",
+            "stdout": f"{observed}\n",
+        },
+    )
+    assert command.status_code == 201, command.text
+    receipt = client.post(
+        f"{BASE}/proof-receipts",
+        json={
+            "run_id": run["id"],
+            "evidence_kind": "command",
+            "command_run_id": command.json()["id"],
+            "observed_result": observed,
+        },
+    )
+    assert receipt.status_code == 201, receipt.text
+    return int(receipt.json()["id"])
+
+
+def _recovery_source(client, run: dict) -> dict:
+    recorded = client.post(
+        f"{BASE}/assessment-runs/{run['id']}/sources",
+        json={
+            "sources": [
+                _source(
+                    target_key="service-a", path="src/read.py", content=b"KEPT = True\n"
+                )
+            ]
+        },
+    )
+    assert recorded.status_code == 201, recorded.text
+    return recorded.json()[0]
+
+
+def _decay_receipt(receipt_id: int) -> None:
+    """Age one recorded receipt out of health, as real evidence decay does."""
+
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_proof_receipts SET recorded_health = 'stale' WHERE id = ?",
+            (receipt_id,),
+        )
+
+
+def _seal(client, run: dict, status_value: str = "completed") -> dict:
+    sealed = client.patch(
+        f"{BASE}/assessment-runs/{run['id']}", json={"status": status_value}
+    )
+    assert sealed.status_code == 200, sealed.text
+    return sealed.json()
+
+
+def _resume(client, parent: dict, *, run_uuid: str) -> dict:
+    child = client.post(
+        f"{BASE}/assessment-runs",
+        json={
+            "run_uuid": run_uuid,
+            "run_kind": "shared",
+            "producer_dispatch_agent_id": "HUNT-RUN-1",
+            "resumed_from_run_id": parent["id"],
+        },
+    )
+    assert child.status_code == 201, child.text
+    return child.json()
+
+
+def _close_candidate(
+    client,
+    run: dict,
+    *,
+    identity_key: str,
+    receipt_id: int,
+    state: str = "rejected",
+    finding_slug: str = "",
+) -> dict:
+    candidate = client.post(
+        f"{BASE}/assessment-runs/{run['id']}/candidates",
+        json={
+            "identity_key": identity_key,
+            "target_key": "service-a",
+            "source_id": None,
+            "source_anchor": "/resource/1",
+            "vulnerability_family": "CWE-639",
+            "hypothesis": "cross-tenant access is possible",
+            "originating_result_id": None,
+            "dispatch_agent_id": "HUNT-RUN-1",
+            "proof_receipt_ids": [],
+            "state": "open",
+        },
+    )
+    assert candidate.status_code == 201, candidate.text
+    closed = client.patch(
+        f"{BASE}/assessment-runs/{run['id']}/candidates/{candidate.json()['id']}",
+        json={
+            "state": state,
+            "reason": f"parent proof makes the candidate {state}",
+            "proof_receipt_ids": [receipt_id],
+            "finding_slug": finding_slug,
+        },
+    )
+    assert closed.status_code == 200, closed.text
+    return closed.json()
+
+
+def _resolve_obligation(client, run: dict, *, receipt_id: int) -> dict:
+    obligation = client.post(
+        f"{BASE}/assessment-runs/{run['id']}/obligations",
+        json={
+            "identity_key": "coverage:service-a",
+            "obligation_kind": "coverage",
+            "object_type": "target",
+            "object_key": "service-a",
+            "hard": True,
+            "status": "resolved",
+            "resolution": "parent proved complete coverage",
+            "proof_receipt_ids": [receipt_id],
+        },
+    )
+    assert obligation.status_code == 201, obligation.text
+    return obligation.json()
+
+
+def _read_source(client, run: dict, source: dict, *, attempt: int, receipt_id: int) -> dict:
+    read = client.post(
+        f"{BASE}/assessment-runs/{run['id']}/source-reads",
+        json={
+            "source_id": source["id"],
+            "dispatch_agent_id": "HUNT-RUN-1",
+            "attempt": attempt,
+            "byte_start": 0,
+            "byte_end": source["byte_size"],
+            "line_start": 1,
+            "line_end": source["line_count"],
+            "proof_receipt_id": receipt_id,
+        },
+    )
+    assert read.status_code == 201, read.text
+    return read.json()
+
+
+def _first(client, child: dict, ledger: str) -> dict:
+    page = client.get(
+        f"{BASE}/assessment-runs/{child['id']}/{ledger}",
+        params={"limit": 10, "offset": 0},
+    )
+    assert page.status_code == 200, page.text
+    return page.json()["items"][0]
+
+
+def _blocker_codes(run: dict) -> set[str]:
+    return {blocker["code"] for blocker in run["blockers"]}
+
+
+def test_resumed_run_reopens_terminal_candidate_with_unhealthy_proof(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    parent = _recovery_parent_run(client, run_uuid="candidate-recovery-parent")
+    parent_receipt_id = _recovery_receipt(
+        client, parent, slug="candidate-recovery-parent", observed="candidate rejected"
+    )
+    _close_candidate(
+        client, parent, identity_key="candidate:recovery", receipt_id=parent_receipt_id
+    )
+    assert _seal(client, parent)["status"] == "completed"
+    _decay_receipt(parent_receipt_id)
+
+    child = _resume(client, parent, run_uuid="candidate-recovery-child")
+    child_candidate = _first(client, child, "candidates")
+    assert child_candidate["state"] == "open"
+    assert child_candidate["proof_receipt_ids"] == []
+    assert child_candidate["finding_slug"] == ""
+    assert "proof_stale" not in _blocker_codes(child)
+
+    child_receipt_id = _recovery_receipt(
+        client,
+        child,
+        slug="candidate-recovery-child",
+        observed="candidate independently rejected",
+    )
+    repaired = client.patch(
+        f"{BASE}/assessment-runs/{child['id']}/candidates/{child_candidate['id']}",
+        json={
+            "state": "rejected",
+            "reason": "replacement proof rejects the candidate",
+            "proof_receipt_ids": [child_receipt_id],
+        },
+    )
+    assert repaired.status_code == 200, repaired.text
+    assert _seal(client, child)["status"] == "completed"
+
+    history = client.get(
+        f"{BASE}/assessment-runs/{child['id']}/candidates/{child_candidate['id']}/history"
+    )
+    assert history.status_code == 200, history.text
+    assert [event["to_state"] for event in history.json()] == ["open", "rejected"]
+    assert history.json()[0]["from_state"] == "rejected"
+    assert history.json()[0]["proof_receipt_ids"] == [parent_receipt_id]
+    assert str(parent_receipt_id) in history.json()[0]["reason"]
+
+    preserved = _first(client, parent, "candidates")
+    assert preserved["state"] == "rejected"
+    assert preserved["proof_receipt_ids"] == [parent_receipt_id]
+
+
+def test_resumed_run_keeps_terminal_candidate_whose_proof_is_healthy(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    parent = _recovery_parent_run(client, run_uuid="candidate-healthy-parent")
+    parent_receipt_id = _recovery_receipt(
+        client, parent, slug="candidate-healthy-parent", observed="candidate rejected"
+    )
+    _close_candidate(
+        client, parent, identity_key="candidate:healthy", receipt_id=parent_receipt_id
+    )
+    assert _seal(client, parent)["status"] == "completed"
+
+    child = _resume(client, parent, run_uuid="candidate-healthy-child")
+    child_candidate = _first(client, child, "candidates")
+    assert child_candidate["state"] == "rejected"
+    assert child_candidate["proof_receipt_ids"] == [parent_receipt_id]
+    assert child["blockers"] == []
+    history = client.get(
+        f"{BASE}/assessment-runs/{child['id']}/candidates/{child_candidate['id']}/history"
+    ).json()
+    assert [event["to_state"] for event in history] == ["rejected"]
+    assert history[0]["reason"] == "resumed from terminal run"
+    assert _seal(client, child)["status"] == "completed"
+
+
+def test_reopened_candidate_event_names_the_parent_finding_slug(
+    client, isolate_settings
+) -> None:
+    """Reopening retires the finding pointer; the event has to keep it readable.
+
+    The candidate event table has no slug column, so if the reason did not carry
+    it the child agent would inherit a bare open candidate with no way back to
+    the finding its parent already produced.
+    """
+
+    _seed(client, isolate_settings)
+    parent = _recovery_parent_run(client, run_uuid="candidate-slug-parent")
+    parent_receipt_id = _recovery_receipt(
+        client, parent, slug="candidate-slug-parent", observed="candidate duplicated"
+    )
+    _close_candidate(
+        client,
+        parent,
+        identity_key="candidate:slug",
+        receipt_id=parent_receipt_id,
+        state="duplicate",
+        finding_slug="VA-001",
+    )
+    assert _seal(client, parent)["status"] == "completed"
+    _decay_receipt(parent_receipt_id)
+
+    child = _resume(client, parent, run_uuid="candidate-slug-child")
+    child_candidate = _first(client, child, "candidates")
+    assert child_candidate["state"] == "open"
+    assert child_candidate["finding_slug"] == ""
+    history = client.get(
+        f"{BASE}/assessment-runs/{child['id']}/candidates/{child_candidate['id']}/history"
+    ).json()
+    assert history[0]["reason"] == (
+        f"resumed from terminal run with proof requiring replacement; dropped "
+        f"unhealthy proof receipts [{parent_receipt_id}] from parent "
+        f"state='duplicate' finding_slug='VA-001'"
+    )
+
+
+def test_resumed_run_reopens_closed_obligation_with_unhealthy_proof(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    parent = _recovery_parent_run(client, run_uuid="obligation-recovery-parent")
+    parent_receipt_id = _recovery_receipt(
+        client, parent, slug="obligation-recovery-parent", observed="coverage proven"
+    )
+    _resolve_obligation(client, parent, receipt_id=parent_receipt_id)
+    assert _seal(client, parent)["status"] == "completed"
+    _decay_receipt(parent_receipt_id)
+
+    child = _resume(client, parent, run_uuid="obligation-recovery-child")
+    child_obligation = _first(client, child, "obligations")
+    assert child_obligation["status"] == "open"
+    assert child_obligation["proof_receipt_ids"] == []
+    assert child_obligation["resolution"] == ""
+    assert "proof_stale" not in _blocker_codes(child)
+
+    child_receipt_id = _recovery_receipt(
+        client, child, slug="obligation-recovery-child", observed="coverage reproven"
+    )
+    repaired = client.patch(
+        f"{BASE}/assessment-runs/{child['id']}/obligations/{child_obligation['id']}",
+        json={
+            "status": "resolved",
+            "resolution": "replacement proof shows complete coverage",
+            "proof_receipt_ids": [child_receipt_id],
+        },
+    )
+    assert repaired.status_code == 200, repaired.text
+    assert _seal(client, child)["status"] == "completed"
+
+    history = client.get(
+        f"{BASE}/assessment-runs/{child['id']}/obligations/{child_obligation['id']}/history"
+    )
+    assert history.status_code == 200, history.text
+    assert [event["to_status"] for event in history.json()] == ["open", "resolved"]
+    assert history.json()[0]["from_status"] == "resolved"
+    assert history.json()[0]["proof_receipt_ids"] == [parent_receipt_id]
+    assert "parent proved complete coverage" in history.json()[0]["resolution"]
+
+    preserved = _first(client, parent, "obligations")
+    assert preserved["status"] == "resolved"
+    assert preserved["proof_receipt_ids"] == [parent_receipt_id]
+
+
+def test_resumed_run_keeps_closed_obligation_whose_proof_is_healthy(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    parent = _recovery_parent_run(client, run_uuid="obligation-healthy-parent")
+    parent_receipt_id = _recovery_receipt(
+        client, parent, slug="obligation-healthy-parent", observed="coverage proven"
+    )
+    _resolve_obligation(client, parent, receipt_id=parent_receipt_id)
+    assert _seal(client, parent)["status"] == "completed"
+
+    child = _resume(client, parent, run_uuid="obligation-healthy-child")
+    child_obligation = _first(client, child, "obligations")
+    assert child_obligation["status"] == "resolved"
+    assert child_obligation["resolution"] == "parent proved complete coverage"
+    assert child_obligation["proof_receipt_ids"] == [parent_receipt_id]
+    assert child["blockers"] == []
+    history = client.get(
+        f"{BASE}/assessment-runs/{child['id']}/obligations/{child_obligation['id']}/history"
+    ).json()
+    assert [event["to_status"] for event in history] == ["resolved"]
+    assert history[0]["resolution"] == "resumed from terminal run"
+    assert _seal(client, child)["status"] == "completed"
+
+
+def test_resumed_run_drops_unhealthy_source_read_proof_binding(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    parent = _recovery_parent_run(client, run_uuid="source-read-recovery-parent")
+    source = _recovery_source(client, parent)
+    parent_receipt_id = _recovery_receipt(
+        client, parent, slug="source-read-recovery-parent", observed="source observed"
+    )
+    _read_source(client, parent, source, attempt=1, receipt_id=parent_receipt_id)
+    assert _seal(client, parent)["status"] == "completed"
+    _decay_receipt(parent_receipt_id)
+
+    child = _resume(client, parent, run_uuid="source-read-recovery-child")
+    # The read itself survives: its observed byte coverage is still true, and
+    # only the proof it was bound to has decayed.
+    assert _first(client, child, "source-reads")["proof_receipt_id"] is None
+    assert "proof_stale" not in _blocker_codes(child)
+    assert [event["reason"] for event in child["lifecycle_history"]] == [
+        "resumed from terminal run",
+        f"resumed from terminal run with proof requiring replacement; dropped "
+        f"unhealthy proof receipts [{parent_receipt_id}] from parent source-read "
+        f"proof bindings",
+    ]
+
+    child_receipt_id = _recovery_receipt(
+        client, child, slug="source-read-recovery-child", observed="source re-observed"
+    )
+    _read_source(
+        client,
+        child,
+        _first(client, child, "sources"),
+        attempt=2,
+        receipt_id=child_receipt_id,
+    )
+    assert _seal(client, child)["status"] == "completed"
+
+    preserved = _first(client, parent, "source-reads")
+    assert preserved["proof_receipt_id"] == parent_receipt_id
+
+
+def test_resumed_run_keeps_source_read_proof_binding_that_is_healthy(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    parent = _recovery_parent_run(client, run_uuid="source-read-healthy-parent")
+    source = _recovery_source(client, parent)
+    parent_receipt_id = _recovery_receipt(
+        client, parent, slug="source-read-healthy-parent", observed="source observed"
+    )
+    _read_source(client, parent, source, attempt=1, receipt_id=parent_receipt_id)
+    assert _seal(client, parent)["status"] == "completed"
+
+    child = _resume(client, parent, run_uuid="source-read-healthy-child")
+    assert _first(client, child, "source-reads")["proof_receipt_id"] == parent_receipt_id
+    assert child["blockers"] == []
+    assert [event["reason"] for event in child["lifecycle_history"]] == [
+        "resumed from terminal run"
+    ]
+    assert _seal(client, child)["status"] == "completed"
+
+
+def test_resumed_run_collapses_source_reads_that_differ_only_by_dropped_proof(
+    client, isolate_settings
+) -> None:
+    """Dropping a binding must not make two parent reads collide in the child.
+
+    A read recorded before its proof exists and re-recorded once the receipt is
+    minted is two parent rows over the same bytes, distinguished only by
+    ``proof_receipt_id`` — which is exactly what the read fingerprint keys on.
+    When that receipt decays both rows copy down to the same fingerprint, and
+    ``UNIQUE(run_id, read_fingerprint)`` would abort the entire resume with a
+    500, leaving the run unresumable at the one moment recovery is needed.
+    """
+
+    _seed(client, isolate_settings)
+    parent = _recovery_parent_run(client, run_uuid="source-read-collapse-parent")
+    source = _recovery_source(client, parent)
+    parent_receipt_id = _recovery_receipt(
+        client, parent, slug="source-read-collapse-parent", observed="source observed"
+    )
+    read_body = {
+        "source_id": source["id"],
+        "dispatch_agent_id": "HUNT-RUN-1",
+        "attempt": 1,
+        "byte_start": 0,
+        "byte_end": source["byte_size"],
+        "line_start": 1,
+        "line_end": source["line_count"],
+    }
+    unproven = client.post(
+        f"{BASE}/assessment-runs/{parent['id']}/source-reads", json=read_body
+    )
+    assert unproven.status_code == 201, unproven.text
+    proven = client.post(
+        f"{BASE}/assessment-runs/{parent['id']}/source-reads",
+        json={**read_body, "proof_receipt_id": parent_receipt_id},
+    )
+    assert proven.status_code == 201, proven.text
+    assert unproven.json()["id"] != proven.json()["id"]
+
+    assert _seal(client, parent)["status"] == "completed"
+    _decay_receipt(parent_receipt_id)
+
+    child = _resume(client, parent, run_uuid="source-read-collapse-child")
+    reads = client.get(
+        f"{BASE}/assessment-runs/{child['id']}/source-reads",
+        params={"limit": 10, "offset": 0},
+    )
+    assert reads.status_code == 200, reads.text
+    assert [row["proof_receipt_id"] for row in reads.json()["items"]] == [None]
+    assert "proof_stale" not in _blocker_codes(child)
+    # The collapse is not silent: the dropped receipt is named in the child's own
+    # lifecycle history, which is the only place a resume records lost bindings.
+    assert any(
+        str(parent_receipt_id) in event["reason"]
+        for event in child["lifecycle_history"]
+    )
+
+    # Both parent rows survive untouched — a resume never edits its parent.
+    parent_reads = client.get(
+        f"{BASE}/assessment-runs/{parent['id']}/source-reads",
+        params={"limit": 10, "offset": 0},
+    )
+    assert sorted(
+        (row["proof_receipt_id"] or 0) for row in parent_reads.json()["items"]
+    ) == [0, parent_receipt_id]
+
+
+def test_resumed_run_tolerates_a_malformed_stored_proof_binding(
+    client, isolate_settings
+) -> None:
+    """A row that predates the write-time receipt gate must not break recovery.
+
+    The health lookup and the consumers that dereference it read the stored JSON
+    through one filter, so a malformed entry is dropped by both rather than
+    counted by one and cast by the other.
+    """
+
+    _seed(client, isolate_settings)
+    parent = _recovery_parent_run(client, run_uuid="malformed-binding-parent")
+    parent_receipt_id = _recovery_receipt(
+        client, parent, slug="malformed-binding-parent", observed="candidate rejected"
+    )
+    candidate = _close_candidate(
+        client, parent, identity_key="candidate:malformed", receipt_id=parent_receipt_id
+    )
+    obligation = _resolve_obligation(client, parent, receipt_id=parent_receipt_id)
+    assert _seal(client, parent)["status"] == "completed"
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_run_candidates SET proof_receipt_ids_json = ? WHERE id = ?",
+            (json.dumps(["not-an-id"]), candidate["id"]),
+        )
+        connection.execute(
+            "UPDATE assessment_run_obligations SET proof_receipt_ids_json = ? WHERE id = ?",
+            (json.dumps([0, None]), obligation["id"]),
+        )
+
+    child = _resume(client, parent, run_uuid="malformed-binding-child")
+    # The malformed entries are dropped, not dereferenced: the child simply has
+    # no inherited evidence left, which is the ordinary empty-proof blocker.
+    assert _blocker_codes(child) == {"proof_missing"}
+    assert _first(client, child, "candidates")["proof_receipt_ids"] == []
+    assert _first(client, child, "obligations")["proof_receipt_ids"] == []
 
 
 def test_phase2_run_schema_migrates_on_a_disposable_database_without_inventing_audit(

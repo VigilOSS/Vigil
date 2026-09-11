@@ -1,7 +1,7 @@
 ---
 name: gf-patterns:trust_surface
 description: Sensitive lifecycle paths (`/upload`, `/webhook`, `/oauth`, `/reset`)
-origin: 1ndianl33t/Gf-Patterns (+ local overlay)
+origin: local overlay (no upstream 1ndianl33t/Gf-Patterns pattern at the audited revision)
 bucket: trust_surface
 weight: 35
 ---

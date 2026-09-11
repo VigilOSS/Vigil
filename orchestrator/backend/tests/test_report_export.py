@@ -1,4 +1,5 @@
 import json
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,19 @@ _FAKE_TEMPLATE = (
     '<script type="module">const SENTINEL="__VIGIL_REPORT_DATA__";</script>'
     "</body></html>"
 )
+
+
+def test_report_export_distribution_version_matches_vigil_release_version():
+    backend_root = Path(__file__).resolve().parents[1]
+    repository_root = Path(__file__).resolve().parents[3]
+    backend_version = tomllib.loads(
+        (backend_root / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]["version"]
+    release_version = tomllib.loads(
+        (repository_root / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]["version"]
+
+    assert backend_version == release_version
 
 
 @pytest.fixture

@@ -1,5 +1,5 @@
 ---
-description: "Submission format selector + shared authoring rules (voice, PII redaction, PoC authoring) and ONE consolidated pre-submission / report QA checklist; platform-neutral across Bugcrowd, HackerOne, and direct-to-company. Per-platform scaffolds live in templates/{bugcrowd,hackerone,direct}.md"
+description: "Submission format selector + shared authoring rules (voice, verbatim evidence, PoC authoring) and ONE consolidated pre-submission / report QA checklist; platform-neutral across Bugcrowd, HackerOne, and direct-to-company. Per-platform scaffolds live in templates/{bugcrowd,hackerone,direct}.md"
 skill: report-generation
 category: Disclosure & Reporting Formats
 ---
@@ -12,7 +12,7 @@ three targets; each finding is a standalone submission.
 
 ## Platform selector
 
-`vigil assess export submission <slug> --platform <p> --draft` generates the per-finding draft; once it is authored, QA'd, and blind-triaged, `vigil assess export submission <slug> --platform <p> --overwrite` (no `--draft`) publishes it — see "Finding is the source of truth" below for the `--overwrite` rule. Pick the platform below and use its scaffold for the platform-specific fields. This doc holds the cross-platform authoring rules all three share (voice, section budgets, PII redaction, PoC authoring, de-harnessing, and one consolidated pre-submission / report QA checklist) — the templates link back here rather than repeating them.
+`vigil assess export submission <slug> --platform <p> --draft` generates the per-finding draft; once it is authored, QA'd, and blind-triaged, `vigil assess export submission <slug> --platform <p> --overwrite` (no `--draft`) publishes it — see "Finding is the source of truth" below for the `--overwrite` rule. Pick the platform below and use its scaffold for the platform-specific fields. This doc holds the cross-platform authoring rules all three share (voice, section budgets, verbatim evidence, PoC authoring, de-harnessing, and one consolidated pre-submission / report QA checklist) — the templates link back here rather than repeating them.
 
 | Target | Scaffold | Platform-specific field | Taxonomy lookup |
 |---|---|---|---|
@@ -52,8 +52,8 @@ re-render, repeatedly. `--overwrite` is what makes that loop work, not a hazard 
   content exactly. A hand edit made only in `submission.md` does not survive it; a write to the
   finding does.
 
-Because the MASKED evidence lives in the finding (raw tool output stays in `scans/` and is only
-referenced), a re-render never re-leaks PII. Publish once QA and blind triage clear the finding:
+Because the exact authored evidence lives in the finding (raw tool output stays in `scans/` and is
+referenced), a re-render preserves the operator-visible proof. Publish once QA and blind triage clear the finding:
 `vigil assess export submission <slug> --platform <same platform> --overwrite` (no `--draft`)
 re-renders the same authored content through the final gate — it exits non-zero before writing if a
 required field or hygiene check fails — and registers `submission.md` as a finding-linked artifact.
@@ -73,13 +73,13 @@ The directory name is the finding's backend slug (e.g., `submissions/VA-003/`). 
 
 PoC artifacts live here alongside `submission.md`. Do NOT place them under `tools/exploit-state/pocs/` — that is the exploitation artifact store, not the submission staging area.
 
-After staging `submission.md` and submitting to the platform, set the finding's submission status:
+After staging `submission.md` and submitting to the platform, set the finding's submission status. The first move off `none` must name the report it refers to — a submission transition with no `--submission-ref` is rejected:
 
 ```bash
-vigil assess finding update <slug> --submission-status submitted --reason "Submitted to <program>"
+vigil assess finding update <slug> --submission-status submitted --submission-platform <bugcrowd|hackerone|direct> --submission-ref <program report id> --reason "Submitted to <program>"
 ```
 
-Update `submission_status` as the program responds (`accepted` / `needs_info` / `rejected` / `duplicate`). This field is orthogonal to `workflow_status` — it tracks program-facing state only and never changes whether the finding is included in the internal report. See "Submission Status Lifecycle" in `agent/skills/report-generation/SKILL.md` for the full sequence.
+Update `submission_status` as the program responds (`accepted` / `needs_info` / `rejected` / `duplicate`), or `withdrawn` when YOU retract the report (that one also requires `--details-inline '{"withdrawal_reason":"..."}'`). Later transitions inherit the stored ref. This field is orthogonal to `workflow_status` — it tracks program-facing state only and never changes whether the finding is included in the internal report. See "Submission Status Lifecycle" in `agent/skills/report-generation/SKILL.md` for the full sequence.
 
 ## Copy-paste workflow
 
@@ -92,7 +92,7 @@ The output is designed to map cleanly onto the platform's submission form. The o
 
 The first `---` separator exists so the operator can select the entire body block in one contiguous paste without stripping the `Title:`/`VRT:`/`Severity:`/`CVSS` metadata lines. Do not put anything between that separator and `### Summary` that the operator should not paste into the platform. The second `---` closes the pasteable body — everything below it is the OPERATOR DETAILS reference section, never pasted.
 
-**The "OPERATOR DETAILS — NOT FOR SUBMISSION" section is never pasted.** It sits below the second `---` (the never-paste line) in both the draft and the final render, and consolidates everything you author the body FROM: the finding metadata to weave in, any internal-identifier hygiene warnings to strip, any advisories to weigh, the structured proof (poc_* / evidence_ref) to mask and weave into Evidence, and the explicitly linked command runs. The pasteable body always ends at that second `---` — select from `### Summary` down to it.
+**The "OPERATOR DETAILS — NOT FOR SUBMISSION" section is never pasted.** It sits below the second `---` (the never-paste line) in both the draft and the final render, and consolidates everything you author the body FROM: the finding metadata to weave in, any internal-identifier hygiene warnings to strip, any advisories to weigh, the structured proof (poc_* / evidence_ref) to preserve and weave into Evidence, and the explicitly linked command runs. The pasteable body always ends at that second `---` — select from `### Summary` down to it.
 
 **Hygiene warnings block; advisories do not.** A `hygiene_warnings` entry is a fact about the document — a leaked internal UUID, an absolute engagement path, a `cases.db` reference — so an unresolved one fails the publish render closed; fix it at the finding. An `advisories` entry (title length, for example) is an editorial opinion the command surfaces without gating on: weigh it against the checklist row it names below and fix it at the finding when you agree. Both appear in `submission-context.json`, in the `--json` summary, and as their own OPERATOR DETAILS sub-block; only the first one can stop a publish.
 
@@ -174,7 +174,7 @@ section's structured proof and linked command runs plus a targeted `vigil assess
 --q <finding's url/param/header/uri>` for reproducing runs the linked set missed. Annotate the
 critical lines with <-- proof markers.
 Truncated to only the lines that matter. No full tool dumps.
-Genuine third-party PII must be partial-masked; self-owned/synthetic data is shown in full — see "PII redaction" below.
+All captured values are shown verbatim; do not mask or substitute evidence.
 This is stored back on the finding as `details.evidence`; the raw output stays in `scans/`.]
 
 (### Attack Scenario)
@@ -184,7 +184,7 @@ No theory.]
 
 ### Impact
 [1-2 sentences. The consequence + how far it reaches (blast radius), quantified by shape/count without
-exposing raw PII. Never re-describes the actor or the reproduction steps — this is the severity/CVSS
+using the exact evidence. Never re-describes the actor or the reproduction steps — this is the severity/CVSS
 justification, not a retelling of the scenario.]
 
 ### Remediation
@@ -196,7 +196,7 @@ justification, not a retelling of the scenario.]
 [Reference section — present in both draft and final, ALWAYS below this second `---`, NEVER pasted.
 Consolidates everything you author the body FROM: the finding metadata to weave in, any
 internal-identifier hygiene warnings to strip, the structured proof (`poc_*` / `evidence_ref`) to
-mask and author Evidence from, and every linked command run. The pasteable body is everything from
+author Evidence from verbatim, and every linked command run. The pasteable body is everything from
 `### Summary` down to this second `---`.]
 ```
 
@@ -366,18 +366,13 @@ All writing rules from `agent/rules/reporting.md` apply (banned language, active
 - **VRT is mandatory.** Every submission must carry a VRT category path from the platform's taxonomy. An unknown VRT is not an excuse — look it up before submitting. Never leave it blank, "TBD", or "N/A". Bugcrowd uses the VRT at https://bugcrowd.com/vulnerability-rating-taxonomy; HackerOne uses CWE. Pick the most specific category that matches the proved attack.
 - **Title must be a single line.** No markdown, no backticks, no internal finding IDs. Use the pattern: `[Bug Class] in [exact component] allows [attacker role] to [impact]`. The title is pasted directly into the platform's title field — anything that looks wrong there is wrong here too.
 
-### PII redaction
+### Evidence fidelity
 
-**Precedence gate — decide this before masking anything:**
-- Self-owned or synthetic — your own test tenant/account, a seeded demo, data in an org you control? **Show it in full.** Do not mask self-owned or synthetic test data; masking it buys zero privacy and destroys the proof.
-- Genuine third-party customer PII? **Partial-mask only**, at the character level (`v****@real-domain.com`) — never substitute a generic placeholder (`example.org`, `respondent@example.org`); a placeholder proves nothing and fails blind triage. The identifying structure must survive: distinct IDs, timestamps, real domains, the actual output line.
-
-A bug bounty submission creates a second copy of the evidence on the platform's infrastructure. Pasting genuine third-party customer PII exposes those customers a second time without their consent. GDPR/CCPA exposure is non-trivial for the target organization even if the platform is "trusted". Partial-mask third-party PII before submitting; self-owned and synthetic data needs no redaction.
-
-- **Never paste unmasked genuine third-party PII** into the submission body, evidence blocks, or screenshots. This covers: full email addresses, phone numbers, case/account/order numbers tied to real (non-test) users, full names, government IDs, SSNs, addresses, DOBs, payment details, session tokens belonging to real users.
-- **Partial masking**, character-level, is the only acceptable treatment for third-party PII: `j***@example.com`, `+1-555-***-4421`, `CASE-12******`. Show enough structure to prove the data is real, not enough to re-identify the customer.
-- **Prefer synthetic data.** If the target has a staging tenant, test accounts, or a seed/demo dataset, reproduce the finding against those and show the synthetic PII in full — a clean PoC against a test account beats a masked PoC against a real one.
-- **Internal report vs external submission.** The internal `report.md` may include unredacted evidence under the engagement's authorized scope. External bug bounty submissions must partial-mask genuine third-party PII only — self-owned and synthetic data is shown in full in both.
+Vigil runs on the authorized operator's machine and does not withhold that operator's evidence.
+Credentials, cookies, tokens, identifiers, headers, raw argv, target-derived proof, and PII render
+verbatim in internal reports and external submissions. Do not add masking, placeholders, shortened
+projections, or reveal toggles. Keep the ROE's collection-volume and stop conditions: capture the
+minimum authorized sample that proves the defect, then preserve that sample exactly.
 
 ### No internal identifiers
 
@@ -447,9 +442,9 @@ Where a row's rationale is a reporting rule it cites the rule (`agent/rules/repo
 - [ ] **[submission]** Safety framing ("offline", "FAKE token", "localhost-only") appears once, in the setup, kept separate from any sentence explaining the vulnerability's mechanism (reporting.md Rule 20)
 - [ ] **[submission]** If evidence, PoC, or claimed severity changed after the finding's last recorded blind-triage verdict, that verdict is STALE — re-run blind triage (`agent/skills/blind-triage/SKILL.md` Pass 2) before publish; do not ship on an outdated `Accept`
 
-### PII & internal identifiers
+### Evidence & internal identifiers
 
-- [ ] **[submission]** Self-owned/synthetic data (own test tenant/account, seeded demo, data in an org you control) is shown in full, unmasked; genuine third-party PII (emails, phone numbers, case/account/SSN values, real names, real session tokens) is partial-masked at the character level with structure intact (distinct IDs, timestamps, real domains) — never a generic placeholder. (The internal `report.md` may keep unredacted evidence under the engagement's authorized scope — this row is submission-only)
+- [ ] **[submission]** Evidence values are shown verbatim: no masking, shortened projections, generic placeholders, or reveal controls. Collection remains bounded by the engagement's ROE.
 - [ ] **[both]** No internal identifiers anywhere in the body — finding slugs (`VA-003`), engagement keys/paths (`$ENGAGEMENT_DIR`, `$DIR/`), backend URLs, tool/command run IDs, `vigil assess` breadcrumbs, `cases.db` references, or "also available at…" alternate-reproducer pointers (reporting.md Rule 17)
 
 ### Human voice / AI-tell elimination

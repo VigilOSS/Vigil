@@ -31,6 +31,7 @@ from tests.test_engagements_api import write_engagement
 
 ENGAGEMENT_KEY = "2026-04-17-120000-example"
 INTEL_BASE = f"/engagements/{ENGAGEMENT_KEY}/intel"
+AUTHOR_AGENT_ID = "INTEL-CREDENTIAL-AUTHOR"
 
 
 def _seed_engagement(client, isolate_settings) -> None:
@@ -38,6 +39,15 @@ def _seed_engagement(client, isolate_settings) -> None:
     # Trigger filesystem discovery + engagement row creation.
     response = client.get(f"/engagements/{ENGAGEMENT_KEY}")
     assert response.status_code == 200, response.text
+    dispatch = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/dispatches",
+        json={
+            "agent_id": AUTHOR_AGENT_ID,
+            "agent_role": "vulnerability-analyst",
+            "task": "Record intel credential fixture findings",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
 
 
 def _summary(client) -> dict[str, int]:
@@ -132,7 +142,7 @@ def test_person_post_get_upsert_and_extra_forbid(client, isolate_settings):
     payload = {
         "name": "Jane Doe",
         "role": "Security Lead",
-        "organization": "AcmeCorp Inc.",
+        "organization": "Acme Corp.",
         "email": "jane@acme-corp.example",
         "source_name": "linkedin",
         "notes": "Public profile.",
@@ -836,6 +846,7 @@ def test_intel_credentials_alias_applies_limit_and_offset(client, isolate_settin
                 "credential_key": f"opaque-{index}",
                 "kind": "token",
                 "principal": f"principal-{index}",
+                "provenance": {"agent_id": AUTHOR_AGENT_ID},
             },
         )
         assert created.status_code == 201, created.text
@@ -925,6 +936,33 @@ def test_intel_search_entity_type_filter(client, isolate_settings):
 
     person_hits = _assert_present_in_search(client, "Apache", entity_type="person")
     assert all(hit.get("entity_type") == "person" for hit in person_hits), person_hits
+
+
+def test_intel_search_filters_by_lead_status_and_provenance(client, isolate_settings):
+    _seed_engagement(client, isolate_settings)
+    for title, lead_status, run_id in (
+        ("Open lead", "open", "run-alpha"),
+        ("Closed lead", "resolved", "run-beta"),
+    ):
+        response = client.post(
+            f"{INTEL_BASE}/notes",
+            json={
+                "title": title,
+                "lead_status": lead_status,
+                "provenance": {"run_id": run_id},
+            },
+        )
+        assert response.status_code == 201, response.text
+
+    response = client.get(
+        f"{INTEL_BASE}/search",
+        params={"lead_status": "open", "provenance": "run-alpha"},
+    )
+    assert response.status_code == 200, response.text
+    assert [hit["record"]["title"] for hit in response.json()] == ["Open lead"]
+
+    invalid = client.get(f"{INTEL_BASE}/search", params={"lead_status": "typo"})
+    assert invalid.status_code == 422, invalid.text
 
 
 # ──────────────────────────────────────────────────────────────

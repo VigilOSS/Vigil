@@ -139,7 +139,7 @@ def test_match_routes_to_disjoint_engagement_scopes(tmp_path: Path) -> None:
 def test_match_drops_out_of_scope_carve_out_under_wildcard(tmp_path: Path) -> None:
     """An OOS host under an in-scope wildcard must not be captured/routed.
 
-    ``*.acme-regional.example`` is in scope but ``appointments.acme-regional.example`` is an
+    ``*.target.example`` is in scope but ``appointments.example.com`` is an
     explicit out_of_scope carve-out — the denylist wins and the flow is dropped.
     """
     module = _load_proxy_addon_module()
@@ -147,23 +147,23 @@ def test_match_drops_out_of_scope_carve_out_under_wildcard(tmp_path: Path) -> No
     root.mkdir()
     _seed_engagement(
         root,
-        "eng-acme-regional",
-        hosts=["*.acme-regional.example"],
-        out_of_scope=["appointments.acme-regional.example"],
+        "eng-example",
+        hosts=["*.target.example"],
+        out_of_scope=["appointments.example.com"],
     )
 
     collector = module.CaseCollector()
     collector.engagements_root = root
     collector._reload_registry(force=True)
 
-    assert collector.registry["eng-acme-regional"].out_of_scope_patterns == [
-        "appointments.acme-regional.example"
+    assert collector.registry["eng-example"].out_of_scope_patterns == [
+        "appointments.example.com"
     ]
 
-    chosen = collector._match_engagement("app.acme-regional.example")
-    assert chosen is not None and chosen.key == "eng-acme-regional"
+    chosen = collector._match_engagement("app.target.example")
+    assert chosen is not None and chosen.key == "eng-example"
     # The carve-out is dropped even though the in-scope wildcard would match it.
-    assert collector._match_engagement("appointments.acme-regional.example") is None
+    assert collector._match_engagement("appointments.example.com") is None
 
 
 def test_out_of_scope_covers_defers_unresolved_cidr() -> None:
@@ -266,6 +266,40 @@ def test_match_uses_scope_priority_for_ties(tmp_path: Path) -> None:
 
     chosen = collector._match_engagement("host.example.com")
     assert chosen is not None and chosen.key == "eng-high"
+
+
+def test_match_leaves_equal_specificity_and_priority_visibly_unattributed(
+    tmp_path: Path,
+) -> None:
+    module = _load_proxy_addon_module()
+    root = tmp_path / "engagements"
+    root.mkdir()
+    older = _seed_engagement(
+        root, "eng-older", hosts=["host.example.com"], scope_priority=7
+    )
+    newer = _seed_engagement(
+        root, "eng-newer", hosts=["host.example.com"], scope_priority=7
+    )
+    # Recency used to silently decide ownership. Make it observably different
+    # so this regression cannot pass because filesystem timestamps tie.
+    older_scope = older / "scope.json"
+    newer_scope = newer / "scope.json"
+    older_scope.touch()
+    newer_scope.touch()
+
+    warnings: list[str] = []
+    module.ctx.log.warn = warnings.append
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+
+    assert collector._match_engagement("host.example.com") is None
+    assert any(
+        "ambiguous" in warning
+        and "eng-newer" in warning
+        and "eng-older" in warning
+        for warning in warnings
+    )
 
 
 def test_no_match_returns_none(tmp_path: Path) -> None:
@@ -539,14 +573,14 @@ def test_request_hook_injects_required_header_on_in_scope_request(tmp_path: Path
     root.mkdir()
     _seed_engagement(
         root, "eng-a", hosts=["app.example.com"],
-        required_headers={"X-Bug-Bounty": "vigiloss"},
+        required_headers={"X-Bug-Bounty": "acme-researcher"},
     )
     collector = module.CaseCollector()
     collector.engagements_root = root
     collector._reload_registry(force=True)
 
     req = _run_request_hook(collector, "https://app.example.com/dashboard")
-    assert req.headers.get("X-Bug-Bounty") == "vigiloss"
+    assert req.headers.get("X-Bug-Bounty") == "acme-researcher"
 
 
 def test_request_hook_does_not_overwrite_client_supplied_header(tmp_path: Path) -> None:
@@ -555,7 +589,7 @@ def test_request_hook_does_not_overwrite_client_supplied_header(tmp_path: Path) 
     root.mkdir()
     _seed_engagement(
         root, "eng-a", hosts=["app.example.com"],
-        required_headers={"X-Bug-Bounty": "vigiloss"},
+        required_headers={"X-Bug-Bounty": "acme-researcher"},
     )
     collector = module.CaseCollector()
     collector.engagements_root = root
@@ -577,7 +611,7 @@ def test_request_hook_leaves_out_of_scope_host_untouched(tmp_path: Path) -> None
     root.mkdir()
     _seed_engagement(
         root, "eng-a", hosts=["app.example.com"],
-        required_headers={"X-Bug-Bounty": "vigiloss"},
+        required_headers={"X-Bug-Bounty": "acme-researcher"},
     )
     collector = module.CaseCollector()
     collector.engagements_root = root
@@ -595,7 +629,7 @@ def test_request_hook_respects_out_of_scope_carve_out(tmp_path: Path) -> None:
     _seed_engagement(
         root, "eng-a", hosts=["*.example.com"],
         out_of_scope=["blocked.example.com"],
-        required_headers={"X-Bug-Bounty": "vigiloss"},
+        required_headers={"X-Bug-Bounty": "acme-researcher"},
     )
     collector = module.CaseCollector()
     collector.engagements_root = root
@@ -603,7 +637,7 @@ def test_request_hook_respects_out_of_scope_carve_out(tmp_path: Path) -> None:
 
     # In-scope under the wildcard → injected.
     ok = _run_request_hook(collector, "https://ok.example.com/x")
-    assert ok.headers.get("X-Bug-Bounty") == "vigiloss"
+    assert ok.headers.get("X-Bug-Bounty") == "acme-researcher"
 
     # Covered by the out_of_scope carve-out → NOT injected (same gating as capture).
     blocked = _run_request_hook(collector, "https://blocked.example.com/x")
@@ -621,7 +655,7 @@ def test_request_hook_global_bypass_attributes_unmatched_and_denied_hosts(
         "eng-bypass",
         hosts=["target.example"],
         out_of_scope=["blocked.example"],
-        required_headers={"X-Bug-Bounty": "vigiloss"},
+        required_headers={"X-Bug-Bounty": "acme-researcher"},
         scope_enforcement="bypass",
     )
     (root / ".active").write_text("eng-bypass\n", encoding="utf-8")
@@ -631,7 +665,7 @@ def test_request_hook_global_bypass_attributes_unmatched_and_denied_hosts(
 
     for url in ("https://outside.example/x", "https://blocked.example/x"):
         req = _run_request_hook(collector, url)
-        assert req.headers.get("X-Bug-Bounty") == "vigiloss"
+        assert req.headers.get("X-Bug-Bounty") == "acme-researcher"
 
 
 def test_request_hook_noop_when_engagement_has_no_required_headers(tmp_path: Path) -> None:
@@ -751,14 +785,14 @@ def test_filesystem_registry_parses_required_headers(tmp_path: Path) -> None:
     root.mkdir()
     _seed_engagement(
         root, "eng-a", hosts=["app.example.com"],
-        required_headers={"X-Bug-Bounty": "vigiloss", "X-Bad": 5, " ": "blank"},
+        required_headers={"X-Bug-Bounty": "acme-researcher", "X-Bad": 5, " ": "blank"},
     )
     collector = module.CaseCollector()
     collector.engagements_root = root
     collector._reload_registry(force=True)
 
     # Only str→str pairs survive (shared scope.required_headers coercion).
-    assert collector.registry["eng-a"].required_headers == {"X-Bug-Bounty": "vigiloss"}
+    assert collector.registry["eng-a"].required_headers == {"X-Bug-Bounty": "acme-researcher"}
 
 
 def test_backend_registry_reads_required_headers_from_scope_json(
@@ -773,7 +807,7 @@ def test_backend_registry_reads_required_headers_from_scope_json(
     # scope.json on disk declares the marker; the backend row below omits it.
     _seed_engagement(
         root, "eng-from-backend", hosts=["api.example.com"],
-        required_headers={"X-Bug-Bounty": "vigiloss"},
+        required_headers={"X-Bug-Bounty": "acme-researcher"},
         scope_enforcement="bypass",
     )
 
@@ -811,7 +845,7 @@ def test_backend_registry_reads_required_headers_from_scope_json(
     )
     entries = collector._fetch_registry_from_backend()
     assert entries is not None and len(entries) == 1
-    assert entries[0].required_headers == {"X-Bug-Bounty": "vigiloss"}
+    assert entries[0].required_headers == {"X-Bug-Bounty": "acme-researcher"}
     assert entries[0].scope_enforcement == "bypass"
 
 
@@ -847,7 +881,7 @@ def test_routes_cache_includes_required_headers(tmp_path: Path) -> None:
     root.mkdir()
     _seed_engagement(
         root, "eng-a", hosts=["app.example.com"],
-        required_headers={"X-Bug-Bounty": "vigiloss"},
+        required_headers={"X-Bug-Bounty": "acme-researcher"},
     )
     collector = module.CaseCollector()
     collector.engagements_root = root
@@ -855,7 +889,7 @@ def test_routes_cache_includes_required_headers(tmp_path: Path) -> None:
 
     payload = json.loads((root / module.ROUTES_CACHE).read_text(encoding="utf-8"))
     rows = {row["key"]: row for row in payload["engagements"]}
-    assert rows["eng-a"]["required_headers"] == {"X-Bug-Bounty": "vigiloss"}
+    assert rows["eng-a"]["required_headers"] == {"X-Bug-Bounty": "acme-researcher"}
 
 
 def test_capture_auth_posts_to_matched_engagement_only(tmp_path: Path) -> None:
@@ -1224,11 +1258,11 @@ def test_out_of_scope_covers_url_form_entry():
     module = _load_proxy_addon_module()
     # URL-form entry reduced to its bare host and matched.
     assert module._out_of_scope_covers(
-        ["https://appointments.acme-regional.example/book"], "appointments.acme-regional.example"
+        ["https://appointments.example.com/book"], "appointments.example.com"
     ) is True
     # A different host under the same apex is NOT covered by the URL-form host.
     assert module._out_of_scope_covers(
-        ["https://appointments.acme-regional.example/book"], "app.acme-regional.example"
+        ["https://appointments.example.com/book"], "app.target.example"
     ) is False
 
 

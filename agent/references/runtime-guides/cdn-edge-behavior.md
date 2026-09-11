@@ -16,7 +16,7 @@ host is otherwise responsive.
 
 Vendor names below are **trait-match examples**, not canonical categories. The
 worked example is **Akamai** (App & API Protector WAF + Bot Manager, observed
-against an Akamai-fronted `.gov` CMS, 2026-06-13), but the same shapes appear on
+against an edge-protected CMS), but the same shapes appear on
 Cloudflare WAF + Bot Management, Fastly/Signal Sciences, AWS WAF + CloudFront,
 and Imperva. Match the row on the behavior, not the brand.
 
@@ -136,7 +136,8 @@ seed (they trip the WAF and pollute the crawl with `403`s), and avoid dynamic AP
 POST bursts.
 
 **Preview / nonprod edge reputation cooldown.** Nonprod edges can carry a
-**per-host reputation cooldown** that production does not. On `preview.quality.acme-agency.example`,
+**per-host reputation cooldown** that production does not. On a synthetic
+`preview.acme-agency.example` deployment,
 after a WAF deny the edge **briefly `403`s even clean requests for a few seconds**
 (a per-host reputation cooldown), then **self-clears in ~8s**. So on a nonprod
 edge, a clean-request `403` *right after* a payload deny can be the cooldown, not

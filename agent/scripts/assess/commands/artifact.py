@@ -89,7 +89,6 @@ def register(subparsers) -> None:
     sp_register.add_argument("--agent-id", default="")
     sp_register.add_argument("--agent-role", default="")
     sp_register.add_argument("--command-run-id", type=int, default=None)
-    sp_register.add_argument("--sensitive", action="store_true")
     sp_register.add_argument("--json", dest="as_json", action="store_true")
     sp_register.set_defaults(func=_run_register)
 
@@ -98,8 +97,22 @@ def register(subparsers) -> None:
         "refresh",
         help="Refresh presence/hash metadata for already registered artifacts.",
     )
+    sp_refresh.add_argument(
+        "artifact_id",
+        nargs="?",
+        type=int,
+        help="Optional artifact id; omit to refresh every registered artifact.",
+    )
     sp_refresh.add_argument("--json", dest="as_json", action="store_true")
     sp_refresh.set_defaults(func=_run_refresh)
+
+    sp_unlink = action_sub.add_parser(
+        "unlink-finding",
+        help="Clear one artifact's finding link without deleting the artifact or proof.",
+    )
+    sp_unlink.add_argument("artifact_id", type=int)
+    sp_unlink.add_argument("--json", dest="as_json", action="store_true")
+    sp_unlink.set_defaults(func=_run_unlink_finding)
 
     # -- mark-scratch ---------------------------------------------------------
     sp_scratch = action_sub.add_parser("mark-scratch", help="Mark an artifact as scratch (excluded from report-readiness).")
@@ -294,7 +307,6 @@ def _run_register(args) -> None:
             "path": args.path,
             "kind": args.kind,
             "media_type": args.media_type,
-            "sensitive": bool(args.sensitive),
             "producer_agent_id": args.agent_id or None,
             "producer_agent_role": args.agent_role or None,
             "producer_command_run_id": args.command_run_id,
@@ -313,12 +325,39 @@ def _run_register(args) -> None:
 def _run_refresh(args) -> None:
     client = _client(args)
     try:
+        artifact_id = getattr(args, "artifact_id", None)
+        endpoint = (
+            f"artifacts/{artifact_id}/refresh"
+            if artifact_id is not None
+            else "artifacts/refresh"
+        )
         result = require_write_result(
-            client.post("artifacts/refresh", {}),
+            client.post(endpoint, {}),
             operation="refresh artifacts",
             nonnegative_counts=("refreshed", "present", "missing"),
         )
         print(json.dumps(result, indent=2, ensure_ascii=False) if args.as_json else _refresh_text(result))
+    finally:
+        client.close()
+
+
+def _run_unlink_finding(args) -> None:
+    client = _client(args)
+    try:
+        row = require_artifact_write_response(
+            client.delete(f"artifacts/{args.artifact_id}/finding-link"),
+            artifact_path=None,
+            operation="clear artifact finding link",
+        )
+        if row.get("related_finding_slug") is not None:
+            raise AssessError(
+                "clear artifact finding link: backend did not confirm an empty link"
+            )
+        print(
+            json.dumps(row, indent=2, ensure_ascii=False)
+            if args.as_json
+            else _render_rows([row])
+        )
     finally:
         client.close()
 

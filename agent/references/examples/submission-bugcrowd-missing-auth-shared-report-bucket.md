@@ -28,7 +28,7 @@ curl -s -D - -o /dev/null -X POST https://export.ridgeline.example/api/v2/render
   -H "Authorization: Bearer $CUSTOMER_A_TOKEN" \
   -d 'html=<h1>VIGILMARK</h1>'
 ```
-**Expect:** 302. `Location` names bucket `amzn-s3-demo-vigil-render-cache` and a UUID object key — keep the key.
+**Expect:** 302. `Location` names the synthetic bucket `amzn-s3-demo-vigil-render-cache` and a UUID object key — keep the key.
 2. [attacker] Follow that location with no further credential:
 ```
 curl -s '<location from step 1>' -o out.pdf && pdftotext out.pdf -

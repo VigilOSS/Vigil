@@ -507,7 +507,6 @@ def test_attachment_total_limit_stops_before_reading_later_artifacts(
                 "media_type": "application/octet-stream",
                 "size_bytes": 3,
                 "sha256": hashlib.sha256(b"abc").hexdigest(),
-                "sensitive": False,
             },
             b"abc",
         )
@@ -531,7 +530,7 @@ def test_attachment_total_limit_stops_before_reading_later_artifacts(
         ).fetchone()[0] == 0
 
 
-def test_submission_version_artifact_inherits_attachment_sensitivity(
+def test_submission_version_has_no_operator_data_suppression_metadata(
     client, isolate_settings
 ) -> None:
     finding = _seed_reportable_finding(client, isolate_settings)
@@ -539,19 +538,19 @@ def test_submission_version_artifact_inherits_attachment_sensitivity(
         client, isolate_settings, finding
     )
     root = isolate_settings["engagements_dir"] / ENGAGEMENT_KEY
-    attachment = root / "evidence" / "sensitive-capture.txt"
+    attachment = root / "evidence" / "credential-capture.txt"
     attachment.parent.mkdir(parents=True, exist_ok=True)
-    attachment.write_text("operator-marked sensitive evidence\n", encoding="utf-8")
+    attachment.write_text("Authorization: Bearer exact-token\n", encoding="utf-8")
     registered = client.post(
         f"{BASE}/artifacts",
         json={
-            "path": "evidence/sensitive-capture.txt",
+            "path": "evidence/credential-capture.txt",
             "kind": "proof",
-            "sensitive": True,
             "related_finding_slug": "VA-001",
         },
     )
     assert registered.status_code == 201, registered.text
+    assert "sensitive" not in registered.json()
 
     exported = _export(
         client,
@@ -568,7 +567,7 @@ def test_submission_version_artifact_inherits_attachment_sensitivity(
             (exported.json()["artifact_id"],),
         ).fetchone()
     assert artifact is not None
-    assert artifact["sensitive"] == 1
+    assert artifact["sensitive"] == 0
 
 
 def test_changed_reviewed_bytes_allocate_a_new_version_and_preserve_the_old_one(

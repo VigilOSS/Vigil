@@ -31,6 +31,7 @@ IMAGE_INPUTS_LABEL = "com.vigil.runtime-inputs-sha256"
 EXCLUDED_INPUT_NAMES = frozenset(
     {
         "__pycache__",
+        ".DS_Store",
         ".pytest_cache",
         ".mypy_cache",
         ".ruff_cache",

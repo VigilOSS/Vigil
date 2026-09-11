@@ -80,7 +80,6 @@ def test_http_policy_set_rejects_response_that_does_not_echo_requested_state(
                 max_body_bytes=None,
                 content_type_allow=None,
                 content_type_deny=None,
-                redaction_profile=None,
             )
         )
 
@@ -104,7 +103,6 @@ def test_artifact_register_rejects_response_for_a_different_path(
                 path="notes/requested.md",
                 kind="note",
                 media_type="text/markdown",
-                sensitive=False,
                 agent_id="",
                 agent_role="",
                 command_run_id=None,
@@ -153,7 +151,9 @@ def test_record_finding_rejects_response_bound_to_a_different_slug(
         def __exit__(self, *_exc):
             return False
 
-        def get(self, _endpoint: str):
+        def get(self, endpoint: str):
+            if endpoint == "dispatches/FINDING-AUTHOR-1":
+                return {"agent_id": "FINDING-AUTHOR-1"}
             return []
 
         def post(self, endpoint: str, _payload: dict):
@@ -195,6 +195,7 @@ def test_record_finding_rejects_response_bound_to_a_different_slug(
                 allow_remint=False,
                 allow_unindexed_evidence=True,
                 quiet=False,
+                agent_id="FINDING-AUTHOR-1",
             )
         )
 

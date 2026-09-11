@@ -35,7 +35,7 @@ A section that exceeds its budget needs to be cut, not wrapped — same rule as
 |---|---|
 | Salutation | ≤1 line, optional |
 | Reply body | ≤6 sentences / ≤2 short paragraphs |
-| New evidence | ≤15 lines of content per fenced block, `<-- proof`-annotated (PII rules: submission-format.md "PII redaction") |
+| New evidence | ≤15 lines of content per fenced block, `<-- proof`-annotated with exact values (submission-format.md "Evidence fidelity") |
 | Attachment pointer | the `**Run:**` / `**Pass if:**` block (submission-format.md "PoC block"), only when the new evidence needs one |
 
 ## Do
@@ -52,8 +52,9 @@ A section that exceeds its budget needs to be cut, not wrapped — same rule as
   sentence must be load-bearing, and the platform already carries that text).
 - Sell it — no "please prioritize", no urgency framing (reporting.md Rule 20).
 - Surface probe counts, telemetry, or ruled-out variants (reporting.md Rule 20).
-- Leak internal IDs, PII, or agent-tells — same gate as a submission, no exceptions for a reply
-  (submission-format.md "No internal identifiers", "PII redaction").
+- Leak internal IDs or agent-tells. Preserve PII and other evidence values verbatim; the formatting
+  gate concerns Vigil's internal bookkeeping, not operator-owned data (submission-format.md
+  "No internal identifiers", "Evidence fidelity").
 - Echo the ask verbatim or restate the title — the triager already has both open.
 
 If a reply gets flagged as AI-generated, the correction is shorter and rougher, never longer or more
@@ -75,7 +76,7 @@ The reply subset of `submission-format.md`'s pre-submission checklist. Run befor
 - [ ] Body ≤6 sentences, leads with the new proof or the answer, not a restatement of the ask
 - [ ] No Summary/Impact/CVSS/VRT restatement anywhere in the body
 - [ ] No internal identifiers — finding slug, engagement path, `vigil assess` breadcrumbs, `cases.db` references (submission-format.md "No internal identifiers")
-- [ ] New evidence, if any: third-party PII partial-masked, self-owned/synthetic shown in full, each fenced block truncated to the ≤15 lines that prove the point (submission-format.md "PII redaction")
+- [ ] New evidence, if any: every captured value preserved verbatim, each fenced block truncated to the ≤15 lines that prove the point (submission-format.md "Evidence fidelity")
 - [ ] No probe counts, telemetry, or ruled-out-variant narration (reporting.md Rule 20)
 - [ ] Contractions present, first person, not uniformly formal (reporting.md Rule 20)
 - [ ] If the prior reply was flagged AI-generated, this one is shorter and rougher, not longer

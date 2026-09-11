@@ -50,10 +50,9 @@ from .engagements import (
     write_opencode_reasoning_config,
 )
 
-# Platform → tenant-file suffix. The historical AcmeCorp tenant lives at
-# ``agent/references/tenants/acme-corp-workspace.md`` (not "acme-corp-gws"),
-# so the resolver maps the CLI ``--platform gws`` to the on-disk ``workspace``
-# alias. Other platforms map 1:1 today.
+# Platform → tenant-file suffix. Google Workspace tenant references use the
+# descriptive ``workspace`` suffix, while the CLI keeps the familiar ``gws``
+# platform spelling. Other platforms map 1:1 today.
 PLATFORM_TO_TENANT_SUFFIX: dict[str, str] = {
     "gws": "workspace",
     "m365": "m365",
@@ -130,7 +129,7 @@ def register_blue_parser(sub: argparse._SubParsersAction) -> None:
         "--customer",
         required=False,
         default=None,
-        help="Customer kebab-case slug, e.g. 'acme-corp' (omit for interactive picker)",
+        help="Customer kebab-case slug, e.g. 'northstar' (omit for interactive picker)",
     )
     engage_p.add_argument(
         "--platform",
@@ -421,7 +420,7 @@ def _cmd_engage(args: argparse.Namespace, install_root: Path) -> None:
     if not KEBAB_SLUG_RE.match(customer):
         raise SystemExit(
             f"--customer must be lowercase kebab-case (got {customer!r}). "
-            "Example: --customer acme-corp"
+            "Example: --customer northstar"
         )
 
     raw_platforms = [piece.strip() for piece in (args.platform or "").split(",") if piece.strip()]
@@ -651,14 +650,14 @@ def _cmd_alert_record(args: argparse.Namespace, install_root: Path) -> None:
     register_rc = _run_assess(
         install_root,
         eng_dir,
-        ["artifact", "register", str(raw_path), "--kind", "alert_intake", "--sensitive"],
+        ["artifact", "register", str(raw_path), "--kind", "alert_intake"],
         check=False,
     )
     if register_rc != 0:
         print(
             f"WARN vigil blue alert record: artifact register failed (rc={register_rc}); "
             f"alert body persisted at {raw_path} but is not in the artifact index yet. "
-            f"Retry with: vigil assess artifact register {raw_path} --kind alert_intake --sensitive",
+            f"Retry with: vigil assess artifact register {raw_path} --kind alert_intake",
             file=sys.stderr,
         )
 

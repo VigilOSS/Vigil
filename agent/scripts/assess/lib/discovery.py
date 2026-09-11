@@ -16,7 +16,7 @@ import re
 
 # DNS service / control records — never a live web origin.
 _SERVICE_RECORD_RE = re.compile(r"(^|\.)(_dmarc|_dkim|_domainkey|_acme-challenge|_spf|_mta-sts)\.", re.IGNORECASE)
-# DHCP / workstation / reverse-DNS noise (the bulk of resolved .mil names in §8).
+# DHCP / workstation / reverse-DNS noise (the bulk of resolved names in the large-apex fixture).
 _DHCP_RE = re.compile(r"(^|\.)(dhcp[-.]|dha-\d+-\d+|dhpcile\d+)", re.IGNORECASE)
 _WORKSTATION_RE = re.compile(r"(-laptop|-desktop|-kw|-pc)(\.|$)", re.IGNORECASE)
 # Leading MAC-octet PTR names, e.g. 00-08-74-ab-... — require >=3 hex-octet
@@ -190,7 +190,8 @@ def wildcard_parent_candidates(hosts: list[str]) -> list[str]:
     """Cluster hosts by 2nd/3rd-level parent → candidate parents to wildcard-probe (CR-17).
 
     Before a permutation brute, each discovered parent that has children should be
-    random-label probed for a wildcard sink (I-010: ``*.review.acme-media.example`` — a
+    random-label probed for a wildcard sink (for example,
+    ``*.review.acme-media.example`` — a
     non-apex parent that apex-only detection misses). This pure helper returns the
     distinct candidate parents (the immediate parent of every multi-label host that
     actually has a child in the set), so a probe stage can test each one and strip

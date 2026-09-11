@@ -39,6 +39,7 @@ from assess.lib.schema_validation import (  # noqa: E402
 
 ENGAGEMENT_KEY = "2026-05-01-090000-evalcap"
 BASE = f"/engagements/{ENGAGEMENT_KEY}/assessment"
+AUTHOR_AGENT_ID = "EVAL-CAPTURE-AUTHOR"
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +96,15 @@ def _schema_example_bodies() -> list[dict]:
 def _seed(client) -> list[dict]:
     response = client.get(f"/engagements/{ENGAGEMENT_KEY}")
     assert response.status_code == 200, response.text
+    dispatch = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": AUTHOR_AGENT_ID,
+            "agent_role": "fixture-finding-author",
+            "task": "Record eval-capture fixture findings",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
     source_manifest_digest = "4a" * 32
     with db_module.get_connection() as connection:
         engagement_id = int(
@@ -118,6 +128,10 @@ def _seed(client) -> list[dict]:
         "source_manifest_digest": source_manifest_digest,
     }
     for body in _schema_example_bodies():
+        body["provenance"] = {
+            **(body.get("provenance") or {}),
+            "agent_id": AUTHOR_AGENT_ID,
+        }
         if str(body.get("canonical_location", "")).startswith("file:"):
             body["provenance"] = {
                 **(body.get("provenance") or {}),

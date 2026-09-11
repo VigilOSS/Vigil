@@ -206,7 +206,7 @@ version-string collisions, etc.) before they reach the finding lifecycle.
 
 - **Critical / high hits** — draft a finding JSON (see `vigil assess contract
   finding record` for the schema), re-validate the template's PoC manually via `vigil assess kali exec` (or the matching typed verb), then
-  record with `vigil assess finding record vulnerability-analyst <finding-json-file>`
+  record with `vigil assess finding record vulnerability-analyst <finding-json-file> --agent-id <your-agent_id>`
   only if the re-test reproduces the hit.
 - **Medium hits** — record as intel with `vigil assess intel record note <json-file>`,
   noting the template-id and matched URL. Medium hits often seed Phase 4 targeted testing

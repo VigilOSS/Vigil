@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -340,9 +341,9 @@ def test_aith_engagement_create_writes_explicit_web_scope(tmp_path: Path, monkey
     assert codex_agents.resolve() == (sandbox_root / ".codex" / "agents").resolve()
     assert (codex_agents / "vulnerability-analyst.toml").exists()
     claude_settings = (created.path / ".claude" / "settings.json").read_text(encoding="utf-8")
-    assert "VIGIL_AGENT_ROOT" in claude_settings
-    assert "agent/scripts/hooks/post-tool-log.sh" in claude_settings
-    assert "agent/scripts/hooks/scope-check.sh" in claude_settings
+    assert "VIGIL_AGENT_ROOT" not in claude_settings
+    assert str(sandbox_root / "scripts" / "hooks" / "post-tool-log.sh") in claude_settings
+    assert str(sandbox_root / "scripts" / "hooks" / "scope-check.sh") in claude_settings
     claude_agents = created.path / ".claude" / "agents"
     assert claude_agents.is_symlink()
     assert claude_agents.resolve() == (sandbox_root / ".claude" / "agents").resolve()
@@ -431,10 +432,14 @@ def test_repair_refreshes_stale_claude_hook_settings(tmp_path: Path) -> None:
         for entry in event_hooks
         for hook in entry["hooks"]
     ]
-    assert all(command.startswith("bash -c ") for command in repaired_commands)
-    assert "VIGIL_AGENT_ROOT" in repaired_settings
-    assert "agent/scripts/hooks/post-tool-log.sh" in repaired_settings
-    assert "agent/scripts/hooks/scope-check.sh" in repaired_settings
+    assert all(shlex.split(command)[0] == "bash" for command in repaired_commands)
+    assert "VIGIL_AGENT_ROOT" not in repaired_settings
+    assert {
+        shlex.split(command)[1] for command in repaired_commands
+    } == {
+        str(sandbox_root / "scripts" / "hooks" / "post-tool-log.sh"),
+        str(sandbox_root / "scripts" / "hooks" / "scope-check.sh"),
+    }
     assert (claude_dir / "agents").is_symlink()
 
 
@@ -463,14 +468,18 @@ def test_aith_engagement_create_code_mode_with_local_repo(tmp_path: Path, monkey
 
     assert scope["engagement_type"] == "code"
     assert scope["name"] == "my-cool-project"
-    assert scope["repos"] == [{"path": str(fake_repo), "name": "my-cool-project"}]
+    assert "repos" not in scope
+    assert "source_repos" not in scope
     assert scope["hosts"] == []
+    assert scope["code_target_contact_policy"] == (
+        "warn-do-not-contact-declared-hosts"
+    )
     assert scope["current_phase"] == "ingest"
-    assert scope["source_repos"] == []
     # Credentials are centralized in the backend store; no auth.json scaffold.
     assert not (created.path / "auth.json").exists()
     assert manifest["name"] == "my-cool-project"
     assert manifest["target"] == "my-cool-project"
+    assert manifest["repos"] == [{"path": str(fake_repo), "name": "my-cool-project"}]
     assert (created.path / "source").is_dir()
     assert (created.path / "start_claude.sh").exists()
     assert not (created.path / "start_codex.sh").exists()

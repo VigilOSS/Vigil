@@ -52,9 +52,9 @@ def _write_blue_scope(eng_dir: Path) -> None:
         json.dumps(
             {
                 "engagement_type": "blue",
-                "customer": "acme-corp",
+                "customer": "acme",
                 "platforms": ["gws"],
-                "tenant_reference_paths": ["agent/references/tenants/acme-corp-workspace.md"],
+                "tenant_reference_paths": ["agent/references/tenants/acme-workspace.md"],
                 "status": "in_progress",
                 "current_phase": "investigate",
                 "hosts": [],
@@ -149,9 +149,9 @@ def test_engagement_create_blue_points_to_canonical_blue_operator_prompt(
         CreateEngagementOptions(
             install_root=install_root,
             engagement_type="blue",
-            customer="acme-corp",
+            customer="acme",
             platforms=["gws"],
-            tenant_reference_paths=["agent/references/tenants/acme-corp-workspace.md"],
+            tenant_reference_paths=["agent/references/tenants/acme-workspace.md"],
             skip_permissions=True,
         )
     )
@@ -648,9 +648,12 @@ def test_engagement_create_cli_repo_plus_web_target_infers_both(
     captured = capsys.readouterr()
     created_path = _created_path_from_stdout(captured.out)
     scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
+    manifest = json.loads((created_path / "engagement.json").read_text(encoding="utf-8"))
     assert scope["engagement_type"] == "both"
     assert scope["hosts"] == ["app.example.com"]
-    assert [repo["path"] for repo in scope["repos"]] == [str(tmp_path / "repo")]
+    assert "repos" not in scope
+    assert "source_repos" not in scope
+    assert [repo["path"] for repo in manifest["repos"]] == [str(tmp_path / "repo")]
     assert "inferred type: both" in captured.err
 
 
@@ -815,7 +818,7 @@ def test_engagement_create_persists_header_and_rate_limit(
             "app.example.com",
             "--no-prompt",
             "--header",
-            "X-Bug-Bounty: vigiloss",
+            "X-Bug-Bounty: acme-researcher",
             "--header",
             "X-Trace: deadbeef",
             "--rate-limit",
@@ -825,7 +828,7 @@ def test_engagement_create_persists_header_and_rate_limit(
 
     created_path = _created_path_from_stdout(capsys.readouterr().out)
     scope = json.loads((created_path / "scope.json").read_text(encoding="utf-8"))
-    assert scope["required_headers"] == {"X-Bug-Bounty": "vigiloss", "X-Trace": "deadbeef"}
+    assert scope["required_headers"] == {"X-Bug-Bounty": "acme-researcher", "X-Trace": "deadbeef"}
     assert scope["rate_limit"] == 5.0
 
 
@@ -1369,6 +1372,16 @@ def _git_commit(root: Path, rel: str, content: str) -> str:
     return _git(root, "rev-parse", "HEAD")
 
 
+def _installable_source(root: Path) -> Path:
+    source_file = root / "src" / "vigil_cli" / "feature.py"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_text("version = 'one'\n", encoding="utf-8")
+    (root / "agent" / "engagements").mkdir(parents=True)
+    (root / "orchestrator" / "backend" / "data").mkdir(parents=True)
+    (root / "README.md").write_text("source\n", encoding="utf-8")
+    return source_file
+
+
 def _minimal_status(**overrides: object) -> dict[str, object]:
     base: dict[str, object] = {
         "install_root": "/x",
@@ -1411,6 +1424,7 @@ def test_install_staleness_current_when_sha_matches(tmp_path: Path) -> None:
     _init_git_repo(source)
     install = tmp_path / "install"
     install.mkdir()
+    shutil.copy2(source / "README.md", install / "README.md")
     write_install_meta(install, source)
 
     result = install_staleness(install, source_root=source)
@@ -1426,11 +1440,1040 @@ def test_install_staleness_stale_when_source_advances(tmp_path: Path) -> None:
     install.mkdir()
     write_install_meta(install, source)  # stamps the old sha
 
-    new_sha = _git_commit(source, "CHANGELOG.md", "v2\n")
+    new_sha = _git_commit(source, "README.md", "v2\n")
     result = install_staleness(install, source_root=source)
     assert result["state"] == "stale"
     assert result["current_source_sha"] == new_sha
     assert result["behind_count"] == 1
+
+
+def test_install_stamp_uses_copied_tree_when_source_mutates_before_stamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli import install as install_module
+    from vigil_cli import status as status_module
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    source = tmp_path / "source"
+    source_file = _installable_source(source)
+    install = tmp_path / "install"
+    real_write_install_meta = status_module.write_install_meta
+
+    def mutate_then_stamp(
+        install_root: Path, source_root: Path, **kwargs: int
+    ) -> dict[str, object]:
+        source_file.write_text("version = 'two'\n", encoding="utf-8")
+        return real_write_install_meta(install_root, source_root, **kwargs)
+
+    monkeypatch.setattr(install_module, "write_install_meta", mutate_then_stamp)
+
+    install_module.install_from_source(
+        install_module.InstallOptions(
+            source_root=source,
+            install_root=install,
+            verify_docker_image=False,
+        )
+    )
+
+    assert (install / "src" / "vigil_cli" / "feature.py").read_text() == (
+        "version = 'one'\n"
+    )
+    assert source_file.read_text() == "version = 'two'\n"
+    assert status_module.install_staleness(install, source_root=source)["state"] == (
+        "stale"
+    )
+
+
+def test_install_manifest_tracks_executable_mode_and_reinstall_repairs_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli import install as install_module
+    from vigil_cli.status import install_staleness
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    source = tmp_path / "source"
+    source_file = _installable_source(source)
+    source_file.chmod(0o644)
+    install = tmp_path / "install"
+    options = install_module.InstallOptions(
+        source_root=source,
+        install_root=install,
+        verify_docker_image=False,
+    )
+    install_module.install_from_source(options)
+    assert install_staleness(install, source_root=source)["state"] == "current"
+
+    source_file.chmod(0o755)
+
+    assert install_staleness(install, source_root=source)["state"] == "stale"
+    install_module.install_from_source(options)
+    assert (install / "src" / "vigil_cli" / "feature.py").stat().st_mode & 0o777 == 0o755
+    assert install_staleness(install, source_root=source)["state"] == "current"
+
+
+def test_client_entrypoint_copy_excludes_cache_and_build_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli import install as install_module
+    from vigil_cli.status import read_install_meta
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    source = tmp_path / "source"
+    _installable_source(source)
+    codex_role = source / "agent" / ".codex" / "agents" / "role.toml"
+    claude_role = source / "agent" / ".claude" / "agents" / "role.md"
+    codex_role.parent.mkdir(parents=True)
+    claude_role.parent.mkdir(parents=True)
+    codex_role.write_text("name = 'role'\n", encoding="utf-8")
+    claude_role.write_text("# Role\n", encoding="utf-8")
+    codex_cache = source / "agent" / ".codex" / "__pycache__" / "cache.pyc"
+    claude_cache = source / "agent" / ".claude" / "node_modules" / "cache.bin"
+    codex_cache.parent.mkdir()
+    claude_cache.parent.mkdir()
+    codex_cache.write_bytes(b"first-cache")
+    claude_cache.write_bytes(b"first-node-module")
+    install = tmp_path / "install"
+    options = install_module.InstallOptions(
+        source_root=source,
+        install_root=install,
+        verify_docker_image=False,
+    )
+
+    install_module.install_from_source(options)
+
+    assert (install / ".codex" / "agents" / "role.toml").is_file()
+    assert (install / ".claude" / "agents" / "role.md").is_file()
+    assert not (install / ".codex" / "__pycache__").exists()
+    assert not (install / ".claude" / "node_modules").exists()
+    first_digest = (read_install_meta(install) or {})["source_content_sha256"]
+    codex_cache.write_bytes(b"changed-cache")
+    claude_cache.write_bytes(b"changed-node-module")
+
+    install_module.install_from_source(options)
+
+    assert not (install / ".codex" / "__pycache__").exists()
+    assert not (install / ".claude" / "node_modules").exists()
+    assert (read_install_meta(install) or {})["source_content_sha256"] == first_digest
+
+
+@pytest.mark.parametrize("link_kind", ["outside", "loop"])
+def test_install_rejects_source_symlink_before_destination_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, link_kind: str
+) -> None:
+    from vigil_cli import install as install_module
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    source = tmp_path / "source"
+    _installable_source(source)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "external.txt").write_text("must not copy\n", encoding="utf-8")
+    link = source / "src" / "link"
+    target = outside if link_kind == "outside" else link
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    install = tmp_path / "install"
+    installed_file = install / "src" / "vigil_cli" / "feature.py"
+    installed_file.parent.mkdir(parents=True)
+    installed_file.write_text("preserve me\n", encoding="utf-8")
+
+    with pytest.raises(OSError, match="unsafe symbolic link"):
+        install_module.install_from_source(
+            install_module.InstallOptions(
+                source_root=source,
+                install_root=install,
+                verify_docker_image=False,
+            )
+        )
+
+    assert installed_file.read_text(encoding="utf-8") == "preserve me\n"
+    assert not (install / ".vigil-install-meta.json").exists()
+
+
+def test_install_rejects_symlinked_destination_before_external_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli import install as install_module
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    source = tmp_path / "source"
+    _installable_source(source)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel.txt"
+    sentinel.write_text("outside\n", encoding="utf-8")
+    install = tmp_path / "install"
+    install.mkdir()
+    try:
+        (install / "src").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    with pytest.raises(OSError, match="unsafe symbolic link"):
+        install_module.install_from_source(
+            install_module.InstallOptions(
+                source_root=source,
+                install_root=install,
+                verify_docker_image=False,
+            )
+        )
+
+    assert sentinel.read_text(encoding="utf-8") == "outside\n"
+    assert not (outside / "vigil_cli").exists()
+    assert not (install / ".vigil-install-meta.json").exists()
+
+
+def test_install_rejects_symlinked_runtime_state_before_external_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli import install as install_module
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    source = tmp_path / "source"
+    _installable_source(source)
+    outside = tmp_path / "outside-runtime"
+    outside.mkdir()
+    install = tmp_path / "install"
+    install.mkdir()
+    try:
+        (install / ".runtime-data").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    with pytest.raises(OSError, match="unsafe symbolic link"):
+        install_module.install_from_source(
+            install_module.InstallOptions(
+                source_root=source,
+                install_root=install,
+                verify_docker_image=False,
+            )
+        )
+
+    assert list(outside.iterdir()) == []
+    assert not (install / ".vigil-install-meta.json").exists()
+
+
+@pytest.mark.parametrize("linked_ancestor", ["source", "install"])
+def test_install_rejects_symlinked_ancestor_without_external_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, linked_ancestor: str
+) -> None:
+    from vigil_cli import install as install_module
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    real_source_parent = tmp_path / "real-source-parent"
+    source = real_source_parent / "source"
+    _installable_source(source)
+    install = tmp_path / "install"
+    install.mkdir()
+    installed_sentinel = install / "sentinel.txt"
+    installed_sentinel.write_text("installed untouched\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_sentinel = outside / "sentinel.txt"
+    outside_sentinel.write_text("outside untouched\n", encoding="utf-8")
+
+    try:
+        if linked_ancestor == "source":
+            alias = tmp_path / "source-alias"
+            alias.symlink_to(real_source_parent, target_is_directory=True)
+            source = alias / "source"
+        else:
+            alias = tmp_path / "install-alias"
+            alias.symlink_to(outside, target_is_directory=True)
+            install = alias / "working-root"
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    with pytest.raises(OSError, match="unsafe symbolic link"):
+        install_module.install_from_source(
+            install_module.InstallOptions(
+                source_root=source,
+                install_root=install,
+                verify_docker_image=False,
+            )
+        )
+
+    assert installed_sentinel.read_text(encoding="utf-8") == "installed untouched\n"
+    assert outside_sentinel.read_text(encoding="utf-8") == "outside untouched\n"
+    assert not (outside / "working-root").exists()
+
+
+def test_install_rejects_destination_root_swap_after_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli import install as install_module
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    source = tmp_path / "source"
+    _installable_source(source)
+    install = tmp_path / "install"
+    install.mkdir()
+    detached = tmp_path / "detached-install"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel.txt"
+    sentinel.write_text("outside untouched\n", encoding="utf-8")
+    real_validate = install_module.validate_install_destination
+    swapped = False
+
+    def validate_then_swap(path: Path) -> None:
+        nonlocal swapped
+        real_validate(path)
+        path.rename(detached)
+        path.symlink_to(outside, target_is_directory=True)
+        swapped = True
+
+    monkeypatch.setattr(
+        install_module, "validate_install_destination", validate_then_swap
+    )
+
+    with pytest.raises(OSError, match="unsafe symbolic link"):
+        install_module.install_from_source(
+            install_module.InstallOptions(
+                source_root=source,
+                install_root=install,
+                verify_docker_image=False,
+            )
+        )
+
+    assert swapped is True
+    assert sentinel.read_text(encoding="utf-8") == "outside untouched\n"
+    assert sorted(path.name for path in outside.iterdir()) == ["sentinel.txt"]
+
+
+def test_install_rejects_destination_child_swap_between_check_and_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli import install as install_module
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    source = tmp_path / "source"
+    _installable_source(source)
+    install = tmp_path / "install"
+    destination_child = install / "src"
+    destination_child.mkdir(parents=True)
+    (destination_child / "old.txt").write_text("old\n", encoding="utf-8")
+    detached = tmp_path / "detached-src"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel.txt"
+    sentinel.write_text("outside untouched\n", encoding="utf-8")
+    real_reject = install_module._reject_symlink
+    swapped = False
+
+    def check_then_swap(path: Path) -> None:
+        nonlocal swapped
+        real_reject(path)
+        if path == destination_child and not swapped:
+            path.rename(detached)
+            path.symlink_to(outside, target_is_directory=True)
+            swapped = True
+
+    monkeypatch.setattr(install_module, "_reject_symlink", check_then_swap)
+
+    with pytest.raises(OSError, match="unsafe symbolic link"):
+        install_module.install_from_source(
+            install_module.InstallOptions(
+                source_root=source,
+                install_root=install,
+                verify_docker_image=False,
+            )
+        )
+
+    assert swapped is True
+    assert sentinel.read_text(encoding="utf-8") == "outside untouched\n"
+    assert sorted(path.name for path in outside.iterdir()) == ["sentinel.txt"]
+
+
+@pytest.mark.parametrize(
+    ("destination_name", "expected"),
+    [
+        ("README.md", "source\n"),
+        ("AGENTS.md", "# Vigil Operator Entry Point\n"),
+        ("CLAUDE.md", "# Claude source\n"),
+    ],
+)
+def test_install_atomically_replaces_hardlinked_managed_and_derived_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    destination_name: str,
+    expected: str,
+) -> None:
+    from vigil_cli import install as install_module
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    source = tmp_path / "source"
+    _installable_source(source)
+    (source / "agent" / "AGENTS.md").write_text("# Agent source\n", encoding="utf-8")
+    (source / "agent" / "CLAUDE.md").write_text("# Claude source\n", encoding="utf-8")
+    install = tmp_path / "install"
+    install.mkdir()
+    outside = tmp_path / f"outside-{destination_name}"
+    outside.write_text("outside untouched\n", encoding="utf-8")
+    os.link(outside, install / destination_name)
+
+    install_module.install_from_source(
+        install_module.InstallOptions(
+            source_root=source,
+            install_root=install,
+            verify_docker_image=False,
+        )
+    )
+
+    assert outside.read_text(encoding="utf-8") == "outside untouched\n"
+    assert (install / destination_name).read_text(encoding="utf-8").startswith(expected)
+    assert (install / destination_name).stat().st_ino != outside.stat().st_ino
+
+
+def test_install_removes_derived_entrypoints_when_their_sources_are_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli import install as install_module
+    from vigil_cli.status import install_staleness
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    source = tmp_path / "source"
+    _installable_source(source)
+    (source / "agent" / "AGENTS.md").write_text("# Agent source\n", encoding="utf-8")
+    (source / "agent" / "CLAUDE.md").write_text("# Claude source\n", encoding="utf-8")
+    (source / "agent" / ".codex" / "agents").mkdir(parents=True)
+    (source / "agent" / ".codex" / "agents" / "role.toml").write_text(
+        "name = 'role'\n", encoding="utf-8"
+    )
+    (source / "agent" / ".claude" / "agents").mkdir(parents=True)
+    (source / "agent" / ".claude" / "agents" / "role.md").write_text(
+        "# Role\n", encoding="utf-8"
+    )
+    install = tmp_path / "install"
+    options = install_module.InstallOptions(
+        source_root=source,
+        install_root=install,
+        verify_docker_image=False,
+    )
+    install_module.install_from_source(options)
+
+    (source / "agent" / "AGENTS.md").unlink()
+    (source / "agent" / "CLAUDE.md").unlink()
+    shutil.rmtree(source / "agent" / ".codex")
+    shutil.rmtree(source / "agent" / ".claude")
+    install_module.install_from_source(options)
+
+    for name in ("AGENTS.md", "CLAUDE.md", ".codex", ".claude"):
+        assert not (install / name).exists()
+    assert install_staleness(install, source_root=source)["state"] == "current"
+
+
+@pytest.mark.parametrize(
+    ("source_kind", "destination_kind"),
+    [("file", "directory"), ("directory", "file")],
+)
+def test_install_reconciles_file_directory_collisions_and_is_immediately_current(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_kind: str,
+    destination_kind: str,
+) -> None:
+    from vigil_cli import install as install_module
+    from vigil_cli.status import install_staleness
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    source = tmp_path / "source"
+    _installable_source(source)
+    managed_source = source / "TODOs"
+    if source_kind == "file":
+        managed_source.write_text("source file\n", encoding="utf-8")
+    else:
+        managed_source.mkdir()
+        (managed_source / "nested.txt").write_text("source dir\n", encoding="utf-8")
+    install = tmp_path / "install"
+    install.mkdir()
+    managed_destination = install / "TODOs"
+    if destination_kind == "file":
+        managed_destination.write_text("old file\n", encoding="utf-8")
+    else:
+        managed_destination.mkdir()
+        (managed_destination / "old.txt").write_text("old dir\n", encoding="utf-8")
+
+    install_module.install_from_source(
+        install_module.InstallOptions(
+            source_root=source,
+            install_root=install,
+            verify_docker_image=False,
+        )
+    )
+
+    assert managed_destination.is_file() is (source_kind == "file")
+    assert managed_destination.is_dir() is (source_kind == "directory")
+    assert install_staleness(install, source_root=source)["state"] == "current"
+
+
+def test_install_manifest_normalizes_installer_created_preserved_ancestors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli import install as install_module
+    from vigil_cli.status import install_staleness
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    source = tmp_path / "source"
+    (source / "agent" / "engagements").mkdir(parents=True)
+    (source / "orchestrator").mkdir(parents=True)
+    (source / "README.md").write_text("source\n", encoding="utf-8")
+    install = tmp_path / "install"
+
+    install_module.install_from_source(
+        install_module.InstallOptions(
+            source_root=source,
+            install_root=install,
+            verify_docker_image=False,
+        )
+    )
+
+    assert (install / "orchestrator" / "backend" / "data").is_dir()
+    assert install_staleness(install, source_root=source)["state"] == "current"
+
+
+def test_in_place_install_preserves_repository_root_entrypoints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli import install as install_module
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    source = tmp_path / "source"
+    _installable_source(source)
+    maintainer_entrypoint = "# Maintainer repository instructions\n"
+    (source / "AGENTS.md").write_text(maintainer_entrypoint, encoding="utf-8")
+    (source / "agent" / "AGENTS.md").write_text(
+        "# Engagement operator instructions\n", encoding="utf-8"
+    )
+
+    install_module.install_from_source(
+        install_module.InstallOptions(
+            source_root=source,
+            install_root=source,
+            verify_docker_image=False,
+        )
+    )
+
+    assert (source / "AGENTS.md").read_text(encoding="utf-8") == maintainer_entrypoint
+
+
+@pytest.mark.parametrize("alias_kind", ["symlink", "hardlink"])
+def test_install_metadata_alias_never_mutates_external_inode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, alias_kind: str
+) -> None:
+    from vigil_cli import install as install_module
+    from vigil_cli.status import INSTALL_META_FILENAME, install_staleness
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    source = tmp_path / "source"
+    _installable_source(source)
+    install = tmp_path / "install"
+    install.mkdir()
+    external = tmp_path / "external-meta.json"
+    external.write_text("external untouched\n", encoding="utf-8")
+    destination = install / INSTALL_META_FILENAME
+    try:
+        if alias_kind == "symlink":
+            destination.symlink_to(external)
+        else:
+            os.link(external, destination)
+    except OSError as exc:
+        pytest.skip(f"filesystem alias unavailable: {exc}")
+
+    if alias_kind == "symlink":
+        with pytest.raises(OSError, match="unsafe symbolic link"):
+            install_module.install_from_source(
+                install_module.InstallOptions(
+                    source_root=source,
+                    install_root=install,
+                    verify_docker_image=False,
+                )
+            )
+    else:
+        install_module.install_from_source(
+            install_module.InstallOptions(
+                source_root=source,
+                install_root=install,
+                verify_docker_image=False,
+            )
+        )
+        assert install_staleness(install, source_root=source)["state"] == "current"
+        assert destination.stat().st_ino != external.stat().st_ino
+
+    assert external.read_text(encoding="utf-8") == "external untouched\n"
+
+
+@pytest.mark.parametrize("command", ["install", "update"])
+@pytest.mark.parametrize("carrier", ["explicit", "environment", "config"])
+def test_public_sync_commands_preserve_source_and_install_aliases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    carrier: str,
+) -> None:
+    from vigil_cli import main as main_module
+    from vigil_cli import paths as paths_module
+    from vigil_cli.install import InstallResult
+
+    real_parent = tmp_path / "real-parent"
+    source = real_parent / "source"
+    _installable_source(source)
+    alias_parent = tmp_path / "alias-parent"
+    try:
+        alias_parent.symlink_to(real_parent, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    source_alias = alias_parent / "source"
+    install_alias = alias_parent / "install"
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    if carrier == "environment":
+        monkeypatch.setenv("VIGIL_SOURCE_DIR", str(source_alias))
+        monkeypatch.setenv("VIGIL_INSTALL_DIR", str(install_alias))
+        arguments = [command]
+    elif carrier == "config":
+        monkeypatch.setattr(
+            paths_module,
+            "get_config_value",
+            lambda key, *_a: {
+                "source.dir": str(source_alias),
+                "install.root": str(install_alias),
+            }.get(key),
+        )
+        arguments = [command]
+    else:
+        arguments = [
+            "--root",
+            str(install_alias),
+            "--source",
+            str(source_alias),
+            command,
+        ]
+
+    captured: dict[str, Path | None] = {}
+
+    def capture_install(options, **_kwargs):
+        captured["install"] = options.install_root
+        captured["source"] = options.source_root
+        return InstallResult(
+            install_root=options.install_root,
+            is_upgrade=False,
+            image_built=False,
+        )
+
+    def capture_up(options, **_kwargs):
+        captured["install"] = options.install_root
+        captured["source"] = getattr(options, "source_root", None)
+
+    monkeypatch.setattr(main_module, "install_from_source", capture_install)
+    monkeypatch.setattr(main_module, "run_up", capture_up)
+    monkeypatch.setattr(main_module.config_module, "set_config_value", lambda *_a: None)
+
+    main_module.main(arguments)
+
+    assert captured == {"install": install_alias, "source": source_alias}
+
+
+@pytest.mark.parametrize("carrier", ["explicit", "environment", "config"])
+def test_public_up_preserves_source_and_install_aliases_until_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, carrier: str
+) -> None:
+    from vigil_cli import paths as paths_module
+    from vigil_cli import up as up_module
+
+    real_parent = tmp_path / "real-parent"
+    source = real_parent / "source"
+    _installable_source(source)
+    alias_parent = tmp_path / "alias-parent"
+    try:
+        alias_parent.symlink_to(real_parent, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    source_alias = alias_parent / "source"
+    install_alias = alias_parent / "install"
+    if carrier == "environment":
+        monkeypatch.setenv("VIGIL_SOURCE_DIR", str(source_alias))
+        source_value = None
+    elif carrier == "config":
+        monkeypatch.setattr(
+            paths_module,
+            "get_config_value",
+            lambda key, *_a: str(source_alias) if key == "source.dir" else None,
+        )
+        source_value = None
+    else:
+        source_value = source_alias
+
+    captured: dict[str, Path] = {}
+
+    def capture_install(options, **_kwargs):
+        captured["install"] = options.install_root
+        captured["source"] = options.source_root
+        raise RuntimeError("captured sync boundary")
+
+    monkeypatch.setattr(up_module, "install_from_source", capture_install)
+
+    with pytest.raises(RuntimeError, match="captured sync boundary"):
+        up_module.run_up(
+            up_module.UpOptions(
+                install_root=install_alias,
+                source_root=source_value,
+            )
+        )
+
+    assert captured == {"install": install_alias, "source": source_alias}
+
+
+def test_main_passes_explicit_source_alias_to_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli import main as main_module
+
+    real_parent = tmp_path / "real-parent"
+    source = real_parent / "source"
+    _installable_source(source)
+    alias_parent = tmp_path / "alias-parent"
+    try:
+        alias_parent.symlink_to(real_parent, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    source_alias = alias_parent / "source"
+    install_alias = alias_parent / "install"
+    captured = None
+
+    def capture_up(options, **_kwargs):
+        nonlocal captured
+        captured = options
+
+    monkeypatch.setattr(main_module, "run_up", capture_up)
+    main_module.main(
+        [
+            "--root",
+            str(install_alias),
+            "--source",
+            str(source_alias),
+            "up",
+        ]
+    )
+
+    assert captured is not None
+    assert captured.install_root == install_alias
+    assert captured.source_root == source_alias
+
+
+def test_install_keeps_destination_boundary_attached_through_post_sync_phases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli import install as install_module
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    source = tmp_path / "source"
+    _installable_source(source)
+    install = tmp_path / "install"
+    detached = tmp_path / "detached"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel.txt"
+    sentinel.write_text("outside untouched\n", encoding="utf-8")
+    real_sync = install_module._sync_install_files
+    post_sync_called = False
+
+    def sync_then_swap(source_root: Path, install_root: Path):
+        boundary = real_sync(source_root, install_root)
+        install_root.rename(detached)
+        install_root.symlink_to(outside, target_is_directory=True)
+        return boundary
+
+    def unexpected_repair(*_args, **_kwargs):
+        nonlocal post_sync_called
+        post_sync_called = True
+        raise AssertionError("post-sync path work touched a replaced root")
+
+    monkeypatch.setattr(install_module, "_sync_install_files", sync_then_swap)
+    monkeypatch.setattr(
+        install_module, "repair_engagement_client_rosters", unexpected_repair
+    )
+
+    with pytest.raises(OSError, match="replaced directory"):
+        install_module.install_from_source(
+            install_module.InstallOptions(
+                source_root=source,
+                install_root=install,
+                verify_docker_image=False,
+            )
+        )
+
+    assert post_sync_called is False
+    assert sentinel.read_text(encoding="utf-8") == "outside untouched\n"
+    assert sorted(path.name for path in outside.iterdir()) == ["sentinel.txt"]
+
+
+@pytest.mark.parametrize(
+    ("phase", "existing_oob_route"),
+    [
+        ("roster", False),
+        ("entrypoint", False),
+        ("oob", False),
+        ("oob", True),
+        ("stamp", False),
+        ("image", False),
+    ],
+    ids=["roster", "entrypoint", "oob-new", "oob-existing", "stamp", "image"],
+)
+def test_post_sync_phases_use_the_pinned_destination_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    existing_oob_route: bool,
+) -> None:
+    from vigil_cli import engagements as engagements_module
+    from vigil_cli import install as install_module
+    from vigil_cli import runtime as runtime_module
+    from vigil_cli.client_rosters import ClientRosterRepairResult
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.engagements import ClientEntrypointRepairResult
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    source = tmp_path / "source"
+    _installable_source(source)
+    install = tmp_path / "install"
+    requested_install_root = Path(os.path.abspath(install))
+    registry_path = tmp_path / "oob-allocations.json"
+    if existing_oob_route:
+        from vigil_cli.oob_tenants import allocate_tenant_route
+
+        allocate_tenant_route(
+            install,
+            tenant_name="install",
+            base_domain="oob.example.test",
+            registry_path=registry_path,
+            identity_factory=lambda: "existing-install-identity",
+        )
+    detached = tmp_path / "detached"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel.txt"
+    sentinel.write_text("outside untouched\n", encoding="utf-8")
+    original_cwd = Path.cwd()
+    swapped = False
+    received_roots: list[Path] = []
+
+    def swap_public_root(root: Path) -> None:
+        nonlocal swapped
+        received_roots.append(root)
+        if not swapped:
+            install.rename(detached)
+            install.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        (root / f"{phase}-effect").write_text("phase effect\n", encoding="utf-8")
+
+    def roster(root: Path, **_kwargs) -> ClientRosterRepairResult:
+        if phase == "roster":
+            swap_public_root(root)
+        return ClientRosterRepairResult()
+
+    def entrypoint(root: Path, **_kwargs) -> ClientEntrypointRepairResult:
+        if phase == "entrypoint":
+            swap_public_root(root)
+        return ClientEntrypointRepairResult(
+            scanned_count=0,
+            reconciled=(),
+            skipped=(),
+        )
+
+    real_initialize_tenant_route = install_module.initialize_tenant_route
+
+    def oob(root: Path, **kwargs) -> None:
+        if phase == "oob":
+            swap_public_root(root)
+            real_initialize_tenant_route(root, **kwargs)
+
+    real_write_install_meta = install_module.write_install_meta
+
+    def stamp(root: Path, source_root: Path, **kwargs: int) -> dict[str, object]:
+        if phase == "stamp":
+            swap_public_root(root)
+        return real_write_install_meta(root, source_root, **kwargs)
+
+    real_build_runtime = runtime_module.build_runtime
+
+    def image(root: Path, **kwargs) -> None:
+        if phase == "image":
+            swap_public_root(root)
+        real_build_runtime(root, **kwargs)
+
+    def runner(argv: list[str], **_kwargs) -> DockerResult:
+        if argv[:2] == ["docker", "build"]:
+            (Path(argv[-1]) / "docker-runner-effect").write_text(
+                "docker effect\n", encoding="utf-8"
+            )
+        return DockerResult(0, "", "")
+
+    monkeypatch.setattr(install_module, "repair_engagement_client_rosters", roster)
+    monkeypatch.setattr(
+        engagements_module, "repair_engagement_client_entrypoints", entrypoint
+    )
+    monkeypatch.setattr(install_module, "initialize_tenant_route", oob)
+    monkeypatch.setattr(install_module, "write_install_meta", stamp)
+    monkeypatch.setattr(install_module, "build_runtime", image)
+    if phase == "oob":
+        monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.test")
+
+    with pytest.raises(OSError, match="replaced directory"):
+        install_module.install_from_source(
+            install_module.InstallOptions(
+                source_root=source,
+                install_root=install,
+                force_image=phase == "image",
+                verify_docker_image=phase == "image",
+            ),
+            runner=runner,
+        )
+
+    assert received_roots == [Path(".")]
+    assert Path.cwd() == original_cwd
+    assert sentinel.read_text(encoding="utf-8") == "outside untouched\n"
+    assert sorted(path.name for path in outside.iterdir()) == ["sentinel.txt"]
+    if phase == "oob":
+        registry = json.loads(registry_path.read_text())
+        [allocation] = registry["allocations"].values()
+        assert allocation["install_root"] == str(requested_install_root)
+
+
+@pytest.mark.parametrize("operation", ["manifest", "copy"])
+def test_special_file_swap_is_opened_nonblocking_and_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    from vigil_cli import install_fs, install_manifest
+
+    source = tmp_path / "source"
+    source.mkdir()
+    source_file = source / "payload"
+    source_file.write_bytes(b"regular\n")
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    source_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY)
+    destination_fd = os.open(destination, os.O_RDONLY | os.O_DIRECTORY)
+    real_open = os.open
+    opened_nonblocking = False
+
+    def guarded_open(path, flags, *args, **kwargs):
+        nonlocal opened_nonblocking
+        if path == "payload":
+            opened_nonblocking = bool(flags & os.O_NONBLOCK)
+            if not opened_nonblocking:
+                raise AssertionError("special-file candidate opened without O_NONBLOCK")
+        return real_open(path, flags, *args, **kwargs)
+
+    source_file.unlink()
+    try:
+        os.mkfifo(source_file)
+    except OSError as exc:
+        os.close(source_fd)
+        os.close(destination_fd)
+        pytest.skip(f"FIFO unavailable: {exc}")
+    monkeypatch.setattr(install_fs.os, "open", guarded_open)
+
+    try:
+        with pytest.raises(OSError, match="non-regular file"):
+            if operation == "copy":
+                install_fs.copy_regular_file(
+                    source_fd,
+                    "payload",
+                    destination_fd,
+                    "payload",
+                    source_display=source_file,
+                    destination_display=destination / "payload",
+                )
+            else:
+                metadata = os.stat(
+                    "payload", dir_fd=source_fd, follow_symlinks=False
+                )
+                install_manifest._read_regular_file(
+                    source_fd, "payload", source_file, metadata
+                )
+    finally:
+        os.close(source_fd)
+        os.close(destination_fd)
+
+    assert opened_nonblocking is True
+
+
+@pytest.mark.parametrize("failure", ["close", "replace"])
+def test_atomic_publication_failure_cleans_temp_and_preserves_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    from vigil_cli import install_fs
+
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    published = destination / "payload"
+    published.write_bytes(b"original")
+    directory_fd = os.open(destination, os.O_RDONLY | os.O_DIRECTORY)
+    if failure == "replace":
+        monkeypatch.setattr(
+            install_fs.os,
+            "replace",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("replace failed")),
+        )
+    else:
+        real_close = install_fs.os.close
+        failed = False
+
+        def close_then_fail(fd: int) -> None:
+            nonlocal failed
+            real_close(fd)
+            if not failed:
+                failed = True
+                raise OSError("close failed")
+
+        monkeypatch.setattr(install_fs.os, "close", close_then_fail)
+
+    try:
+        with pytest.raises(OSError, match=f"{failure} failed"):
+            install_fs.atomic_write_bytes(
+                directory_fd,
+                "payload",
+                b"replacement",
+                mode=0o644,
+                display=published,
+            )
+    finally:
+        if failure != "close":
+            os.close(directory_fd)
+
+    assert published.read_bytes() == b"original"
+    assert sorted(path.name for path in destination.iterdir()) == ["payload"]
+
+
+def test_install_prunes_removed_required_root_except_preserved_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli import install as install_module
+    from vigil_cli.status import install_staleness
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    source = tmp_path / "source"
+    _installable_source(source)
+    stale = source / "orchestrator" / "stale.txt"
+    stale.write_text("remove me\n", encoding="utf-8")
+    install = tmp_path / "install"
+    options = install_module.InstallOptions(
+        source_root=source,
+        install_root=install,
+        verify_docker_image=False,
+    )
+    install_module.install_from_source(options)
+    preserved = install / "orchestrator" / "backend" / "data" / "keep.db"
+    preserved.write_bytes(b"keep")
+    shutil.rmtree(source / "orchestrator")
+
+    install_module.install_from_source(options)
+
+    assert preserved.read_bytes() == b"keep"
+    assert not (install / "orchestrator" / "stale.txt").exists()
+    assert install_staleness(install, source_root=source)["state"] == "current"
 
 
 def test_install_staleness_unknown_without_resolvable_source(tmp_path: Path) -> None:
@@ -1646,6 +2689,7 @@ def test_install_in_place_first_run_is_not_an_upgrade(
     from vigil_cli.install import InstallOptions, install_from_source
 
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.test")
     root = tmp_path / "checkout"
     _seed_source_tree(root)
     seen = _capture_tenant_route(monkeypatch)
@@ -1666,6 +2710,7 @@ def test_install_in_place_second_run_is_an_upgrade(
     from vigil_cli.install import InstallOptions, install_from_source
 
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.test")
     root = tmp_path / "checkout"
     _seed_source_tree(root)
     seen = _capture_tenant_route(monkeypatch)
@@ -1690,6 +2735,7 @@ def test_install_out_of_tree_over_existing_install_is_an_upgrade(
     from vigil_cli.status import INSTALL_META_FILENAME
 
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.test")
     source = tmp_path / "source"
     _seed_source_tree(source)
 
@@ -1726,6 +2772,7 @@ def test_install_out_of_tree_into_empty_root_is_not_an_upgrade(
     from vigil_cli.install import InstallOptions, install_from_source
 
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.test")
     source = tmp_path / "source"
     _seed_source_tree(source)
     seen = _capture_tenant_route(monkeypatch)
@@ -1740,22 +2787,104 @@ def test_install_out_of_tree_into_empty_root_is_not_an_upgrade(
     assert seen == [False]
 
 
-def test_install_from_source_dry_run_does_not_stamp(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("prior_marker", "expected_upgrade"),
+    [(None, False), (".vigil-install-meta.json", True)],
+)
+def test_install_from_source_dry_run_preflights_and_reports_state_without_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prior_marker: str | None,
+    expected_upgrade: bool,
+) -> None:
     from vigil_cli.install import InstallOptions, install_from_source
-    from vigil_cli.status import read_install_meta
 
     source = tmp_path / "source"
-    (source / "agent").mkdir(parents=True)
+    (source / "agent" / "engagements").mkdir(parents=True)
+    (source / "README.md").write_text("managed source\n", encoding="utf-8")
     install = tmp_path / "install"
     install.mkdir()
+    if prior_marker is not None:
+        (install / prior_marker).write_text("{}\n", encoding="utf-8")
+    sentinel = install / "operator-state.txt"
+    sentinel.write_text("preserve me\n", encoding="utf-8")
+    before = {
+        path.relative_to(tmp_path): (path.lstat().st_mode, path.read_bytes())
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
 
-    install_from_source(
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("dry-run crossed a mutating install phase")
+
+    monkeypatch.setattr("vigil_cli.install._sync_install_files", forbidden)
+    monkeypatch.setattr("vigil_cli.install.config_module.load_config", forbidden)
+    monkeypatch.setattr("vigil_cli.install.initialize_tenant_route", forbidden)
+    monkeypatch.setattr("vigil_cli.install.repair_engagement_client_rosters", forbidden)
+    monkeypatch.setattr("vigil_cli.install.write_install_meta", forbidden)
+    monkeypatch.setattr("vigil_cli.install.build_runtime", forbidden)
+    monkeypatch.setattr("vigil_cli.install.docker.image_exists", forbidden)
+
+    result = install_from_source(
         InstallOptions(
-            source_root=source, install_root=install, dry_run=True, verify_docker_image=False
+            source_root=source,
+            install_root=install,
+            dry_run=True,
+            force_image=True,
+            verify_docker_image=True,
         )
     )
 
-    assert read_install_meta(install) is None
+    assert result.install_root == install
+    assert result.is_upgrade is expected_upgrade
+    assert result.image_built is False
+    assert before == {
+        path.relative_to(tmp_path): (path.lstat().st_mode, path.read_bytes())
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+
+
+def test_install_from_source_dry_run_rejects_unsafe_destination(
+    tmp_path: Path,
+) -> None:
+    from vigil_cli.install import InstallOptions, install_from_source
+
+    source = tmp_path / "source"
+    source.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel"
+    sentinel.write_text("untouched\n", encoding="utf-8")
+    install = tmp_path / "install"
+    install.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(OSError, match="unsafe symbolic link"):
+        install_from_source(
+            InstallOptions(source_root=source, install_root=install, dry_run=True)
+        )
+
+    assert sentinel.read_text(encoding="utf-8") == "untouched\n"
+
+
+def test_install_from_source_dry_run_rejects_unsafe_managed_source(
+    tmp_path: Path,
+) -> None:
+    from vigil_cli.install import InstallOptions, install_from_source
+
+    source = tmp_path / "source"
+    source.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (source / "agent").symlink_to(outside, target_is_directory=True)
+    install = tmp_path / "install"
+
+    with pytest.raises(OSError, match="unsafe symbolic link"):
+        install_from_source(
+            InstallOptions(source_root=source, install_root=install, dry_run=True)
+        )
+
+    assert not install.exists()
 
 
 def test_up_source_sync_restamps_the_working_root(
@@ -1874,9 +3003,11 @@ def test_assess_passthrough_is_silent_when_install_is_current(
     (source / "agent" / "scripts").mkdir(parents=True)
     (source / "orchestrator").mkdir(parents=True)
     _init_git_repo(source, {"README.md": "seed\n"})
+    (source / "agent" / "scripts" / "assess.py").write_text("#!\n", encoding="utf-8")
     install = tmp_path / "install"
-    (install / "agent" / "scripts").mkdir(parents=True)
-    (install / "agent" / "scripts" / "assess.py").write_text("#!\n", encoding="utf-8")
+    shutil.copytree(source / "agent", install / "agent")
+    shutil.copytree(source / "orchestrator", install / "orchestrator")
+    shutil.copy2(source / "README.md", install / "README.md")
     write_install_meta(install, source)
     monkeypatch.setenv("VIGIL_SOURCE_DIR", str(source))
     monkeypatch.setattr(main_module.os, "execvpe", lambda *_a: None)
@@ -2019,9 +3150,7 @@ def test_mitmproxy_docker_start_builds_and_mounts_engagements_root(tmp_path: Pat
         "ORCHESTRATOR_BASE_URL=http://127.0.0.1:18000\n",
         encoding="utf-8",
     )
-    dockerfile = install_root / "agent" / "docker" / "mitmproxy" / "Dockerfile"
-    dockerfile.parent.mkdir(parents=True)
-    dockerfile.write_text("FROM python:3.12-slim\n", encoding="utf-8")
+    _make_mitmproxy_inputs(install_root)
     commands: list[list[str]] = []
 
     def runner(argv: list[str], **_: object) -> DockerResult:
@@ -2050,8 +3179,12 @@ def test_mitmproxy_docker_start_builds_and_mounts_engagements_root(tmp_path: Pat
 
     build_command = next(command for command in commands if command[:3] == ["docker", "build", "-t"])
     run_command = next(command for command in commands if command[:3] == ["docker", "run", "-d"])
-    assert str(install_root / "agent" / "docker" / "mitmproxy" / "Dockerfile") in build_command
-    assert str(install_root / "agent") == build_command[-1]
+    build_context = Path(build_command[-1])
+    build_dockerfile = Path(build_command[build_command.index("-f") + 1])
+    assert build_context != install_root
+    assert build_context != install_root / "agent"
+    assert build_context.name.startswith("vigil-proxy-build-")
+    assert build_dockerfile == build_context / "Dockerfile"
     assert "--add-host=host.docker.internal:host-gateway" in run_command
     assert "127.0.0.1:9090:8080" in run_command
     # New contract: bind-mount the whole engagements tree at /engagements.
@@ -2061,6 +3194,92 @@ def test_mitmproxy_docker_start_builds_and_mounts_engagements_root(tmp_path: Pat
     assert "ORCHESTRATOR_BASE_URL=http://host.docker.internal:18000" in run_command
     # The --set switches the addon to multi-engagement mode.
     assert "engagements_root=/engagements" in run_command
+
+
+def test_mitmproxy_build_stages_canonical_scope_parser_without_install_state(
+    tmp_path: Path,
+) -> None:
+    """The proxy image imports the shared scope parser without sending the
+    install root (and its engagement secrets) to Docker as build context.
+
+    Regression: ``scope.py`` fell back to ``parents[4]`` inside the image when
+    ``vigil_cli`` was absent.  Its image path is only three parents deep, so the
+    addon crashed before mitmproxy could open its port.
+    """
+    from vigil_cli import mitmproxy as mitmproxy_module
+    from vigil_cli import scope_entries as canonical_scope_entries
+    from vigil_cli.docker import DockerResult
+
+    install_root = tmp_path / "install"
+    _make_mitmproxy_inputs(install_root)
+    assess = install_root / "agent" / "scripts" / "assess"
+    (assess / "lib").mkdir(parents=True)
+    shutil.copy2(
+        repo_root / "agent" / "scripts" / "assess" / "lib" / "scope.py",
+        assess / "lib" / "scope.py",
+    )
+    (assess / "__init__.py").write_text("", encoding="utf-8")
+    (assess / "lib" / "__init__.py").write_text("", encoding="utf-8")
+
+    # These are runtime state, not image sources. Merely exposing them as build
+    # context sends their bytes to the Docker daemon even when COPY omits them.
+    (install_root / ".env").write_text("TOP_LEVEL_SECRET=present\n", encoding="utf-8")
+    engagement = install_root / "agent" / "engagements" / "customer"
+    engagement.mkdir(parents=True)
+    (engagement / ".env").write_text("ENGAGEMENT_SECRET=present\n", encoding="utf-8")
+    (engagement / "scope.json").write_text("{}\n", encoding="utf-8")
+
+    observed_context: Path | None = None
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        nonlocal observed_context
+        assert argv[:3] == ["docker", "build", "--no-cache"]
+        context = Path(argv[-1])
+        observed_context = context
+        assert context != install_root
+        assert context != install_root / "agent"
+        assert (context / "Dockerfile").is_file()
+        assert (context / "scripts" / "proxy_addon.py").is_file()
+        assert (context / "scripts" / "assess" / "lib" / "scope.py").is_file()
+
+        staged_scope_entries = context / "vigil_cli" / "scope_entries.py"
+        assert staged_scope_entries.read_bytes() == Path(
+            canonical_scope_entries.__file__
+        ).read_bytes()
+        assert not (context / ".env").exists()
+        assert not (context / "engagements").exists()
+        assert not (context / "agent" / "engagements").exists()
+
+        # Recreate the Dockerfile's /opt layout and import from an unrelated cwd
+        # so repository/install-root sys.path entries cannot mask image drift.
+        image_opt = tmp_path / "image-opt"
+        shutil.copytree(context / "scripts" / "assess", image_opt / "assess")
+        shutil.copytree(context / "vigil_cli", image_opt / "vigil_cli")
+        isolated_cwd = tmp_path / "isolated"
+        isolated_cwd.mkdir()
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(image_opt)
+        imported = subprocess.run(
+            [
+                sys.executable,
+                "-S",
+                "-c",
+                "from assess.lib.scope import classify_scope_entry; "
+                "assert classify_scope_entry('Example.COM')['host'] == 'example.com'",
+            ],
+            cwd=isolated_cwd,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert imported.returncode == 0, imported.stderr
+        return DockerResult(0, "", "")
+
+    mitmproxy_module.build_image(install_root, force=True, runner=runner)
+
+    assert observed_context is not None
+    assert not observed_context.exists()
 
 
 def test_mitmproxy_start_rebuilds_existing_stale_image(tmp_path: Path) -> None:
@@ -2916,6 +4135,26 @@ def test_vigil_runtime_resources_renders_configured_and_live_state(monkeypatch: 
     assert "pids.max=512" in output
 
 
+def test_vigil_runtime_resources_prints_the_proxy_url_with_its_credentials(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The egress row shows the configured proxy URL exactly as configured.
+
+    The operator set that URL on their own machine; a `***@host` rewrite only
+    hid which credential the runtime was about to egress through (ADR 0019)."""
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.runtime import vigil_runtime_resources
+
+    monkeypatch.setenv("VIGIL_RUNTIME_EGRESS_PROXY", "http://operator:hunter2@proxy.test:8080")
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        return DockerResult(0, "", "")
+
+    vigil_runtime_resources(runner=runner, json_output=True)
+    egress = json.loads(capsys.readouterr().out)["egress"]
+    assert egress["proxy"] == "http://operator:hunter2@proxy.test:8080"
+
+
 def test_vigil_runtime_resources_handles_stopped_container(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     from vigil_cli.docker import DockerResult
     from vigil_cli.runtime import vigil_runtime_resources
@@ -3026,6 +4265,7 @@ def test_engagement_select_uses_fzf_when_requested(tmp_path: Path, monkeypatch: 
 
     monkeypatch.setattr(engagements.shutil, "which", fake_which)
     monkeypatch.setattr(engagements.subprocess, "run", fake_run)
+    monkeypatch.setattr(engagements.sys, "stdin", _TTYStdin())
 
     assert engagements.resolve_engagement_path(tmp_path / "install", select=True) == newer.resolve()
 
@@ -3466,6 +4706,9 @@ def test_auth_status_probe_reports_requested_identity_instead_of_active(
     # Both printed lines name the REQUESTED identity.
     assert "\tidentity=cap-target\t" in status_out
     assert "other-active" not in status_out
+    # And the status line carries the cookie itself, not a count of cookies: the
+    # value is what tells the operator which session the next request replays as.
+    assert "\tcookies=sid=b\t" in status_out
     assert liveness_out.startswith(
         "liveness=live\tidentity=cap-target\tscope=https://chat.example.test\t"
     )
@@ -3784,6 +5027,7 @@ def test_auth_select_selector_overrides_current_engagement(tmp_path: Path, monke
 
     monkeypatch.setattr(engagements.shutil, "which", fake_which)
     monkeypatch.setattr(engagements.subprocess, "run", fake_run)
+    monkeypatch.setattr(engagements.sys, "stdin", _TTYStdin())
     monkeypatch.chdir(older)
 
     main_module.main(["--root", str(install_root), "auth", "clear", "--select"])
@@ -4338,9 +5582,7 @@ def test_channel_verdict_cache_write_failure_never_fails_the_check(
 # `_oob_options` resolves the default tenant domain, and `interactions_for_domain`
 # filters callbacks against it — the fixture host must live under it.
 def _oob_poll_payload_host() -> str:
-    from vigil_cli.oob import DEFAULT_OOB_DOMAIN
-
-    return f"agent-a.{DEFAULT_OOB_DOMAIN}"
+    return "agent-a.oob.example.test"
 
 
 def _seed_oob_poll_engagement(install_root: Path, key: str) -> Path:
@@ -4383,6 +5625,7 @@ def _run_oob_poll(
 ) -> _OobPollClient:
     from vigil_cli import main as main_module
 
+    monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.test")
     key = "2026-08-25-120000-poll"
     _seed_oob_poll_engagement(install_root, key)
     client = _OobPollClient(probes)
@@ -5063,7 +6306,11 @@ def test_up_skips_oob_when_existing_sessions_are_active(tmp_path: Path, monkeypa
     assert calls == ["runtime", "orchestrator"]
 
 
-def test_up_starts_oob_when_only_client_sessions_exist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_up_skips_oob_when_only_client_sessions_exist_but_endpoint_is_unconfigured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     from vigil_cli import up as up_module
 
     calls: list[str] = []
@@ -5088,10 +6335,18 @@ def test_up_starts_oob_when_only_client_sessions_exist(tmp_path: Path, monkeypat
 
     up_module.run_up(up_module.UpOptions(install_root=tmp_path), runner=lambda *args, **kwargs: None)
 
-    assert calls == ["runtime", "orchestrator", "oob"]
+    assert calls == ["runtime", "orchestrator"]
+    output = capsys.readouterr().out
+    assert "oob\tskipped; infrastructure is not configured" in output
+    assert "vigil config set oob.frp_host <host>" in output
+    assert "vigil config set oob.domain <domain>" in output
 
 
-def test_up_starts_orchestrator_before_prompting_for_missing_frp_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_up_does_not_prompt_for_token_until_oob_endpoint_is_configured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     from vigil_cli import up as up_module
 
     calls: list[str] = []
@@ -5121,10 +6376,10 @@ def test_up_starts_orchestrator_before_prompting_for_missing_frp_token(tmp_path:
 
     up_module.run_up(up_module.UpOptions(install_root=tmp_path), runner=lambda *args, **kwargs: None)
 
-    # Mitmproxy now starts unconditionally (it serves every engagement at
-    # once), so the ordered call list includes it between orchestrator and the
-    # oob token prompt.
-    assert calls[:4] == ["runtime", "orchestrator", "mitmproxy", "frp-prompt"]
+    assert calls == ["runtime", "orchestrator", "mitmproxy"]
+    output = capsys.readouterr().out
+    assert "oob\tskipped; infrastructure is not configured" in output
+    assert "vigil config set oob.frp_host <host>" in output
 
 
 def test_up_passes_injected_runner_to_image_builds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -5172,6 +6427,9 @@ def _make_mitmproxy_inputs(install_root: Path) -> tuple[Path, Path]:
     addon = install_root / "agent" / "scripts" / "proxy_addon.py"
     addon.parent.mkdir(parents=True)
     addon.write_text("# addon\n", encoding="utf-8")
+    assess = install_root / "agent" / "scripts" / "assess"
+    assess.mkdir()
+    (assess / "__init__.py").write_text("", encoding="utf-8")
     return dockerfile, addon
 
 
@@ -5258,6 +6516,26 @@ def test_mitmproxy_build_rebuilds_when_assess_package_changes(
 
     assert any(command[:3] == ["docker", "build", "-t"] for command in commands)
     assert "image built" in capsys.readouterr().out
+
+
+def test_mitmproxy_freshness_detects_canonical_scope_parser_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli import mitmproxy as mitmproxy_module
+
+    install_root = tmp_path / "install"
+    _make_mitmproxy_inputs(install_root)
+    canonical = tmp_path / "scope_entries.py"
+    canonical.write_text("# canonical v1\n", encoding="utf-8")
+    monkeypatch.setattr(mitmproxy_module.scope_entries, "__file__", str(canonical))
+    stamped = _mitmproxy_digest(install_root)
+
+    canonical.write_text("# canonical v2\n", encoding="utf-8")
+
+    assert _mitmproxy_digest(install_root) != stamped
+    commands: list[list[str]] = []
+    mitmproxy_module.build_image(install_root, runner=_label_runner(commands, stamped))
+    assert any(command[:3] == ["docker", "build", "-t"] for command in commands)
 
 
 def test_mitmproxy_freshness_ignores_bytecode_and_cache_churn(tmp_path: Path) -> None:
@@ -5906,6 +7184,107 @@ def test_transition_phase_both_engagement_requires_track_for_ambiguous_complete(
 
     assert exc.value.code == 2
     assert "pass --track web or --track code" in capsys.readouterr().err
+
+
+def test_transition_phase_both_missing_code_phase_requires_supported_repair(
+    monkeypatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _load_assess_module(
+        "transition_phase_missing_code_phase_module",
+        "agent/scripts/assess/commands/transition_phase.py",
+    )
+    engagement = tmp_path / "agent" / "engagements" / "eng-test"
+    engagement.mkdir(parents=True)
+    scope_path = engagement / "scope.json"
+    scope_path.write_text(
+        json.dumps({"engagement_type": "both", "current_phase": "collect"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(engagement),
+            engagement_key=engagement.name,
+            agent_root=str(tmp_path / "agent"),
+        ),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(engagement),
+                target_phase="classify-map",
+                force=False,
+                track="code",
+                reason="",
+            )
+        )
+
+    assert exc.value.code == 2
+    assert "repair-tracks" in capsys.readouterr().err
+    assert "code_phase" not in json.loads(scope_path.read_text(encoding="utf-8"))
+
+
+def test_transition_phase_both_completes_only_after_each_track(
+    monkeypatch, tmp_path: Path
+) -> None:
+    module = _load_assess_module(
+        "transition_phase_aggregate_completion_module",
+        "agent/scripts/assess/commands/transition_phase.py",
+    )
+    engagement = tmp_path / "agent" / "engagements" / "eng-test"
+    engagement.mkdir(parents=True)
+    scope_path = engagement / "scope.json"
+    scope_path.write_text(
+        json.dumps(
+            {
+                "engagement_type": "both",
+                "current_phase": "report",
+                "code_phase": "fuzz",
+                "status": "in_progress",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir=str(engagement),
+            engagement_key=engagement.name,
+            agent_root=str(tmp_path / "agent"),
+        ),
+    )
+    monkeypatch.setattr(module, "_check_preconditions", lambda *_args, **_kwargs: [])
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir=str(engagement),
+            target_phase="complete",
+            force=False,
+            track="web",
+            reason="",
+        )
+    )
+    first = json.loads(scope_path.read_text(encoding="utf-8"))
+    assert first["current_phase"] == "complete"
+    assert first["code_phase"] == "fuzz"
+    assert first["status"] == "in_progress"
+
+    module.run(
+        SimpleNamespace(
+            engagement_dir=str(engagement),
+            target_phase="complete",
+            force=False,
+            track="code",
+            reason="",
+        )
+    )
+    second = json.loads(scope_path.read_text(encoding="utf-8"))
+    assert second["status"] == "completed"
 
 
 def test_transition_phase_exploit_variant_gate_requests_full_dispatch_page(
@@ -7599,15 +8978,15 @@ def test_blue_initial_report_scaffold_uses_customer_and_platform(
         CreateEngagementOptions(
             install_root=install_root,
             engagement_type="blue",
-            customer="acme-corp",
+            customer="acme",
             platforms=["gws"],
-            tenant_reference_paths=["agent/references/tenants/acme-corp-workspace.md"],
+            tenant_reference_paths=["agent/references/tenants/acme-workspace.md"],
         )
     )
 
     report = (created.path / "report.md").read_text(encoding="utf-8")
-    assert "- **Customer**: acme-corp" in report
-    assert "- **Scope**: acme-corp:gws" in report
+    assert "- **Customer**: acme" in report
+    assert "- **Scope**: acme:gws" in report
 
 
 def test_blue_tenant_init_generic_platform_has_template(
@@ -7621,13 +9000,13 @@ def test_blue_tenant_init_generic_platform_has_template(
     shutil.copytree(repo_root / "agent" / "references" / "tenants", tenant_root)
 
     blue_module._cmd_tenant_init(
-        SimpleNamespace(customer="acme-corp", platform="generic", force=False),
+        SimpleNamespace(customer="acme", platform="generic", force=False),
         install_root,
     )
 
-    created = tenant_root / "acme-corp-generic.md"
+    created = tenant_root / "acme-generic.md"
     assert created.is_file()
-    assert "acme-corp-generic.md" in capsys.readouterr().out
+    assert "acme-generic.md" in capsys.readouterr().out
 
 
 def test_blue_customers_lists_known_tenant_refs_grouped(
@@ -7639,16 +9018,16 @@ def test_blue_customers_lists_known_tenant_refs_grouped(
     tenant_root = tmp_path / "agent" / "references" / "tenants"
     tenant_root.mkdir(parents=True)
     (tenant_root / "_template-gws.md").write_text("template\n", encoding="utf-8")
-    (tenant_root / "acme-corp-workspace.md").write_text("gws\n", encoding="utf-8")
-    (tenant_root / "acme-corp-m365.md").write_text("m365\n", encoding="utf-8")
-    (tenant_root / "acme-aws.md").write_text("aws\n", encoding="utf-8")
+    (tenant_root / "acme-workspace.md").write_text("gws\n", encoding="utf-8")
+    (tenant_root / "acme-m365.md").write_text("m365\n", encoding="utf-8")
+    (tenant_root / "other-example-aws.md").write_text("aws\n", encoding="utf-8")
 
     blue_module._cmd_customers(SimpleNamespace(platform=None, json=False), tmp_path)
 
     output = capsys.readouterr().out
     assert "customer\tplatforms\ttenant_reference_paths" in output
-    assert "acme\taws\t" in output
-    assert "acme-corp\tgws,m365\t" in output
+    assert "other-example\taws\t" in output
+    assert "acme\tgws,m365\t" in output
     assert "_template" not in output
 
 
@@ -7660,17 +9039,17 @@ def test_blue_customers_json_filters_by_platform(
 
     tenant_root = tmp_path / "agent" / "references" / "tenants"
     tenant_root.mkdir(parents=True)
-    (tenant_root / "acme-corp-workspace.md").write_text("gws\n", encoding="utf-8")
-    (tenant_root / "acme-corp-m365.md").write_text("m365\n", encoding="utf-8")
+    (tenant_root / "acme-workspace.md").write_text("gws\n", encoding="utf-8")
+    (tenant_root / "acme-m365.md").write_text("m365\n", encoding="utf-8")
 
     blue_module._cmd_customers(SimpleNamespace(platform="gws", json=True), tmp_path)
 
     rows = json.loads(capsys.readouterr().out)
     assert rows == [
         {
-            "customer": "acme-corp",
+            "customer": "acme",
             "platforms": ["gws"],
-            "tenant_reference_paths": [str(tenant_root / "acme-corp-workspace.md")],
+            "tenant_reference_paths": [str(tenant_root / "acme-workspace.md")],
         }
     ]
 
@@ -7684,7 +9063,7 @@ def test_blue_engage_guides_operator_to_start_session_and_paste_alert(
 
     tenant_root = tmp_path / "agent" / "references" / "tenants"
     tenant_root.mkdir(parents=True)
-    (tenant_root / "acme-corp-workspace.md").write_text("tenant\n", encoding="utf-8")
+    (tenant_root / "acme-workspace.md").write_text("tenant\n", encoding="utf-8")
     created_path = tmp_path / "agent" / "engagements" / "eng-1"
 
     monkeypatch.setattr(
@@ -7695,7 +9074,7 @@ def test_blue_engage_guides_operator_to_start_session_and_paste_alert(
 
     blue_module._cmd_engage(
         SimpleNamespace(
-            customer="acme-corp",
+            customer="acme",
             platform="gws",
             severity="high",
             source=None,
@@ -7715,7 +9094,7 @@ def test_blue_engage_guides_operator_to_start_session_and_paste_alert(
     assert "Then paste the alert into the operator chat" in captured.err
     assert "vigil blue alert record" in captured.err
     assert (
-        "Shortcut next time: vigil blue engage --customer acme-corp "
+        "Shortcut next time: vigil blue engage --customer acme "
         "--platform gws --start codex" in captured.err
     )
     # The red footer (mitmproxy/oob plumbing) must never leak into a blue engage.
@@ -7732,7 +9111,7 @@ def test_blue_engage_start_chains_into_operator_session(
 
     tenant_root = tmp_path / "agent" / "references" / "tenants"
     tenant_root.mkdir(parents=True)
-    (tenant_root / "acme-corp-workspace.md").write_text("tenant\n", encoding="utf-8")
+    (tenant_root / "acme-workspace.md").write_text("tenant\n", encoding="utf-8")
     created_path = tmp_path / "agent" / "engagements" / "eng-1"
 
     monkeypatch.setattr(
@@ -7749,7 +9128,7 @@ def test_blue_engage_start_chains_into_operator_session(
 
     blue_module._cmd_engage(
         SimpleNamespace(
-            customer="acme-corp",
+            customer="acme",
             platform="gws",
             severity="high",
             source=None,
@@ -7778,7 +9157,7 @@ def test_blue_engage_non_tty_without_flags_lists_combos(
 
     tenant_root = tmp_path / "agent" / "references" / "tenants"
     tenant_root.mkdir(parents=True)
-    (tenant_root / "acme-corp-workspace.md").write_text("tenant\n", encoding="utf-8")
+    (tenant_root / "acme-workspace.md").write_text("tenant\n", encoding="utf-8")
 
     # pytest's captured stdin isn't a TTY; make that explicit and deterministic.
     monkeypatch.setattr(blue_module.sys, "stdin", SimpleNamespace(isatty=lambda: False))
@@ -7805,8 +9184,8 @@ def test_blue_engage_interactive_picker_numbered_fallback(
 
     tenant_root = tmp_path / "agent" / "references" / "tenants"
     tenant_root.mkdir(parents=True)
-    (tenant_root / "acme-corp-workspace.md").write_text("tenant\n", encoding="utf-8")
-    (tenant_root / "acme-corp-m365.md").write_text("tenant\n", encoding="utf-8")
+    (tenant_root / "acme-workspace.md").write_text("tenant\n", encoding="utf-8")
+    (tenant_root / "acme-m365.md").write_text("tenant\n", encoding="utf-8")
     created_path = tmp_path / "agent" / "engagements" / "eng-1"
 
     seen: dict[str, object] = {}
@@ -7821,7 +9200,7 @@ def test_blue_engage_interactive_picker_numbered_fallback(
     # Force the numbered-menu fallback (no fzf) and a TTY so the picker runs.
     monkeypatch.setattr(blue_module.shutil, "which", lambda _name: None)
     monkeypatch.setattr(blue_module.sys, "stdin", SimpleNamespace(isatty=lambda: True))
-    responses = iter(["1", "2", "high"])  # customer=acme-corp, platform=m365, severity=high
+    responses = iter(["1", "2", "high"])  # customer=acme, platform=m365, severity=high
     monkeypatch.setattr("builtins.input", lambda *_args, **_kwargs: next(responses))
 
     blue_module._cmd_engage(
@@ -7836,7 +9215,7 @@ def test_blue_engage_interactive_picker_numbered_fallback(
         tmp_path,
     )
 
-    assert seen["customer"] == "acme-corp"
+    assert seen["customer"] == "acme"
     assert seen["platforms"] == ["m365"]
     assert seen["severity"] == "high"
 
@@ -7869,9 +9248,9 @@ def test_engagement_create_blue_skips_red_footer(
         CreateEngagementOptions(
             install_root=install_root,
             engagement_type="blue",
-            customer="acme-corp",
+            customer="acme",
             platforms=["gws"],
-            tenant_reference_paths=["agent/references/tenants/acme-corp-workspace.md"],
+            tenant_reference_paths=["agent/references/tenants/acme-workspace.md"],
         )
     )
 
@@ -7924,7 +9303,7 @@ def test_blue_alert_record_body_file_stdin_reads_piped_alert(
 
     raw_path = eng_dir / "ir" / "alerts" / "AL-9.txt"
     assert raw_path.read_text(encoding="utf-8") == body
-    assert ["artifact", "register", str(raw_path), "--kind", "alert_intake", "--sensitive"] in calls
+    assert ["artifact", "register", str(raw_path), "--kind", "alert_intake"] in calls
     assert capsys.readouterr().out.strip() == str(raw_path)
 
 
@@ -8001,7 +9380,7 @@ def test_blue_alert_record_body_file_updates_scope_and_registers_artifact(
 
     raw_path = eng_dir / "ir" / "alerts" / "AL-1.txt"
     assert raw_path.read_text(encoding="utf-8") == body_path.read_text(encoding="utf-8")
-    assert ["artifact", "register", str(raw_path), "--kind", "alert_intake", "--sensitive"] in calls
+    assert ["artifact", "register", str(raw_path), "--kind", "alert_intake"] in calls
     assert any(call[:5] == ["log", "operator", "alert intake", "alert_intake", "alert recorded"] for call in calls)
     next_step = capsys.readouterr().err
     assert "vigil assess agent start --role alert-triage-specialist" in next_step
@@ -8359,20 +9738,33 @@ def test_host_exec_uses_agent_name_env_for_audit_payload(
             engagement_dir=str(tmp_path),
         ),
     )
-    monkeypatch.setattr(
-        module,
-        "_run_host_process",
-        lambda *_args, **_kwargs: (events.append("process") or (0, "ok\n", "", False)),
-    )
+    process_kwargs: dict[str, object] = {}
+
+    def _fake_run_host_process(*_args: object, **kwargs: object):
+        process_kwargs.update(kwargs)
+        events.append("process")
+        return 0, "ok\n", "", False
+
+    monkeypatch.setattr(module, "_run_host_process", _fake_run_host_process)
     prepared: list[tuple[list[str], str | None]] = []
-    monkeypatch.setattr(
-        module,
-        "prepare_execution_command",
-        lambda argv, **kwargs: (
-            prepared.append((list(argv), kwargs.get("identity"))) or "member"
+
+    def _fake_prepare(argv: list[str], **kwargs: object) -> str:
+        prepared.append((list(argv), kwargs.get("identity")))
+        report = kwargs.get("report")
+        if isinstance(report, dict):
+            report["required_header_status"] = "referenced_in_script"
+        return "member"
+
+    monkeypatch.setattr(module, "prepare_execution_command", _fake_prepare)
+    (tmp_path / "scope.json").write_text(
+        json.dumps(
+            {
+                "hosts": [],
+                "required_headers": {"X-Attribution": "researcher"},
+            }
         ),
+        encoding="utf-8",
     )
-    (tmp_path / "scope.json").write_text(json.dumps({"hosts": []}), encoding="utf-8")
 
     with pytest.raises(SystemExit) as exc_info:
         module.run(
@@ -8385,7 +9777,7 @@ def test_host_exec_uses_agent_name_env_for_audit_payload(
                 technique="T0000",
                 phase="investigate",
                 target_host="",
-                scope_host="acme-corp",
+                scope_host="acme",
                 cwd=None,
                 timeout=30,
                 audit_source="argv",
@@ -8399,6 +9791,13 @@ def test_host_exec_uses_agent_name_env_for_audit_payload(
     assert posts[0][1]["agent_name"] == "investigator"
     assert posts[0][1]["auth_context"] == "member"
     assert prepared == [(["echo", "ok"], "member")]
+    assert json.loads(posts[0][1]["notes"])["required_header_status"] == (
+        "referenced_in_script"
+    )
+    assert (
+        "VIGIL_REQUIRED_HEADERS",
+        "X-Attribution: researcher",
+    ) in process_kwargs["env_pairs"]
     assert posts[0][1]["status"] == "running"
     assert posts[0][1]["stdout"] == ""
     assert "command_hash" not in posts[0][1]
@@ -8477,7 +9876,7 @@ def test_host_exec_replays_pre_exec_post_after_lost_response_before_execution(
                 technique="T0000",
                 phase="investigate",
                 target_host="",
-                scope_host="acme-corp",
+                scope_host="acme",
                 cwd=None,
                 timeout=30,
                 audit_source="argv",
@@ -10204,6 +11603,97 @@ def test_host_exec_policy_refusal_uses_terminal_inline_audit_without_spills(
     assert payload["stderr_path"] is None
 
 
+@pytest.mark.parametrize(
+    ("container_key", "message_fragment"),
+    [
+        ("other-engagement", "other-engagement"),
+        ("eng", "cannot be executed by host-exec"),
+    ],
+)
+def test_host_exec_refuses_container_namespace_script_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    container_key: str,
+    message_fragment: str,
+) -> None:
+    module = _load_assess_module(
+        "host_exec_command_module_cross_engagement_path",
+        "agent/scripts/assess/commands/host_exec.py",
+    )
+    engagement_dir = tmp_path / "eng"
+    engagement_dir.mkdir()
+    (engagement_dir / "scope.json").write_text(
+        json.dumps({"hosts": ["allowed.example"]}), encoding="utf-8"
+    )
+    (engagement_dir / "probe.py").write_text(
+        'import requests\nrequests.get("https://allowed.example")\n',
+        encoding="utf-8",
+    )
+    posts: list[tuple[str, dict]] = []
+
+    class _Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def post(self, endpoint: str, payload: dict) -> dict:
+            posts.append((endpoint, payload))
+            return {"id": 42}
+
+        def close(self) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            self.close()
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+    monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "anonymous")
+    monkeypatch.setattr(
+        module,
+        "_run_host_process",
+        lambda *_args, **_kwargs: pytest.fail("policy-refused command must not execute"),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.run(
+            SimpleNamespace(
+                engagement_dir=str(engagement_dir),
+                from_json=None,
+                command=["python3", f"/engagements/{container_key}/probe.py"],
+                tool="python3",
+                intent="cross-engagement script path",
+                technique="T0000",
+                phase="investigate",
+                target_host="",
+                agent_name=None,
+                scope_host="",
+                cwd=None,
+                timeout=30,
+                audit_source="argv",
+                allow_destructive=False,
+                require_audit=True,
+                identity=None,
+                identity_scope="",
+            )
+        )
+
+    assert exc_info.value.code == 3
+    assert len(posts) == 1
+    assert message_fragment in posts[0][1]["stderr"]
+
+
 def test_host_exec_emits_nonblocking_recency_advisory_after_pre_exec_audit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -10338,7 +11828,7 @@ def test_host_exec_fails_closed_when_pre_exec_audit_record_fails(
                 phase="respond",
                 target_host="",
                 agent_name=None,
-                scope_host="acme-corp",
+                scope_host="acme",
                 cwd=None,
                 timeout=30,
                 audit_source="argv",
@@ -11024,7 +12514,7 @@ def test_blue_intake_gate_recorded_alert_passes_without_redundant_metadata(
     )
     eng_dir = tmp_path / "engagement"
     eng_dir.mkdir(parents=True, exist_ok=True)
-    ref_rel = "references/tenants/acme-corp.md"
+    ref_rel = "references/tenants/acme.md"
     ref_path = eng_dir / ref_rel
     ref_path.parent.mkdir(parents=True, exist_ok=True)
     ref_path.write_text("# tenant\n", encoding="utf-8")
@@ -12750,7 +14240,6 @@ def test_artifact_cli_registers_payload(
             agent_id="AG-1",
             agent_role="vulnerability-analyst",
             command_run_id=12,
-            sensitive=True,
             as_json=True,
         )
     )
@@ -12762,7 +14251,6 @@ def test_artifact_cli_registers_payload(
                 "path": "notes/VA-047.md",
                 "kind": "note",
                 "media_type": "text/markdown",
-                "sensitive": True,
                 "producer_agent_id": "AG-1",
                 "producer_agent_role": "vulnerability-analyst",
                 "producer_command_run_id": 12,
@@ -12810,6 +14298,48 @@ def test_artifact_cli_refresh_posts_endpoint(
 
     assert posts == [("artifacts/refresh", {})]
     assert capsys.readouterr().out.strip() == "refreshed=3 present=2 missing=1"
+
+
+def test_artifact_cli_targeted_refresh_and_unlink_use_exact_id(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_assess_module(
+        "artifact_command_module_targeted",
+        "agent/scripts/assess/commands/artifact.py",
+    )
+    calls: list[tuple[str, str, dict | None]] = []
+
+    class _Client:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        def post(self, endpoint: str, payload: dict):
+            calls.append(("post", endpoint, payload))
+            return {"refreshed": 1, "present": 1, "missing": 0}
+
+        def delete(self, endpoint: str):
+            calls.append(("delete", endpoint, None))
+            return {"id": 7, "relative_path": "notes/a.md", "related_finding_slug": None}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "AssessmentClient", _Client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
+    )
+
+    module._run_refresh(SimpleNamespace(engagement_dir="/tmp/eng", artifact_id=7, as_json=False))
+    module._run_unlink_finding(SimpleNamespace(engagement_dir="/tmp/eng", artifact_id=7, as_json=True))
+
+    assert calls == [
+        ("post", "artifacts/7/refresh", {}),
+        ("delete", "artifacts/7/finding-link", None),
+    ]
+    assert '"related_finding_slug": null' in capsys.readouterr().out
 
 
 def test_list_command_runs_cli_sends_fuzzy_search_flags(
@@ -14696,9 +16226,10 @@ def test_auth_status_reports_bearer_token_and_recommends_refresh(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """C42a: vigil assess auth-status reads auth.json and emits a structured
-    snapshot — auth_context, mode, expires_state, present token shapes, and
-    a refresh-path recommendation matching the C42 recovery loop. The
-    command does NOT write to auth.json or trigger a refresh."""
+    snapshot — auth_context, mode, expires_state, the auth material it carries
+    (raw values, the form an operator replays by hand), and a refresh-path
+    recommendation matching the C42 recovery loop. The command does NOT write
+    to auth.json or trigger a refresh."""
     eng_dir = tmp_path / "eng"
     eng_dir.mkdir(parents=True, exist_ok=True)
     module = _load_auth_status_module()
@@ -14773,8 +16304,8 @@ def test_auth_status_reports_bearer_token_and_recommends_refresh(
     assert snapshot["auth_context"] == "authenticated"
     assert snapshot["mode"] == "proxy_capture"
     assert snapshot["expires_state"] == "valid"
-    assert any("Authorization: Bearer" in t for t in snapshot["tokens"])
-    assert any("flat_cookies" in t for t in snapshot["tokens"])
+    assert "Authorization: Bearer aaa.bbb.ccc.ddd.eee.fff" in snapshot["tokens"]
+    assert "flat_cookies: sessionid=abc123" in snapshot["tokens"]
     assert snapshot["last_auth_probe"]["run_id"] == 7
     assert "Bearer token present" in snapshot["recommend"]
 

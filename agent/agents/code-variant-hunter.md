@@ -127,7 +127,7 @@ Before your dispatch returns, use the sequence selected by Operational Mode Gate
 
 **Phase 3 receipt-bearing mode:**
 
-1. `vigil assess finding record code-variant-hunter <finding-json>` per variant finding, each with
+1. `vigil assess finding record code-variant-hunter <finding-json> --agent-id <your-agent_id>` per variant finding, each with
    `links.variant_of` pointing at an assigned parent slug.
 2. `vigil assess code-record variant-check <per-file-receipt-json>` once for **every current
    admitted file**, including clean files, guarded matches, and bounded quick non-matches for files

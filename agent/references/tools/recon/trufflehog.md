@@ -77,7 +77,7 @@ Each line is one finding:
 | `VerificationError` | Present when verification attempted but failed (non-2xx or network error) |
 | `Raw` | Raw secret string as matched |
 | `RawV2` | Second capture group if the detector uses one |
-| `Redacted` | Partially masked version (safe for logs) |
+| `Redacted` | Tool-produced partial representation; do not use it in Vigil records when `Raw` is available |
 | `SourceMetadata.Data.Filesystem.file` | File where the secret was found |
 | `SourceMetadata.Data.Filesystem.line` | Line number |
 | `ExtraData` | Detector-specific context (e.g. IAM ARN for AWS) |

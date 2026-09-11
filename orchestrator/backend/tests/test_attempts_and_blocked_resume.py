@@ -46,6 +46,16 @@ def _seed_finding(client, eng: Path, slug: str, *, details: dict | None = None) 
     (eng / "notes").mkdir(parents=True, exist_ok=True)
     note = eng / "notes" / f"{slug}-note.md"
     note.write_text(f"{slug} evidence", encoding="utf-8")
+    author_id = f"attempts-author-{slug.lower()}"
+    dispatch = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": author_id,
+            "agent_role": "vulnerability-analyst",
+            "task": f"record {slug}",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
     payload = {
         "slug": slug,
         "title": f"{slug} finding",
@@ -56,6 +66,7 @@ def _seed_finding(client, eng: Path, slug: str, *, details: dict | None = None) 
         "summary": f"{slug} summary",
         "evidence_ref": f"notes/{slug}-note.md",
         "source_name": "vulnerability-analyst",
+        "provenance": {"agent_id": author_id},
         "details": {
             "impact": "impact",
             "evidence": "evidence",

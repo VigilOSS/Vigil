@@ -133,7 +133,7 @@ def _row_host_filtered_out(host: Any, scope: tuple[list[str], list[str]] | None)
     """True only when the filter is known and a non-empty host is not retained.
 
     I-07 dataset shaping: an observed-but-not-owned co-tenant ``pending`` row
-    (``otherchurch.acme-portal.example`` under a specific-host allowlist, or a host
+    (``other.acme-church.example`` under a specific-host allowlist, or a host
     named in ``out_of_scope``) is excluded from every claim projection — the SAME
     predicate ``web_uncovered_high_route_hosts`` applies. A row with an EMPTY
     host fails OPEN (kept): shaping excludes KNOWN-foreign rows, it never requires

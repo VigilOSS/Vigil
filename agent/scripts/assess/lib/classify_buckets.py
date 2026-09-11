@@ -642,7 +642,7 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
         # `auth_redirect.do`), `sys_*`/`x_*` scoped tables (`/sys_`,`/x_`), the
         # GlideRecord `/$` and Service Portal `/sp?` entry points. Param keys are
         # the ServiceNow `sysparm_*` family + `glide_sso_id`. Generic — ServiceNow
-        # is a ubiquitous enterprise SaaS, not a Acme Telco artifact. Weight 30. The
+        # is a ubiquitous enterprise SaaS, not a target-specific artifact. Weight 30. The
         # `auth_redirect.do?sysparm_url=` open-redirect/SSO surface clusters here
         # via the `sysparm_url` WHOLE key (servicenow wins as the strong match);
         # Fix 4's tiered inner-token mechanism (now landed) additionally exposes the
@@ -837,7 +837,7 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
     (
         "object-storage",
         # NEW (classify-surface 2026-06, §6.6, override #2): NEVER a bare
-        # `/files/` or `/storage/` fragment (acme-agency.example has thousands of
+        # `/files/` or `/storage/` fragment (document-heavy sites have thousands of
         # `/files/*.pdf`). Use Domino-specific discriminators (`$file`,`.nsf`,
         # `files.nsf`,`docscat`,`didc`) PLUS cloud (`/s3/`,`/gcs/`,`/blob/`,
         # `/bucket/`). `key`/`object` dropped from the key set (too generic).
@@ -1029,13 +1029,14 @@ def regex_fragment_in_path(pattern: str, url_path_lower: str) -> bool:
 #   * `assess.lib.classify.classify_type()` — the dominant categorizer that every
 #     ingest path (ingest-endpoints / ingest-spec / ingest-candidates / dispatch)
 #     runs. It emits the canonical, content-derived types: `api` (the dominant
-#     API type — 1,002 rows in acme-agency-example, 92 in xfinity), `api-spec` (HYPHEN — the
+#     API type — 1,002 rows in the nested route fixtures, 92 in the consumer-service
+#     corpus), `api-spec` (HYPHEN — the
 #     OpenAPI/Swagger/api-docs type), `graphql`, `sourcemap`, `host_root`, etc.
 #   * `assess.lib.candidate_records.candidate_type()` — a SECONDARY signal-driven
 #     path that RELABELS `api` → `api_route` (underscore) and adds the
 #     surface-flavored types `auth_entry`, `portal_session`, `debug_config`,
 #     `event_feed`, `workflow`. These are the minority types (e.g. 41 `api_route`
-#     in acme-agency-example) layered on top of the `classify_type` output.
+#     in the nested route fixtures) layered on top of the `classify_type` output.
 #
 # Therefore:
 #   * `api` and `api_route` are the SAME semantic type (api_route is just

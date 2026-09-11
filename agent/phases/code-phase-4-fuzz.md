@@ -122,7 +122,7 @@ ls tools/fuzz-state/harnesses/*/harness.c
 ls tools/fuzz-state/campaigns/*.json
 
 # Record any findings from quick validation runs or pre-fuzz audit
-vigil assess finding record code-fuzz-engineer <finding-json>
+vigil assess finding record code-fuzz-engineer <finding-json> --agent-id <your-agent_id>
 ```
 
 Each file finding follows `vigil assess contract finding record` and carries the current
@@ -177,7 +177,7 @@ minimize -> reproduce -> trace -> validate -> classify
 **On return from crash triage:**
 ```bash
 # Record true findings
-vigil assess finding record code-fuzz-engineer <finding-json>
+vigil assess finding record code-fuzz-engineer <finding-json> --agent-id <your-agent_id>
 
 # Triage reports written to tools/fuzz-state/reports/
 ls tools/fuzz-state/reports/*-triage.json
@@ -254,7 +254,7 @@ See `agent/references/examples/submission-direct-buffer-overflow-fuzz.md` for a 
    Author Evidence from the OPERATOR DETAILS section's structured proof and linked runs plus a
    *targeted* `vigil assess command-run list --q <finding's file/function/parameter>` (keyed tightly
    to this finding, not a broad sweep) to
-   catch reproducing runs the linked set missed, then mask any sensitive values and annotate the
+   catch reproducing runs the linked set missed, then preserve exact values and annotate the
    proof lines; store it in `details.evidence`. Fuzz findings (CF-xxx) carry the crash input and
    ASAN report as the gate-satisfying proof (`evidence_ref`/`poc_code`), which the authored Evidence
    references — the raw crash artifact stays under `tools/fuzz-state/` and is not rendered.

@@ -183,7 +183,7 @@ When a recorded surface (`vigil assess record-surface`) corresponds to a cluster
 
 ```bash
 vigil assess work-buffer link-surface --cluster <cluster_key> --surface-id <id> \
-  --relation primary-endpoint --evidence-ref "<artifact path>"
+  --relation primary-endpoint --link-evidence-ref "<artifact path>"
 ```
 
 Selection is by `--cluster` (the work buffer's `cluster_key`) or `--queue-key`; a work item that never successfully posted to the backend (no `request_variant_id`) is skipped with a warning rather than failing the whole run.

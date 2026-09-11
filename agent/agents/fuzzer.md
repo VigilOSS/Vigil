@@ -81,7 +81,7 @@ On shared platforms, also watch for account identifiers (account IDs, subdomain 
 
 Before your dispatch returns, run in this order:
 
-1. `vigil assess finding record fuzzer <finding-json>` for each confirmed finding
+1. `vigil assess finding record fuzzer <finding-json> --agent-id <your-agent_id>` for each confirmed finding
 2. `vigil assess record-surface <type> <target> <source> [--rationale TEXT]` for any new surface fuzzing uncovered (newly-evidenced parameter, hidden directory, etc.)
 3. `vigil assess ingest endpoints fuzzer` for newly discovered paths
 4. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (point at the raw fuzzer hit log under `$DIR/scans/fuzzer/`), and role-specific extras (`payloads_tried`, `hits`, `hit_ratio`)

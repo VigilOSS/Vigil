@@ -91,7 +91,7 @@ To expose it to remote targets, set up an frp tunnel.
 
 The `oob-rev` proxy rendered by `vigil oob start` in `/data/oob/frpc.toml` handles this. After `vigil oob start` is healthy, record the address:
 ```bash
-echo "oob-relay.example.com:8443" > "$DIR/.listener_url"
+echo "<frp-host>:8443" > "$DIR/.listener_url"
 ```
 
 Agents read `LISTENER_HOST` and `LISTENER_PORT` from `$DIR/.listener_url` (or from dispatch context)

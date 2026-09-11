@@ -261,8 +261,8 @@ def test_capture_logout_deleted_value_is_a_noop(client, isolate_settings):
     client.post(
         f"/engagements/{KEY}/credentials/capture",
         json={
-            "host": "example.acme-agency.example",
-            "scope_host": "example.acme-agency.example",
+            "host": "portal.acme-agency.example",
+            "scope_host": "portal.acme-agency.example",
             "cookies": {"MRHSession": "abc123valid-session", "F5_ST": "ST2of2id9876"},
         },
     )
@@ -274,8 +274,8 @@ def test_capture_logout_deleted_value_is_a_noop(client, isolate_settings):
     client.post(
         f"/engagements/{KEY}/credentials/capture",
         json={
-            "host": "example.acme-agency.example",
-            "scope_host": "example.acme-agency.example",
+            "host": "portal.acme-agency.example",
+            "scope_host": "portal.acme-agency.example",
             "cookies": {"MRHSession": "deleted", "F5_ST": "deleted"},
         },
     )
@@ -297,8 +297,8 @@ def test_capture_empty_value_is_a_noop(client, isolate_settings):
     client.post(
         f"/engagements/{KEY}/credentials/capture",
         json={
-            "host": "example.acme-agency.example",
-            "scope_host": "example.acme-agency.example",
+            "host": "portal.acme-agency.example",
+            "scope_host": "portal.acme-agency.example",
             "cookies": {"MRHSession": "alive-session-value"},
         },
     )
@@ -307,8 +307,8 @@ def test_capture_empty_value_is_a_noop(client, isolate_settings):
     client.post(
         f"/engagements/{KEY}/credentials/capture",
         json={
-            "host": "example.acme-agency.example",
-            "scope_host": "example.acme-agency.example",
+            "host": "portal.acme-agency.example",
+            "scope_host": "portal.acme-agency.example",
             "cookies": {"MRHSession": ""},
         },
     )
@@ -330,8 +330,8 @@ def test_capture_fresh_login_appends_new_identity(client, isolate_settings):
     client.post(
         f"/engagements/{KEY}/credentials/capture",
         json={
-            "host": "example.acme-agency.example",
-            "scope_host": "example.acme-agency.example",
+            "host": "portal.acme-agency.example",
+            "scope_host": "portal.acme-agency.example",
             "cookies": {"MRHSession": "old-session-value-1"},
         },
     )
@@ -340,8 +340,8 @@ def test_capture_fresh_login_appends_new_identity(client, isolate_settings):
     client.post(
         f"/engagements/{KEY}/credentials/capture",
         json={
-            "host": "example.acme-agency.example",
-            "scope_host": "example.acme-agency.example",
+            "host": "portal.acme-agency.example",
+            "scope_host": "portal.acme-agency.example",
             "cookies": {"MRHSession": "brand-new-session-value-2"},
         },
     )
@@ -365,8 +365,8 @@ def test_capture_mixed_deletion_and_live_within_one_identity(client, isolate_set
     client.post(
         f"/engagements/{KEY}/credentials/capture",
         json={
-            "host": "example.acme-agency.example",
-            "scope_host": "example.acme-agency.example",
+            "host": "portal.acme-agency.example",
+            "scope_host": "portal.acme-agency.example",
             "cookies": {"MRHSession": "keep-me-16chars-xx", "F5_ST": "tokenvalue-16chars"},
         },
     )
@@ -375,8 +375,8 @@ def test_capture_mixed_deletion_and_live_within_one_identity(client, isolate_set
     client.post(
         f"/engagements/{KEY}/credentials/capture",
         json={
-            "host": "example.acme-agency.example",
-            "scope_host": "example.acme-agency.example",
+            "host": "portal.acme-agency.example",
+            "scope_host": "portal.acme-agency.example",
             "cookies": {
                 "MRHSession": "keep-me-16chars-xx",
                 "F5_ST": "deleted",
@@ -403,8 +403,8 @@ def test_capture_quoted_empty_cookie_is_a_noop(client, isolate_settings):
     client.post(
         f"/engagements/{KEY}/credentials/capture",
         json={
-            "host": "example.acme-agency.example",
-            "scope_host": "example.acme-agency.example",
+            "host": "portal.acme-agency.example",
+            "scope_host": "portal.acme-agency.example",
             "cookies": {"MRHSession": "alive-session-value"},
         },
     )
@@ -412,8 +412,8 @@ def test_capture_quoted_empty_cookie_is_a_noop(client, isolate_settings):
     client.post(
         f"/engagements/{KEY}/credentials/capture",
         json={
-            "host": "example.acme-agency.example",
-            "scope_host": "example.acme-agency.example",
+            "host": "portal.acme-agency.example",
+            "scope_host": "portal.acme-agency.example",
             "cookies": {"MRHSession": '""'},  # quoted-empty logout
         },
     )
@@ -432,8 +432,8 @@ def test_capture_quoted_live_cookie_stored_dequoted(client, isolate_settings):
         f"/engagements/{KEY}/credentials/capture",
         json={
             "identity_name": "default",
-            "host": "example.acme-agency.example",
-            "scope_host": "example.acme-agency.example",
+            "host": "portal.acme-agency.example",
+            "scope_host": "portal.acme-agency.example",
             "cookies": {"sid": '"abc123"'},
         },
     ).json()

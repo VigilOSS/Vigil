@@ -93,17 +93,23 @@ ANDROID_APK_BINARIES = (
 )
 
 
-def test_mitmproxy_dockerfile_copy_sources_exist_in_build_context():
-    """The managed proxy build uses ``agent/`` as its Docker context."""
-    missing: list[str] = []
-    for line in MITMPROXY_DOCKERFILE.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped.startswith("COPY "):
-            continue
-        source = stripped.split()[1]
-        if not (REPO_ROOT / "agent" / source).exists():
-            missing.append(source)
-    assert not missing, f"mitmproxy Dockerfile COPY sources do not exist: {missing}"
+def test_mitmproxy_dockerfile_copy_sources_exist_in_staged_build_context():
+    """The managed proxy builder exposes only the Dockerfile's declared inputs."""
+    from vigil_cli.mitmproxy import _proxy_build_context
+
+    sources = {
+        line.strip().split()[1]
+        for line in MITMPROXY_DOCKERFILE.read_text(encoding="utf-8").splitlines()
+        if line.strip().startswith("COPY ")
+    }
+    assert sources == {
+        "scripts/assess",
+        "scripts/proxy_addon.py",
+        "vigil_cli/scope_entries.py",
+    }
+    with _proxy_build_context(REPO_ROOT) as context:
+        missing = [source for source in sources if not (context / source).exists()]
+    assert not missing, f"mitmproxy Dockerfile COPY sources are not staged: {missing}"
 
 
 def _dockerfile_has_install_line(text: str, binary: str) -> bool:
@@ -183,6 +189,23 @@ def test_runtime_full_dockerfile_declares_subdomain_enum_binaries():
         f"{missing}. The subdomain-enumeration SKILL preflights these binaries; if any are "
         "dropped from the runtime image, the silent-degradation failure mode (puredns→empty / "
         "dnsx fallback CPU spike) reappears."
+    )
+
+
+def test_runtime_full_pins_bbot_to_a_supported_python_interpreter():
+    """BBOT 2.x and its pyzmq bound are not compatible with Python 3.14.
+
+    Kali rolling already defaults to 3.14, so the image must install BBOT with
+    its explicit 3.13 interpreter instead of inheriting the moving system
+    default and failing the entire runtime build.
+    """
+    text = RUNTIME_FULL_DOCKERFILE.read_text(encoding="utf-8")
+    packages = re.search(r"ARG APT_BASE_PACKAGES=\"([^\"]+)\"", text)
+    assert packages is not None
+    assert {"python3.13", "python3.13-venv"} <= set(packages.group(1).split())
+    assert re.search(
+        r'pipx install --python\s+"?\$\{?BBOT_PYTHON\}?"?\s+"bbot==\$\{BBOT_VERSION\}"',
+        text,
     )
 
 

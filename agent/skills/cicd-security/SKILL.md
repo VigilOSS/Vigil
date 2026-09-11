@@ -242,7 +242,7 @@ fire the EXACT host mint prints (`$OOB_HOST`):
 ```bash
 # Mint one nonce per injection point; record the correlation context.
 vigil oob mint --client <name> --technique cmdi --target-url https://github.com/TARGET/REPO --probe-kind exploit
-# → host  <prefix>-<token>.<client-id>.oob.example.com   (= $OOB_HOST)
+# → host  <prefix>-<token>.<client-id>.<configured-oob-domain>   (= $OOB_HOST)
 ```
 
 Embed the EXACT host mint prints (`$OOB_HOST` — the nonce bound under the client

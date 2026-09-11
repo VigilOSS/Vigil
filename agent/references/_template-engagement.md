@@ -191,22 +191,21 @@ genuinely unknown.
 
 ## 6. Exfiltration Limits
 
-> Proof-of-access requires a minimal redacted sample — never bulk-pull real user records.
+> Proof-of-access requires one exact minimal sample — never bulk-pull real user records.
 > Volume is not stronger evidence and only increases harm. See `agent/shared-constraints.md §4`.
 
-Per-finding exfiltration limit: **one minimal redacted sample** (enough to identify the
-record class and one non-PII field). Specific limits for this engagement:
+Per-finding exfiltration limit: **one exact minimal sample** (enough to prove the
+record class and access). Specific limits for this engagement:
 
 | Data class | Limit | Notes |
 |------------|-------|-------|
-| PII / user records | 1 redacted row | Do not include real names, emails, or IDs in the finding |
-| Payment / financial data | 1 masked row (last 4 / stars) | Stop immediately on first confirmed access |
-| Credentials / tokens | Record the format proof only | Do not capture or store the value |
+| PII / user records | 1 exact row | Preserve the captured row verbatim; do not collect a second row |
+| Payment / financial data | 1 exact row | Preserve the captured row verbatim; stop immediately on first confirmed access |
+| Credentials / tokens | 1 exact value when it is the proof | Preserve the captured value verbatim; stop after confirmation |
 | `[FILL: engagement-specific class]` | `[FILL]` | `[FILL]` |
 
 Evidence-not-collection principle: if a single record proves access, stop. The finding's
-`details.evidence` carries the proof format and the redacted sample; it does not carry
-a downloaded table.
+`details.evidence` carries that exact minimal sample; it does not carry a downloaded table.
 
 ---
 

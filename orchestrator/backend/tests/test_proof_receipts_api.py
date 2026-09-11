@@ -4,6 +4,8 @@ import hashlib
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from app import db as db_module
 from tests.test_engagements_api import write_engagement
 
@@ -129,6 +131,101 @@ def _source_observation(
     return receipt.json()
 
 
+def test_proof_receipt_contract_has_no_operator_data_withholding_controls(
+    client, isolate_settings
+) -> None:
+    engagement_dir = _seed(client, isolate_settings)
+    run = _run(client)
+    artifact = _artifact(
+        client,
+        engagement_dir,
+        "evidence/verbatim.txt",
+        "Authorization: Bearer literal-operator-token",
+    )
+    created = client.post(
+        f"{BASE}/proof-receipts",
+        json={
+            "run_id": run["id"],
+            "evidence_kind": "artifact",
+            "artifact_id": artifact["id"],
+            "observed_result": "Authorization: Bearer literal-operator-token",
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["observed_result"] == "Authorization: Bearer literal-operator-token"
+    assert "redaction_status" not in created.json()
+    assert "derivative_of_receipt_id" not in created.json()
+    assert "raw_receipt_id" not in created.json()
+
+    refused_control = client.post(
+        f"{BASE}/proof-receipts",
+        json={
+            "run_id": run["id"],
+            "evidence_kind": "artifact",
+            "artifact_id": artifact["id"],
+            "redaction_status": "redacted",
+        },
+    )
+    assert refused_control.status_code == 422, refused_control.text
+
+
+def test_legacy_derivative_receipt_keeps_migration_provenance_without_controls(
+    client, isolate_settings
+) -> None:
+    engagement_dir = _seed(client, isolate_settings)
+    run = _run(client)
+    raw_artifact = _artifact(
+        client,
+        engagement_dir,
+        "evidence/legacy-raw.txt",
+        "Authorization: Bearer exact-legacy-token",
+    )
+    historical_artifact = _artifact(
+        client,
+        engagement_dir,
+        "evidence/legacy-derivative.txt",
+        "historical transformed bytes",
+    )
+    raw = client.post(
+        f"{BASE}/proof-receipts",
+        json={
+            "run_id": run["id"],
+            "evidence_kind": "artifact",
+            "artifact_id": raw_artifact["id"],
+        },
+    )
+    derivative = client.post(
+        f"{BASE}/proof-receipts",
+        json={
+            "run_id": run["id"],
+            "evidence_kind": "artifact",
+            "artifact_id": historical_artifact["id"],
+        },
+    )
+    assert raw.status_code == 201, raw.text
+    assert derivative.status_code == 201, derivative.text
+
+    with db_module.get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE assessment_proof_receipts
+            SET redaction_status = 'redacted', derivative_of_receipt_id = ?
+            WHERE id = ?
+            """,
+            (raw.json()["id"], derivative.json()["id"]),
+        )
+
+    fetched = client.get(f"{BASE}/proof-receipts/{derivative.json()['id']}")
+    assert fetched.status_code == 200, fetched.text
+    body = fetched.json()
+    assert "redaction_status" not in body
+    assert "derivative_of_receipt_id" not in body
+    assert body["legacy_derivative_provenance"] == {
+        "source_receipt_id": raw.json()["id"],
+        "exact_bytes_are_historical_derivative": True,
+    }
+
+
 def _verified_command_finding(client, *, slug: str, stdout: str) -> tuple[dict, dict]:
     finding = client.post(
         f"{BASE}/findings",
@@ -189,7 +286,7 @@ def _verified_command_finding(client, *, slug: str, stdout: str) -> tuple[dict, 
     return command.json(), receipt.json()
 
 
-def test_run_and_raw_derivative_receipts_retain_attribution_hash_and_health(
+def test_exact_receipts_retain_attribution_hash_and_health(
     client, isolate_settings
 ) -> None:
     engagement_dir = _seed(client, isolate_settings)
@@ -206,7 +303,6 @@ def test_run_and_raw_derivative_receipts_retain_attribution_hash_and_health(
             "expected_result": "cross-tenant request is denied",
             "observed_result": "cross-tenant response returned 200 with tenant data",
             "artifact_id": raw_artifact["id"],
-            "redaction_status": "raw",
         },
     )
     assert raw_response.status_code == 201, raw_response.text
@@ -216,33 +312,13 @@ def test_run_and_raw_derivative_receipts_retain_attribution_hash_and_health(
     assert raw["evidence_health"] == "healthy"
     assert raw["artifact_relative_path"] == "evidence/raw.txt"
 
-    redacted_artifact = _artifact(
-        client, engagement_dir, "evidence/redacted.txt", "response: secret=[REDACTED]"
-    )
-    derivative_response = client.post(
-        f"{BASE}/proof-receipts",
-        json={
-            "run_id": run["id"],
-            "evidence_kind": "artifact",
-            "expected_result": "shareable proof preserves the decisive response",
-            "observed_result": "sensitive token redacted; status and body retained",
-            "artifact_id": redacted_artifact["id"],
-            "redaction_status": "redacted",
-            "derivative_of_receipt_id": raw["id"],
-        },
-    )
-    assert derivative_response.status_code == 201, derivative_response.text
-    derivative = derivative_response.json()
-    assert derivative["derivative_of_receipt_id"] == raw["id"]
-    assert derivative["raw_receipt_id"] == raw["id"]
-
     run_evidence = client.get(
         f"{BASE}/assessment-runs/{run['id']}/proof-receipts",
         params={"limit": 1, "offset": 0},
     )
     assert run_evidence.status_code == 200, run_evidence.text
-    assert run_evidence.json()["total"] == 2
-    assert run_evidence.json()["has_more"] is True
+    assert run_evidence.json()["total"] == 1
+    assert run_evidence.json()["has_more"] is False
     assert run_evidence.json()["items"][0]["producer_dispatch_agent_id"] == "VERIFY-1"
     assert run_evidence.json()["items"][0]["origin_run_id"] == run["id"]
     for evidence_kind in ("browser_action", "oob_event"):
@@ -281,7 +357,62 @@ def test_run_and_raw_derivative_receipts_retain_attribution_hash_and_health(
     assert tombstoned.json()["artifact_relative_path"] == "evidence/raw.txt"
 
 
-def test_receipts_reject_cross_engagement_or_invalid_derivative_links(
+@pytest.mark.parametrize(
+    "evidence_kind",
+    [
+        "artifact",
+        "source_observation",
+        "http_exchange",
+        "browser_action",
+        "oob_event",
+    ],
+)
+def test_artifact_backed_receipts_check_live_snapshot_without_refresh(
+    client, isolate_settings, evidence_kind: str
+) -> None:
+    engagement_dir = _seed(client, isolate_settings)
+    run = _run(client)
+    artifact = _artifact(
+        client,
+        engagement_dir,
+        f"evidence/{evidence_kind}.txt",
+        "version one",
+    )
+    receipt = client.post(
+        f"{BASE}/proof-receipts",
+        json={
+            "run_id": run["id"],
+            "evidence_kind": evidence_kind,
+            "artifact_id": artifact["id"],
+        },
+    )
+    assert receipt.status_code == 201, receipt.text
+    receipt_id = receipt.json()["id"]
+    artifact_path = engagement_dir / artifact["relative_path"]
+
+    artifact_path.write_text("version two", encoding="utf-8")
+
+    detail = client.get(f"{BASE}/proof-receipts/{receipt_id}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["evidence_health"] == "stale"
+    run_receipts = client.get(
+        f"{BASE}/assessment-runs/{run['id']}/proof-receipts"
+    )
+    assert run_receipts.status_code == 200, run_receipts.text
+    run_receipt = next(
+        row for row in run_receipts.json()["items"] if row["id"] == receipt_id
+    )
+    assert run_receipt["evidence_health"] == "stale"
+
+    artifact_path.unlink()
+
+    listing = client.get(f"{BASE}/proof-receipts")
+    assert listing.status_code == 200, listing.text
+    listed = next(row for row in listing.json() if row["id"] == receipt_id)
+    assert listed["evidence_health"] == "missing"
+
+
+def test_receipts_reject_retired_operator_data_withholding_fields(
     client, isolate_settings
 ) -> None:
     engagement_dir = _seed(client, isolate_settings)
@@ -304,7 +435,7 @@ def test_receipts_reject_cross_engagement_or_invalid_derivative_links(
             "derivative_of_receipt_id": 1,
         },
     )
-    assert raw_with_parent.status_code == 400, raw_with_parent.text
+    assert raw_with_parent.status_code == 422, raw_with_parent.text
 
     redacted_without_parent = client.post(
         f"{BASE}/proof-receipts",
@@ -315,7 +446,7 @@ def test_receipts_reject_cross_engagement_or_invalid_derivative_links(
             "redaction_status": "redacted",
         },
     )
-    assert redacted_without_parent.status_code == 400, redacted_without_parent.text
+    assert redacted_without_parent.status_code == 422, redacted_without_parent.text
 
 
 def test_proof_receipts_require_a_durable_evidence_record(
@@ -964,6 +1095,7 @@ def test_legacy_findings_remain_readable_without_invented_runs_or_receipts(
             "verification_status": "unreviewed",
             "canonical_location": "https://example.test/legacy",
             "source_name": "legacy-import",
+            "provenance": {"agent_id": "HUNT-1"},
         },
     )
     assert created.status_code == 201, created.text
@@ -1022,7 +1154,7 @@ def test_receipt_health_tracks_artifact_refresh_without_rewriting_recorded_hash(
     assert missing.json()["evidence_sha256"] == recorded_sha256
 
 
-def test_degraded_decision_receipt_blocks_readiness_without_rewriting_verification(
+def test_degraded_decision_receipt_blocks_readiness_without_artifact_refresh(
     client, isolate_settings
 ) -> None:
     engagement_dir = _seed(client, isolate_settings)
@@ -1082,7 +1214,6 @@ def test_degraded_decision_receipt_blocks_readiness_without_rewriting_verificati
     (engagement_dir / "evidence/decision.txt").write_text(
         "materially changed", encoding="utf-8"
     )
-    assert client.post(f"{BASE}/artifacts/refresh").status_code == 200
 
     finding_detail = client.get(f"{BASE}/findings/VA-901")
     assert finding_detail.status_code == 200, finding_detail.text
@@ -1100,7 +1231,6 @@ def test_degraded_decision_receipt_blocks_readiness_without_rewriting_verificati
     assert blocker["proof_receipt_id"] == receipt_id
 
     (engagement_dir / "evidence/decision.txt").unlink()
-    assert client.post(f"{BASE}/artifacts/refresh").status_code == 200
     missing_readiness = client.get(f"{BASE}/report-readiness")
     assert missing_readiness.status_code == 200, missing_readiness.text
     missing_blocker = next(

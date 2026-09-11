@@ -7,7 +7,8 @@ backend) and surfaces:
 - ``use_for_requests`` flag
 - ``state`` (available / missing / expired)
 - ``expires_at`` (with a flag when it has passed or is within 5 minutes)
-- Token shapes present (Bearer header, session cookies, OAuth refresh_token)
+- The auth material it carries, values included (Authorization header,
+  session cookies, OAuth tokens)
 - Timestamp of the most recent live-credential probe via
   ``command-run list --technique AUTH``
 - Recommended refresh path per the C42 Auth-expiry recovery loop
@@ -241,44 +242,57 @@ def _parse_iso8601(value: str | None) -> datetime | None:
     return dt
 
 
-def _token_shapes(auth: dict) -> list[str]:
-    """Identify which token shapes the active credential carries today."""
-    shapes: list[str] = []
+def _cookie_pairs(cookies: dict) -> str:
+    return "; ".join(f"{name}={cookies[name]}" for name in sorted(cookies))
+
+
+def _token_material(auth: dict) -> list[str]:
+    """Render every piece of auth material the credential carries, values included.
+
+    These are the engagement's own credentials on the operator's own machine, so
+    the live value is what makes the view useful: it is what gets replayed by
+    hand, pasted into a repro, and compared against a 401. Nothing is filtered by
+    name either — a stored record holds auth material by construction, and a
+    name allowlist could only drop a header the operator deliberately stored."""
+    material: list[str] = []
     headers = auth.get("headers") or {}
     if isinstance(headers, dict):
         for key, value in headers.items():
-            if not isinstance(value, str):
-                continue
-            lower_key = key.lower()
-            if lower_key == "authorization" and value.lower().startswith("bearer "):
-                shapes.append(f"Authorization: Bearer (length={len(value)})")
-            elif lower_key == "authorization":
-                shapes.append(f"Authorization: <other> (length={len(value)})")
-            elif lower_key in {"x-csrf-token", "x-userrtoken", "x-userToken".lower(), "x-requestdigest"}:
-                shapes.append(f"{key}: {value[:20]}{'...' if len(value) > 20 else ''}")
+            material.append(f"{key}: {value}")
     cookies = auth.get("cookies") or {}
     if isinstance(cookies, dict) and cookies:
-        names = ",".join(sorted(cookies.keys())[:4])
-        more = "" if len(cookies) <= 4 else f" + {len(cookies) - 4} more"
-        shapes.append(f"flat_cookies: {names}{more}")
-    host_cookies = auth.get("host_cookies") or []
-    if isinstance(host_cookies, list) and host_cookies:
-        shapes.append(f"host_cookies: {len(host_cookies)} host bucket(s)")
+        material.append(f"flat_cookies: {_cookie_pairs(cookies)}")
+    for bucket in auth.get("host_cookies") or []:
+        if not isinstance(bucket, dict):
+            continue
+        bucket_cookies = bucket.get("cookies")
+        if isinstance(bucket_cookies, dict) and bucket_cookies:
+            material.append(
+                f"host_cookies[{bucket.get('host') or '-'}]: {_cookie_pairs(bucket_cookies)}"
+            )
     tokens = auth.get("tokens") or {}
     if isinstance(tokens, dict):
         for key, value in tokens.items():
-            if isinstance(value, str):
-                shapes.append(f"tokens.{key}: <string len={len(value)}>")
-            else:
-                shapes.append(f"tokens.{key}: {type(value).__name__}")
-    return shapes
+            material.append(f"tokens.{key}: {value}")
+    return material
 
 
-def _refresh_recommendation(auth: dict, token_shapes: list[str]) -> str:
-    """Heuristic refresh-path recommendation matching the C42 recovery loop."""
-    has_bearer = any(s.startswith("Authorization: Bearer") for s in token_shapes)
-    has_session = any(s.startswith("flat_cookies") or s.startswith("host_cookies") for s in token_shapes)
-    has_refresh = any("refresh_token" in s for s in token_shapes)
+def _refresh_recommendation(auth: dict) -> str:
+    """Heuristic refresh-path recommendation matching the C42 recovery loop.
+
+    Reads the stored record directly rather than the rendered material lines —
+    those now carry live cookie and token values, and a target-chosen value that
+    happens to spell ``refresh_token`` must not pick the refresh path."""
+    headers = auth.get("headers")
+    headers = headers if isinstance(headers, dict) else {}
+    tokens = auth.get("tokens")
+    tokens = tokens if isinstance(tokens, dict) else {}
+    has_bearer = any(
+        str(key).lower() == "authorization" and str(value).lower().startswith("bearer ")
+        for key, value in headers.items()
+    )
+    has_session = bool(auth.get("cookies")) or bool(auth.get("host_cookies"))
+    has_refresh = any("refresh_token" in str(key) for key in tokens)
     if has_refresh:
         return (
             "OAuth refresh_token present — re-run the OAuth authorization-code grant "
@@ -388,7 +402,6 @@ def run(args) -> None:
             )
     else:
         auth = active_material(cfg.engagement_dir, record_use=False)
-    shapes = _token_shapes(auth) if auth else []
 
     expires_at_raw = auth.get("expires_at") if isinstance(auth, dict) else None
     expires_dt = _parse_iso8601(expires_at_raw)
@@ -490,6 +503,7 @@ def run(args) -> None:
                     liveness_detail["persist_error"] = str(exc)
         liveness = liveness_detail["liveness"]
 
+    material = _token_material(auth) if auth else []
     state = {
         "engagement_key": cfg.engagement_key,
         "identity_name": subject_identity or None,
@@ -500,11 +514,11 @@ def run(args) -> None:
         "expires_at": expires_at_raw,
         "expires_state": expires_state,
         "expires_in_seconds": expires_in_seconds,
-        "tokens": shapes,
+        "tokens": material,
         "liveness": liveness,
         "liveness_probe": liveness_detail,
         "last_auth_probe": last_probe,
-        "recommend": _refresh_recommendation(auth, shapes),
+        "recommend": _refresh_recommendation(auth),
     }
 
     if getattr(args, "json_output", False):
@@ -524,10 +538,10 @@ def run(args) -> None:
             minutes = max(1, (expires_in_seconds or 0) // 60)
             suffix = f"  (expires in ~{minutes}m)"
         print(f"expires_at:     {expires_at_raw}{suffix}")
-    if shapes:
+    if material:
         print("tokens:")
-        for s in shapes:
-            print(f"  - {s}")
+        for line in material:
+            print(f"  - {line}")
     else:
         print("tokens:         (none detected)")
     if liveness_detail is not None:

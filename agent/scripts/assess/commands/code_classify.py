@@ -8,6 +8,7 @@ from pathlib import Path
 
 from assess.lib.client import AssessmentClient, AssessError, require_write_result
 from assess.lib.code_languages import CANONICAL_CODE_LANGUAGES, CODE_LANGUAGE_ALIASES
+from assess.lib.code_structural_identity import parse_code_file_page
 from assess.lib.config import load_config
 from assess.lib.schema_validation import load_schema
 
@@ -49,17 +50,29 @@ def _fetch_code_files(cfg) -> list[dict]:
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         rows: list[dict] = []
         offset = 0
+        expected_total: int | None = None
         while True:
             page = client.get(f'code/files?limit={_CODE_FILE_LOOKUP_PAGE_SIZE}&offset={offset}')
-            if not isinstance(page, list):
-                result = page
+            try:
+                items, total, has_more = parse_code_file_page(
+                    page,
+                    expected_offset=offset,
+                    context="code file lookup response",
+                )
+            except ValueError:
+                result = None
                 break
-            rows.extend(page)
-            if len(page) < _CODE_FILE_LOOKUP_PAGE_SIZE:
+            if expected_total is None:
+                expected_total = total
+            elif total != expected_total:
+                result = None
+                break
+            rows.extend(items)
+            if not has_more:
                 result = rows
                 break
-            offset += _CODE_FILE_LOOKUP_PAGE_SIZE
-    if not isinstance(result, list):
+            offset += len(items)
+    if result is None:
         print("Could not fetch code files for path resolution", file=sys.stderr)
         sys.exit(1)
     return result

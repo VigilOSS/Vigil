@@ -362,14 +362,13 @@ def test_keepalive_cycle_persists_typed_scoped_liveness(tmp_path, monkeypatch):
             "reason": "live: authed_marker present, status 200",
         },
     )]
-def test_env_preflight_reports_presence_and_source_never_values(monkeypatch):
+def test_env_preflight_reports_presence_and_source_per_key(monkeypatch):
     monkeypatch.setenv("VIGIL_USER", "super-secret-user")
     rows = auth.env_preflight(["VIGIL_USER", "VIGIL_PASS"])
     assert rows == [
         {"name": "VIGIL_USER", "present": True, "source": "environment"},
         {"name": "VIGIL_PASS", "present": False, "source": "missing"},
     ]
-    assert "super-secret-user" not in str(rows)
 
 
 def test_packaged_cli_loads_single_classifier_from_install_root(tmp_path):

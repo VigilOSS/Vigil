@@ -336,7 +336,9 @@ def test_kali_result_transport_error_defaults_false():
 def fake_engagement(tmp_path, monkeypatch):
     eng_dir = tmp_path / "engagements" / "2026-06-13-test"
     eng_dir.mkdir(parents=True, exist_ok=True)
-    (eng_dir / "scope.json").write_text(json.dumps({"hostname": "example.com"}))
+    (eng_dir / "scope.json").write_text(
+        json.dumps({"hostname": "example.com", "hosts": ["example.com"]})
+    )
     # Credentials are centralized in the backend store; no auth.json file. The
     # runtime creds_client fails closed (auth_context "none") with no backend.
     monkeypatch.setenv("ENGAGEMENT_DIR", str(eng_dir))

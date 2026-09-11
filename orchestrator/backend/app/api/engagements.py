@@ -39,6 +39,8 @@ class EngagementResponse(BaseModel):
     platforms: list[str] = Field(default_factory=list)
     tenant_reference_paths: list[str] = Field(default_factory=list)
     out_of_scope: list[str] = Field(default_factory=list)
+    track_state: dict[str, dict[str, str | bool | None]] = Field(default_factory=dict)
+    aggregate_complete: bool = False
     # Per-engagement mitmproxy capture policy (backend-owned durable state). The
     # shared proxy addon reads this off the registry payload so restarting it
     # never silently changes capture behavior; a capture-policy.json filesystem
@@ -59,6 +61,26 @@ class SessionResponse(BaseModel):
 
 
 def _engagement_response(engagement: EngagementView) -> EngagementResponse:
+    engagement_type = (engagement.engagement_type or "web").strip().lower()
+    if engagement_type == "both":
+        track_state = {
+            "web": {
+                "phase": engagement.current_phase,
+                "complete": engagement.current_phase == "complete",
+            },
+            "code": {
+                "phase": engagement.code_phase,
+                "complete": engagement.code_phase == "complete",
+            },
+        }
+    else:
+        track = engagement_type if engagement_type in {"code", "blue", "android"} else "web"
+        track_state = {
+            track: {
+                "phase": engagement.current_phase,
+                "complete": engagement.current_phase == "complete",
+            }
+        }
     return EngagementResponse(
         id=engagement.id,
         key=engagement.key,
@@ -80,6 +102,10 @@ def _engagement_response(engagement: EngagementView) -> EngagementResponse:
         platforms=list(engagement.platforms or []),
         tenant_reference_paths=list(engagement.tenant_reference_paths or []),
         out_of_scope=list(engagement.out_of_scope or []),
+        track_state=track_state,
+        aggregate_complete=all(
+            bool(state["complete"]) for state in track_state.values()
+        ),
         capture_policy=dict(engagement.capture_policy or {}),
     )
 

@@ -22,7 +22,7 @@ Most XSS findings in 2025 are in client-side rendering contexts (React `dangerou
 - `vigil assess kali exec -- dalfox ...` (automated reflected XSS scanner — all target-facing tool invocations must go through the kali exec wrapper; use `--technique XSS --probe-kind payload --phase consume-test --timeout 300`)
 - `vigil assess kali exec -- curl ...` (manual request crafting and response analysis — use `--technique XSS --probe-kind payload --phase consume-test --timeout 30`)
 - Browser DevTools — DOM inspection, source-to-sink tracing, event listener enumeration (client-side analysis only)
-- `vigil oob mint` / `vigil oob poll` — blind XSS verification: `mint --client <name>` binds a nonce-tagged callback host under a running client's interactsh id (so `poll` can correlate it) and prints the full host `<nonce>.<client-id>.oob.example.com` — call this `$OOB_HOST`. Pass `--client <name>` when several clients run; `mint` auto-selects the sole running client otherwise. Embed the EXACT host `mint` prints in the payload (never hand-build it — a bare `<nonce>.oob.example.com` host would never reach poll), then `poll` to see which planted payload fired and where (replaces eyeballing the raw listener log). Check readiness with `vigil oob status --json`; if no named client is running, start one with `vigil oob client start <name> --engagement <key> --agent <agent>`.
+- `vigil oob mint` / `vigil oob poll` — blind XSS verification: `mint --client <name>` binds a nonce-tagged callback host under a running client's interactsh id (so `poll` can correlate it) and prints the full host `<nonce>.<client-id>.<configured-oob-domain>` — call this `$OOB_HOST`. Pass `--client <name>` when several clients run; `mint` auto-selects the sole running client otherwise. Embed the EXACT host `mint` prints in the payload (never hand-build it — a bare `<nonce>.<configured-oob-domain>` host would never reach poll), then `poll` to see which planted payload fired and where (replaces eyeballing the raw listener log). Check readiness with `vigil oob status --json`; if no named client is running, start one with `vigil oob client start <name> --engagement <key> --agent <agent>`.
 
 ---
 
@@ -268,7 +268,7 @@ Use an OOB callback to detect when and where the payload fires. **Mint a fresh n
 # Mint one callback per planted field; the printed host carries a unique nonce
 vigil oob mint --client <name> --technique blind-xss --target-url "https://target/support/ticket" \
   --param ticket_subject --probe-kind stored-blind
-# → host  <nonce>.<client-id>.oob.example.com   (= $OOB_HOST)
+# → host  <nonce>.<client-id>.<configured-oob-domain>   (= $OOB_HOST)
 ```
 
 Substitute the EXACT host `vigil oob mint --client <name>` prints (`$OOB_HOST` — it already embeds the client id; never hand-build it) into each payload:

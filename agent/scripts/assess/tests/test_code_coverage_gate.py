@@ -390,7 +390,12 @@ def test_force_cannot_manufacture_code_completion_with_open_debt(
             )
         )
 
-    assert "cannot be forced to complete" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "cannot be forced to complete" in err
+    # A gate with no documented way through is a dead end an operator can only
+    # escape by editing scope.json by hand, so the refusal has to name the exit.
+    assert "--force does not apply to this edge" in err
+    assert "code-coverage --require-transition-ready complete" in err
     assert json.loads((eng / "scope.json").read_text())["current_phase"] == "fuzz"
     assert not [row for row in recorded if row["kind"] == "forced_transition_override"]
 

@@ -71,6 +71,9 @@ def record_dispatch(
     requested_reasoning: str | None = None,
     actual_reasoning: str = "unknown",
     client_name: str = "unknown",
+    requested_client: str = "unknown",
+    launcher_effective_client: str = "unknown",
+    provider_observed_client: str = "unknown",
     source_revision: str = "unknown",
     operator_instruction_path: str | None = None,
     operator_instruction_sha256: str | None = None,
@@ -164,14 +167,15 @@ def record_dispatch(
             INSERT INTO assessment_dispatches (
                 engagement_id, agent_id, agent_role, task, application_unit_id,
                 requested_model, actual_model, requested_reasoning, actual_reasoning,
-                client_name, source_revision,
+                client_name, requested_client, launcher_effective_client,
+                provider_observed_client, source_revision,
                 operator_instruction_path, operator_instruction_sha256,
                 specialist_instruction_path, specialist_instruction_sha256,
                 instruction_identity_status, instructions_stale,
                 dispatched_at, status,
                 dispatch_mode, finding_slugs_json, skills, tier,
                 vuln_classes, identity
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 engagement.id,
@@ -184,6 +188,9 @@ def record_dispatch(
                 requested_reasoning,
                 actual_reasoning,
                 client_name,
+                requested_client,
+                launcher_effective_client,
+                provider_observed_client,
                 source_revision,
                 operator_instruction_path,
                 operator_instruction_sha256,
@@ -271,8 +278,15 @@ def update_dispatch(
         if not sets:
             return _serialize_dispatch(existing)
         values.extend([engagement.id, agent_id])
+        where = "engagement_id = ? AND agent_id = ?"
+        if status_value is not None:
+            # Dispatch status is a one-way lifecycle. Bind every status write to
+            # the sole mutable state so a timeout abort cannot overwrite a
+            # specialist that completed after the read above.
+            where += " AND status = ?"
+            values.append(DispatchStatus.IN_PROGRESS)
         connection.execute(
-            f"UPDATE assessment_dispatches SET {', '.join(sets)} WHERE engagement_id = ? AND agent_id = ?",
+            f"UPDATE assessment_dispatches SET {', '.join(sets)} WHERE {where}",
             tuple(values),
         )
         row = connection.execute(

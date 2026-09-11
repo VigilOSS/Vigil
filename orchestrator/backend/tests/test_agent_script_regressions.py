@@ -669,6 +669,61 @@ def test_list_intel_search_uses_canonical_entity_type(monkeypatch, tmp_path: Pat
     assert "[]" in capsys.readouterr().out
 
 
+def test_list_intel_filters_use_server_side_search(monkeypatch, tmp_path: Path, capsys) -> None:
+    module = _load_script_module(
+        "test_list_intel_filter_module",
+        "agent/scripts/assess/commands/list_intel.py",
+    )
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement_dir),
+        ),
+    )
+    captured: list[tuple[str, str]] = []
+
+    class FakeClient:
+        def __init__(self, *_args) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def get_engagement(self, endpoint: str, query: str = ""):
+            captured.append((endpoint, query))
+            return []
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+    module.run(
+        SimpleNamespace(
+            engagement_dir=tmp_path,
+            q="",
+            intel_type="note",
+            lead_status="open",
+            provenance="run-alpha",
+            limit=50,
+            offset=0,
+            as_json=True,
+        )
+    )
+
+    assert captured[0][0] == "intel/search"
+    assert parse_qs(captured[0][1]) == {
+        "entity_type": ["note"],
+        "lead_status": ["open"],
+        "provenance": ["run-alpha"],
+        "limit": ["51"],
+        "offset": ["0"],
+    }
+    assert "[]" in capsys.readouterr().out
+
+
 def test_proxy_addon_loads_legacy_scope_keys(tmp_path: Path) -> None:
     """The filesystem fallback supports the same legacy scope-key aliases as
     before (``hosts`` / ``scope_hosts`` / ``scope`` plus ``hostname``)."""
@@ -773,8 +828,8 @@ def test_filter_scope_excludes_out_of_scope_carve_out(monkeypatch, tmp_path: Pat
     (engagement_dir / "scope.json").write_text(
         json.dumps(
             {
-                "hosts": ["*.acme-regional.example"],
-                "out_of_scope": ["appointments.acme-regional.example"],
+                "hosts": ["*.acme-telco.example"],
+                "out_of_scope": ["appointments.acme-telco.example"],
             }
         ),
         encoding="utf-8",
@@ -783,9 +838,9 @@ def test_filter_scope_excludes_out_of_scope_carve_out(monkeypatch, tmp_path: Pat
     input_file.write_text(
         "\n".join(
             [
-                "https://app.acme-regional.example/a",
-                "https://appointments.acme-regional.example/booking",
-                "https://acme-regional.example/apex",
+                "https://app.acme-telco.example/a",
+                "https://appointments.acme-telco.example/booking",
+                "https://acme-telco.example/apex",
             ]
         )
         + "\n",
@@ -811,8 +866,8 @@ def test_filter_scope_excludes_out_of_scope_carve_out(monkeypatch, tmp_path: Pat
 
     captured = capsys.readouterr()
     assert captured.out.splitlines() == [
-        "https://app.acme-regional.example/a",
-        "https://acme-regional.example/apex",
+        "https://app.acme-telco.example/a",
+        "https://acme-telco.example/apex",
     ]
 
 
@@ -1718,7 +1773,7 @@ def _write_bound_structural_fixture(
     )
     index_root = manifest_dir / "structural-index"
     generation_dir = (
-        index_root / str(repo_id) / str(generation) / "v5" / digest / input_digest
+        index_root / str(repo_id) / str(generation) / "v6" / digest / input_digest
     )
     files_dir = generation_dir / "files"
     files_dir.mkdir(parents=True)
@@ -1765,7 +1820,7 @@ def _write_bound_structural_fixture(
     manifest_path.write_text(
         json.dumps(
             {
-                "schema": "structural-index/v5",
+                "schema": "structural-index/v6",
                 "repo_id": repo_id,
                 "repo_key": repo_key,
                 "repo_generation": generation,
@@ -1949,7 +2004,13 @@ def test_code_index_sync_repo_id_scopes_aggregate_to_matching_manifest(
                 return [repo_a["backend_repo"], repo_b["backend_repo"]]
             self.file_requests.append(endpoint)
             assert endpoint == "code/files?limit=5000&offset=0&repo_id=2"
-            return [dict(repo_b["backend_file"])]
+            return {
+                "total": 1,
+                "offset": 0,
+                "count": 1,
+                "has_more": False,
+                "items": [dict(repo_b["backend_file"])],
+            }
 
         def post(self, endpoint: str, payload: dict[str, object]):
             self.posts.append((endpoint, payload))
@@ -1989,7 +2050,7 @@ def test_code_index_sync_repo_id_scopes_aggregate_to_matching_manifest(
     assert FakeClient.file_requests == ["code/files?limit=5000&offset=0&repo_id=2"]
     assert len(FakeClient.posts) == 1
     _, payload = FakeClient.posts[0]
-    assert payload["structural_index_schema"] == "structural-index/v5"
+    assert payload["structural_index_schema"] == "structural-index/v6"
     assert payload["structural_input_digest"] == repo_b["summary"][
         "structural_input_digest"
     ]
@@ -2844,7 +2905,7 @@ def test_start_swarm_records_N_rows_with_worker_encoded_task(
                     "repo_path": "/sealed/swarm-repo/source",
                     "active_generation": 4,
                     "source_manifest_digest": "c" * 64,
-                    "structural_index_schema": "structural-index/v5",
+                    "structural_index_schema": "structural-index/v6",
                     "structural_index_manifest_path": "/sealed/swarm-repo/index/manifest.json",
                     "lsp_config": {},
                 }

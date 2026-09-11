@@ -134,6 +134,24 @@ def _positive_int_list(values: Iterable[Any]) -> list[int]:
     return result
 
 
+def _stored_receipt_ids(value: Any) -> list[int]:
+    """Return the usable receipt ids inside one stored ``*_json`` column.
+
+    Write paths gate on ``_positive_int_list``, which refuses anything else, so
+    a well-formed row round-trips unchanged. Read paths cannot refuse: a run
+    resumed from a row that predates that gate still has to be creatable, and
+    reading it must not raise. One shared reader also keeps the health lookup
+    and its consumers filtering the same values, so a malformed entry can never
+    be counted by one and dereferenced by the other.
+    """
+
+    return [
+        entry
+        for entry in _json_value(value, [])
+        if type(entry) is int and entry > 0
+    ]
+
+
 def _assessment_run_row(
     connection: sqlite3.Connection,
     engagement_id: int,
@@ -155,6 +173,9 @@ def _assessment_run_row(
                dispatches.requested_reasoning,
                dispatches.actual_reasoning,
                dispatches.client_name,
+               dispatches.requested_client,
+               dispatches.launcher_effective_client,
+               dispatches.provider_observed_client,
                dispatches.source_revision,
                dispatches.operator_instruction_path,
                dispatches.operator_instruction_sha256,
@@ -193,6 +214,15 @@ def _dispatch_provenance(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         "actual_model": str(record.get("actual_model") or "unknown"),
         "requested_reasoning": record.get("requested_reasoning"),
         "actual_reasoning": str(record.get("actual_reasoning") or "unknown"),
+        "requested_client": str(record.get("requested_client") or "unknown"),
+        "launcher_effective_client": str(
+            record.get("launcher_effective_client") or "unknown"
+        ),
+        "provider_observed_client": str(
+            record.get("provider_observed_client") or "unknown"
+        ),
+        # Compatibility projection of launcher_effective_client. New consumers
+        # use the three explicit identity fields above.
         "client_name": str(record.get("client_name") or "unknown"),
         "source_revision": str(record.get("source_revision") or "unknown"),
         "operator_instruction_path": record.get("operator_instruction_path"),
@@ -342,7 +372,7 @@ def _receipt_health_rows(
 ) -> list[dict[str, Any]]:
     rows = connection.execute(
         f"""
-        SELECT receipts.recorded_health, receipts.evidence_kind,
+        SELECT receipts.id, receipts.recorded_health, receipts.evidence_kind,
                receipts.source_read_id,
                receipts.command_run_id,
                receipts.artifact_id,
@@ -371,6 +401,28 @@ def _receipt_health_rows(
                 int(record["command_run_id"]), "stale"
             )
     return records
+
+
+def _receipt_health_by_id(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    receipt_ids: Iterable[int],
+) -> dict[int, str]:
+    ordered_ids = sorted(set(receipt_ids))
+    health_by_id: dict[int, str] = {}
+    for offset in range(0, len(ordered_ids), 500):
+        batch = ordered_ids[offset : offset + 500]
+        placeholders = ",".join("?" for _ in batch)
+        rows = _receipt_health_rows(
+            connection,
+            engagement_id,
+            where_sql=f"receipts.id IN ({placeholders})",
+            parameters=tuple(batch),
+        )
+        health_by_id.update(
+            (int(row["id"]), _evidence_health(row)) for row in rows
+        )
+    return health_by_id
 
 
 def _evidence_health_counts(
@@ -442,11 +494,7 @@ def _effective_proof_receipt_ids(
             (engagement_id, run_id),
         ).fetchall()
         for row in rows:
-            receipt_ids.update(
-                int(value)
-                for value in _json_value(row["proof_receipt_ids_json"], [])
-                if type(value) is int and value > 0
-            )
+            receipt_ids.update(_stored_receipt_ids(row["proof_receipt_ids_json"]))
 
     pending = set(receipt_ids)
     while pending:
@@ -1100,6 +1148,48 @@ def _serialize_run(
     return record
 
 
+_RESUME_REASON = "resumed from terminal run"
+_RESUME_PROOF_REPLACEMENT_REASON = (
+    "resumed from terminal run with proof requiring replacement"
+)
+
+
+def _partition_inherited_receipts(
+    health_by_id: dict[int, str], receipt_ids: Iterable[int]
+) -> tuple[list[int], list[int]]:
+    """Split bound receipts into the ones a resumed run inherits and the rest.
+
+    An id with no health row lands in the dropped half: the receipt it named is
+    not readable from this engagement, so the child cannot stand behind it.
+    """
+
+    inherited: list[int] = []
+    dropped: list[int] = []
+    for receipt_id in receipt_ids:
+        bucket = inherited if health_by_id.get(receipt_id) == "healthy" else dropped
+        bucket.append(receipt_id)
+    return inherited, dropped
+
+
+def _resume_reason(dropped_receipt_ids: list[int], origin: str = "") -> str:
+    """Return the reason a resumed run records for one copied record.
+
+    A resume never edits its parent, so the child's own event row is the only
+    place an operator can read which bindings were dropped and what the parent
+    had concluded with them. ``origin`` carries that parent conclusion — the
+    finding slug, the resolution text — which the reopened child row no longer
+    asserts.
+    """
+
+    if not dropped_receipt_ids:
+        return _RESUME_REASON
+    origin_detail = f" from {origin}" if origin else ""
+    return (
+        f"{_RESUME_PROOF_REPLACEMENT_REASON}; dropped unhealthy proof receipts "
+        f"{dropped_receipt_ids}{origin_detail}"
+    )
+
+
 def create_assessment_run(
     engagement_id: int,
     *,
@@ -1217,7 +1307,7 @@ def create_assessment_run(
                 engagement.id,
                 run_id,
                 initial_status,
-                "resumed from terminal run" if resumed_from_run_id is not None else "created",
+                _RESUME_REASON if resumed_from_run_id is not None else "created",
             ),
         )
         relevant_repositories = target_identity.get("security_relevant_repositories", [])
@@ -1293,11 +1383,58 @@ def create_assessment_run(
                     ),
                 )
                 source_id_map[int(source["id"])] = int(copied.lastrowid)
-            for source_read in connection.execute(
+            source_reads = connection.execute(
                 "SELECT * FROM assessment_run_source_reads WHERE run_id = ? ORDER BY id",
                 (resumed_from_run_id,),
-            ).fetchall():
+            ).fetchall()
+            obligations = connection.execute(
+                "SELECT * FROM assessment_run_obligations WHERE run_id = ? ORDER BY id",
+                (resumed_from_run_id,),
+            ).fetchall()
+            candidates = connection.execute(
+                "SELECT * FROM assessment_run_candidates WHERE run_id = ? ORDER BY id",
+                (resumed_from_run_id,),
+            ).fetchall()
+            # One recovery rule for every copied binding: a resumed run inherits
+            # only proof that is still healthy at resume time. Anything else
+            # would follow the parent's receipt into the child's effective proof
+            # set, raise a proof_* blocker the child cannot clear, and hold the
+            # run at partial forever — the parent's rows are sealed and the
+            # child's copy of a closed disposition is immutable.
+            inherited_health = _receipt_health_by_id(
+                connection,
+                engagement.id,
+                [
+                    *(
+                        int(read["proof_receipt_id"])
+                        for read in source_reads
+                        if read["proof_receipt_id"] is not None
+                    ),
+                    *(
+                        receipt_id
+                        for row in (*obligations, *candidates)
+                        for receipt_id in _stored_receipt_ids(
+                            row["proof_receipt_ids_json"]
+                        )
+                    ),
+                ],
+            )
+            dropped_source_read_receipt_ids: list[int] = []
+            copied_read_fingerprints: set[str] = set()
+            for source_read in source_reads:
                 copied_source_id = source_id_map[int(source_read["source_id"])]
+                parent_receipt_id = source_read["proof_receipt_id"]
+                _, dropped_receipt_ids = _partition_inherited_receipts(
+                    inherited_health,
+                    [] if parent_receipt_id is None else [int(parent_receipt_id)],
+                )
+                dropped_source_read_receipt_ids.extend(dropped_receipt_ids)
+                # A read's observed byte coverage stands on its own — nothing in
+                # the ledger derives coverage from the receipt — so the read is
+                # copied intact and only loses the proof pointer. Re-recording
+                # the same range against fresh proof yields a new fingerprint,
+                # so the child can rebind without colliding with this row.
+                copied_receipt_id = None if dropped_receipt_ids else parent_receipt_id
                 read_fingerprint = _sha256(
                     {
                         "source_id": copied_source_id,
@@ -1311,9 +1448,21 @@ def create_assessment_run(
                         "byte_end": int(source_read["byte_end"]),
                         "line_start": int(source_read["line_start"]),
                         "line_end": int(source_read["line_end"]),
-                        "proof_receipt_id": source_read["proof_receipt_id"],
+                        "proof_receipt_id": copied_receipt_id,
                     }
                 )
+                # Two parent rows over the same range that differed ONLY by proof
+                # binding become one row once both bindings are dropped, and the
+                # (run_id, read_fingerprint) unique index would abort the whole
+                # resume on the second insert. Collapse them the way the write
+                # path already does — it returns the existing row for a repeated
+                # fingerprint rather than adding a second — since the surviving
+                # row asserts exactly the same observed bytes. The receipts they
+                # carried are named in the lifecycle event written below, so the
+                # collapse loses no lineage.
+                if read_fingerprint in copied_read_fingerprints:
+                    continue
+                copied_read_fingerprints.add(read_fingerprint)
                 connection.execute(
                     """
                     INSERT INTO assessment_run_source_reads (
@@ -1332,15 +1481,33 @@ def create_assessment_run(
                         source_read["byte_end"],
                         source_read["line_start"],
                         source_read["line_end"],
-                        source_read["proof_receipt_id"],
+                        copied_receipt_id,
                         read_fingerprint,
                         source_read["created_at"],
                     ),
                 )
-            for obligation in connection.execute(
-                "SELECT * FROM assessment_run_obligations WHERE run_id = ? ORDER BY id",
-                (resumed_from_run_id,),
-            ).fetchall():
+            if dropped_source_read_receipt_ids:
+                # Source reads have no per-row event table, so the run's own
+                # lifecycle history carries the drop; it is returned on every
+                # run read, so the resuming agent sees it without a second call.
+                connection.execute(
+                    """
+                    INSERT INTO assessment_run_lifecycle_events (
+                        engagement_id, run_id, from_status, to_status, reason
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        engagement.id,
+                        run_id,
+                        initial_status,
+                        initial_status,
+                        _resume_reason(
+                            dropped_source_read_receipt_ids,
+                            "parent source-read proof bindings",
+                        ),
+                    ),
+                )
+            for obligation in obligations:
                 obligation_kind = str(obligation["obligation_kind"])
                 identity_key = str(obligation["identity_key"])
                 if obligation_kind in {
@@ -1354,7 +1521,24 @@ def create_assessment_run(
                         mapped_source_id = source_id_map.get(int(suffix))
                         if mapped_source_id is not None:
                             identity_key = f"{prefix}{mapped_source_id}"
-                receipt_ids = _json_value(obligation["proof_receipt_ids_json"], [])
+                parent_status = str(obligation["status"])
+                parent_resolution = str(obligation["resolution"])
+                parent_receipt_ids = _stored_receipt_ids(
+                    obligation["proof_receipt_ids_json"]
+                )
+                copied_receipt_ids, dropped_receipt_ids = _partition_inherited_receipts(
+                    inherited_health, parent_receipt_ids
+                )
+                # A closed obligation is immutable, so a child that inherits one
+                # whose evidence has decayed can never re-resolve it. Reopening
+                # returns it to the one status an agent can still move, and its
+                # unevidenced resolution text is retired with the proof it rested on.
+                requires_new_proof = bool(dropped_receipt_ids) and parent_status in {
+                    "resolved",
+                    "accepted_gap",
+                }
+                copied_status = "open" if requires_new_proof else parent_status
+                copied_resolution = "" if requires_new_proof else parent_resolution
                 obligation_record_sha256 = _sha256(
                     {
                         "identity_key": identity_key,
@@ -1362,9 +1546,9 @@ def create_assessment_run(
                         "object_type": str(obligation["object_type"]),
                         "object_key": str(obligation["object_key"]),
                         "hard": bool(obligation["hard"]),
-                        "status": str(obligation["status"]),
-                        "resolution": str(obligation["resolution"]),
-                        "proof_receipt_ids": receipt_ids,
+                        "status": copied_status,
+                        "resolution": copied_resolution,
+                        "proof_receipt_ids": copied_receipt_ids,
                     }
                 )
                 copied = connection.execute(
@@ -1383,9 +1567,9 @@ def create_assessment_run(
                         obligation["object_type"],
                         obligation["object_key"],
                         obligation["hard"],
-                        obligation["status"],
-                        obligation["resolution"],
-                        obligation["proof_receipt_ids_json"],
+                        copied_status,
+                        copied_resolution,
+                        _json_text(copied_receipt_ids),
                         obligation_record_sha256,
                         obligation["created_at"],
                         obligation["updated_at"],
@@ -1402,21 +1586,42 @@ def create_assessment_run(
                         engagement.id,
                         run_id,
                         int(copied.lastrowid),
-                        obligation["status"],
-                        obligation["status"],
-                        "resumed from terminal run",
-                        obligation["proof_receipt_ids_json"],
+                        parent_status,
+                        copied_status,
+                        _resume_reason(
+                            dropped_receipt_ids,
+                            f"parent status={parent_status!r} "
+                            f"resolution={parent_resolution!r}",
+                        ),
+                        _json_text(parent_receipt_ids),
                     ),
                 )
-            for candidate in connection.execute(
-                "SELECT * FROM assessment_run_candidates WHERE run_id = ? ORDER BY id",
-                (resumed_from_run_id,),
-            ).fetchall():
+            for candidate in candidates:
                 copied_source_id = (
                     source_id_map[int(candidate["source_id"])]
                     if candidate["source_id"] is not None
                     else None
                 )
+                parent_state = str(candidate["state"])
+                parent_finding_slug = str(candidate["finding_slug"])
+                parent_receipt_ids = _stored_receipt_ids(
+                    candidate["proof_receipt_ids_json"]
+                )
+                copied_receipt_ids, dropped_receipt_ids = _partition_inherited_receipts(
+                    inherited_health, parent_receipt_ids
+                )
+                # Same rule as obligations: a terminal candidate state is
+                # immutable, so an inherited disposition whose proof decayed has
+                # to reopen or the child can never dispose of it again. The
+                # promoted finding slug is retired with it and named in the
+                # event, so the child still has the pointer to re-work from.
+                requires_new_proof = bool(dropped_receipt_ids) and parent_state in {
+                    "promoted",
+                    "rejected",
+                    "duplicate",
+                }
+                copied_state = "open" if requires_new_proof else parent_state
+                copied_finding_slug = "" if requires_new_proof else parent_finding_slug
                 copied_record_sha256 = _sha256(
                     {
                         "identity_key": str(candidate["identity_key"]),
@@ -1428,11 +1633,9 @@ def create_assessment_run(
                         "originating_result_id": candidate["originating_result_id"],
                         "originating_signal_id": candidate["originating_signal_id"],
                         "dispatch_id": int(candidate["dispatch_id"]),
-                        "proof_receipt_ids": _json_value(
-                            candidate["proof_receipt_ids_json"], []
-                        ),
-                        "state": str(candidate["state"]),
-                        "finding_slug": str(candidate["finding_slug"]),
+                        "proof_receipt_ids": copied_receipt_ids,
+                        "state": copied_state,
+                        "finding_slug": copied_finding_slug,
                     }
                 )
                 copied = connection.execute(
@@ -1457,9 +1660,9 @@ def create_assessment_run(
                         candidate["originating_result_id"],
                         candidate["originating_signal_id"],
                         candidate["dispatch_id"],
-                        candidate["proof_receipt_ids_json"],
-                        candidate["state"],
-                        candidate["finding_slug"],
+                        _json_text(copied_receipt_ids),
+                        copied_state,
+                        copied_finding_slug,
                         copied_record_sha256,
                         candidate["created_at"],
                         candidate["updated_at"],
@@ -1470,15 +1673,20 @@ def create_assessment_run(
                     INSERT INTO assessment_run_candidate_events (
                         engagement_id, run_id, candidate_id, from_state, to_state,
                         reason, proof_receipt_ids_json
-                    ) VALUES (?, ?, ?, ?, ?, 'resumed from terminal run', ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         engagement.id,
                         run_id,
                         int(copied.lastrowid),
-                        candidate["state"],
-                        candidate["state"],
-                        candidate["proof_receipt_ids_json"],
+                        parent_state,
+                        copied_state,
+                        _resume_reason(
+                            dropped_receipt_ids,
+                            f"parent state={parent_state!r} "
+                            f"finding_slug={parent_finding_slug!r}",
+                        ),
+                        _json_text(parent_receipt_ids),
                     ),
                 )
         row = _run_or_404(connection, engagement.id, run_id)
@@ -1497,7 +1705,10 @@ def list_assessment_runs(
                    dispatches.agent_role AS producer_dispatch_agent_role,
                    dispatches.requested_model, dispatches.actual_model,
                    dispatches.requested_reasoning, dispatches.actual_reasoning,
-                   dispatches.client_name, dispatches.source_revision,
+                   dispatches.client_name, dispatches.requested_client,
+                   dispatches.launcher_effective_client,
+                   dispatches.provider_observed_client,
+                   dispatches.source_revision,
                    dispatches.operator_instruction_path,
                    dispatches.operator_instruction_sha256,
                    dispatches.specialist_instruction_path,

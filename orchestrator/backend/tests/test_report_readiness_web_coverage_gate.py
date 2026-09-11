@@ -30,6 +30,7 @@ from app.services import state_manager
 
 
 BASE_TMPL = "/engagements/{key}/assessment"
+AUTHOR_AGENT_ID = "WEB-COVERAGE-AUTHOR"
 
 
 # The single-file report template's data node, byte-for-byte. The backend
@@ -96,7 +97,17 @@ def _write_engagement(
 def _register(client, key: str) -> str:
     response = client.get(f"/engagements/{key}")
     assert response.status_code == 200, response.text
-    return BASE_TMPL.format(key=key)
+    base = BASE_TMPL.format(key=key)
+    dispatch = client.post(
+        f"{base}/dispatches",
+        json={
+            "agent_id": AUTHOR_AGENT_ID,
+            "agent_role": "vulnerability-analyst",
+            "task": "Record web-coverage fixture findings",
+        },
+    )
+    assert dispatch.status_code == 201, dispatch.text
+    return base
 
 
 def _ingest_routes(client, base: str, *, host: str, paths: list[str]) -> None:
@@ -127,6 +138,7 @@ def _draft_unreviewed_finding(
             "canonical_location": f"https://{host}/x",
             "summary": "needs a grade",
             "source_name": "vulnerability-analyst",
+            "provenance": {"agent_id": AUTHOR_AGENT_ID},
         },
     )
     assert resp.status_code == 201, resp.text
@@ -206,6 +218,7 @@ def test_recording_a_verdict_clears_uncovered_host(client, isolate_settings):
             "canonical_location": "https://app.example.com/alpha",
             "summary": "covered",
             "source_name": "vulnerability-analyst",
+            "provenance": {"agent_id": AUTHOR_AGENT_ID},
         },
     )
     assert resp.status_code == 201, resp.text

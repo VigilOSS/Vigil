@@ -82,7 +82,7 @@ gates:
 Before your dispatch returns, run in this order:
 
 1. `vigil assess intel record <type> <intel-json>` for every intel row — one call per row (cve, tech-component, person, email, domain, dns-record, social-profile, breach-record, org-fact, note). CVE matches are intel, not findings — see "CVE Validation Gate" below.
-2. `vigil assess finding record osint-analyst <finding-json>` ONLY when you have target-specific proof that does not require exploit-developer validation (breached credentials confirmed against the target, public data leak containing target-specific secrets).
+2. `vigil assess finding record osint-analyst <finding-json> --agent-id <your-agent_id>` ONLY when you have target-specific proof that does not require exploit-developer validation (breached credentials confirmed against the target, public data leak containing target-specific secrets).
 3. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts, open questions, and role-specific extras (`cve_matches`, `high_value_cve_matches`, `intel_rows`, `github_orgs_enumerated`)
 4. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 

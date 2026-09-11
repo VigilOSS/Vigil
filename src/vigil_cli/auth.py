@@ -114,7 +114,7 @@ def _csrf_export_arg(
     """Render the opt-in CSRF double-submit ``-H`` arg for the copy-paste path.
 
     Mirrors ``assess.lib.kali._csrf_double_submit_pair`` so the printed curl matches
-    what ``vigil assess kali --identity`` injects at exec time: the header is emitted
+    what ``vigil assess kali <tool> --identity`` injects at exec time: the header is emitted
     ONLY on a state-changing ``method``, ONLY when the identity declares the
     app-specific ``csrf`` mapping AND the named cookie is present in the rendered
     cookie view, and NEVER when the identity already carries that header (so an
@@ -215,7 +215,12 @@ def quarantine_identity(
 
 
 def env_preflight(keys: list[str]) -> list[dict[str, object]]:
-    """Report environment credential prerequisites without exposing values."""
+    """Answer "is each of these env vars set?" for a pre-run prerequisite check.
+
+    Presence is the whole question this verb is asked — an operator checking that
+    `VIGIL_TARGET_PASSWORD` is exported before a run is not asking to read it back,
+    and `echo $KEY` already answers that. The boolean is the answer, not a
+    concealment of the value (ADR 0019)."""
     return [
         {
             "name": str(key),
@@ -241,6 +246,15 @@ def _active_material(engagement_dir: Path) -> dict[str, Any]:
     resolved = _api(engagement_dir, "GET", "/resolve")
     material = resolved.get("material") if isinstance(resolved, dict) else None
     return material if isinstance(material, dict) else {}
+
+
+def _pairs(material: dict[str, Any]) -> str:
+    """Render a cookie/header map as ``name=value; ...`` for the status line.
+
+    The values are the engagement's own session material on the operator's own
+    machine: an operator reading this line is checking exactly which cookie the
+    next request will carry, so a count would answer the wrong question."""
+    return "; ".join(f"{name}={value}" for name, value in material.items()) or "-"
 
 
 def status_line(
@@ -281,7 +295,7 @@ def status_line(
         f"{_key(engagement_dir)}\tmode={material.get('mode', 'none')}"
         f"\tstate={material.get('state', 'none')}"
         f"\tidentity={resolved_name or material.get('identity_name', '-')}"
-        f"\tcookies={len(cookies)}\theaders={len(headers)}"
+        f"\tcookies={_pairs(cookies)}\theaders={_pairs(headers)}"
         f"\texpires_at={expires_at or '-'}\tstale={stale_repr}"
     )
 
@@ -488,7 +502,7 @@ def export_curl_args(
     """Render the identity's material as curl ``-H`` arguments (operator copy-paste).
 
     ``host`` selects the matching ``host_cookies`` bucket(s) and uses it ALONE —
-    the same host-scoped lookup ``vigil assess kali --identity`` applies at
+    the same host-scoped lookup ``vigil assess kali <tool> --identity`` applies at
     injection time (I-22). The flat ``cookies`` field is a UNION across every
     captured host, so seeding it and overlaying the bucket (the old behavior)
     would leave cookie names unique to OTHER hosts in the printed ``Cookie``
@@ -587,7 +601,7 @@ def _authed_request_headers(
 ) -> dict[str, str]:
     """Build the request headers for a host-side authed probe from identity material.
 
-    Cookies are host-scoped the same way ``vigil assess kali --identity`` injects
+    Cookies are host-scoped the same way ``vigil assess kali <tool> --identity`` injects
     them: the matching ``host_cookies`` bucket is used ALONE, falling back to the
     flat ``cookies`` view ONLY for identities with no per-host buckets at all.
     When buckets exist but none match the probed host we omit cookies entirely —
@@ -860,7 +874,8 @@ def _resolve_caps(
     """Freshest full-anchor capture per distinct login, newest-first, capped to ``caps``.
 
     Ports the reference ``resolve_caps``: from the FULL identity map (cookie VALUES
-    included — the value-redacted ``auth list`` view cannot do this) keep only
+    included — the ``auth list`` TABLE carries names only to stay scannable, so the
+    anchor comparison below needs the map rather than that view) keep only
     captures that carry one of the OPERATOR-DECLARED ``anchor_cookies`` (this
     engagement's session-anchor cookie name(s); Vigil assumes none), DROP any whose
     anchor value is the literal ``deleted`` (a captured logout folded into the jar),

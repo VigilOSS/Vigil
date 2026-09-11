@@ -8,7 +8,7 @@ list endpoint is a thin passthrough to ``services.intel``; search hits
 from __future__ import annotations
 
 import functools
-from typing import Any
+from typing import Any, Literal
 
 import anyio
 from fastapi import APIRouter, HTTPException, Query, status
@@ -90,6 +90,10 @@ def search_intel(
     engagement_key: str,
     q: str = Query(default="", max_length=1024),
     entity_type: str = Query(default="", max_length=64),
+    lead_status: Literal["open", "in_progress", "resolved", "ruled_out"] | None = Query(
+        default=None
+    ),
+    provenance: str = Query(default="", max_length=1024),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
@@ -98,6 +102,8 @@ def search_intel(
         engagement.id,
         q,
         entity_type=entity_type,
+        lead_status=lead_status,
+        provenance=provenance,
         limit=limit,
         offset=offset,
     )

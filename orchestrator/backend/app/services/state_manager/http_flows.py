@@ -12,7 +12,7 @@ artifact relative_path + sha256 + byte counts + truncation flags, plus the small
 header maps needed to reconstruct a HAR entry.
 
 HAR interoperability (export/import) is a thin adapter around this store; the
-canonical row — not HAR — preserves Vigil routing/auth/truncation/redaction
+canonical row — not HAR — preserves Vigil routing/auth/truncation
 metadata via a ``_vigil`` custom field on each HAR entry so an export→import
 round-trip reconstructs the flow metadata.
 """
@@ -47,8 +47,6 @@ DEFAULT_CAPTURE_POLICY: dict[str, Any] = {
     "max_body_bytes": DEFAULT_MAX_BODY_BYTES,
     "content_type_allow": [],
     "content_type_deny": [],
-    "redaction_profile": "none",
-    "redaction_warning": "",
     "retention": "until_engagement_deletion",
 }
 
@@ -119,6 +117,9 @@ def _parse_json_object(value: Any) -> dict[str, Any]:
 
 def _serialize_http_flow(row: Any) -> dict[str, Any]:
     data = dict(row)
+    # Compatibility-only column from before ADR 0019. It never altered stored
+    # bytes and is deliberately absent from the current operator contract.
+    data.pop("redaction_status", None)
     for column in _HEADER_JSON_COLUMNS:
         key = column[: -len("_json")]  # request_headers_json -> request_headers
         data[key] = _parse_json_object(data.pop(column, None))
@@ -157,7 +158,6 @@ def insert_http_flow(
     response_body_artifact_path: str | None = None,
     request_headers: dict[str, Any] | None = None,
     response_headers: dict[str, Any] | None = None,
-    redaction_status: str = "none",
     host_mismatch: bool = False,
     url_authority: str = "",
     host_header: str = "",
@@ -189,10 +189,10 @@ def insert_http_flow(
                 request_body_capture_status, response_body_capture_status,
                 request_body_capture_error, response_body_capture_error,
                 request_body_artifact_path, response_body_artifact_path,
-                request_headers_json, response_headers_json, redaction_status,
+                request_headers_json, response_headers_json,
                 host_mismatch, url_authority, host_header, sni, timing_ms, started_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 engagement.id,
@@ -223,7 +223,6 @@ def insert_http_flow(
                 response_body_artifact_path or None,
                 _json_object_text(request_headers),
                 _json_object_text(response_headers),
-                str(redaction_status or "none"),
                 1 if host_mismatch else 0,
                 str(url_authority or ""),
                 str(host_header or ""),
@@ -342,13 +341,6 @@ def get_http_flow(engagement_id: int, flow_uid_or_id: str | int) -> dict[str, An
 
 def _serialize_capture_policy(row: Any) -> dict[str, Any]:
     data = dict(row)
-    stored_redaction = str(data["redaction_profile"] or "none")
-    redaction_warning = ""
-    if stored_redaction != "none":
-        redaction_warning = (
-            f"stored redaction profile {stored_redaction!r} is unsupported; "
-            "raw evidence remains unredacted and the effective profile is 'none'"
-        )
     return {
         "enabled": bool(data["enabled"]),
         "capture_request_bodies": bool(data["capture_request_bodies"]),
@@ -356,8 +348,6 @@ def _serialize_capture_policy(row: Any) -> dict[str, Any]:
         "max_body_bytes": int(data["max_body_bytes"]),
         "content_type_allow": _parse_json_list(data["content_type_allow_json"]),
         "content_type_deny": _parse_json_list(data["content_type_deny_json"]),
-        "redaction_profile": "none",
-        "redaction_warning": redaction_warning,
         "retention": "until_engagement_deletion",
         "updated_at": str(data["updated_at"] or ""),
     }
@@ -389,13 +379,6 @@ def normalize_capture_policy(raw: dict[str, Any] | None) -> dict[str, Any]:
         max_body = int(source.get("max_body_bytes", DEFAULT_MAX_BODY_BYTES))
     except (TypeError, ValueError):
         max_body = DEFAULT_MAX_BODY_BYTES
-    stored_redaction = str(source.get("redaction_profile") or "none")
-    redaction_warning = ""
-    if stored_redaction != "none":
-        redaction_warning = (
-            f"stored redaction profile {stored_redaction!r} is unsupported; "
-            "raw evidence remains unredacted and the effective profile is 'none'"
-        )
     return {
         "enabled": _flag("enabled"),
         "capture_request_bodies": _flag("capture_request_bodies"),
@@ -403,8 +386,6 @@ def normalize_capture_policy(raw: dict[str, Any] | None) -> dict[str, Any]:
         "max_body_bytes": max(0, max_body),
         "content_type_allow": _parse_json_list(source.get("content_type_allow", [])),
         "content_type_deny": _parse_json_list(source.get("content_type_deny", [])),
-        "redaction_profile": "none",
-        "redaction_warning": redaction_warning,
         "retention": "until_engagement_deletion",
     }
 
@@ -431,7 +412,6 @@ def set_capture_policy(
     max_body_bytes: int | None = None,
     content_type_allow: list[str] | None = None,
     content_type_deny: list[str] | None = None,
-    redaction_profile: str | None = None,
 ) -> dict[str, Any]:
     """Upsert the engagement's capture policy. Fields left ``None`` retain their
     current stored (or default) value, so a partial PUT never resets unrelated
@@ -463,11 +443,6 @@ def set_capture_policy(
             if content_type_deny is None
             else [str(item) for item in content_type_deny]
         ),
-        "redaction_profile": (
-            current["redaction_profile"]
-            if redaction_profile is None
-            else str(redaction_profile)
-        ),
     }
     with _common.get_connection() as connection:
         connection.execute(
@@ -475,9 +450,9 @@ def set_capture_policy(
             INSERT INTO assessment_capture_policy (
                 engagement_id, enabled, capture_request_bodies, capture_response_bodies,
                 max_body_bytes, content_type_allow_json, content_type_deny_json,
-                redaction_profile, updated_at
+                updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(engagement_id) DO UPDATE SET
                 enabled = excluded.enabled,
                 capture_request_bodies = excluded.capture_request_bodies,
@@ -485,7 +460,6 @@ def set_capture_policy(
                 max_body_bytes = excluded.max_body_bytes,
                 content_type_allow_json = excluded.content_type_allow_json,
                 content_type_deny_json = excluded.content_type_deny_json,
-                redaction_profile = excluded.redaction_profile,
                 updated_at = CURRENT_TIMESTAMP
             """,
             (
@@ -496,7 +470,6 @@ def set_capture_policy(
                 int(merged["max_body_bytes"]),
                 _json_text(merged["content_type_allow"]),
                 _json_text(merged["content_type_deny"]),
-                merged["redaction_profile"],
             ),
         )
     stored = get_capture_policy(engagement.id)
@@ -698,7 +671,7 @@ def har_from_flows(
 
     When ``root`` is provided, request/response body sidecars are read from the
     engagement root and inlined into ``postData`` / ``content`` up to
-    ``max_body_bytes``. Vigil-specific routing/auth/truncation/redaction fields
+    ``max_body_bytes``. Vigil-specific routing/auth/truncation fields
     ride on a ``_vigil`` custom object per entry so import can reconstruct them.
     """
     entries: list[dict[str, Any]] = []
@@ -770,7 +743,6 @@ def har_from_flows(
                     "url_authority": flow.get("url_authority"),
                     "host_header": flow.get("host_header"),
                     "sni": flow.get("sni"),
-                    "redaction_status": flow.get("redaction_status"),
                     "request_body_sha256": flow.get("request_body_sha256"),
                     "response_body_sha256": flow.get("response_body_sha256"),
                     "request_body_bytes": flow.get("request_body_bytes"),
@@ -924,7 +896,6 @@ def flows_from_har(
                 "response_body_artifact_path": response_body_artifact_path,
                 "request_headers": request_headers,
                 "response_headers": response_headers,
-                "redaction_status": str(vigil.get("redaction_status") or "none"),
                 "host_mismatch": bool(vigil.get("host_mismatch")),
                 "url_authority": str(vigil.get("url_authority") or ""),
                 "host_header": str(vigil.get("host_header") or ""),

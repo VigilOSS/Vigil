@@ -1,7 +1,7 @@
 ---
 name: gf-patterns:lfi
 description: File-handling parameter patterns that signal local file inclusion and path traversal surfaces
-origin: 1ndianl33t/Gf-Patterns (+ local overlay)
+origin: 1ndianl33t/Gf-Patterns@f686f06ae647726578920084c894100d702496cc (+ local overlay)
 bucket: lfi
 skill: file-inclusion
 weight: 40
@@ -66,7 +66,7 @@ covered by `debug_logic`.
 
 - [1ndianl33t/Gf-Patterns](https://github.com/1ndianl33t/Gf-Patterns) — canonical community pattern set
 - [tomnomnom/gf](https://github.com/tomnomnom/gf) — tool
-- [PayloadsAllTheThings File Inclusion](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/File%20Inclusion)
+- [PayloadsAllTheThings File Inclusion](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/3ac27901c711bdf3f5b65a7b1d1820a1f65bd09a/File%20Inclusion)
 
 ## Related
 

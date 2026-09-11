@@ -32,9 +32,6 @@ def _receipt(receipt_id: int = 31, **overrides) -> dict:
         "artifact_relative_path": "evidence/raw/http.txt",
         "evidence_sha256": _SHA,
         "evidence_health": "healthy",
-        "redaction_status": "raw",
-        "derivative_of_receipt_id": None,
-        "raw_receipt_id": receipt_id,
         "tombstone_reason": "",
         "created_at": "2026-09-09T12:00:00+00:00",
     }
@@ -61,8 +58,6 @@ def test_proof_receipt_create_preserves_artifact_evidence_contract(
             command_run_id=payload["command_run_id"],
             evidence_sha256=payload["evidence_sha256"],
             evidence_health=payload["evidence_health"],
-            redaction_status=payload["redaction_status"],
-            derivative_of_receipt_id=payload["derivative_of_receipt_id"],
             tombstone_reason=payload["tombstone_reason"],
         )
 
@@ -102,8 +97,6 @@ def test_proof_receipt_create_preserves_artifact_evidence_contract(
                 "command_run_id": None,
                 "evidence_sha256": _SHA,
                 "evidence_health": "healthy",
-                "redaction_status": "raw",
-                "derivative_of_receipt_id": None,
                 "tombstone_reason": "",
             },
         )
@@ -152,57 +145,35 @@ def test_proof_receipt_create_binds_command_evidence_to_an_execution(
     assert posted[0]["command_run_id"] == 88
 
 
-def test_proof_receipt_create_preserves_redacted_derivative_fields(
+def test_proof_receipt_create_rejects_retired_operator_data_withholding_fields(
     tmp_path, monkeypatch, capsys
 ) -> None:
     engagement = _engagement(tmp_path)
-    payloads: list[dict] = []
     monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
-
-    def post(_client, _endpoint: str, payload: dict):
-        payloads.append(payload)
-        return _receipt(
-            32,
-            evidence_kind="http_exchange",
-            artifact_id=None,
-            artifact_relative_path="",
-            evidence_sha256="b" * 64,
-            redaction_status="redacted",
-            derivative_of_receipt_id=31,
-            raw_receipt_id=31,
-            **{
-                key: payload[key]
-                for key in (
-                    "run_id",
-                    "expected_result",
-                    "observed_result",
-                    "evidence_health",
-                    "tombstone_reason",
-                )
-            },
-        )
-
-    monkeypatch.setattr(AssessmentClient, "post", post)
-    cli.main(
-        [
-            "--engagement-dir",
-            str(engagement),
-            "proof-receipt",
-            "create",
-            "--run-id",
-            "17",
-            "--kind",
-            "http_exchange",
-            "--redaction-status",
-            "redacted",
-            "--derivative-of-receipt-id",
-            "31",
-        ]
+    monkeypatch.setattr(
+        AssessmentClient,
+        "post",
+        lambda *_args, **_kwargs: pytest.fail("retired controls must not reach the API"),
     )
-
-    assert json.loads(capsys.readouterr().out)["raw_receipt_id"] == 31
-    assert payloads[0]["redaction_status"] == "redacted"
-    assert payloads[0]["derivative_of_receipt_id"] == 31
+    with pytest.raises(SystemExit) as exc:
+        cli.main(
+            [
+                "--engagement-dir",
+                str(engagement),
+                "proof-receipt",
+                "create",
+                "--run-id",
+                "17",
+                "--kind",
+                "http_exchange",
+                "--redaction-status",
+                "redacted",
+                "--derivative-of-receipt-id",
+                "31",
+            ]
+        )
+    assert exc.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
 
 
 def test_proof_receipt_get_and_bounded_list_validate_canonical_rows(
@@ -217,7 +188,7 @@ def test_proof_receipt_get_and_bounded_list_validate_canonical_rows(
         if endpoint == "proof-receipts/31":
             return _receipt()
         if endpoint == "proof-receipts?finding_slug=VA-047&limit=2&offset=0":
-            return [_receipt(), _receipt(30, raw_receipt_id=30)]
+            return [_receipt(), _receipt(30)]
         raise AssertionError(endpoint)
 
     monkeypatch.setattr(AssessmentClient, "get", get)
@@ -249,7 +220,7 @@ def test_proof_receipt_get_and_bounded_list_validate_canonical_rows(
 @pytest.mark.parametrize(
     ("argv", "response"),
     [
-        (["proof-receipt", "get", "31"], _receipt(32, raw_receipt_id=32)),
+        (["proof-receipt", "get", "31"], _receipt(32)),
         (["proof-receipt", "list"], {"id": 31}),
         (["proof-receipt", "list"], [_receipt(evidence_sha256="not-a-sha")]),
     ],

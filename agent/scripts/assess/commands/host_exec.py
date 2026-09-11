@@ -30,7 +30,12 @@ from assess.lib.client import (
 )
 from assess.lib.config import load_config
 from assess.lib.execution_recency import emit_foreign_lane_recency
-from assess.lib.kali import prepare_execution_command
+from assess.lib.kali import (
+    _required_headers,
+    prepare_execution_command,
+    required_header_env_pairs,
+)
+from assess.lib.kali_audit import _extract_target_anchor
 
 # Conservative destructive-token list. Operators must pass --allow-destructive
 # to bypass. Tokens are matched as substrings in the joined argv after stripping
@@ -643,6 +648,7 @@ def _run_host_process(
     stderr_path: Path | None = None,
     stdout_descriptor: int | None = None,
     stderr_descriptor: int | None = None,
+    env_pairs: list[tuple[str, str]] | None = None,
 ) -> tuple[int, str, str, bool]:
     """Run one host process with line-one spill and precise group ownership."""
     output_dir = Path(engagement_dir) / "scans" / "host-exec"
@@ -684,9 +690,12 @@ def _run_host_process(
             os.fdopen(stderr_process_descriptor, "r+b") as stderr_file,
         ):
             try:
+                process_env = os.environ.copy()
+                process_env.update(env_pairs or [])
                 process = subprocess.Popen(  # noqa: S603 - operator-supplied argv is the contract
                     argv,
                     cwd=cwd,
+                    env=process_env,
                     stdout=stdout_file,
                     stderr=stderr_file,
                     start_new_session=True,
@@ -921,20 +930,33 @@ def run(args) -> None:
     started_monotonic = time.monotonic()
 
     auth_context = "anonymous"
+    prepare_report: dict[str, str] = {}
+    required_header_pairs = required_header_env_pairs(
+        _required_headers(Path(cfg.engagement_dir))
+    )
     try:
         auth_context = prepare_execution_command(
             argv,
             tool_name=args.tool.strip(),
             engagement_dir=Path(cfg.engagement_dir),
+            execution_cwd=Path(cwd),
+            container_paths=False,
             identity=getattr(args, "identity", None),
             identity_scope=getattr(args, "identity_scope", "") or "",
+            report=prepare_report,
         )
+        inferred_target_host = _extract_target_anchor(args.tool.strip(), argv)[0]
         execution_policy = scope_lib.enforce_execution_policy(
             argv,
             tool_name=args.tool.strip(),
             engagement_dir=cfg.engagement_dir,
+            execution_cwd=cwd,
+            container_paths=False,
             require_declared_tool=True,
+            target_host=(args.target_host or inferred_target_host or "").strip(),
+            execution_phase=args.phase.strip(),
         )
+        execution_policy.update(prepare_report)
     except scope_lib.ScopePolicyError as exc:
         reason = str(exc)
         refusal_payload = {
@@ -1109,6 +1131,7 @@ def run(args) -> None:
                 stderr_path=stderr_path,
                 stdout_descriptor=stdout_descriptor,
                 stderr_descriptor=stderr_descriptor,
+                env_pairs=required_header_pairs,
             )
         except HostProcessNotQuiescent as exc:
             return_code = 1

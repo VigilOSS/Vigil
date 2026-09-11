@@ -133,8 +133,8 @@ otherwise seal the run with its truthful failed, interrupted, or canceled status
 rejects later receipts, so this order preserves which evidence actually existed at completion.
 Inspect durable state with `vigil assess proof-run get|list` and
 `vigil assess proof-receipt get|list`, then cite the completed independent run's receipt IDs in
-`vigil assess finding verify`. Redacted receipts point to their retained raw parent; presentation
-never rewrites the raw receipt.
+`vigil assess finding verify`. Proof receipts identify the exact captured bytes; presentation
+never rewrites their evidence.
 
 When the dispatch assigns a source-accounted scan, also read
 `vigil assess contract run-audit`. Start the owning `proof-run` with `--purpose scan`, import its

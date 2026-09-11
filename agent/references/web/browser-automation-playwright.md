@@ -1,5 +1,5 @@
 ---
-description: How to actually drive a browser for testing — headed stealth Playwright Chromium as the primary tool, the two capture modes (A through-proxy auto-capture, B direct + cookie-dump when the proxy trips bot defense), stealth hardening that beats Akamai Bot Manager, login-flow automation (multi-selector fields, two-step username→password, akredirect interstitial detection, OTP/email step-up, screenshot-every-step), and context.cookies() → Netscape jar for curl_chrome116 replay. Tool-choice rationale vs curl-impersonate / headless-chromium / Selenium. Verified 2026-06-22 against Akamai-fronted www.acme-bank.example.
+description: How to drive a browser for testing — headed stealth Playwright Chromium, proxy and direct cookie-dump capture modes, bot-defense handling, login-flow automation, screenshots, and context.cookies() to Netscape-jar replay. Examples use fictional targets.
 skill: browser-automation
 ---
 
@@ -21,7 +21,7 @@ assumes you already decided the answer is yes.
 | Headless Chromium (Playwright/Katana `-headless`/Puppeteer) | Browser with no UI | Broad JS-aware crawling where bot defense is weak/absent | **Headless is detectable** — Akamai Bot Manager fingerprints headless and blocks at the login step even with the right TLS (see below) |
 | Selenium | Older WebDriver automation | Legacy harnesses that already use it | WebDriver leaks `navigator.webdriver`, slower to harden, weaker structured output for LLM consumption than Playwright |
 
-**The load-bearing finding (verified 2026-06-22, Akamai-fronted www.acme-bank.example):**
+**The load-bearing pattern (illustrated with fictional `www.acme-bank.example`):**
 a headless or MITM-proxied automated browser hit Akamai Bot Manager at the login
 step — `"We are unable to complete your request / our system is currently
 unavailable"`. A **HEADED** Chromium on a **residential IP** with stealth
@@ -71,7 +71,7 @@ install: `agent/references/tools/proxy/mitmproxy.md`.
 
 **The MITM proxy in the TLS path can itself trip Akamai.** Routing the automated
 browser through mitmproxy produced the same `"system currently unavailable"`
-block on www.acme-bank.example — the extra TLS hop / cert / timing was enough to fail the
+block on the fictional target — the extra TLS hop, certificate, or timing was enough to fail the
 challenge. Going **DIRECT** on the residential IP and dumping
 `context.cookies()` *after* login worked.
 

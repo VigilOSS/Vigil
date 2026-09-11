@@ -220,6 +220,7 @@ def test_both_engagement_exposes_independent_code_phase(client, isolate_settings
             "engagement_type": "both",
             "current_phase": "hunt",
             "code_phase": "verify-variant",
+            "status": "completed",
         }
     )
     scope_path.write_text(json.dumps(scope), encoding="utf-8")
@@ -235,6 +236,12 @@ def test_both_engagement_exposes_independent_code_phase(client, isolate_settings
     assert list_row["current_phase"] == "hunt"
     assert list_row["code_phase"] == "verify-variant"
     assert fetched.json()["code_phase"] == "verify-variant"
+    assert fetched.json()["track_state"] == {
+        "web": {"phase": "hunt", "complete": False},
+        "code": {"phase": "verify-variant", "complete": False},
+    }
+    assert fetched.json()["aggregate_complete"] is False
+    assert fetched.json()["status"] == "in_progress"
 
 
 def test_list_engagements_surfaces_scope_hosts_for_proxy_router(client, isolate_settings):
@@ -290,7 +297,7 @@ def test_list_engagements_surfaces_out_of_scope_for_proxy_router(client, isolate
         json.dumps(
             {
                 "key": "2026-04-01-110000-oos",
-                "target": "https://acme-regional.example",
+                "target": "https://target.example",
                 "created_at": "2026-04-01T11:00:00Z",
             }
         ),
@@ -299,9 +306,9 @@ def test_list_engagements_surfaces_out_of_scope_for_proxy_router(client, isolate
     (engagement_dir / "scope.json").write_text(
         json.dumps(
             {
-                "hostname": "acme-regional.example",
-                "hosts": ["*.acme-regional.example"],
-                "out_of_scope": ["Appointments.acme-regional.example", "*.mobile.acme-net.example", "appointments.acme-regional.example"],
+                "hostname": "target.example",
+                "hosts": ["*.target.example"],
+                "out_of_scope": ["Appointments.example.com", "*.mobile.example.com", "appointments.example.com"],
                 "status": "in_progress",
                 "current_phase": "recon",
             }
@@ -314,7 +321,7 @@ def test_list_engagements_surfaces_out_of_scope_for_proxy_router(client, isolate
     assert response.status_code == 200
     row = next(item for item in response.json() if item["key"] == "2026-04-01-110000-oos")
     # Lowercased + deduped, order-preserving.
-    assert row["out_of_scope"] == ["appointments.acme-regional.example", "*.mobile.acme-net.example"]
+    assert row["out_of_scope"] == ["appointments.example.com", "*.mobile.example.com"]
 
 
 def test_list_engagements_filters_by_status(client, isolate_settings):
@@ -423,11 +430,11 @@ def test_tombstoned_engagement_is_hidden_from_active_registry(client, isolate_se
 
 def test_list_engagements_surfaces_and_filters_blue_customer_platform(client, isolate_settings):
     engagements_dir = isolate_settings["engagements_dir"]
-    blue_dir = engagements_dir / "2026-05-20-120000-acme-corp-gws"
-    other_dir = engagements_dir / "2026-05-20-121000-acme-aws"
+    blue_dir = engagements_dir / "2026-05-20-120000-acme-gws"
+    other_dir = engagements_dir / "2026-05-20-121000-other-example-aws"
     for path, customer, platforms in (
-        (blue_dir, "acme-corp", ["gws", "m365"]),
-        (other_dir, "acme", ["aws"]),
+        (blue_dir, "acme", ["gws", "m365"]),
+        (other_dir, "other-example", ["aws"]),
     ):
         (path / "sessions").mkdir(parents=True)
         (path / "engagement.json").write_text(
@@ -457,11 +464,11 @@ def test_list_engagements_surfaces_and_filters_blue_customer_platform(client, is
         )
         (path / "sessions" / "index.json").write_text("[]", encoding="utf-8")
 
-    rows = client.get("/engagements?engagement_type=blue&customer=acme-corp").json()
+    rows = client.get("/engagements?engagement_type=blue&customer=acme").json()
     assert [row["key"] for row in rows] == [blue_dir.name]
-    assert rows[0]["customer"] == "acme-corp"
+    assert rows[0]["customer"] == "acme"
     assert rows[0]["platforms"] == ["gws", "m365"]
-    assert rows[0]["tenant_reference_paths"] == ["agent/references/tenants/acme-corp-gws.md"]
+    assert rows[0]["tenant_reference_paths"] == ["agent/references/tenants/acme-gws.md"]
 
     platform_rows = client.get("/engagements?engagement_type=blue&platform=m365").json()
     assert [row["key"] for row in platform_rows] == [blue_dir.name]
@@ -1300,7 +1307,10 @@ def test_findings_endpoint_filters_and_paginates_server_side(client, isolate_set
         else:
             response = client.post(
                 "/engagements/2026-03-30-120000-example/assessment/findings",
-                json=payload,
+                json={
+                    **payload,
+                    "provenance": _author_provenance(client, payload["slug"]),
+                },
             )
             assert response.status_code == 201, response.text
 
@@ -1339,6 +1349,7 @@ def test_finding_create_rejects_malformed_slug_and_lookup_accepts_alias(client, 
             "summary": "Malformed slug should be rejected at write time.",
             "evidence_ref": "findings.md",
             "source_name": "vulnerability-analyst",
+            "provenance": _author_provenance(client, "VA047"),
         },
     )
     assert malformed.status_code == 400
@@ -1356,6 +1367,7 @@ def test_finding_create_rejects_malformed_slug_and_lookup_accepts_alias(client, 
             "summary": "Canonical slug should be stored.",
             "evidence_ref": "findings.md",
             "source_name": "vulnerability-analyst",
+            "provenance": _author_provenance(client, "VA-047"),
         },
     )
     assert created.status_code == 201, created.text
@@ -1380,6 +1392,7 @@ def test_finding_auto_slug_counts_canonical_ids_beyond_999(client, isolate_setti
             "summary": "Existing finding beyond the first 999 IDs.",
             "evidence_ref": "findings.md",
             "source_name": "vulnerability-analyst",
+            "provenance": _author_provenance(client, "VA-1000"),
         },
     )
     assert seeded.status_code == 201, seeded.text
@@ -1395,6 +1408,7 @@ def test_finding_auto_slug_counts_canonical_ids_beyond_999(client, isolate_setti
             "summary": "Auto-allocation should not collide with VA-1000.",
             "evidence_ref": "findings.md",
             "source_name": "vulnerability-analyst",
+            "provenance": _author_provenance(client, "VA-1001"),
         },
     )
     assert allocated.status_code == 201, allocated.text
@@ -1414,6 +1428,7 @@ def test_finding_auto_slug_falls_back_for_unknown_source_name(client, isolate_se
             "canonical_location": "https://example.com/unknown",
             "summary": "Clients that omit source_name still get a backend slug.",
             "evidence_ref": "findings.md",
+            "provenance": _author_provenance(client, "unknown-source-finding"),
         },
     )
     assert created.status_code == 201, created.text
@@ -1569,6 +1584,7 @@ def test_final_report_mode_returns_conflict_when_readiness_fails(client, isolate
                 "impact": "cross-tenant access",
             },
             "provenance": {
+                **_author_provenance(client, "VA-009"),
                 "agent_name": "vulnerability-analyst",
             },
             "links": [],
@@ -1601,9 +1617,9 @@ def test_final_report_includes_verified_contained_blue_finding(client, isolate_s
     scope.update(
         {
             "engagement_type": "blue",
-            "customer": "acme-corp",
+            "customer": "acme",
             "platforms": ["gws"],
-            "tenant_reference_paths": ["agent/references/tenants/acme-corp-workspace.md"],
+            "tenant_reference_paths": ["agent/references/tenants/acme-workspace.md"],
             "current_phase": "report",
         }
     )
@@ -1613,7 +1629,7 @@ def test_final_report_includes_verified_contained_blue_finding(client, isolate_s
         "/engagements/2026-03-30-120000-example/assessment/surfaces",
         json={
             "surface_type": "object_reference",
-            "target_descriptor": "acme-corp:gws:user@acme-corp.example",
+            "target_descriptor": "acme:gws:user@acme.example",
             "source_name": "investigator",
             "status": "covered",
         },
@@ -1631,7 +1647,7 @@ def test_final_report_includes_verified_contained_blue_finding(client, isolate_s
             "defect_family": "account-compromise",
             "root_cause_key": "gws-compromised-session",
             "auth_context": "tenant",
-            "canonical_location": "acme-corp:gws:user@acme-corp.example",
+            "canonical_location": "acme:gws:user@acme.example",
             "summary": "Attacker held a valid mailbox session before revocation.",
             "evidence_ref": "ir/evidence/session.md",
             "notes": "Contained via session revoke.",
@@ -1995,6 +2011,7 @@ def test_findings_verify_pending_runtime_proof_roundtrips_and_holds(client, isol
                 "chain_required": True,
             },
             "provenance": {
+                **_author_provenance(client, "VA-050"),
                 "agent_name": "vulnerability-analyst",
             },
             "links": [],
@@ -2057,7 +2074,10 @@ def test_pending_runtime_proof_is_sticky_against_bare_none_rerecord(client, isol
         "evidence_ref": "findings.md",
         "source_name": "vulnerability-analyst",
         "details": {"evidence": "code review", "impact": "pending runtime"},
-        "provenance": {"agent_name": "vulnerability-analyst"},
+        "provenance": {
+            **_author_provenance(client, "VA-051"),
+            "agent_name": "vulnerability-analyst",
+        },
         "links": [],
     }
     created = client.post(
@@ -2167,7 +2187,10 @@ def test_pending_runtime_proof_blocks_report_readiness_and_exploit_candidates(cl
             "evidence_ref": "findings.md",
             "source_name": "vulnerability-analyst",
             "details": {"evidence": "code review", "impact": "pending runtime"},
-            "provenance": {"agent_name": "vulnerability-analyst"},
+            "provenance": {
+                **_author_provenance(client, "VA-053"),
+                "agent_name": "vulnerability-analyst",
+            },
             "links": [],
         },
     )
@@ -2228,7 +2251,10 @@ def test_verification_narrative_artifact_registers_and_is_searchable(client, iso
             "evidence_ref": "findings.md",
             "source_name": "vulnerability-analyst",
             "details": {"evidence": "code review", "impact": "pending runtime"},
-            "provenance": {"agent_name": "vulnerability-analyst"},
+            "provenance": {
+                **_author_provenance(client, "VA-060"),
+                "agent_name": "vulnerability-analyst",
+            },
             "links": [],
         },
     )
@@ -2335,6 +2361,82 @@ def test_findings_patch_can_revive_false_positive_and_lower_severity(client, iso
     assert revived.json()["transition"]["action"] == "verification_invalidated"
 
 
+@pytest.mark.parametrize(
+    "destructive_patch",
+    [
+        {
+            "details": {"evidence": "Replacement proof set."},
+            "details_mode": "merge",
+        },
+        {
+            "details": {"impact": "Replacement removed the evidence narrative."},
+            "details_mode": "replace",
+        },
+    ],
+)
+def test_findings_patch_append_evidence_preserves_terminal_verification(
+    client, isolate_settings, destructive_patch
+):
+    write_engagement(isolate_settings["engagements_dir"])
+    created = _record_terminal_finding(
+        client,
+        {
+            "slug": "VA-061",
+            "title": "Confirmed parser issue",
+            "severity": "high",
+            "workflow_status": "active",
+            "verification_status": "confirmed",
+            "defect_family": "buffer-overflow",
+            "root_cause_key": "parser-issue",
+            "auth_context": "anonymous",
+            "canonical_location": "https://example.com/api/parse",
+            "summary": "The parser trusts an attacker-controlled length.",
+            "evidence_ref": "findings.md",
+            "source_name": "vulnerability-analyst",
+            "details": {"impact": "Memory corruption"},
+            "provenance": {
+                **_author_provenance(client, "CH-010"),
+                "agent_name": "vulnerability-analyst",
+            },
+        },
+    )
+    assert created.status_code == 200, created.text
+    original_receipts = created.json()["finding"]["proof_receipts"]
+    assert original_receipts
+
+    appended = client.patch(
+        "/engagements/2026-03-30-120000-example/assessment/findings/VA-061",
+        json={
+            "details": {"evidence": "Live replay reached the same copy."},
+            "details_mode": "append",
+            "source_name": "exploit-developer",
+        },
+    )
+
+    assert appended.status_code == 200, appended.text
+    finding = appended.json()["finding"]
+    assert finding["verification_status"] == "confirmed"
+    assert finding["verification_invalidated"] is False
+    assert finding["details"]["evidence"] == "Live replay reached the same copy."
+    assert finding["proof_receipts"] == original_receipts
+
+    replaced = client.patch(
+        "/engagements/2026-03-30-120000-example/assessment/findings/VA-061",
+        json={
+            **destructive_patch,
+            **(
+                {"expected_row_version": finding["row_version"]}
+                if destructive_patch["details_mode"] == "replace"
+                else {}
+            ),
+            "source_name": "exploit-developer",
+        },
+    )
+    assert replaced.status_code == 200, replaced.text
+    assert replaced.json()["finding"]["verification_status"] == "unreviewed"
+    assert replaced.json()["finding"]["verification_invalidated"] is True
+
+
 def test_findings_patch_rejects_direct_verification_bypass(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
@@ -2358,7 +2460,10 @@ def test_findings_patch_rejects_direct_verification_bypass(client, isolate_setti
                 "evidence": "Initial request/response pair",
                 "impact": "Potential unauthorized access",
             },
-            "provenance": {"agent_name": "vulnerability-analyst"},
+            "provenance": {
+                **_author_provenance(client, "CH-010"),
+                "agent_name": "vulnerability-analyst",
+            },
             "links": [],
         },
     )
@@ -2395,7 +2500,10 @@ def test_findings_patch_allows_explicit_workflow_rollback(client, isolate_settin
             "notes": "Initial triage.",
             "source_name": "vulnerability-analyst",
             "details": {"evidence": "Initial request/response pair"},
-            "provenance": {"agent_name": "vulnerability-analyst"},
+            "provenance": {
+                **_author_provenance(client, "CH-011"),
+                "agent_name": "vulnerability-analyst",
+            },
             "links": [],
         },
     )
@@ -2874,6 +2982,21 @@ def test_merge_false_positive_source_preserves_live_target(client, isolate_setti
         },
     )
     assert target.status_code == 200
+    with db_module.get_connection() as connection:
+        target_proof_receipts_before = [
+            int(row["proof_receipt_id"])
+            for row in connection.execute(
+                """
+                SELECT proof_receipt_id
+                FROM assessment_finding_proof_receipts
+                WHERE finding_id = (
+                    SELECT id FROM assessment_findings WHERE slug = 'CH-033'
+                ) AND relation = 'verification'
+                ORDER BY proof_receipt_id
+                """
+            ).fetchall()
+        ]
+    assert len(target_proof_receipts_before) == 1
 
     merge = client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings/merge",
@@ -2887,15 +3010,69 @@ def test_merge_false_positive_source_preserves_live_target(client, isolate_setti
     assert merge.status_code == 200
     merge_payload = merge.json()
     assert merge_payload["target"]["workflow_status"] == "active"
-    assert merge_payload["target"]["verification_status"] == "unreviewed"
+    assert merge_payload["target"]["verification_status"] == "confirmed"
+    assert merge_payload["target"]["severity"] == "high"
+    assert merge_payload["target"]["summary"] == "Target finding is still live."
+    assert merge_payload["target"]["evidence_ref"] == (
+        "tools/analysis-state/live-target.json"
+    )
+    assert merge_payload["target"]["details"]["evidence"] == "Unchecked copy"
+    assert merge_payload["target"]["details"]["impact"] == "Heap corruption"
+    assert merge_payload["target"]["details"]["kill_check"] == 5
+    assert merge_payload["target"]["details"]["kill_reason"] == (
+        "Old triage considered the path dead."
+    )
     assert merge_payload["source"]["workflow_status"] == "merged"
     assert merge_payload["source"]["verification_status"] == "false_positive"
+
+    transitions = client.get(
+        "/engagements/2026-03-30-120000-example/assessment/findings/CH-033/transitions"
+    )
+    assert transitions.status_code == 200, transitions.text
+    merge_transition = transitions.json()[0]
+    assert merge_transition["action"] == "operator_override"
+    assert merge_transition["reason_code"] == "merge"
+    merge_metadata = json.loads(merge_transition["metadata_json"])
+    assert merge_metadata["verification_invalidated"] is False
+    assert merge_metadata["replaced_dependencies"] == []
+
+    with db_module.get_connection() as connection:
+        target_proof_receipts_after = [
+            int(row["proof_receipt_id"])
+            for row in connection.execute(
+                """
+                SELECT proof_receipt_id
+                FROM assessment_finding_proof_receipts
+                WHERE finding_id = (
+                    SELECT id FROM assessment_findings WHERE slug = 'CH-033'
+                ) AND relation = 'verification'
+                ORDER BY proof_receipt_id
+                """
+            ).fetchall()
+        ]
+        target_evidence_refs = {
+            str(row["target_ref"])
+            for row in connection.execute(
+                """
+                SELECT target_ref
+                FROM assessment_finding_links
+                WHERE finding_id = (
+                    SELECT id FROM assessment_findings WHERE slug = 'CH-033'
+                ) AND link_kind = 'evidence' AND retired_at IS NULL
+                """
+            ).fetchall()
+        }
+    assert target_proof_receipts_after == target_proof_receipts_before
+    assert target_evidence_refs == {
+        "tools/analysis-state/live-target.json",
+        "tools/analysis-state/suppressed-duplicate.json",
+    }
 
     findings = client.get("/engagements/2026-03-30-120000-example/assessment/findings")
     assert findings.status_code == 200
     by_slug = {item["slug"]: item for item in findings.json()}
     assert by_slug["CH-033"]["workflow_status"] == "active"
-    assert by_slug["CH-033"]["verification_status"] == "unreviewed"
+    assert by_slug["CH-033"]["verification_status"] == "confirmed"
     assert by_slug["CH-032"]["workflow_status"] == "merged"
     assert by_slug["CH-032"]["verification_status"] == "false_positive"
 
@@ -3032,6 +3209,7 @@ def test_verify_downgrade_rejects_equal_severity_without_prior_lowering(
             "canonical_location": "https://example.com/api/not-lowered",
             "summary": "An equal severity is not a downgrade.",
             "source_name": "vulnerability-analyst",
+            "provenance": _author_provenance(client, "CH-142"),
         },
     )
     assert created.status_code == 201, created.text
@@ -3069,6 +3247,7 @@ def test_finding_update_source_name_is_actor_not_discovery_attribution(
             "canonical_location": "https://example.com/source",
             "summary": "Discovery attribution is immutable on patch.",
             "source_name": "vulnerability-analyst",
+            "provenance": _author_provenance(client, "CH-141"),
         },
     )
     assert created.status_code == 201, created.text
@@ -3109,7 +3288,10 @@ def test_findings_verify_disputed_keeps_finding_live(client, isolate_settings):
                 "evidence": "State machine enters the suspicious branch with malformed input.",
                 "impact": "Potential parse confusion with unclear reachability.",
             },
-            "provenance": {"agent_name": "code-vuln-hunter"},
+            "provenance": {
+                **_author_provenance(client, "CH-041"),
+                "agent_name": "code-vuln-hunter",
+            },
             "links": [],
         },
     )
@@ -3162,7 +3344,10 @@ def test_findings_verify_rejects_records_merged_after_validation(client, isolate
             "notes": "Created for stale verify race coverage.",
             "source_name": "code-vuln-hunter",
             "details": {"evidence": "Export endpoint skips tenant check", "impact": "Cross-tenant export"},
-            "provenance": {"agent_name": "code-vuln-hunter"},
+            "provenance": {
+                **_author_provenance(client, "CH-042"),
+                "agent_name": "code-vuln-hunter",
+            },
             "links": [],
         },
     )
@@ -3233,7 +3418,9 @@ def test_findings_verify_rejects_merged_records(client, isolate_settings):
             "notes": "Created for merge test.",
             "source_name": "vulnerability-analyst",
             "details": {"evidence": "source evidence", "impact": "source impact"},
-            "provenance": {"agent_name": "vulnerability-analyst"},
+            "provenance": {
+                "agent_name": "vulnerability-analyst",
+            },
             "links": [],
         },
     )
@@ -3256,7 +3443,9 @@ def test_findings_verify_rejects_merged_records(client, isolate_settings):
             "notes": "Created for merge test.",
             "source_name": "vulnerability-analyst",
             "details": {"evidence": "target evidence", "impact": "target impact"},
-            "provenance": {"agent_name": "vulnerability-analyst"},
+            "provenance": {
+                "agent_name": "vulnerability-analyst",
+            },
             "links": [],
         },
     )
@@ -3570,7 +3759,10 @@ def test_pending_runtime_proof_absent_from_draft_report_findings(client, isolate
             "evidence_ref": "findings.md",
             "source_name": "vulnerability-analyst",
             "details": {"evidence": "code review", "impact": "pending runtime"},
-            "provenance": {"agent_name": "vulnerability-analyst"},
+            "provenance": {
+                **_author_provenance(client, "VA-071"),
+                "agent_name": "vulnerability-analyst",
+            },
             "links": [],
         },
     )
@@ -3631,7 +3823,10 @@ def test_markdown_tree_draft_projection_excludes_pending_runtime_proof(client, i
             "evidence_ref": "findings.md",
             "source_name": "vulnerability-analyst",
             "details": {"evidence": "code review", "impact": "pending runtime"},
-            "provenance": {"agent_name": "vulnerability-analyst"},
+            "provenance": {
+                **_author_provenance(client, "VA-072"),
+                "agent_name": "vulnerability-analyst",
+            },
             "links": [],
         },
     )
@@ -3691,8 +3886,7 @@ def _record_va_finding(
     }
     if details is not None:
         body["details"] = details
-    if author_key is not None:
-        body["provenance"] = _author_provenance(client, author_key)
+    body["provenance"] = _author_provenance(client, author_key or location)
     return client.post(
         "/engagements/2026-03-30-120000-example/assessment/findings",
         json=body,
@@ -3896,6 +4090,9 @@ def test_finding_row_version_increments_on_each_same_second_patch(client, isolat
             "summary": "initial",
             "evidence_ref": "findings.md",
             "source_name": "vulnerability-analyst",
+            "provenance": _author_provenance(
+                client, "VA-910", key=engagement_key
+            ),
         },
     )
     assert response.status_code == 201, response.text

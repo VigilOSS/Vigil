@@ -3,17 +3,26 @@ from __future__ import annotations
 
 import argparse
 from fnmatch import fnmatch
+import hashlib
 import json
 import re
+import stat
 import sys
 from pathlib import Path
 
 from assess.lib.code_audit import write_json_snapshot
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.code_snapshot import MAX_JSON_ARTIFACT_BYTES, read_bounded_regular_file
+from assess.lib.code_structural_identity import parse_code_file_page
 
 _CODE_FILE_LOOKUP_PAGE_SIZE = 10000
 _MAX_QUEUE_IDS_FILE_BYTES = 64 * 1024
+_MAX_QUEUE_LOOKUP_MATCHES = 10000
+_MAX_QUEUE_NORMALIZED_ITEMS = 10000
+_MAX_QUEUE_INPUT_BYTES = MAX_JSON_ARTIFACT_BYTES
+_QUEUE_SUBMISSION_BATCH_SIZE = 200
+_MAX_QUEUE_REPORTED_OUTCOMES = 200
 _PROCESS_DESCRIPTOR_PATH = re.compile(r"/(?:dev|proc/self)/fd/[0-9]+")
 _DONE_DISPOSITIONS = ("clean", "finding", "suspicious", "skipped")
 # C50: when disposition=skipped the operator must supply --skip-reason so
@@ -267,11 +276,17 @@ def run(args) -> None:
 
 def _validate_id_list(id_list: str) -> list[int]:
     """Validate and parse comma-separated ID list."""
-    import re
-    if not re.match(r"^[0-9,]+$", id_list):
-        print("ERROR: id_list must contain only numeric IDs separated by commas", file=sys.stderr)
+    if re.fullmatch(r"[1-9][0-9]*(?:,[1-9][0-9]*)*", id_list) is None:
+        print("ERROR: id-list must contain positive integer IDs separated by commas", file=sys.stderr)
         sys.exit(1)
-    return [int(x) for x in id_list.split(",") if x]
+    return [int(value) for value in id_list.split(",")]
+
+
+def _validate_single_id(value: str) -> int:
+    if re.fullmatch(r"[1-9][0-9]*", value) is None:
+        print("ERROR: item-id must be one positive integer", file=sys.stderr)
+        raise SystemExit(1)
+    return int(value)
 
 
 def _stats(cfg) -> None:
@@ -386,6 +401,40 @@ def _parse_fetch_filters(tokens: list[str]) -> dict[str, object]:
     return filters
 
 
+def _prepare_dispatch_scratch_dir(
+    engagement_dir: str | Path,
+    *,
+    queue_item_id: int,
+    lease_token: str,
+) -> Path:
+    lease_key = hashlib.sha256(lease_token.encode("utf-8")).hexdigest()[:16]
+    relative = Path(
+        "tools",
+        "analysis-state",
+        "code-dispatch-scratch",
+        str(queue_item_id),
+        f"lease-{lease_key}",
+    )
+    root = Path(engagement_dir).resolve()
+    current = root
+    try:
+        for component in relative.parts:
+            current /= component
+            try:
+                current.mkdir(mode=0o700)
+            except FileExistsError:
+                pass
+            metadata = current.lstat()
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                raise ValueError
+            current.resolve().relative_to(root)
+        current.chmod(0o700)
+    except (OSError, ValueError):
+        print("Unsafe code-analysis scratch path", file=sys.stderr)
+        raise SystemExit(1) from None
+    return relative
+
+
 def _fetch(cfg, limit: int, agent_name: str, filters: dict[str, object] | None = None) -> None:
     payload: dict[str, object] = {
         'limit': limit,
@@ -405,8 +454,30 @@ def _fetch(cfg, limit: int, agent_name: str, filters: dict[str, object] | None =
             assigned_agent = item.pop("assigned_agent", None)
             if "agent_name" not in item and assigned_agent is not None:
                 item["agent_name"] = assigned_agent
+            queue_item_id = item.get("id")
+            lease_token = item.get("lease_token")
+            if type(queue_item_id) is not int or queue_item_id < 1 or not isinstance(lease_token, str) or not lease_token:
+                print("Invalid code-analysis claim identity returned by backend", file=sys.stderr)
+                raise SystemExit(1)
+            scratch_relative = _prepare_dispatch_scratch_dir(
+                cfg.engagement_dir,
+                queue_item_id=queue_item_id,
+                lease_token=lease_token,
+            )
+            item["scratch_dir"] = scratch_relative.as_posix()
             normalized_result.append(item)
         result = normalized_result
+
+    if result == []:
+        filter_text = ", ".join(
+            f"{key}={value}" for key, value in sorted((filters or {}).items())
+        ) or "none"
+        print(
+            "No current pending code-analysis queue items matched the claim filters "
+            f"({filter_text}). Inspect `vigil assess code-dispatch stats` and the "
+            "code-files queue join before retrying.",
+            file=sys.stderr,
+        )
 
     snapshot = write_json_snapshot(
         cfg.engagement_dir,
@@ -436,10 +507,7 @@ def _done(
     dry_run: bool = False,
     skip_reason: str = "",
 ) -> None:
-    ids = _validate_id_list(id_list)
-    if len(ids) != 1:
-        print("ERROR: code-dispatch done accepts exactly one queue item id", file=sys.stderr)
-        sys.exit(1)
+    ids = [_validate_single_id(id_list)]
     normalized_disposition = disposition.strip().lower()
     if normalized_disposition not in _DONE_DISPOSITIONS:
         print(
@@ -516,22 +584,16 @@ def _done(
 
 
 def _heartbeat(cfg, item_id: str, agent_name: str, lease_token: str) -> None:
-    ids = _validate_id_list(item_id)
-    if len(ids) != 1:
-        print("ERROR: code-dispatch heartbeat accepts exactly one queue item id", file=sys.stderr)
-        sys.exit(1)
+    item_id_value = _validate_single_id(item_id)
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.post('code/analysis-queue/heartbeat', {
-            'item_id': ids[0], 'agent_name': agent_name, 'lease_token': lease_token,
+            'item_id': item_id_value, 'agent_name': agent_name, 'lease_token': lease_token,
         })
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 def _error(cfg, id_list: str, agent_name: str, lease_token: str, notes: str = "") -> None:
-    ids = _validate_id_list(id_list)
-    if len(ids) != 1:
-        print("ERROR: code-dispatch error accepts exactly one queue item id", file=sys.stderr)
-        sys.exit(1)
+    ids = [_validate_single_id(id_list)]
     payload: dict = {'item_ids': ids, 'agent_name': agent_name, 'lease_token': lease_token}
     if notes:
         payload['notes'] = notes
@@ -555,10 +617,7 @@ def _error(cfg, id_list: str, agent_name: str, lease_token: str, notes: str = ""
 def _needs_context(
     cfg, id_list: str, agent_name: str, lease_token: str, expansion_file: str | None
 ) -> None:
-    ids = _validate_id_list(id_list)
-    if len(ids) != 1:
-        print("ERROR: code-dispatch needs-context accepts exactly one queue item id", file=sys.stderr)
-        sys.exit(1)
+    ids = [_validate_single_id(id_list)]
 
     payload: dict = {'item_ids': ids, 'agent_name': agent_name, 'lease_token': lease_token}
     if expansion_file:
@@ -643,21 +702,99 @@ def _retry_needs_context(cfg, id_list: str, reason: str) -> None:
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
-def _fetch_code_files(cfg) -> list[dict]:
+def _queue_lookup_matches(row: dict, selectors: list[dict]) -> bool:
+    return _compiled_queue_lookup_matches(row, _compile_queue_lookup(selectors))
+
+
+def _compile_queue_lookup(
+    selectors: list[dict],
+) -> tuple[set[str], set[tuple[int, str]], list[dict]]:
+    """Index exact selectors once while retaining glob matching semantics."""
+
+    unscoped_paths: set[str] = set()
+    repo_paths: set[tuple[int, str]] = set()
+    glob_selectors: list[dict] = []
+    for selector in selectors:
+        requested = str(selector.get("file_path", "")).strip()
+        if any(character in requested for character in "*?["):
+            glob_selectors.append(selector)
+            continue
+        repo_id = selector.get("repo_id")
+        if repo_id in (None, ""):
+            unscoped_paths.add(requested)
+        elif type(repo_id) is int:
+            repo_paths.add((repo_id, requested))
+    return unscoped_paths, repo_paths, glob_selectors
+
+
+def _compiled_queue_lookup_matches(
+    row: dict,
+    lookup: tuple[set[str], set[tuple[int, str]], list[dict]],
+) -> bool:
+    unscoped_paths, repo_paths, glob_selectors = lookup
+    candidate = str(row.get("file_path", ""))
+    if candidate in unscoped_paths:
+        return True
+    row_repo_id = row.get("repo_id")
+    if type(row_repo_id) is int and (row_repo_id, candidate) in repo_paths:
+        return True
+    for selector in glob_selectors:
+        requested = str(selector.get("file_path", "")).strip()
+        repo_id = selector.get("repo_id")
+        if repo_id not in (None, "") and row.get("repo_id") != repo_id:
+            continue
+        if fnmatch(candidate, requested):
+            return True
+    return False
+
+
+def _fetch_code_files(cfg, selectors: list[dict]) -> list[dict]:
+    lookup = _compile_queue_lookup(selectors)
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        rows: list[dict] = []
+        matched_by_id: dict[int, dict] = {}
         offset = 0
+        expected_total: int | None = None
+        result: list[dict] | None = None
         while True:
             page = client.get(f'code/files?limit={_CODE_FILE_LOOKUP_PAGE_SIZE}&offset={offset}')
-            if not isinstance(page, list):
-                result = page
+            try:
+                items, total, has_more = parse_code_file_page(
+                    page,
+                    expected_offset=offset,
+                    context="code queue file lookup response",
+                )
+            except ValueError:
+                result = None
                 break
-            rows.extend(page)
-            if len(page) < _CODE_FILE_LOOKUP_PAGE_SIZE:
-                result = rows
+            if expected_total is None:
+                expected_total = total
+            elif total != expected_total:
+                result = None
                 break
-            offset += _CODE_FILE_LOOKUP_PAGE_SIZE
-    if not isinstance(result, list):
+            invalid_row = False
+            for row in items:
+                if not _compiled_queue_lookup_matches(row, lookup):
+                    continue
+                file_id = row.get("id")
+                if type(file_id) is not int or file_id <= 0:
+                    invalid_row = True
+                    break
+                matched_by_id[file_id] = row
+                if len(matched_by_id) > _MAX_QUEUE_LOOKUP_MATCHES:
+                    print(
+                        "Queue path lookup exceeds the bounded match cap of "
+                        f"{_MAX_QUEUE_LOOKUP_MATCHES}; split broad globs into smaller "
+                        "path or repository selections",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+            if invalid_row:
+                break
+            if not has_more:
+                result = list(matched_by_id.values())
+                break
+            offset += len(items)
+    if result is None:
         print("Could not fetch code files for queue normalization", file=sys.stderr)
         sys.exit(1)
     return result
@@ -797,9 +934,19 @@ def _normalize_queue_items(cfg, raw_items: list[dict]) -> list[dict]:
     flattened: list[dict] = []
     for item in raw_items:
         flattened.extend(_flatten_queue_specs(item))
+        if len(flattened) > _MAX_QUEUE_NORMALIZED_ITEMS:
+            print(
+                "Queue input exceeds the bounded item cap of "
+                f"{_MAX_QUEUE_NORMALIZED_ITEMS}; split it into smaller submissions",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     needs_lookup = any(entry.get('file_id') in (None, "") for entry in flattened)
-    code_files = _fetch_code_files(cfg) if needs_lookup else []
+    lookup_selectors = [
+        entry for entry in flattened if entry.get("file_id") in (None, "")
+    ]
+    code_files = _fetch_code_files(cfg, lookup_selectors) if needs_lookup else []
 
     normalized: list[dict] = []
     seen: set[str] = set()
@@ -832,12 +979,26 @@ def _normalize_queue_items(cfg, raw_items: list[dict]) -> list[dict]:
                 'slot_types': _normalize_string_list(entry.get('slot_types')),
                 'guidance_hypotheses': _normalize_string_list(entry.get('guidance_hypotheses')),
             }
+            supersedes = entry.get("supersedes")
+            if supersedes is not None:
+                if type(supersedes) is not int or supersedes <= 0:
+                    print("Queue supersedes must be a positive integer row ID", file=sys.stderr)
+                    sys.exit(1)
+                normalized_item["supersedes"] = supersedes
 
             dedupe_key = json.dumps(normalized_item, sort_keys=True, ensure_ascii=False)
             if dedupe_key in seen:
                 continue
             seen.add(dedupe_key)
             normalized.append(normalized_item)
+            if len(normalized) > _MAX_QUEUE_NORMALIZED_ITEMS:
+                print(
+                    "Expanded queue selection exceeds the bounded item cap of "
+                    f"{_MAX_QUEUE_NORMALIZED_ITEMS}; split globs or metadata variants "
+                    "into smaller submissions",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
 
     return normalized
 
@@ -858,7 +1019,20 @@ def _queue(
         print(f"Queue items JSON file not found: {queue_items_file}", file=sys.stderr)
         sys.exit(1)
 
-    items = json.loads(fp.read_text(encoding="utf-8"))
+    try:
+        raw_items = read_bounded_regular_file(
+            fp,
+            max_bytes=_MAX_QUEUE_INPUT_BYTES,
+            label="queue input",
+        )
+    except (OSError, ValueError) as exc:
+        print(
+            "Queue items file exceeds the bounded input cap or cannot be read "
+            f"safely: {exc}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    items = json.loads(raw_items)
     if isinstance(items, dict):
         # Single item wrapped
         items = [items]
@@ -867,6 +1041,9 @@ def _queue(
         sys.exit(1)
 
     normalized_items = _normalize_queue_items(cfg, items)
+    if not normalized_items:
+        print("Queue input does not contain any queue items", file=sys.stderr)
+        sys.exit(1)
 
     normalized_mode = str(mode).strip().lower()
     normalized_reason = str(reason).strip()
@@ -875,6 +1052,19 @@ def _queue(
         sys.exit(1)
     if normalized_mode == "reanalysis" and not normalized_reason:
         print("Reanalysis reason is required", file=sys.stderr)
+        sys.exit(1)
+    if normalized_mode == "reanalysis" and any(
+        item.get("supersedes") is None for item in normalized_items
+    ):
+        print(
+            "Every reanalysis item requires supersedes with the exact predecessor queue row ID",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if normalized_mode == "initial" and any(
+        item.get("supersedes") is not None for item in normalized_items
+    ):
+        print("Initial queue items must not set supersedes", file=sys.stderr)
         sys.exit(1)
 
     request_payload: dict[str, object] = {
@@ -906,36 +1096,82 @@ def _queue(
             "count": len(normalized_items),
         },
     )
+    totals = {
+        "inserted": 0,
+        "updated": 0,
+        "already_active": 0,
+        "conflicts": 0,
+        "reanalysis": 0,
+    }
+    reported_outcomes: list[dict] = []
+    response_snapshots: list[Path] = []
+    batch_count = (
+        len(normalized_items) + _QUEUE_SUBMISSION_BATCH_SIZE - 1
+    ) // _QUEUE_SUBMISSION_BATCH_SIZE
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        result = client.post('code/analysis-queue', request_payload)
+        for batch_index, start in enumerate(
+            range(0, len(normalized_items), _QUEUE_SUBMISSION_BATCH_SIZE),
+            start=1,
+        ):
+            batch = normalized_items[start : start + _QUEUE_SUBMISSION_BATCH_SIZE]
+            batch_payload = dict(request_payload)
+            batch_payload["items"] = batch
+            result = client.post("code/analysis-queue", batch_payload)
+            response = result if isinstance(result, dict) else {}
+            for key in totals:
+                totals[key] += int(response.get(key, len(batch) if key == "inserted" else 0))
+            outcomes = response.get("outcomes", [])
+            if isinstance(outcomes, list) and len(reported_outcomes) < _MAX_QUEUE_REPORTED_OUTCOMES:
+                remaining = _MAX_QUEUE_REPORTED_OUTCOMES - len(reported_outcomes)
+                reported_outcomes.extend(
+                    outcome for outcome in outcomes[:remaining] if isinstance(outcome, dict)
+                )
+            label = fp.stem if batch_count == 1 else f"{fp.stem}-batch-{batch_index:04d}"
+            response_snapshots.append(
+                write_json_snapshot(
+                    cfg.engagement_dir,
+                    category="code-queue-response",
+                    label=label,
+                    payload=result,
+                    source_path=str(submit_snapshot),
+                    metadata={
+                        "command": command_name,
+                        "mode": normalized_mode,
+                        "count": len(batch),
+                        "batch": batch_index,
+                        "batches": batch_count,
+                    },
+                )
+            )
+            if totals["conflicts"]:
+                break
 
-    response_snapshot = write_json_snapshot(
-        cfg.engagement_dir,
-        category="code-queue-response",
-        label=fp.stem,
-        payload=result,
-        source_path=str(submit_snapshot),
-        metadata={
-            "command": command_name,
-            "mode": normalized_mode,
-            "count": len(normalized_items),
-        },
-    )
-    response = result if isinstance(result, dict) else {}
-    inserted_count = int(response.get("inserted", len(normalized_items)))
-    updated_count = int(response.get("updated", 0))
-    already_active_count = int(response.get("already_active", 0))
-    conflict_count = int(response.get("conflicts", 0))
-    reanalysis_count = int(response.get("reanalysis", 0))
+    inserted_count = totals["inserted"]
+    updated_count = totals["updated"]
+    already_active_count = totals["already_active"]
+    conflict_count = totals["conflicts"]
+    reanalysis_count = totals["reanalysis"]
     print(
         "Queue outcomes: "
         f"inserted={inserted_count}, updated={updated_count}, "
         f"already-active={already_active_count}, conflicts={conflict_count}, "
         f"reanalysis={reanalysis_count}"
     )
-    print(f"Audit snapshots: {submit_snapshot.name}, {response_snapshot.name}")
-    if isinstance(result, dict) and result:
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+    snapshot_names = ", ".join(path.name for path in response_snapshots)
+    print(f"Audit snapshots: {submit_snapshot.name}, {snapshot_names}")
+    print(
+        json.dumps(
+            {
+                "batches_completed": len(response_snapshots),
+                "batches_total": batch_count,
+                "outcomes": reported_outcomes,
+                "outcomes_truncated": sum(totals.values()) > len(reported_outcomes),
+                **totals,
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
     if conflict_count:
         print(
             f"Queue submission reported {conflict_count} conflict(s)",

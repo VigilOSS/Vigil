@@ -575,14 +575,14 @@ and the Super Admin break-glass account.
 L2 proposes; L3 `alert-fp-verification` decides. Propose alongside
 confidence so the verifier has a starting position.
 
-- **`verified` (high)** — adversarial OAuth grant + post-grant token use
+- **`confirmed` (high)** — adversarial OAuth grant + post-grant token use
   against Mail / Files, **OR** impossible-travel > 800 km/h + new
   inbox rule matching adversarial keywords, **OR** token-replay
   (non-interactive sign-in from new ASN with no preceding interactive
   from that ASN) + a downstream UAL action (`MailItemsAccessed` /
   `Send` / `FileDownloaded`). Two independent signals; reproduction
   available.
-- **`verified` (medium)** — one strong adversarial primitive (new
+- **`confirmed` (medium)** — one strong adversarial primitive (new
   high-risk OAuth grant, new external auto-forward, adversarial inbox
   rule) without yet-reproduced post-grant action.
 - **`false_positive`** — sign-in matches tenant ref's
@@ -592,7 +592,7 @@ confidence so the verifier has a starting position.
 - **`downgraded`** — credential-replay attempt **blocked** by CA
   policy verdict `failure`; primitive confirmed but proved impact
   narrows to "failed authentication attempt."
-- **`escalated`** — single anomalous signal (e.g., one risky sign-in
+- **`disputed`** — single anomalous signal (e.g., one risky sign-in
   flagged by Identity Protection) without corroborating action, rule,
   grant, or forwarding artifact.
 
@@ -623,7 +623,7 @@ Standard `metadata_json` shape:
   "alert_external_id": "<source-system-id>",
   "platform": "m365",
   "skill_loaded": "m365-signin-investigation",
-  "disposition": "verified|false_positive|downgraded|escalated|pending",
+  "disposition": "confirmed|false_positive|downgraded|disputed|pending_runtime_proof",
   "confidence": "high|medium|low",
   "confidence_rationale": "<one-line>",
   "mitre_techniques": ["T1078.004", "T1098.001"],
@@ -656,7 +656,7 @@ citable across dispatches).
   "platform": "m365",
   "actor": {"upn": "user@<tenant>.onmicrosoft.com", "objectId": "<guid>", "aliases": ["..."]},
   "time_window_utc": ["<iso-start>", "<iso-end>"],
-  "proposed_disposition": "verified",
+  "proposed_disposition": "confirmed",
   "confidence": "high",
   "confidence_rationale": "...",
   "mitre_techniques": ["T1078.004", "T1098.001", "T1564.008"],
@@ -682,9 +682,8 @@ Sequential. Do not declare the dispatch complete until all five land.
 1. **Register every raw pull as `ir_log`.** Sign-in JSON per stream,
    directory audit JSON, OAuth grants JSON, mailbox settings JSON,
    inbox rules JSON, mailbox permissions JSON, UAL JSON, CA policies
-   JSON. Use `--sensitive` for mailbox-content pulls
-   (`Search-UnifiedAuditLog` returning subject lines, `MailItemsAccessed`
-   detail) to suppress the FTS preview while keeping hash + linkage:
+   JSON. Mailbox-content pulls (`Search-UnifiedAuditLog` returning subject
+   lines, `MailItemsAccessed` detail) remain fully indexed with hash + linkage:
 
    ```bash
    vigil assess artifact register "$DIR/<file>.json" \

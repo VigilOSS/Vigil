@@ -246,7 +246,36 @@ def record_credential(
     identity: str = "",
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+    is_discovered = (status_value or "").strip().lower() == "discovered"
     with _common.get_connection() as connection:
+        if is_discovered:
+            # A discovered credential auto-mints a candidate finding. Validate
+            # that finding's immutable author before persisting the credential,
+            # otherwise an author refusal would leave a half-bridged row behind.
+            existing_finding = connection.execute(
+                """
+                SELECT * FROM assessment_findings
+                WHERE engagement_id = ?
+                  AND defect_family = 'exposed-credential'
+                  AND root_cause_key = ?
+                  AND auth_context = 'unauthenticated'
+                  AND canonical_location = ?
+                  AND status != 'merged'
+                ORDER BY id
+                LIMIT 1
+                """,
+                (
+                    engagement.id,
+                    f"discovered-credential:{credential_key}",
+                    f"credential:{credential_key}",
+                ),
+            ).fetchone()
+            _findings._require_record_author_dispatch(
+                connection,
+                engagement.id,
+                existing=existing_finding,
+                provenance=provenance,
+            )
         record = _upsert_simple_entity(
             connection,
             table="assessment_credentials",
@@ -270,7 +299,7 @@ def record_credential(
     # from what it unlocks, and (b) — iff the secret is a session artifact — a
     # replayable engagement-credential identity, cross-linked back onto this row.
     # Operator-known creds (any other status) are recorded exactly as before.
-    if (status_value or "").strip().lower() == "discovered":
+    if is_discovered:
         bridged = _bridge_discovered_credential(
             engagement.id,
             record,

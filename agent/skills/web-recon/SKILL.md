@@ -308,7 +308,7 @@ Evaluate the trigger fingerprints from `agent/references/tools/recon/nikto.md` a
 the httpx + whatweb output. Run nikto only when at least one trigger fires:
 
 ```bash
-vigil assess kali nikto --host www.example.com --ssl \
+vigil assess kali nikto --host www.example.com -ssl \
   -Tuning x60 -Pause 2 -maxtime 300 \
   -Format json -output /engagements/$ENGAGEMENT_KEY/scans/nikto_www.json \
   --technique INFO-DISCLOSURE --intent "nikto on legacy IIS/7.5 fingerprint" \

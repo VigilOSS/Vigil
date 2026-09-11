@@ -125,8 +125,8 @@ present in both draft and final. `### Evidence` renders ONLY the authored `detai
 structured proof and linked runs stay in OPERATOR DETAILS, which you author Evidence FROM. You author
 each section ONCE, write it back to the finding, and re-render; a hand edit made only in
 `submission.md` is lost on the next render, while a write to the finding is durable and reproduces at
-publish. Storing the MASKED, annotated Evidence in the finding is also what keeps a re-render from
-re-leaking PII — the raw tool output stays in `scans/` (or `tools/` for code/fuzz) and is referenced,
+publish. Storing the exact annotated Evidence in the finding keeps a re-render faithful — the raw
+tool output stays in `scans/` (or `tools/` for code/fuzz) and is referenced,
 never rendered.
 
 1. **Confirm proof readiness.** Before drafting, check the finding against "Proof Standard by
@@ -159,9 +159,8 @@ never rendered.
    *targeted* `vigil assess command-run list --q <the finding's url/param/header/file/function>`
    (keyed tightly to this finding, not a broad sweep) to catch reproducing runs the linked set
    missed; link any it finds (`vigil assess finding link <slug> --link-kind evidence --target-kind
-   command_run --target-id <run_id>` — durable reference), then partial-mask genuine third-party PII
-   only — self-owned/synthetic data stays in full (see "PII redaction" in
-   `agent/references/submission-format.md`), truncate to the proof lines,
+   command_run --target-id <run_id>` — durable reference), preserve every evidence value verbatim
+   (see "Evidence fidelity" in `agent/references/submission-format.md`), truncate to the proof lines,
    and annotate each. `steps_to_reproduce` renders exactly as authored, with no numbering or marker
    added — write it as ONE string carrying your own `1.`/`2.`/… numbering (a list of strings still
    renders, one paragraph per item, but only a single block lets you control the numbers that later
@@ -185,7 +184,7 @@ never rendered.
      "summary": "<authored Summary — impact-first>",
      "details": {
        "steps_to_reproduce": "1. <step 1>\n2. <step 2>",
-       "evidence": "<annotated proof; third-party PII partial-masked, self-owned/synthetic shown in full>",
+       "evidence": "<annotated proof with exact captured values>",
        "attack_scenario": "<optional: realistic adversary + starting access + action, ending at first compromise>",
        "impact": "<proven, quantified>",
        "remediation": "<specific control>"
@@ -557,17 +556,32 @@ Rules for the staging tree:
 `export submission` never sets this field — draft and final modes both omit `submission_status`
 entirely, so `create` lands `none` and `upsert` preserves whatever is already there. Only the
 transitions below, run explicitly once the finding is actually delivered, change it. For `direct`
-mode (no external program), read "program" below as "client" — the same four post-delivery states
+mode (no external program), read "program" below as "client" — the same post-delivery states
 apply to a company-facing writeup.
 
-Allowed values: `none` (default) | `submitted` | `accepted` | `needs_info` | `rejected` | `duplicate`
+Allowed values: `none` (default) | `submitted` | `accepted` | `needs_info` | `rejected` | `duplicate` | `withdrawn`
+
+**Every move off `none` must name the report it refers to.** The backend rejects a transition with
+no `submission_ref` (400: "a submission state with no referent cannot be joined back to the report
+it describes"), so the FIRST transition carries `--submission-ref <program report id>` — pair it
+with `--submission-platform` and `--submission-url` while you have them. Later transitions inherit
+the stored ref and only need it when it changes. Read `vigil assess contract finding update` for the
+full field list.
+
+`withdrawn` is the researcher-initiated retraction — the one state that asserts YOUR action rather
+than a program decision, so it additionally requires `details.withdrawal_reason` (400 without it).
+Use it instead of `rejected`, which asserts a third-party decision that never happened.
 
 Lifecycle transitions via the CLI:
 
 ```bash
-# 1. After staging submission.md and submitting to the platform:
+# 1. After staging submission.md and submitting to the platform. The FIRST transition
+#    off `none` establishes the submission identity; later ones inherit it.
 vigil assess finding update <slug> \
   --submission-status submitted \
+  --submission-platform <bugcrowd|hackerone|direct> \
+  --submission-ref <program report id> \
+  --submission-url <report url> \
   --reason "Submitted to program on <date>"
 
 # 2. Program confirms the finding:
@@ -587,6 +601,12 @@ vigil assess finding update <slug> \
 vigil assess finding update <slug> \
   --submission-status duplicate \
   --reason "Program: duplicate of existing report"
+
+# 5. You retract the report yourself (withdrawn REQUIRES details.withdrawal_reason):
+vigil assess finding update <slug> \
+  --submission-status withdrawn \
+  --details-inline '{"withdrawal_reason":"Re-tested against current build; the bypass no longer reproduces"}' \
+  --reason "Withdrawn by researcher"
 ```
 
 The `needs_info` state is the trigger for a targeted reply, authored through the reply flow and written durably onto the finding's reply record — not a `submission.md` hand-edit, which does not survive the next `export submission --overwrite`. Run the reply flow instead: `vigil assess export reply <slug> --in-response-to "<triager's question>" --platform <p> --draft`, author the answer per `agent/references/reply-format.md`, then `vigil assess record-reply <slug> --seq N ...` to write it back durably. Once sent, `record-reply --seq N --sent --set-submission-status submitted` closes the loop in one call — `record-reply` never sets `submission_status` on its own, so `--set-submission-status` is the explicit opt-in for the `needs_info → submitted` transition. See "Reply mode" in `agent/agents/report-writer.md` for the full closing sequence.
@@ -612,8 +632,8 @@ Differences from red mode:
 - **Scope unit** — tenant, not host. Pull `scope.json:tenant_reference_paths[]` for the
   tenant-ref citations the report cross-references; never cite cross-tenant artifacts.
 - **PII handling** — sections 1–10 carry no PII. PII references (UPN-to-human mappings,
-  message bodies, credential fragments, IP/UPN combinations) live in Appendix B, which
-  is delivered separately on an encrypted channel.
+  message bodies, exact credentials, IP/UPN combinations) live verbatim in Appendix B,
+  which is delivered separately on an encrypted channel and remains operator-visible.
 - **Forbidden vocabulary** — no "PoC", "exploit chain", "weaponized", "Steps to
   Reproduce" (red framing). Blue uses "evidence reproduction" (artifact-id-cited
   command), "kill-chain stage", "adversary capability".

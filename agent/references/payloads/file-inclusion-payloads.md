@@ -2,6 +2,8 @@
 description: Path traversal, PHP wrappers, null byte, log poisoning, interesting files
 skill: file-inclusion
 source: PayloadsAllTheThings — File Inclusion
+source_revision: 3ac27901c711bdf3f5b65a7b1d1820a1f65bd09a
+source_license: MIT; see THIRD_PARTY_NOTICES.md
 ---
 
 # File Inclusion (LFI/RFI) Payloads

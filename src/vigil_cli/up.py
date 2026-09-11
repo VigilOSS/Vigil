@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import getpass
+import os
 import select
 import sys
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ from .runtime import RuntimeOptions, build_runtime, runtime_image_inputs, start_
 @dataclass(frozen=True, slots=True)
 class UpOptions:
     install_root: Path
+    source_root: Path | None = None
     no_build: bool = False
     runtime_restart_timeout: int = 10
     yes_restart_runtime: bool = False
@@ -27,10 +29,14 @@ class UpOptions:
 
 
 def run_up(options: UpOptions, *, runner: docker.Runner = docker.run_command) -> None:
-    install_root = options.install_root.expanduser().resolve()
+    install_root = Path(os.path.abspath(options.install_root.expanduser()))
 
     try:
-        source_root = resolve_source_root(None, install_root=install_root)
+        source_root = resolve_source_root(
+            options.source_root,
+            install_root=install_root,
+            preserve_path=True,
+        )
         print("source sync\tupdating install root")
         install_from_source(
             InstallOptions(
@@ -168,6 +174,13 @@ def _start_oob_if_needed(install_root: Path, *, runner: docker.Runner) -> None:
                 "Run `vigil oob restart` intentionally before switching tenant routes."
             )
         print("oob\talready active; existing FRP/interactsh sessions left untouched")
+        return
+
+    if not options.frp_host or not options.oob_domain:
+        print("oob\tskipped; infrastructure is not configured")
+        print("Configure it with: vigil config set oob.frp_host <host>")
+        print("                   vigil config set oob.domain <domain>")
+        print("Then start OOB with: vigil oob start")
         return
 
     if not options.frp_token:
