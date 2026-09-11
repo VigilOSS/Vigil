@@ -176,6 +176,73 @@ def test_one_shot_command_run_without_status_infers_terminal_state(
     assert second_row.get("dedup_predecessor_id") is None
 
 
+def test_foreign_lane_recency_aggregate_counts_target_facing_history(
+    client, isolate_settings
+):
+    _write_engagement(isolate_settings["engagements_dir"])
+    target_facing = json.dumps({"target_facing": True})
+    rows = (
+        _base_payload(
+            command="curl https://example.com/current",
+            agent_name="current-agent",
+            notes=target_facing,
+            started_at="2026-09-10T12:00:00Z",
+        ),
+        _base_payload(
+            command="curl https://example.com/older",
+            agent_name="other-agent",
+            notes=target_facing,
+            started_at="2026-09-10T11:58:00Z",
+        ),
+        _base_payload(
+            command="curl https://example.com/latest",
+            agent_name="other-agent",
+            notes=target_facing,
+            started_at="2026-09-10T11:59:30Z",
+        ),
+        _base_payload(
+            command="curl https://example.com/non-target",
+            agent_name="other-agent",
+            notes=json.dumps({"target_facing": False}),
+            started_at="2026-09-10T12:01:00Z",
+        ),
+        _base_payload(
+            command="curl https://example.com/malformed",
+            agent_name="other-agent",
+            notes="{not-json",
+            started_at="2026-09-10T12:02:00Z",
+        ),
+    )
+    for payload in rows:
+        response = _post(client, payload)
+        assert response.status_code == 201, response.text
+    with command_runs_service._common.get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE assessment_command_runs
+            SET started_at = '', created_at = ?
+            WHERE engagement_id = (SELECT id FROM engagements WHERE key = ?)
+              AND command = ?
+            """,
+            (
+                "2026-09-10T11:59:30Z",
+                ENGAGEMENT_KEY,
+                "curl https://example.com/latest",
+            ),
+        )
+
+    response = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/foreign-lane-recency",
+        params={"agent_name": "current-agent"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "foreign_count": 2,
+        "latest_started_at": "2026-09-10T11:59:30Z",
+    }
+
+
 def test_job_patch_accepts_stop_failed_terminal_status(client, isolate_settings):
     _write_engagement(isolate_settings["engagements_dir"])
 

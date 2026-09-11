@@ -3,7 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from typing import Any
+from pathlib import Path
+from typing import Any, Iterable
 
 from fastapi import HTTPException, status
 
@@ -27,6 +28,26 @@ TERMINAL_VERIFICATION_STATUSES = frozenset(
     {"confirmed", "downgraded", "false_positive"}
 )
 VERIFICATION_AUDIT_RECORD_LIMIT = 100
+
+_COMMAND_OUTPUT_DEGRADED_RETENTION_STATUSES = frozenset(
+    {
+        "integrity_failure",
+        "measurement_conflict",
+        "partially_measured",
+        "preview_only",
+        "suppression_deferred",
+        "suppression_pending",
+        "unmeasured",
+        "untrusted",
+    }
+)
+_COMMAND_OUTPUT_HEALTHY_RETENTION_STATUSES = frozenset(
+    {"artifact", "empty", "retained", "suppressed"}
+)
+_COMMAND_OUTPUT_DEGRADED_CLEANUP_STATUSES = frozenset(
+    {"deferred", "pending", "warning"}
+)
+_COMMAND_OUTPUT_DEGRADED_INTEGRITY_STATUSES = frozenset({"pending", "warning"})
 
 
 def _invalid(name: str, value: str, allowed: frozenset[str]) -> HTTPException:
@@ -112,6 +133,190 @@ def _serialize_receipt(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     )
     record.pop("recorded_health", None)
     return record
+
+
+def _command_output_relative_path(root: Path, path_value: object) -> str | None:
+    value = str(path_value or "").strip()
+    if not value:
+        return ""
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        return candidate.resolve(strict=False).relative_to(root).as_posix()
+    except (OSError, ValueError):
+        return None
+
+
+def _command_output_evidence_healths(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    command_run_ids: Iterable[int],
+) -> dict[int, str]:
+    """Derive command-proof health from measured, retained output truth."""
+
+    command_ids = sorted({int(command_id) for command_id in command_run_ids})
+    if not command_ids:
+        return {}
+    placeholders = ",".join("?" for _ in command_ids)
+    rows = connection.execute(
+        f"""
+        SELECT commands.id, commands.status, commands.route,
+               commands.output_retention_status,
+               commands.output_cleanup_status,
+               commands.output_integrity_status,
+               commands.stdout_bytes, commands.stderr_bytes,
+               commands.stdout_sha256, commands.stderr_sha256,
+               commands.stdout_preview, commands.stderr_preview,
+               commands.stdout_artifact_ref, commands.stderr_artifact_ref,
+               commands.stdout_path, commands.stderr_path,
+               engagements.engagement_root
+        FROM assessment_command_runs AS commands
+        JOIN engagements ON engagements.id = commands.engagement_id
+        WHERE commands.engagement_id = ?
+          AND commands.id IN ({placeholders})
+        """,
+        (engagement_id, *command_ids),
+    ).fetchall()
+    artifacts = connection.execute(
+        f"""
+        SELECT producer_command_run_id, relative_path, kind, present,
+               integrity_status, sha256
+        FROM assessment_artifacts
+        WHERE engagement_id = ?
+          AND producer_command_run_id IN ({placeholders})
+        """,
+        (engagement_id, *command_ids),
+    ).fetchall()
+    artifacts_by_command: dict[int, list[dict[str, Any]]] = {}
+    for artifact in artifacts:
+        command_id = int(artifact["producer_command_run_id"])
+        artifacts_by_command.setdefault(command_id, []).append(dict(artifact))
+
+    result = {command_id: "stale" for command_id in command_ids}
+    for row in rows:
+        command = dict(row)
+        command_id = int(command["id"])
+        retention_status = str(command["output_retention_status"] or "")
+        if str(command["status"] or "") not in _common.COMMAND_RUN_TERMINAL_STATUSES:
+            continue
+        if (
+            retention_status in _COMMAND_OUTPUT_DEGRADED_RETENTION_STATUSES
+            or retention_status not in _COMMAND_OUTPUT_HEALTHY_RETENTION_STATUSES
+            or str(command["output_cleanup_status"] or "")
+            in _COMMAND_OUTPUT_DEGRADED_CLEANUP_STATUSES
+            or str(command["output_integrity_status"] or "")
+            in _COMMAND_OUTPUT_DEGRADED_INTEGRITY_STATUSES
+        ):
+            continue
+
+        stdout_bytes = int(command["stdout_bytes"] or 0)
+        stderr_bytes = int(command["stderr_bytes"] or 0)
+        if retention_status == "empty":
+            if (
+                stdout_bytes != 0
+                or stderr_bytes != 0
+                or bool(command["stdout_preview"])
+                or bool(command["stderr_preview"])
+            ):
+                continue
+            result[command_id] = "healthy"
+            continue
+        if retention_status == "suppressed":
+            result[command_id] = "healthy"
+            continue
+
+        root = Path(str(command["engagement_root"])).expanduser().resolve()
+        command_artifacts = artifacts_by_command.get(command_id, [])
+        artifact_health: list[str] = []
+        for stream in ("stdout", "stderr"):
+            byte_count = int(command[f"{stream}_bytes"] or 0)
+            expected_sha256 = str(command[f"{stream}_sha256"] or "")
+            artifact_ref = str(command[f"{stream}_artifact_ref"] or "")
+            output_path = (
+                ""
+                if str(command["route"] or "") == "host_exec"
+                else str(command[f"{stream}_path"] or "")
+            )
+            retained_path = artifact_ref or output_path
+            if retained_path:
+                relative_path = _command_output_relative_path(root, retained_path)
+                if relative_path is None:
+                    artifact_health.append("stale")
+                    continue
+                matching = [
+                    artifact
+                    for artifact in command_artifacts
+                    if artifact["kind"] == "command-run-output"
+                    and artifact["relative_path"] == relative_path
+                ]
+                if not matching:
+                    artifact_health.append("missing")
+                    continue
+                artifact = matching[0]
+                if (
+                    str(artifact["integrity_status"] or "") == "missing"
+                    or not bool(artifact["present"])
+                ):
+                    artifact_health.append("missing")
+                elif (
+                    not expected_sha256
+                    or str(artifact["integrity_status"] or "") == "mismatch"
+                    or str(artifact["sha256"] or "") != expected_sha256
+                ):
+                    artifact_health.append("stale")
+                else:
+                    artifact_health.append("healthy")
+                continue
+            if byte_count > 0 and (
+                not expected_sha256 or not bool(command[f"{stream}_preview"])
+            ):
+                artifact_health.append("stale")
+
+        if retention_status == "artifact" and not artifact_health:
+            result[command_id] = "missing"
+        elif "missing" in artifact_health:
+            result[command_id] = "missing"
+        elif "stale" not in artifact_health:
+            result[command_id] = "healthy"
+    return result
+
+
+def _apply_command_output_health(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    command_ids = [
+        int(record["command_run_id"])
+        for record in records
+        if record.get("evidence_kind") == "command"
+        and record.get("command_run_id") is not None
+    ]
+    health_by_command = _command_output_evidence_healths(
+        connection, engagement_id, command_ids
+    )
+    for record in records:
+        command_run_id = record.get("command_run_id")
+        if (
+            record.get("evidence_kind") == "command"
+            and command_run_id is not None
+            and record.get("evidence_health") == "healthy"
+        ):
+            record["evidence_health"] = health_by_command.get(
+                int(command_run_id), "stale"
+            )
+    return records
+
+
+def _serialize_receipts(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    rows: Iterable[sqlite3.Row | dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return _apply_command_output_health(
+        connection, engagement_id, [_serialize_receipt(row) for row in rows]
+    )
 
 
 def _serialize_run_receipt(row: sqlite3.Row) -> dict[str, Any]:
@@ -372,15 +577,21 @@ def create_proof_receipt(
                 str(tombstone_reason or ""),
             ),
         )
-        return _serialize_receipt(
-            _receipt_row(connection, engagement.id, int(cursor.lastrowid))
-        )
+        return _serialize_receipts(
+            connection,
+            engagement.id,
+            [_receipt_row(connection, engagement.id, int(cursor.lastrowid))],
+        )[0]
 
 
 def get_proof_receipt(engagement_id: int, receipt_id: int) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
-        return _serialize_receipt(_receipt_row(connection, engagement.id, receipt_id))
+        return _serialize_receipts(
+            connection,
+            engagement.id,
+            [_receipt_row(connection, engagement.id, receipt_id)],
+        )[0]
 
 
 def list_proof_receipts(
@@ -418,7 +629,7 @@ def list_proof_receipts(
             """,
             tuple(params),
         ).fetchall()
-        return [_serialize_receipt(row) for row in rows]
+        return _serialize_receipts(connection, engagement.id, rows)
 
 
 def list_run_proof_receipts(
@@ -527,8 +738,13 @@ def list_run_proof_receipts(
                 offset,
             ),
         ).fetchall()
+        serialized = _apply_command_output_health(
+            connection,
+            engagement.id,
+            [_serialize_run_receipt(row) for row in rows],
+        )
         return {
-            "items": [_serialize_run_receipt(row) for row in rows],
+            "items": serialized,
             "total": total,
             "offset": offset,
             "limit": limit,
@@ -609,7 +825,7 @@ def proof_receipts_for_finding(
         """,
         (engagement_id, finding_id),
     ).fetchall()
-    return [_serialize_receipt(row) for row in rows]
+    return _serialize_receipts(connection, engagement_id, rows)
 
 
 def _serialize_counterchecks(
@@ -861,9 +1077,11 @@ def proof_evidence_health_issues_for_finding(
         parent_id = receipt.get("derivative_of_receipt_id")
         if parent_id is None:
             continue
-        raw = _serialize_receipt(
-            _receipt_row(connection, engagement_id, int(parent_id))
-        )
+        raw = _serialize_receipts(
+            connection,
+            engagement_id,
+            [_receipt_row(connection, engagement_id, int(parent_id))],
+        )[0]
         if raw["evidence_health"] != "healthy":
             issues.append(
                 {
@@ -908,7 +1126,7 @@ def _verification_receipts(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"proof_receipt_id {receipt_id} does not belong to this engagement",
             )
-        receipt = _serialize_receipt(row)
+        receipt = _serialize_receipts(connection, engagement_id, [row])[0]
         run_status = str(receipt.pop("run_status") or "")
         if run_status != "completed":
             raise HTTPException(
@@ -925,13 +1143,17 @@ def _verification_receipts(
                 ),
             )
         if receipt["redaction_status"] == "redacted":
-            raw = _serialize_receipt(
-                _receipt_row(
-                    connection,
-                    engagement_id,
-                    int(receipt["derivative_of_receipt_id"]),
-                )
-            )
+            raw = _serialize_receipts(
+                connection,
+                engagement_id,
+                [
+                    _receipt_row(
+                        connection,
+                        engagement_id,
+                        int(receipt["derivative_of_receipt_id"]),
+                    )
+                ],
+            )[0]
             if raw["evidence_health"] != "healthy":
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,

@@ -1813,6 +1813,18 @@ def get_command_runs(
     )
 
 
+@router.get("/command-runs/foreign-lane-recency")
+def get_foreign_lane_command_recency(
+    engagement_key: str,
+    agent_name: str = "",
+) -> dict[str, int | str | None]:
+    """One-row all-history coordination context for target-facing commands."""
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.foreign_lane_target_facing_recency(
+        engagement.id, current_agent=agent_name
+    )
+
+
 @router.get("/resume-brief")
 def get_resume_brief(
     engagement_key: str,

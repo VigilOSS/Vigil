@@ -26,6 +26,7 @@ from .client_rosters import (
     ensure_goose_recipes_link,
     ensure_goose_standard_hooks,
     ensure_opencode_agents_link,
+    unsafe_symlink_destination,
 )
 from .paths import (
     DEFAULT_ORCHESTRATOR_BASE_URL,
@@ -2126,6 +2127,23 @@ class ClientEntrypointRepairResult:
         return len(self.skipped)
 
 
+_ENTRYPOINT_REPAIR_DESTINATIONS = (
+    ".codex/config.toml",
+    ".claude/settings.json",
+    ".opencode/plugin/standard-hooks.js",
+    ".opencode/plugins/standard-hooks.js",
+    "opencode.json",
+    ".goose",
+    ".goosehints",
+    ".agents/plugins/vigil-standard/hooks/hooks.json",
+    "start_codex.sh",
+    "start_claude.sh",
+    "start_opencode.sh",
+    "start_goose.sh",
+    "start_kimi.sh",
+)
+
+
 def _write_launchers(agent_root: Path, eng_dir: Path, client_kind: str, *, skip_permissions: bool) -> None:
     if client_kind in {"codex", "both"}:
         _write_launcher(
@@ -2310,9 +2328,31 @@ def repair_engagement_client_entrypoints(
     skipped: list[ClientEntrypointRepairSkip] = []
     scanned_count = 0
     for eng_dir in sorted(root.iterdir(), key=lambda path: path.name):
+        if eng_dir.is_symlink():
+            if eng_dir.is_dir() and (eng_dir / "scope.json").is_file():
+                scanned_count += 1
+                skipped.append(
+                    ClientEntrypointRepairSkip(
+                        engagement_key=eng_dir.name,
+                        reason="unsafe_engagement_path",
+                    )
+                )
+            continue
         if not eng_dir.is_dir() or not (eng_dir / "scope.json").is_file():
             continue
         scanned_count += 1
+        unsafe_destination = unsafe_symlink_destination(
+            eng_dir, _ENTRYPOINT_REPAIR_DESTINATIONS
+        )
+        if unsafe_destination is not None:
+            skipped.append(
+                ClientEntrypointRepairSkip(
+                    engagement_key=eng_dir.name,
+                    reason="unsafe_repair_destination",
+                    evidence=(unsafe_destination,),
+                )
+            )
+            continue
         client_kind = _existing_engagement_client_kind(eng_dir)
         if client_kind is None:
             skipped.append(

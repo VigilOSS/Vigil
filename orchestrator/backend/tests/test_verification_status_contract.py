@@ -155,9 +155,13 @@ def test_verification_endpoint_and_history_emit_only_versioned_status(
     (
         pytest.param({"defect_family": "authentication"}, id="defect-family"),
         pytest.param({"details": {"cwe_id": "CWE-639"}}, id="cwe-id"),
+        pytest.param(
+            {"summary": "Object authorization remains missing at this endpoint."},
+            id="summary",
+        ),
     ),
 )
-def test_material_edits_invalidate_verification_but_notes_and_wording_do_not(
+def test_material_edits_invalidate_verification_but_notes_and_title_wording_do_not(
     client, isolate_settings, material_patch
 ) -> None:
     _seed(client, isolate_settings)
@@ -182,14 +186,6 @@ def test_material_edits_invalidate_verification_but_notes_and_wording_do_not(
     )
     assert wording.status_code == 200, wording.text
     assert wording.json()["finding"]["verification_status"] == "confirmed"
-
-    summary_wording = client.patch(
-        f"{BASE}/findings/VA-020",
-        json={"summary": "Object authorization remains missing at this endpoint."},
-    )
-    assert summary_wording.status_code == 200, summary_wording.text
-    assert summary_wording.json()["finding"]["verification_status"] == "confirmed"
-    assert summary_wording.json()["finding"]["verification_invalidated"] is False
 
     material = client.patch(
         f"{BASE}/findings/VA-020",

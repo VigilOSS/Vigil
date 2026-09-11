@@ -17,6 +17,7 @@ from fastapi import HTTPException, status
 
 from . import _common
 from ._common import _engagement_or_404
+from .proofs import _command_output_evidence_healths
 
 
 RUN_KINDS = frozenset({"code", "web", "blue", "shared"})
@@ -298,12 +299,10 @@ def _evidence_health(row: sqlite3.Row | dict[str, Any]) -> str:
     recorded = str(record.get("recorded_health") or "healthy")
     if recorded != "healthy":
         return recorded
-    if str(record.get("evidence_kind") or "") == "command" and (
-        record.get("command_run_id") is None
-        or str(record.get("command_status") or "")
-        not in _common.COMMAND_RUN_TERMINAL_STATUSES
-    ):
-        return "stale"
+    if str(record.get("evidence_kind") or "") == "command":
+        command_health = str(record.get("command_output_evidence_health") or "stale")
+        if command_health != "healthy":
+            return command_health
     if (
         str(record.get("evidence_kind") or "") == "source_observation"
         and record.get("source_read_id") is None
@@ -340,23 +339,38 @@ def _receipt_health_rows(
     *,
     where_sql: str,
     parameters: tuple[Any, ...],
-) -> list[sqlite3.Row]:
-    return connection.execute(
+) -> list[dict[str, Any]]:
+    rows = connection.execute(
         f"""
         SELECT receipts.recorded_health, receipts.evidence_kind,
                receipts.source_read_id,
-               receipts.command_run_id, commands.status AS command_status,
+               receipts.command_run_id,
                receipts.artifact_id,
                receipts.artifact_relative_path, receipts.evidence_sha256,
                artifacts.present, artifacts.integrity_status,
                artifacts.sha256 AS current_sha256
         FROM assessment_proof_receipts AS receipts
         LEFT JOIN assessment_artifacts AS artifacts ON artifacts.id = receipts.artifact_id
-        LEFT JOIN assessment_command_runs AS commands ON commands.id = receipts.command_run_id
         WHERE receipts.engagement_id = ? AND {where_sql}
         """,
         (engagement_id, *parameters),
     ).fetchall()
+    records = [dict(row) for row in rows]
+    command_health = _command_output_evidence_healths(
+        connection,
+        engagement_id,
+        (
+            int(record["command_run_id"])
+            for record in records
+            if record.get("command_run_id") is not None
+        ),
+    )
+    for record in records:
+        if record.get("command_run_id") is not None:
+            record["command_output_evidence_health"] = command_health.get(
+                int(record["command_run_id"]), "stale"
+            )
+    return records
 
 
 def _evidence_health_counts(

@@ -109,6 +109,66 @@ def _source_observation(client, run: dict, observed_result: str) -> dict:
     return receipt.json()
 
 
+def _verified_command_finding(client, *, slug: str, stdout: str) -> tuple[dict, dict]:
+    finding = client.post(
+        f"{BASE}/findings",
+        json={
+            "slug": slug,
+            "title": f"{slug} command-backed finding",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_status": "unreviewed",
+            "canonical_location": f"https://example.test/{slug}",
+            "summary": "The command output independently reproduced the defect.",
+            "source_name": "vulnerability-analyst",
+            "provenance": {"agent_id": "HUNT-1"},
+        },
+    )
+    assert finding.status_code == 201, finding.text
+    run = _run(client)
+    command = client.post(
+        f"{BASE}/command-runs",
+        json={
+            "command": "python reproduce.py",
+            "argv": ["python", "reproduce.py"],
+            "tool_name": "python",
+            "agent_name": "VERIFY-1",
+            "phase": "verify",
+            "return_code": 0,
+            "timed_out": False,
+            "success": True,
+            "started_at": "2026-09-09T12:00:00Z",
+            "completed_at": "2026-09-09T12:00:01Z",
+            "duration_ms": 1000,
+            "stdout": stdout,
+            "stderr": "",
+            "run_uuid": f"command-{slug.lower()}",
+        },
+    )
+    assert command.status_code == 201, command.text
+    receipt = client.post(
+        f"{BASE}/proof-receipts",
+        json={
+            "run_id": run["id"],
+            "evidence_kind": "command",
+            "command_run_id": command.json()["id"],
+            "observed_result": "the reproducer confirmed the defect",
+        },
+    )
+    assert receipt.status_code == 201, receipt.text
+    _complete_run(client, run)
+    verified = client.post(
+        f"{BASE}/findings/{slug}/verify",
+        json={
+            "verification_status": "confirmed",
+            "reason_text": "Independent command proof reproduced the defect.",
+            "proof_receipt_ids": [receipt.json()["id"]],
+        },
+    )
+    assert verified.status_code == 200, verified.text
+    return command.json(), receipt.json()
+
+
 def test_run_and_raw_derivative_receipts_retain_attribution_hash_and_health(
     client, isolate_settings
 ) -> None:
@@ -386,6 +446,70 @@ def test_command_receipt_requires_and_exposes_an_actual_recorded_execution(
     assert command_drilldown.json()["total"] == 1
     assert command_drilldown.json()["items"][0]["audit_run_id"] == run["id"]
     assert command_drilldown.json()["items"][0]["command"] == run_receipt["command"]
+
+
+def test_command_receipt_and_readiness_degrade_when_output_becomes_unmeasured(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    command, receipt = _verified_command_finding(
+        client,
+        slug="VA-910",
+        stdout="decisive reproduced output\n",
+    )
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_command_runs SET output_retention_status = 'unmeasured' "
+            "WHERE id = ?",
+            (command["id"],),
+        )
+
+    proof = client.get(f"{BASE}/proof-receipts/{receipt['id']}")
+    assert proof.status_code == 200, proof.text
+    assert proof.json()["evidence_health"] == "stale"
+    finding = client.get(f"{BASE}/findings/VA-910")
+    assert finding.status_code == 200, finding.text
+    assert finding.json()["proof_receipts"][0]["evidence_health"] == "stale"
+    readiness = client.get(f"{BASE}/report-readiness")
+    assert readiness.status_code == 200, readiness.text
+    assert any(
+        blocker["kind"] == "finding_proof_evidence_stale"
+        and blocker.get("slug") == "VA-910"
+        and blocker.get("proof_receipt_id") == receipt["id"]
+        for blocker in readiness.json()["blockers"]
+    )
+
+
+def test_command_receipt_and_readiness_degrade_when_output_artifact_is_missing(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    command, receipt = _verified_command_finding(
+        client,
+        slug="VA-911",
+        stdout="A" * 70_000,
+    )
+    assert command["output_retention_status"] == "artifact"
+    stdout_artifact = Path(command["stdout_artifact_ref"])
+    assert stdout_artifact.is_file()
+    stdout_artifact.unlink()
+    refreshed = client.post(f"{BASE}/artifacts/refresh")
+    assert refreshed.status_code == 200, refreshed.text
+
+    proof = client.get(f"{BASE}/proof-receipts/{receipt['id']}")
+    assert proof.status_code == 200, proof.text
+    assert proof.json()["evidence_health"] == "missing"
+    finding = client.get(f"{BASE}/findings/VA-911")
+    assert finding.status_code == 200, finding.text
+    assert finding.json()["proof_receipts"][0]["evidence_health"] == "missing"
+    readiness = client.get(f"{BASE}/report-readiness")
+    assert readiness.status_code == 200, readiness.text
+    assert any(
+        blocker["kind"] == "finding_proof_evidence_missing"
+        and blocker.get("slug") == "VA-911"
+        and blocker.get("proof_receipt_id") == receipt["id"]
+        for blocker in readiness.json()["blockers"]
+    )
 
 
 def test_resumed_run_summary_preserves_parent_linked_findings(

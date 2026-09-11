@@ -4,47 +4,19 @@ import importlib
 from datetime import datetime, timezone
 
 
-def test_foreign_lane_recency_pages_all_history_and_reports_without_enforcement(capsys):
+def test_foreign_lane_recency_uses_aggregate_and_reports_without_enforcement(capsys):
     module = importlib.import_module("assess.lib.execution_recency")
 
     class _Client:
         def __init__(self) -> None:
-            self.offsets: list[int] = []
+            self.endpoints: list[str] = []
 
         def get(self, endpoint: str):
-            assert endpoint.startswith("command-runs?")
-            offset = int(endpoint.split("offset=", 1)[1].split("&", 1)[0])
-            self.offsets.append(offset)
-            if offset == 0:
-                return [
-                    {
-                        "agent_name": "same-agent",
-                        "started_at": "2026-09-10T12:00:00Z",
-                        "notes": '{"target_facing":true}',
-                    },
-                    *[
-                        {
-                            "agent_name": "unrelated",
-                            "started_at": "2026-09-09T12:00:00Z",
-                            "notes": '{"target_facing":false}',
-                        }
-                        for _ in range(999)
-                    ],
-                ]
-            if offset == 1000:
-                return [
-                    {
-                        "agent_name": "other-a",
-                        "started_at": "2026-09-10T11:59:30Z",
-                        "notes": '{"target_facing":true}',
-                    },
-                    {
-                        "agent_name": "other-b",
-                        "started_at": "2026-09-10T11:58:00Z",
-                        "notes": '{"target_facing":true}',
-                    },
-                ]
-            return []
+            self.endpoints.append(endpoint)
+            return {
+                "foreign_count": 2,
+                "latest_started_at": "2026-09-10T11:59:30Z",
+            }
 
     client = _Client()
     module.emit_foreign_lane_recency(
@@ -54,7 +26,9 @@ def test_foreign_lane_recency_pages_all_history_and_reports_without_enforcement(
     )
 
     err = capsys.readouterr().err
-    assert client.offsets == [0, 1000]
+    assert client.endpoints == [
+        "command-runs/foreign-lane-recency?agent_name=same-agent"
+    ]
     assert "2 foreign-lane target-facing command(s) recorded (all history)" in err
     assert "latest 30s ago" in err
     assert "advisory only; no reservation or rate enforcement" in err
@@ -72,34 +46,26 @@ def test_foreign_lane_recency_malformed_rows_fail_open(capsys):
     assert "advisory unavailable" in capsys.readouterr().err
 
 
-def test_foreign_lane_recency_stops_at_page_cap_and_labels_sample(
-    monkeypatch, capsys
-):
+def test_foreign_lane_recency_uses_one_bounded_request_for_large_history(capsys):
     module = importlib.import_module("assess.lib.execution_recency")
-    monkeypatch.setattr(module, "_MAX_PAGES", 2)
 
     class _Client:
         def __init__(self) -> None:
-            self.offsets: list[int] = []
+            self.endpoints: list[str] = []
 
         def get(self, endpoint: str):
-            offset = int(endpoint.split("offset=", 1)[1].split("&", 1)[0])
-            self.offsets.append(offset)
-            return [
-                {
-                    "id": offset + index,
-                    "agent_name": "other-agent",
-                    "started_at": "2026-09-10T11:59:30Z",
-                    "notes": '{"target_facing":true}',
-                }
-                for index in range(module._PAGE_SIZE)
-            ]
+            self.endpoints.append(endpoint)
+            return {
+                "foreign_count": 1_000_000,
+                "latest_started_at": "2026-09-10T11:59:30Z",
+            }
 
     client = _Client()
-    module.emit_foreign_lane_recency(client, current_agent="same-agent")
+    module.emit_foreign_lane_recency(client, current_agent="same agent/a")
 
-    assert client.offsets == [0, 1000]
+    assert client.endpoints == [
+        "command-runs/foreign-lane-recency?agent_name=same+agent%2Fa"
+    ]
     err = capsys.readouterr().err
-    assert "2000 foreign-lane target-facing command(s) recorded" in err
-    assert "bounded history sample; older rows not counted" in err
+    assert "1000000 foreign-lane target-facing command(s) recorded (all history)" in err
     assert "advisory only; no reservation or rate enforcement" in err

@@ -2263,9 +2263,7 @@ def patch_finding(
                 auth_context is not None and auth_context != str(existing["auth_context"]),
                 canonical_location is not None
                 and canonical_location != str(existing["canonical_location"]),
-                transition_reason_code == "claim_retracted"
-                and summary is not None
-                and summary != str(existing["summary"]),
+                summary is not None and summary != str(existing["summary"]),
                 evidence_ref is not None and evidence_ref != str(existing["evidence_ref"]),
                 _verification_material_details_changed(
                     str(existing["details_json"]), details, details_mode

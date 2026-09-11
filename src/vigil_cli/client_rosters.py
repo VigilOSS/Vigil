@@ -54,6 +54,32 @@ class _PhysicalRoster:
     destination: Path
 
 
+def unsafe_symlink_destination(
+    engagement_dir: Path, destinations: tuple[str, ...]
+) -> str | None:
+    """Return the first repair destination containing a symlink.
+
+    Client rosters deliberately contain leaf symlinks to generated sources under
+    ``agent/``.  Callers therefore pass only paths they own and write through;
+    those paths must never contain a symlink, even one that resolves inside the
+    engagement, because following it could overwrite unrelated run state.
+    """
+
+    for destination in destinations:
+        current = engagement_dir
+        for part in Path(destination).parts:
+            current /= part
+            try:
+                mode = current.lstat().st_mode
+            except FileNotFoundError:
+                break
+            except (NotADirectoryError, OSError):
+                return str(current.relative_to(engagement_dir))
+            if stat.S_ISLNK(mode):
+                return str(current.relative_to(engagement_dir))
+    return None
+
+
 def _ensure_agents_link(
     agents_src: Path, client_dir: Path, *, link_names: tuple[str, ...] = ("agents",)
 ) -> None:
@@ -464,6 +490,27 @@ def repair_engagement_client_rosters(
                 raise _unsafe_physical_roster("engagement path is a symlink", eng_dir)
             continue
         if eng_dir.is_dir() and (eng_dir / "scope.json").is_file():
+            # The generated roster leaves themselves are external symlinks by
+            # design, but none of their owning client directories may be.  This
+            # repair also refreshes Claude/OpenCode/Goose support files, so check
+            # the hook path's intermediate components as well.
+            unsafe_destination = unsafe_symlink_destination(
+                eng_dir,
+                (
+                    ".codex",
+                    ".claude",
+                    ".opencode",
+                    ".goose",
+                    ".agents/plugins/vigil-standard/hooks/hooks.json",
+                ),
+            )
+            if unsafe_destination is not None:
+                if refresh_physical_client_rosters:
+                    raise _unsafe_physical_roster(
+                        "has a symlink collision",
+                        eng_dir / unsafe_destination,
+                    )
+                continue
             plans.append(_client_plan(agent_root, eng_dir))
 
     all_rosters = tuple(

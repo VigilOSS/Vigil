@@ -2781,6 +2781,53 @@ def list_command_runs(
     ]
 
 
+def foreign_lane_target_facing_recency(
+    engagement_id: int, *, current_agent: str
+) -> dict[str, int | str | None]:
+    """Return all-history foreign target-facing execution timing in one row.
+
+    The advisory is intentionally non-enforcing, but it runs before every
+    target-facing sync and async command.  Keeping its target-facing predicate
+    and count in the command-run service avoids replaying bounded list pages in
+    each client execution path.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    query = """
+        WITH foreign_target_facing_runs AS (
+            SELECT
+                r.id,
+                CASE
+                    WHEN r.started_at IS NOT NULL AND r.started_at != '' THEN r.started_at
+                    ELSE r.created_at
+                END AS activity_at
+            FROM assessment_command_runs AS r
+            WHERE r.engagement_id = ?
+              AND COALESCE(r.agent_name, '') != ?
+              AND CASE
+                    WHEN json_valid(r.notes) THEN json_extract(r.notes, '$.target_facing')
+                    ELSE 0
+                  END = 1
+        )
+        SELECT
+            COUNT(*) AS foreign_count,
+            (
+                SELECT activity_at
+                FROM foreign_target_facing_runs
+                WHERE julianday(activity_at) IS NOT NULL
+                ORDER BY julianday(activity_at) DESC, id DESC
+                LIMIT 1
+            ) AS latest_started_at
+        FROM foreign_target_facing_runs
+    """
+    with _common.get_connection() as connection:
+        row = connection.execute(query, (engagement.id, current_agent)).fetchone()
+    assert row is not None
+    return {
+        "foreign_count": int(row["foreign_count"]),
+        "latest_started_at": row["latest_started_at"],
+    }
+
+
 def _list_distant_command_runs(
     engagement_id: int,
     *,

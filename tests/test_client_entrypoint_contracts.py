@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -863,6 +864,137 @@ def test_entrypoint_repair_accepts_legacy_generated_launcher_without_engagement_
         engagement_dir / "start_claude.sh"
     ).read_text()
     assert "--auto" in (engagement_dir / "start_kimi.sh").read_text()
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        ".codex",
+        ".codex/config.toml",
+        ".claude",
+        ".claude/settings.json",
+        ".opencode",
+        ".opencode/plugin",
+        ".opencode/plugins",
+        "opencode.json",
+        ".goose",
+        ".goosehints",
+        ".agents",
+        ".agents/plugins/vigil-standard/hooks/hooks.json",
+        "start_codex.sh",
+        "start_claude.sh",
+        "start_opencode.sh",
+        "start_goose.sh",
+        "start_kimi.sh",
+    ),
+)
+def test_entrypoint_repair_skips_external_symlinked_destination(
+    tmp_path: Path, relative_path: str
+) -> None:
+    install_root, engagement_dir, _bin_dir = _build_entrypoint_fixture(tmp_path)
+    destination = engagement_dir / relative_path
+    outside = tmp_path / f"outside-{relative_path.replace('/', '-')}"
+    if destination.is_dir() and not destination.is_symlink():
+        shutil.rmtree(destination)
+        outside.mkdir()
+        (outside / "sentinel").write_text("do not modify\n")
+        destination.symlink_to(outside, target_is_directory=True)
+    else:
+        destination.unlink()
+        outside.write_text("do not modify\n")
+        destination.symlink_to(outside)
+
+    result = engagements.repair_engagement_client_entrypoints(install_root)
+
+    assert result.reconciled == ()
+    assert len(result.skipped) == 1
+    assert result.skipped[0].reason == "unsafe_repair_destination"
+    assert result.skipped[0].evidence == (relative_path,)
+    if outside.is_dir():
+        assert sorted(path.name for path in outside.iterdir()) == ["sentinel"]
+        assert (outside / "sentinel").read_text() == "do not modify\n"
+    else:
+        assert outside.read_text() == "do not modify\n"
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        ".codex",
+        ".codex/config.toml",
+        "opencode.json",
+        ".agents/plugins/vigil-standard/hooks/hooks.json",
+        "start_opencode.sh",
+    ),
+)
+def test_entrypoint_repair_refuses_internal_symlinked_destination(
+    tmp_path: Path, relative_path: str
+) -> None:
+    install_root, engagement_dir, _bin_dir = _build_entrypoint_fixture(tmp_path)
+    destination = engagement_dir / relative_path
+    preserved = engagement_dir / f"preserved-{relative_path.replace('/', '-')}"
+    if destination.is_dir() and not destination.is_symlink():
+        shutil.rmtree(destination)
+        preserved.mkdir()
+        (preserved / "sentinel").write_text("do not modify\n")
+        destination.symlink_to(preserved, target_is_directory=True)
+    else:
+        destination.unlink()
+        preserved.write_text("do not modify\n")
+        destination.symlink_to(preserved)
+
+    result = engagements.repair_engagement_client_entrypoints(install_root)
+
+    assert result.reconciled == ()
+    assert len(result.skipped) == 1
+    assert result.skipped[0].reason == "unsafe_repair_destination"
+    assert result.skipped[0].evidence == (relative_path,)
+    if preserved.is_dir():
+        assert sorted(path.name for path in preserved.iterdir()) == ["sentinel"]
+        assert (preserved / "sentinel").read_text() == "do not modify\n"
+    else:
+        assert preserved.read_text() == "do not modify\n"
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (".codex", ".claude", ".opencode", ".goose", ".agents"),
+)
+def test_roster_repair_does_not_follow_external_symlinked_client_paths(
+    tmp_path: Path, relative_path: str
+) -> None:
+    install_root, engagement_dir, _bin_dir = _build_entrypoint_fixture(tmp_path)
+    destination = engagement_dir / relative_path
+    assert destination.is_dir()
+    shutil.rmtree(destination)
+    outside = tmp_path / f"outside-roster-{relative_path.removeprefix('.') }"
+    outside.mkdir()
+    (outside / "sentinel").write_text("do not modify\n")
+    destination.symlink_to(outside, target_is_directory=True)
+
+    client_rosters.repair_engagement_client_rosters(install_root)
+
+    assert sorted(path.name for path in outside.iterdir()) == ["sentinel"]
+    assert (outside / "sentinel").read_text() == "do not modify\n"
+
+
+@pytest.mark.parametrize("relative_path", (".codex", ".agents"))
+def test_roster_repair_does_not_follow_internal_symlinked_client_paths(
+    tmp_path: Path, relative_path: str
+) -> None:
+    install_root, engagement_dir, _bin_dir = _build_entrypoint_fixture(tmp_path)
+    destination = engagement_dir / relative_path
+    assert destination.is_dir()
+    shutil.rmtree(destination)
+    preserved = engagement_dir / f"preserved-roster-{relative_path.removeprefix('.')}"
+    preserved.mkdir()
+    (preserved / "sentinel").write_text("do not modify\n")
+    destination.symlink_to(preserved, target_is_directory=True)
+
+    client_rosters.repair_engagement_client_rosters(install_root)
+
+    assert sorted(path.name for path in preserved.iterdir()) == ["sentinel"]
+    assert (preserved / "sentinel").read_text() == "do not modify\n"
 
 
 def test_install_cli_plumbs_explicit_ambiguous_permission_override(
