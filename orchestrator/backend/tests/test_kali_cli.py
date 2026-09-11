@@ -6598,6 +6598,60 @@ def test_a_404_probe_is_not_recorded_as_covering_the_class(
     assert probe["result_status"] == "error"
 
 
+@pytest.mark.parametrize(
+    ("cmd", "terminal_status", "terminal_reason"),
+    [
+        (
+            ["curl", "-L", "-i", "https://shop.example.com/api/fetch?u=x"],
+            404,
+            "Not Found",
+        ),
+        (
+            [
+                "curl",
+                "-L",
+                "--dump-header",
+                "-",
+                "https://shop.example.com/api/fetch?u=x",
+            ],
+            500,
+            "Internal Server Error",
+        ),
+    ],
+)
+def test_redirected_curl_probe_records_the_terminal_http_failure(
+    monkeypatch,
+    fake_engagement,
+    cmd,
+    terminal_status,
+    terminal_reason,
+):
+    stdout = (
+        "HTTP/1.1 302 Found\r\n"
+        "Location: https://shop.example.com/final\r\n"
+        "Server: redirect-edge\r\n"
+        "\r\n"
+        f"HTTP/1.1 {terminal_status} {terminal_reason}\r\n"
+        "Server: terminal-origin\r\n"
+        "Content-Type: application/json\r\n"
+        "\r\n"
+        '{"error":"terminal response"}'
+    )
+    _result, fake_client = _run_emit_case(
+        monkeypatch,
+        fake_engagement,
+        technique="SSRF",
+        probe_kind="payload",
+        cmd=cmd,
+        tool_name="curl",
+        stdout_preview=stdout,
+    )
+
+    probe = _probe_posts(fake_client)[0]
+    assert probe["observed_http_status"] == terminal_status
+    assert probe["result_status"] == "error"
+
+
 def test_a_403_still_covers_an_access_control_probe(monkeypatch, fake_engagement):
     """A 403 on another principal's object is the healthy IDOR signal — the
     measurement, not a failed request."""

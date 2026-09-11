@@ -71,6 +71,17 @@ SUPERSEDED_CODE_SNAPSHOT_PROVENANCE_KEY = "superseded_code_snapshot"
 # resolves itself, so the two cases stop looking alike.
 CODE_SNAPSHOT_ATTESTATION_PROVENANCE_KEY = "code_snapshot_attestation"
 _CODE_SNAPSHOT_WRITE_MODES = frozenset({"record", "patch", "verify"})
+_VERIFICATION_MATERIAL_DETAIL_KEYS = frozenset(
+    {
+        "cwe_id",
+        "cvss_score",
+        "cvss_vector",
+        "evidence",
+        "exploitability",
+        "impact",
+        "proof",
+    }
+)
 
 
 def is_file_finding(canonical_location: str) -> bool:
@@ -870,6 +881,23 @@ def _resolved_details(
     if details_mode == "append":
         return _common._append_object_text(existing_details_json, details, path="details")
     return _merge_object_text(existing_details_json, details)
+
+
+def _verification_material_details_changed(
+    existing_details_json: str,
+    details: dict[str, Any] | None,
+    details_mode: str,
+) -> bool:
+    if details is None:
+        return False
+    before = _json_object(existing_details_json)
+    after = _json_object(
+        _resolved_details(existing_details_json, details, details_mode)
+    )
+    return any(
+        (key in before) != (key in after) or before.get(key) != after.get(key)
+        for key in _VERIFICATION_MATERIAL_DETAIL_KEYS
+    )
 
 
 def _resolved_notes(
@@ -2236,18 +2264,8 @@ def patch_finding(
                 canonical_location is not None
                 and canonical_location != str(existing["canonical_location"]),
                 evidence_ref is not None and evidence_ref != str(existing["evidence_ref"]),
-                details is not None
-                and any(
-                    key in details
-                    for key in {
-                        "cwe",
-                        "cvss_score",
-                        "cvss_vector",
-                        "evidence",
-                        "exploitability",
-                        "impact",
-                        "proof",
-                    }
+                _verification_material_details_changed(
+                    str(existing["details_json"]), details, details_mode
                 ),
             )
         )
@@ -2784,11 +2802,16 @@ def relocate_finding(
         merged_provenance[ORIGINAL_CANONICAL_LOCATION_PROVENANCE_KEY] = from_location
         before_state = _finding_state_snapshot(existing)
         before_content = _finding_content_snapshot(existing)
+        verification_invalidated = before_state["verification_status"] != "unreviewed"
         cursor = connection.execute(
             """
             UPDATE assessment_findings
             SET canonical_location = ?,
                 provenance_json = ?,
+                verification_status = CASE
+                    WHEN ? = 1 THEN 'unreviewed'
+                    ELSE verification_status
+                END,
                 row_version = row_version + 1,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ? AND row_version = ?
@@ -2796,6 +2819,7 @@ def relocate_finding(
             (
                 canonical_location,
                 _json_text(merged_provenance),
+                1 if verification_invalidated else 0,
                 int(existing["id"]),
                 expected_row_version,
             ),
@@ -2817,7 +2841,12 @@ def relocate_finding(
             reason_code="relocation",
             reason_text=str(reason_text).strip(),
             artifact_ref="",
-            metadata={"from": from_location, "to": canonical_location},
+            metadata={
+                "from": from_location,
+                "to": canonical_location,
+                "material_change": True,
+                "verification_invalidated": verification_invalidated,
+            },
             before_content=before_content,
             after_content=_finding_content_snapshot(row),
         )

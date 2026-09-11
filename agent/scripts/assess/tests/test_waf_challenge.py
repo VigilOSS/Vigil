@@ -513,6 +513,41 @@ def test_extract_headers_from_curl_dash_i_dump():
     assert headers.get("cache-control") == "no-store, max-age=0"
 
 
+@pytest.mark.parametrize(
+    ("cmd", "terminal_status", "terminal_reason"),
+    [
+        (["curl", "-L", "-i", "https://x"], 404, "Not Found"),
+        (
+            ["curl", "-L", "--dump-header", "-", "https://x"],
+            500,
+            "Internal Server Error",
+        ),
+    ],
+)
+def test_redirected_curl_headers_and_status_come_from_the_terminal_response(
+    cmd, terminal_status, terminal_reason
+):
+    stdout = (
+        "HTTP/1.1 302 Found\r\n"
+        "Location: https://x/final\r\n"
+        "Server: redirect-edge\r\n"
+        "\r\n"
+        f"HTTP/1.1 {terminal_status} {terminal_reason}\r\n"
+        "Server: terminal-origin\r\n"
+        "Content-Type: application/json\r\n"
+        "\r\n"
+        '{"error":"terminal response"}'
+    )
+
+    headers = ko.extract_probe_response_headers("curl", cmd, stdout)
+
+    assert isinstance(headers, dict)
+    normalized = {str(key).lower(): value for key, value in headers.items()}
+    assert normalized["server"] == "terminal-origin"
+    assert "location" not in normalized
+    assert ko.extract_http_status(stdout, headers) == terminal_status
+
+
 def test_extract_headers_curl_sS_body_only_returns_none():
     # The real production curl liveness probe: -sS, body only, NO header block.
     headers = ko.extract_probe_response_headers(

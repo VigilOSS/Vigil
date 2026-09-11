@@ -438,10 +438,10 @@ def extract_http_status(body: str, headers: Optional[dict]) -> int | None:
     WAF guard AND for the auto-emitted probe_run.
 
     Reads an explicit status off a ``headers`` mapping (``status`` /
-    ``http_status`` / ``:status`` / ``status_code``) first, then falls back to a
-    leading ``HTTP/x.y NNN`` status line in a header dump (curl ``-i`` / ``-D``).
-    Returns ``None`` when no status is recoverable — the caller treats that as
-    "do not veto" rather than "definitely not a challenge".
+    ``http_status`` / ``:status`` / ``status_code``) first, then falls back to
+    the terminal ``HTTP/x.y NNN`` status line in a header dump (curl ``-i`` /
+    ``-D``). Returns ``None`` when no status is recoverable — the caller treats
+    that as "do not veto" rather than "definitely not a challenge".
     """
     if isinstance(headers, dict):
         for key in ("status", "http_status", ":status", "status_code"):
@@ -452,9 +452,9 @@ def extract_http_status(body: str, headers: Optional[dict]) -> int | None:
                 return int(str(value).strip().split()[0])
             except (ValueError, IndexError):
                 continue
-    match = re.search(r"^HTTP/\d(?:\.\d)?\s+(\d{3})", body or "", re.MULTILINE)
-    if match:
-        return int(match.group(1))
+    matches = re.findall(r"^HTTP/\d(?:\.\d)?\s+(\d{3})", body or "", re.MULTILINE)
+    if matches:
+        return int(matches[-1])
     return None
 
 
@@ -731,19 +731,22 @@ def _headers_from_curl_dump(stdout_preview: str) -> Optional[dict]:
     """Response headers parsed from a curl header dump prepended to stdout.
 
     A curl probe run with ``-i``/``--include`` or ``-D -``/``--dump-header -``
-    writes the response header block (``HTTP/x.y NNN`` status line + ``Name:
-    Value`` lines + blank line) ahead of the body. We parse the FIRST such block.
-    Returns ``None`` when stdout carries no leading header block (the bare
-    ``curl -sS`` liveness probe), so the caller falls back to body-only.
+    writes each response header block (``HTTP/x.y NNN`` status line + ``Name:
+    Value`` lines + blank line) ahead of the body. Redirect-following requests
+    can emit several blocks, so we parse the terminal response. Returns ``None``
+    when stdout carries no header block (the bare ``curl -sS`` liveness probe),
+    so the caller falls back to body-only.
     """
     lines = (stdout_preview or "").splitlines()
-    start = next(
-        (i for i, ln in enumerate(lines[:64]) if re.match(r"^HTTP/\d", ln.strip())),
-        None,
-    )
-    if start is None:
+    starts = [
+        (i, match.group(1))
+        for i, line in enumerate(lines)
+        if (match := re.match(r"^HTTP/\d(?:\.\d)?\s+(\d{3})", line.strip()))
+    ]
+    if not starts:
         return None
-    headers: dict[str, str] = {}
+    start, status = starts[-1]
+    headers: dict[str, str] = {"status": status}
     for ln in lines[start + 1:]:
         if not ln.strip():
             break

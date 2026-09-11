@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from tests.proof_fixtures import post_artifact_backed_source_observation
 from tests.test_engagements_api import write_engagement
 
@@ -37,6 +39,42 @@ def _finding_payload(slug: str, **overrides) -> dict:
     }
     payload.update(overrides)
     return payload
+
+
+def _verify_with_proof(client, slug: str, verification_status: str = "confirmed"):
+    run = client.post(
+        f"{BASE}/assessment-runs",
+        json={
+            "run_uuid": f"verification-status-{slug}-{verification_status}",
+            "run_kind": "shared",
+            "producer_dispatch_agent_id": "VERIFY-B",
+        },
+    )
+    assert run.status_code == 201, run.text
+    receipt = post_artifact_backed_source_observation(
+        client,
+        f"{BASE}/proof-receipts",
+        json={
+            "run_id": run.json()["id"],
+            "evidence_kind": "source_observation",
+            "expected_result": "an authorization bypass is impossible",
+            "observed_result": "an unguarded path reaches the protected read",
+        },
+    )
+    assert receipt.status_code == 201, receipt.text
+    finished = client.patch(
+        f"{BASE}/assessment-runs/{run.json()['id']}",
+        json={"status": "completed"},
+    )
+    assert finished.status_code == 200, finished.text
+    payload = {
+        "verification_status": verification_status,
+        "reason_text": "independent proof",
+        "proof_receipt_ids": [receipt.json()["id"]],
+    }
+    if verification_status == "downgraded":
+        payload["new_severity"] = "medium"
+    return client.post(f"{BASE}/findings/{slug}/verify", json=payload)
 
 
 def test_api_uses_only_the_seven_value_verification_status_contract(
@@ -112,8 +150,15 @@ def test_verification_endpoint_and_history_emit_only_versioned_status(
     assert legacy.status_code == 422, legacy.text
 
 
+@pytest.mark.parametrize(
+    "material_patch",
+    (
+        pytest.param({"defect_family": "authentication"}, id="defect-family"),
+        pytest.param({"details": {"cwe_id": "CWE-639"}}, id="cwe-id"),
+    ),
+)
 def test_material_edits_invalidate_verification_but_notes_and_wording_do_not(
-    client, isolate_settings
+    client, isolate_settings, material_patch
 ) -> None:
     _seed(client, isolate_settings)
     created = client.post(
@@ -121,39 +166,7 @@ def test_material_edits_invalidate_verification_but_notes_and_wording_do_not(
         json=_finding_payload("VA-020"),
     )
     assert created.status_code == 201, created.text
-    run = client.post(
-        f"{BASE}/assessment-runs",
-        json={
-            "run_uuid": "verification-status-material-edit",
-            "run_kind": "shared",
-            "producer_dispatch_agent_id": "VERIFY-B",
-        },
-    )
-    assert run.status_code == 201, run.text
-    receipt = post_artifact_backed_source_observation(
-        client,
-        f"{BASE}/proof-receipts",
-        json={
-            "run_id": run.json()["id"],
-            "evidence_kind": "source_observation",
-            "expected_result": "an authorization bypass is impossible",
-            "observed_result": "an unguarded path reaches the protected read",
-        },
-    )
-    assert receipt.status_code == 201, receipt.text
-    finished = client.patch(
-        f"{BASE}/assessment-runs/{run.json()['id']}",
-        json={"status": "completed"},
-    )
-    assert finished.status_code == 200, finished.text
-    verified = client.post(
-        f"{BASE}/findings/VA-020/verify",
-        json={
-            "verification_status": "confirmed",
-            "reason_text": "independent proof",
-            "proof_receipt_ids": [receipt.json()["id"]],
-        },
-    )
+    verified = _verify_with_proof(client, "VA-020")
     assert verified.status_code == 200, verified.text
 
     notes = client.patch(
@@ -172,7 +185,7 @@ def test_material_edits_invalidate_verification_but_notes_and_wording_do_not(
 
     material = client.patch(
         f"{BASE}/findings/VA-020",
-        json={"defect_family": "authentication"},
+        json=material_patch,
     )
     assert material.status_code == 200, material.text
     assert material.json()["finding"]["verification_status"] == "unreviewed"
@@ -181,4 +194,38 @@ def test_material_edits_invalidate_verification_but_notes_and_wording_do_not(
     transitions = client.get(f"{BASE}/findings/VA-020/transitions").json()
     assert transitions[0]["action"] == "verification_invalidated"
     assert transitions[0]["from_verification_status"] == "confirmed"
+    assert transitions[0]["to_verification_status"] == "unreviewed"
+
+
+@pytest.mark.parametrize("verification_status", ("confirmed", "downgraded"))
+def test_replace_removing_material_details_invalidates_verification(
+    client, isolate_settings, verification_status
+) -> None:
+    _seed(client, isolate_settings)
+    created = client.post(
+        f"{BASE}/findings",
+        json=_finding_payload("VA-021"),
+    )
+    assert created.status_code == 201, created.text
+    verified = _verify_with_proof(client, "VA-021", verification_status)
+    assert verified.status_code == 200, verified.text
+
+    replaced = client.patch(
+        f"{BASE}/findings/VA-021",
+        json={
+            "details": {"remediation": "Enforce object ownership."},
+            "details_mode": "replace",
+            "expected_row_version": verified.json()["finding"]["row_version"],
+        },
+    )
+
+    assert replaced.status_code == 200, replaced.text
+    assert replaced.json()["finding"]["details"] == {
+        "remediation": "Enforce object ownership."
+    }
+    assert replaced.json()["finding"]["verification_status"] == "unreviewed"
+    assert replaced.json()["finding"]["verification_invalidated"] is True
+    transitions = client.get(f"{BASE}/findings/VA-021/transitions").json()
+    assert transitions[0]["action"] == "verification_invalidated"
+    assert transitions[0]["from_verification_status"] == verification_status
     assert transitions[0]["to_verification_status"] == "unreviewed"

@@ -401,10 +401,13 @@ class AssessmentClient:
         path = f"{self._assessment_prefix}/{endpoint}"
         body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
         status, resp_body = self._request("POST", path, body=body, max_retries=1)
-        # This is the sole assessment mutation whose documented response is a
-        # top-level array. Keep the exception exact instead of weakening every
-        # write to accept arbitrary JSON values.
-        if endpoint.strip("/") == "code/modules":
+        # These assessment mutations have documented top-level array responses.
+        # Keep the exceptions exact instead of weakening every write to accept
+        # arbitrary JSON values.
+        endpoint_name = endpoint.strip("/")
+        if endpoint_name in {"code/modules", "code/analysis-queue/fetch"} or re.fullmatch(
+            r"assessment-runs/\d+/sources", endpoint_name
+        ):
             return self._write_json_array("POST", path, status, resp_body)
         return self._write_json_object("POST", path, status, resp_body)
 

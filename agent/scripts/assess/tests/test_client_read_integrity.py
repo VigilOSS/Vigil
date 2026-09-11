@@ -247,6 +247,38 @@ def test_code_module_bulk_create_preserves_its_documented_array_response(monkeyp
     assert client.post("code/modules", {"repo_id": 1, "modules": [{}]}) == rows
 
 
+def test_code_analysis_queue_fetch_preserves_its_documented_array_response(monkeypatch):
+    client = AssessmentClient("http://localhost:8000/orchestrator", "example")
+    connection = Mock(spec=http.client.HTTPConnection)
+    response = Mock(spec=http.client.HTTPResponse)
+    response.status = 200
+    rows = [{"id": 11, "assigned_agent": "code-hunter"}]
+    response.read.return_value = json.dumps(rows).encode()
+    connection.getresponse.return_value = response
+    monkeypatch.setattr(client, "_get_conn", lambda _: connection)
+
+    assert client.post(
+        "code/analysis-queue/fetch",
+        {"limit": 1, "agent_name": "code-hunter"},
+    ) == rows
+
+
+def test_run_source_import_preserves_its_documented_array_response(monkeypatch):
+    client = AssessmentClient("http://localhost:8000/orchestrator", "example")
+    connection = Mock(spec=http.client.HTTPConnection)
+    response = Mock(spec=http.client.HTTPResponse)
+    response.status = 201
+    rows = [{"id": 29, "run_id": 17, "path": "src/auth.py"}]
+    response.read.return_value = json.dumps(rows).encode()
+    connection.getresponse.return_value = response
+    monkeypatch.setattr(client, "_get_conn", lambda _: connection)
+
+    assert client.post(
+        "assessment-runs/17/sources",
+        {"sources": [{"path": "src/auth.py"}]},
+    ) == rows
+
+
 def test_no_content_engagement_delete_remains_supported(monkeypatch):
     client = AssessmentClient("http://localhost:8000/orchestrator", "example")
     connection = Mock(spec=http.client.HTTPConnection)

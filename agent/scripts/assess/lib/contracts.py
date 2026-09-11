@@ -1442,6 +1442,44 @@ _CONTRACTS: dict[str, CommandContract] = {
             },
         ),
     ),
+    "finding relocate": CommandContract(
+        name="finding relocate",
+        goals=("finding-lifecycle",),
+        phase=("consume-test", "verify", "exploit", "code-hunt", "code-verify"),
+        summary=(
+            "Move a finding to a reviewed canonical location through the dedicated "
+            "audited transition."
+        ),
+        schema_name="backend FindingRelocateRequest",
+        preferred_invocations=(
+            'vigil assess finding relocate <slug> --canonical-location "https://target.example/api/path" --reason "Runtime proof located the defect boundary" --expected-row-version <version>',
+            'vigil assess finding relocate <slug> --canonical-location "file:src/path.py:42" --reason "Source review located the sink" --expected-row-version <version> --provenance-inline \'{"code_snapshot":{"repo_id":7,"repo_generation":3,"source_manifest_digest":"<64-lowercase-hex>"}}\'',
+        ),
+        author_supplied_fields=(
+            "<slug>",
+            "--canonical-location",
+            "--reason",
+            "--expected-row-version",
+            "--source-name (optional; default operator)",
+            "--provenance-inline (required with a current code_snapshot when moving into file:)",
+        ),
+        notes=(
+            "Use this dedicated helper when the canonical defect location genuinely changes, including a file/non-file boundary crossing; generic finding update deliberately refuses that crossing.",
+            "Relocation is a material change. One atomic location_relocated transition records both locations and changes confirmed, downgraded, or false_positive verification to unreviewed; independently verify the relocated claim again before report inclusion.",
+            "The required expected row version makes the relocation a compare-and-swap, so concurrent finding edits fail with a conflict instead of being overwritten.",
+            "Moving into file: requires provenance.code_snapshot bound to the current verified repository snapshot. Moving out preserves the old binding under superseded_code_snapshot rather than erasing reviewed-source history.",
+        ),
+        common_mistakes=(
+            (
+                "finding update --canonical-location across file/non-file categories",
+                "use finding relocate so the crossing and verification invalidation are audited",
+            ),
+            (
+                "moving into file: without provenance.code_snapshot",
+                "copy the current repo_id, repo_generation, and source_manifest_digest into --provenance-inline",
+            ),
+        ),
+    ),
     "resolve": CommandContract(
         name="resolve",
         phase=("collect", "consume-test", "verify"),
@@ -3186,12 +3224,13 @@ _INLINE_DOCUMENTED_NAMESPACES: tuple[str, ...] = (
 # the child contracts' tags so the root can never drift from its actions.
 _NAMESPACE_ROOT_META: dict[str, dict[str, Any]] = {
     "finding": {
-        "summary": "Finding lifecycle group: record, update, verify, retract-claim, merge, link, list, get, history, and the grouped report projection.",
-        "actions": "record | update | verify | retract-claim | merge | link | list | get | history | report",
+        "summary": "Finding lifecycle group: record, update, verify, relocate, retract-claim, merge, link, list, get, history, and the grouped report projection.",
+        "actions": "record | update | verify | relocate | retract-claim | merge | link | list | get | history | report",
         "invocations": (
             "vigil assess finding record <agent-name> <finding-json-file>",
             "vigil assess finding verify <slug> --status confirmed --reason \"...\"",
             "vigil assess finding update <slug> --status reported --reason \"...\"",
+            "vigil assess finding relocate <slug> --canonical-location <location> --reason \"...\" --expected-row-version <version>",
             "vigil assess finding link <sibling-slug> --root-cause <root-slug>",
             "vigil assess finding list --severity high --status active",
             "vigil assess finding get <slug>",

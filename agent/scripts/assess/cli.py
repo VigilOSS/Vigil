@@ -247,6 +247,7 @@ def main(argv: list[str] | None = None) -> None:
         record_probe,
         record_reply,
         record_surface,
+        relocate_finding,
         retract_finding_claim,
         run_audit,
         scaffold_probe,
@@ -324,12 +325,13 @@ def main(argv: list[str] | None = None) -> None:
     _register_subcommand_group(
         sub,
         name="finding",
-        help_text="Finding lifecycle: record, update, verify, retract-claim, merge, link, list, get, history, report.",
+        help_text="Finding lifecycle: record, update, verify, relocate, retract-claim, merge, link, list, get, history, report.",
         dest="finding_action",
         leaf_modules=(
             record_finding,
             update_finding,
             verify_finding,
+            relocate_finding,
             retract_finding_claim,
             merge_finding,
             link_finding,

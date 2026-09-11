@@ -904,6 +904,69 @@ def test_relocation_crosses_the_category_boundary_and_records_both_locations(
     assert transitions[0]["to_canonical_location"] == "https://example.com/api/parse"
 
 
+@pytest.mark.parametrize(
+    "reviewed_status",
+    [
+        "confirmed",
+        "downgraded",
+        "false_positive",
+        "disputed",
+        "pending_runtime_proof",
+        "blocked",
+    ],
+)
+def test_relocation_invalidates_a_reviewed_verification(
+    client, isolate_settings, reviewed_status
+) -> None:
+    binding = _seed_repo(client, isolate_settings)
+    assert _record(
+        client,
+        _finding_payload(
+            "VA-045",
+            binding,
+            location="file:src/parser.c:45",
+        ),
+    ).status_code == 201
+    with db_module.get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE assessment_findings
+            SET verification_status = ?, row_version = row_version + 1
+            WHERE engagement_id = (
+                SELECT id FROM engagements WHERE key = ?
+            ) AND slug = 'VA-045'
+            """,
+            (reviewed_status, _ENGAGEMENT_KEY),
+        )
+    terminal = client.get(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/VA-045"
+    )
+    assert terminal.status_code == 200, terminal.text
+    assert terminal.json()["verification_status"] == reviewed_status
+
+    moved = client.put(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/VA-045/canonical-location",
+        json={
+            "canonical_location": "https://example.com/api/parse",
+            "reason_text": "Runtime proof relocated the defect to the edge service.",
+            "source_name": "exploit-specialist",
+            "expected_row_version": terminal.json()["row_version"],
+        },
+    )
+
+    assert moved.status_code == 200, moved.text
+    assert moved.json()["finding"]["verification_status"] == "unreviewed"
+    transitions = client.get(
+        f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/VA-045/transitions"
+    ).json()
+    assert transitions[0]["action"] == "location_relocated"
+    assert transitions[0]["from_verification_status"] == reviewed_status
+    assert transitions[0]["to_verification_status"] == "unreviewed"
+    metadata = json.loads(transitions[0]["metadata_json"])
+    assert metadata["material_change"] is True
+    assert metadata["verification_invalidated"] is True
+
+
 def test_relocation_into_file_still_requires_a_current_binding(
     client, isolate_settings
 ) -> None:

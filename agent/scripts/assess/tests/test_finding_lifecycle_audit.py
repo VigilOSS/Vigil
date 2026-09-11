@@ -133,6 +133,71 @@ def test_finding_history_default_page_reports_continuation(
     )
 
 
+def test_finding_relocate_uses_the_typed_location_route(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    engagement = _engagement(tmp_path)
+    calls: list[tuple[str, dict]] = []
+    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
+
+    def put(_client, endpoint: str, payload: dict):
+        calls.append((endpoint, payload))
+        return {
+            "finding": {
+                "slug": "VA-045",
+                "canonical_location": payload["canonical_location"],
+                "verification_status": "unreviewed",
+            },
+            "transition": {"action": "location_relocated"},
+        }
+
+    monkeypatch.setattr(AssessmentClient, "put", put)
+
+    cli.main(
+        [
+            "--engagement-dir",
+            str(engagement),
+            "finding",
+            "relocate",
+            "VA-045",
+            "--canonical-location",
+            "https://example.test/api/parser",
+            "--reason",
+            "Runtime proof moved the defect boundary.",
+            "--source-name",
+            "exploit-specialist",
+            "--expected-row-version",
+            "9",
+            "--provenance-inline",
+            '{"review_dispatch":"EXP-1"}',
+        ]
+    )
+
+    assert calls == [
+        (
+            "findings/VA-045/canonical-location",
+            {
+                "canonical_location": "https://example.test/api/parser",
+                "reason_text": "Runtime proof moved the defect boundary.",
+                "source_name": "exploit-specialist",
+                "expected_row_version": 9,
+                "provenance": {"review_dispatch": "EXP-1"},
+            },
+        )
+    ]
+    result = json.loads(capsys.readouterr().out)
+    assert result["finding"]["verification_status"] == "unreviewed"
+    assert result["transition"]["action"] == "location_relocated"
+
+
+def test_finding_relocate_has_a_discoverable_typed_contract() -> None:
+    contract = contracts.get_contract("finding relocate")
+
+    assert contract is not None
+    assert contract.schema_name == "backend FindingRelocateRequest"
+    assert "unreviewed" in " ".join(contract.notes)
+
+
 def test_retract_claim_replaces_current_claim_and_preserves_audit_and_evidence(
     tmp_path, monkeypatch, capsys
 ) -> None:
