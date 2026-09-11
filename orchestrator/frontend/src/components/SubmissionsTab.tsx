@@ -116,16 +116,31 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const listingRequestGeneration = useRef(0);
+  const selectedFindingRef = useRef<{
+    engagementKey: string;
+    finding: SubmissionFindingSummary;
+  } | null>(null);
 
   const refreshListing = useCallback(async () => {
     const requestGeneration = ++listingRequestGeneration.current;
     const next = await listSubmissions(engagementKey);
     if (requestGeneration !== listingRequestGeneration.current) return;
-    setListing(next);
-    setSelectedSlug((current) => {
-      if (next.findings.some((finding) => finding.slug === current)) return current;
-      return next.findings[0]?.slug ?? "";
-    });
+    const previousSelection = selectedFindingRef.current?.engagementKey === engagementKey
+      ? selectedFindingRef.current.finding
+      : null;
+    const refreshedSelection = next.findings.find(
+      (finding) => finding.slug === previousSelection?.slug,
+    );
+    const retainedSelection = !refreshedSelection && previousSelection && next.findings_page.has_more
+      ? previousSelection
+      : null;
+    const selectedFinding = refreshedSelection ?? retainedSelection ?? next.findings[0] ?? null;
+    const findings = retainedSelection ? [...next.findings, retainedSelection] : next.findings;
+    selectedFindingRef.current = selectedFinding
+      ? { engagementKey, finding: selectedFinding }
+      : null;
+    setListing({ ...next, findings });
+    setSelectedSlug(selectedFinding?.slug ?? "");
   }, [engagementKey]);
 
   const refreshDetail = useCallback(async () => {
@@ -480,7 +495,10 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
               type="button"
               key={finding.slug}
               className={`submission-finding ${finding.slug === selectedSlug ? "is-selected" : ""}`}
-              onClick={() => setSelectedSlug(finding.slug)}
+              onClick={() => {
+                selectedFindingRef.current = { engagementKey, finding };
+                setSelectedSlug(finding.slug);
+              }}
               disabled={exporting || recovering || loadingMoreAttachments}
             >
               <span className={`submission-severity severity-${finding.severity}`} aria-hidden="true" />

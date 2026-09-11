@@ -410,6 +410,13 @@ def _store_artifact(
                     WHEN assessment_artifacts.verified_device IS NOT NULL
                      AND excluded.verified_device IS NULL
                     THEN assessment_artifacts.producer_agent_id
+                    WHEN excluded.producer_agent_id IS NOT NULL
+                     AND excluded.producer_agent_id IS NOT assessment_artifacts.producer_agent_id
+                     AND EXISTS (
+                        SELECT 1 FROM assessment_proof_receipts
+                        WHERE artifact_id = assessment_artifacts.id
+                      )
+                    THEN assessment_artifacts.producer_agent_id
                     ELSE COALESCE(excluded.producer_agent_id, assessment_artifacts.producer_agent_id) END,
                 producer_agent_role = CASE
                     WHEN assessment_artifacts.verified_device IS NOT NULL
@@ -419,6 +426,13 @@ def _store_artifact(
                 producer_command_run_id = CASE
                     WHEN assessment_artifacts.verified_device IS NOT NULL
                      AND excluded.verified_device IS NULL
+                    THEN assessment_artifacts.producer_command_run_id
+                    WHEN excluded.producer_command_run_id IS NOT NULL
+                     AND excluded.producer_command_run_id IS NOT assessment_artifacts.producer_command_run_id
+                     AND EXISTS (
+                        SELECT 1 FROM assessment_proof_receipts
+                        WHERE artifact_id = assessment_artifacts.id
+                      )
                     THEN assessment_artifacts.producer_command_run_id
                     ELSE COALESCE(excluded.producer_command_run_id, assessment_artifacts.producer_command_run_id) END,
                 related_finding_slug = CASE
@@ -477,7 +491,26 @@ def _store_artifact(
             "SELECT * FROM assessment_artifacts WHERE engagement_id = ? AND relative_path = ?",
             (engagement_id, relative_path),
         ).fetchone()
-    assert row is not None
+        assert row is not None
+        requested_producer = {
+            "producer_agent_id": producer_agent_id,
+            "producer_command_run_id": producer_command_run_id,
+        }
+        producer_mismatch = any(
+            value is not None and row[field] != value
+            for field, value in requested_producer.items()
+        )
+        if producer_mismatch and connection.execute(
+            "SELECT EXISTS(SELECT 1 FROM assessment_proof_receipts WHERE artifact_id = ?)",
+            (int(row["id"]),),
+        ).fetchone()[0]:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "artifact producer agent/command attribution is immutable after proof "
+                    "registration"
+                ),
+            )
     return _serialize_artifact(row)
 
 
@@ -672,6 +705,94 @@ def _verified_snapshot_payload(
             "content_bytes": bytes(content[:GET_CONTENT_BYTES]),
             "content_truncated": size > GET_CONTENT_BYTES,
         }
+    finally:
+        os.close(descriptor)
+
+
+def verified_snapshot_evidence_health(
+    root: Path,
+    relative_path: str,
+    *,
+    expected_device: int,
+    expected_inode: int,
+    expected_size: int,
+    expected_sha256: str,
+) -> str:
+    """Check immutable artifact identity and bytes without mutating its index row."""
+
+    try:
+        _verified_snapshot_payload(
+            root,
+            relative_path,
+            expected_device=expected_device,
+            expected_inode=expected_inode,
+            expected_size=expected_size,
+            expected_sha256=expected_sha256,
+        )
+    except HTTPException as exc:
+        if exc.detail == "verified artifact is missing":
+            return "missing"
+        return "stale"
+    except OSError:
+        return "stale"
+    return "healthy"
+
+
+def registered_snapshot_evidence_health(
+    root: Path,
+    relative_path: str,
+    *,
+    expected_size: int,
+    expected_sha256: str,
+    verified_device: int | None,
+    verified_inode: int | None,
+) -> str:
+    """Read current bytes safely and compare them with one registered snapshot."""
+
+    if verified_device is not None or verified_inode is not None:
+        if verified_device is None or verified_inode is None:
+            return "stale"
+        return verified_snapshot_evidence_health(
+            root,
+            relative_path,
+            expected_device=verified_device,
+            expected_inode=verified_inode,
+            expected_size=expected_size,
+            expected_sha256=expected_sha256,
+        )
+    try:
+        descriptor = _open_registered_artifact(root, relative_path)
+    except HTTPException:
+        return "stale"
+    if descriptor is None:
+        return "missing"
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            return "stale"
+        digest = hashlib.sha256()
+        size = 0
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            size += len(chunk)
+        after = os.fstat(descriptor)
+        if (
+            before.st_dev != after.st_dev
+            or before.st_ino != after.st_ino
+            or before.st_size != after.st_size
+            or before.st_mtime_ns != after.st_mtime_ns
+            or size != after.st_size
+        ):
+            return "stale"
+        if size != expected_size or digest.hexdigest() != expected_sha256:
+            return "stale"
+        return "healthy"
+    except OSError:
+        return "stale"
     finally:
         os.close(descriptor)
 

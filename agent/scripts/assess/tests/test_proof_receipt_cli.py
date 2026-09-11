@@ -355,3 +355,4 @@ def test_proof_receipt_contract_documents_creation_and_reads() -> None:
     assert contract is not None
     assert contract.name == "proof-receipt"
     assert "create | list | get" in " ".join(contract.author_supplied_fields)
+    assert "reusing author-produced evidence" in " ".join(contract.notes)

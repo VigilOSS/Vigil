@@ -92,6 +92,7 @@ def test_canonical_contracts_have_one_cli_shape() -> None:
     assert "artifact search --q" in artifact_contract
     assert "search: --q" in artifact_contract
     assert "artifact search VA-047" not in artifact_contract
+    assert "Producer agent/command attribution is immutable" in artifact_contract
     assert "--reason" in link_contract
     assert "--note" not in link_contract
     assert "<db_path>" not in agent_contract

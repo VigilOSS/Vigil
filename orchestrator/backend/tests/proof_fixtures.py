@@ -27,6 +27,11 @@ def post_artifact_backed_source_observation(
     assert json.get("source_read_id") is None
     run_id = json.get("run_id")
     assert isinstance(run_id, int) and not isinstance(run_id, bool) and run_id > 0
+    assessment_base = endpoint.removesuffix("/proof-receipts")
+    run = client.get(f"{assessment_base}/assessment-runs/{run_id}")
+    assert run.status_code == 200, run.text
+    producer_agent_id = run.json().get("producer_dispatch_agent_id")
+    assert isinstance(producer_agent_id, str) and producer_agent_id, run.text
 
     evidence = {
         "run_id": run_id,
@@ -47,11 +52,12 @@ def post_artifact_backed_source_observation(
         raise AssertionError(f"could not write fixture evidence {evidence_path}: {exc}") from exc
 
     artifact = client.post(
-        endpoint.removesuffix("/proof-receipts") + "/artifacts",
+        assessment_base + "/artifacts",
         json={
             "path": relative_path,
             "kind": "proof",
             "media_type": "application/json",
+            "producer_agent_id": producer_agent_id,
         },
     )
     assert artifact.status_code == 201, artifact.text

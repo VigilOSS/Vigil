@@ -376,7 +376,6 @@ def _receipt_health_rows(
 def _evidence_health_counts(
     connection: sqlite3.Connection, engagement_id: int, run_id: int
 ) -> dict[str, int]:
-    counts = {"healthy": 0, "missing": 0, "stale": 0, "tombstoned": 0}
     lineage_ids = _run_lineage_ids(connection, run_id)
     placeholders = ",".join("?" for _ in lineage_ids)
     rows = _receipt_health_rows(
@@ -385,9 +384,109 @@ def _evidence_health_counts(
         where_sql=f"receipts.run_id IN ({placeholders})",
         parameters=tuple(lineage_ids),
     )
+    return _health_counts(rows)
+
+
+def _health_counts(rows: Iterable[sqlite3.Row | dict[str, Any]]) -> dict[str, int]:
+    counts = {"healthy": 0, "missing": 0, "stale": 0, "tombstoned": 0}
     for row in rows:
         health = _evidence_health(row)
         counts[health] = counts.get(health, 0) + 1
+    return counts
+
+
+def _effective_proof_receipt_ids(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    run: sqlite3.Row,
+) -> list[int]:
+    """Return evidence that still participates in this recovery attempt.
+
+    Parent receipts remain immutable lineage history. A resumed run evaluates
+    its own newly captured receipts plus parent receipts still named by copied
+    child state; unrelated parent attempts are not an unrepairable completion
+    blocker.
+    """
+
+    run_id = int(run["id"])
+    receipt_ids = {
+        int(row["id"])
+        for row in connection.execute(
+            "SELECT id FROM assessment_proof_receipts "
+            "WHERE engagement_id = ? AND run_id = ?",
+            (engagement_id, run_id),
+        ).fetchall()
+    }
+    if run["resumed_from_run_id"] is None:
+        return sorted(receipt_ids)
+
+    source_read_receipts = connection.execute(
+        """
+        SELECT proof_receipt_id
+        FROM assessment_run_source_reads
+        WHERE engagement_id = ? AND run_id = ? AND proof_receipt_id IS NOT NULL
+        """,
+        (engagement_id, run_id),
+    ).fetchall()
+    receipt_ids.update(int(row["proof_receipt_id"]) for row in source_read_receipts)
+    for table in (
+        "assessment_run_obligations",
+        "assessment_run_candidates",
+        "assessment_run_tool_signals",
+        "assessment_run_discovery_passes",
+        "assessment_run_code_receipt_links",
+    ):
+        rows = connection.execute(
+            f"SELECT proof_receipt_ids_json FROM {table} "
+            "WHERE engagement_id = ? AND run_id = ?",
+            (engagement_id, run_id),
+        ).fetchall()
+        for row in rows:
+            receipt_ids.update(
+                int(value)
+                for value in _json_value(row["proof_receipt_ids_json"], [])
+                if type(value) is int and value > 0
+            )
+
+    pending = set(receipt_ids)
+    while pending:
+        placeholders = ",".join("?" for _ in pending)
+        rows = connection.execute(
+            f"""
+            SELECT derivative_of_receipt_id
+            FROM assessment_proof_receipts
+            WHERE engagement_id = ? AND id IN ({placeholders})
+              AND derivative_of_receipt_id IS NOT NULL
+            """,
+            (engagement_id, *sorted(pending)),
+        ).fetchall()
+        dependencies = {
+            int(row["derivative_of_receipt_id"])
+            for row in rows
+            if int(row["derivative_of_receipt_id"]) not in receipt_ids
+        }
+        receipt_ids.update(dependencies)
+        pending = dependencies
+    return sorted(receipt_ids)
+
+
+def _effective_evidence_health_counts(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    run: sqlite3.Row,
+) -> dict[str, int]:
+    receipt_ids = _effective_proof_receipt_ids(connection, engagement_id, run)
+    if not receipt_ids:
+        return {"healthy": 0, "missing": 0, "stale": 0, "tombstoned": 0}
+    placeholders = ",".join("?" for _ in receipt_ids)
+    rows = _receipt_health_rows(
+        connection,
+        engagement_id,
+        where_sql=f"receipts.id IN ({placeholders})",
+        parameters=tuple(receipt_ids),
+    )
+    counts = _health_counts(rows)
+    counts["stale"] += len(receipt_ids) - len(rows)
     return counts
 
 
@@ -592,6 +691,9 @@ def _current_blockers(
     engagement_id = int(run["engagement_id"])
     blockers: list[dict[str, Any]] = []
     counts = _run_counts(connection, engagement_id, run_id)
+    effective_proof_health = _effective_evidence_health_counts(
+        connection, engagement_id, run
+    )
     if str(run["run_purpose"]) == "scan":
         if not _json_value(run["target_identity_json"], {}):
             blockers.append(
@@ -836,7 +938,7 @@ def _current_blockers(
                             "action": "record a fresh evidence-backed discovery pass",
                         }
                     )
-    elif counts["proof_receipts"] == 0:
+    elif sum(effective_proof_health.values()) == 0:
         blockers.append(
             {
                 "code": "proof_missing",
@@ -916,7 +1018,7 @@ def _current_blockers(
                 ),
             }
         )
-    for health, count in _evidence_health_counts(connection, engagement_id, run_id).items():
+    for health, count in effective_proof_health.items():
         if health != "healthy" and count:
             blockers.append(
                 {

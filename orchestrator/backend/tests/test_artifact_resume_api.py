@@ -125,12 +125,28 @@ def _verify_finding(client, slug: str, *, artifact_id: int) -> None:
         },
     )
     assert run.status_code == 201, run.text
+    command = client.post(
+        f"{BASE}/command-runs",
+        json={
+            "run_uuid": f"artifact-proof-command-{slug.lower()}",
+            "command": f"independently verify artifact {artifact_id}",
+            "tool_name": "fixture-verifier",
+            "agent_name": verifier_id,
+            "phase": "verify",
+            "status": "completed",
+            "return_code": 0,
+            "started_at": "2026-05-19T12:00:00Z",
+            "completed_at": "2026-05-19T12:00:01Z",
+            "stdout": "independent review reproduced the finding\n",
+        },
+    )
+    assert command.status_code == 201, command.text
     receipt = client.post(
         f"{BASE}/proof-receipts",
         json={
             "run_id": run.json()["id"],
-            "evidence_kind": "artifact",
-            "artifact_id": artifact_id,
+            "evidence_kind": "command",
+            "command_run_id": command.json()["id"],
             "expected_result": "the finding evidence remains attributable and readable",
             "observed_result": "the independently reviewed evidence supports the finding",
         },

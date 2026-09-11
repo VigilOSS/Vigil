@@ -1238,7 +1238,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Start the owning proof run first. Artifact-backed receipts bind to the backend artifact identity and current SHA-256. Source observations bind to an exact trusted source-read record; HTTP, browser, and OOB observations require a registered artifact. Caller-authored prose alone is not proof.",
             "A redacted receipt must point to its raw parent receipt, and both receipts must belong to the same producer dispatch.",
             "Command receipts must reference an actual terminal command-run row from the same engagement; free-text command claims are not execution proof.",
-            "Only receipts from a completed independent verifier run can support a terminal finding decision. Receipt history remains durable when evidence later becomes missing, stale, or tombstoned.",
+            "Only receipts from a completed independent verifier run can support a terminal finding decision. The underlying command agent_name, source-read dispatch, or artifact --agent-id / producing command must match that verifier dispatch; reusing author-produced evidence is not independent verification. Receipt history remains durable when evidence later becomes missing, stale, or tombstoned.",
             "List reads one bounded page by default and reports an exact or lower-bound total plus a continuation command; --paginate is the explicit all-page opt-in.",
         ),
         common_mistakes=(
@@ -1280,6 +1280,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Each action is a typed subcommand — run `vigil assess artifact <action> --help` for per-action flags.",
             "Large/raw files stay on disk; the backend stores hashes, capped previews, presence, and entity links.",
             "Register paths relative to the engagement root; absolute paths are accepted only when they resolve inside the engagement directory.",
+            "Producer agent/command attribution is immutable once an artifact is cited by a proof receipt. Supply --agent-id / --command-run-id before creating that receipt; use a new path for evidence produced by another dispatch. Descriptive producer role metadata may still be enriched.",
             "`mark-scratch` flags a note non-durable so `check-phase-readiness --phase report` stops blocking on it; the row stays searchable.",
         ),
         common_mistakes=(

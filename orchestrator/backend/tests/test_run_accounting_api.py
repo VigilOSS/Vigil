@@ -2906,6 +2906,119 @@ def test_proof_run_without_evidence_cannot_be_sealed_completed(
     assert terminal.json()["seal"]["blockers"][0]["code"] == "proof_missing"
 
 
+def test_resumed_proof_run_replaces_unhealthy_parent_evidence_without_erasing_it(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    parent = client.post(
+        f"{BASE}/assessment-runs",
+        json={
+            "run_uuid": "proof-recovery-parent",
+            "run_kind": "shared",
+            "producer_dispatch_agent_id": "HUNT-RUN-1",
+        },
+    ).json()
+    parent_command = client.post(
+        f"{BASE}/command-runs",
+        json={
+            "run_uuid": "proof-recovery-parent-command",
+            "agent_name": "HUNT-RUN-1",
+            "command": "run parent reproducer",
+            "tool_name": "reproducer",
+            "phase": "verify",
+            "status": "completed",
+            "return_code": 0,
+            "started_at": "2026-09-11T12:00:00Z",
+            "completed_at": "2026-09-11T12:00:01Z",
+            "stdout": "parent reproduction succeeded\n",
+        },
+    )
+    assert parent_command.status_code == 201, parent_command.text
+    parent_receipt = client.post(
+        f"{BASE}/proof-receipts",
+        json={
+            "run_id": parent["id"],
+            "evidence_kind": "command",
+            "command_run_id": parent_command.json()["id"],
+            "observed_result": "parent reproduction succeeded",
+        },
+    )
+    assert parent_receipt.status_code == 201, parent_receipt.text
+    sealed_parent = client.patch(
+        f"{BASE}/assessment-runs/{parent['id']}", json={"status": "completed"}
+    )
+    assert sealed_parent.status_code == 200, sealed_parent.text
+    assert sealed_parent.json()["status"] == "completed"
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_proof_receipts SET recorded_health = 'stale' "
+            "WHERE id = ?",
+            (parent_receipt.json()["id"],),
+        )
+
+    child_response = client.post(
+        f"{BASE}/assessment-runs",
+        json={
+            "run_uuid": "proof-recovery-child",
+            "run_kind": "shared",
+            "producer_dispatch_agent_id": "HUNT-RUN-1",
+            "resumed_from_run_id": parent["id"],
+        },
+    )
+    assert child_response.status_code == 201, child_response.text
+    child = child_response.json()
+    assert child["proof_health"]["stale"] == 1
+    assert {blocker["code"] for blocker in child["blockers"]} == {"proof_missing"}
+
+    child_command = client.post(
+        f"{BASE}/command-runs",
+        json={
+            "run_uuid": "proof-recovery-child-command",
+            "agent_name": "HUNT-RUN-1",
+            "command": "run replacement reproducer",
+            "tool_name": "reproducer",
+            "phase": "verify",
+            "status": "completed",
+            "return_code": 0,
+            "started_at": "2026-09-11T12:01:00Z",
+            "completed_at": "2026-09-11T12:01:01Z",
+            "stdout": "replacement reproduction succeeded\n",
+        },
+    )
+    assert child_command.status_code == 201, child_command.text
+    child_receipt = client.post(
+        f"{BASE}/proof-receipts",
+        json={
+            "run_id": child["id"],
+            "evidence_kind": "command",
+            "command_run_id": child_command.json()["id"],
+            "observed_result": "replacement reproduction succeeded",
+        },
+    )
+    assert child_receipt.status_code == 201, child_receipt.text
+
+    completed = client.patch(
+        f"{BASE}/assessment-runs/{child['id']}", json={"status": "completed"}
+    )
+    assert completed.status_code == 200, completed.text
+    assert completed.json()["status"] == "completed"
+    assert completed.json()["seal"]["proof_health"] == {
+        "healthy": 1,
+        "missing": 0,
+        "stale": 1,
+        "tombstoned": 0,
+    }
+    lineage_receipts = client.get(
+        f"{BASE}/assessment-runs/{child['id']}/proof-receipts",
+        params={"limit": 10, "offset": 0},
+    )
+    assert lineage_receipts.status_code == 200, lineage_receipts.text
+    assert {receipt["id"] for receipt in lineage_receipts.json()["items"]} == {
+        parent_receipt.json()["id"],
+        child_receipt.json()["id"],
+    }
+
+
 def test_phase2_run_schema_migrates_on_a_disposable_database_without_inventing_audit(
     client, isolate_settings
 ) -> None:

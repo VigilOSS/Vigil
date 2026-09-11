@@ -8,6 +8,7 @@ from typing import Any, Iterable
 
 from fastapi import HTTPException, status
 
+from .. import artifact_index
 from . import _common
 from ._common import _engagement_or_404
 
@@ -181,7 +182,8 @@ def _command_output_evidence_healths(
     artifacts = connection.execute(
         f"""
         SELECT producer_command_run_id, relative_path, kind, present,
-               integrity_status, sha256
+               integrity_status, sha256, size_bytes,
+               verified_device, verified_inode
         FROM assessment_artifacts
         WHERE engagement_id = ?
           AND producer_command_run_id IN ({placeholders})
@@ -266,7 +268,24 @@ def _command_output_evidence_healths(
                 ):
                     artifact_health.append("stale")
                 else:
-                    artifact_health.append("healthy")
+                    artifact_health.append(
+                        artifact_index.registered_snapshot_evidence_health(
+                            root,
+                            relative_path,
+                            expected_size=int(artifact["size_bytes"] or 0),
+                            expected_sha256=expected_sha256,
+                            verified_device=(
+                                int(artifact["verified_device"])
+                                if artifact["verified_device"] is not None
+                                else None
+                            ),
+                            verified_inode=(
+                                int(artifact["verified_inode"])
+                                if artifact["verified_inode"] is not None
+                                else None
+                            ),
+                        )
+                    )
                 continue
             if byte_count > 0 and (
                 not expected_sha256 or not bool(command[f"{stream}_preview"])
@@ -1093,6 +1112,79 @@ def proof_evidence_health_issues_for_finding(
     return issues
 
 
+def _require_verifier_owned_evidence(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    receipt_id: int,
+) -> None:
+    """Require the receipt's durable evidence to belong to its named producer."""
+
+    row = connection.execute(
+        """
+        SELECT receipts.evidence_kind, receipts.command_run_id,
+               receipts.source_read_id, receipts.artifact_id,
+               receipts.producer_dispatch_id,
+               dispatches.agent_id AS verifier_agent_id,
+               commands.agent_name AS command_agent_id,
+               source_reads.dispatch_id AS source_dispatch_id,
+               artifacts.producer_agent_id AS artifact_agent_id,
+               artifacts.producer_command_run_id AS artifact_command_run_id,
+               artifact_commands.agent_name AS artifact_command_agent_id
+        FROM assessment_proof_receipts AS receipts
+        JOIN assessment_dispatches AS dispatches
+          ON dispatches.id = receipts.producer_dispatch_id
+         AND dispatches.engagement_id = receipts.engagement_id
+        LEFT JOIN assessment_command_runs AS commands
+          ON commands.id = receipts.command_run_id
+         AND commands.engagement_id = receipts.engagement_id
+        LEFT JOIN assessment_run_source_reads AS source_reads
+          ON source_reads.id = receipts.source_read_id
+         AND source_reads.engagement_id = receipts.engagement_id
+        LEFT JOIN assessment_artifacts AS artifacts
+          ON artifacts.id = receipts.artifact_id
+         AND artifacts.engagement_id = receipts.engagement_id
+        LEFT JOIN assessment_command_runs AS artifact_commands
+          ON artifact_commands.id = artifacts.producer_command_run_id
+         AND artifact_commands.engagement_id = receipts.engagement_id
+        WHERE receipts.engagement_id = ? AND receipts.id = ?
+        """,
+        (engagement_id, receipt_id),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=400, detail="proof receipt attribution is missing")
+
+    evidence_kind = str(row["evidence_kind"])
+    verifier_agent_id = str(row["verifier_agent_id"])
+    if evidence_kind == "command":
+        attributed = (
+            row["command_run_id"] is not None
+            and str(row["command_agent_id"] or "") == verifier_agent_id
+        )
+    elif row["source_read_id"] is not None:
+        attributed = (
+            row["source_dispatch_id"] is not None
+            and int(row["source_dispatch_id"]) == int(row["producer_dispatch_id"])
+        )
+    elif row["artifact_id"] is not None:
+        if row["artifact_command_run_id"] is not None:
+            attributed = (
+                str(row["artifact_command_agent_id"] or "") == verifier_agent_id
+            )
+        else:
+            attributed = str(row["artifact_agent_id"] or "") == verifier_agent_id
+    else:
+        attributed = False
+    if attributed:
+        return
+    action = "was not executed" if evidence_kind == "command" else "was not produced"
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=(
+            f"proof receipt {receipt_id} evidence {action} by the verifier dispatch"
+        ),
+    )
+
+
 def _verification_receipts(
     connection: sqlite3.Connection,
     engagement_id: int,
@@ -1142,6 +1234,11 @@ def _verification_receipts(
                     "terminal verification decision"
                 ),
             )
+        _require_verifier_owned_evidence(
+            connection,
+            engagement_id,
+            receipt_id,
+        )
         if receipt["redaction_status"] == "redacted":
             raw = _serialize_receipts(
                 connection,
@@ -1162,6 +1259,21 @@ def _verification_receipts(
                         f"{raw['evidence_health']}"
                     ),
                 )
+            if int(raw["producer_dispatch_id"]) != int(
+                receipt["producer_dispatch_id"]
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"proof receipt {receipt_id} depends on raw evidence from "
+                        "a different verifier dispatch"
+                    ),
+                )
+            _require_verifier_owned_evidence(
+                connection,
+                engagement_id,
+                int(raw["id"]),
+            )
         producer_dispatch_ids.add(int(receipt["producer_dispatch_id"]))
         receipts.append(receipt)
     if len(producer_dispatch_ids) != 1:

@@ -171,6 +171,67 @@ describe("SubmissionsTab", () => {
     expect(screen.queryByText("Stale submission finding")).toBeNull();
   });
 
+  it("preserves a selected later-page finding across first-page refreshes", async () => {
+    const secondFinding = {
+      ...listing.findings[0],
+      id: 92,
+      slug: "VA-002",
+      title: "Second finding",
+    };
+    const firstPage = {
+      ...listing,
+      findings_page: {
+        offset: 0,
+        limit: 1,
+        returned: 1,
+        total: 2,
+        has_more: true,
+        next_offset: 1,
+      },
+    };
+    const secondPage = {
+      ...listing,
+      findings: [secondFinding],
+      findings_page: {
+        offset: 1,
+        limit: 1,
+        returned: 1,
+        total: 2,
+        has_more: false,
+        next_offset: null,
+      },
+    };
+    vi.mocked(listSubmissions)
+      .mockResolvedValueOnce(firstPage)
+      .mockResolvedValueOnce(secondPage)
+      .mockResolvedValueOnce({
+        ...firstPage,
+        findings: [{ ...listing.findings[0], title: "Refreshed first finding" }],
+      });
+    vi.mocked(getSubmissionDetail).mockImplementation(async (_engagementKey, slug) => ({
+      ...detail,
+      finding: slug === "VA-002"
+        ? { ...detail.finding, id: 92, slug: "VA-002", title: "Second finding" }
+        : detail.finding,
+    }));
+
+    const { rerender } = render(
+      <SubmissionsTab engagementKey="engagement one" refreshVersion={0} />,
+    );
+    await screen.findByText("Missing authorization on admin API");
+    fireEvent.click(screen.getByRole("button", { name: "Load more findings" }));
+    const secondButton = await screen.findByRole("button", { name: /Second finding/ });
+    fireEvent.click(secondButton);
+    await waitFor(() => expect(secondButton.className).toContain("is-selected"));
+
+    rerender(<SubmissionsTab engagementKey="engagement one" refreshVersion={1} />);
+    await waitFor(() => expect(listSubmissions).toHaveBeenCalledTimes(3));
+
+    const retainedButton = await screen.findByRole("button", { name: /Second finding/ });
+    expect(retainedButton.className).toContain("is-selected");
+    expect(screen.getByText("Refreshed first finding")).toBeTruthy();
+  });
+
   it("keeps the reviewed document primary and attachments opt-in", async () => {
     vi.mocked(listSubmissions).mockResolvedValue(listing);
     vi.mocked(getSubmissionDetail).mockResolvedValue(detail);

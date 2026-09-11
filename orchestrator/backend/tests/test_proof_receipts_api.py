@@ -51,16 +51,36 @@ def _complete_run(client, run: dict, status: str = "completed") -> dict:
     return response.json()
 
 
-def _artifact(client, engagement_dir: Path, path: str, content: str) -> dict:
+def _artifact(
+    client,
+    engagement_dir: Path,
+    path: str,
+    content: str,
+    *,
+    producer_agent_id: str | None = None,
+) -> dict:
     target = engagement_dir / path
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
-    response = client.post(f"{BASE}/artifacts", json={"path": path, "kind": "proof"})
+    response = client.post(
+        f"{BASE}/artifacts",
+        json={
+            "path": path,
+            "kind": "proof",
+            "producer_agent_id": producer_agent_id,
+        },
+    )
     assert response.status_code == 201, response.text
     return response.json()
 
 
-def _source_observation(client, run: dict, observed_result: str) -> dict:
+def _source_observation(
+    client,
+    run: dict,
+    observed_result: str,
+    *,
+    dispatch_agent_id: str = "VERIFY-1",
+) -> dict:
     content = f"proof source for run {run['id']}\n".encode()
     source = client.post(
         f"{BASE}/assessment-runs/{run['id']}/sources",
@@ -87,7 +107,7 @@ def _source_observation(client, run: dict, observed_result: str) -> dict:
         f"{BASE}/assessment-runs/{run['id']}/source-reads",
         json={
             "source_id": source.json()[0]["id"],
-            "dispatch_agent_id": "VERIFY-1",
+            "dispatch_agent_id": dispatch_agent_id,
             "attempt": 1,
             "byte_start": 0,
             "byte_end": len(content),
@@ -448,6 +468,180 @@ def test_command_receipt_requires_and_exposes_an_actual_recorded_execution(
     assert command_drilldown.json()["items"][0]["command"] == run_receipt["command"]
 
 
+def test_command_verification_rejects_execution_owned_by_a_different_dispatch(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    finding = client.post(
+        f"{BASE}/findings",
+        json={
+            "slug": "VA-913",
+            "title": "Verifier must independently reproduce this finding",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_status": "unreviewed",
+            "source_name": "vulnerability-analyst",
+            "provenance": {"agent_id": "HUNT-1"},
+        },
+    )
+    assert finding.status_code == 201, finding.text
+    run = _run(client)
+    author_command = client.post(
+        f"{BASE}/command-runs",
+        json={
+            "command": "python reproduce.py",
+            "argv": ["python", "reproduce.py"],
+            "tool_name": "python",
+            "agent_name": "HUNT-1",
+            "phase": "exploit",
+            "return_code": 0,
+            "timed_out": False,
+            "success": True,
+            "started_at": "2026-09-09T12:00:00Z",
+            "completed_at": "2026-09-09T12:00:01Z",
+            "duration_ms": 1000,
+            "stdout": "author observed the defect",
+            "stderr": "",
+            "run_uuid": "proof-command-author-1",
+        },
+    )
+    assert author_command.status_code == 201, author_command.text
+
+    receipt = client.post(
+        f"{BASE}/proof-receipts",
+        json={
+            "run_id": run["id"],
+            "evidence_kind": "command",
+            "command_run_id": author_command.json()["id"],
+            "observed_result": "verifier reused the author's execution",
+        },
+    )
+    assert receipt.status_code == 201, receipt.text
+    _complete_run(client, run)
+
+    verified = client.post(
+        f"{BASE}/findings/VA-913/verify",
+        json={
+            "verification_status": "confirmed",
+            "reason_text": "The verifier claims the author's command as independent proof.",
+            "proof_receipt_ids": [receipt.json()["id"]],
+        },
+    )
+
+    assert verified.status_code == 409, verified.text
+    assert "was not executed by the verifier dispatch" in verified.json()["detail"]
+
+
+def test_source_verification_rejects_read_owned_by_a_different_dispatch(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    finding = client.post(
+        f"{BASE}/findings",
+        json={
+            "slug": "VA-914",
+            "title": "Verifier must independently read the decisive source",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_status": "unreviewed",
+            "source_name": "vulnerability-analyst",
+            "provenance": {"agent_id": "HUNT-1"},
+        },
+    )
+    assert finding.status_code == 201, finding.text
+    run = _run(client)
+    receipt = _source_observation(
+        client,
+        run,
+        "verifier reused the author's source read",
+        dispatch_agent_id="HUNT-1",
+    )
+    _complete_run(client, run)
+
+    verified = client.post(
+        f"{BASE}/findings/VA-914/verify",
+        json={
+            "verification_status": "confirmed",
+            "reason_text": "The verifier claims the author's read as independent proof.",
+            "proof_receipt_ids": [receipt["id"]],
+        },
+    )
+
+    assert verified.status_code == 409, verified.text
+    assert "was not produced by the verifier dispatch" in verified.json()["detail"]
+
+def test_artifact_verification_rejects_artifact_owned_by_a_different_dispatch(
+    client, isolate_settings
+) -> None:
+    engagement_dir = _seed(client, isolate_settings)
+    finding = client.post(
+        f"{BASE}/findings",
+        json={
+            "slug": "VA-915",
+            "title": "Verifier must independently capture the decisive artifact",
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_status": "unreviewed",
+            "source_name": "vulnerability-analyst",
+            "provenance": {"agent_id": "HUNT-1"},
+        },
+    )
+    assert finding.status_code == 201, finding.text
+    run = _run(client)
+    author_artifact = _artifact(
+        client,
+        engagement_dir,
+        "evidence/author-proof.txt",
+        "author observed the defect",
+        producer_agent_id="HUNT-1",
+    )
+    receipt = client.post(
+        f"{BASE}/proof-receipts",
+        json={
+            "run_id": run["id"],
+            "evidence_kind": "artifact",
+            "artifact_id": author_artifact["id"],
+            "observed_result": "verifier reused the author's artifact",
+        },
+    )
+    assert receipt.status_code == 201, receipt.text
+    _complete_run(client, run)
+
+    verified = client.post(
+        f"{BASE}/findings/VA-915/verify",
+        json={
+            "verification_status": "confirmed",
+            "reason_text": "The verifier claims the author's artifact as independent proof.",
+            "proof_receipt_ids": [receipt.json()["id"]],
+        },
+    )
+
+    assert verified.status_code == 409, verified.text
+    assert "was not produced by the verifier dispatch" in verified.json()["detail"]
+
+    relabeled = client.post(
+        f"{BASE}/artifacts",
+        json={
+            "path": author_artifact["relative_path"],
+            "kind": "proof",
+            "producer_agent_id": "VERIFY-1",
+        },
+    )
+    assert relabeled.status_code == 409, relabeled.text
+    assert "producer agent/command attribution is immutable" in relabeled.json()["detail"]
+
+    still_rejected = client.post(
+        f"{BASE}/findings/VA-915/verify",
+        json={
+            "verification_status": "confirmed",
+            "reason_text": "Relabeling existing author evidence cannot make it independent.",
+            "proof_receipt_ids": [receipt.json()["id"]],
+        },
+    )
+    assert still_rejected.status_code == 409, still_rejected.text
+    assert "was not produced by the verifier dispatch" in still_rejected.json()["detail"]
+
+
 def test_command_receipt_and_readiness_degrade_when_output_becomes_unmeasured(
     client, isolate_settings
 ) -> None:
@@ -509,6 +703,45 @@ def test_command_receipt_and_readiness_degrade_when_output_artifact_is_missing(
         and blocker.get("slug") == "VA-911"
         and blocker.get("proof_receipt_id") == receipt["id"]
         for blocker in readiness.json()["blockers"]
+    )
+
+
+def test_command_receipt_health_checks_output_artifact_without_manual_refresh(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    command, receipt = _verified_command_finding(
+        client,
+        slug="VA-912",
+        stdout="A" * 70_000,
+    )
+    assert command["output_retention_status"] == "artifact"
+    stdout_artifact = Path(command["stdout_artifact_ref"])
+    stdout_artifact.write_text("B" * 70_000, encoding="utf-8")
+
+    modified = client.get(f"{BASE}/proof-receipts/{receipt['id']}")
+    assert modified.status_code == 200, modified.text
+    assert modified.json()["evidence_health"] == "stale"
+    modified_readiness = client.get(f"{BASE}/report-readiness")
+    assert modified_readiness.status_code == 200, modified_readiness.text
+    assert any(
+        blocker["kind"] == "finding_proof_evidence_stale"
+        and blocker.get("slug") == "VA-912"
+        and blocker.get("proof_receipt_id") == receipt["id"]
+        for blocker in modified_readiness.json()["blockers"]
+    )
+
+    stdout_artifact.unlink()
+    missing = client.get(f"{BASE}/proof-receipts/{receipt['id']}")
+    assert missing.status_code == 200, missing.text
+    assert missing.json()["evidence_health"] == "missing"
+    missing_readiness = client.get(f"{BASE}/report-readiness")
+    assert missing_readiness.status_code == 200, missing_readiness.text
+    assert any(
+        blocker["kind"] == "finding_proof_evidence_missing"
+        and blocker.get("slug") == "VA-912"
+        and blocker.get("proof_receipt_id") == receipt["id"]
+        for blocker in missing_readiness.json()["blockers"]
     )
 
 
@@ -816,7 +1049,13 @@ def test_degraded_decision_receipt_blocks_readiness_without_rewriting_verificati
     )
     assert finding.status_code == 201, finding.text
     run = _run(client)
-    artifact = _artifact(client, engagement_dir, "evidence/decision.txt", "decisive")
+    artifact = _artifact(
+        client,
+        engagement_dir,
+        "evidence/decision.txt",
+        "decisive",
+        producer_agent_id="VERIFY-1",
+    )
     receipt_response = client.post(
         f"{BASE}/proof-receipts",
         json={
@@ -834,6 +1073,8 @@ def test_degraded_decision_receipt_blocks_readiness_without_rewriting_verificati
             "verification_status": "confirmed",
             "reason_text": "Independent proof reproduced the claim.",
             "proof_receipt_ids": [receipt_id],
+            "artifact_ref": "evidence/decision.txt",
+            "source_name": "code-vuln-verifier",
         },
     )
     assert verified.status_code == 200, verified.text
