@@ -2796,6 +2796,95 @@ def test_interrupted_run_is_sealed_and_resume_creates_a_linked_run_without_loss(
     assert preserved_signals.json()["items"][0]["candidate_id"] == signal.json()["candidate_id"]
 
 
+@pytest.mark.parametrize(
+    "identity_override",
+    [
+        {
+            "target_identity": {
+                "scope": "repository",
+                "repositories": ["unrelated-service"],
+            }
+        },
+        {
+            "source_generations": [
+                {
+                    "target_key": "unrelated-service",
+                    "generation": 1,
+                    "manifest_digest": "e" * 64,
+                }
+            ]
+        },
+        {
+            "exclusions": [
+                {
+                    "target_key": "unrelated-service",
+                    "path": "ignored/",
+                    "reason": "unrelated boundary",
+                }
+            ]
+        },
+    ],
+    ids=["target-identity", "source-generations", "exclusions"],
+)
+def test_resumed_run_rejects_identity_that_differs_from_its_parent(
+    client, isolate_settings, identity_override
+) -> None:
+    _seed(client, isolate_settings)
+    parent = _create_scan(client, run_uuid="resume-identity-parent")
+    terminal = client.patch(
+        f"{BASE}/assessment-runs/{parent['id']}",
+        json={"status": "interrupted", "reason": "worker exited"},
+    )
+    assert terminal.status_code == 200, terminal.text
+
+    resumed = client.post(
+        f"{BASE}/assessment-runs",
+        json={
+            "run_uuid": "resume-identity-child",
+            "run_kind": "code",
+            "run_purpose": "scan",
+            "producer_dispatch_agent_id": "HUNT-RUN-1",
+            "resumed_from_run_id": parent["id"],
+            **identity_override,
+        },
+    )
+
+    assert resumed.status_code == 409, resumed.text
+    assert resumed.json()["detail"] == "resumed run must preserve its parent's identity"
+    runs = client.get(f"{BASE}/assessment-runs", params={"limit": 100, "offset": 0})
+    assert runs.status_code == 200, runs.text
+    assert {run["run_uuid"] for run in runs.json()} == {"resume-identity-parent"}
+
+
+def test_resumed_run_accepts_explicit_parent_identity(client, isolate_settings) -> None:
+    _seed(client, isolate_settings)
+    parent = _create_scan(client, run_uuid="resume-exact-identity-parent")
+    terminal = client.patch(
+        f"{BASE}/assessment-runs/{parent['id']}",
+        json={"status": "interrupted", "reason": "worker exited"},
+    )
+    assert terminal.status_code == 200, terminal.text
+
+    resumed = client.post(
+        f"{BASE}/assessment-runs",
+        json={
+            "run_uuid": "resume-exact-identity-child",
+            "run_kind": "code",
+            "run_purpose": "scan",
+            "producer_dispatch_agent_id": "HUNT-RUN-1",
+            "target_identity": parent["target_identity"],
+            "source_generations": parent["source_generations"],
+            "exclusions": parent["exclusions"],
+            "resumed_from_run_id": parent["id"],
+        },
+    )
+
+    assert resumed.status_code == 201, resumed.text
+    assert resumed.json()["target_identity"] == parent["target_identity"]
+    assert resumed.json()["source_generations"] == parent["source_generations"]
+    assert resumed.json()["exclusions"] == parent["exclusions"]
+
+
 def test_proof_run_without_evidence_cannot_be_sealed_completed(
     client, isolate_settings
 ) -> None:

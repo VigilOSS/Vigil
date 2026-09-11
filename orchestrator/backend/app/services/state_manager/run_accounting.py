@@ -1028,12 +1028,26 @@ def create_assessment_run(
                     status_code=409,
                     detail="resumed run must preserve its parent's kind and purpose",
                 )
-            if not target_identity:
-                target_identity = _json_value(parent["target_identity_json"], {})
-            if not source_generations:
-                source_generations = _json_value(parent["source_generations_json"], [])
-            if not exclusions:
-                exclusions = _json_value(parent["exclusions_json"], [])
+            parent_target_identity = _json_value(parent["target_identity_json"], {})
+            parent_source_generations = _json_value(
+                parent["source_generations_json"], []
+            )
+            parent_exclusions = _json_value(parent["exclusions_json"], [])
+            if (
+                (target_identity and target_identity != parent_target_identity)
+                or (
+                    source_generations
+                    and source_generations != parent_source_generations
+                )
+                or (exclusions and exclusions != parent_exclusions)
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="resumed run must preserve its parent's identity",
+                )
+            target_identity = parent_target_identity
+            source_generations = parent_source_generations
+            exclusions = parent_exclusions
         existing = _assessment_run_row(connection, engagement.id, run_uuid=run_uuid)
         identity = {
             "run_kind": run_kind,
