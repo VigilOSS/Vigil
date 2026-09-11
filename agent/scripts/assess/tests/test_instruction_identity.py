@@ -139,6 +139,31 @@ def test_dispatch_instruction_identity_never_guesses_unknown_client_wrapper(
     assert any("client identity is unavailable" in warning for warning in warnings)
 
 
+def test_dispatch_instruction_identity_rejects_role_path_components(
+    tmp_path: Path,
+) -> None:
+    source_root, agent_root, engagement_dir = _fixture_tree(tmp_path)
+    operator_bytes = b"operator instructions\n"
+    (agent_root / "AGENTS.md").write_bytes(operator_bytes)
+    (source_root / "agent" / "AGENTS.md").write_bytes(operator_bytes)
+    (agent_root / ".claude" / "agents").mkdir(parents=True)
+    (source_root / "agent" / ".claude" / "agents").mkdir(parents=True)
+    (engagement_dir / "scope.json").write_text("{}", encoding="utf-8")
+
+    identity, warnings = build_dispatch_instruction_identity(
+        agent_root=agent_root,
+        engagement_dir=engagement_dir,
+        agent_role="../../AGENTS",
+        client_name="claude",
+    )
+
+    assert identity["specialist_instruction_path"] is None
+    assert identity["specialist_instruction_sha256"] is None
+    assert identity["instruction_identity_status"] == "incomplete"
+    assert identity["instructions_stale"] is None
+    assert any("role is not a safe basename" in warning for warning in warnings)
+
+
 def test_dispatch_instruction_identity_retains_known_client_without_specialist_wrapper(
     tmp_path: Path,
     monkeypatch,

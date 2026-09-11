@@ -51,6 +51,20 @@ def _client_name(explicit: str | None) -> str:
     return normalized if normalized in _KNOWN_CLIENTS else "unknown"
 
 
+def _safe_role_basename(value: str) -> str | None:
+    role = str(value).strip()
+    if (
+        not role
+        or role in {".", ".."}
+        or "/" in role
+        or "\\" in role
+        or "\x00" in role
+        or Path(role).name != role
+    ):
+        return None
+    return role
+
+
 def build_dispatch_instruction_identity(
     *,
     agent_root: Path,
@@ -101,14 +115,21 @@ def build_dispatch_instruction_identity(
                 "specialist instruction fingerprint is unknown"
             )
     else:
-        specialist_relative = Path(str(template).format(role=agent_role))
-        specialist_path = install_root / specialist_relative
-        if specialist_path.is_file():
-            specialist_digest = _sha256(specialist_path)
-        else:
+        safe_role = _safe_role_basename(agent_role)
+        if safe_role is None:
             warnings.append(
-                f"installed specialist instructions are missing: {specialist_relative}"
+                "dispatch agent role is not a safe basename; "
+                "specialist instruction fingerprint is unknown"
             )
+        else:
+            specialist_relative = Path(str(template).format(role=safe_role))
+            specialist_path = install_root / specialist_relative
+            if specialist_path.is_file():
+                specialist_digest = _sha256(specialist_path)
+            else:
+                warnings.append(
+                    f"installed specialist instructions are missing: {specialist_relative}"
+                )
 
     complete = operator_digest is not None and specialist_digest is not None
     instructions_stale: bool | None = None
