@@ -109,6 +109,7 @@ def run(args) -> None:
             "details_mode": "merge",
             "reason_code": "claim_retracted",
             "reason_text": reason,
+            "source_name": source_name,
             "expected_row_version": row_version,
         }
         response = require_finding_write_response(

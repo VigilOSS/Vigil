@@ -183,6 +183,14 @@ def test_material_edits_invalidate_verification_but_notes_and_wording_do_not(
     assert wording.status_code == 200, wording.text
     assert wording.json()["finding"]["verification_status"] == "confirmed"
 
+    summary_wording = client.patch(
+        f"{BASE}/findings/VA-020",
+        json={"summary": "Object authorization remains missing at this endpoint."},
+    )
+    assert summary_wording.status_code == 200, summary_wording.text
+    assert summary_wording.json()["finding"]["verification_status"] == "confirmed"
+    assert summary_wording.json()["finding"]["verification_invalidated"] is False
+
     material = client.patch(
         f"{BASE}/findings/VA-020",
         json=material_patch,
@@ -229,3 +237,60 @@ def test_replace_removing_material_details_invalidates_verification(
     assert transitions[0]["action"] == "verification_invalidated"
     assert transitions[0]["from_verification_status"] == verification_status
     assert transitions[0]["to_verification_status"] == "unreviewed"
+
+
+@pytest.mark.parametrize("verification_status", ("confirmed", "downgraded"))
+def test_claim_retraction_invalidates_terminal_verification_and_attributes_the_actor(
+    client, isolate_settings, verification_status
+) -> None:
+    _seed(client, isolate_settings)
+    created = client.post(
+        f"{BASE}/findings",
+        json=_finding_payload("VA-022"),
+    )
+    assert created.status_code == 201, created.text
+    verified = _verify_with_proof(client, "VA-022", verification_status)
+    assert verified.status_code == 200, verified.text
+
+    retracted = client.patch(
+        f"{BASE}/findings/VA-022",
+        json={
+            "summary": "Authorization is enforced for tenant invoice reads.",
+            "details": {
+                "correction_history": [
+                    {
+                        "field": "summary",
+                        "retracted_claim": "Object authorization is missing.",
+                        "replacement_claim": (
+                            "Authorization is enforced for tenant invoice reads."
+                        ),
+                    }
+                ]
+            },
+            "reason_code": "claim_retracted",
+            "reason_text": "The original claim exceeded the captured proof.",
+            "source_name": "retraction-operator",
+            "expected_row_version": verified.json()["finding"]["row_version"],
+        },
+    )
+
+    assert retracted.status_code == 200, retracted.text
+    assert retracted.json()["finding"]["verification_status"] == "unreviewed"
+    assert retracted.json()["finding"]["verification_invalidated"] is True
+    transition = retracted.json()["transition"]
+    assert transition["action"] == "verification_invalidated"
+    assert transition["actor"] == "retraction-operator"
+    assert transition["reason_code"] == "claim_retracted"
+    assert transition["from_verification_status"] == verification_status
+    assert transition["to_verification_status"] == "unreviewed"
+
+    activity = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/activity-entries",
+        params={"q": "finding-update"},
+    )
+    assert activity.status_code == 200, activity.text
+    update_rows = [
+        row for row in activity.json()["items"] if row["title"] == "finding-update"
+    ]
+    assert len(update_rows) == 1
+    assert update_rows[0]["actor_name"] == "retraction-operator"

@@ -256,6 +256,7 @@ def test_retract_claim_replaces_current_claim_and_preserves_audit_and_evidence(
     assert payload["reason_text"] == (
         "The original claim overgeneralized the captured tenant boundary."
     )
+    assert payload["source_name"] == "vulnerability-analyst"
     assert payload["details"]["correction_history"][:-1] == [
         "Earlier wording correction."
     ]
