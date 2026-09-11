@@ -391,6 +391,35 @@ def test_fetch_engagement_list_paginate_preserves_complete_rows(capsys) -> None:
     assert "fetched 1 intel/notes row(s)" in capsys.readouterr().err
 
 
+def test_fetch_engagement_list_paginate_honors_explicit_window_from_offset(
+    capsys,
+) -> None:
+    calls: list[tuple[str, str]] = []
+    source = [{"id": index, "body_markdown": str(index)} for index in range(5)]
+
+    class _Client:
+        def get_engagement(self, endpoint: str, query: str = ""):
+            calls.append((endpoint, query))
+            params = dict(parse_qsl(query))
+            offset = int(params["offset"])
+            limit = int(params["limit"])
+            return source[offset : offset + limit]
+
+    rows = fetch._fetch_engagement_endpoint(
+        _Client(),
+        "intel/notes?limit=2&offset=1",
+        paginate=True,
+    )
+
+    assert rows == source[1:]
+    assert calls == [
+        ("intel/notes", "limit=2&offset=1"),
+        ("intel/notes", "limit=2&offset=3"),
+        ("intel/notes", "limit=2&offset=5"),
+    ]
+    assert "fetched 4 intel/notes row(s)" in capsys.readouterr().err
+
+
 def test_fetch_activity_paginate_combines_every_complete_entry(capsys) -> None:
     calls: list[tuple[str, str]] = []
 
@@ -417,6 +446,36 @@ def test_fetch_activity_paginate_combines_every_complete_entry(capsys) -> None:
         ("activity-entries", "limit=1&offset=1"),
     ]
     assert "fetched 2 activity-entries row(s)" in capsys.readouterr().err
+
+
+def test_fetch_activity_paginate_honors_explicit_window_from_offset(capsys) -> None:
+    calls: list[tuple[str, str]] = []
+
+    class _Client:
+        def get_engagement(self, endpoint: str, query: str = ""):
+            calls.append((endpoint, query))
+            params = dict(parse_qsl(query))
+            offset = int(params["offset"])
+            limit = int(params["limit"])
+            items = [
+                {"id": index + 1, "body_markdown": str(index + 1)}
+                for index in range(offset, min(offset + limit, 5))
+            ]
+            return {"total": 5, "items": items}
+
+    result = fetch._fetch_engagement_endpoint(
+        _Client(),
+        "activity-entries?limit=2&offset=1",
+        paginate=True,
+    )
+
+    assert result["total"] == 4
+    assert [row["id"] for row in result["items"]] == [2, 3, 4, 5]
+    assert calls == [
+        ("activity-entries", "limit=2&offset=1"),
+        ("activity-entries", "limit=2&offset=3"),
+    ]
+    assert "fetched 4 activity-entries row(s)" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(

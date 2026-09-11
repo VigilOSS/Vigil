@@ -235,7 +235,9 @@ def _fetch_engagement_endpoint(
         return client.get_engagement(endpoint)
 
     query_items = parse_qsl(raw_query, keep_blank_values=True)
-    if any(key in {"limit", "offset"} for key, _value in query_items):
+    has_limit = any(key == "limit" for key, _value in query_items)
+    has_offset = any(key == "offset" for key, _value in query_items)
+    if (has_limit or has_offset) and not paginate:
         return client.get_engagement(normalized_path, query=urlencode(query_items))
 
     if not paginate:
@@ -251,8 +253,30 @@ def _fetch_engagement_endpoint(
         )
         return result
 
-    effective_page_size = int(page_size or (1000 if is_activity else 500))
+    page_cap = 1000 if is_activity else 500
+    effective_page_size = int(page_size or page_cap)
     offset = 0
+    if has_limit or has_offset:
+        limit_values = [value for key, value in query_items if key == "limit"]
+        offset_values = [value for key, value in query_items if key == "offset"]
+        try:
+            if len(limit_values) > 1 or len(offset_values) > 1:
+                raise ValueError
+            if limit_values:
+                effective_page_size = int(limit_values[0])
+            if offset_values:
+                offset = int(offset_values[0])
+        except ValueError as exc:
+            raise AssessError(
+                f"fetch {normalized_path}: limit and offset must each be one integer"
+            ) from exc
+        if not 1 <= effective_page_size <= page_cap or offset < 0:
+            raise AssessError(
+                f"fetch {normalized_path}: limit must be 1..{page_cap} and offset non-negative"
+            )
+        query_items = [
+            item for item in query_items if item[0] not in {"limit", "offset"}
+        ]
     combined: list[Any] = []
     first_activity: dict[str, Any] | None = None
     while True:
