@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Download, FileArchive, RefreshCcw, ShieldCheck } from "lucide-react";
 
 import {
@@ -115,9 +115,12 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
   const [recoveryIssues, setRecoveryIssues] = useState<SubmissionRecoveryResult | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const listingRequestGeneration = useRef(0);
 
   const refreshListing = useCallback(async () => {
+    const requestGeneration = ++listingRequestGeneration.current;
     const next = await listSubmissions(engagementKey);
+    if (requestGeneration !== listingRequestGeneration.current) return;
     setListing(next);
     setSelectedSlug((current) => {
       if (next.findings.some((finding) => finding.slug === current)) return current;
@@ -151,6 +154,7 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
       });
     return () => {
       cancelled = true;
+      listingRequestGeneration.current += 1;
     };
   }, [refreshListing, refreshVersion]);
 
@@ -214,11 +218,13 @@ export function SubmissionsTab({ engagementKey, refreshVersion = 0 }: Submission
     if (!listing || loadingMoreFindings || !page.has_more || page.next_offset == null) return;
     setLoadingMoreFindings(true);
     setError("");
+    const requestGeneration = ++listingRequestGeneration.current;
     try {
       const next = await listSubmissions(engagementKey, {
         findingOffset: page.next_offset,
         findingLimit: page.limit,
       });
+      if (requestGeneration !== listingRequestGeneration.current) return;
       setListing((current) => {
         if (!current) return current;
         const findings = new Map(current.findings.map((finding) => [finding.id, finding]));

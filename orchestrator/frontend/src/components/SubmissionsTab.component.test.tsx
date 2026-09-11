@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -130,6 +130,45 @@ describe("SubmissionsTab", () => {
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("submission API unavailable");
     expect(screen.queryByText("No findings to review")).toBeNull();
+  });
+
+  it("keeps the newest listing when overlapping refreshes finish out of order", async () => {
+    const staleListing = {
+      ...listing,
+      findings: [{ ...listing.findings[0], title: "Stale submission finding" }],
+    };
+    const freshListing = {
+      ...listing,
+      findings: [{ ...listing.findings[0], title: "Fresh submission finding" }],
+    };
+    let resolveStale: (value: typeof listing) => void = () => undefined;
+    let resolveFresh: (value: typeof listing) => void = () => undefined;
+    vi.mocked(listSubmissions)
+      .mockImplementationOnce(
+        () => new Promise((resolve) => {
+          resolveStale = resolve;
+        }),
+      )
+      .mockImplementationOnce(
+        () => new Promise((resolve) => {
+          resolveFresh = resolve;
+        }),
+      );
+    vi.mocked(getSubmissionDetail).mockResolvedValue(detail);
+
+    const { rerender } = render(
+      <SubmissionsTab engagementKey="engagement one" refreshVersion={0} />,
+    );
+    await waitFor(() => expect(listSubmissions).toHaveBeenCalledTimes(1));
+    rerender(<SubmissionsTab engagementKey="engagement one" refreshVersion={1} />);
+    await waitFor(() => expect(listSubmissions).toHaveBeenCalledTimes(2));
+
+    await act(async () => resolveFresh(freshListing));
+    expect(await screen.findByText("Fresh submission finding")).toBeTruthy();
+    await act(async () => resolveStale(staleListing));
+
+    expect(screen.getByText("Fresh submission finding")).toBeTruthy();
+    expect(screen.queryByText("Stale submission finding")).toBeNull();
   });
 
   it("keeps the reviewed document primary and attachments opt-in", async () => {

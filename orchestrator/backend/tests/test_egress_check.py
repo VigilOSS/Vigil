@@ -177,6 +177,30 @@ def test_unclassified_sample_records_inconclusive_observation(monkeypatch, tmp_p
     }
 
 
+def test_sparse_blackhole_output_cannot_establish_a_cluster_verdict(
+    monkeypatch, tmp_path, capsys
+):
+    mod = _load()
+    hosts = ",".join(f"host-{index}.example.com" for index in range(10))
+    probe = (
+        "example.com 200 0.040000 1.2.3.4\n"
+        "host-0.example.com 000 0.000000 \n"
+    )
+    recorded = _wire(monkeypatch, mod, tmp_path, probe)
+
+    mod.run(_args(tmp_path, hosts=hosts))
+
+    captured = capsys.readouterr()
+    assert "verdict=inconclusive" in captured.out
+    assert "egress_block_pct=10" in captured.out
+    payload = recorded["decision"]["payload"]
+    assert payload["reason"] == "unclassified_samples"
+    assert payload["blocked_pct"] == 10
+    assert payload["classified"] == 1
+    assert payload["sampled"] == 10
+    assert not (tmp_path / "blocked.txt").exists()
+
+
 def test_artifact_write_response_must_identify_registered_probe(monkeypatch, tmp_path):
     mod = _load()
     probe = (
@@ -276,10 +300,10 @@ def test_edge_block_response_is_inconclusive_not_reachable(
     ]["a.example.com"]
 
 
-def test_garbled_sample_line_does_not_dilute_blocked_pct(monkeypatch, tmp_path, capsys):
+def test_garbled_sample_line_does_not_inflate_blocked_pct(monkeypatch, tmp_path, capsys):
     mod = _load()
-    # 2 blackholed + 1 host with NO probe line. The unclassified host must be
-    # excluded from the denominator, so the block is still detected (not masked).
+    # 2 blackholed + 1 host with NO probe line is only 67% of the requested
+    # sample, so it cannot satisfy the 80% cluster threshold.
     probe = (
         "example.com 200 0.040000 1.2.3.4\n"   # control live
         "a.example.com 000 0.000000 \n"        # blackholed
@@ -289,9 +313,11 @@ def test_garbled_sample_line_does_not_dilute_blocked_pct(monkeypatch, tmp_path, 
     recorded = _wire(monkeypatch, mod, tmp_path, probe)
     mod.run(_args(tmp_path, hosts="a.example.com,b.example.com,c.example.com"))
     out = capsys.readouterr().out
-    assert "egress_block_pct=100" in out          # 2/2 classified, not 2/3
-    assert "verdict=cluster_blackholed" in out
+    assert "egress_block_pct=67" in out
+    assert "verdict=inconclusive" in out
+    assert recorded["decision"]["payload"]["reason"] == "unclassified_samples"
     assert recorded["decision"]["payload"]["sampled"] == 3   # total sample still reported
+    assert not (tmp_path / "blocked.txt").exists()
 
 
 def test_no_record_skips_decision_but_writes_blocked_file(monkeypatch, tmp_path):
