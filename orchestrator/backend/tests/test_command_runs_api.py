@@ -1797,7 +1797,7 @@ def test_generic_upsert_cannot_rebind_verified_snapshot_metadata_or_provenance(
     assert artifact["related_finding_slug"] is None
 
 
-def test_concurrent_host_finalizers_have_one_hash_and_cleanup_owner(
+def test_concurrent_host_finalizers_share_canonical_output_truth(
     client, isolate_settings, monkeypatch
 ):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
@@ -1861,18 +1861,32 @@ def test_concurrent_host_finalizers_have_one_hash_and_cleanup_owner(
         release_first.set()
         responses = [first.result(timeout=5), second.result(timeout=5)]
 
-    assert sorted(response.status_code for response in responses) == [200, 409]
-    assert call_count == 2
-    finalized = next(
+    assert all(response.status_code in {200, 409} for response in responses)
+    successful = [
         response.json() for response in responses if response.status_code == 200
-    )
-    conflict = next(
+    ]
+    conflicts = [
         response.json() for response in responses if response.status_code == 409
-    )
-    assert (
-        conflict["detail"]["existing"]["stdout_sha256"]
-        == finalized["stdout_sha256"]
-    )
+    ]
+    assert len(successful) in {1, 2}
+    assert len(successful) + len(conflicts) == 2
+    assert call_count == 2 * len(successful)
+    assert {
+        result["stdout_sha256"] for result in successful
+    } == {hashlib.sha256(b"https://example.com/logo.png\n").hexdigest()}
+
+    # After the terminal transaction commits, either the original owner can
+    # finish deferred cleanup before the waiter acquires SQLite's write lock,
+    # or the waiter can safely recover that pending work. Both schedules retain
+    # one terminal write and identical output truth.
+    if conflicts:
+        assert conflicts[0]["detail"]["existing"]["stdout_sha256"] == successful[0][
+            "stdout_sha256"
+        ]
+    else:
+        assert sum(
+            result.get("recovered_pending_output") is True for result in successful
+        ) == 1
 
 
 def test_host_exec_suppression_rejects_entry_swapped_before_unlink(

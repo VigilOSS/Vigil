@@ -148,11 +148,11 @@ _PROBE_EMITTING_KINDS = frozenset({"payload", "exploit", "baseline", "replay"})
 
 _NON_WEB_ENGAGEMENT_TYPES = frozenset({"code", "blue"})
 
-# Families where a 4xx response IS the measurement rather than a failed one: a
-# 401/403 on another principal's object is the healthy IDOR/BOLA signal, and an
-# auth probe that is refused has answered its own question. Everywhere else a
-# 4xx/5xx means the request never reached the code path the class lives in.
-_HTTP_STATUS_TOLERANT_FAMILIES = frozenset({"access-control", "auth"})
+# Families where an explicit HTTP authentication/authorization denial IS the
+# measurement rather than a failed probe. Other 4xx responses can be a bad
+# route, and a 5xx is an application failure; neither earns depth credit.
+_HTTP_DENIAL_TOLERANT_FAMILIES = frozenset({"access-control", "auth"})
+_HTTP_DENIAL_STATUS_CODES = frozenset({401, 403})
 
 
 def _killpg(process: subprocess.Popen, sig: int) -> None:
@@ -255,7 +255,8 @@ def _emit_probe_run(
         family EXCEPT access-control/auth, because a request that 404s or is
         rejected at the edge never reached the code path the class lives in, and
         crediting coverage for it is how a blind spot gets closed on paper. For
-        access-control and auth a 401/403 IS the measurement, so it stands.
+        access-control and auth an explicit 401/403 IS the measurement, so it
+        stands; other 4xx/5xx responses remain errors.
 
     BEST-EFFORT: any failure warns to stderr and returns; it must NEVER block or
     fail the tool run, and must not raise.
@@ -278,12 +279,16 @@ def _emit_probe_run(
             stdout_preview,
             extract_probe_response_headers(tool_name, cmd, stdout_preview),
         )
+        family = vuln_taxonomy.family_of(attack_family)
+        is_auth_denial = (
+            family in _HTTP_DENIAL_TOLERANT_FAMILIES
+            and observed_http_status in _HTTP_DENIAL_STATUS_CODES
+        )
         if (
             result_status == "tested"
             and observed_http_status is not None
             and observed_http_status >= 400
-            and vuln_taxonomy.family_of(attack_family)
-            not in _HTTP_STATUS_TOLERANT_FAMILIES
+            and not is_auth_denial
         ):
             result_status = "error"
         target_host, target_path, target_port = _extract_target_anchor(tool_name, cmd)
