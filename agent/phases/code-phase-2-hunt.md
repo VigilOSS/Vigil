@@ -213,13 +213,15 @@ Use `code-dispatch done` with `clean`, `finding`, `suspicious`, or an explicit `
 attributable disposition. An analyzed completion records a complete `cwe_coverage` array (the bare
 JSON array, not wrapped in an object) instead of a half-formed backend 422. Include one entry per
 `applicable_vuln_classes` value, with explicit zero-effort gap entries for anything unexamined.
-Record the analysis result before closeout: `finding`/`suspicious` require a current result with
+Record grouped file/call-chain receipts before closeout: `finding`/`suspicious` require a current result with
 inline `evidence` or an `evidence_ref`; `clean` requires non-empty family coverage and review
 notes. If the worker directly read a degraded/unsupported/truncated file to discharge Structural
 Coverage Debt, close it through that normal result path; never label completed semantic review as
 `skipped`, because skip records intentionally unreviewed material and cannot clear the debt
-(`shared-constraints-code.md` §2). Per-file detail derives from result rows, evidenced rows, and
-distinct-function effort, so a submitted effort number alone is not proof of work.
+(`shared-constraints-code.md` §2). Every non-skipped receipt names exact structural callable
+identities or reviewed source spans; critical/high closeout fails without one. Per-file detail
+derives from current receipts, evidenced receipts, and the union of structurally bound callables,
+so a submitted `functions_analyzed` or effort number alone is not proof of work.
 
 **Handling needs-context returns:** Check what's missing and why. If the hunter could have
 self-resolved it via filesystem access, note that as a process gap for future dispatches. If the
@@ -253,9 +255,8 @@ vigil assess code-coverage --cwe-matrix
 ```
 
 Shows, per critical/high file: expected classes from `SLOT_VULN_CLASSES`, current effort per class,
-threshold flags (`!` = below threshold), and a structural cross-check (self-reported
-`functions_analyzed` against the structural index's actual function count -- a gap suggests the
-hunter skipped functions needing a disposition). These scores steer review depth; they do not
+threshold flags (`!` = below threshold), and callable coverage derived from exact references on
+current receipts. `functions_analyzed` remains advisory context only. These scores steer review depth; they do not
 authorize or block a phase transition. If no warning represents a material gap, record that
 judgment and continue to 2C/2D. Pending cross-file triggers remain a separate structural-readiness
 blocker regardless of the quality score.

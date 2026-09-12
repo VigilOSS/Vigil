@@ -1996,6 +1996,38 @@ def test_code_record_analysis_rejects_bad_nested_payloads_before_post(tmp_path, 
     assert "cwe_coverage must be a JSON array" in capsys.readouterr().err
 
 
+def test_code_record_analysis_requires_grouped_source_receipt_before_post(
+    monkeypatch, tmp_path, capsys
+):
+    module = _load_code_record_analysis_module()
+    analysis_path = tmp_path / "analysis.json"
+    analysis_path.write_text(
+        json.dumps(
+            {
+                "queue_item_id": 101,
+                "agent_name": "code-vuln-hunter",
+                "lease_token": "lease-101",
+                "disposition": "clean",
+                "function_name": "legacy-name-is-not-proof",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("must reject before backend")),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(
+            SimpleNamespace(analysis_json=str(analysis_path), engagement_dir=tmp_path)
+        )
+
+    assert excinfo.value.code == 1
+    assert "callable_refs or reviewed_spans" in capsys.readouterr().err
+
+
 def test_code_record_registers_variant_check_leaf():
     module = _load_code_record_group_module()
     parser = argparse.ArgumentParser()
@@ -2564,6 +2596,8 @@ def test_contract_prints_code_record_analysis_contract(capsys):
     assert "Schema: code-analysis-result.schema.json" in out
     assert "queue_item_id" in out
     assert "file_id = derived by the backend from queue_item_id" in out
+    assert "receipt_kind" in out
+    assert "callable_refs" in out
     assert "file_id-only result -> include queue_item_id" in out
 
 

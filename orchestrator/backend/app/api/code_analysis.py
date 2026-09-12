@@ -294,6 +294,35 @@ class QueueHeartbeatRequest(BaseModel):
     lease_token: str = Field(min_length=1, max_length=128)
 
 
+class SourceLineSpan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    start_line: int = Field(strict=True, ge=1)
+    end_line: int = Field(strict=True, ge=1)
+
+    @model_validator(mode="after")
+    def validate_order(self) -> SourceLineSpan:
+        if self.end_line < self.start_line:
+            raise ValueError("end_line cannot precede start_line")
+        return self
+
+
+class StructuralCallableRecord(SourceLineSpan):
+    name: str = Field(min_length=1, max_length=512)
+    qualified_name: str = Field(min_length=1, max_length=1024)
+
+
+class StructuralCallableReference(SourceLineSpan):
+    file_id: StrictPositiveId
+    name: str = Field(min_length=1, max_length=512)
+    qualified_name: str = Field(min_length=1, max_length=1024)
+
+
+class ReviewedSourceSpan(SourceLineSpan):
+    file_id: StrictPositiveId
+    label: str = Field(default="", max_length=512)
+
+
 class AnalysisResultRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -301,6 +330,15 @@ class AnalysisResultRecord(BaseModel):
     file_id: StrictPositiveId | None = None
     agent_name: str = Field(min_length=1, max_length=128)
     lease_token: str = Field(min_length=1, max_length=128)
+    receipt_kind: Literal["file", "call_chain"] = "file"
+    callable_refs: list[StructuralCallableReference] = Field(
+        default_factory=list,
+        max_length=10000,
+    )
+    reviewed_spans: list[ReviewedSourceSpan] = Field(
+        default_factory=list,
+        max_length=10000,
+    )
     function_name: str = Field(default="", max_length=512)
     hypothesis: str = Field(default="", max_length=20000)
     evidence: str = Field(default="", max_length=20000)
@@ -401,6 +439,10 @@ class StructuralMetadataItem(BaseModel):
     structural_artifact_truncated: bool
     structural_truncated_dimensions: list[StructuralDimension]
     structural_signal_counts: StructuralSignalCounts
+    callables: list[StructuralCallableRecord] = Field(
+        default_factory=list,
+        max_length=10000,
+    )
 
     @model_validator(mode="after")
     def validate_structural_coverage_metadata(self) -> StructuralMetadataItem:
@@ -505,6 +547,18 @@ class StructuralMetadataItem(BaseModel):
             raise ValueError("total_entry_points must match structural_signal_counts.entry_points")
         if self.total_sinks != self.structural_signal_counts.security_sinks:
             raise ValueError("total_sinks must match structural_signal_counts.security_sinks")
+        if len(self.callables) > self.total_functions:
+            raise ValueError("callables cannot exceed total_functions")
+        identities = [
+            (
+                callable_record.qualified_name,
+                callable_record.start_line,
+                callable_record.end_line,
+            )
+            for callable_record in self.callables
+        ]
+        if len(identities) != len(set(identities)):
+            raise ValueError("callables must have unique qualified-name/source-span identities")
         return self
 
 
@@ -939,7 +993,7 @@ async def bulk_structural_metadata(
             artifact_truncated_files=request.artifact_truncated_files,
             artifact_truncated_file_paths=request.artifact_truncated_file_paths,
             analysis_status_counts=request.analysis_status_counts.model_dump(),
-            updates=[u.model_dump() for u in request.updates],
+            updates=[u.model_dump(exclude_unset=True) for u in request.updates],
         )
     )
     await _broadcast(engagement.key, "structural_metadata", record)
@@ -1197,12 +1251,14 @@ def list_code_triggers(
     engagement_key: str,
     status_filter: str | None = Query(default=None, alias="status"),
     repo_id: int | None = Query(default=None),
+    include_superseded: bool = Query(default=False),
 ) -> list[dict[str, Any]]:
     engagement = get_engagement_or_404(engagement_key)
     return code_analysis.list_code_triggers(
         engagement.id,
         status_filter=status_filter,
         repo_id=repo_id,
+        include_superseded=include_superseded,
     )
 
 
@@ -1247,7 +1303,10 @@ async def create_analysis_result(engagement_key: str, request: AnalysisResultRec
             _audit_code_mutation,
             engagement.id,
             title="code-record-analysis",
-            action=f"file_id={record['file_id']} function={request.function_name or '(file)'}",
+            action=(
+                f"file_id={record['file_id']} receipt={request.receipt_kind} "
+                f"callables={len(request.callable_refs)} spans={len(request.reviewed_spans)}"
+            ),
             actor_name=request.agent_name,
             result=request.disposition,
             metadata={
@@ -1255,6 +1314,9 @@ async def create_analysis_result(engagement_key: str, request: AnalysisResultRec
                 "queue_item_id": request.queue_item_id,
                 "finding_slug": request.finding_slug,
                 "disposition": request.disposition,
+                "receipt_kind": request.receipt_kind,
+                "callable_count": len(request.callable_refs),
+                "reviewed_span_count": len(request.reviewed_spans),
             },
         )
     )

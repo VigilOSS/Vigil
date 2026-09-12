@@ -475,6 +475,49 @@ def _prepare_repo_payload(
             file_id = int(backend_file.get("id") or 0)
             if file_id < 1:
                 raise ValueError(f"repo {repo_id} backend file has no ID for {rel_path}")
+            callable_records: list[dict[str, Any]] = []
+            callable_identities: set[tuple[str, int, int]] = set()
+            for callable_record in indexed.get("functions", []):
+                if not isinstance(callable_record, dict):
+                    raise ValueError(
+                        f"repo {repo_id} structural callable is invalid for {rel_path}"
+                    )
+                source_span = callable_record.get("source_span")
+                span = source_span if isinstance(source_span, dict) else callable_record
+                name = callable_record.get("name")
+                qualified_name = callable_record.get("qualified_name")
+                start_line = span.get("start_line", span.get("line_start"))
+                end_line = span.get("end_line", span.get("line_end"))
+                if (
+                    not isinstance(name, str)
+                    or not name
+                    or name != name.strip()
+                    or not isinstance(qualified_name, str)
+                    or not qualified_name
+                    or qualified_name != qualified_name.strip()
+                    or type(start_line) is not int
+                    or type(end_line) is not int
+                    or start_line < 1
+                    or end_line < start_line
+                    or end_line > int(indexed.get("total_lines") or 0)
+                ):
+                    raise ValueError(
+                        f"repo {repo_id} structural callable identity is invalid for {rel_path}"
+                    )
+                identity = (qualified_name, start_line, end_line)
+                if identity in callable_identities:
+                    raise ValueError(
+                        f"repo {repo_id} structural callable identity is duplicated for {rel_path}"
+                    )
+                callable_identities.add(identity)
+                callable_records.append(
+                    {
+                        "name": name,
+                        "qualified_name": qualified_name,
+                        "start_line": start_line,
+                        "end_line": end_line,
+                    }
+                )
             updates.append(
                 {
                     "file_id": file_id,
@@ -484,6 +527,7 @@ def _prepare_repo_payload(
                     "total_entry_points": int(indexed["signal_counts"]["entry_points"]),
                     "total_sinks": int(indexed["signal_counts"]["security_sinks"]),
                     "total_exports": int(indexed["total_exports"]),
+                    "callables": callable_records,
                     **structural_metadata,
                 }
             )

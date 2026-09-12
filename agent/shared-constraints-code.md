@@ -360,17 +360,21 @@ crossing.
 
 ---
 
-## 6. Account For Every Analyzed Function
+## 6. Account For Every Reviewed Source Region
 
-Every function you analyze must still receive exactly one disposition because the backend
-records one result per function:
+Every reviewed callable or source span must receive a disposition, but the receipt is not a
+reasoning quota. One `file` receipt may group several callables in the claimed file; one
+`call_chain` receipt may group a traced chain across files in the same sealed repository snapshot.
+Name every covered callable with the exact structural-index identity, and use exact reviewed spans
+for non-callable source regions. A reviewed span cannot stand in for a registered callable it
+overlaps; include every overlapped callable as an exact `callable_ref`:
 
 - `finding` -- Confirmed vulnerability with CWE, evidence, and exploitability assessment
 - `suspicious` -- Anomalous pattern needing variant analysis or deeper context to confirm
 - `clean` -- No vulnerabilities found in current analysis
 - `needs-context` -- Analysis blocked on missing information (specify exactly what is needed)
 
-Coverage must be explicit, but write-up depth can be proportional:
+Coverage must be structurally attributable, but write-up depth can be proportional:
 - Attack-facing, sink-bearing, stateful, or ambiguous functions need full reasoning.
 - Obviously mechanical helpers can use concise `clean` dispositions once you have verified they
   do not hide sinks, trust-boundary assumptions, or material error behavior.
@@ -378,12 +382,13 @@ Coverage must be explicit, but write-up depth can be proportional:
 Proportional write-up is never a license to skip the read or the check (§7): every function,
 mechanical-looking or not, is read in full and checked against sinks/trust-boundaries/error paths
 before its disposition prose gets to be brief. What shortens for a verified-mechanical helper is
-the write-up, not the analysis behind it.
+the write-up, not the analysis behind it. Grouping verified mechanical helpers is encouraged;
+grouping must never erase a finding, suspicious hypothesis, unresolved gap, or its exact evidence.
 
 Record dispositions via `vigil assess code-record analysis`.
 `finding` dispositions record durable finding state through `finding record`; `suspicious`,
 `clean`, and `needs-context` still record through `code-record analysis` so backend coverage knows
-which functions were reviewed and why the queue can advance or re-dispatch.
+which source regions were reviewed and why the queue can advance or re-dispatch.
 
 ---
 
@@ -520,21 +525,21 @@ verbs` or `## Mandatory Closing Sequence` section for the exact sequence you run
 
 ## 12. Coverage Integrity
 
-The backend cross-references your `functions_analyzed` coverage claim against the actual
-analysis-result rows recorded for that queue item, and reports the comparison back as
-`coverage_integrity` on the `code-dispatch done` response.
+The backend derives callable coverage from exact structural references on current, unreplaced
+analysis receipts and reports it as `coverage_integrity` on the `code-dispatch done` response.
 
-1. Record each function's analysis result via `code-record analysis` BEFORE calling
+1. Record grouped source receipts via `code-record analysis` BEFORE calling
    `code-dispatch done <item-id> <agent-name> <lease-token> <disposition> <coverage-json>
-   [notes]` — the backend derives the comparison from result rows that already exist at
+   [notes]` — the backend derives coverage from receipt anchors that already exist at
    completion time, not from the coverage JSON alone.
-2. A `functions_analyzed` count is only as informative as the distinct `function_name` values
-   behind it. The backend flags the claim as implausible when fewer than 30% of the claimed count
-   has a matching distinct-function result row for that queue item — write one result row per
-   function you actually dispose of, and the ratio takes care of itself.
-3. Each file's coverage should reflect that file's own functions, entry chains, and code
-   structure — assembled from this file's analysis, not adapted from another file's.
+2. `functions_analyzed` is advisory self-reporting, never coverage proof. Each file's authoritative
+   numerator is the union of exact `callable_refs` that name that file, including references from
+   a current cross-file `call_chain`; `reviewed_spans` prove checked source that has no structural
+   callable identity but do not invent callable coverage.
+3. Cross-file callable coverage does not transfer lease ownership. Only a source receipt anchored
+   to the claimed queue file can close that file's critical/high review; referenced files retain
+   their own queue, disposition, evidence, and closeout obligations.
 4. Not-applicable entries (`disposition: "not_applicable"`) are exempt from the backing check.
 5. Use `analysis_effort` in per-file coverage detail as the trustworthy effort projection: it is
-   derived from current nonsuperseded result rows, evidenced rows, distinct function names, and
-   the structural-index function total rather than the submitted effort number alone.
+   derived from current receipt rows, evidenced receipts, distinct structural callable bindings,
+   and the structural-index function total rather than the submitted effort number alone.

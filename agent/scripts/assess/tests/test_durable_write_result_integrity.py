@@ -216,8 +216,11 @@ def test_code_record_analysis_rejects_response_without_queue_result_identity(
             {
                 "queue_item_id": 7,
                 "agent_name": "hunter-1",
-                "lease_token": "lease-1",
-                "disposition": "clean",
+                    "lease_token": "lease-1",
+                    "disposition": "clean",
+                    "reviewed_spans": [
+                        {"file_id": 11, "start_line": 1, "end_line": 1}
+                    ],
             }
         ),
         encoding="utf-8",
@@ -232,6 +235,127 @@ def test_code_record_analysis_rejects_response_without_queue_result_identity(
     )
 
     with pytest.raises(AssessError, match="record code analysis result") as exc:
+        code_record_analysis.run(
+            SimpleNamespace(analysis_json=str(source), engagement_dir=tmp_path)
+        )
+
+    assert "do not retry automatically" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    ("submitted_anchors", "returned_anchors", "binding_status"),
+    [
+        (
+            {
+                "callable_refs": [],
+                "reviewed_spans": [
+                    {"file_id": 11, "start_line": 1, "end_line": 1}
+                ],
+            },
+            {
+                "callable_refs": [],
+                "reviewed_spans": [
+                    {
+                        "file_id": 11,
+                        "file_path": "src/a.py",
+                        "start_line": 1,
+                        "end_line": 2,
+                        "label": "",
+                    }
+                ],
+            },
+            "source_span",
+        ),
+        (
+            {
+                "callable_refs": [
+                    {
+                        "file_id": 11,
+                        "name": "parse",
+                        "qualified_name": "parse",
+                        "start_line": 1,
+                        "end_line": 2,
+                    }
+                ],
+                "reviewed_spans": [],
+            },
+            {
+                "callable_refs": [
+                    {
+                        "callable_key": "a" * 64,
+                        "file_id": 11,
+                        "file_path": "src/a.py",
+                        "name": "other",
+                        "qualified_name": "other",
+                        "start_line": 1,
+                        "end_line": 2,
+                    }
+                ],
+                "reviewed_spans": [],
+            },
+            "structural",
+        ),
+        (
+            {
+                "callable_refs": [],
+                "reviewed_spans": [
+                    {"file_id": 11, "start_line": 1, "end_line": 1}
+                ],
+            },
+            {
+                "callable_refs": [],
+                "reviewed_spans": [
+                    {
+                        "file_id": 11,
+                        "file_path": "src/a.py",
+                        "start_line": 1,
+                        "end_line": 1,
+                        "label": "",
+                    }
+                ],
+            },
+            "legacy_unbound",
+        ),
+    ],
+    ids=["reviewed-span-mismatch", "callable-ref-mismatch", "binding-status-mismatch"],
+)
+def test_code_record_analysis_rejects_noncanonical_source_receipt_response(
+    monkeypatch,
+    tmp_path,
+    submitted_anchors,
+    returned_anchors,
+    binding_status,
+) -> None:
+    submitted = {
+        "queue_item_id": 7,
+        "file_id": 11,
+        "agent_name": "hunter-1",
+        "lease_token": "lease-1",
+        "disposition": "clean",
+        "receipt_kind": "file",
+        **submitted_anchors,
+    }
+    source = tmp_path / "analysis.json"
+    source.write_text(json.dumps(submitted), encoding="utf-8")
+    response = {
+        "id": 9,
+        "queue_item_id": 7,
+        "file_id": 11,
+        "agent_name": "hunter-1",
+        "lease_token": "lease-1",
+        "disposition": "clean",
+        "receipt_kind": "file",
+        "receipt_binding_status": binding_status,
+        **returned_anchors,
+    }
+    _strict_record_client(monkeypatch, code_record_analysis, response)
+    monkeypatch.setattr(
+        code_record_analysis,
+        "write_json_snapshot",
+        lambda *_args, **_kwargs: tmp_path / "audit.json",
+    )
+
+    with pytest.raises(AssessError, match="record code analysis source receipt") as exc:
         code_record_analysis.run(
             SimpleNamespace(analysis_json=str(source), engagement_dir=tmp_path)
         )

@@ -33,12 +33,108 @@
       "title": "Lease Token",
       "type": "string"
     },
+    "receipt_kind": {
+      "default": "file",
+      "enum": [
+        "file",
+        "call_chain"
+      ],
+      "title": "Receipt Kind",
+      "type": "string",
+      "description": "file groups reviewed source in the claimed queue file; call_chain may include exact anchors in other files from the same sealed repository snapshot, but must include the claimed file."
+    },
+    "callable_refs": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "start_line": {
+            "minimum": 1,
+            "title": "Start Line",
+            "type": "integer"
+          },
+          "end_line": {
+            "minimum": 1,
+            "title": "End Line",
+            "type": "integer"
+          },
+          "file_id": {
+            "exclusiveMinimum": 0,
+            "title": "File Id",
+            "type": "integer"
+          },
+          "name": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "qualified_name": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Qualified Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start_line",
+          "end_line",
+          "file_id",
+          "name",
+          "qualified_name"
+        ],
+        "title": "StructuralCallableReference",
+        "type": "object"
+      },
+      "maxItems": 10000,
+      "title": "Callable Refs",
+      "type": "array",
+      "description": "Exact callable identities copied from the current structural index. Each referenced file's coverage is derived from the union of these references on current receipts; cross-file coverage does not close that file's separate lease."
+    },
+    "reviewed_spans": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "start_line": {
+            "minimum": 1,
+            "title": "Start Line",
+            "type": "integer"
+          },
+          "end_line": {
+            "minimum": 1,
+            "title": "End Line",
+            "type": "integer"
+          },
+          "file_id": {
+            "exclusiveMinimum": 0,
+            "title": "File Id",
+            "type": "integer"
+          },
+          "label": {
+            "default": "",
+            "maxLength": 512,
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start_line",
+          "end_line",
+          "file_id"
+        ],
+        "title": "ReviewedSourceSpan",
+        "type": "object"
+      },
+      "maxItems": 10000,
+      "title": "Reviewed Spans",
+      "type": "array",
+      "description": "Exact source line spans reviewed where no structural callable identity applies. Each span is validated against the sealed file and cannot substitute for an overlapped registered callable unless every overlapped callable is also supplied as an exact callable_ref. Non-skipped receipts require callable_refs or reviewed_spans."
+    },
     "function_name": {
       "default": "",
       "maxLength": 512,
       "title": "Function Name",
       "type": "string",
-      "description": "Name of the analyzed function."
+      "description": "Deprecated legacy display/filter field. It is not coverage evidence; new receipts use callable_refs and reviewed_spans."
     },
     "hypothesis": {
       "default": "",
@@ -157,7 +253,7 @@
           "functions_analyzed": {
             "type": "integer",
             "default": 0,
-            "description": "Number of functions in this file examined for this vulnerability class"
+            "description": "Advisory self-reported count for this vulnerability class. It never proves coverage; callable_refs do."
           },
           "entry_chains_traced": {
             "type": "integer",
@@ -231,7 +327,7 @@
       ],
       "default": null,
       "title": "Supersedes",
-      "description": "Optional analysis-result row ID explicitly replaced by this correction. The original must be current and have the same queue item, lease token, file, function, and repository generation."
+      "description": "Optional analysis-result row ID explicitly replaced by this correction. The original must be current and have the same queue item, lease token, file, grouped source anchors, and repository generation."
     }
   },
   "required": [
@@ -242,13 +338,30 @@
   ],
   "title": "Code Analysis Result",
   "type": "object",
-  "description": "Per-function analysis result payload recorded by code-vuln-hunter after analyzing a source code file.",
+  "description": "Grouped file or call-chain source-review receipt recorded by code-vuln-hunter for one claimed file lease.",
   "examples": [
     {
       "queue_item_id": 42,
       "agent_name": "code-vuln-hunter",
       "lease_token": "lease-7f6c0d12",
-      "function_name": "parseurl",
+      "receipt_kind": "call_chain",
+      "callable_refs": [
+        {
+          "file_id": 42,
+          "name": "parseurl",
+          "qualified_name": "url_parser.parseurl",
+          "start_line": 330,
+          "end_line": 371
+        },
+        {
+          "file_id": 43,
+          "name": "url_validate_scheme",
+          "qualified_name": "url_validate_scheme",
+          "start_line": 88,
+          "end_line": 112
+        }
+      ],
+      "reviewed_spans": [],
       "hypothesis": "Attacker-controlled URL scheme length passed to memcpy without bounds check",
       "evidence": "In parseurl() at line 342, schemelen is derived from user-supplied URL without validation. memcpy(buf, scheme, schemelen) copies attacker-controlled bytes into fixed-size heap buffer.",
       "evidence_ref": "tools/analysis-state/code-evidence/parseurl-taint.txt",

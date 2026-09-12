@@ -3755,12 +3755,67 @@ def _create_code_analysis_tables(connection: sqlite3.Connection) -> None:
                 structural_artifact_truncated INTEGER NOT NULL DEFAULT 0,
                 structural_truncated_dimensions_json TEXT NOT NULL DEFAULT '[]',
                 structural_signal_counts_json TEXT NOT NULL DEFAULT '{}',
+                retired_at TEXT,
+                retirement_reason TEXT,
+                replacement_repo_generation INTEGER,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(engagement_id, repo_id, file_path),
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
                 FOREIGN KEY(repo_id) REFERENCES code_repos(id) ON DELETE CASCADE,
                 FOREIGN KEY(module_id) REFERENCES code_modules(id) ON DELETE SET NULL
+            )
+            """
+    )
+    connection.execute(
+        """
+            CREATE TABLE IF NOT EXISTS code_source_generations (
+                engagement_id INTEGER NOT NULL,
+                repo_id INTEGER NOT NULL,
+                repo_generation INTEGER NOT NULL,
+                source_manifest_version TEXT NOT NULL,
+                source_manifest_digest TEXT NOT NULL,
+                source_review_identity_digest TEXT NOT NULL,
+                snapshot_manifest_path TEXT NOT NULL DEFAULT '',
+                snapshot_digest TEXT NOT NULL DEFAULT '',
+                source_snapshot_quality TEXT NOT NULL,
+                repo_path TEXT NOT NULL,
+                source_origin_path TEXT NOT NULL DEFAULT '',
+                source_kind TEXT NOT NULL DEFAULT 'legacy',
+                commit_hash TEXT NOT NULL DEFAULT '',
+                branch TEXT NOT NULL DEFAULT '',
+                worktree_dirty INTEGER,
+                promoted_at TEXT NOT NULL,
+                source_superseded_at TEXT,
+                source_supersession_reason TEXT NOT NULL DEFAULT '',
+                replacement_repo_generation INTEGER,
+                PRIMARY KEY(engagement_id, repo_id, repo_generation),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(repo_id) REFERENCES code_repos(id) ON DELETE CASCADE
+            )
+            """
+    )
+    connection.execute(
+        """
+            CREATE TABLE IF NOT EXISTS code_source_generation_files (
+                engagement_id INTEGER NOT NULL,
+                repo_id INTEGER NOT NULL,
+                repo_generation INTEGER NOT NULL,
+                file_id INTEGER NOT NULL,
+                file_path TEXT NOT NULL,
+                file_hash TEXT NOT NULL,
+                language TEXT NOT NULL DEFAULT '',
+                loc INTEGER NOT NULL DEFAULT 0,
+                header_snippet TEXT NOT NULL DEFAULT '',
+                git_churn_score INTEGER NOT NULL DEFAULT 0,
+                has_past_cve_fix INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(engagement_id, repo_id, repo_generation, file_id),
+                UNIQUE(engagement_id, repo_id, repo_generation, file_path),
+                FOREIGN KEY(engagement_id, repo_id, repo_generation)
+                    REFERENCES code_source_generations(
+                        engagement_id, repo_id, repo_generation
+                    ) ON DELETE CASCADE,
+                FOREIGN KEY(file_id) REFERENCES code_files(id) ON DELETE RESTRICT
             )
             """
     )
@@ -3790,6 +3845,9 @@ def _create_code_analysis_tables(connection: sqlite3.Connection) -> None:
                 reanalysis_of_queue_item_id INTEGER,
                 consumed_at TEXT,
                 completed_at TEXT,
+                source_superseded_at TEXT,
+                source_supersession_reason TEXT NOT NULL DEFAULT '',
+                replacement_repo_generation INTEGER,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
@@ -3805,6 +3863,10 @@ def _create_code_analysis_tables(connection: sqlite3.Connection) -> None:
                 queue_item_id INTEGER,
                 file_id INTEGER NOT NULL,
                 agent_name TEXT NOT NULL DEFAULT '',
+                receipt_kind TEXT NOT NULL DEFAULT 'file',
+                callable_refs_json TEXT NOT NULL DEFAULT '[]',
+                reviewed_spans_json TEXT NOT NULL DEFAULT '[]',
+                receipt_binding_status TEXT NOT NULL DEFAULT 'legacy_unbound',
                 function_name TEXT NOT NULL DEFAULT '',
                 hypothesis TEXT NOT NULL DEFAULT '',
                 evidence TEXT NOT NULL DEFAULT '',
@@ -3823,12 +3885,76 @@ def _create_code_analysis_tables(connection: sqlite3.Connection) -> None:
                 result_fingerprint TEXT NOT NULL DEFAULT '',
                 supersedes_result_id INTEGER UNIQUE REFERENCES code_analysis_results(id) ON DELETE RESTRICT,
                 superseded_at TEXT,
+                source_superseded_at TEXT,
+                source_supersession_reason TEXT NOT NULL DEFAULT '',
+                replacement_repo_generation INTEGER,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
                 FOREIGN KEY(queue_item_id) REFERENCES code_analysis_queue(id) ON DELETE CASCADE,
                 FOREIGN KEY(file_id) REFERENCES code_files(id) ON DELETE CASCADE
             )
             """
+    )
+    connection.execute(
+        """
+            CREATE TABLE IF NOT EXISTS code_structural_callable_publications (
+                engagement_id INTEGER NOT NULL,
+                repo_id INTEGER NOT NULL,
+                repo_generation INTEGER NOT NULL,
+                source_manifest_digest TEXT NOT NULL,
+                published_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY(engagement_id, repo_id, repo_generation),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(repo_id) REFERENCES code_repos(id) ON DELETE CASCADE
+            )
+            """
+    )
+    connection.execute(
+        """
+            CREATE TABLE IF NOT EXISTS code_structural_callables (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL,
+                repo_id INTEGER NOT NULL,
+                repo_generation INTEGER NOT NULL,
+                source_manifest_digest TEXT NOT NULL,
+                file_id INTEGER NOT NULL,
+                file_sha256 TEXT NOT NULL,
+                callable_key TEXT NOT NULL,
+                name TEXT NOT NULL,
+                qualified_name TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(engagement_id, repo_id, repo_generation, callable_key),
+                UNIQUE(engagement_id, file_id, repo_generation, qualified_name, start_line, end_line),
+                FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
+                FOREIGN KEY(repo_id) REFERENCES code_repos(id) ON DELETE CASCADE,
+                FOREIGN KEY(file_id) REFERENCES code_files(id) ON DELETE CASCADE
+            )
+            """
+    )
+    connection.execute(
+        """
+            CREATE TABLE IF NOT EXISTS code_analysis_result_callables (
+                result_id INTEGER NOT NULL,
+                callable_id INTEGER NOT NULL,
+                file_id INTEGER NOT NULL,
+                ordinal INTEGER NOT NULL,
+                PRIMARY KEY(result_id, callable_id),
+                UNIQUE(result_id, ordinal),
+                FOREIGN KEY(result_id) REFERENCES code_analysis_results(id) ON DELETE CASCADE,
+                FOREIGN KEY(callable_id) REFERENCES code_structural_callables(id) ON DELETE RESTRICT,
+                FOREIGN KEY(file_id) REFERENCES code_files(id) ON DELETE CASCADE
+            )
+            """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_code_structural_callables_current_file "
+        "ON code_structural_callables(engagement_id, file_id, repo_generation, qualified_name)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_code_analysis_result_callables_file "
+        "ON code_analysis_result_callables(file_id, result_id)"
     )
     connection.execute(
         """
@@ -3982,6 +4108,12 @@ def _create_code_analysis_tables(connection: sqlite3.Connection) -> None:
                 status TEXT NOT NULL DEFAULT 'pending',
                 resolved_queue_item_id INTEGER,
                 resolution_note TEXT NOT NULL DEFAULT '',
+                repo_id INTEGER NOT NULL DEFAULT 0,
+                repo_generation INTEGER NOT NULL DEFAULT 0,
+                source_manifest_digest TEXT NOT NULL DEFAULT '',
+                source_superseded_at TEXT,
+                source_supersession_reason TEXT NOT NULL DEFAULT '',
+                replacement_repo_generation INTEGER,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
@@ -4151,6 +4283,20 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         # authoritative snapshots. Generation zero is reserved for an
         # uncommitted first refresh, so preserve legacy visibility as gen 1.
         connection.execute("UPDATE code_repos SET active_generation = 1")
+
+    file_history_columns = {
+        "retired_at": "TEXT",
+        "retirement_reason": "TEXT",
+        "replacement_repo_generation": "INTEGER",
+    }
+    file_columns = _table_columns(connection, "code_files")
+    for col_name, col_def in file_history_columns.items():
+        if file_columns and col_name not in file_columns:
+            connection.execute(
+                f"ALTER TABLE code_files ADD COLUMN {col_name} {col_def}"
+            )
+    file_columns = _table_columns(connection, "code_files")
+
     if repo_columns:
         connection.execute(
             "UPDATE code_repos SET source_origin_path = repo_path WHERE source_origin_path = ''"
@@ -4166,7 +4312,11 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
             ).fetchall()
             for row in rows:
                 file_rows = connection.execute(
-                    "SELECT file_path, file_hash, language FROM code_files WHERE repo_id = ?",
+                    """
+                    SELECT file_path, file_hash, language
+                    FROM code_files
+                    WHERE repo_id = ? AND retired_at IS NULL
+                    """,
                     (int(row[0]),),
                 ).fetchall()
                 connection.execute(
@@ -4183,6 +4333,48 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
                         int(row[0]),
                     ),
                 )
+
+        # Upgrades can preserve only the source generation that is still
+        # represented by the live repository row. Older rows deleted by a
+        # previous release are deliberately not reconstructed.
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO code_source_generations (
+                engagement_id, repo_id, repo_generation,
+                source_manifest_version, source_manifest_digest,
+                source_review_identity_digest, snapshot_manifest_path,
+                snapshot_digest, source_snapshot_quality, repo_path,
+                source_origin_path, source_kind, commit_hash, branch,
+                worktree_dirty, promoted_at
+            )
+            SELECT engagement_id, id, active_generation,
+                   source_manifest_version, source_manifest_digest,
+                   source_review_identity_digest, snapshot_manifest_path,
+                   snapshot_digest, source_snapshot_quality, repo_path,
+                   source_origin_path, source_kind, commit_hash, branch,
+                   worktree_dirty, COALESCE(created_at, CURRENT_TIMESTAMP)
+            FROM code_repos
+            WHERE active_generation > 0
+            """
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO code_source_generation_files (
+                engagement_id, repo_id, repo_generation, file_id, file_path,
+                file_hash, language, loc, header_snippet, git_churn_score,
+                has_past_cve_fix
+            )
+            SELECT files.engagement_id, files.repo_id, repos.active_generation,
+                   files.id, files.file_path, files.file_hash, files.language,
+                   files.loc, files.header_snippet, files.git_churn_score,
+                   files.has_past_cve_fix
+            FROM code_files AS files
+            JOIN code_repos AS repos
+              ON repos.id = files.repo_id
+             AND repos.engagement_id = files.engagement_id
+            WHERE repos.active_generation > 0 AND files.retired_at IS NULL
+            """
+        )
 
     result_columns = {
         row[1]
@@ -4219,6 +4411,9 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         "queue_mode": "TEXT NOT NULL DEFAULT 'initial'",
         "reanalysis_reason": "TEXT NOT NULL DEFAULT ''",
         "reanalysis_of_queue_item_id": "INTEGER",
+        "source_superseded_at": "TEXT",
+        "source_supersession_reason": "TEXT NOT NULL DEFAULT ''",
+        "replacement_repo_generation": "INTEGER",
     }
     for col_name, col_def in queue_new_columns.items():
         if queue_columns and col_name not in queue_columns:
@@ -4252,12 +4447,19 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
             "ALTER TABLE code_analysis_results ADD COLUMN cross_file_triggers_json TEXT NOT NULL DEFAULT '[]'"
         )
     for col_name, col_def in {
+        "receipt_kind": "TEXT NOT NULL DEFAULT 'file'",
+        "callable_refs_json": "TEXT NOT NULL DEFAULT '[]'",
+        "reviewed_spans_json": "TEXT NOT NULL DEFAULT '[]'",
+        "receipt_binding_status": "TEXT NOT NULL DEFAULT 'legacy_unbound'",
         "lease_token": "TEXT NOT NULL DEFAULT ''",
         "repo_generation": "INTEGER NOT NULL DEFAULT 0",
         "evidence_ref": "TEXT NOT NULL DEFAULT ''",
         "result_fingerprint": "TEXT NOT NULL DEFAULT ''",
         "supersedes_result_id": "INTEGER REFERENCES code_analysis_results(id) ON DELETE RESTRICT",
         "superseded_at": "TEXT",
+        "source_superseded_at": "TEXT",
+        "source_supersession_reason": "TEXT NOT NULL DEFAULT ''",
+        "replacement_repo_generation": "INTEGER",
     }.items():
         if result_columns and col_name not in result_columns:
             connection.execute(
@@ -4277,6 +4479,63 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_code_analysis_results_lease_function "
         "ON code_analysis_results(queue_item_id, lease_token, function_name)"
     )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_code_analysis_results_binding_status "
+        "ON code_analysis_results(engagement_id, repo_generation, receipt_binding_status)"
+    )
+
+    trigger_columns = _table_columns(connection, "code_analysis_triggers")
+    for col_name, col_def in {
+        "repo_id": "INTEGER NOT NULL DEFAULT 0",
+        "repo_generation": "INTEGER NOT NULL DEFAULT 0",
+        "source_manifest_digest": "TEXT NOT NULL DEFAULT ''",
+        "source_superseded_at": "TEXT",
+        "source_supersession_reason": "TEXT NOT NULL DEFAULT ''",
+        "replacement_repo_generation": "INTEGER",
+    }.items():
+        if trigger_columns and col_name not in trigger_columns:
+            connection.execute(
+                f"ALTER TABLE code_analysis_triggers ADD COLUMN {col_name} {col_def}"
+            )
+    if trigger_columns:
+        connection.execute(
+            """
+            UPDATE code_analysis_triggers
+            SET repo_id = COALESCE((
+                    SELECT files.repo_id
+                    FROM code_files AS files
+                    WHERE files.id = code_analysis_triggers.source_file_id
+                      AND files.engagement_id = code_analysis_triggers.engagement_id
+                ), 0),
+                repo_generation = COALESCE((
+                    SELECT queue.repo_generation
+                    FROM code_analysis_queue AS queue
+                    WHERE queue.id = code_analysis_triggers.source_queue_item_id
+                      AND queue.engagement_id = code_analysis_triggers.engagement_id
+                ), (
+                    SELECT repos.active_generation
+                    FROM code_files AS files
+                    JOIN code_repos AS repos ON repos.id = files.repo_id
+                    WHERE files.id = code_analysis_triggers.source_file_id
+                      AND files.engagement_id = code_analysis_triggers.engagement_id
+                ), 0),
+                source_manifest_digest = COALESCE((
+                    SELECT generations.source_manifest_digest
+                    FROM code_source_generations AS generations
+                    WHERE generations.engagement_id = code_analysis_triggers.engagement_id
+                      AND generations.repo_id = COALESCE((
+                          SELECT files.repo_id FROM code_files AS files
+                          WHERE files.id = code_analysis_triggers.source_file_id
+                      ), 0)
+                      AND generations.repo_generation = COALESCE((
+                          SELECT queue.repo_generation
+                          FROM code_analysis_queue AS queue
+                          WHERE queue.id = code_analysis_triggers.source_queue_item_id
+                      ), 0)
+                ), '')
+            WHERE repo_generation = 0
+            """
+        )
 
     # Migrate code_files: add structural metadata columns from tree-sitter index
     file_columns = _table_columns(connection, "code_files")

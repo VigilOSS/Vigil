@@ -763,7 +763,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
             filename="code-analysis-result.schema.json",
             model=AnalysisResultRecord,
             title="Code Analysis Result",
-            description="Per-function analysis result payload recorded by code-vuln-hunter after analyzing a source code file.",
+            description="Grouped file or call-chain source-review receipt recorded by code-vuln-hunter for one claimed file lease.",
             overlay={
                 "additionalProperties": False,
                 "examples": [
@@ -771,7 +771,24 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "queue_item_id": 42,
                         "agent_name": "code-vuln-hunter",
                         "lease_token": "lease-7f6c0d12",
-                        "function_name": "parseurl",
+                        "receipt_kind": "call_chain",
+                        "callable_refs": [
+                            {
+                                "file_id": 42,
+                                "name": "parseurl",
+                                "qualified_name": "url_parser.parseurl",
+                                "start_line": 330,
+                                "end_line": 371,
+                            },
+                            {
+                                "file_id": 43,
+                                "name": "url_validate_scheme",
+                                "qualified_name": "url_validate_scheme",
+                                "start_line": 88,
+                                "end_line": 112,
+                            },
+                        ],
+                        "reviewed_spans": [],
                         "hypothesis": "Attacker-controlled URL scheme length passed to memcpy without bounds check",
                         "evidence": "In parseurl() at line 342, schemelen is derived from user-supplied URL without validation. memcpy(buf, scheme, schemelen) copies attacker-controlled bytes into fixed-size heap buffer.",
                         "evidence_ref": "tools/analysis-state/code-evidence/parseurl-taint.txt",
@@ -818,8 +835,17 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                     "agent_name": {
                         "description": "Name of the agent that produced this result.",
                     },
+                    "receipt_kind": {
+                        "description": "file groups reviewed source in the claimed queue file; call_chain may include exact anchors in other files from the same sealed repository snapshot, but must include the claimed file.",
+                    },
+                    "callable_refs": {
+                        "description": "Exact callable identities copied from the current structural index. Each referenced file's coverage is derived from the union of these references on current receipts; cross-file coverage does not close that file's separate lease.",
+                    },
+                    "reviewed_spans": {
+                        "description": "Exact source line spans reviewed where no structural callable identity applies. Each span is validated against the sealed file and cannot substitute for an overlapped registered callable unless every overlapped callable is also supplied as an exact callable_ref. Non-skipped receipts require callable_refs or reviewed_spans.",
+                    },
                     "function_name": {
-                        "description": "Name of the analyzed function.",
+                        "description": "Deprecated legacy display/filter field. It is not coverage evidence; new receipts use callable_refs and reviewed_spans.",
                     },
                     "hypothesis": {
                         "description": "The vulnerability hypothesis tested. What could go wrong and why.",
@@ -848,7 +874,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "description": "Untrusted-input class this vulnerability is reached through, named from the same nine slot types the file classification uses: NETWORK-INPUT, URL-COMPONENT, CMD-ARGUMENT, FILE-CONTENT, ENV-VARIABLE, CALLBACK-DATA, PROTOCOL-FIELD, SERIALIZED-DATA, EXEC-POLICY (see agent/skills/code-architecture-mapping/SKILL.md Step 10 for the canonical table). Unlike the file-level slot_types list, this field is deliberately free text and is not validated: prefer a value from that list, but record a more precise one when the nine do not describe the reached input. It is a label only - it never gates coverage or family derivation, which read the file-level slot_types.",
                     },
                     "supersedes": {
-                        "description": "Optional analysis-result row ID explicitly replaced by this correction. The original must be current and have the same queue item, lease token, file, function, and repository generation.",
+                        "description": "Optional analysis-result row ID explicitly replaced by this correction. The original must be current and have the same queue item, lease token, file, grouped source anchors, and repository generation.",
                     },
                     "notes": {
                         "description": "Additional notes, context expansion requests, or follow-up recommendations.",
@@ -885,7 +911,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                                 "functions_analyzed": {
                                     "type": "integer",
                                     "default": 0,
-                                    "description": "Number of functions in this file examined for this vulnerability class",
+                                    "description": "Advisory self-reported count for this vulnerability class. It never proves coverage; callable_refs do.",
                                 },
                                 "entry_chains_traced": {
                                     "type": "integer",

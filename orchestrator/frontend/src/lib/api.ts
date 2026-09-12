@@ -1698,6 +1698,24 @@ export type CodeAnalysisResult = {
   file_id: number;
   file_path?: string | null;
   agent_name: string;
+  receipt_kind: "file" | "call_chain";
+  receipt_binding_status: string;
+  callable_refs: Array<{
+    callable_key: string;
+    file_id: number;
+    file_path: string;
+    name: string;
+    qualified_name: string;
+    start_line: number;
+    end_line: number;
+  }>;
+  reviewed_spans: Array<{
+    file_id: number;
+    file_path: string;
+    start_line: number;
+    end_line: number;
+    label: string;
+  }>;
   function_name: string;
   hypothesis: string;
   evidence: string;

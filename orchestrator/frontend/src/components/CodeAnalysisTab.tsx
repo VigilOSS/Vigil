@@ -89,6 +89,10 @@ function parseQuery(q: string): ParsedQuery {
 function buildCorpus(r: CodeAnalysisResult): string {
   return [
     r.function_name,
+    r.receipt_kind,
+    r.receipt_binding_status,
+    ...r.callable_refs.flatMap((ref) => [ref.name, ref.qualified_name, ref.file_path]),
+    ...r.reviewed_spans.flatMap((span) => [span.file_path, span.label]),
     r.file_path ?? "",
     r.hypothesis,
     r.evidence,
@@ -209,7 +213,12 @@ export function CodeAnalysisTab({
             if (!(r.file_path || "").toLowerCase().includes(v)) return false;
             break;
           case "function":
-            if (!(r.function_name || "").toLowerCase().includes(v)) return false;
+            if (
+              !(r.function_name || "").toLowerCase().includes(v) &&
+              !r.callable_refs.some((ref) =>
+                `${ref.name} ${ref.qualified_name}`.toLowerCase().includes(v)
+              )
+            ) return false;
             break;
         }
       }
@@ -788,7 +797,9 @@ export function CodeAnalysisTab({
                   >
                     <div className="code-result-header">
                       <span className={`badge code-disposition-${r.disposition}`}>{r.disposition}</span>
-                      <strong className="mono-text">{r.function_name || (r.file_path ? r.file_path.split("/").pop() : `file #${r.file_id}`)}</strong>
+                      <strong className="mono-text">
+                        {r.function_name || `${r.receipt_kind} receipt (${r.callable_refs.length} callables, ${r.reviewed_spans.length} spans)`}
+                      </strong>
                       {r.cwe_id && <span className="badge">{r.cwe_id}</span>}
                       {r.slot_type && <span className="badge">{r.slot_type}</span>}
                       <span className={`badge code-confidence-${r.confidence}`}>{r.confidence} conf.</span>
@@ -800,6 +811,22 @@ export function CodeAnalysisTab({
                         <span className="mono-text">{r.file_path}</span>
                       </div>
                     )}
+                    {r.callable_refs.map((ref) => (
+                      <div className="code-result-detail" key={ref.callable_key}>
+                        <span className="code-result-label">Callable:</span>
+                        <span className="mono-text">
+                          {ref.file_path}:{ref.start_line}-{ref.end_line} {ref.qualified_name}
+                        </span>
+                      </div>
+                    ))}
+                    {r.reviewed_spans.map((span, index) => (
+                      <div className="code-result-detail" key={`${span.file_id}:${span.start_line}:${span.end_line}:${index}`}>
+                        <span className="code-result-label">Reviewed span:</span>
+                        <span className="mono-text">
+                          {span.file_path}:{span.start_line}-{span.end_line}{span.label ? ` ${span.label}` : ""}
+                        </span>
+                      </div>
+                    ))}
                     {r.hypothesis && (
                       <div className={`code-result-detail ${isExpanded ? "is-expanded" : ""}`}>
                         <span className="code-result-label">Hypothesis:</span>

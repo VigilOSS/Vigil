@@ -1,6 +1,6 @@
 # ADR 0027 — Code-analysis leases coordinate files, not reasoning
 
-- Status: Accepted — partially implemented; grouped receipt contracts remain pending
+- Status: Accepted — implemented
 - Date: 2026-09-12
 
 ## Context
@@ -30,18 +30,22 @@ Findings, suspicious results, and unresolved work retain exact individual rows a
 evidence. Grouping must preserve review coverage without forcing mechanical output
 that crowds out analysis. This ADR makes no incremental scanning or reuse decision.
 
-File-level claiming, multi-file fetches, full-snapshot reading, heartbeat, and
-stale-writer rejection are implemented. Current prompts, API/schema fields, and
-coverage-integrity projections still encourage one result row per free-text
-`function_name`; their coherent cutover remains pending.
+File-level claiming, multi-file fetches, full-snapshot reading, heartbeat,
+stale-writer rejection, grouped receipt contracts, and structural coverage
+projection are implemented. Every new non-skipped receipt names exact current
+structural callables and/or disjoint non-callable source spans. A cross-file
+call-chain receipt contributes each callable to its referenced file's coverage
+union, while queue completion remains owned by the claimed file and lease.
+Ambiguous or missing legacy bindings remain visible in explicit history but do
+not count as current results, readiness, or coverage.
 
 ## Consequences
 
 - Recovery and concurrent-write safety do not choke investigation depth.
 - Coverage receipts become structurally attributable without multiplying empty
   “clean” rows.
-- Schema, CLI contract, backend projections, prompts, and generated wrappers must
-  change together before the grouped receipt model is complete.
+- Schema, CLI contract, backend projections, prompts, and generated wrappers
+  enforce the grouped receipt model as one coherent contract.
 
 ## Alternatives considered
 

@@ -95,7 +95,7 @@ instructions: |2
         classic memory-corruption family fires
   - [ ] Sealed-source access confirmed -- can Read, Grep, and Glob beyond the file batch while
         keeping `snapshot_path` as the source root
-  - [ ] Audit trail plan ready -- every analysis result will include `audit_metadata`
+  - [ ] Audit trail plan ready -- every grouped source receipt will include `audit_metadata`
 
   Load the CWE pattern reference for a class as its signal appears in the code, from
   `agent/references/code-vuln-patterns/` -- not as a precondition to starting. If a class in
@@ -217,7 +217,7 @@ instructions: |2
   Before your dispatch returns, run in this order:
 
   1. `vigil assess finding record code-vuln-hunter <finding-json> --agent-id <your-agent_id>` per finding
-  2. `vigil assess code-record analysis <analysis-json>` per queue item (carries dispositions, CWE coverage, cross-file triggers, and the fetched queue lease)
+  2. `vigil assess code-record analysis <analysis-json>` per queue item (carries grouped file/call-chain receipts, exact callable/span anchors, dispositions, CWE coverage, cross-file triggers, and the fetched queue lease)
   3. `vigil assess agent handoff --from-json <path>` to capture summary, coverage gaps, next steps (per-finding verifier dispatch suggestions go here), runtime issues, working artifacts, open questions, and role-specific extras (`modules_hunted`, `findings_by_severity`)
   4. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
@@ -247,14 +247,15 @@ instructions: |2
   ## Post-Batch Coverage Check
 
   Before returning results, confirm the batch holds together as a complete pass, not a partial one:
-  every function in every file has a disposition (concise `clean` notes are fine for truly
-  mechanical helpers), every macro call was expanded and analyzed in its expanded form, every
+  every function in every file is covered by an exact structural reference on a receipt (verified
+  mechanical helpers may share a concise grouped `clean` receipt), every macro call was expanded and analyzed in its expanded form, every
   `#ifdef` branch was checked for guard completeness across all conditional paths, and every
   `needs-context` item names the exact missing function/file, the hypothesis it blocks, and the
   self-service already attempted. Produce `cwe_coverage` for every applicable vulnerability class
   (an explicit gap entry where effort is genuinely zero) and `cross_file_triggers` for any finding
   that connects elsewhere via the call graph. If the structural index was available, every listed
-  function has a disposition. Guidance hypotheses were checked after the skill's unconstrained pass
+  callable has a disposition. `functions_analyzed` is advisory; the receipt's structural references
+  are the coverage proof. Guidance hypotheses were checked after the skill's unconstrained pass
   (Steps 1-3), never before it.
 
   ## Handoffs

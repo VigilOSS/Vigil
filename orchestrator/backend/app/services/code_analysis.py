@@ -37,6 +37,7 @@ from .variant_scopes import (
 
 STRUCTURAL_INPUT_IDENTITY_SCHEMA = "structural-input-identity/v1"
 STRUCTURAL_INDEX_SCHEMA = "structural-index/v6"
+STRUCTURAL_CALLABLE_IDENTITY_SCHEMA = "structural-callable/v1"
 VARIANT_INPUT_IDENTITY_SCHEMA = "variant-input-identity/v1"
 MAX_VARIANT_RECEIPT_PAGE = 500
 DEFAULT_VARIANT_RECEIPT_PAGE = 100
@@ -156,6 +157,218 @@ def structural_input_identity_digest(
         ),
     }
     return hashlib.sha256(_json_text(payload).encode("utf-8")).hexdigest()
+
+
+def _structural_callable_key(
+    *,
+    repo_id: int,
+    repo_generation: int,
+    source_manifest_digest: str,
+    file_id: int,
+    file_sha256: str,
+    name: str,
+    qualified_name: str,
+    start_line: int,
+    end_line: int,
+) -> str:
+    return hashlib.sha256(
+        _json_text(
+            {
+                "schema": STRUCTURAL_CALLABLE_IDENTITY_SCHEMA,
+                "repo_id": repo_id,
+                "repo_generation": repo_generation,
+                "source_manifest_digest": source_manifest_digest,
+                "file_id": file_id,
+                "file_sha256": file_sha256,
+                "name": name,
+                "qualified_name": qualified_name,
+                "start_line": start_line,
+                "end_line": end_line,
+            }
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _canonical_structural_callables(
+    item: dict[str, Any],
+    file_row: dict[str, Any],
+    *,
+    repo_id: int,
+    repo_generation: int,
+    source_manifest_digest: str,
+) -> list[dict[str, Any]]:
+    callables = item.get("callables", [])
+    if not isinstance(callables, list):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="structural callables must be a list",
+        )
+    if len(callables) > int(item["total_functions"]):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="structural callables cannot exceed total_functions",
+        )
+    canonical: list[dict[str, Any]] = []
+    seen: set[tuple[str, int, int]] = set()
+    for raw in callables:
+        if not isinstance(raw, dict):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="each structural callable must be an object",
+            )
+        _reject_unknown_fields(
+            raw,
+            {"name", "qualified_name", "start_line", "end_line"},
+            entity_name="structural callable",
+        )
+        name = raw.get("name")
+        qualified_name = raw.get("qualified_name")
+        if (
+            not isinstance(name, str)
+            or not name
+            or name != name.strip()
+            or not isinstance(qualified_name, str)
+            or not qualified_name
+            or qualified_name != qualified_name.strip()
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="structural callable names must be non-empty unpadded strings",
+            )
+        start_line = raw.get("start_line")
+        end_line = raw.get("end_line")
+        if (
+            type(start_line) is not int
+            or type(end_line) is not int
+            or start_line < 1
+            or end_line < start_line
+            or end_line > int(file_row["loc"])
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "structural callable source span must fall within the sealed file "
+                    f"for file_id={file_row['id']}"
+                ),
+            )
+        identity = (qualified_name, start_line, end_line)
+        if identity in seen:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="structural callable identities must be unique within a file",
+            )
+        seen.add(identity)
+        canonical.append(
+            {
+                "engagement_id": int(file_row["engagement_id"]),
+                "repo_id": repo_id,
+                "repo_generation": repo_generation,
+                "source_manifest_digest": source_manifest_digest,
+                "file_id": int(file_row["id"]),
+                "file_path": str(file_row["file_path"]),
+                "file_sha256": str(file_row["file_hash"]),
+                "name": name,
+                "qualified_name": qualified_name,
+                "start_line": start_line,
+                "end_line": end_line,
+                "callable_key": _structural_callable_key(
+                    repo_id=repo_id,
+                    repo_generation=repo_generation,
+                    source_manifest_digest=source_manifest_digest,
+                    file_id=int(file_row["id"]),
+                    file_sha256=str(file_row["file_hash"]),
+                    name=name,
+                    qualified_name=qualified_name,
+                    start_line=start_line,
+                    end_line=end_line,
+                ),
+            }
+        )
+    return canonical
+
+
+def _bind_legacy_analysis_results(
+    connection,
+    *,
+    engagement_id: int,
+    repo_id: int,
+    repo_generation: int,
+) -> None:
+    legacy_rows = connection.execute(
+        """
+        SELECT results.id, results.file_id, results.function_name
+        FROM code_analysis_results AS results
+        JOIN code_files AS files
+          ON files.id = results.file_id
+         AND files.engagement_id = results.engagement_id
+        WHERE results.engagement_id = ? AND files.repo_id = ?
+          AND results.repo_generation = ?
+          AND results.receipt_binding_status = 'legacy_unbound'
+          AND trim(results.function_name) != ''
+        """,
+        (engagement_id, repo_id, repo_generation),
+    ).fetchall()
+    for legacy in legacy_rows:
+        matches = connection.execute(
+            """
+            SELECT callables.*, files.file_path
+            FROM code_structural_callables AS callables
+            JOIN code_files AS files
+              ON files.id = callables.file_id
+             AND files.engagement_id = callables.engagement_id
+            WHERE callables.engagement_id = ? AND callables.repo_id = ?
+              AND callables.repo_generation = ? AND callables.file_id = ?
+              AND (callables.name = ? OR callables.qualified_name = ?)
+            ORDER BY callables.id
+            """,
+            (
+                engagement_id,
+                repo_id,
+                repo_generation,
+                int(legacy["file_id"]),
+                str(legacy["function_name"]),
+                str(legacy["function_name"]),
+            ),
+        ).fetchall()
+        if len(matches) != 1:
+            connection.execute(
+                """
+                UPDATE code_analysis_results
+                SET receipt_binding_status = ?
+                WHERE id = ? AND receipt_binding_status = 'legacy_unbound'
+                """,
+                (
+                    "legacy_ambiguous" if matches else "legacy_missing",
+                    int(legacy["id"]),
+                ),
+            )
+            continue
+        matched = matches[0]
+        callable_ref = {
+            "callable_key": str(matched["callable_key"]),
+            "file_id": int(matched["file_id"]),
+            "file_path": str(matched["file_path"]),
+            "name": str(matched["name"]),
+            "qualified_name": str(matched["qualified_name"]),
+            "start_line": int(matched["start_line"]),
+            "end_line": int(matched["end_line"]),
+        }
+        connection.execute(
+            """
+            UPDATE code_analysis_results
+            SET callable_refs_json = ?, receipt_binding_status = 'legacy_bound'
+            WHERE id = ? AND receipt_binding_status = 'legacy_unbound'
+            """,
+            (_json_list_text([callable_ref]), int(legacy["id"])),
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO code_analysis_result_callables (
+                result_id, callable_id, file_id, ordinal
+            ) VALUES (?, ?, ?, 0)
+            """,
+            (int(legacy["id"]), int(matched["id"]), int(matched["file_id"])),
+        )
 
 
 def _normalized_variant_language(value: Any) -> str:
@@ -486,7 +699,198 @@ def _hydrate_code_analysis_result(row: Any) -> dict[str, Any]:
     payload["audit_metadata"] = _json_decode(payload.get("audit_metadata_json"), {})
     payload["cwe_coverage"] = _json_decode(payload.get("cwe_coverage_json"), [])
     payload["cross_file_triggers"] = _json_decode(payload.get("cross_file_triggers_json"), [])
+    payload["callable_refs"] = _json_decode(payload.get("callable_refs_json"), [])
+    payload["reviewed_spans"] = _json_decode(payload.get("reviewed_spans_json"), [])
     return payload
+
+
+def _normalize_analysis_receipt_anchors(
+    connection,
+    *,
+    engagement_id: int,
+    queue_row: dict[str, Any],
+    queue_file: dict[str, Any],
+    receipt_kind: str,
+    callable_refs: Any,
+    reviewed_spans: Any,
+) -> tuple[list[dict[str, Any]], list[int], list[dict[str, Any]], str]:
+    if receipt_kind not in {"file", "call_chain"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="receipt_kind must be file or call_chain",
+        )
+    if not isinstance(callable_refs, list) or not isinstance(reviewed_spans, list):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="callable_refs and reviewed_spans must be lists",
+        )
+    if not callable_refs and not reviewed_spans:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="analysis result requires callable_refs or reviewed_spans",
+        )
+    all_file_ids: set[int] = set()
+    for anchor in [*callable_refs, *reviewed_spans]:
+        if not isinstance(anchor, dict) or type(anchor.get("file_id")) is not int:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="every source receipt anchor requires an exact integer file_id",
+            )
+        all_file_ids.add(int(anchor["file_id"]))
+    file_rows = _get_file_rows(connection, engagement_id, all_file_ids)
+    repo_id = int(queue_file["repo_id"])
+    if any(int(row["repo_id"]) != repo_id for row in file_rows.values()):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="grouped source receipt cannot cross repository snapshots",
+        )
+    if receipt_kind == "file" and all_file_ids != {int(queue_file["id"])}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="file receipt anchors must all belong to the claimed queue file",
+        )
+    if int(queue_file["id"]) not in all_file_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="grouped source receipt must include the claimed queue file",
+        )
+
+    canonical_refs: list[dict[str, Any]] = []
+    callable_ids: list[int] = []
+    seen_callable_ids: set[int] = set()
+    for raw in callable_refs:
+        _reject_unknown_fields(
+            raw,
+            {"file_id", "name", "qualified_name", "start_line", "end_line"},
+            entity_name="structural callable reference",
+        )
+        file_id = int(raw["file_id"])
+        row = connection.execute(
+            """
+            SELECT callables.*, files.file_path
+            FROM code_structural_callables AS callables
+            JOIN code_files AS files
+              ON files.id = callables.file_id
+             AND files.engagement_id = callables.engagement_id
+            WHERE callables.engagement_id = ? AND callables.repo_id = ?
+              AND callables.repo_generation = ?
+              AND callables.source_manifest_digest = ?
+              AND callables.file_id = ? AND callables.file_sha256 = ?
+              AND callables.name = ? AND callables.qualified_name = ?
+              AND callables.start_line = ? AND callables.end_line = ?
+            """,
+            (
+                engagement_id,
+                repo_id,
+                int(queue_row["repo_generation"]),
+                str(
+                    connection.execute(
+                        "SELECT source_manifest_digest FROM code_repos WHERE id = ?",
+                        (repo_id,),
+                    ).fetchone()[0]
+                ),
+                file_id,
+                str(file_rows[file_id]["file_hash"]),
+                raw.get("name"),
+                raw.get("qualified_name"),
+                raw.get("start_line"),
+                raw.get("end_line"),
+            ),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="structural callable reference does not match the current structural index",
+            )
+        callable_id = int(row["id"])
+        if callable_id in seen_callable_ids:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="structural callable references must be unique within a receipt",
+            )
+        seen_callable_ids.add(callable_id)
+        callable_ids.append(callable_id)
+        canonical_refs.append(
+            {
+                "callable_key": str(row["callable_key"]),
+                "file_id": file_id,
+                "file_path": str(row["file_path"]),
+                "name": str(row["name"]),
+                "qualified_name": str(row["qualified_name"]),
+                "start_line": int(row["start_line"]),
+                "end_line": int(row["end_line"]),
+            }
+        )
+
+    canonical_spans: list[dict[str, Any]] = []
+    seen_spans: set[tuple[int, int, int, str]] = set()
+    for raw in reviewed_spans:
+        _reject_unknown_fields(
+            raw,
+            {"file_id", "start_line", "end_line", "label"},
+            entity_name="reviewed span",
+        )
+        file_id = int(raw["file_id"])
+        start_line = raw.get("start_line")
+        end_line = raw.get("end_line")
+        label = str(raw.get("label") or "")
+        if (
+            type(start_line) is not int
+            or type(end_line) is not int
+            or start_line < 1
+            or end_line < start_line
+            or end_line > int(file_rows[file_id]["loc"])
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="reviewed span must fall within the sealed file",
+            )
+        identity = (file_id, start_line, end_line, label)
+        if identity in seen_spans:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="reviewed spans must be unique within a receipt",
+            )
+        overlapped_callable_ids = {
+            int(row["id"])
+            for row in connection.execute(
+                """
+                SELECT id
+                FROM code_structural_callables
+                WHERE engagement_id = ? AND repo_id = ? AND repo_generation = ?
+                  AND file_id = ? AND start_line <= ? AND end_line >= ?
+                """,
+                (
+                    engagement_id,
+                    repo_id,
+                    int(queue_row["repo_generation"]),
+                    file_id,
+                    end_line,
+                    start_line,
+                ),
+            ).fetchall()
+        }
+        missing_callable_refs = overlapped_callable_ids - seen_callable_ids
+        if missing_callable_refs:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "reviewed span overlaps a registered structural callable; "
+                    "submit every overlapped callable as an exact callable_ref"
+                ),
+            )
+        seen_spans.add(identity)
+        canonical_spans.append(
+            {
+                "file_id": file_id,
+                "file_path": str(file_rows[file_id]["file_path"]),
+                "start_line": start_line,
+                "end_line": end_line,
+                "label": label,
+            }
+        )
+    binding_status = "structural" if canonical_refs else "source_span"
+    return canonical_refs, callable_ids, canonical_spans, binding_status
 
 
 def _analysis_result_row(connection, result_id: int) -> Any:
@@ -558,7 +962,8 @@ def _get_file_rows(connection, engagement_id: int, file_ids: set[int]) -> dict[i
           ON repos.id = files.repo_id
          AND repos.engagement_id = files.engagement_id
          AND repos.active_generation > 0
-        WHERE files.engagement_id = ? AND files.id IN ({placeholders})
+        WHERE files.engagement_id = ? AND files.retired_at IS NULL
+          AND files.id IN ({placeholders})
         """,
         (engagement_id, *sorted(file_ids)),
     ).fetchall()
@@ -748,60 +1153,6 @@ def _require_queue_generation(
         )
 
 
-def _reclaim_stale_generation_leases(connection, engagement_id: int) -> int:
-    """Release processing leases invalidated by a committed repository refresh.
-
-    Generation checks deliberately reject the old agent's writes as soon as a
-    refresh commits. The next atomic fetch releases those leases but leaves the
-    rows on their original generation as preserved history. Fresh work must be
-    queued explicitly for the active generation; fetch never rewrites identity.
-    """
-    stale_rows = connection.execute(
-        """
-        SELECT queue.id, queue.file_id, queue.lease_token
-        FROM code_analysis_queue AS queue
-        JOIN code_files AS files
-          ON files.id = queue.file_id
-         AND files.engagement_id = queue.engagement_id
-        JOIN code_repos AS repos
-          ON repos.id = files.repo_id
-         AND repos.engagement_id = files.engagement_id
-         AND repos.active_generation > 0
-        WHERE queue.engagement_id = ?
-          AND queue.status = 'processing'
-          AND queue.repo_generation != repos.active_generation
-        """,
-        (engagement_id,),
-    ).fetchall()
-    superseded_at = _now_iso()
-    reclaimed = 0
-    for row in stale_rows:
-        cursor = connection.execute(
-            """
-            UPDATE code_analysis_queue
-            SET status = 'pending', assigned_agent = '', lease_token = '',
-                consumed_at = NULL, last_heartbeat_at = NULL,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE engagement_id = ? AND id = ? AND status = 'processing'
-              AND lease_token = ?
-            """,
-            (engagement_id, int(row["id"]), str(row["lease_token"] or "")),
-        )
-        if cursor.rowcount != 1:
-            continue
-        reclaimed += 1
-        connection.execute(
-            """
-            UPDATE code_analysis_results SET superseded_at = ?
-            WHERE queue_item_id = ? AND lease_token = ? AND superseded_at IS NULL
-            """,
-            (superseded_at, int(row["id"]), str(row["lease_token"] or "")),
-        )
-        _sync_file_analysis_status(connection, engagement_id, int(row["file_id"]))
-        _sync_trigger_status_for_file(connection, engagement_id, int(row["file_id"]))
-    return reclaimed
-
-
 def _sync_file_analysis_status(connection, engagement_id: int, file_id: int) -> None:
     queue_row = connection.execute(
         """
@@ -819,6 +1170,7 @@ def _sync_file_analysis_status(connection, engagement_id: int, file_id: int) -> 
              AND repos.engagement_id = files.engagement_id
             WHERE queue.engagement_id = ? AND queue.file_id = ?
               AND queue.repo_generation = repos.active_generation
+              AND queue.source_superseded_at IS NULL
         )
         SELECT status, active_count
         FROM current_attempts
@@ -930,7 +1282,7 @@ def _sync_module_rollup(connection, engagement_id: int, module_id: int) -> None:
         """
         SELECT analysis_status, COUNT(*) AS total
         FROM code_files
-        WHERE engagement_id = ? AND module_id = ?
+        WHERE engagement_id = ? AND module_id = ? AND retired_at IS NULL
         GROUP BY analysis_status
         """,
         (engagement_id, module_id),
@@ -943,6 +1295,7 @@ def _sync_module_rollup(connection, engagement_id: int, module_id: int) -> None:
         SELECT COUNT(*)
         FROM code_files
         WHERE engagement_id = ? AND module_id = ? AND classification = 'critical'
+          AND retired_at IS NULL
         """,
         (engagement_id, module_id),
     )
@@ -1072,6 +1425,9 @@ def _valid_claimed_result_receipt_sql(
         AND trim({result_alias}.lease_token) != ''
         AND {result_alias}.lease_token = {queue_alias}.lease_token
         AND trim({result_alias}.result_fingerprint) != ''
+        AND {result_alias}.receipt_binding_status NOT IN (
+            'legacy_ambiguous', 'legacy_missing', 'legacy_unbound'
+        )
     """
 
 
@@ -1171,6 +1527,41 @@ def _successful_terminal_review_row_sql(
                 )
             )
         )
+        AND (
+            NOT EXISTS (
+                SELECT 1 FROM code_files AS receipt_required_file
+                WHERE receipt_required_file.engagement_id = {queue_alias}.engagement_id
+                  AND receipt_required_file.id = {queue_alias}.file_id
+                  AND receipt_required_file.classification IN ('critical', 'high')
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM code_analysis_results AS source_receipt
+                WHERE source_receipt.engagement_id = {queue_alias}.engagement_id
+                  AND source_receipt.queue_item_id = {queue_alias}.id
+                  AND source_receipt.file_id = {queue_alias}.file_id
+                  AND source_receipt.lease_token = {queue_alias}.lease_token
+                  AND source_receipt.repo_generation = {queue_alias}.repo_generation
+                  AND source_receipt.disposition = {queue_alias}.disposition
+                  AND ({result_is_current("source_receipt")})
+                  AND ({_valid_claimed_result_receipt_sql(
+                      queue_alias, "source_receipt"
+                  )})
+                  AND (
+                      EXISTS (
+                          SELECT 1
+                          FROM code_analysis_result_callables AS source_link
+                          WHERE source_link.result_id = source_receipt.id
+                            AND source_link.file_id = {queue_alias}.file_id
+                      )
+                      OR EXISTS (
+                          SELECT 1 FROM json_each(source_receipt.reviewed_spans_json) AS source_span
+                          WHERE CAST(json_extract(source_span.value, '$.file_id') AS INTEGER)
+                                = {queue_alias}.file_id
+                      )
+                  )
+            )
+        )
     """
 
 
@@ -1182,6 +1573,7 @@ def _latest_current_queue_attempt_sql(queue_alias: str, repos_alias: str) -> str
             WHERE latest_attempt.engagement_id = {queue_alias}.engagement_id
               AND latest_attempt.file_id = {queue_alias}.file_id
               AND latest_attempt.repo_generation = {repos_alias}.active_generation
+              AND latest_attempt.source_superseded_at IS NULL
         )
     """
 
@@ -1194,6 +1586,7 @@ def _no_superseded_active_attempt_sql(queue_alias: str, repos_alias: str) -> str
             WHERE superseded_active.engagement_id = {queue_alias}.engagement_id
               AND superseded_active.file_id = {queue_alias}.file_id
               AND superseded_active.repo_generation = {repos_alias}.active_generation
+              AND superseded_active.source_superseded_at IS NULL
               AND superseded_active.status IN ('pending', 'processing')
               AND superseded_active.id != {queue_alias}.id
         )
@@ -1211,6 +1604,7 @@ def _invalid_active_history_exists_sql(files_alias: str) -> str:
             WHERE superseded_active.engagement_id = {files_alias}.engagement_id
               AND superseded_active.file_id = {files_alias}.id
               AND superseded_active.repo_generation = active_repo.active_generation
+              AND superseded_active.source_superseded_at IS NULL
               AND superseded_active.status IN ('pending', 'processing')
               AND superseded_active.id != (
                   SELECT MAX(latest_attempt.id)
@@ -1218,6 +1612,7 @@ def _invalid_active_history_exists_sql(files_alias: str) -> str:
                   WHERE latest_attempt.engagement_id = {files_alias}.engagement_id
                     AND latest_attempt.file_id = {files_alias}.id
                     AND latest_attempt.repo_generation = active_repo.active_generation
+                    AND latest_attempt.source_superseded_at IS NULL
               )
         )
     """
@@ -1244,12 +1639,17 @@ def _current_result_receipt_sql(
         )
     return f"""
         {result_alias}.superseded_at IS NULL
+        AND {result_alias}.source_superseded_at IS NULL
         AND ({_result_not_replaced_sql(result_alias)})
+        AND {result_alias}.receipt_binding_status NOT IN (
+            'legacy_ambiguous', 'legacy_missing', 'legacy_unbound'
+        )
         AND {result_alias}.engagement_id = {queue_alias}.engagement_id
         AND {result_alias}.queue_item_id = {queue_alias}.id
         AND {result_alias}.file_id = {queue_alias}.file_id
         AND {result_alias}.lease_token = {queue_alias}.lease_token
         AND {result_alias}.repo_generation = {queue_alias}.repo_generation
+        AND {queue_alias}.source_superseded_at IS NULL
         AND {queue_alias}.file_id = {files_alias}.id
         AND {queue_alias}.engagement_id = {files_alias}.engagement_id
         AND {files_alias}.repo_id = {repos_alias}.id
@@ -1281,6 +1681,7 @@ def _current_terminal_review_exists_sql(*, allow_accounted_skip: bool) -> str:
               AND completed_review.file_id = files.id
               AND completed_review.status = 'done'
               AND completed_review.repo_generation = completed_review_repo.active_generation
+              AND completed_review.source_superseded_at IS NULL
               AND ({_latest_current_queue_attempt_sql(
                   "completed_review", "completed_review_repo"
               )})
@@ -1335,6 +1736,7 @@ def _current_suspicious_analysis_counts(
              AND semantic_repo.active_generation > 0
             WHERE semantic_attempt.engagement_id = ?
               AND semantic_attempt.repo_generation = semantic_repo.active_generation
+              AND semantic_attempt.source_superseded_at IS NULL
               AND ({semantic_review})
         )
         SELECT repo_id, COUNT(*) AS suspicious_count
@@ -1374,6 +1776,7 @@ def _has_current_successful_review(connection, engagement_id: int, file_id: int)
         SELECT 1
         FROM code_files AS files
         WHERE files.engagement_id = ? AND files.id = ?
+          AND files.retired_at IS NULL
           AND ({_CURRENT_SUCCESSFUL_REVIEW_EXISTS_SQL})
         """,
         (engagement_id, file_id),
@@ -1384,11 +1787,17 @@ def _has_current_successful_review(connection, engagement_id: int, file_id: int)
 def _trigger_status_for_file(connection, engagement_id: int, file_id: int) -> str:
     trigger_rows = connection.execute(
         f"""
-        SELECT status, COUNT(*) AS total
-        FROM code_analysis_triggers
-        WHERE engagement_id = ? AND target_file_id = ?
-          AND status NOT IN ({','.join('?' for _ in _TERMINAL_TRIGGER_RESOLUTION_STATUSES)})
-        GROUP BY status
+        SELECT triggers.status, COUNT(*) AS total
+        FROM code_analysis_triggers AS triggers
+        JOIN code_repos AS repos
+          ON repos.id = triggers.repo_id
+         AND repos.engagement_id = triggers.engagement_id
+         AND repos.active_generation > 0
+        WHERE triggers.engagement_id = ? AND triggers.target_file_id = ?
+          AND triggers.repo_generation = repos.active_generation
+          AND triggers.source_superseded_at IS NULL
+          AND triggers.status NOT IN ({','.join('?' for _ in _TERMINAL_TRIGGER_RESOLUTION_STATUSES)})
+        GROUP BY triggers.status
         """,
         (
             engagement_id,
@@ -1420,6 +1829,7 @@ def _trigger_status_for_file(connection, engagement_id: int, file_id: int) -> st
              AND repos.engagement_id = files.engagement_id
             WHERE queue.engagement_id = ? AND queue.file_id = ?
               AND queue.repo_generation = repos.active_generation
+              AND queue.source_superseded_at IS NULL
         )
         SELECT status, active_count
         FROM current_attempts
@@ -1465,6 +1875,7 @@ def _bound_trigger_status(
          AND repos.active_generation > 0
         WHERE queue.engagement_id = ? AND queue.id = ? AND queue.file_id = ?
           AND queue.repo_generation = repos.active_generation
+          AND queue.source_superseded_at IS NULL
           AND ({_latest_current_queue_attempt_sql("queue", "repos")})
           AND ({_no_superseded_active_attempt_sql("queue", "repos")})
         """,
@@ -1496,6 +1907,14 @@ def _sync_trigger_status_for_file(connection, engagement_id: int, file_id: int) 
         SELECT id, resolved_queue_item_id
         FROM code_analysis_triggers
         WHERE engagement_id = ?
+          AND source_superseded_at IS NULL
+          AND repo_generation = (
+              SELECT active_generation
+              FROM code_repos
+              WHERE id = code_analysis_triggers.repo_id
+                AND engagement_id = code_analysis_triggers.engagement_id
+                AND active_generation > 0
+          )
           AND status NOT IN ({terminal_placeholders})
           AND (
               target_file_id = ?
@@ -1652,6 +2071,7 @@ def preview_code_repo_refresh(
             SELECT file_path, file_hash, language, loc, header_snippet,
                    git_churn_score, has_past_cve_fix
             FROM code_files WHERE engagement_id = ? AND repo_id = ?
+              AND retired_at IS NULL
             """,
             (engagement.id, int(repo["id"])),
         ).fetchall()
@@ -1710,27 +2130,14 @@ def stage_code_repo_refresh_files(
 
 
 def _invalidate_file_analysis(connection, engagement_id: int, file_id: int) -> None:
-    """Discard every conclusion whose validity depends on file content or path."""
-    connection.execute(
-        "DELETE FROM code_analysis_triggers WHERE engagement_id = ? AND source_file_id = ?",
-        (engagement_id, file_id),
-    )
+    """Reset current file state without erasing generation-bound audit history."""
     connection.execute(
         """
-        UPDATE code_analysis_triggers
-        SET status = 'pending', resolved_queue_item_id = NULL,
-            resolution_note = '', updated_at = CURRENT_TIMESTAMP
-        WHERE engagement_id = ? AND target_file_id = ?
+        UPDATE code_analysis_results
+        SET superseded_at = COALESCE(superseded_at, ?)
+        WHERE engagement_id = ? AND file_id = ?
         """,
-        (engagement_id, file_id),
-    )
-    connection.execute(
-        "DELETE FROM code_analysis_results WHERE engagement_id = ? AND file_id = ?",
-        (engagement_id, file_id),
-    )
-    connection.execute(
-        "DELETE FROM code_analysis_queue WHERE engagement_id = ? AND file_id = ?",
-        (engagement_id, file_id),
+        (_now_iso(), engagement_id, file_id),
     )
     connection.execute(
         """
@@ -1789,6 +2196,184 @@ def _invalidate_repo_structural_index(connection, engagement_id: int, repo_id: i
 
 _METADATA_REFRESH_REVIEW_THEME = "metadata-refresh-review"
 _METADATA_REFRESH_REVIEW_MODE = "metadata-refresh"
+_SOURCE_GENERATION_REPLACED_REASON = "source_generation_replaced"
+
+
+def _record_source_generation(
+    connection,
+    *,
+    engagement_id: int,
+    repo_id: int,
+    previous_generation: int,
+    repo_generation: int,
+    metadata: dict[str, Any],
+    source_manifest_version: str,
+    source_manifest_digest_value: str,
+    source_review_identity_digest: str,
+    staged_paths: set[str],
+) -> None:
+    promoted_at = _now_iso()
+    if previous_generation > 0:
+        connection.execute(
+            """
+            UPDATE code_source_generations
+            SET source_superseded_at = ?,
+                source_supersession_reason = ?,
+                replacement_repo_generation = ?
+            WHERE engagement_id = ? AND repo_id = ? AND repo_generation = ?
+              AND source_superseded_at IS NULL
+            """,
+            (
+                promoted_at,
+                _SOURCE_GENERATION_REPLACED_REASON,
+                repo_generation,
+                engagement_id,
+                repo_id,
+                previous_generation,
+            ),
+        )
+        for table_name in ("code_analysis_queue", "code_analysis_results"):
+            connection.execute(
+                f"""
+                UPDATE {table_name}
+                SET source_superseded_at = ?,
+                    source_supersession_reason = ?,
+                    replacement_repo_generation = ?
+                WHERE engagement_id = ? AND repo_generation = ?
+                  AND file_id IN (
+                      SELECT id FROM code_files
+                      WHERE engagement_id = ? AND repo_id = ?
+                  )
+                  AND source_superseded_at IS NULL
+                """,
+                (
+                    promoted_at,
+                    _SOURCE_GENERATION_REPLACED_REASON,
+                    repo_generation,
+                    engagement_id,
+                    previous_generation,
+                    engagement_id,
+                    repo_id,
+                ),
+            )
+        connection.execute(
+            """
+            UPDATE code_analysis_results
+            SET superseded_at = COALESCE(superseded_at, ?)
+            WHERE engagement_id = ? AND repo_generation = ?
+              AND file_id IN (
+                  SELECT id FROM code_files
+                  WHERE engagement_id = ? AND repo_id = ?
+              )
+            """,
+            (
+                promoted_at,
+                engagement_id,
+                previous_generation,
+                engagement_id,
+                repo_id,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE code_analysis_triggers
+            SET source_superseded_at = ?,
+                source_supersession_reason = ?,
+                replacement_repo_generation = ?
+            WHERE engagement_id = ? AND repo_id = ? AND repo_generation = ?
+              AND source_superseded_at IS NULL
+            """,
+            (
+                promoted_at,
+                _SOURCE_GENERATION_REPLACED_REASON,
+                repo_generation,
+                engagement_id,
+                repo_id,
+                previous_generation,
+            ),
+        )
+
+    connection.execute(
+        """
+        INSERT INTO code_source_generations (
+            engagement_id, repo_id, repo_generation,
+            source_manifest_version, source_manifest_digest,
+            source_review_identity_digest, snapshot_manifest_path,
+            snapshot_digest, source_snapshot_quality, repo_path,
+            source_origin_path, source_kind, commit_hash, branch,
+            worktree_dirty, promoted_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            engagement_id,
+            repo_id,
+            repo_generation,
+            source_manifest_version,
+            source_manifest_digest_value,
+            source_review_identity_digest,
+            str(metadata.get("snapshot_manifest_path") or ""),
+            str(metadata.get("snapshot_digest") or ""),
+            str(metadata.get("source_snapshot_quality") or "legacy-unverified"),
+            str(metadata.get("repo_path") or ""),
+            str(metadata.get("source_origin_path") or metadata.get("repo_path") or ""),
+            str(metadata.get("source_kind") or "legacy"),
+            str(metadata.get("commit_hash") or ""),
+            str(metadata.get("branch") or ""),
+            (
+                1
+                if metadata.get("worktree_dirty") is True
+                else 0
+                if metadata.get("worktree_dirty") is False
+                else None
+            ),
+            promoted_at,
+        ),
+    )
+    if not staged_paths:
+        return
+    placeholders = ",".join("?" for _ in staged_paths)
+    file_rows = connection.execute(
+        f"""
+        SELECT id, file_path, file_hash, language, loc, header_snippet,
+               git_churn_score, has_past_cve_fix
+        FROM code_files
+        WHERE engagement_id = ? AND repo_id = ?
+          AND retired_at IS NULL
+          AND file_path IN ({placeholders})
+        ORDER BY file_path
+        """,
+        (engagement_id, repo_id, *sorted(staged_paths)),
+    ).fetchall()
+    if len(file_rows) != len(staged_paths):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="source generation file identity changed before promotion",
+        )
+    connection.executemany(
+        """
+        INSERT INTO code_source_generation_files (
+            engagement_id, repo_id, repo_generation, file_id, file_path,
+            file_hash, language, loc, header_snippet, git_churn_score,
+            has_past_cve_fix
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                engagement_id,
+                repo_id,
+                repo_generation,
+                int(row["id"]),
+                str(row["file_path"]),
+                str(row["file_hash"]),
+                str(row["language"]),
+                int(row["loc"]),
+                str(row["header_snippet"]),
+                int(row["git_churn_score"]),
+                int(row["has_past_cve_fix"]),
+            )
+            for row in file_rows
+        ],
+    )
 
 
 def _has_current_file_analysis_activity(
@@ -1808,6 +2393,7 @@ def _has_current_file_analysis_activity(
          AND repos.engagement_id = files.engagement_id
         WHERE queue.engagement_id = ? AND queue.file_id = ?
           AND queue.repo_generation = repos.active_generation
+          AND queue.source_superseded_at IS NULL
         LIMIT 1
         """,
         (engagement_id, file_id),
@@ -2139,11 +2725,16 @@ def commit_code_repo_refresh(
                 or snapshot_trust_boundary_changed
             )
             repo_generation = current_generation + 1 if generation_changed else current_generation
-            existing_rows = connection.execute(
+            all_existing_rows = connection.execute(
                 "SELECT * FROM code_files WHERE engagement_id = ? AND repo_id = ?",
                 (engagement.id, repo_id),
             ).fetchall()
+            all_existing = {
+                str(row["file_path"]): dict(row) for row in all_existing_rows
+            }
+            existing_rows = [row for row in all_existing_rows if row["retired_at"] is None]
             existing = {str(row["file_path"]): dict(row) for row in existing_rows}
+            retired_paths = set(all_existing) - set(existing)
 
             missing_paths = set(existing) - set(staged)
             new_paths = set(staged) - set(existing)
@@ -2160,6 +2751,8 @@ def commit_code_repo_refresh(
                 if not file_hash or len(old_paths) != 1 or len(new_matches) != 1:
                     continue
                 old_path, new_path = old_paths[0], new_matches[0]
+                if new_path in retired_paths:
+                    continue
                 record = staged[new_path]
                 file_id = int(existing[old_path]["id"])
                 _invalidate_file_analysis(connection, engagement.id, file_id)
@@ -2167,6 +2760,8 @@ def commit_code_repo_refresh(
                     """
                     UPDATE code_files SET file_path = ?, language = ?, loc = ?, file_hash = ?,
                         header_snippet = ?, git_churn_score = ?, has_past_cve_fix = ?,
+                        retired_at = NULL, retirement_reason = NULL,
+                        replacement_repo_generation = NULL,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE engagement_id = ? AND id = ?
                     """,
@@ -2175,14 +2770,6 @@ def commit_code_repo_refresh(
                         record.get("header_snippet", ""), record.get("git_churn_score", 0),
                         1 if record.get("has_past_cve_fix") else 0, engagement.id, file_id,
                     ),
-                )
-                connection.execute(
-                    """
-                    UPDATE code_analysis_triggers
-                    SET target_file_path = ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE engagement_id = ? AND target_file_id = ?
-                    """,
-                    (new_path, engagement.id, file_id),
                 )
                 renamed_old.add(old_path)
                 renamed_new.add(new_path)
@@ -2193,19 +2780,46 @@ def commit_code_repo_refresh(
                     continue
                 current = existing.get(path)
                 if current is None:
-                    connection.execute(
-                        """
-                        INSERT INTO code_files (
-                            engagement_id, repo_id, file_path, language, loc, file_hash,
-                            header_snippet, git_churn_score, has_past_cve_fix
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            engagement.id, repo_id, path, record.get("language", ""), record.get("loc", 0),
-                            record.get("file_hash", ""), record.get("header_snippet", ""),
-                            record.get("git_churn_score", 0), 1 if record.get("has_past_cve_fix") else 0,
-                        ),
-                    )
+                    retired = all_existing.get(path)
+                    if retired is None:
+                        connection.execute(
+                            """
+                            INSERT INTO code_files (
+                                engagement_id, repo_id, file_path, language, loc, file_hash,
+                                header_snippet, git_churn_score, has_past_cve_fix
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                engagement.id, repo_id, path, record.get("language", ""),
+                                record.get("loc", 0), record.get("file_hash", ""),
+                                record.get("header_snippet", ""),
+                                record.get("git_churn_score", 0),
+                                1 if record.get("has_past_cve_fix") else 0,
+                            ),
+                        )
+                    else:
+                        _invalidate_file_analysis(
+                            connection, engagement.id, int(retired["id"])
+                        )
+                        connection.execute(
+                            """
+                            UPDATE code_files
+                            SET language = ?, loc = ?, file_hash = ?, header_snippet = ?,
+                                git_churn_score = ?, has_past_cve_fix = ?,
+                                retired_at = NULL, retirement_reason = NULL,
+                                replacement_repo_generation = NULL,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE engagement_id = ? AND id = ?
+                            """,
+                            (
+                                record.get("language", ""), record.get("loc", 0),
+                                record.get("file_hash", ""),
+                                record.get("header_snippet", ""),
+                                record.get("git_churn_score", 0),
+                                1 if record.get("has_past_cve_fix") else 0,
+                                engagement.id, retired["id"],
+                            ),
+                        )
                     inserted += 1
                     continue
                 content_changed = str(current.get("file_hash", "")) != str(record.get("file_hash", ""))
@@ -2270,7 +2884,29 @@ def commit_code_repo_refresh(
                     unchanged += 1
 
             for path in missing_paths - renamed_old:
-                connection.execute("DELETE FROM code_files WHERE id = ?", (existing[path]["id"],))
+                file_id = int(existing[path]["id"])
+                prior_module_id = existing[path].get("module_id")
+                _invalidate_file_analysis(connection, engagement.id, file_id)
+                connection.execute(
+                    """
+                    UPDATE code_files
+                    SET retired_at = ?, retirement_reason = ?,
+                        replacement_repo_generation = ?, module_id = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE engagement_id = ? AND id = ?
+                    """,
+                    (
+                        _now_iso(),
+                        _SOURCE_GENERATION_REPLACED_REASON,
+                        repo_generation,
+                        engagement.id,
+                        file_id,
+                    ),
+                )
+                if prior_module_id is not None:
+                    _sync_module_rollup(
+                        connection, engagement.id, int(prior_module_id)
+                    )
                 deleted += 1
 
             if generation_changed:
@@ -2289,9 +2925,21 @@ def commit_code_repo_refresh(
                         structural_artifact_truncated = 0,
                         structural_truncated_dimensions_json = '[]',
                         structural_signal_counts_json = '{}'
-                    WHERE engagement_id = ? AND repo_id = ?
+                    WHERE engagement_id = ? AND repo_id = ? AND retired_at IS NULL
                     """,
                     (engagement.id, repo_id),
+                )
+                _record_source_generation(
+                    connection,
+                    engagement_id=engagement.id,
+                    repo_id=repo_id,
+                    previous_generation=current_generation,
+                    repo_generation=repo_generation,
+                    metadata=metadata,
+                    source_manifest_version=manifest_version,
+                    source_manifest_digest_value=manifest_digest,
+                    source_review_identity_digest=incoming_review_identity_digest,
+                    staged_paths=set(staged),
                 )
 
             connection.execute(
@@ -2353,38 +3001,6 @@ def commit_code_repo_refresh(
                 "DELETE FROM code_ingest_staging WHERE repo_id = ? AND refresh_token = ?",
                 (repo_id, refresh_token),
             )
-            if generation_changed:
-                terminal_placeholders = ",".join(
-                    "?" for _ in _TERMINAL_TRIGGER_RESOLUTION_STATUSES
-                )
-                connection.execute(
-                    f"""
-                    UPDATE code_analysis_triggers
-                    SET status = ?, resolved_queue_item_id = NULL,
-                        resolution_note = '', updated_at = CURRENT_TIMESTAMP
-                    WHERE engagement_id = ?
-                      AND status NOT IN ({terminal_placeholders})
-                      AND (
-                          source_file_id IN (
-                              SELECT id FROM code_files
-                              WHERE engagement_id = ? AND repo_id = ?
-                          )
-                          OR target_file_id IN (
-                              SELECT id FROM code_files
-                              WHERE engagement_id = ? AND repo_id = ?
-                          )
-                      )
-                    """,
-                    (
-                        _TRIGGER_STATUS_PENDING,
-                        engagement.id,
-                        *_TERMINAL_TRIGGER_RESOLUTION_STATUSES,
-                        engagement.id,
-                        repo_id,
-                        engagement.id,
-                        repo_id,
-                    ),
-                )
             for module_row in connection.execute(
                 "SELECT id FROM code_modules WHERE engagement_id = ? AND repo_id = ?", (engagement.id, repo_id)
             ).fetchall():
@@ -2547,7 +3163,11 @@ def list_code_files(
     include_header_snippet: bool = False,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
-    clauses = ["files.engagement_id = ?", "repos.active_generation > 0"]
+    clauses = [
+        "files.engagement_id = ?",
+        "files.retired_at IS NULL",
+        "repos.active_generation > 0",
+    ]
     params: list[Any] = [engagement.id]
     if repo_id is not None:
         clauses.append("files.repo_id = ?")
@@ -2763,6 +3383,7 @@ def _synchronize_pending_queue_priority(
          AND repos.engagement_id = files.engagement_id
         WHERE queue.engagement_id = ? AND queue.file_id = ?
           AND queue.repo_generation = repos.active_generation
+          AND queue.source_superseded_at IS NULL
         ORDER BY queue.id
         """,
         (engagement_id, file_id),
@@ -3269,6 +3890,7 @@ def bulk_update_structural_metadata(
         "structural_artifact_truncated",
         "structural_truncated_dimensions",
         "structural_signal_counts",
+        "callables",
     }
 
     with get_connection() as connection:
@@ -3292,7 +3914,11 @@ def bulk_update_structural_metadata(
                 detail="structural index contains duplicate file IDs",
             )
         current_rows = connection.execute(
-            "SELECT * FROM code_files WHERE engagement_id = ? AND repo_id = ? ORDER BY id",
+            """
+            SELECT * FROM code_files
+            WHERE engagement_id = ? AND repo_id = ? AND retired_at IS NULL
+            ORDER BY id
+            """,
             (engagement.id, repo_id),
         ).fetchall()
         current_by_id = {int(row["id"]): dict(row) for row in current_rows}
@@ -3342,6 +3968,60 @@ def bulk_update_structural_metadata(
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="structural index input identity is stale",
+            )
+
+        callable_registry_flags = ["callables" in item for item in updates]
+        if any(callable_registry_flags) and not all(callable_registry_flags):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="structural callable registry publication must cover every file",
+            )
+        publishes_callable_registry = all(callable_registry_flags)
+
+        canonical_callables = [
+            callable_record
+            for item in updates
+            for callable_record in _canonical_structural_callables(
+                item,
+                current_by_id[int(item["file_id"])],
+                repo_id=repo_id,
+                repo_generation=repo_generation,
+                source_manifest_digest=source_manifest_digest,
+            )
+        ]
+        submitted_callable_keys = {
+            str(callable_record["callable_key"])
+            for callable_record in canonical_callables
+        }
+        existing_callable_keys = {
+            str(row["callable_key"])
+            for row in connection.execute(
+                """
+                SELECT callable_key
+                FROM code_structural_callables
+                WHERE engagement_id = ? AND repo_id = ? AND repo_generation = ?
+                """,
+                (engagement.id, repo_id, repo_generation),
+            ).fetchall()
+        }
+        callable_registry_published = connection.execute(
+            """
+            SELECT 1
+            FROM code_structural_callable_publications
+            WHERE engagement_id = ? AND repo_id = ? AND repo_generation = ?
+            """,
+            (engagement.id, repo_id, repo_generation),
+        ).fetchone() is not None
+        if (
+            callable_registry_published
+            and existing_callable_keys != submitted_callable_keys
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "structural callable registry is already sealed for this repository "
+                    "generation"
+                ),
             )
 
         canonical_status_counts = {"complete": 0, "degraded": 0, "unsupported": 0}
@@ -3403,6 +4083,47 @@ def bulk_update_structural_metadata(
                     int(item["file_id"]),
                 ),
             )
+        for callable_record in canonical_callables:
+            connection.execute(
+                """
+                INSERT INTO code_structural_callables (
+                    engagement_id, repo_id, repo_generation,
+                    source_manifest_digest, file_id, file_sha256,
+                    callable_key, name, qualified_name, start_line, end_line
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(engagement_id, repo_id, repo_generation, callable_key)
+                DO NOTHING
+                """,
+                (
+                    callable_record["engagement_id"],
+                    callable_record["repo_id"],
+                    callable_record["repo_generation"],
+                    callable_record["source_manifest_digest"],
+                    callable_record["file_id"],
+                    callable_record["file_sha256"],
+                    callable_record["callable_key"],
+                    callable_record["name"],
+                    callable_record["qualified_name"],
+                    callable_record["start_line"],
+                    callable_record["end_line"],
+                ),
+            )
+        if publishes_callable_registry:
+            connection.execute(
+                """
+                INSERT INTO code_structural_callable_publications (
+                    engagement_id, repo_id, repo_generation, source_manifest_digest
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(engagement_id, repo_id, repo_generation) DO NOTHING
+                """,
+                (engagement.id, repo_id, repo_generation, source_manifest_digest),
+            )
+            _bind_legacy_analysis_results(
+                connection,
+                engagement_id=engagement.id,
+                repo_id=repo_id,
+                repo_generation=repo_generation,
+            )
         connection.execute(
             """
             UPDATE code_repos
@@ -3441,6 +4162,8 @@ def bulk_update_structural_metadata(
         "artifact_truncated_files": artifact_truncated_files,
         "artifact_truncated_file_paths": artifact_truncated_file_paths,
         "analysis_status_counts": analysis_status_counts,
+        "registered_callables": len(canonical_callables),
+        "callable_registry_published": publishes_callable_registry,
         "updated": len(updates),
     }
 
@@ -3462,7 +4185,7 @@ def bulk_create_code_modules(
             """
             SELECT id, file_path
             FROM code_files
-            WHERE engagement_id = ? AND repo_id = ?
+            WHERE engagement_id = ? AND repo_id = ? AND retired_at IS NULL
             """,
             (engagement.id, repo_id),
         ).fetchall()
@@ -3990,12 +4713,28 @@ def queue_stats(engagement_id: int) -> dict[str, Any]:
                  AND repos.active_generation > 0
                 WHERE queue.engagement_id = ?
                   AND queue.repo_generation = repos.active_generation
+                  AND queue.source_superseded_at IS NULL
             )
             SELECT status, assigned_agent, lease_token, attempt_rank, active_count
             FROM ranked
             """,
             (engagement.id,),
         ).fetchall()
+        historical_total = _scalar_row(
+            connection,
+            """
+            SELECT COUNT(*)
+            FROM code_analysis_queue AS queue
+            JOIN code_files AS files
+              ON files.id = queue.file_id
+             AND files.engagement_id = queue.engagement_id
+            JOIN code_repos AS repos
+              ON repos.id = files.repo_id
+             AND repos.engagement_id = files.engagement_id
+            WHERE queue.engagement_id = ? AND repos.active_generation > 0
+            """,
+            (engagement.id,),
+        )
     counts: dict[str, int] = {}
     current_attempt_total = 0
     invalid_active_identity = 0
@@ -4028,8 +4767,8 @@ def queue_stats(engagement_id: int) -> dict[str, Any]:
         "error": counts.get("error", 0),
         "needs_context": counts.get("needs_context", 0),
         "total": actionable_total,
-        "historical_total": len(rows),
-        "superseded_history": len(rows) - current_attempt_total,
+        "historical_total": historical_total,
+        "superseded_history": historical_total - current_attempt_total,
         "invalid_active_identity": invalid_active_identity,
         "invalid_active_history": invalid_active_history,
     }
@@ -4071,7 +4810,6 @@ def fetch_queue_items(
     filter_sql = "" if not filter_clauses else " AND " + " AND ".join(filter_clauses)
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
-        _reclaim_stale_generation_leases(connection, engagement.id)
         selected = connection.execute(
             f"""
             SELECT queue.id, queue.repo_generation
@@ -4086,6 +4824,7 @@ def fetch_queue_items(
             WHERE queue.engagement_id = ? AND queue.status = 'pending'
               AND queue.assigned_agent = '' AND queue.lease_token = ''
               AND queue.repo_generation = repos.active_generation
+              AND queue.source_superseded_at IS NULL
               AND ({_latest_current_queue_attempt_sql("queue", "repos")})
               AND ({_no_superseded_active_attempt_sql("queue", "repos")})
               {filter_sql}
@@ -4234,31 +4973,47 @@ def _compute_coverage_integrity(
     total_functions: int,
     cwe_coverage: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Cross-reference claimed coverage against actual analysis-result rows."""
-    actual_result_count = connection.execute(
+    """Derive source coverage from current grouped receipts and structural bindings."""
+    receipt_counts = connection.execute(
         """
-        SELECT COUNT(*) FROM code_analysis_results
+        SELECT
+            COUNT(*) AS current_receipt_rows,
+            COALESCE(SUM(
+                CASE WHEN trim(evidence) != '' OR trim(evidence_ref) != '' THEN 1 ELSE 0 END
+            ), 0) AS evidenced_receipt_rows
+        FROM code_analysis_results
         WHERE engagement_id = ? AND queue_item_id = ? AND file_id = ?
           AND superseded_at IS NULL
+          AND receipt_binding_status NOT IN (
+              'legacy_ambiguous', 'legacy_missing', 'legacy_unbound'
+          )
           AND NOT EXISTS (
               SELECT 1 FROM code_analysis_results AS replacement
               WHERE replacement.supersedes_result_id = code_analysis_results.id
           )
         """,
         (engagement_id, queue_item_id, file_id),
-    ).fetchone()[0] or 0
+    ).fetchone()
+    current_receipt_rows = int(receipt_counts["current_receipt_rows"] or 0)
+    evidenced_receipt_rows = int(receipt_counts["evidenced_receipt_rows"] or 0)
 
-    distinct_functions_analyzed = connection.execute(
+    distinct_structural_callables = connection.execute(
         """
-        SELECT COUNT(DISTINCT function_name) FROM code_analysis_results
-        WHERE engagement_id = ? AND queue_item_id = ? AND file_id = ?
-          AND function_name != '' AND superseded_at IS NULL
+        SELECT COUNT(DISTINCT links.callable_id)
+        FROM code_analysis_results AS results
+        JOIN code_analysis_result_callables AS links
+          ON links.result_id = results.id AND links.file_id = ?
+        WHERE results.engagement_id = ? AND results.queue_item_id = ?
+          AND results.file_id = ? AND results.superseded_at IS NULL
+          AND results.receipt_binding_status NOT IN (
+              'legacy_ambiguous', 'legacy_missing', 'legacy_unbound'
+          )
           AND NOT EXISTS (
               SELECT 1 FROM code_analysis_results AS replacement
-              WHERE replacement.supersedes_result_id = code_analysis_results.id
+              WHERE replacement.supersedes_result_id = results.id
           )
         """,
-        (engagement_id, queue_item_id, file_id),
+        (file_id, engagement_id, queue_item_id, file_id),
     ).fetchone()[0] or 0
 
     analyzed_entries = [
@@ -4276,17 +5031,18 @@ def _compute_coverage_integrity(
     authoritative_blockers: list[str] = []
     advisories: list[str] = []
 
-    if actual_result_count == 0 and max_claimed_functions > 0:
+    if current_receipt_rows == 0 and max_claimed_functions > 0:
         authoritative_blockers.append(
             f"functions_analyzed={max_claimed_functions} claimed but 0 analysis-result rows recorded"
         )
 
-    if distinct_functions_analyzed > 0 and max_claimed_functions > 0:
-        ratio = distinct_functions_analyzed / max_claimed_functions
+    if distinct_structural_callables > 0 and max_claimed_functions > 0:
+        ratio = distinct_structural_callables / max_claimed_functions
         if ratio < 0.3:
             advisories.append(
                 f"functions_analyzed={max_claimed_functions} claimed but only "
-                f"{distinct_functions_analyzed} distinct function results recorded (ratio={ratio:.2f})"
+                f"{distinct_structural_callables} structurally bound callables recorded "
+                f"(ratio={ratio:.2f})"
             )
 
     if total_functions > 0 and max_claimed_functions > total_functions:
@@ -4294,15 +5050,19 @@ def _compute_coverage_integrity(
             f"functions_analyzed={max_claimed_functions} exceeds file total_functions={total_functions}"
         )
 
-    if total_functions > 0 and max_effort >= 60 and actual_result_count == 0:
+    if total_functions > 0 and max_effort >= 60 and current_receipt_rows == 0:
         authoritative_blockers.append(
             f"effort={max_effort:.0f} claimed for file with {total_functions} functions "
             f"but 0 analysis-result rows"
         )
 
     return {
-        "actual_result_rows": actual_result_count,
-        "distinct_functions_with_results": distinct_functions_analyzed,
+        "current_receipt_rows": current_receipt_rows,
+        "evidenced_receipt_rows": evidenced_receipt_rows,
+        "distinct_structural_callables_reviewed": distinct_structural_callables,
+        "callable_coverage_pct": round(
+            min(100.0, distinct_structural_callables / total_functions * 100.0), 1
+        ) if total_functions > 0 else 0.0,
         "max_claimed_functions_analyzed": max_claimed_functions,
         "total_functions_on_file": total_functions,
         "max_effort": max_effort,
@@ -4363,6 +5123,9 @@ def _record_cross_file_triggers(
         return
     source_file_row = _get_file_rows(connection, engagement_id, {source_file_id})[source_file_id]
     source_repo_id = int(source_file_row["repo_id"])
+    source_repo = _get_published_repo_row(connection, engagement_id, source_repo_id)
+    source_repo_generation = int(source_repo["active_generation"])
+    source_manifest_digest_value = str(source_repo["source_manifest_digest"])
     for trigger in cross_file_triggers:
         target_file_path = str(trigger["file_path"])
         vuln_class = str(trigger["vuln_class"])
@@ -4372,6 +5135,7 @@ def _record_cross_file_triggers(
             SELECT id
             FROM code_files
             WHERE engagement_id = ? AND repo_id = ? AND file_path = ?
+              AND retired_at IS NULL
             """,
             (engagement_id, source_repo_id, target_file_path),
         ).fetchone()
@@ -4387,6 +5151,7 @@ def _record_cross_file_triggers(
                 FROM code_analysis_triggers
                 WHERE engagement_id = ? AND target_file_id = ? AND vuln_class = ?
                   AND reason = ? AND source_file_id IS ? AND source_queue_item_id IS ?
+                  AND repo_id = ? AND repo_generation = ?
                 """,
                 (
                     engagement_id,
@@ -4395,6 +5160,8 @@ def _record_cross_file_triggers(
                     reason,
                     source_file_id,
                     source_queue_item_id,
+                    source_repo_id,
+                    source_repo_generation,
                 ),
             ).fetchone()
         else:
@@ -4405,6 +5172,7 @@ def _record_cross_file_triggers(
                 WHERE engagement_id = ? AND source_file_id = ? AND target_file_id IS NULL
                   AND target_file_path = ? AND vuln_class = ?
                   AND reason = ? AND source_queue_item_id IS ?
+                  AND repo_id = ? AND repo_generation = ?
                 """,
                 (
                     engagement_id,
@@ -4413,6 +5181,8 @@ def _record_cross_file_triggers(
                     vuln_class,
                     reason,
                     source_queue_item_id,
+                    source_repo_id,
+                    source_repo_generation,
                 ),
             ).fetchone()
 
@@ -4423,9 +5193,10 @@ def _record_cross_file_triggers(
                 """
                 INSERT INTO code_analysis_triggers (
                     engagement_id, source_queue_item_id, source_file_id, target_file_id,
-                    target_file_path, vuln_class, reason, status, resolution_note
+                    target_file_path, vuln_class, reason, status, resolution_note,
+                    repo_id, repo_generation, source_manifest_digest
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     engagement_id,
@@ -4437,6 +5208,9 @@ def _record_cross_file_triggers(
                     reason,
                     trigger_status,
                     resolution_note,
+                    source_repo_id,
+                    source_repo_generation,
+                    source_manifest_digest_value,
                 ),
             )
             continue
@@ -4644,6 +5418,56 @@ def complete_queue_items(
                         "with evidence or evidence_ref"
                     ),
                 )
+        if (
+            str(file_row.get("classification") or "") in {"critical", "high"}
+            and disposition != "skipped"
+        ):
+            source_receipt = connection.execute(
+                """
+                SELECT results.id
+                FROM code_analysis_results AS results
+                WHERE results.engagement_id = ? AND results.queue_item_id = ?
+                  AND results.file_id = ? AND results.lease_token = ?
+                  AND results.repo_generation = ? AND results.disposition = ?
+                  AND results.superseded_at IS NULL
+                  AND results.receipt_binding_status NOT IN (
+                      'legacy_ambiguous', 'legacy_missing', 'legacy_unbound'
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM code_analysis_results AS replacement
+                      WHERE replacement.supersedes_result_id = results.id
+                  )
+                  AND (
+                      EXISTS (
+                          SELECT 1 FROM code_analysis_result_callables AS links
+                          WHERE links.result_id = results.id AND links.file_id = ?
+                      )
+                      OR EXISTS (
+                          SELECT 1 FROM json_each(results.reviewed_spans_json) AS span
+                          WHERE CAST(json_extract(span.value, '$.file_id') AS INTEGER) = ?
+                      )
+                  )
+                LIMIT 1
+                """,
+                (
+                    engagement.id,
+                    int(queue_row["id"]),
+                    int(queue_row["file_id"]),
+                    lease_token,
+                    int(queue_row["repo_generation"]),
+                    disposition,
+                    int(queue_row["file_id"]),
+                    int(queue_row["file_id"]),
+                ),
+            ).fetchone()
+            if source_receipt is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "critical/high review requires a current source-level receipt "
+                        "with a matching disposition, bound to this file and lease"
+                    ),
+                )
         # Skipped items bypass the cwe-coverage completeness check — by
         # definition the analyst did not analyze the file. Other dispositions
         # still enforce the existing coverage rule.
@@ -4795,6 +5619,7 @@ def reset_stale_queue_items(
             WHERE queue.engagement_id = ?
               AND queue.status = 'processing'
               AND queue.repo_generation = repos.active_generation
+              AND queue.source_superseded_at IS NULL
               AND ({_latest_current_queue_attempt_sql("queue", "repos")})
               AND ({_no_superseded_active_attempt_sql("queue", "repos")})
               AND (COALESCE(queue.last_heartbeat_at, queue.consumed_at) IS NULL
@@ -5138,6 +5963,30 @@ def create_analysis_result(
             {int(queue_item_id): queue_row},
             action="record analysis results",
         )
+        receipt_kind = str(result.get("receipt_kind") or "file")
+        has_source_anchors = bool(
+            result.get("callable_refs") or result.get("reviewed_spans")
+        )
+        if disposition == "skipped" and not has_source_anchors:
+            canonical_callable_refs: list[dict[str, Any]] = []
+            callable_ids: list[int] = []
+            canonical_reviewed_spans: list[dict[str, Any]] = []
+            receipt_binding_status = "skipped_unbound"
+        else:
+            (
+                canonical_callable_refs,
+                callable_ids,
+                canonical_reviewed_spans,
+                receipt_binding_status,
+            ) = _normalize_analysis_receipt_anchors(
+                connection,
+                engagement_id=engagement.id,
+                queue_row=queue_row,
+                queue_file=file_row,
+                receipt_kind=receipt_kind,
+                callable_refs=result.get("callable_refs", []),
+                reviewed_spans=result.get("reviewed_spans", []),
+            )
         active_scan = connection.execute(
             """
             SELECT id FROM assessment_runs
@@ -5183,6 +6032,9 @@ def create_analysis_result(
         }
         fingerprint_payload["file_id"] = int(file_row["id"])
         fingerprint_payload["cross_file_triggers"] = normalized_cross_file_triggers
+        fingerprint_payload["receipt_kind"] = receipt_kind
+        fingerprint_payload["callable_refs"] = canonical_callable_refs
+        fingerprint_payload["reviewed_spans"] = canonical_reviewed_spans
         result_fingerprint = hashlib.sha256(
             _json_text(fingerprint_payload).encode("utf-8")
         ).hexdigest()
@@ -5197,8 +6049,34 @@ def create_analysis_result(
                 (engagement.id, int(file_row["repo_id"])),
             ).fetchone()
             assert repo is not None
-            function_name = str(result.get("function_name") or "(file)").strip()
-            source_anchor = f"{file_row['file_path']}:{function_name}"
+            if canonical_callable_refs:
+                primary_anchor = next(
+                    (
+                        ref
+                        for ref in canonical_callable_refs
+                        if int(ref["file_id"]) == int(file_row["id"])
+                    ),
+                    canonical_callable_refs[0],
+                )
+                source_anchor = (
+                    f"{primary_anchor['file_path']}:{primary_anchor['start_line']}-"
+                    f"{primary_anchor['end_line']}:{primary_anchor['qualified_name']}"
+                )
+            elif canonical_reviewed_spans:
+                primary_span = next(
+                    (
+                        span
+                        for span in canonical_reviewed_spans
+                        if int(span["file_id"]) == int(file_row["id"])
+                    ),
+                    canonical_reviewed_spans[0],
+                )
+                source_anchor = (
+                    f"{primary_span['file_path']}:{primary_span['start_line']}-"
+                    f"{primary_span['end_line']}"
+                )
+            else:
+                source_anchor = f"{file_row['file_path']}:(skipped)"
             # Keep exact queue/run/lease ids in the result provenance, but not in
             # the identity used to compare the same candidate across later scans.
             candidate_fingerprint_payload = {
@@ -5218,6 +6096,9 @@ def create_analysis_result(
             candidate_fingerprint_payload["cross_file_triggers"] = (
                 normalized_cross_file_triggers
             )
+            candidate_fingerprint_payload["receipt_kind"] = receipt_kind
+            candidate_fingerprint_payload["callable_refs"] = canonical_callable_refs
+            candidate_fingerprint_payload["reviewed_spans"] = canonical_reviewed_spans
             result_identity_fingerprint = hashlib.sha256(
                 _json_text(candidate_fingerprint_payload).encode("utf-8")
             ).hexdigest()
@@ -5336,22 +6217,26 @@ def create_analysis_result(
                 int(queue_item_id),
                 int(file_row["id"]),
                 lease_token,
-                str(result.get("function_name", "")),
                 int(queue_row.get("repo_generation", 0) or 0),
+                receipt_kind,
+                _json_list_text(canonical_callable_refs),
+                _json_list_text(canonical_reviewed_spans),
             )
             actual_identity = (
                 int(superseded_result["queue_item_id"]),
                 int(superseded_result["file_id"]),
                 str(superseded_result["lease_token"]),
-                str(superseded_result["function_name"]),
                 int(superseded_result["repo_generation"]),
+                str(superseded_result["receipt_kind"]),
+                str(superseded_result["callable_refs_json"]),
+                str(superseded_result["reviewed_spans_json"]),
             )
             if actual_identity != expected_identity:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=(
                         "supersedes must identify a current result with the same "
-                        "queue item, lease token, file, function, and repository generation"
+                        "queue item, lease token, file, source anchors, and repository generation"
                     ),
                 )
 
@@ -5360,20 +6245,25 @@ def create_analysis_result(
                 """
             INSERT INTO code_analysis_results (
                 engagement_id, queue_item_id, file_id,
-                agent_name, function_name, hypothesis, evidence, evidence_ref,
+                agent_name, receipt_kind, callable_refs_json, reviewed_spans_json,
+                receipt_binding_status, function_name, hypothesis, evidence, evidence_ref,
                 disposition, confidence, finding_slug, cwe_id,
                 slot_type, notes, audit_metadata_json,
                 cwe_coverage_json, cross_file_triggers_json,
                 lease_token, repo_generation, result_fingerprint,
                 supersedes_result_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     engagement.id,
                     queue_item_id,
                     int(file_row["id"]),
                     agent_name,
+                    receipt_kind,
+                    _json_list_text(canonical_callable_refs),
+                    _json_list_text(canonical_reviewed_spans),
+                    receipt_binding_status,
                     result.get("function_name", ""),
                     result.get("hypothesis", ""),
                     result.get("evidence", ""),
@@ -5400,6 +6290,20 @@ def create_analysis_result(
                     detail="supersedes analysis result was concurrently replaced",
                 ) from exc
             raise
+        for ordinal, callable_id in enumerate(callable_ids):
+            connection.execute(
+                """
+                INSERT INTO code_analysis_result_callables (
+                    result_id, callable_id, file_id, ordinal
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    int(cursor.lastrowid),
+                    callable_id,
+                    int(canonical_callable_refs[ordinal]["file_id"]),
+                    ordinal,
+                ),
+            )
         row = _analysis_result_row(connection, int(cursor.lastrowid))
         assert row is not None
         run_candidate = None
@@ -5682,6 +6586,7 @@ _LATEST_CURRENT_VARIANT_RECEIPTS_SQL = """
       ON scopes.dispatch_id = dispatches.id
      AND scopes.engagement_id = dispatches.engagement_id
     WHERE current_files.engagement_id = ?
+      AND current_files.retired_at IS NULL
     ORDER BY current_files.id
 """
 
@@ -5889,6 +6794,7 @@ def _variant_receipt_is_current(
              AND repos.engagement_id = files.engagement_id
              AND repos.active_generation > 0
             WHERE files.engagement_id = ? AND files.id = ?
+              AND files.retired_at IS NULL
             """,
             (engagement_id, int(file_id)),
         ).fetchone()
@@ -6337,6 +7243,7 @@ def report_durable_finding_variant_receipt_obligations(
                  AND repos.engagement_id = files.engagement_id
                  AND repos.active_generation > 0
                 WHERE files.engagement_id = ?
+                  AND files.retired_at IS NULL
                 ORDER BY files.repo_id, files.file_path, files.id
                 """,
                 (engagement.id,),
@@ -6457,10 +7364,13 @@ def code_coverage_summary(
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
 
-    repo_clause = " AND repo_id IN (SELECT id FROM code_repos WHERE active_generation > 0)"
+    repo_clause = (
+        " AND repo_id IN (SELECT id FROM code_repos WHERE active_generation > 0)"
+        " AND retired_at IS NULL"
+    )
     repo_params: tuple[Any, ...] = ()
     if repo_id is not None:
-        repo_clause = " AND repo_id = ?"
+        repo_clause = " AND repo_id = ? AND retired_at IS NULL"
         repo_params = (repo_id,)
 
     with get_connection() as connection:
@@ -6511,6 +7421,7 @@ def code_coverage_summary(
                                WHERE current_queue.engagement_id = files.engagement_id
                                  AND current_queue.file_id = files.id
                                  AND current_queue.repo_generation = current_queue_repo.active_generation
+                                 AND current_queue.source_superseded_at IS NULL
                                  AND ({_latest_current_queue_attempt_sql(
                                      "current_queue", "current_queue_repo"
                                  )})
@@ -6525,6 +7436,7 @@ def code_coverage_summary(
                                WHERE current_queue.engagement_id = files.engagement_id
                                  AND current_queue.file_id = files.id
                                  AND current_queue.repo_generation = current_queue_repo.active_generation
+                                 AND current_queue.source_superseded_at IS NULL
                                  AND ({_latest_current_queue_attempt_sql(
                                      "current_queue", "current_queue_repo"
                                  )})
@@ -6539,6 +7451,7 @@ def code_coverage_summary(
                                WHERE current_queue.engagement_id = files.engagement_id
                                  AND current_queue.file_id = files.id
                                  AND current_queue.repo_generation = current_queue_repo.active_generation
+                                 AND current_queue.source_superseded_at IS NULL
                                  AND ({_latest_current_queue_attempt_sql(
                                      "current_queue", "current_queue_repo"
                                  )})
@@ -6668,6 +7581,7 @@ def code_coverage_summary(
             WHERE queue.engagement_id = ? AND queue.status = 'needs_context'
               AND repos.active_generation > 0
               AND queue.repo_generation = repos.active_generation
+              AND queue.source_superseded_at IS NULL
               AND ({_latest_current_queue_attempt_sql("queue", "repos")})
               AND ({_no_superseded_active_attempt_sql("queue", "repos")})
               {queue_repo_clause}
@@ -6710,6 +7624,7 @@ def code_coverage_summary(
               AND queue.status IN ('pending', 'processing')
               AND repos.active_generation > 0
               AND queue.repo_generation = repos.active_generation
+              AND queue.source_superseded_at IS NULL
               AND ({_latest_current_queue_attempt_sql("queue", "repos")})
               AND ({_no_superseded_active_attempt_sql("queue", "repos")})
               {queue_repo_clause}
@@ -6740,6 +7655,8 @@ def code_coverage_summary(
                  AND repos.engagement_id = sf.engagement_id
                  AND repos.active_generation > 0
                 WHERE t.engagement_id = ?
+                  AND t.repo_generation = repos.active_generation
+                  AND t.source_superseded_at IS NULL
                 GROUP BY t.status
                 """
                 if repo_id is None
@@ -6754,6 +7671,8 @@ def code_coverage_summary(
                  AND repos.engagement_id = sf.engagement_id
                  AND repos.active_generation > 0
                 WHERE t.engagement_id = ? AND sf.repo_id = ?
+                  AND t.repo_generation = repos.active_generation
+                  AND t.source_superseded_at IS NULL
                 GROUP BY t.status
                 """
             ),
@@ -6779,12 +7698,14 @@ def code_coverage_summary(
               AND trim(queue.skip_reason) != ''
               AND repos.active_generation > 0
               AND queue.repo_generation = repos.active_generation
+              AND queue.source_superseded_at IS NULL
               AND queue.id = (
                   SELECT MAX(latest_queue.id)
                   FROM code_analysis_queue AS latest_queue
                   WHERE latest_queue.engagement_id = queue.engagement_id
                     AND latest_queue.file_id = queue.file_id
                     AND latest_queue.repo_generation = repos.active_generation
+                    AND latest_queue.source_superseded_at IS NULL
               )
               AND ({_no_superseded_active_attempt_sql("queue", "repos")})
               {skip_repo_clause}
@@ -6996,12 +7917,8 @@ def code_coverage_summary(
             )
             result_count_rows = connection.execute(
                 f"""
-                SELECT results.file_id, COUNT(*) AS result_count,
-                       COUNT(DISTINCT CASE
-                           WHEN trim(results.function_name) != ''
-                            AND (trim(results.evidence) != '' OR trim(results.evidence_ref) != '')
-                           THEN results.function_name
-                       END) AS distinct_functions
+                SELECT results.file_id,
+                       COUNT(DISTINCT results.id) AS receipt_count
                 FROM code_analysis_results AS results
                 JOIN code_analysis_queue AS result_queue
                   ON result_queue.id = results.queue_item_id
@@ -7018,11 +7935,40 @@ def code_coverage_summary(
             ).fetchall()
             result_counts = {
                 int(r["file_id"]): {
-                    "result_count": int(r["result_count"]),
-                    "distinct_functions": int(r["distinct_functions"]),
+                    "receipt_count": int(r["receipt_count"]),
+                    "distinct_structural_callables": 0,
                 }
                 for r in result_count_rows
             }
+            callable_count_rows = connection.execute(
+                f"""
+                SELECT links.file_id,
+                       COUNT(DISTINCT links.callable_id)
+                           AS distinct_structural_callables
+                FROM code_analysis_results AS results
+                JOIN code_analysis_result_callables AS links
+                  ON links.result_id = results.id
+                JOIN code_analysis_queue AS result_queue
+                  ON result_queue.id = results.queue_item_id
+                JOIN code_files AS result_files
+                  ON result_files.id = results.file_id
+                JOIN code_repos AS result_repos
+                  ON result_repos.id = result_files.repo_id
+                WHERE results.engagement_id = ?
+                  AND links.file_id IN ({placeholders})
+                  AND ({current_result_receipt})
+                GROUP BY links.file_id
+                """,
+                (engagement.id, *file_id_list),
+            ).fetchall()
+            for row in callable_count_rows:
+                fid = int(row["file_id"])
+                result_counts.setdefault(
+                    fid,
+                    {"receipt_count": 0, "distinct_structural_callables": 0},
+                )["distinct_structural_callables"] = int(
+                    row["distinct_structural_callables"]
+                )
             file_func_rows = connection.execute(
                 f"""
                 SELECT id, total_functions FROM code_files
@@ -7037,15 +7983,18 @@ def code_coverage_summary(
             for fid, meta in file_meta.items():
                 if not meta["has_coverage_record"]:
                     continue
-                actual = result_counts.get(fid, {"result_count": 0, "distinct_functions": 0})
+                actual = result_counts.get(
+                    fid,
+                    {"receipt_count": 0, "distinct_structural_callables": 0},
+                )
                 total_funcs = file_total_functions.get(fid, 0)
                 file_warnings: list[str] = []
-                if actual["result_count"] == 0 and meta["has_coverage_record"]:
+                if actual["receipt_count"] == 0 and meta["has_coverage_record"]:
                     efforts = file_efforts.get(fid, {})
                     max_effort = max(efforts.values(), default=0.0)
                     if max_effort >= 60 and total_funcs > 0:
                         file_warnings.append(
-                            f"effort={max_effort:.0f} with 0 analysis-result rows"
+                            f"effort={max_effort:.0f} with 0 source-review receipts"
                         )
                 if file_warnings:
                     integrity_warnings.append({
@@ -7053,17 +8002,17 @@ def code_coverage_summary(
                         "file_path": meta["file_path"],
                         "classification": meta["classification"],
                         "total_functions": total_funcs,
-                        "actual_result_rows": actual["result_count"],
-                        "distinct_functions_with_results": actual["distinct_functions"],
+                        "current_receipt_rows": actual["receipt_count"],
+                        "distinct_structural_callables_reviewed": actual[
+                            "distinct_structural_callables"
+                        ],
                         "warnings": file_warnings,
                     })
 
-            # -- W3b: uncovered high-risk files (function-count structural
+            # -- W3b: uncovered high-risk files (callable-receipt structural
             # verification). A critical/high file that is terminal
             # (analyzed/done) and whose structural index found functions, but
-            # which shows ZERO function-level analysis (no claimed
-            # functions_analyzed in any CWE family AND no distinct
-            # analysis-result function rows), has no linked finding, and no
+            # which shows ZERO structurally bound callable coverage, has no linked finding, and no
             # accepted-gap resolution (all applicable families marked
             # not_applicable), is a coverage hole the effort gate alone misses
             # — the broad-18 near-miss where high files were closed with
@@ -7107,10 +8056,12 @@ def code_coverage_summary(
                 not_applicable = file_not_applicable.get(fid, set())
                 if all(family in not_applicable for family in applicable):
                     continue  # accepted gap: every applicable family is not_applicable
-                actual = result_counts.get(fid, {"distinct_functions": 0})
-                funcs_analyzed = int(actual.get("distinct_functions", 0))
-                if funcs_analyzed > 0:
-                    continue  # real function-level analysis was recorded
+                actual = result_counts.get(fid, {"distinct_structural_callables": 0})
+                callables_reviewed = int(
+                    actual.get("distinct_structural_callables", 0)
+                )
+                if callables_reviewed > 0:
+                    continue  # structurally attributable callable review was recorded
                 file_path = str(meta["file_path"])
                 prefix = f"file:{file_path}"
                 if any(loc == prefix or loc.startswith(prefix + ":") for loc in finding_locations):
@@ -7298,6 +8249,7 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                          AND repos.engagement_id = files.engagement_id
                          AND repos.active_generation > 0
                         WHERE files.engagement_id = ?
+                          AND files.retired_at IS NULL
                         ORDER BY files.repo_id, files.id
                         """,
                         (engagement.id,),
@@ -7368,6 +8320,7 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                     SELECT COUNT(*)
                     FROM code_files
                     WHERE engagement_id = ? AND repo_id = ?
+                      AND retired_at IS NULL
                       AND structural_analysis_status NOT IN (
                         'complete', 'degraded', 'unsupported'
                       )
@@ -7393,6 +8346,7 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                                files.structural_artifact_truncated
                         FROM code_files AS files
                         WHERE files.engagement_id = ? AND files.repo_id = ?
+                          AND files.retired_at IS NULL
                           AND (
                             files.structural_analysis_status IN ('degraded', 'unsupported')
                             OR files.structural_artifact_truncated = 1
@@ -7440,6 +8394,7 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                 """
                 SELECT COUNT(*) FROM code_files
                 WHERE engagement_id = ? AND repo_id = ? AND classification = 'unclassified'
+                  AND retired_at IS NULL
                 """,
                 (engagement.id, repo_id),
             )
@@ -7462,6 +8417,7 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                 SELECT COUNT(*)
                 FROM code_files AS files
                 WHERE files.engagement_id = ? AND files.repo_id = ?
+                  AND files.retired_at IS NULL
                   AND NOT ({_CURRENT_ACCOUNTED_FILE_EXISTS_SQL})
                 """,
                 (engagement.id, repo_id),
@@ -7500,6 +8456,7 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                 f"""
                 SELECT COUNT(*) FROM code_files AS files
                 WHERE files.engagement_id = ? AND files.repo_id = ?
+                  AND files.retired_at IS NULL
                   AND files.classification IN ('critical', 'high')
                   AND NOT ({_CURRENT_SUCCESSFUL_REVIEW_EXISTS_SQL})
                 """,
@@ -7526,8 +8483,10 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                   ON queue_repos.id = files.repo_id
                  AND queue_repos.engagement_id = files.engagement_id
                 WHERE queue.engagement_id = ? AND files.repo_id = ?
+                  AND files.retired_at IS NULL
                   AND queue.status IN ('pending', 'processing', 'error')
                   AND queue.repo_generation = queue_repos.active_generation
+                  AND queue.source_superseded_at IS NULL
                   AND ({_latest_current_queue_attempt_sql("queue", "queue_repos")})
                   AND ({_no_superseded_active_attempt_sql("queue", "queue_repos")})
                 """,
@@ -7539,6 +8498,7 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                 SELECT COUNT(*)
                 FROM code_files AS files
                 WHERE files.engagement_id = ? AND files.repo_id = ?
+                  AND files.retired_at IS NULL
                   AND ({_invalid_active_history_exists_sql("files")})
                 """,
                 (engagement.id, repo_id),
@@ -7565,8 +8525,10 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                   ON queue_repos.id = files.repo_id
                  AND queue_repos.engagement_id = files.engagement_id
                 WHERE queue.engagement_id = ? AND files.repo_id = ?
+                  AND files.retired_at IS NULL
                   AND queue.status = 'needs_context'
                   AND queue.repo_generation = queue_repos.active_generation
+                  AND queue.source_superseded_at IS NULL
                   AND ({_latest_current_queue_attempt_sql("queue", "queue_repos")})
                   AND ({_no_superseded_active_attempt_sql("queue", "queue_repos")})
                 """,
@@ -7601,8 +8563,14 @@ def code_readiness(engagement_id: int, *, target_phase: str) -> dict[str, Any]:
                 SELECT COUNT(*)
                 FROM code_analysis_triggers AS triggers
                 JOIN code_files AS files ON files.id = triggers.source_file_id
+                JOIN code_repos AS repos
+                  ON repos.id = triggers.repo_id
+                 AND repos.engagement_id = triggers.engagement_id
+                 AND repos.active_generation > 0
                 WHERE triggers.engagement_id = ? AND files.repo_id = ?
                   AND triggers.status = 'pending'
+                  AND triggers.repo_generation = repos.active_generation
+                  AND triggers.source_superseded_at IS NULL
                 """,
                 (engagement.id, repo_id),
             )
@@ -8027,6 +8995,7 @@ def requeue_triggered_files(
                      AND repos.engagement_id = files.engagement_id
                      AND repos.active_generation > 0
                     WHERE files.engagement_id = ? AND files.id = ?
+                      AND files.retired_at IS NULL
                     """,
                     (engagement.id, validated_file_id),
                 ).fetchone()
@@ -8047,6 +9016,7 @@ def requeue_triggered_files(
                          AND repos.engagement_id = files.engagement_id
                          AND repos.active_generation > 0
                         WHERE files.engagement_id = ? AND files.file_path = ?
+                          AND files.retired_at IS NULL
                         """
                         if validated_repo_id is None
                         else """
@@ -8059,6 +9029,7 @@ def requeue_triggered_files(
                          AND repos.active_generation > 0
                         WHERE files.engagement_id = ? AND files.repo_id = ?
                           AND files.file_path = ?
+                          AND files.retired_at IS NULL
                         """
                     ),
                     (engagement.id, raw_file_path)
@@ -8183,10 +9154,16 @@ def requeue_triggered_files(
                 JOIN code_files AS source_files
                   ON source_files.id = triggers.source_file_id
                  AND source_files.engagement_id = triggers.engagement_id
+                JOIN code_repos AS source_repos
+                  ON source_repos.id = triggers.repo_id
+                 AND source_repos.engagement_id = triggers.engagement_id
+                 AND source_repos.active_generation > 0
                 JOIN code_files AS target_files
                   ON target_files.id = ?
                  AND target_files.engagement_id = triggers.engagement_id
                 WHERE triggers.engagement_id = ? AND triggers.status = ?
+                  AND triggers.repo_generation = source_repos.active_generation
+                  AND triggers.source_superseded_at IS NULL
                   AND (
                       triggers.target_file_id = target_files.id
                       OR (
@@ -8421,6 +9398,7 @@ def list_code_triggers(
     *,
     status_filter: str | None = None,
     repo_id: int | None = None,
+    include_superseded: bool = False,
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
     if status_filter and status_filter not in _TRIGGER_STATUSES:
@@ -8430,6 +9408,13 @@ def list_code_triggers(
         )
     clauses = ["t.engagement_id = ?"]
     params: list[Any] = [engagement.id]
+    if not include_superseded:
+        clauses.extend(
+            [
+                "t.repo_generation = repos.active_generation",
+                "t.source_superseded_at IS NULL",
+            ]
+        )
     if status_filter:
         clauses.append("t.status = ?")
         params.append(status_filter)
@@ -8512,6 +9497,14 @@ def resolve_code_triggers(
                         resolution_note = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE engagement_id = ? AND id = ? AND status = ?
+                      AND source_superseded_at IS NULL
+                      AND repo_generation = (
+                          SELECT active_generation
+                          FROM code_repos
+                          WHERE id = code_analysis_triggers.repo_id
+                            AND engagement_id = code_analysis_triggers.engagement_id
+                            AND active_generation > 0
+                      )
                       AND source_file_id IN (
                           SELECT files.id
                           FROM code_files AS files
@@ -8548,6 +9541,12 @@ def resolve_code_triggers(
                 "engagement_id = ?",
                 "target_file_path = ?",
                 "status = ?",
+                "source_superseded_at IS NULL",
+                "repo_generation = ("
+                "SELECT active_generation FROM code_repos "
+                "WHERE id = code_analysis_triggers.repo_id "
+                "AND engagement_id = code_analysis_triggers.engagement_id "
+                "AND active_generation > 0)",
                 "source_file_id IN ("
                 "SELECT files.id FROM code_files AS files "
                 "JOIN code_repos AS repos ON repos.id = files.repo_id "
@@ -8613,10 +9612,11 @@ def code_coverage_cwe_detail(
 
     repo_clause = """
       AND f.repo_id IN (SELECT id FROM code_repos WHERE active_generation > 0)
+      AND f.retired_at IS NULL
     """
     repo_params: tuple[Any, ...] = ()
     if repo_id is not None:
-        repo_clause = " AND f.repo_id = ?"
+        repo_clause = " AND f.repo_id = ? AND f.retired_at IS NULL"
         repo_params = (repo_id,)
 
     with get_connection() as connection:
@@ -8655,6 +9655,7 @@ def code_coverage_cwe_detail(
                 WHERE queue.engagement_id = ?
                   AND queue.file_id IN ({placeholders})
                   AND queue.repo_generation = queue_repos.active_generation
+                  AND queue.source_superseded_at IS NULL
                   AND ({_latest_current_queue_attempt_sql("queue", "queue_repos")})
                   AND ({_no_superseded_active_attempt_sql("queue", "queue_repos")})
                   AND ({successful_queue_review})
@@ -8697,17 +9698,11 @@ def code_coverage_cwe_detail(
             effort_rows = connection.execute(
                 f"""
                 SELECT results.file_id,
-                       COUNT(*) AS current_result_rows,
-                       SUM(
+                       COUNT(DISTINCT results.id) AS current_receipt_rows,
+                       COUNT(DISTINCT
                            CASE WHEN trim(results.evidence) != '' OR trim(results.evidence_ref) != ''
-                                THEN 1 ELSE 0 END
-                       ) AS evidenced_result_rows,
-                       COUNT(DISTINCT CASE
-                           WHEN trim(results.function_name) != ''
-                            AND (trim(results.evidence) != '' OR trim(results.evidence_ref) != '')
-                           THEN results.function_name
-                       END)
-                           AS distinct_functions_with_results
+                                THEN results.id END
+                       ) AS evidenced_receipt_rows
                 FROM code_analysis_results AS results
                 JOIN code_analysis_queue AS result_queue
                   ON result_queue.id = results.queue_item_id
@@ -8724,14 +9719,45 @@ def code_coverage_cwe_detail(
             ).fetchall()
             result_effort_by_file = {
                 int(row["file_id"]): {
-                    "current_result_rows": int(row["current_result_rows"] or 0),
-                    "evidenced_result_rows": int(row["evidenced_result_rows"] or 0),
-                    "distinct_functions_with_results": int(
-                        row["distinct_functions_with_results"] or 0
-                    ),
+                    "current_receipt_rows": int(row["current_receipt_rows"] or 0),
+                    "evidenced_receipt_rows": int(row["evidenced_receipt_rows"] or 0),
+                    "distinct_structural_callables_reviewed": 0,
                 }
                 for row in effort_rows
             }
+            callable_effort_rows = connection.execute(
+                f"""
+                SELECT links.file_id,
+                       COUNT(DISTINCT links.callable_id)
+                           AS distinct_structural_callables_reviewed
+                FROM code_analysis_results AS results
+                JOIN code_analysis_result_callables AS links
+                  ON links.result_id = results.id
+                JOIN code_analysis_queue AS result_queue
+                  ON result_queue.id = results.queue_item_id
+                JOIN code_files AS result_files
+                  ON result_files.id = results.file_id
+                JOIN code_repos AS result_repos
+                  ON result_repos.id = result_files.repo_id
+                WHERE results.engagement_id = ?
+                  AND links.file_id IN ({placeholders})
+                  AND ({current_result_receipt})
+                GROUP BY links.file_id
+                """,
+                (engagement.id, *file_ids),
+            ).fetchall()
+            for row in callable_effort_rows:
+                fid = int(row["file_id"])
+                result_effort_by_file.setdefault(
+                    fid,
+                    {
+                        "current_receipt_rows": 0,
+                        "evidenced_receipt_rows": 0,
+                        "distinct_structural_callables_reviewed": 0,
+                    },
+                )["distinct_structural_callables_reviewed"] = int(
+                    row["distinct_structural_callables_reviewed"] or 0
+                )
 
         files_detail: list[dict[str, Any]] = []
         for fr in file_rows:
@@ -8747,14 +9773,16 @@ def code_coverage_cwe_detail(
             result_effort = result_effort_by_file.get(
                 fid,
                 {
-                    "current_result_rows": 0,
-                    "evidenced_result_rows": 0,
-                    "distinct_functions_with_results": 0,
+                    "current_receipt_rows": 0,
+                    "evidenced_receipt_rows": 0,
+                    "distinct_structural_callables_reviewed": 0,
                 },
             )
-            distinct_functions = int(result_effort["distinct_functions_with_results"])
-            function_coverage_pct = (
-                min(100.0, distinct_functions / total_functions * 100.0)
+            distinct_callables = int(
+                result_effort["distinct_structural_callables_reviewed"]
+            )
+            callable_coverage_pct = (
+                min(100.0, distinct_callables / total_functions * 100.0)
                 if total_functions > 0
                 else 0.0
             )
@@ -8774,7 +9802,7 @@ def code_coverage_cwe_detail(
                 "analysis_effort": {
                     **result_effort,
                     "total_functions": total_functions,
-                    "function_coverage_pct": round(function_coverage_pct, 1),
+                    "callable_coverage_pct": round(callable_coverage_pct, 1),
                 },
             })
 

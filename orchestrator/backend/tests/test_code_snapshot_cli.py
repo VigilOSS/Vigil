@@ -3239,7 +3239,14 @@ def test_code_index_sync_validates_all_files_before_bound_cas_post(
         "total_functions": 1,
         "total_exports": 0,
         "total_lines": 1,
-        "functions": [],
+        "functions": [
+            {
+                "name": "main",
+                "qualified_name": "main",
+                "line_start": 1,
+                "line_end": 1,
+            }
+        ],
         "entry_points": [],
         "security_sinks": [],
         "security_sources": [],
@@ -3427,6 +3434,14 @@ def test_code_index_sync_validates_all_files_before_bound_cas_post(
                         "total_entry_points": 0,
                         "total_sinks": 0,
                         "total_exports": 0,
+                        "callables": [
+                            {
+                                "name": "main",
+                                "qualified_name": "main",
+                                "start_line": 1,
+                                "end_line": 1,
+                            }
+                        ],
                         "structural_analysis_status": "complete",
                         "structural_analysis_mode": "tree_sitter",
                         "structural_degradation_reason": None,

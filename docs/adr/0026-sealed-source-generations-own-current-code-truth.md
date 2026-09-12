@@ -1,6 +1,6 @@
 # ADR 0026 — Sealed source generations own current code truth
 
-- Status: Accepted — partially implemented; complete generation-history retention remains pending
+- Status: Accepted
 - Date: 2026-09-12
 
 ## Context
@@ -23,17 +23,32 @@ change advances the active generation. Historical snapshots and generation-bound
 records are retained for audit, but only the active generation can satisfy
 coverage, findings, structural indexes, or readiness.
 
+Each promoted generation has an immutable source record and exact admitted-file
+inventory. Promotion marks the replaced generation and its queue items, result
+receipts, and cross-file triggers with one supersession timestamp, the
+`source_generation_replaced` reason, and the replacement generation. It does not
+rewrite queue status, lease ownership, disposition, receipt identity, callable
+links, or trigger resolution. Files absent from the replacement inventory are
+retired rather than deleted so their generation-bound foreign keys and audit
+history remain intact; live file, coverage, and readiness projections exclude
+retired rows.
+
 This decision does not authorize incremental reuse. A later design may define
 safe callable lineage and affected-scope reuse; until then, a new generation
 makes earlier conclusions non-current. Sealed snapshots and active-generation
-gating are implemented, but refresh still deletes some changed-file queue/result
-rows rather than retaining a complete generation history.
+gating remain the only reuse policy: a preserved earlier receipt is audit history,
+not evidence for the replacement generation.
 
 ## Consequences
 
 - “Current” means reviewed against attested bytes and scope, not a familiar path
   or commit label.
 - Old conclusions cannot silently cover a changed generation.
+- Operators can inspect the original receipt, callable links, disposition, trigger
+  resolution, and lease identity after a later generation replaces it.
+- Additive migration captures only the source generation still represented by the
+  live repository row; it does not fabricate generations or records deleted by an
+  older release.
 - Incremental scanning cannot be introduced without a separate evidence-backed
   decision and durable identity model.
 
