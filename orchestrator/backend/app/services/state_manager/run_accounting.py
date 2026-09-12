@@ -172,6 +172,9 @@ def _assessment_run_row(
                dispatches.actual_model,
                dispatches.requested_reasoning,
                dispatches.actual_reasoning,
+               dispatches.launcher_effective_model,
+               dispatches.launcher_effective_reasoning,
+               dispatches.launcher_effective_source,
                dispatches.client_name,
                dispatches.requested_client,
                dispatches.launcher_effective_client,
@@ -214,6 +217,9 @@ def _dispatch_provenance(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         "actual_model": str(record.get("actual_model") or "unknown"),
         "requested_reasoning": record.get("requested_reasoning"),
         "actual_reasoning": str(record.get("actual_reasoning") or "unknown"),
+        "launcher_effective_model": record.get("launcher_effective_model"),
+        "launcher_effective_reasoning": record.get("launcher_effective_reasoning"),
+        "launcher_effective_source": record.get("launcher_effective_source"),
         "requested_client": str(record.get("requested_client") or "unknown"),
         "launcher_effective_client": str(
             record.get("launcher_effective_client") or "unknown"
@@ -1130,6 +1136,8 @@ def _serialize_run(
     warnings: list[str] = []
     if str(record.get("actual_model") or "unknown") == "unknown":
         warnings.append("provider-observed model identity is unknown")
+    if record.get("launcher_effective_model") is None:
+        warnings.append("launcher-effective model identity is unknown")
     if record.get("instructions_stale"):
         warnings.append("installed instructions were stale at dispatch time")
     record["warnings"] = warnings
@@ -1705,6 +1713,9 @@ def list_assessment_runs(
                    dispatches.agent_role AS producer_dispatch_agent_role,
                    dispatches.requested_model, dispatches.actual_model,
                    dispatches.requested_reasoning, dispatches.actual_reasoning,
+                   dispatches.launcher_effective_model,
+                   dispatches.launcher_effective_reasoning,
+                   dispatches.launcher_effective_source,
                    dispatches.client_name, dispatches.requested_client,
                    dispatches.launcher_effective_client,
                    dispatches.provider_observed_client,

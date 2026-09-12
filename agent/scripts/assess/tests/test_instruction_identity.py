@@ -73,6 +73,9 @@ def test_dispatch_instruction_identity_hashes_exact_installed_files(
         "requested_client": "unknown",
         "launcher_effective_client": "codex",
         "provider_observed_client": "unknown",
+        "launcher_effective_model": None,
+        "launcher_effective_reasoning": None,
+        "launcher_effective_source": None,
         "source_revision": "a" * 40,
         "operator_instruction_path": "agent/AGENTS.md",
         "operator_instruction_sha256": _sha256(operator_bytes),
@@ -116,6 +119,141 @@ def test_dispatch_instruction_identity_keeps_request_launcher_and_provider_facts
     assert identity["client_name"] == "codex"  # compatible legacy projection
     assert identity["provider_observed_client"] == "unknown"
     assert not any("client identity is unavailable" in warning for warning in warnings)
+
+
+@pytest.mark.parametrize(
+    ("model", "reasoning_options"),
+    [
+        (
+            "deepseek-v4-flash",
+            {"thinking": {"type": "disabled"}},
+        ),
+        (
+            "deepseek-v4-pro",
+            {
+                "thinking": {"type": "enabled"},
+                "reasoningEffort": "high",
+            },
+        ),
+        (
+            "deepseek-v4-pro",
+            {
+                "thinking": {"type": "enabled"},
+                "reasoningEffort": "max",
+            },
+        ),
+    ],
+)
+def test_dispatch_instruction_identity_does_not_treat_static_opencode_configuration_as_launch_evidence(
+    tmp_path: Path,
+    model: str,
+    reasoning_options: dict,
+) -> None:
+    source_root, agent_root, engagement_dir = _fixture_tree(tmp_path)
+    operator_bytes = b"operator\n"
+    specialist_bytes = (
+        b"---\ndescription: recon\nmode: subagent\n"
+        + f"model: deepseek/{model}\n---\nbody\n".encode()
+    )
+    relative = Path("agent/.opencode/agent/recon-specialist.md")
+    (agent_root / "AGENTS.md").write_bytes(operator_bytes)
+    (source_root / "agent" / "AGENTS.md").write_bytes(operator_bytes)
+    (agent_root / ".opencode" / "agent").mkdir(parents=True)
+    (source_root / relative.parent).mkdir(parents=True)
+    (agent_root / ".opencode" / "agent" / "recon-specialist.md").write_bytes(
+        specialist_bytes
+    )
+    (source_root / relative).write_bytes(specialist_bytes)
+    (engagement_dir / "scope.json").write_text("{}", encoding="utf-8")
+    (engagement_dir / "opencode.json").write_text(
+        json.dumps(
+            {
+                "provider": {
+                    "deepseek": {
+                        "models": {model: {"options": reasoning_options}}
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    identity, warnings = build_dispatch_instruction_identity(
+        agent_root=agent_root,
+        engagement_dir=engagement_dir,
+        agent_role="recon-specialist",
+        client_name="opencode",
+    )
+
+    assert identity["launcher_effective_model"] is None
+    assert identity["launcher_effective_reasoning"] is None
+    assert identity["launcher_effective_source"] is None
+    assert warnings == []
+
+
+def test_dispatch_instruction_identity_does_not_treat_static_goose_recipe_as_launch_evidence(
+    tmp_path: Path,
+) -> None:
+    source_root, agent_root, engagement_dir = _fixture_tree(tmp_path)
+    operator_bytes = b"operator\n"
+    specialist_bytes = (
+        b'version: "1.0.0"\ntitle: recon-specialist\ninstructions: |2\n'
+        b"  body\nsettings:\n  goose_model: deepseek-v4-flash\n"
+    )
+    relative = Path("agent/.goose/recipes/recon-specialist.yaml")
+    (agent_root / "AGENTS.md").write_bytes(operator_bytes)
+    (source_root / "agent" / "AGENTS.md").write_bytes(operator_bytes)
+    (agent_root / ".goose" / "recipes").mkdir(parents=True)
+    (source_root / relative.parent).mkdir(parents=True)
+    (agent_root / ".goose" / "recipes" / "recon-specialist.yaml").write_bytes(
+        specialist_bytes
+    )
+    (source_root / relative).write_bytes(specialist_bytes)
+    (engagement_dir / "scope.json").write_text("{}", encoding="utf-8")
+
+    identity, warnings = build_dispatch_instruction_identity(
+        agent_root=agent_root,
+        engagement_dir=engagement_dir,
+        agent_role="recon-specialist",
+        client_name="goose",
+    )
+
+    assert identity["launcher_effective_model"] is None
+    assert identity["launcher_effective_reasoning"] is None
+    assert identity["launcher_effective_source"] is None
+    assert warnings == []
+
+
+def test_dispatch_instruction_identity_does_not_copy_requested_identity_without_launcher_signal(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_root, agent_root, engagement_dir = _fixture_tree(tmp_path)
+    operator_bytes = b"operator\n"
+    specialist_bytes = b'name = "recon-specialist"\nmodel = "looks-effective"\n'
+    (agent_root / "AGENTS.md").write_bytes(operator_bytes)
+    (source_root / "agent" / "AGENTS.md").write_bytes(operator_bytes)
+    (agent_root / ".codex" / "agents" / "recon-specialist.toml").write_bytes(
+        specialist_bytes
+    )
+    (
+        source_root / "agent" / ".codex" / "agents" / "recon-specialist.toml"
+    ).write_bytes(specialist_bytes)
+    (engagement_dir / "scope.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("VIGIL_REQUESTED_MODEL", "requested-model")
+    monkeypatch.setenv("VIGIL_REQUESTED_REASONING", "xhigh")
+
+    identity, warnings = build_dispatch_instruction_identity(
+        agent_root=agent_root,
+        engagement_dir=engagement_dir,
+        agent_role="recon-specialist",
+        client_name="codex",
+    )
+
+    assert identity["launcher_effective_model"] is None
+    assert identity["launcher_effective_reasoning"] is None
+    assert identity["launcher_effective_source"] is None
+    assert warnings == []
 
 
 def test_dispatch_instruction_identity_uses_blue_operator_and_reports_staleness(
@@ -243,6 +381,9 @@ def test_agent_start_overwrites_forged_provenance_and_omits_caller_observed_iden
         "operator_instruction_sha256": "0" * 64,
         "actual_model": "caller-forged-model",
         "actual_reasoning": "caller-forged-reasoning",
+        "launcher_effective_model": "caller-forged-model",
+        "launcher_effective_reasoning": "caller-forged-reasoning",
+        "launcher_effective_source": "caller-forged-source",
     }
 
     warnings = agent._attach_dispatch_provenance(
@@ -258,7 +399,13 @@ def test_agent_start_overwrites_forged_provenance_and_omits_caller_observed_iden
     assert payload["specialist_instruction_sha256"] == _sha256(specialist_bytes)
     assert "actual_model" not in payload
     assert "actual_reasoning" not in payload
-    assert any("provider-observed model identity" in warning for warning in warnings)
+    assert "launcher_effective_model" not in payload
+    assert "launcher_effective_reasoning" not in payload
+    assert "launcher_effective_source" not in payload
+    assert (
+        "launcher-effective model and reasoning are unavailable; "
+        "provider-observed model and reasoning are unknown"
+    ) in warnings
 
 
 @pytest.mark.parametrize("field", ["--actual-model", "--actual-reasoning"])

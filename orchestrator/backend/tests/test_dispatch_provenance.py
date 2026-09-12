@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 
 ENGAGEMENT_KEY = "2026-09-08-120000-dispatch-provenance"
 BASE = f"/engagements/{ENGAGEMENT_KEY}/assessment"
@@ -69,6 +71,9 @@ def test_dispatch_instruction_provenance_round_trips_without_legacy_aliases(
         assert created.json()[key] == value
     assert created.json()["actual_model"] == "unknown"
     assert created.json()["actual_reasoning"] == "unknown"
+    assert created.json()["launcher_effective_model"] is None
+    assert created.json()["launcher_effective_reasoning"] is None
+    assert created.json()["launcher_effective_source"] is None
     assert "model" not in created.json()
     assert "reasoning" not in created.json()
     fetched = client.get(f"{BASE}/dispatches/PROVENANCE-1")
@@ -133,6 +138,37 @@ def test_dispatch_api_rejects_caller_attested_actual_identity(
             json={field: "caller-claim"},
         )
         assert self_attested_update.status_code == 422, self_attested_update.text
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("launcher_effective_model", "deepseek/deepseek-v4-flash"),
+        ("launcher_effective_reasoning", "off"),
+        (
+            "launcher_effective_source",
+            "agent/.opencode/agent/recon-specialist.md",
+        ),
+    ],
+)
+def test_dispatch_api_rejects_caller_attested_launcher_effective_identity(
+    client,
+    isolate_settings,
+    field: str,
+    value: str,
+) -> None:
+    _seed(client, isolate_settings["engagements_dir"])
+    response = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": "FORGED-LAUNCHER-EFFECTIVE",
+            "agent_role": "recon-specialist",
+            "client_name": "opencode",
+            field: value,
+        },
+    )
+
+    assert response.status_code == 422, response.text
 
 
 def test_dispatch_provenance_rejects_malformed_hashes_and_status(

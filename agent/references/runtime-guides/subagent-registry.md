@@ -30,8 +30,11 @@ The operator's audit trail. One row per dispatched specialist agent.
 | `completed_at` | ISO datetime | Set on `vigil assess agent done` when status moves to a terminal value. |
 | `status` | enum | `in-progress` / `completed` / `failed` / `aborted` / `blocked`. |
 | `requested_model` | string | Operator-requested model id (`claude-opus-4-7`, …). |
+| `launcher_effective_model` | string or null | Exact model attested for this child invocation by a trusted launcher/session integration; currently null for ordinary dispatches. |
 | `actual_model` | string | Provider-observed model, or `unknown`; read-only to dispatch callers. |
 | `requested_reasoning` | string | Requested reasoning level. |
+| `launcher_effective_reasoning` | string or null | Exact reasoning configuration attested for this child invocation; currently null for ordinary dispatches. |
+| `launcher_effective_source` | string or null | Attributable launcher/session evidence for the effective value; currently null for ordinary dispatches. |
 | `actual_reasoning` | string | Provider-observed reasoning level, or `unknown`; read-only to dispatch callers. |
 | `dispatch_mode` | string | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` / `swarm`. |
 | `finding_slugs_json` | JSON array | Finding slugs the dispatch produced (`agent done` PATCH may append additively). |
@@ -70,8 +73,13 @@ vigil assess agent get recon_a3f9
 
 The request fields (`application_unit_id`, `requested_model`,
 `requested_reasoning`, `dispatch_mode`, `skills`) capture the intended dispatch
-shape. Responses also expose provider-observed actual model/reasoning when a
-trusted integration has supplied them; otherwise both remain `unknown`.
+shape. Launcher-effective values remain null for every ordinary client. Static
+OpenCode agent frontmatter, `opencode.json`, and Goose recipe settings describe
+available configuration, but do not prove that a specific child invocation ran
+or what arguments it ultimately received. Only a future trusted launcher/session
+integration tied to that invocation may populate the nullable stored fields.
+Responses also expose provider-observed actual model/reasoning when a trusted
+integration has supplied them; otherwise both remain `unknown`.
 
 ## Contract Schema
 
@@ -94,8 +102,10 @@ in `dispatch-template.md`; missing or empty values fail before the dispatch
 write. These presentation fields are intentionally not duplicated in the
 backend dispatch schema.
 
-`actual_model` and `actual_reasoning` are audit response fields, not public
-write inputs. Caller-provided values are rejected rather than treated as proof.
+`launcher_effective_model`, `launcher_effective_reasoning`,
+`launcher_effective_source`, `actual_model`, and `actual_reasoning` are audit
+response/storage fields, not public write inputs. Caller-provided launcher or
+provider observations are rejected rather than treated as proof.
 
 ## Table 2 — `assessment_dispatch_handoffs`
 

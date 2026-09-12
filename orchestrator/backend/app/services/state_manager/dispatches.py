@@ -70,6 +70,9 @@ def record_dispatch(
     actual_model: str = "unknown",
     requested_reasoning: str | None = None,
     actual_reasoning: str = "unknown",
+    launcher_effective_model: str | None = None,
+    launcher_effective_reasoning: str | None = None,
+    launcher_effective_source: str | None = None,
     client_name: str = "unknown",
     requested_client: str = "unknown",
     launcher_effective_client: str = "unknown",
@@ -167,6 +170,8 @@ def record_dispatch(
             INSERT INTO assessment_dispatches (
                 engagement_id, agent_id, agent_role, task, application_unit_id,
                 requested_model, actual_model, requested_reasoning, actual_reasoning,
+                launcher_effective_model, launcher_effective_reasoning,
+                launcher_effective_source,
                 client_name, requested_client, launcher_effective_client,
                 provider_observed_client, source_revision,
                 operator_instruction_path, operator_instruction_sha256,
@@ -175,7 +180,7 @@ def record_dispatch(
                 dispatched_at, status,
                 dispatch_mode, finding_slugs_json, skills, tier,
                 vuln_classes, identity
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 engagement.id,
@@ -187,6 +192,9 @@ def record_dispatch(
                 actual_model,
                 requested_reasoning,
                 actual_reasoning,
+                launcher_effective_model,
+                launcher_effective_reasoning,
+                launcher_effective_source,
                 client_name,
                 requested_client,
                 launcher_effective_client,

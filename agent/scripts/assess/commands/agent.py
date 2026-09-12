@@ -824,6 +824,11 @@ def _dispatch_prompt(
             *skill_lines,
             f"requested_model: {payload.get('requested_model') or 'unknown'}",
             f"requested_reasoning: {payload.get('requested_reasoning') or 'unknown'}",
+            f"launcher_effective_model: {payload.get('launcher_effective_model') or 'unknown'}",
+            f"launcher_effective_reasoning: {payload.get('launcher_effective_reasoning') or 'unknown'}",
+            f"launcher_effective_source: {payload.get('launcher_effective_source') or 'unknown'}",
+            "provider_observed_model: unknown",
+            "provider_observed_reasoning: unknown",
             *customer_lines,
             f"depth expectation: {prompt_context['depth_expectation']}",
             f"rate_limit_budget: {rate_budget}",
@@ -943,15 +948,18 @@ def _attach_dispatch_provenance(payload: dict, cfg) -> list[str]:
         agent_role=str(payload.get("agent_role") or ""),
     )
     # These fields describe installed bytes observed by this process. A JSON
-    # payload must not be able to self-attest different provenance. Provider-
-    # observed model identity belongs to the backend/runtime boundary, so remove
-    # any caller value instead of sending forbidden self-attestation fields.
+    # payload must not be able to self-attest different provenance. Runtime
+    # identity belongs to trusted launcher/provider integrations, so omit those
+    # fields from this public request instead of sending caller-controlled data.
     payload.pop("actual_model", None)
     payload.pop("actual_reasoning", None)
     payload.update(identity)
+    payload.pop("launcher_effective_model", None)
+    payload.pop("launcher_effective_reasoning", None)
+    payload.pop("launcher_effective_source", None)
     warnings.append(
-        "provider-observed model identity and reasoning are unavailable; "
-        "the backend records actual values as unknown"
+        "launcher-effective model and reasoning are unavailable; "
+        "provider-observed model and reasoning are unknown"
     )
     return warnings
 

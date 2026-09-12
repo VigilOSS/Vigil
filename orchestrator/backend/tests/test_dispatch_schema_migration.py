@@ -121,6 +121,9 @@ def test_dispatch_migration_preserves_history_and_cuts_over_schema(
         "requested_client",
         "launcher_effective_client",
         "provider_observed_client",
+        "launcher_effective_model",
+        "launcher_effective_reasoning",
+        "launcher_effective_source",
         "source_revision",
         "operator_instruction_path",
         "operator_instruction_sha256",
@@ -135,7 +138,8 @@ def test_dispatch_migration_preserves_history_and_cuts_over_schema(
             SELECT requested_model, actual_model, requested_reasoning,
                    client_name, source_revision, instruction_identity_status,
                    requested_client, launcher_effective_client,
-                   provider_observed_client
+                   provider_observed_client, launcher_effective_model,
+                   launcher_effective_reasoning, launcher_effective_source
             FROM assessment_dispatches WHERE agent_id = 'legacy-agent'
             """
         ).fetchone()
@@ -162,6 +166,9 @@ def test_dispatch_migration_preserves_history_and_cuts_over_schema(
         "unknown",
         "unknown",
         "unknown",
+        None,
+        None,
+        None,
     )
     assert history is not None and history[0] == "legacy-agent"
     preserved = json.loads(history[1])

@@ -409,6 +409,9 @@ def test_terminal_seal_freezes_dispatch_and_instruction_provenance(
         "requested_client": "claude",
         "launcher_effective_client": "codex",
         "provider_observed_client": "opencode",
+        "launcher_effective_model": None,
+        "launcher_effective_reasoning": None,
+        "launcher_effective_source": None,
         "source_revision": "revision-123",
         "operator_instruction_path": "AGENTS.md",
         "operator_instruction_sha256": "a" * 64,
@@ -441,6 +444,9 @@ def test_live_run_projection_preserves_distinct_client_identities(
         "requested_client": "claude",
         "launcher_effective_client": "codex",
         "provider_observed_client": "opencode",
+        "launcher_effective_model": None,
+        "launcher_effective_reasoning": None,
+        "launcher_effective_source": None,
     }
     assert {key: run[key] for key in expected} == expected
 

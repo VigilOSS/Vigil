@@ -170,6 +170,12 @@ def build_dispatch_instruction_identity(
         # No supported provider currently exposes one stable, client-owned signal
         # across every launch context. Unknown is data, not a failure to guess.
         "provider_observed_client": "unknown",
+        # Static role definitions prove only which instructions are installed.
+        # They do not attest that this dispatch was launched or which runtime
+        # arguments the client passed to that specific child invocation.
+        "launcher_effective_model": None,
+        "launcher_effective_reasoning": None,
+        "launcher_effective_source": None,
         "source_revision": source_revision,
         "operator_instruction_path": str(operator_relative),
         "operator_instruction_sha256": operator_digest,

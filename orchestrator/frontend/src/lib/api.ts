@@ -582,6 +582,9 @@ export type AssessmentRun = {
   actual_model?: string;
   requested_reasoning?: string;
   actual_reasoning?: string;
+  launcher_effective_model?: string | null;
+  launcher_effective_reasoning?: string | null;
+  launcher_effective_source?: string | null;
   client_name?: string;
   requested_client?: string;
   launcher_effective_client?: string;

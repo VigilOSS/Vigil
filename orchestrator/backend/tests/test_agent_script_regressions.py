@@ -3394,6 +3394,36 @@ def test_resume_brief_dict_body_still_renders(monkeypatch, tmp_path, capsys):
     assert "## Work Buffer" not in out
 
 
+def test_resume_brief_renders_all_three_dispatch_identity_layers(
+    monkeypatch, tmp_path, capsys
+):
+    body = {
+        "engagement": {"key": "eng"},
+        "dispatches": {
+            "selected_dispatch": {
+                "agent_id": "recon-1",
+                "agent_role": "recon-specialist",
+                "status": "in-progress",
+                "dispatched_at": "2026-09-12T12:00:00Z",
+                "requested_model": "requested-model",
+                "requested_reasoning": "xhigh",
+                "launcher_effective_model": None,
+                "launcher_effective_reasoning": None,
+                "launcher_effective_source": None,
+                "actual_model": "unknown",
+                "actual_reasoning": "unknown",
+            }
+        },
+    }
+
+    _run_resume_brief(monkeypatch, tmp_path, body, as_json=False)
+
+    out = capsys.readouterr().out
+    assert "requested: model=requested-model reasoning=xhigh" in out
+    assert "launcher-effective: model=unknown reasoning=unknown source=unknown" in out
+    assert "provider-observed: model=unknown reasoning=unknown" in out
+
+
 def test_resume_brief_renders_surfaces_and_work_buffer(monkeypatch, tmp_path, capsys):
     body = {
         "engagement": {"key": "eng"},

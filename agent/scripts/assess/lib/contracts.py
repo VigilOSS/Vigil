@@ -213,10 +213,14 @@ class SpecialistDispatchContract:
     Aligns with the Specialist Dispatch Contract table in ``agent/operator-core.md``.
     Use ``validate_specialist_dispatch_contract`` to lint a parsed JSON payload.
 
-    The public write contract accepts ``requested_model`` / ``requested_reasoning``.
-    Provider-observed ``actual_model`` / ``actual_reasoning`` remain ``unknown``
-    until a trusted integration can supply them; dispatch callers cannot self-attest
-    those values. Legacy aliases ``model`` / ``reasoning`` are rejected.
+    The public operator contract accepts ``requested_model`` /
+    ``requested_reasoning``. Launcher-effective model/reasoning remain
+    unavailable until a trusted launcher/session integration attests a specific
+    child invocation; static role definitions are not launch evidence.
+    Provider-observed ``actual_model`` / ``actual_reasoning`` likewise remain
+    ``unknown`` until a trusted integration can supply them. Dispatch callers
+    cannot self-attest either layer. Legacy aliases ``model`` / ``reasoning``
+    are rejected.
     """
 
     role: str

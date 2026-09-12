@@ -1,6 +1,6 @@
 # ADR 0030 — Model identity signals remain distinct
 
-- Status: Accepted — partially implemented outside the benchmark harness
+- Status: Accepted
 - Date: 2026-09-12
 
 ## Context
@@ -26,9 +26,13 @@ pricing fallback is never provider identity. Aggregates preserve disagreement
 instead of selecting a convenient label.
 
 The benchmark manifest and supported session telemetry implement all three model
-layers. Ordinary dispatches preserve requested model/reasoning and keep provider
-observation unknown, but do not yet persist a separate launcher-effective
-model/reasoning value; that general dispatch cutover remains pending.
+layers. Ordinary dispatches persist nullable launcher-effective model, reasoning,
+and source fields, but no current ordinary launcher/session integration attests
+a specific child invocation. Those values therefore remain unavailable for all
+ordinary clients. Static OpenCode agent definitions, project configuration, and
+Goose recipes are configuration inputs, not evidence that a child actually ran
+with them. Provider observation remains unknown until an attributable client- or
+provider-owned session record exists.
 
 ## Consequences
 

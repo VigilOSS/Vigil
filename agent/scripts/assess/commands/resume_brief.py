@@ -305,6 +305,18 @@ def _render_markdown(brief: dict) -> str:
             f"- agent_id: {selected.get('agent_id')} role={selected.get('agent_role')} "
             f"status={selected.get('status')} dispatched_at={selected.get('dispatched_at')}"
         )
+        lines.extend(
+            [
+                f"- requested: model={selected.get('requested_model') or 'unknown'} "
+                f"reasoning={selected.get('requested_reasoning') or 'unknown'}",
+                "- launcher-effective: "
+                f"model={selected.get('launcher_effective_model') or 'unknown'} "
+                f"reasoning={selected.get('launcher_effective_reasoning') or 'unknown'} "
+                f"source={selected.get('launcher_effective_source') or 'unknown'}",
+                f"- provider-observed: model={selected.get('actual_model') or 'unknown'} "
+                f"reasoning={selected.get('actual_reasoning') or 'unknown'}",
+            ]
+        )
         if selected.get("task"):
             lines.append(f"- task: {_trim(str(selected.get('task') or ''), 200)}")
         if selected.get("finding_slugs"):
