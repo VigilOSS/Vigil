@@ -12,7 +12,7 @@ coverage, explicit authorization, and trustworthy evidence.
    target-specific exploit material.
 4. Use Jujutsu in this colocated repository; do not create commits or branches with raw Git.
 
-For a public clone, initialize Jujutsu's colocated metadata before making changes:
+For a fresh clone, initialize Jujutsu's colocated metadata before making changes:
 
 ```bash
 git clone https://github.com/vigil-oss/vigil.git

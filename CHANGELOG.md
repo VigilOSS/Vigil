@@ -9,7 +9,7 @@ have.
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-09-12
+## [1.0.0] - 2026-09-12
 
 ### Added
 
@@ -22,9 +22,9 @@ have.
   legacy authorless records have a one-time audited binding command. Dispatches keep requested,
   launcher-effective, and provider-observed client facts separate, with the unavailable provider
   observation represented as `unknown` rather than guessed from model variables.
-- **Public-source release foundations.** Apache-2.0 licensing, security/contribution/community
+- **Release-quality source foundations.** Apache-2.0 licensing, security/contribution/community
   policy, package metadata, synthetic methodology/fixtures, and dependency-license evidence are in
-  place. Destructive history rewriting and public cutover remain owner-only gates.
+  place. Destructive history rewriting and the private release cutover remain owner-only gates.
 - **Bounded parser and million-file qualification.** Exact structural parsers now run in a
   resource-capped child process with typed failure outcomes and complete streaming fallback. A
   virtual million-file regression drives production listing through interrupted and complete

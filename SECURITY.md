@@ -22,7 +22,7 @@ is implied.
 
 ## Supported versions
 
-Until tagged public releases are available, only the current default branch is supported. Historical
+Until tagged releases are available, only the current default branch is supported. Historical
 commits, private forks, modified runtime images, and third-party distributions are not covered by
 this policy.
 

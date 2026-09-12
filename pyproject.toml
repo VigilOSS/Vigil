@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vigil"
-version = "0.3.0"
+version = "1.0.0"
 description = "Universal CLI for Vigil installs, engagements, runtime, and orchestrator operations"
 readme = "README.md"
 license = "Apache-2.0"
@@ -13,7 +13,7 @@ authors = [{name = "Vigil OSS Maintainers"}]
 requires-python = ">=3.11"
 dependencies = []
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
