@@ -159,7 +159,8 @@ are never read as coverage. `depth_satisfied` therefore requires both no evidenc
 ## 5. What actually blocks (vs advises)
 
 Almost everything is advisory/WARN-first. The **only** hard, process-exiting gates live in
-`transition_phase.py`, escapable only via `--force --reason` (which records an override decision):
+`transition_phase.py`, escapable via `--force` (an optional `--reason` is retained in the recorded
+override decision):
 
 - **`missing_variant_pass`** — every confirmed critical/high finding needs a completed
   `variant-rotation` VA dispatch naming it. Gates `verify → exploit`.
@@ -169,7 +170,7 @@ Almost everything is advisory/WARN-first. The **only** hard, process-exiting gat
   Gates `report/complete`.
 - **`terminal_depth_block`** — the one hard block from the depth harness, split into two blocker `kind`s
   from the same call (`_depth_backstop_blockers`), both `severity="block"`, both cleared by the same
-  `depth_deferral`/`--force --reason` valves:
+  `depth_deferral`/`--force` valves (with an optional recorded `--reason`):
   - `depth_unsatisfied_units` (`block_grain="family"`, the historical block) — fires when an app-unit is
     high-confidence-or-decisive **and** unsatisfied **and** untouched **and** undeferred.
   - `depth_uncovered_classes` (`block_grain="class"`, ADR 0012) — fires when a high-confidence-or-decisive
@@ -348,7 +349,7 @@ recon/discovery tools  ──►  classify_from_fields (inline, client-side, unc
           two blocker kinds, same call: depth_unsatisfied_units (family — untouched, historical) OR
           depth_uncovered_classes (class — BLOCK_HIGH class still uncovered, fires even if "touched" /
           family-satisfied; ADR 0012, decisive units only)
-                                                              escape: depth_deferral / --force --reason
+                                                              escape: depth_deferral / --force [--reason ...]
 
 phase_readiness() assembles coverage_readiness + per_host + depth_ledger + report_readiness + intel
         │                                                              │

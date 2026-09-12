@@ -32,9 +32,9 @@ tools/analysis-state/
 
 # Preserve the synthetic classifier contract, not the real-target labeling
 # corpus used to derive it.
-docs/research/classify-surface-2026-06/*
-!docs/research/classify-surface-2026-06/README.md
-!docs/research/classify-surface-2026-06/IMPLEMENTATION-SPEC.md
+docs/plans/research/classify-surface-2026-06/*
+!docs/plans/research/classify-surface-2026-06/README.md
+!docs/plans/research/classify-surface-2026-06/IMPLEMENTATION-SPEC.md
 CLAUDE-REVIEW.md
 CODEX-FINDINGS.md
 docs/plans/_session-handoff-*.md

@@ -7668,6 +7668,26 @@ def test_transition_report_depth_force_reason_proceeds_and_records(monkeypatch, 
                for b in decisions[0]["payload"]["overridden_blockers"])
 
 
+def test_transition_report_force_without_reason_proceeds_and_records(monkeypatch, tmp_path):
+    module = _load_assess_module(
+        "tp_depth_force_reason_optional",
+        "agent/scripts/assess/commands/transition_phase.py",
+    )
+    eng, decisions = _setup_transition_env(
+        monkeypatch,
+        module,
+        tmp_path,
+        scope={"engagement_type": "web", "current_phase": "exploit"},
+        terminal_block=_terminal_block_payload(blocking=[_BLOCKING_UNIT]),
+    )
+
+    module.run(_transition_args(eng, "report", force=True))
+
+    assert decisions[0]["kind"] == "forced_transition_override"
+    assert decisions[0]["payload"]["reason"] == "(no reason given; --force)"
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "report"
+
+
 # ---------------------------------------------------------------------------
 # Coverage-grain unbundle (ADR 0012): the CLASS-grain terminal block. A
 # decisive/high-confidence unit with `block_grain="class"` + uncovered_classes
