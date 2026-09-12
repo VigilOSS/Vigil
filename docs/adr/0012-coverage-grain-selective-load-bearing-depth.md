@@ -29,8 +29,9 @@ on the same discontinuity.
 
 ## Decision
 
-**Unbundle (a) from (b). Keep (a) and ADR 0011's route-count-gate rejection exactly as they stand. Make
-the already-computed per-class signal selectively load-bearing — narrowly, for decisive units only.**
+**Unbundle (a) from (b). Keep (a) and ADR 0011's rejection of per-route obligations exactly as they
+stand. Make the already-computed per-class signal selectively load-bearing — narrowly, for decisive
+units only.**
 
 1. **Scope: decisive units only.** The one existing hard block (`terminal_depth_block`, feeding
    `transition_phase.py`'s `_depth_backstop_blockers`) is extended with a second grain, not duplicated
@@ -43,17 +44,20 @@ the already-computed per-class signal selectively load-bearing — narrowly, for
    catches the single-class blind spot the family collapse leaves open (a sibling-class probe, e.g. one
    `ssti` probe, marks the whole `injection` family covered while a `sqli`-typed coverage-item was never
    demanded), so it can block even a unit that looks family-satisfied or merely touched. Both grains are
-   `severity="block"` on the same terminal edge, cleared by the same `depth_deferral`/`--force --reason`
-   valves. Every other unit (non-decisive, non-high-confidence) is unaffected — it never reaches either
+   `severity="block"` on the same terminal edge, cleared by the same `depth_deferral`/`--force`
+   valves. A force override is audited; a supplied reason is retained, while an invocation without a
+   reason is recorded explicitly as having no reason. Every other unit (non-decisive,
+   non-high-confidence) is unaffected — it never reaches either
    grain and keeps today's family-level behavior and the touched→WARN downgrade, unconditionally.
 2. **Every existing guard stays intact.** "Covered" still requires a whitelisted `result_status`
    (`tested`/`signal`) or an evidence-bearing coverage-item; `status="completed"` alone never counts.
    `BLOCK_WARN` families (`disclosure`, `client-side`, `business-logic`, `protocol`) never enter the hard
-   set alone. `depth_deferral` (with reason) and `--force --reason` remain the escape valves, unchanged.
+   set alone. `depth_deferral` (with reason) and `--force` remain the escape valves. A reason should be
+   supplied for a force override, but the current CLI does not require one.
    One gate, extended — not a second, parallel one.
-3. **ADR 0011's route-count-gate rejection stands.** A gate keyed on "≥N routes uncovered" is a different,
-   still-gameable shape (route tallying is trivially gamed by marking routes covered). Nothing here
-   reopens that; this decision operates per-class on signal already proven durable, at the narrowest
+3. **ADR 0011's rejection of per-route obligations stands.** Route count may classify a host as a real
+   application for the separate host-verdict closeout rule, but it never creates one coverage obligation
+   per route. This decision operates per-class on signal already proven durable, at the narrowest
    possible scope.
 4. **Headers: capture + the same class-gate, still no per-name coverage-items.** `header_schema` is now
    populated at the two paths that used to drop it (`ingest_endpoints.py:667`, `proxy_addon.py:1013`),
@@ -68,6 +72,15 @@ the already-computed per-class signal selectively load-bearing — narrowly, for
    `signal_classes_uncovered` renders in the DEFAULT `check-phase-readiness` text, not only `--json`. The
    posture is named honestly — a *deferred-terminal* obligation, continuously visible from phase 4 on —
    not an "advisory" signal that silently turns terminal at the exit.
+
+6. **Exact enforcement boundary.** This depth backstop is web-only and is enforced by
+   `vigil assess transition-phase report` and `vigil assess transition-phase complete`; a forward jump
+   that crosses those terminal phases runs the same preconditions. An ongoing engagement may preview the
+   obligations without being stopped until it requests terminal progression. The depth backstop is not
+   consulted by HTML report export or by per-finding submission export. Those surfaces retain their own
+   readiness and proof contracts, including ADR 0011's host-verdict requirement for final web report
+   export. Code engagements use a separate code-readiness/completion gate, and unresolved durable code
+   debt cannot be forced through `transition-phase --track code complete`.
 
 **Why this isn't re-litigating ADR 0001:** nothing here introduces a new category of signal.
 `signal_classes_uncovered` already existed, already read only durable structured state, and was already
@@ -128,8 +141,9 @@ transition gate) WHAT is still uncovered, never HOW to cover it.
 
 - **Unbundles ADR 0001**: keeps rule (a) intact; narrows rule (b) from "always coarse" to "coarse by
   default, class-level for decisive units on `BLOCK_HIGH` classes."
-- **Reaffirms ADR 0011 decision #1** (the route-count gate stays rejected) — a different gate shape,
-  operating per-class on already-durable signal rather than a route tally.
+- **Reaffirms ADR 0011's per-route boundary** — route count can classify a real-application host, but
+  coverage depth operates per-class on already-durable signal rather than requiring every route to be
+  tested.
 - **Cites ADR 0010 historically** for selective fail-closed enforcement on a
   narrow, high-stakes, already-durable signal; ADR 0010's outbound gate is no
   longer active.

@@ -16,7 +16,7 @@ prose, faithful evidence preservation becomes an instruction-injection path.
 This affects offensive and blue-team workflows alike.
 
 The public research synthesis requires summaries to
-[preserve source evidence](../plans/research-operator-robustness/agent-memory-main-report.md#preserve-source-evidence)
+[preserve source evidence](../plans/research/operator-and-product-reliability/agent-memory-main-report.md#preserve-source-evidence)
 and treats target-derived content as evidence rather than authority.
 OWASP separately documents agent-memory poisoning and defensive controls
 ([Agent Memory Guard](https://owasp.org/www-project-agent-memory-guard/)).

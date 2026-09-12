@@ -13,7 +13,7 @@ engagement creates a competing authority and undetectable drift.
 Prompt size is also a correctness constraint: a large prompt can be partially
 delivered without an error, and unfocused standing context competes with the
 instructions needed for the current task. The public research synthesis therefore
-uses a [bounded index with focused records](../plans/research-operator-robustness/agent-memory-main-report.md#bounded-index-focused-records) rather than an unbounded repository overview.
+uses a [bounded index with focused records](../plans/research/operator-and-product-reliability/agent-memory-main-report.md#bounded-index-focused-records) rather than an unbounded repository overview.
 
 ## Decision
 

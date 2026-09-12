@@ -11,7 +11,7 @@ sources and introduce another reconciliation problem. The memory review also
 found that bad memory persisted in 84.2% of cases, selective repair succeeded
 only 56.1%, and deterministic deletion performed poorly on changed identifiers
 ([MemSecBench](https://arxiv.org/html/2607.27080v1)). The public design synthesis therefore treats
-[negative knowledge as retryable evidence](../plans/research-operator-robustness/agent-memory-main-report.md#negative-knowledge-needs-an-expiry-path), not permanent authority.
+[negative knowledge as retryable evidence](../plans/research/operator-and-product-reliability/agent-memory-main-report.md#negative-knowledge-needs-an-expiry-path), not permanent authority.
 
 Human practice supports keeping interpretation attributable: the redteam.guide
 operator-log guidance states that only the operator can record how an action was
