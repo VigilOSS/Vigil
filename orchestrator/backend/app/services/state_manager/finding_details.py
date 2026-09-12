@@ -323,7 +323,7 @@ FINDING_DETAIL_CORE_PROPERTIES: dict[str, dict[str, Any]] = {
     },
     "replies": {
         "type": "array",
-        "description": "Append-only thread of OUTGOING replies to the program on this submitted finding (Bugcrowd comment / HackerOne activity reply / direct follow-up). Written by `vigil assess record-reply` via read-modify-write and re-rendered by `export reply`; never hand-edited (a shallow details merge would clobber the array).",
+        "description": "Append-only thread of OUTGOING replies to the program on this submitted finding (Bugcrowd comment / HackerOne activity reply / direct follow-up). Drafts are written by `vigil assess record-reply` via read-modify-write and rendered by `export reply`; sent replies export their separate immutable byte record and are never rerendered from this authored thread.",
         "items": {
             "type": "object",
             "additionalProperties": False,
@@ -348,7 +348,7 @@ FINDING_DETAIL_CORE_PROPERTIES: dict[str, dict[str, Any]] = {
                 },
                 "body": {
                     "type": "string",
-                    "description": "Authored reply prose — exactly what is sent. The ONLY pasteable block in the rendered reply.",
+                    "description": "Editable authored reply prose used by the exact-byte renderer at send time. After send, the immutable byte record — not this field — is the historical outbound representation.",
                 },
                 "new_evidence": {
                     "type": "string",
@@ -361,7 +361,7 @@ FINDING_DETAIL_CORE_PROPERTIES: dict[str, dict[str, Any]] = {
                 "sent_status": {
                     "type": "string",
                     "enum": ["draft", "sent"],
-                    "description": "Operator-marked send state. 'sent' is set only via `record-reply --sent`, never inferred.",
+                    "description": "Operator-marked send state. 'sent' is set only by `record-reply --sent` through the atomic sent-reply byte-capture endpoint, never inferred or accepted through a generic finding update.",
                 },
                 "created_at": {
                     "type": "string",
@@ -664,6 +664,11 @@ def _validate_reply_versions(
         value, path=path, status_code=status.HTTP_400_BAD_REQUEST
     )
     existing_rows = existing_value if isinstance(existing_value, list) else []
+    existing_by_seq = {
+        row.get("seq"): row
+        for row in existing_rows
+        if isinstance(row, dict) and type(row.get("seq")) is int
+    }
     item_schema = FINDING_DETAIL_PROPERTIES["replies"]["items"]
     prior_by_seq: dict[int, dict[str, Any]] = {}
     for index, row in enumerate(rows):
@@ -680,6 +685,17 @@ def _validate_reply_versions(
             _invalid(row_path, "sent replies require a nonempty sent_at")
         if sent_status == "draft" and sent_at is not None:
             _invalid(row_path, "draft replies require sent_at=null")
+        existing_row = existing_by_seq.get(row["seq"])
+        if sent_status == "sent" and (
+            existing_row is None or existing_row.get("sent_status") != "sent"
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"{row_path} must use the sent-reply byte capture endpoint; "
+                    "generic finding writes cannot mark a reply sent"
+                ),
+            )
         has_pointer = "corrects_seq" in row
         has_event = "event_type" in row
         if has_pointer != has_event or (has_event and row["event_type"] != "correction"):

@@ -464,7 +464,7 @@
         },
         "replies": {
           "type": "array",
-          "description": "Append-only thread of OUTGOING replies to the program on this submitted finding (Bugcrowd comment / HackerOne activity reply / direct follow-up). Written by `vigil assess record-reply` via read-modify-write and re-rendered by `export reply`; never hand-edited (a shallow details merge would clobber the array).",
+          "description": "Append-only thread of OUTGOING replies to the program on this submitted finding (Bugcrowd comment / HackerOne activity reply / direct follow-up). Drafts are written by `vigil assess record-reply` via read-modify-write and rendered by `export reply`; sent replies export their separate immutable byte record and are never rerendered from this authored thread.",
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -496,7 +496,7 @@
               },
               "body": {
                 "type": "string",
-                "description": "Authored reply prose — exactly what is sent. The ONLY pasteable block in the rendered reply."
+                "description": "Editable authored reply prose used by the exact-byte renderer at send time. After send, the immutable byte record — not this field — is the historical outbound representation."
               },
               "new_evidence": {
                 "type": "string",
@@ -512,7 +512,7 @@
                   "draft",
                   "sent"
                 ],
-                "description": "Operator-marked send state. 'sent' is set only via `record-reply --sent`, never inferred."
+                "description": "Operator-marked send state. 'sent' is set only by `record-reply --sent` through the atomic sent-reply byte-capture endpoint, never inferred or accepted through a generic finding update."
               },
               "created_at": {
                 "type": "string",

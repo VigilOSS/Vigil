@@ -21,6 +21,7 @@ client, pinning the behaviour the plan locks down:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 
 import pytest
@@ -43,11 +44,20 @@ class _Cfg:
 class _FakeClient:
     """Routes GETs to canned payloads; records every GET/POST/PATCH endpoint."""
 
-    def __init__(self, finding: dict, *, links=None, command_runs=None) -> None:
+    def __init__(
+        self,
+        finding: dict,
+        *,
+        links=None,
+        command_runs=None,
+        sent_records=None,
+    ) -> None:
         self._finding = finding
         self._links = links or []
         self._command_runs = command_runs or {}
+        self._sent_records = sent_records or {}
         self.gets: list[str] = []
+        self.binary_gets: list[str] = []
         self.posts: list[tuple[str, dict]] = []
         self.patches: list[tuple[str, dict]] = []
 
@@ -65,7 +75,21 @@ class _FakeClient:
             if run_id not in self._command_runs:
                 raise AssessError(f"HTTP 404: command-run {run_id} not found")
             return self._command_runs[run_id]
+        if endpoint.startswith("submissions/") and endpoint.endswith("/sent"):
+            seq = int(endpoint.split("/")[-2])
+            record = self._sent_records.get(seq)
+            if record is None:
+                return {"reply_sequence": seq, "availability": "legacy_unavailable"}
+            return record[0]
         raise AssessError(f"unexpected GET {endpoint}")
+
+    def get_bytes(self, endpoint: str) -> bytes:
+        self.binary_gets.append(endpoint)
+        seq = int(endpoint.split("/")[-3])
+        record = self._sent_records.get(seq)
+        if record is None:
+            raise AssessError("HTTP 409: legacy sent reply bytes are unavailable")
+        return record[1]
 
     def post(self, endpoint: str, payload: dict) -> dict:
         self.posts.append((endpoint, payload))
@@ -648,3 +672,66 @@ def test_final_reply_renders_when_the_body_is_clean(tmp_path, monkeypatch, capsy
     assert out["mode"] == "final"
     assert out["hygiene_warnings"] == []
     assert _reply_path(tmp_path, 1).exists()
+
+
+def test_sent_reply_downloads_verified_frozen_bytes_without_rerendering(
+    tmp_path, monkeypatch, capsys
+):
+    frozen = b"Exact bytes reviewed and sent.\n"
+    metadata = {
+        "id": 4,
+        "reply_sequence": 1,
+        "availability": "captured",
+        "size_bytes": len(frozen),
+        "sha256": hashlib.sha256(frozen).hexdigest(),
+        "renderer_identity": "vigil-assess/export-reply",
+        "renderer_version": "1",
+        "created_at": "2026-09-12T12:01:00Z",
+        "idempotent_replay": False,
+    }
+    entry = _reply(
+        1,
+        body="Mutable authored content must not replace frozen bytes.",
+        ask="q1",
+        sent=True,
+        sent_at="2026-09-12T12:01:00Z",
+    )
+    fake = _FakeClient(
+        _finding(replies=[entry]), sent_records={1: (metadata, frozen)}
+    )
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["reply", "VA-047", "--seq", "1", "--json"], str(tmp_path))
+
+    export_reply.run(args)
+    summary = json.loads(capsys.readouterr().out)
+
+    assert _reply_path(tmp_path, 1).read_bytes() == frozen
+    assert b"Mutable authored content" not in _reply_path(tmp_path, 1).read_bytes()
+    assert b"THREAD HISTORY" not in _reply_path(tmp_path, 1).read_bytes()
+    assert fake.binary_gets == [
+        "submissions/VA-047/replies/1/sent/download"
+    ]
+    assert summary["mode"] == "sent"
+    assert summary["sha256"] == metadata["sha256"]
+    assert summary["renderer_identity"] == "vigil-assess/export-reply"
+
+
+def test_legacy_sent_reply_is_unavailable_instead_of_rerendered(
+    tmp_path, monkeypatch
+):
+    entry = _reply(
+        1,
+        body="Authored text is not proof of historical bytes.",
+        ask="q1",
+        sent=True,
+        sent_at="2026-08-01T00:00:00Z",
+    )
+    fake = _FakeClient(_finding(replies=[entry]))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["reply", "VA-047", "--seq", "1"], str(tmp_path))
+
+    with pytest.raises(AssessError, match="legacy.*unavailable"):
+        export_reply.run(args)
+
+    assert not _reply_path(tmp_path, 1).exists()
+    assert fake.binary_gets == []

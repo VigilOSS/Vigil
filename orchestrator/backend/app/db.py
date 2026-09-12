@@ -3261,6 +3261,56 @@ def _create_submission_version_tables(connection: sqlite3.Connection) -> None:
     )
 
 
+def _create_sent_reply_version_tables(connection: sqlite3.Connection) -> None:
+    """Create immutable exact-byte records for operator-marked sent replies.
+
+    Existing sent reply entries live inside finding ``details_json`` and are left
+    untouched.  The absence of a row here is therefore an explicit legacy state,
+    never an invitation to reconstruct bytes from mutable authored content.
+    """
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assessment_sent_reply_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+            finding_id INTEGER NOT NULL REFERENCES assessment_findings(id) ON DELETE RESTRICT,
+            reply_sequence INTEGER NOT NULL CHECK(reply_sequence >= 1),
+            body_bytes BLOB NOT NULL,
+            size_bytes INTEGER NOT NULL CHECK(size_bytes >= 1),
+            sha256 TEXT NOT NULL CHECK(length(sha256) = 64),
+            renderer_identity TEXT NOT NULL CHECK(length(renderer_identity) >= 1),
+            renderer_version TEXT NOT NULL CHECK(length(renderer_version) >= 1),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(engagement_id, finding_id, reply_sequence)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assessment_sent_reply_versions_finding "
+        "ON assessment_sent_reply_versions(engagement_id, finding_id, reply_sequence)"
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS assessment_sent_reply_versions_immutable_update
+        BEFORE UPDATE ON assessment_sent_reply_versions
+        BEGIN
+            SELECT RAISE(ABORT, 'sent reply versions are immutable');
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS assessment_sent_reply_versions_immutable_delete
+        BEFORE DELETE ON assessment_sent_reply_versions
+        WHEN EXISTS (SELECT 1 FROM engagements WHERE id = OLD.engagement_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'sent reply versions are immutable');
+        END
+        """
+    )
+
+
 def _create_jobs_table(connection: sqlite3.Connection) -> None:
     # assessment_jobs tracks long-running dtach-supervised workers spawned
     # by `vigil assess kali job start`. parent_command_run_id links the
@@ -5868,6 +5918,7 @@ def init_db() -> None:
         _create_command_runs_table_and_fts(connection)
         _create_artifacts_table_and_fts(connection)
         _create_submission_version_tables(connection)
+        _create_sent_reply_version_tables(connection)
         _create_http_flow_tables(connection)
         _create_jobs_table(connection)
         _create_code_analysis_tables(connection)
@@ -5967,7 +6018,14 @@ def init_db() -> None:
 _READINESS_SUBSYSTEM_TABLES: tuple[tuple[str, frozenset[str]], ...] = (
     (
         "assessment_schema",
-        frozenset({"engagements", "assessment_dispatches", "assessment_findings"}),
+        frozenset(
+            {
+                "engagements",
+                "assessment_dispatches",
+                "assessment_findings",
+                "assessment_sent_reply_versions",
+            }
+        ),
     ),
     (
         "code_analysis_schema",

@@ -8,18 +8,25 @@ client, pinning the array-safe write path the plan locks down:
     merge would otherwise replace the whole key);
   * `--seq N` on an existing entry updates it IN PLACE; a new reply defaults to
     max(seq)+1;
-  * `--sent` operator-marks the reply (`sent_status`/`sent_at`) and NEVER writes
-    `submission_status`; `--set-submission-status` is the one explicit opt-in that
-    DOES; creating a reply requires `--in-response-to` + a body.
+  * `--sent` atomically captures the exact outbound bytes and moves the draft to
+    operator-marked sent state; it NEVER writes `submission_status` unless
+    `--set-submission-status` explicitly opts in; creating a reply requires
+    `--in-response-to` + a body.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 
 import pytest
 
 from assess.commands import record_reply
 from assess.lib.client import AssessError
+from assess.lib.reply_render import (
+    REPLY_RENDERER_IDENTITY,
+    REPLY_RENDERER_VERSION,
+    render_outbound_reply_bytes,
+)
 
 _NOW = "2026-07-17T12:00:00Z"
 
@@ -35,7 +42,9 @@ class _FakeClient:
     def __init__(self, finding: dict) -> None:
         self._finding = finding
         self.gets: list[str] = []
+        self.posts: list[tuple[str, dict]] = []
         self.patches: list[tuple[str, dict]] = []
+        self.sent_bytes: dict[int, bytes] = {}
 
     def get(self, endpoint: str):
         self.gets.append(endpoint)
@@ -48,11 +57,42 @@ class _FakeClient:
 
     def patch(self, endpoint: str, payload: dict, **kwargs) -> dict:
         self.patches.append((endpoint, payload))
-        return {
-            "finding": {
-                "slug": endpoint.split("/", 1)[-1],
-                **payload,
+        if isinstance(payload.get("details"), dict):
+            self._finding["details"] = {
+                **self._finding.get("details", {}),
+                **payload["details"],
             }
+        if "submission_status" in payload:
+            self._finding["submission_status"] = payload["submission_status"]
+        self._finding["row_version"] = int(self._finding.get("row_version", 0)) + 1
+        return {
+            "finding": dict(self._finding)
+        }
+
+    def post(self, endpoint: str, payload: dict) -> dict:
+        self.posts.append((endpoint, payload))
+        seq = int(endpoint.split("/")[-2])
+        replies = list(self._finding["details"]["replies"])
+        entry = next(row for row in replies if row["seq"] == seq)
+        outbound = render_outbound_reply_bytes(entry)
+        self.sent_bytes[seq] = outbound
+        entry["sent_status"] = "sent"
+        entry["sent_at"] = _NOW
+        self._finding["details"]["replies"] = replies
+        self._finding["row_version"] = int(self._finding.get("row_version", 0)) + 1
+        return {
+            "finding": dict(self._finding),
+            "sent_reply": {
+                "id": 1,
+                "reply_sequence": seq,
+                "availability": "captured",
+                "size_bytes": len(outbound),
+                "sha256": hashlib.sha256(outbound).hexdigest(),
+                "renderer_identity": REPLY_RENDERER_IDENTITY,
+                "renderer_version": REPLY_RENDERER_VERSION,
+                "created_at": _NOW,
+                "idempotent_replay": False,
+            },
         }
 
     def __enter__(self) -> "_FakeClient":
@@ -306,11 +346,11 @@ def test_sent_marks_entry_and_never_writes_submission_status(tmp_path, monkeypat
     record_reply.run(args)
     capsys.readouterr()
 
-    endpoint, payload = fake.patches[0]
-    replies = payload["details"]["replies"]
-    assert replies[0]["sent_status"] == "sent"
-    assert replies[0]["sent_at"] == _NOW
-    # HARD INVARIANT: --sent never touches submission_status.
+    assert fake.patches == []
+    endpoint, payload = fake.posts[0]
+    assert endpoint == "submissions/VA-047/replies/1/send"
+    assert fake.sent_bytes[1] == b"answered\n"
+    assert set(payload) == {"expected_row_version", "actor", "reason"}
     assert "submission_status" not in payload
 
 
@@ -326,7 +366,68 @@ def test_set_submission_status_opt_in_writes_it(tmp_path, monkeypatch, capsys):
 
     _endpoint, payload = fake.patches[0]
     assert payload["submission_status"] == "submitted"
-    assert payload["details"]["replies"][0]["sent_status"] == "sent"
+    assert "details" not in payload
+    assert fake.posts[0][0] == "submissions/VA-047/replies/1/send"
+
+
+def test_sent_capture_uses_exact_unmasked_renderer_bytes(
+    tmp_path, monkeypatch, capsys
+):
+    token = "eyJhbGciOiJIUzI1NiJ9.operator-token.signature"
+    entry = _reply(1, body=f"Retested with Bearer {token}.", ask="q1")
+    entry["new_evidence"] = "HTTP 200 returned José's order."
+    fake = _FakeClient(_finding(replies=[entry]))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["record-reply", "VA-047", "--seq", "1", "--sent"], str(tmp_path))
+
+    record_reply.run(args)
+    capsys.readouterr()
+
+    payload = fake.posts[0][1]
+    outbound = fake.sent_bytes[1]
+    assert outbound == (
+        f"Retested with Bearer {token}.\n\n"
+        "**New evidence:**\n\nHTTP 200 returned José's order.\n"
+    ).encode("utf-8")
+    assert b"***" not in outbound and b"[masked]" not in outbound
+    assert not {
+        "body_base64",
+        "size_bytes",
+        "sha256",
+        "renderer_identity",
+        "renderer_version",
+    }.intersection(payload)
+
+
+def test_sent_capture_refuses_hygiene_leak_before_any_write(
+    tmp_path, monkeypatch
+):
+    fake = _FakeClient(
+        _finding(replies=[_reply(1, body="See VA-047 in the internal tracker.", ask="q1")])
+    )
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["record-reply", "VA-047", "--seq", "1", "--sent"], str(tmp_path))
+
+    with pytest.raises(AssessError, match="hygiene warnings remain"):
+        record_reply.run(args)
+
+    assert fake.patches == []
+    assert fake.posts == []
+
+
+@pytest.mark.parametrize("body", ["", "   "])
+def test_sent_capture_refuses_empty_authored_body_before_any_write(
+    tmp_path, monkeypatch, body
+):
+    fake = _FakeClient(_finding(replies=[_reply(1, body=body, ask="q1")]))
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["record-reply", "VA-047", "--seq", "1", "--sent"], str(tmp_path))
+
+    with pytest.raises(AssessError, match="authored body"):
+        record_reply.run(args)
+
+    assert fake.patches == []
+    assert fake.posts == []
 
 
 def test_create_never_writes_submission_status_by_default(tmp_path, monkeypatch, capsys):
@@ -447,7 +548,7 @@ def test_omitting_the_new_evidence_flags_preserves_recorded_values(
     record_reply.run(args)
     capsys.readouterr()
 
-    updated = _patched_replies(fake)[0]
+    updated = fake._finding["details"]["replies"][0]
     assert updated["new_evidence"] == "member B read order 1001"
     assert updated["new_evidence_ref"] == "scans/va-jolt-0725c/proof.txt"
 

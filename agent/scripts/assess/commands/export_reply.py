@@ -1,16 +1,17 @@
-"""vigil assess export-reply — render a reply to the program on a submitted finding.
+"""vigil assess export reply — export a reply on a submitted finding.
 
-Renders ONE outgoing reply (a Bugcrowd comment / HackerOne activity reply / direct
-vendor follow-up) into a pasteable ``reply-<N>.md`` under
-``$ENGAGEMENT_DIR/submissions/<slug>/replies/``. Mirrors the submission-first
-architecture: the finding is the source of truth (its ``details.replies`` thread),
-and the ``.md`` is a disposable render — a re-render loses nothing that was written
-back to the finding (``record-reply``). Like ``export submission``, this command
-assembles and presents but never rewrites authored text: there is no automatic
-credential transformation. Credentials, tokens, PII, and other captured evidence
-remain verbatim in the durable reply entry, so every later render reproduces it.
+Exports ONE outgoing reply (a Bugcrowd comment / HackerOne activity reply / direct
+vendor follow-up) to ``reply-<N>.md``. Drafts are disposable renders of the finding's
+editable ``details.replies`` thread. A sent reply is never rendered again: this command
+downloads the immutable final outbound bytes captured by ``record-reply --sent`` and
+verifies their length and SHA-256 before writing them. Legacy sent rows created before
+byte capture report unavailable rather than reconstructing history from authored text.
 
-A reply is NOT a submission: there is no Title / VRT / CVSS / Summary. The layout is
+Like ``export submission``, this command never rewrites operator data. Credentials,
+tokens, PII, and other captured evidence remain verbatim in draft renders and immutable
+sent-byte downloads.
+
+An editable reply is NOT a submission: there is no Title / VRT / CVSS / Summary. Its layout is
 
     <reply body — leads with the new proof, answers the specific ask>   ← the ONLY
                                                                           pasteable block
@@ -29,9 +30,10 @@ A reply is NOT a submission: there is no Title / VRT / CVSS / Summary. The layou
 The single ``---`` is the never-paste line (the reply analog of export-submission's
 second ``---``): everything below it is reference the operator never pastes.
 
-INVARIANTS (mirrored from export-submission): this is a PURE render — it NEVER PATCHes
-the finding and NEVER writes ``submission_status`` (the durable write path is the
-dedicated ``record-reply`` verb). Internal identifiers (this finding's slug, engagement
+INVARIANTS (mirrored from export-submission): this is a read-only export — it NEVER
+PATCHes the finding and NEVER writes ``submission_status`` (the durable write path is
+the dedicated ``record-reply`` verb). For draft/final-unsent renders, internal identifiers
+(this finding's slug, engagement
 UUIDs, absolute engagement paths, cases.db references) are FLAGGED non-destructively via
 the shared hygiene gate, never rewritten, so the reply-format checklist / blind-triage
 gate strips them deliberately before an external send — and a FINAL (non-``--draft``)
@@ -40,6 +42,7 @@ deliberate diagnostic ``--draft``.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -60,6 +63,7 @@ from assess.lib.finding_render import (
     poc_lines,
 )
 from assess.lib.reply_versions import reply_seq, reply_versions
+from assess.lib.reply_render import outbound_reply_lines
 # ``export-reply`` reuses export-submission's finding-links → command-run resolution
 # so the reply's THREAD HISTORY surfaces the same explicitly-linked, non-retired
 # reproducing runs the submission does (author NEW evidence from them) — one helper, so
@@ -77,9 +81,9 @@ def register(subparsers) -> None:
     p = subparsers.add_parser(
         "reply",
         help=(
-            "Render one reply-N.md (pasteable body + never-paste THREAD HISTORY) for a "
-            "reply to the program on an already-submitted finding. Pure render: never "
-            "PATCHes the finding. Use record-reply to persist the authored reply."
+            "Export one reply-N.md for a reply to the program on an already-submitted "
+            "finding. Drafts render with never-paste THREAD HISTORY; sent replies "
+            "download and verify their frozen bytes. Never PATCHes the finding."
         ),
     )
     p.add_argument("slug", help="Finding slug the reply is on (e.g. VA-047)")
@@ -111,7 +115,10 @@ def register(subparsers) -> None:
         dest="seq",
         type=int,
         default=None,
-        help="Reply seq to render (default: next = max(seq)+1). Pass an existing seq to re-render it.",
+        help=(
+            "Reply seq to export (default: next = max(seq)+1). Existing drafts are "
+            "rendered; existing sent replies are downloaded from frozen byte evidence."
+        ),
     )
     p.add_argument(
         "--draft",
@@ -176,14 +183,7 @@ def _pasteable_lines(entry: dict, draft: bool) -> list[str]:
     reasoning, same conclusion as ``export submission``'s deliberate omission of a
     ``POC:`` line from its paste header.
     """
-    lines: list[str] = []
-    body = nonempty(entry.get("body"))
-    lines += [body or "[NEEDS: reply body]", ""]
-
-    new_evidence = nonempty(entry.get("new_evidence"))
-    if new_evidence:
-        lines += ["**New evidence:**", "", new_evidence, ""]
-    return lines
+    return outbound_reply_lines(entry, draft=draft)
 
 
 def _thread_history_lines(
@@ -313,6 +313,96 @@ def _build_summary(
     }
 
 
+def _register_reply_artifact(
+    client: AssessmentClient,
+    *,
+    reply_rel: str | None,
+    slug: str,
+) -> bool:
+    if reply_rel is None:
+        print(
+            "WARN export-reply: output is outside the engagement dir; "
+            "skipping artifact registration.",
+            file=sys.stderr,
+        )
+        return False
+    try:
+        require_artifact_write_response(
+            client.post(
+                "artifacts",
+                {
+                    "path": reply_rel,
+                    "kind": "reply",
+                    "media_type": "text/markdown",
+                    "producer_agent_id": None,
+                    "producer_agent_role": None,
+                    "producer_command_run_id": None,
+                    "related_finding_slug": slug,
+                },
+            ),
+            artifact_path=reply_rel,
+            operation="register reply artifact",
+        )
+    except AssessError as exc:
+        print(f"WARN export-reply: artifact registration failed: {exc}", file=sys.stderr)
+        return False
+    return True
+
+
+def _read_verified_sent_reply(
+    client: AssessmentClient,
+    *,
+    slug: str,
+    seq: int,
+) -> tuple[dict, bytes]:
+    endpoint = f"submissions/{slug}/replies/{seq}/sent"
+    metadata = client.get(endpoint)
+    if not isinstance(metadata, dict):
+        raise AssessError(
+            f"export-reply: malformed sent-reply metadata for {slug} seq {seq}"
+        )
+    availability = metadata.get("availability")
+    if availability == "legacy_unavailable":
+        raise AssessError(
+            f"export-reply: legacy sent reply bytes are unavailable for {slug} seq {seq}; "
+            "Vigil will not reconstruct them from mutable authored content"
+        )
+    if availability != "captured":
+        raise AssessError(
+            f"export-reply: sent-reply metadata for {slug} seq {seq} has invalid "
+            f"availability {availability!r}"
+        )
+
+    returned_seq = metadata.get("reply_sequence")
+    size_bytes = metadata.get("size_bytes")
+    sha256 = metadata.get("sha256")
+    renderer_identity = metadata.get("renderer_identity")
+    renderer_version = metadata.get("renderer_version")
+    if (
+        type(returned_seq) is not int
+        or returned_seq != seq
+        or type(size_bytes) is not int
+        or size_bytes < 1
+        or not isinstance(sha256, str)
+        or len(sha256) != 64
+        or not isinstance(renderer_identity, str)
+        or not renderer_identity.strip()
+        or not isinstance(renderer_version, str)
+        or not renderer_version.strip()
+    ):
+        raise AssessError(
+            f"export-reply: malformed sent-reply integrity metadata for {slug} seq {seq}"
+        )
+
+    data = client.get_bytes(f"{endpoint}/download")
+    if len(data) != size_bytes or hashlib.sha256(data).hexdigest() != sha256:
+        raise AssessError(
+            f"export-reply: downloaded sent reply failed size/digest verification "
+            f"for {slug} seq {seq}; no file was written"
+        )
+    return metadata, data
+
+
 def run(args) -> None:
     slug = args.slug
     draft = bool(args.draft)
@@ -339,17 +429,18 @@ def run(args) -> None:
 
         existing = next((entry for entry in replies if reply_seq(entry) == seq), None)
         if existing is not None:
-            # Re-render a recorded entry from its durable fields; flags only refine
-            # the ask / threading, never the authored body. Platform is refined only
-            # when --platform is explicit — a bare re-render keeps entry N's own
-            # platform rather than adopting a later reply's.
             entry = dict(existing)
-            if nonempty(args.platform):
-                entry["platform"] = args.platform
-            if nonempty(args.in_response_to):
-                entry["in_response_to"] = args.in_response_to
-            if args.reply_to is not None:
-                entry["reply_to_seq"] = args.reply_to
+            if entry.get("sent_status") != "sent":
+                # Editable drafts render from current authored fields. Flags may
+                # refine the ask/threading, and an explicit platform may refine the
+                # channel. Sent replies take the immutable download path below and
+                # never consume these rendering overrides.
+                if nonempty(args.platform):
+                    entry["platform"] = args.platform
+                if nonempty(args.in_response_to):
+                    entry["in_response_to"] = args.in_response_to
+                if args.reply_to is not None:
+                    entry["reply_to_seq"] = args.reply_to
         else:
             # Scaffold a NEW reply from flags (before record-reply persists it).
             if not nonempty(args.in_response_to):
@@ -368,6 +459,49 @@ def run(args) -> None:
                 "sent_status": "draft",
             }
 
+        reply_md = out_dir / f"reply-{seq}.md"
+        reply_rel = engagement_relative(reply_md, engagement_dir)
+
+        if entry.get("sent_status") == "sent":
+            # A sent export is an evidence read, not a render. The authored finding
+            # entry may have changed or the renderer may have evolved since send;
+            # neither is allowed to alter the bytes represented as externally sent.
+            if reply_md.exists() and not args.overwrite:
+                raise AssessError(
+                    f"export-reply: {reply_rel or reply_md} already exists; "
+                    "pass --overwrite to replace it."
+                )
+            metadata, outbound_bytes = _read_verified_sent_reply(
+                client, slug=slug, seq=seq
+            )
+            out_dir.mkdir(parents=True, exist_ok=True)
+            reply_md.write_bytes(outbound_bytes)
+            artifact_registered = _register_reply_artifact(
+                client, reply_rel=reply_rel, slug=slug
+            )
+            display_path = reply_rel or str(reply_md)
+            summary = {
+                "slug": slug,
+                "platform": nonempty(entry.get("platform")) or platform,
+                "seq": seq,
+                "mode": "sent",
+                "path": display_path,
+                "availability": "captured",
+                "size_bytes": metadata["size_bytes"],
+                "sha256": metadata["sha256"],
+                "renderer_identity": metadata["renderer_identity"],
+                "renderer_version": metadata["renderer_version"],
+                "artifact_registered": artifact_registered,
+            }
+            if args.as_json:
+                print(json.dumps(summary, indent=2, ensure_ascii=False))
+            else:
+                print(
+                    f"Wrote verified sent {summary['platform']} reply (seq {seq}) "
+                    f"for {slug} to {display_path}"
+                )
+            return
+
         # Final mode: refuse to render a reply that has not been authored yet (mirror
         # export-submission's completeness gate). Draft mode always writes, marking the
         # unauthored body with [NEEDS: reply body].
@@ -383,11 +517,9 @@ def run(args) -> None:
                 "with --draft to scaffold a work-in-progress with [NEEDS: ...] markers)."
             )
 
-        reply_md = out_dir / f"reply-{seq}.md"
         linked_runs = _linked_command_runs(client, slug)
         internal_ids = collect_internal_ids(finding, linked_runs)
         prior_entries = _prior_replies(replies, seq)
-        reply_rel = engagement_relative(reply_md, engagement_dir)
 
         # FAITHFUL render — no content rewriting. Render once WITHOUT the hygiene
         # sub-block to scan the real content, then re-render with the resulting
@@ -436,34 +568,9 @@ def run(args) -> None:
         # Register the reply as a finding-linked artifact. NEVER include
         # submission_status: export-reply is a pure render and must never touch the
         # finding's submission state (that is record-reply's explicit opt-in only).
-        artifact_registered = False
-        if reply_rel is not None:
-            try:
-                require_artifact_write_response(
-                    client.post(
-                        "artifacts",
-                        {
-                            "path": reply_rel,
-                            "kind": "reply",
-                            "media_type": "text/markdown",
-                            "producer_agent_id": None,
-                            "producer_agent_role": None,
-                            "producer_command_run_id": None,
-                            "related_finding_slug": slug,
-                        },
-                    ),
-                    artifact_path=reply_rel,
-                    operation="register reply artifact",
-                )
-                artifact_registered = True
-            except AssessError as exc:
-                print(f"WARN export-reply: artifact registration failed: {exc}", file=sys.stderr)
-        else:
-            print(
-                "WARN export-reply: output is outside the engagement dir; "
-                "skipping artifact registration.",
-                file=sys.stderr,
-            )
+        artifact_registered = _register_reply_artifact(
+            client, reply_rel=reply_rel, slug=slug
+        )
 
     for warning in hygiene:
         print(f"WARN export-reply: {warning}", file=sys.stderr)

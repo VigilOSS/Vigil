@@ -266,7 +266,7 @@ class AssessmentClient:
                 pass
             self._conn = None
 
-    def _request(
+    def _request_raw(
         self,
         method: str,
         path: str,
@@ -275,8 +275,8 @@ class AssessmentClient:
         read_timeout: float = 10.0,
         max_retries: int | None = None,
         accept_409: bool = False,
-    ) -> tuple[int, str]:
-        """Execute an HTTP request with retry logic.
+    ) -> tuple[int, bytes]:
+        """Execute an HTTP request with retry logic and preserve response bytes.
 
         ``accept_409`` lets callers treat HTTP 409 as success and receive the
         canonical row payload back. The finalize PATCH on assessment
@@ -294,7 +294,7 @@ class AssessmentClient:
                 conn.timeout = read_timeout
                 conn.request(method, path, body=body, headers=headers)
                 resp = conn.getresponse()
-                resp_body = resp.read().decode("utf-8", errors="replace")
+                resp_body = resp.read()
 
                 if resp.status < 400:
                     return resp.status, resp_body
@@ -309,10 +309,15 @@ class AssessmentClient:
 
                 # Non-retryable error — report it
                 if resp.status == 422:
-                    msg = _format_validation_error(resp_body)
+                    msg = _format_validation_error(
+                        resp_body.decode("utf-8", errors="replace")
+                    )
                     raise AssessError(f"HTTP 422 validation error:\n{msg}")
 
-                raise AssessError(f"HTTP {resp.status}:\n{resp_body}")
+                raise AssessError(
+                    f"HTTP {resp.status}:\n"
+                    f"{resp_body.decode('utf-8', errors='replace')}"
+                )
 
             except AssessError:
                 raise
@@ -327,6 +332,29 @@ class AssessmentClient:
             f"Failed after {retries} attempts: {last_error}\n"
             f"{self._orchestrator_hint()}"
         )
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        body: bytes | None = None,
+        connect_timeout: float = 2.0,
+        read_timeout: float = 10.0,
+        max_retries: int | None = None,
+        accept_409: bool = False,
+    ) -> tuple[int, str]:
+        """Execute a text API request, decoding only after preserving transport bytes."""
+
+        status_code, response_body = self._request_raw(
+            method,
+            path,
+            body=body,
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+            max_retries=max_retries,
+            accept_409=accept_409,
+        )
+        return status_code, response_body.decode("utf-8", errors="replace")
 
     def _orchestrator_hint(self) -> str:
         return (
@@ -395,6 +423,18 @@ class AssessmentClient:
     def get(self, endpoint: str) -> Any:
         """GET /assessment/{endpoint}."""
         return self._get_json(f"{self._assessment_prefix}/{endpoint}")
+
+    def get_bytes(self, endpoint: str) -> bytes:
+        """GET exact transport bytes from an assessment download route.
+
+        Callers own any endpoint-specific integrity check. Sent-reply downloads,
+        for example, are verified by the backend and then again by the exporter.
+        """
+
+        _status, body = self._request_raw(
+            "GET", f"{self._assessment_prefix}/{endpoint}"
+        )
+        return body
 
     def post(self, endpoint: str, payload: dict) -> Any:
         """POST /assessment/{endpoint}."""

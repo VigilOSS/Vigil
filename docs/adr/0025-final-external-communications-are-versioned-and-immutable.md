@@ -1,6 +1,6 @@
 # ADR 0025 — Final external communications are versioned and immutable
 
-- Status: Accepted — partially implemented; a digest-bound sent-reply byte record remains pending
+- Status: Accepted — implemented
 - Date: 2026-09-12
 
 ## Context
@@ -23,10 +23,14 @@ is a new version that explicitly links to the earlier sent version; the original
 remains readable. Marking a record finalized or sent is an operator action, never
 an inference from export or rendering.
 
-Completed submission versions and sent-reply authored-content/correction rules
-are implemented. Sent replies do not yet persist the exact final outbound byte
-sequence and its digest as one immutable record, so that part of this decision
-remains open.
+Completed submission versions and sent replies both implement this boundary. At
+the explicit sent transition, the backend selects the persisted nonempty draft
+inside the write transaction and derives the exact UTF-8 reply bytes itself. It
+stores those bytes with their length, SHA-256, server-owned renderer
+identity/version, and positive reply sequence; callers cannot supply any of
+those integrity claims. Every sent read verifies the stored bytes. Rows sent
+before this record existed remain explicit legacy/unavailable state and are
+never backfilled from mutable authored content.
 
 ## Consequences
 

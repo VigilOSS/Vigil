@@ -29,6 +29,24 @@ def _base() -> str:
     return f"/engagements/{ENGAGEMENT_KEY}/assessment"
 
 
+def _capture_sent_reply(seeded, reply: dict) -> dict:
+    draft = {**reply, "sent_status": "draft", "sent_at": None}
+    stored = seeded.patch(
+        f"{_base()}/findings/VA-001", json={"details": {"replies": [draft]}}
+    )
+    assert stored.status_code == 200, stored.text
+    sent = seeded.post(
+        f"{_base()}/submissions/VA-001/replies/1/send",
+        json={
+            "expected_row_version": stored.json()["finding"]["row_version"],
+            "actor": "report-writer",
+            "reason": "Sent after operator review.",
+        },
+    )
+    assert sent.status_code == 201, sent.text
+    return sent.json()["finding"]
+
+
 @pytest.fixture
 def seeded(client, isolate_settings):
     engagement_dir: Path = isolate_settings["engagements_dir"] / ENGAGEMENT_KEY
@@ -166,10 +184,8 @@ def test_backend_preserves_sent_reply_bytes_and_accepts_linked_correction(seeded
         "sent_at": "2026-09-11T00:01:00Z",
         "author": "report-writer",
     }
-    stored = seeded.patch(
-        f"{_base()}/findings/VA-001", json={"details": {"replies": [sent]}}
-    )
-    assert stored.status_code == 200, stored.text
+    stored = _capture_sent_reply(seeded, sent)
+    sent = stored["details"]["replies"][0]
 
     rewritten = seeded.patch(
         f"{_base()}/findings/VA-001",
@@ -208,18 +224,15 @@ def test_backend_refuses_details_replace_that_drops_a_sent_reply(seeded) -> None
         "sent_at": "2026-09-11T00:01:00Z",
         "author": "report-writer",
     }
-    recorded = seeded.patch(
-        f"{_base()}/findings/VA-001",
-        json={"details": {"replies": [sent]}},
-    )
-    assert recorded.status_code == 200, recorded.text
+    recorded_finding = _capture_sent_reply(seeded, sent)
+    sent = recorded_finding["details"]["replies"][0]
 
     refused = seeded.patch(
         f"{_base()}/findings/VA-001",
         json={
             "details": {"impact": "replacement details"},
             "details_mode": "replace",
-            "expected_row_version": recorded.json()["finding"]["row_version"],
+            "expected_row_version": recorded_finding["row_version"],
         },
     )
 

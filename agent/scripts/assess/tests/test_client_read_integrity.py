@@ -73,6 +73,27 @@ def test_http_error_is_not_reclassified_as_a_json_error(api_read, status):
     connection.request.assert_called_once_with("GET", path, body=None, headers={})
 
 
+def test_binary_read_preserves_response_bytes_exactly(monkeypatch):
+    client = AssessmentClient("http://localhost:8000/orchestrator", "example")
+    connection = Mock(spec=http.client.HTTPConnection)
+    response = Mock(spec=http.client.HTTPResponse)
+    response.status = 200
+    response.read.return_value = b"renderer bytes: \xc3\xa9\n\xff"
+    connection.getresponse.return_value = response
+    monkeypatch.setattr(client, "_get_conn", lambda _: connection)
+
+    assert client.get_bytes("submissions/VA-001/replies/1/sent/download") == (
+        b"renderer bytes: \xc3\xa9\n\xff"
+    )
+    connection.request.assert_called_once_with(
+        "GET",
+        "/orchestrator/engagements/example/assessment/submissions/VA-001/"
+        "replies/1/sent/download",
+        body=None,
+        headers={},
+    )
+
+
 @pytest.mark.parametrize(
     ("method_name", "endpoint"),
     [
