@@ -88,23 +88,52 @@ json_preview() {
 
 # post_activity_entry <actor_kind> <title> <action> <result>
 # Delegates to vigil assess log so URL resolution, retry, and schema shaping all
-# live in one place. The hook is best-effort: failure is logged to stderr but
-# does not block the agent's next step.
+# live in one place.
+#
+# The runner is `vigil` when it is on PATH, and otherwise assess.py executed
+# DIRECTLY — never `python3 assess.py`. assess.py is a PEP 723 script whose
+# `#!/usr/bin/env -S uv run --script` shebang provisions its inline dependency
+# set (psutil, the tree-sitter grammars); invoking it under a bare interpreter
+# skips that provisioning entirely. `log` happens to reach nothing outside the
+# stdlib today, which is the only reason the old `python3` form worked — the day
+# it does, every engagement loses its audit trail silently. Same resolution
+# order as session-end.sh, deliberately: two hooks writing to the same CLI
+# should not disagree about how to reach it.
+#
+# Best-effort and SILENT on every path. This fires after each tool call, so a
+# diagnostic on failure would be noise on a per-command cadence, and a non-zero
+# exit must never turn a successful tool call into a failed one.
 post_activity_entry() {
   local actor_kind="$1"
   local title="$2"
   local action="$3"
   local result="$4"
 
-  ENGAGEMENT_DIR="$ENG_DIR" \
-    python3 "$ASSESS_PY" --engagement-dir "$ENG_DIR" log \
-      --actor-kind "$actor_kind" \
-      "$AGENT_TYPE" \
-      "$title" \
-      "$action" \
-      "$result" \
-      >/dev/null 2>&1 \
-    || true
+  if command -v vigil >/dev/null 2>&1; then
+    ENGAGEMENT_DIR="$ENG_DIR" \
+      vigil assess --engagement-dir "$ENG_DIR" log \
+        --actor-kind "$actor_kind" \
+        "$AGENT_TYPE" \
+        "$title" \
+        "$action" \
+        "$result" \
+        >/dev/null 2>&1 \
+      || true
+    return 0
+  fi
+
+  if [ -x "$ASSESS_PY" ]; then
+    ENGAGEMENT_DIR="$ENG_DIR" \
+      "$ASSESS_PY" --engagement-dir "$ENG_DIR" log \
+        --actor-kind "$actor_kind" \
+        "$AGENT_TYPE" \
+        "$title" \
+        "$action" \
+        "$result" \
+        >/dev/null 2>&1 \
+      || true
+  fi
+  return 0
 }
 
 case "$TOOL_NAME" in

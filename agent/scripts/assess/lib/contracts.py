@@ -15,6 +15,7 @@ from .config import ENGAGEMENT_BINDING_CONTRACT
 from .intel_types import INTEL_TYPES
 from .kali_audit import ALLOWED_PHASES, _enum_reject_message
 from .kali_output import KALI_EXIT_CODES
+from .phases import canonical_phase
 from .schema_validation import load_schema
 from .surfaces import CREATABLE_STATUSES, VALID_SURFACE_TYPES
 
@@ -24,27 +25,6 @@ from .surfaces import CREATABLE_STATUSES, VALID_SURFACE_TYPES
 # from kali_audit, not re-declared — so `vigil assess list-commands --phase <N>`
 # and the audit gate can never drift to two divergent phase enums.
 CATALOG_PHASES: tuple[str, ...] = ALLOWED_PHASES
-
-# The readiness command (check_phase_readiness) labels the canonical persisted
-# "consume-test" phase with the short form "consume" internally. Accept both
-# spellings on a --phase filter so a caller who types either resolves to the
-# canonical value; this is the one explicit alias bridging the short readiness
-# labels to CATALOG_PHASES.
-_PHASE_FILTER_ALIASES: dict[str, str] = {
-    "consume": "consume-test",
-    "consume_test": "consume-test",
-}
-
-
-def canonical_phase(phase: str) -> str:
-    """Normalize a phase token to its CATALOG_PHASES spelling.
-
-    Lower-cases and resolves the ``consume``→``consume-test`` short alias so a
-    ``--phase`` filter written in either form matches the canonical tags.
-    """
-    key = (phase or "").strip().lower()
-    return _PHASE_FILTER_ALIASES.get(key, key)
-
 
 # Canonical cross-cutting "goal" vocabulary for `vigil assess list-commands
 # --goal <goal>`. A goal is an intent-oriented lens ORTHOGONAL to `phase`: it
@@ -214,13 +194,10 @@ class SpecialistDispatchContract:
     Use ``validate_specialist_dispatch_contract`` to lint a parsed JSON payload.
 
     The public operator contract accepts ``requested_model`` /
-    ``requested_reasoning``. Launcher-effective model/reasoning remain
-    unavailable until a trusted launcher/session integration attests a specific
-    child invocation; static role definitions are not launch evidence.
-    Provider-observed ``actual_model`` / ``actual_reasoning`` likewise remain
-    ``unknown`` until a trusted integration can supply them. Dispatch callers
-    cannot self-attest either layer. Legacy aliases ``model`` / ``reasoning``
-    are rejected.
+    ``requested_reasoning``. Launcher-effective and provider-observed identity
+    remain unavailable until a trusted integration can supply them; dispatch
+    callers cannot self-attest those values. Legacy aliases ``model`` /
+    ``reasoning`` are rejected.
     """
 
     role: str
@@ -1292,6 +1269,41 @@ _CONTRACTS: dict[str, CommandContract] = {
                 "retrying create after a malformed success response",
                 "inspect proof-receipt get/list because the write may already be durable",
             ),
+        ),
+    ),
+    "operator-checkpoint": CommandContract(
+        name="operator-checkpoint",
+        goals=("dispatch",),
+        summary=(
+            "Record or read the operator's own durable checkpoint: references to "
+            "rows the backend already holds, plus one UNVERIFIED intent note."
+        ),
+        schema_name="assessment_operator_checkpoints table + /assessment/operator-checkpoints endpoints",
+        preferred_invocations=(
+            "vigil assess operator-checkpoint record --intent \"<what you were about to do and why>\"",
+            "vigil assess operator-checkpoint record --intent \"...\" --finding VA-047 --agent-id vuln-analyst-3",
+            "vigil assess operator-checkpoint record --intent \"...\" --command-run 812 --artifact 44",
+            "vigil assess operator-checkpoint show",
+            "vigil assess operator-checkpoint show --all",
+        ),
+        author_supplied_fields=(
+            "action: record | show",
+            "record: --intent \"<text>\" (required; the ONLY free-text field)",
+            "record: --finding <slug> / --agent-id <id> / --command-run <n> / --artifact <n> (each repeatable)",
+            "show: --all to walk the supersession chain instead of the current row",
+        ),
+        notes=(
+            "The checkpoint cannot hold a new factual claim about the target by construction: every field except --intent is a reference to an existing backend row, and the phase is server-derived at write time.",
+            "--intent is recorded and rendered as UNVERIFIED operator intent — what you were about to do and why. It is never a finding, a measurement, or evidence; record those with `finding record` / `record-probe`.",
+            "Every referenced id must already exist in this engagement. An unknown finding slug, agent id, command-run id, or artifact id refuses the write (HTTP 400) naming the unknown ids, because a checkpoint pointing at a nonexistent row is itself a false claim.",
+            "Storage is append-only. Correct a wrong checkpoint by recording a NEW one — the previous row stays readable and renders as `superseded by checkpoint #N`, so the correction is visible instead of erasing the mistake.",
+            "There is exactly one current checkpoint per engagement; `show` prints it and `show --all` walks the chain with a truthful total.",
+            "Automatic client session-end receipts belong in the activity ledger; they never write or supersede an operator checkpoint.",
+        ),
+        common_mistakes=(
+            ("recording an observation about the target in --intent", "--intent is unverified intent only; record target behaviour with `finding record`, `record-probe`, or `intel record`"),
+            ("editing a wrong checkpoint", "record a new one — the supersession chain is the correction"),
+            ("passing a finding slug that was never recorded", "record the finding first; the checkpoint refuses unknown references"),
         ),
     ),
     "artifact": CommandContract(
@@ -3363,6 +3375,7 @@ _INLINE_DOCUMENTED_NAMESPACES: tuple[str, ...] = (
     "http",
     "ingest",
     "kali job",
+    "operator-checkpoint",
     "proof-receipt",
     "proof-run",
     "run-audit",

@@ -5129,6 +5129,99 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
         "ON assessment_dispatch_decisions(engagement_id, kind)"
     )
 
+    # The operator's own durable checkpoint. Every dispatched specialist writes
+    # an ``assessment_dispatch_handoffs`` row; the operator wrote nothing, so its
+    # state died with the session. This table is that missing row — and it is
+    # deliberately built so it CANNOT hold a new factual claim about the target:
+    # every column except ``intent_note`` is a reference to a row the backend
+    # already holds (phase, finding slugs, dispatch agent ids, command-run ids,
+    # artifact ids), and ``current_phase`` is server-derived at write time rather
+    # than caller-supplied. ``intent_note`` is the single free-text block and is
+    # rendered everywhere as UNVERIFIED operator intent, never as evidence.
+    #
+    # Storage is append-only: a correction is a NEW row (version N+1) that stamps
+    # the previous current row's ``superseded_by_id``, matching the ledger idiom
+    # used by submission versions, sent-reply versions, and finding transitions.
+    # Mutating a wrong entry in place would erase the wrong claim, which is
+    # itself state-truth loss; superseding keeps the correction visible.
+    #
+    # Why not ``assessment_dispatch_decisions``: its ``payload_json`` is
+    # unstructured, so a checkpoint written there could hold any assertion about
+    # the target as though verified, nothing validates that referenced ids exist,
+    # and it is a flat per-decision ledger with no single current row per
+    # engagement. This table is the opposite on all three axes by construction.
+    connection.execute(
+        """
+            CREATE TABLE IF NOT EXISTS assessment_operator_checkpoints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+                checkpoint_version INTEGER NOT NULL CHECK(checkpoint_version >= 1),
+                superseded_by_id INTEGER REFERENCES assessment_operator_checkpoints(id),
+                current_phase TEXT NOT NULL,
+                finding_slugs_json TEXT NOT NULL DEFAULT '[]',
+                dispatch_agent_ids_json TEXT NOT NULL DEFAULT '[]',
+                command_run_ids_json TEXT NOT NULL DEFAULT '[]',
+                artifact_ids_json TEXT NOT NULL DEFAULT '[]',
+                intent_note TEXT NOT NULL,
+                source TEXT NOT NULL,
+                client_name TEXT NOT NULL DEFAULT 'unknown',
+                created_at TEXT NOT NULL,
+                UNIQUE(engagement_id, checkpoint_version)
+            )
+            """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_operator_checkpoints_engagement_current "
+        "ON assessment_operator_checkpoints(engagement_id, superseded_by_id)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_operator_checkpoints_engagement_version "
+        "ON assessment_operator_checkpoints(engagement_id, checkpoint_version DESC)"
+    )
+    # Append-only enforced in the schema, not only in the service: the ONLY
+    # permitted update is stamping a NULL ``superseded_by_id``. Rewriting an
+    # already-superseded pointer, or editing any other column, is refused.
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS assessment_operator_checkpoints_append_only_update
+        BEFORE UPDATE ON assessment_operator_checkpoints
+        WHEN NOT (
+            OLD.superseded_by_id IS NULL
+            AND NEW.superseded_by_id IS NOT NULL
+            AND NEW.id = OLD.id
+            AND NEW.engagement_id = OLD.engagement_id
+            AND NEW.checkpoint_version = OLD.checkpoint_version
+            AND NEW.current_phase = OLD.current_phase
+            AND NEW.finding_slugs_json = OLD.finding_slugs_json
+            AND NEW.dispatch_agent_ids_json = OLD.dispatch_agent_ids_json
+            AND NEW.command_run_ids_json = OLD.command_run_ids_json
+            AND NEW.artifact_ids_json = OLD.artifact_ids_json
+            AND NEW.intent_note = OLD.intent_note
+            AND NEW.source = OLD.source
+            AND NEW.client_name = OLD.client_name
+            AND NEW.created_at = OLD.created_at
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'operator checkpoints are append-only; record a new checkpoint instead of editing one'
+            );
+        END
+        """
+    )
+    # The engagement-cascade carve-out mirrors the sent-reply-version triggers:
+    # deleting the engagement still cascades, but nothing else may delete a row.
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS assessment_operator_checkpoints_append_only_delete
+        BEFORE DELETE ON assessment_operator_checkpoints
+        WHEN EXISTS (SELECT 1 FROM engagements WHERE id = OLD.engagement_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'operator checkpoints are append-only');
+        END
+        """
+    )
+
 
 def _create_verification_evidence_tables(connection: sqlite3.Connection) -> None:
     """Shared run/proof identities used by code, web, and blue workflows."""

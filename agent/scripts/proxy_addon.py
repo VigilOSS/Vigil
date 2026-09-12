@@ -824,6 +824,23 @@ class CaseCollector:
         *,
         defer_unresolved_cidr: bool = False,
     ) -> EngagementEntry | None:
+        """Pick the engagement that owns ``hostname``, or ``None``.
+
+        Precedence is exactly two keys, compared as one tuple:
+        ``(pattern_score, scope_priority)`` — pattern specificity first (a
+        literal host beats a narrower wildcard beats a broader one), then the
+        engagement's declared ``scope_priority``.
+
+        There is deliberately NO third tiebreak. When two engagements tie on
+        both keys the flow is left UNATTRIBUTED: the addon warns once per
+        hostname and returns ``None``, because guessing an owner would file
+        another engagement's traffic under this one. Disambiguate by editing
+        ``scope_priority`` or the scope roots, not by ordering.
+
+        An explicit ``out_of_scope`` carve-out is subtracted before candidacy,
+        and a host every declared owner carved out stays unclaimed rather than
+        falling through to a global bypass entry.
+        """
         if not hostname:
             return None
         hostname = hostname.lower()

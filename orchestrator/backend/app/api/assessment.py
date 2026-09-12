@@ -16,6 +16,7 @@ from ..retry_state import RETRY_STATES
 from ..services import activity as activity_service
 from ..services import assessment_memory
 from ..services import artifact_index
+from ..services import operator_checkpoints
 from ..services import state_manager
 from ..services.state_manager.coverage import (
     DEFAULT_PROBE_RUN_LIMIT,
@@ -46,27 +47,6 @@ router = APIRouter(prefix="/engagements/{engagement_key}/assessment", tags=["ass
 
 COMMAND_FINALIZE_PREVIEW_MAX_CHARS = 65_536
 MAX_BULK_ASSESSMENT_WRITE_ITEMS = 500
-
-_ALLOWED_PHASES: frozenset[str] = frozenset(
-    {
-        "recon",
-        "collect",
-        "consume-test",
-        "verify",
-        "exploit",
-        "report",
-        "code-ingest",
-        "code-classify",
-        "code-hunt",
-        "code-verify",
-        # Half-phase tags for mid-engagement work between formal phase
-        # transitions. The dispatching agent passes these explicitly when
-        # the snapshot in scope.json does not match what the dispatch was
-        # actually authorized for.
-        "recon-pivot",
-        "exploit-recon",
-    }
-)
 
 
 class WorkItemInput(BaseModel):
@@ -424,7 +404,11 @@ class CommandRunRecordRequest(BaseModel):
     # phase is required from input; the command-run contract has no env-var
     # fallback that the patched MCP server used; the dispatching agent must
     # pass --phase explicitly because scope.json.current_phase is operator
-    # state that does not reflect what the dispatch was authorized for.
+    # state that does not reflect what the dispatch was authorized for. It is
+    # stored as plain TEXT: the roster (`assess.lib.phases.AUDIT_PHASE_TAGS`)
+    # is enforced fail-closed host-side by `kali_audit.ALLOWED_PHASES`, and the
+    # backend stays permissive so historical and externally-written rows keep
+    # reading back.
     phase: str = Field(min_length=1, max_length=64)
     return_code: int | None = None
     timed_out: bool = False
@@ -4268,15 +4252,6 @@ _CONFIDENCE = Literal["low", "medium", "high"]
 _HANDOFF_STATUS = Literal["checkpointed", "ready", "blocked", "superseded"]
 
 
-# Roles exempt from declaring `skills` on dispatch. The operator coordinates
-# phases rather than executing a single skill, so requiring an explicit skill
-# list on operator dispatches would be misleading. Every other specialist role
-# must declare which skills it loaded so the dispatch row is a truthful audit
-# of the specialist context. Mirrors `_DISPATCH_ROLES_WITHOUT_SKILLS` in
-# `agent/scripts/assess/lib/contracts.py`; keep the two in sync.
-_DISPATCH_ROLES_WITHOUT_SKILLS: frozenset[str] = frozenset({"operator"})
-
-
 class DispatchCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -4676,6 +4651,9 @@ async def create_dispatch(engagement_key: str, request: DispatchCreate) -> dict[
             actual_model="unknown",
             requested_reasoning=request.requested_reasoning,
             actual_reasoning="unknown",
+            launcher_effective_model=None,
+            launcher_effective_reasoning=None,
+            launcher_effective_source=None,
             client_name=request.client_name,
             requested_client=request.requested_client,
             launcher_effective_client=request.launcher_effective_client,
@@ -4959,3 +4937,82 @@ async def patch_decision(
     )
     await _broadcast(engagement.key, "dispatch_decision", record)
     return record
+
+
+# The operator's own checkpoint. Deliberately NO ``current_phase`` field: the
+# phase is server-derived at write time, so a caller cannot assert a phase the
+# engagement is not in. The list caps and the note cap are validation bounds —
+# over-long input is REFUSED with a clear error, never silently truncated.
+class OperatorCheckpointCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    intent_note: str = Field(
+        min_length=1,
+        max_length=operator_checkpoints.MAX_INTENT_NOTE_CHARS,
+        description=(
+            "UNVERIFIED operator intent: what you were about to do and why. This "
+            "is the only free-text field on a checkpoint and is never a finding, "
+            "a measurement, or evidence about the target."
+        ),
+    )
+    finding_slugs: list[str] = Field(
+        default_factory=list, max_length=operator_checkpoints.MAX_REFERENCES
+    )
+    dispatch_agent_ids: list[str] = Field(
+        default_factory=list, max_length=operator_checkpoints.MAX_REFERENCES
+    )
+    command_run_ids: list[int] = Field(
+        default_factory=list, max_length=operator_checkpoints.MAX_REFERENCES
+    )
+    artifact_ids: list[int] = Field(
+        default_factory=list, max_length=operator_checkpoints.MAX_REFERENCES
+    )
+
+
+@router.post("/operator-checkpoints", status_code=status.HTTP_201_CREATED)
+async def create_operator_checkpoint(
+    engagement_key: str, request: OperatorCheckpointCreate
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            operator_checkpoints.record_checkpoint,
+            engagement.id,
+            intent_note=request.intent_note,
+            finding_slugs=list(request.finding_slugs),
+            dispatch_agent_ids=list(request.dispatch_agent_ids),
+            command_run_ids=list(request.command_run_ids),
+            artifact_ids=list(request.artifact_ids),
+        )
+    )
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_assessment_mutation,
+            engagement.id,
+            title="operator checkpoint",
+            action=f"checkpoint_version={record['checkpoint_version']}",
+            result=record["current_phase"],
+            metadata={
+                "checkpoint_version": record["checkpoint_version"],
+                "source": record["source"],
+            },
+        )
+    )
+    await _broadcast(engagement.key, "operator_checkpoint", record)
+    return record
+
+
+@router.get("/operator-checkpoints")
+def get_operator_checkpoints(
+    engagement_key: str,
+    include_superseded: bool = Query(default=False),
+    limit: int = Query(default=50, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return operator_checkpoints.list_checkpoints(
+        engagement.id,
+        include_superseded=include_superseded,
+        limit=limit,
+        offset=offset,
+    )

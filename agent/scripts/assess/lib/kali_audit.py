@@ -31,6 +31,7 @@ from .client import (
     AssessmentClient,
     require_command_run_finalize_response,
 )
+from .phases import AUDIT_PHASE_TAGS
 from .scope import execution_policy_notes
 from .config import Config
 from .kali_output import (
@@ -40,23 +41,13 @@ from .kali_output import (
 )
 
 
-# Allowed phase enum mirrors orchestrator/backend/app/api/assessment.py
-# `_ALLOWED_PHASES`. Fail closed if the agent passes anything else so the
-# operator gets a clear error before the backend rejects with 422.
-ALLOWED_PHASES: tuple[str, ...] = (
-    "recon",
-    "collect",
-    "consume-test",
-    "verify",
-    "exploit",
-    "report",
-    "code-ingest",
-    "code-classify",
-    "code-hunt",
-    "code-verify",
-    "recon-pivot",
-    "exploit-recon",
-)
+# The fail-closed `--phase` enum. Sourced from the canonical roster in
+# `lib/phases.py` rather than re-spelled here, so the audit vocabulary and the
+# engagement phase tracks cannot drift apart. The backend stores `phase` as
+# plain TEXT for forward compatibility with older rows, so this host-side check
+# is the one that gives the operator a clear error before a malformed row is
+# written.
+ALLOWED_PHASES: tuple[str, ...] = AUDIT_PHASE_TAGS
 
 
 _INTENT_MAX_LEN = 400

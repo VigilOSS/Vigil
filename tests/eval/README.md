@@ -9,22 +9,18 @@ external network.
 
 ## How to run
 
-The eval tests live under `tests/eval/` (repo root) but the backend virtual
-environment is required because `assess.lib.*` is imported from
-`agent/scripts/`.  Use one of the following forms — both are equivalent:
+The eval tests live under `tests/eval/` (repo root), but the backend virtual
+environment and dev extra provide their runtime and pytest dependencies. Run
+them from any directory with a Jujutsu-rooted absolute path:
 
 ```bash
-# From the repo root
-uv run --directory orchestrator/backend pytest "$(git rev-parse --show-toplevel)/tests/eval"
-
-# Or with an explicit relative path from orchestrator/backend
-uv run --directory orchestrator/backend pytest ../../tests/eval
+uv run --directory orchestrator/backend --extra dev pytest "$(jj root)/tests/eval"
 ```
 
 **Do NOT use `cd orchestrator/backend && pytest tests/eval`** — `pytest
 tests/eval` resolves relative to the current working directory, so it looks
-for `orchestrator/backend/tests/eval` (which does not exist) and silently
-collects zero tests, producing a false-green result.
+for `orchestrator/backend/tests/eval` (which does not exist). Also avoid `uv run`
+without `--extra dev`; a clean backend environment may not contain pytest.
 
 ## What the tests do
 
@@ -36,7 +32,10 @@ modes:
 - `soft` — a `UserWarning` is emitted and the test **continues**.
 
 Assertions supported: `min_findings`, `max_findings`, `expected_cwes`,
-`expected_severities`, `severity_distribution`, `attacker_outcome_present`.
+`expected_severities`, `severity_distribution`, `attacker_outcome_present`, and
+`white_box_finding_contract`. The white-box contract requires an exact code-finding
+identity set, the expected source snapshot, and per-finding provenance, location,
+proof, and verifier metadata.
 
 ## Wave 0 production lifecycle reference
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import ipaddress
 import json
 import os
@@ -96,9 +97,10 @@ from .orchestrator import (
     stop_orchestrator,
 )
 from .paths import default_runtime_container, resolve_install_root, resolve_source_root
+from .preflight import _preflight_engagement_start, _warn_if_install_stale
 from .quickstart import QuickstartOptions, run_quickstart
 from .runtime import RuntimeOptions, vigil_runtime_resources, build_runtime, runtime_image_build_state, runtime_status, start_runtime, stop_runtime
-from .status import collect_doctor_checks, collect_status, install_staleness, print_doctor, print_status
+from .status import collect_doctor_checks, collect_status, print_doctor, print_status
 from .up import UpOptions, run_up
 
 
@@ -183,6 +185,7 @@ class _SiblingHintParser(argparse.ArgumentParser):
 
 def main(argv: list[str] | None = None) -> None:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
+    raw_argv = _hoist_engagement_start_root(raw_argv)
     command_idx = _top_level_command_index(raw_argv)
     if command_idx is not None and raw_argv[command_idx] == "assess":
         _exec_assess_passthrough(raw_argv, command_idx)
@@ -514,7 +517,17 @@ def main(argv: list[str] | None = None) -> None:
                          help="DeepSeek thinking level for --client opencode: off=disabled, "
                               "high=on, max=maximum (default: client default — thinking on). "
                               "Ignored for claude/codex/kimi.")
-    start_p.add_argument("client_args", nargs="*")
+    start_p.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        help="Start the client without the preflight checks (client binary, provider key, "
+             "orchestrator, runtime container, install freshness).",
+    )
+    # Everything this parser does not own is forwarded to the client verbatim
+    # (`--model opus`, `-- "operator message"`). It is collected by parse_known_args
+    # rather than a positional, because a positional would reorder an option away
+    # from its value. See _engagement_start_client_args.
+    start_p.set_defaults(client_args=[])
     open_p = engagement_sub.add_parser("open")
     open_p.add_argument("key", nargs="?")
     open_p.add_argument("--select", action="store_true")
@@ -1102,7 +1115,28 @@ def main(argv: list[str] | None = None) -> None:
     assess_p = sub.add_parser("assess", add_help=False)
     assess_p.add_argument("assess_args", nargs=argparse.REMAINDER)
 
-    args = parser.parse_args(raw_argv)
+    if command_idx is not None and raw_argv[command_idx : command_idx + 2] == [
+        "engagement",
+        "start",
+    ]:
+        # `engagement start` is the one verb that forwards unknown flags to another
+        # program, so it is the one verb parsed leniently. Fill the optional key
+        # position when the caller omitted it: otherwise argparse consumes the first
+        # plain client-argument value (or post-`--` message) as the engagement key.
+        parse_argv = raw_argv
+        no_key_sentinel = "__vigil_engagement_start_without_explicit_key__"
+        inserted_no_key = False
+        start_tail = raw_argv[command_idx + 2 :]
+        if not _engagement_start_has_explicit_key(start_p, start_tail):
+            parse_argv = list(raw_argv)
+            parse_argv.insert(command_idx + 2, no_key_sentinel)
+            inserted_no_key = True
+        args, client_extras = parser.parse_known_args(parse_argv)
+        if inserted_no_key:
+            args.key = None
+        args.client_args = _engagement_start_client_args(start_p, client_extras)
+    else:
+        args = parser.parse_args(raw_argv)
     sync_command = args.command in {"install", "update", "up"}
     install_value = getattr(args, "install_dir", None) or args.root
     install_root = (
@@ -1228,49 +1262,162 @@ def main(argv: list[str] | None = None) -> None:
         )
 
 
+def _hoist_engagement_start_root(raw_argv: list[str]) -> list[str]:
+    """Keep the global ``--root`` option global on the lenient start parser.
+
+    ``engagement start`` alone forwards unknown options to a client. Accepting a
+    correctly spelled global flag after that subcommand must not silently turn
+    it into client argv. An explicit ``--`` remains the passthrough boundary.
+    """
+    command_index = _top_level_command_index(raw_argv)
+    if command_index is None or raw_argv[command_index : command_index + 2] != [
+        "engagement",
+        "start",
+    ]:
+        return raw_argv
+
+    hoisted: list[str] = []
+    rest: list[str] = []
+    index = 0
+    passthrough = False
+    start_options_at = command_index + 2
+    while index < len(raw_argv):
+        token = raw_argv[index]
+        if index >= start_options_at and token == "--":
+            passthrough = True
+        option, separator, _value = token.partition("=")
+        is_root_option = (
+            option.startswith("--")
+            and len(option) > 2
+            and "--root".startswith(option)
+        )
+        if index >= start_options_at and not passthrough and is_root_option:
+            if separator:
+                hoisted.append(f"--root={_value}")
+                index += 1
+                continue
+            if index + 1 >= len(raw_argv):
+                raise SystemExit(f"vigil: error: {option} requires a path")
+            hoisted.extend(("--root", raw_argv[index + 1]))
+            index += 2
+            continue
+        rest.append(token)
+        index += 1
+    return [*hoisted, *rest]
+
+
 def _top_level_command_index(raw_argv: list[str]) -> int | None:
     i = 0
     while i < len(raw_argv):
         token = raw_argv[i]
-        if token in {"--root", "--source"}:
-            i += 2
-            continue
-        if token.startswith("--root=") or token.startswith("--source="):
-            i += 1
+        resolved = _global_value_option(token)
+        if resolved is not None:
+            _name, inline_value = resolved
+            i += 1 if inline_value else 2
             continue
         return i
     return None
 
 
-def _warn_if_install_stale(install_root: Path) -> None:
-    """Emit one non-fatal STDERR line when the assess passthrough execs a lagging root.
+def _global_value_option(token: str) -> tuple[str, bool] | None:
+    """Resolve argparse-compatible abbreviations of global value options."""
 
-    ``vigil assess ...`` execs the INSTALL ROOT's ``assess.py``, so a working root
-    behind its source silently exposes an older verb set — the failure surfaces as
-    "no such verb" rather than "your install lags". Never writes to stdout (callers
-    parse assess JSON there), never raises, and never blocks the exec: the agent
-    stays free to proceed and decide.
+    option, separator, _value = token.partition("=")
+    if not option.startswith("--") or len(option) <= 2:
+        return None
+    matches = [name for name in ("--root", "--source") if name.startswith(option)]
+    if len(matches) != 1:
+        return None
+    return matches[0], bool(separator)
+
+
+# A forwarded token this close to one of `engagement start`'s own long options is a
+# typo, not a client flag. Real client flags sit far below it (`--thinking-budget` vs
+# `--thinking` scores 0.74; `--slect` vs `--select` scores 0.93), so the cutoff
+# separates the two cleanly instead of guessing.
+_VIGIL_OPTION_TYPO_RATIO = 0.85
+
+
+def _engagement_start_has_explicit_key(
+    start_parser: argparse.ArgumentParser, tail: list[str]
+) -> bool:
+    """Return whether ``tail`` contains an unambiguous engagement key.
+
+    A key may follow Vigil-owned start options, but it must precede the first
+    unknown option or explicit ``--`` passthrough boundary. Once client argv has
+    begun, a plain token is a flag value or operator message, never a key.
     """
-    try:
-        staleness = install_staleness(install_root)
-    except Exception:  # noqa: BLE001 — a diagnostic must never break the exec
-        return
-    state = str(staleness.get("state") or "")
-    if state not in {"stale", "no-stamp"}:
-        return
-    installed = str(staleness.get("installed_sha") or "unstamped")[:12]
-    current = str(staleness.get("current_source_sha") or "unknown")[:12]
-    if staleness.get("reason") == "source_content_changed_without_revision":
-        detail = f"source files changed without a new revision at {current}"
+    owned_options = {
+        option: action
+        for action in start_parser._actions
+        for option in action.option_strings
+    }
+    index = 0
+    while index < len(tail):
+        token = tail[index]
+        if token == "--":
+            return False
+        if not token.startswith("-"):
+            return True
+        option, separator, _value = token.partition("=")
+        action = owned_options.get(option)
+        if action is None and option.startswith("--"):
+            abbreviated = {
+                id(candidate): candidate
+                for spelling, candidate in owned_options.items()
+                if spelling.startswith("--") and spelling.startswith(option)
+            }
+            if len(abbreviated) == 1:
+                action = next(iter(abbreviated.values()))
+        if action is None:
+            return False
+        index += 1
+        if not separator and action.nargs != 0:
+            index += 1
+    return False
+
+
+def _engagement_start_client_args(
+    start_parser: argparse.ArgumentParser, extras: list[str]
+) -> list[str]:
+    """Validate and return the argv `engagement start` forwards to the client.
+
+    Lenient parsing is what lets `--client claude --model opus` work at all, but it
+    also means a mistyped Vigil flag would be handed to the client instead of
+    rejected. Two things keep that visible: a near-miss of one of this subparser's own
+    options is refused with the intended spelling, and whatever IS forwarded is echoed
+    on stderr so nothing reaches the client unannounced.
+    """
+    if "--" in extras:
+        # Tokens after an explicit `--` are the operator's declared passthrough; only
+        # the ones argparse could plausibly have owned are typo-checked.
+        separator = extras.index("--")
+        ambiguous, forwarded = extras[:separator], extras[:separator] + extras[separator + 1 :]
     else:
-        detail = f"installed {installed}, source {current}"
-    print(
-        f"[vigil] WARN: install root {install_root} is {state} "
-        f"({detail}); "
-        "run `vigil install` to sync it.",
-        file=sys.stderr,
-        flush=True,  # execvpe replaces this process without flushing Python buffers
-    )
+        ambiguous = forwarded = list(extras)
+    vigil_options = [
+        option
+        for action in start_parser._actions
+        for option in action.option_strings
+        if option.startswith("--")
+    ]
+    for token in ambiguous:
+        if not token.startswith("--"):
+            continue
+        near = difflib.get_close_matches(
+            token, vigil_options, n=1, cutoff=_VIGIL_OPTION_TYPO_RATIO
+        )
+        if near:
+            raise SystemExit(
+                f"vigil: error: unrecognized argument {token}; did you mean {near[0]}? "
+                f"Pass it to the client verbatim with `-- {token}`."
+            )
+    if forwarded:
+        print(
+            f"[vigil] forwarding to the client: {shlex.join(forwarded)}",
+            file=sys.stderr,
+        )
+    return forwarded
 
 
 def _exec_assess_passthrough(raw_argv: list[str], idx: int) -> None:
@@ -1278,23 +1425,21 @@ def _exec_assess_passthrough(raw_argv: list[str], idx: int) -> None:
     source_value: str | None = None
     i = 0
     while i < idx:
-        if raw_argv[i] == "--root" and i + 1 < idx:
-            root_value = raw_argv[i + 1]
-            i += 2
-            continue
-        if raw_argv[i] == "--source" and i + 1 < idx:
-            source_value = raw_argv[i + 1]
-            i += 2
-            continue
-        if raw_argv[i].startswith("--root="):
-            root_value = raw_argv[i].split("=", 1)[1]
+        resolved = _global_value_option(raw_argv[i])
+        if resolved is None:
             i += 1
             continue
-        if raw_argv[i].startswith("--source="):
-            source_value = raw_argv[i].split("=", 1)[1]
-            i += 1
-            continue
-        i += 1
+        name, inline_value = resolved
+        value = (
+            raw_argv[i].split("=", 1)[1]
+            if inline_value
+            else raw_argv[i + 1]
+        )
+        if name == "--root":
+            root_value = value
+        else:
+            source_value = value
+        i += 1 if inline_value else 2
     install_root = resolve_install_root(root_value)
     _warn_if_install_stale(install_root)
     assess = install_root / "agent" / "scripts" / "assess.py"
@@ -1471,11 +1616,12 @@ def _engagement(args: argparse.Namespace, install_root: Path) -> None:
         print(print_shell_cd_init(args.shell), end="")
     elif command == "start":
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
-        client_args = args.client_args[1:] if args.client_args[:1] == ["--"] else args.client_args
+        if not args.skip_preflight:
+            _preflight_engagement_start(install_root, path, args.client)
         if args.client == "opencode":
             from .engagements import write_opencode_reasoning_config
             write_opencode_reasoning_config(path, args.thinking)
-        start_engagement(install_root, path, args.client, client_args)
+        start_engagement(install_root, path, args.client, args.client_args)
     elif command == "open":
         path = _resolve_current_or_selected_engagement(install_root, key=args.key, select=args.select)
         webbrowser.open(path.as_uri())

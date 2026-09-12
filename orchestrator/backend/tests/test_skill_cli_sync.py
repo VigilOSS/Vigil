@@ -189,6 +189,12 @@ def _doc_files() -> list[Path]:
       catches a render step that ever transforms a verb,
     - the reference library + rules,
     - the top-level user docs (README, CODE-MAP, root maintainer AGENTS.md),
+    - the ``docs/`` operator and maintainer pages that name concrete
+      invocations — the assessment-CLI reference, the session-command
+      reference, agent clients, authentication, blue engagements, code
+      analysis, OOB routing, operations, and install integrity. These are
+      living user-facing docs: a verb renamed out from under one of them is
+      exactly the copy-paste failure this lint exists to catch,
     - the editor-rule pointer (.cursor) and the eval harness README.
 
     Deliberately EXCLUDED (historical release notes and per-engagement work
@@ -219,6 +225,15 @@ def _doc_files() -> list[Path]:
         _REPO_ROOT / "agent" / "AGENTS.md",
         _REPO_ROOT / "agent" / "shared-specialist-core.md",
         _REPO_ROOT / "README.md",
+        _REPO_ROOT / "docs" / "assessment-cli.md",
+        _REPO_ROOT / "docs" / "session-commands.md",
+        _REPO_ROOT / "docs" / "agent-clients.md",
+        _REPO_ROOT / "docs" / "authentication.md",
+        _REPO_ROOT / "docs" / "blue-engagements.md",
+        _REPO_ROOT / "docs" / "code-analysis.md",
+        _REPO_ROOT / "docs" / "oob-routing.md",
+        _REPO_ROOT / "docs" / "operations.md",
+        _REPO_ROOT / "docs" / "install-integrity.md",
         _REPO_ROOT / "CODE-MAP.md",
         _REPO_ROOT / "AGENTS.md",
         _REPO_ROOT / ".cursor" / "rules" / "operator.md",

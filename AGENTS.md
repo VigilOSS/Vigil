@@ -1,4 +1,3 @@
--
 # Maintainer & contributor guide
 
 This is the development guide for the repository: local setup, the
@@ -26,6 +25,9 @@ not a prototype. Every change should leave the codebase clearer than it found it
   so nothing half-lands, and keep generated artifacts, schemas, and the map in sync in the same change.
 - **Durable over expedient.** Fix the root cause, not the symptom. Choose the design that still reads
   well in a year and write it so the next maintainer needs no archaeology.
+- **Tests fail first.** For a behavior change or bug fix, write the smallest focused regression and
+  run it before production edits. The failure must demonstrate the missing behavior—not a collection,
+  import, fixture, or syntax error—then make it green and run the impacted suite.
 - **Coverage is the mission; difficulty never narrows scope.** This is threat-hunting tooling — the
   goal is *precision and deep coverage* so a real finding is never missed. Never drop, defer, or
   down-scope a detection/classification improvement because the correct mechanism is more code or
@@ -142,8 +144,7 @@ authority for which file owns what — these recipes name the files; the map exp
 ## Add a skill
 
 Skills are the procedure layer: workflow and vuln-family methodology that specialists load on
-dispatch. Discovery is a directory walk, so a skill is self-registering — there is intentionally no
-roster file to edit.
+dispatch. Discovery walks the skill directories; there is no roster file.
 
 1. Create `agent/skills/<name>/SKILL.md` with YAML frontmatter. `description` is what
    `vigil assess list-skills` shows the operator; `name` is optional metadata (the directory name is
@@ -154,6 +155,7 @@ roster file to edit.
    name: <name>
    description: One-line "use when" summary the operator scans to pick this skill
    origin: Vigil
+   vuln_class: <canonical-class>  # required when one or more classes accurately own the skill
    ---
 
    # <Title>
@@ -165,30 +167,31 @@ roster file to edit.
    ...
    ```
 
-2. Confirm discovery — no other file needs editing:
+2. For an offensive/code skill, set `vuln_class:` to one or more values from
+   `agent/scripts/assess/lib/vuln_taxonomy.py`. A process, blue, mobile, or genuinely multi-class
+   skill with no accurate class must instead be added to `SKILLS_WITHOUT_VULN_CLASS` in
+   `orchestrator/backend/tests/test_vuln_taxonomy.py`; do not invent a class to clear the test.
+
+3. Confirm discovery:
 
    ```bash
    vigil assess list-skills | grep <name>
    ```
 
-   `agent/scripts/assess/commands/list_skills.py` globs `agent/skills/*/SKILL.md` and parses the
-   frontmatter, so the skill appears the moment its directory exists. If `description` is omitted it
-   falls back to the first `# ` heading. The deprecated `agent/SKILL.md` roster is a soft pointer
-   only — do not add the new skill there.
+   The directory name is the canonical dispatch identifier. `description` is the discovery summary;
+   `name` is optional metadata. Do not add the skill to the deprecated `agent/SKILL.md` pointer.
 
-3. Reference the skill by `name` from the prompt layer that should dispatch it
+4. Reference the directory name from the prompt layer that should dispatch it
    (`agent/operator-core*.md` or a role prompt under `agent/agents/`). The operator passes the skill
    `path` to the specialist; the operator itself does not read skill bodies.
 
-Frontmatter is load-bearing: `list_skills.py` keys on `description` (falling back to the first `# `
-heading), so a skill with neither is discoverable only by directory name. Always ship a `description`.
+5. Run `test_vuln_taxonomy.py`, the list-skill coverage in `test_vigil_cli.py`, and any behavior test
+   for the skill's executable helper. Prompt/doc changes are reviewed by diff, not wording tests.
 
 ## Add a reference
 
-References are the payload / checklist / tooling library specialists load on
-dispatch. Like skills, discovery is a frontmatter scan. References intended for
-skill-routed discovery need a resolvable `skill:` key; general templates and
-engagement-owned references may intentionally remain unpaired.
+References are the payload, checklist, and tooling library specialists load on dispatch. Discovery
+scans the entire `agent/references/` tree.
 
 1. Create `agent/references/<area>/<name>.md` with YAML frontmatter that includes
    a `description` and, when the reference belongs to a skill, a `skill:` key:
@@ -196,37 +199,37 @@ engagement-owned references may intentionally remain unpaired.
    ```markdown
    ---
    description: One-line summary the operator scans in `vigil assess list-references`
-   skill: <skill-name>   # the paired skill; must match a directory under agent/skills/
+   skill: <skill-name>   # comma-separated when several skills own it
    ---
 
    # <Title>
    ...
    ```
 
-   `agent/scripts/assess/commands/list_references.py` globs `agent/references/**/*.md` and parses the
-   frontmatter. A reference with no `skill:` key still appears in the global
-   listing but not under `list-references --skill <name>`. The `skill:` value must
-   resolve to a real `agent/skills/<name>/` directory (comma-separate to pair with
-   several). Tool and methodology references should be paired; omit `skill:` only
-   for deliberately general templates or engagement-specific material.
+   Every `skill:` value must resolve to `agent/skills/<name>/`. A deliberately cross-cutting or
+   currently unowned reference must be added, with a reason, to `_KNOWN_UNPAIRED` in
+   `orchestrator/backend/tests/test_reference_frontmatter.py`; omission alone is a CI failure.
 
-2. Confirm discovery and pairing — no other file needs editing:
+2. Confirm discovery and pairing:
 
    ```bash
    vigil assess list-references | grep <name>
    vigil assess list-references --skill <skill-name>   # the ref must appear here
    ```
 
-   `orchestrator/backend/tests/test_reference_frontmatter.py` enforces this in CI: every
-   `agent/references/tools/**/*.md` must carry a `description` + a resolvable `skill:` (a small
-   `_KNOWN_UNPAIRED` allowlist covers refs with no matching skill yet — remove an entry when you pair it).
+3. Run `test_reference_frontmatter.py` and the list-reference coverage in `test_vigil_cli.py`.
+   Remove an allowlist entry as soon as the reference gains a real skill owner.
 
-## Add an `vigil assess` verb
+## Add a `vigil assess` verb
 
-`vigil assess` is the agent-facing contract surface. A verb is one command module plus its wiring and
-a test. `agent/scripts/assess/cli.py` is the authoritative subcommand registry.
+`vigil assess` is the agent-facing contract surface. `agent/scripts/assess/cli.py` is the
+authoritative registry, but registration shape depends on the command.
 
-1. Create `agent/scripts/assess/commands/<name>.py` exposing a `register(subparsers)` that adds the
+1. Before production edits, add the smallest behavior test under `agent/scripts/assess/tests/` and
+   run it through the assess-suite command until it fails for the intended missing behavior. Backend
+   persistence also needs a failing backend API/service test.
+
+2. Create `agent/scripts/assess/commands/<name>.py` exposing a `register(subparsers)` that adds the
    parser and sets the handler, plus the `run(args)` handler itself:
 
    ```python
@@ -242,20 +245,22 @@ a test. `agent/scripts/assess/cli.py` is the authoritative subcommand registry.
    Keep payload-shape and lifecycle truth in the command/lib, not in prompts — prompts should point
    at `vigil assess contract <verb>` rather than duplicating the schema.
 
-2. Wire it into `agent/scripts/assess/cli.py` in **both** places: add `<name>` to the
-   `from assess.commands import (...)` block and add the module to the `for mod in (...)`
-   registration loop. (Kali tool verbs register into the separate `kali_sub` loop instead.)
+3. Wire the applicable `cli.py` touch points: the import block plus either the flat loop, one of four
+   `_register_subcommand_group(...)` calls, or the inline Kali loop. A command with bespoke action
+   help may also need the pre-`parse_args` hook. A Kali verb joins `KALI_TARGET_VERBS` or
+   `KALI_MAINT_VERBS`; `KALI_VERBS` is their computed union.
 
-3. If the verb carries durable contract metadata operators should introspect, add it to
+4. If the verb carries durable contract metadata operators should introspect, add it to
    `agent/scripts/assess/lib/contracts.py` so `vigil assess contract <verb>` documents it — that is the
    only operator-facing surface for verb contracts.
 
-4. Add a test under `orchestrator/backend/tests/test_<name>.py`. Load the command module with the
-   `sys.path.insert(0, agent/scripts)` + `importlib` pattern used by
-   `orchestrator/backend/tests/test_anomaly_score.py`, then assert on `run(...)` behavior:
+5. Make the focused test green, then run the assess suite and registry-shape guard:
 
    ```bash
-   uv run --directory orchestrator/backend --extra dev pytest tests/test_<name>.py
+   uv run --directory orchestrator/backend --extra dev pytest \
+     "$(jj root)/agent/scripts/assess/tests/test_<name>.py"
+   uv run --directory orchestrator/backend --extra dev pytest \
+     "$(jj root)/agent/scripts/assess/tests/test_cli_canonical_shapes.py"
    ```
 
    If the verb persists a new field that the backend stores, follow the coupling and registration
@@ -268,20 +273,24 @@ Oracles are pure decision helpers — no LLM, no network, no backend store. They
 reproducible verdict (anomaly ranking, payload classification, reachability) the operator can trust.
 `anomaly-score` is the reference implementation.
 
-1. Put the pure logic in `agent/scripts/assess/lib/<name>.py`. It must be deterministic and
+1. Add focused pure-function and CLI tests under `agent/scripts/assess/tests/`, then run them and
+   observe the intended behavioral failure before adding the implementation.
+
+2. Put the pure logic in `agent/scripts/assess/lib/<name>.py`. It must be deterministic and
    side-effect-free: same input, same output, every time — that is what lets an agent rely on the
    verdict without re-running a tool.
 
-2. Add a thin CLI wrapper at `agent/scripts/assess/commands/<name>.py` that reads input (file or
-   stdin), calls the lib, and prints a human table (default) or `--json`. Register it exactly as in
-   the verb recipe above (both spots in `cli.py`). The command stays I/O-only so the testable logic
+3. Add a thin CLI wrapper at `agent/scripts/assess/commands/<name>.py` that reads input (file or
+   stdin), calls the lib, and prints a human table (default) or `--json`. Register it through the
+   applicable path in the verb recipe. The command stays I/O-only so the testable logic
    lives in the lib.
 
-3. Add `orchestrator/backend/tests/test_<name>.py` covering the lib's pure function and a CLI smoke
-   for file + stdin input, mirroring `test_anomaly_score.py`. Keep every case deterministic:
+4. Make the focused tests green, then run the full assess suite. Keep file and stdin cases
+   deterministic:
 
    ```bash
-   uv run --directory orchestrator/backend --extra dev pytest tests/test_<name>.py
+   uv run --directory orchestrator/backend --extra dev pytest \
+     "$(jj root)/agent/scripts/assess/tests/test_<name>.py"
    ```
 
    When an invariant must exist in exactly one place (a bucket table, an enum, a noise filter), make
@@ -354,6 +363,10 @@ cd agent
 After rerendering, review the generated prompt diffs directly. The repository does not
 maintain tests that assert markdown prompt/doc wording, headings, or exact strings.
 
+The Claude `PreCompact` hook's stdout is currently used as summarizer instructions. That behavior
+was verified against Claude Code 2.1.261 but is a third-party implementation detail, not a published
+contract; re-verify it when upgrading the client. Codex compaction steering is not shipped.
+
 # Assess schema regeneration
 
 Backend-backed schemas in `agent/schemas/` are generated from backend request models plus explicit
@@ -372,47 +385,26 @@ uv run --directory orchestrator/backend python scripts/generate_agent_schemas.py
 
 # Prompt system flow
 
-Use this section when editing prompts. It is intentionally architectural rather than field-specific.
-`CODE-MAP.md` documents file ownership; this section documents how the prompt layers fit together
-so edits land in the right place and do not create drift.
+`CODE-MAP.md` owns file boundaries; this section routes prompt edits.
 
 ## Prompt layers
 
-- `agent/operator-core.md` is the source-of-truth operator loop for web/runtime engagements.
-  It defines phase flow, dispatch rules, recording rules, and backend-vs-artifact truth boundaries.
-- `agent/operator-core-code.md` is a mode overlay for white-box code analysis. It reuses the same
-  backend and CLI, but changes phases, dispatch context, and specialist responsibilities.
-- `agent/operator-core-blue.md` is the source-of-truth operator loop for blue-team incident
-  engagements. It defines intake/triage/investigate/verify/respond/report flow, tenant-reference
-  injection, and containment proposal/approval/recording boundaries.
-- `agent/AGENTS.md`, `agent/AGENTS-blue.md`, and `agent/CLAUDE.md` are generated operator wrappers. They are committed outputs,
-  not authoring surfaces. If they need semantic changes, edit the source prompt and rerender.
-- `agent/agents/*.md` are role prompts. They define agent identity, responsibilities, handoffs,
-  and examples for a specific specialist. They should not become an independent source of backend
-  contract truth.
-- `agent/shared-constraints.md`, `agent/shared-constraints-code.md`, and `agent/shared-constraints-blue.md` are the first-load
-  specialist contract layer. Rules that must hold across many specialists belong here or in the
-  CLI, not in only one role prompt.
-- `agent/rules/*.md` are always-active behavioral rules. They shape methodology and writing style;
-  they are not the place to define endpoint ownership or payload schemas.
-- `vigil assess` and the underlying `agent/scripts/assess.py` helper subcommands are the agent-facing contract surface for
-  durable state. If a helper owns a lifecycle transition, prompts should point to that helper
-  instead of teaching raw endpoint payloads from memory.
+- `agent/operator-core.md` owns the web/runtime operator loop; `operator-core-code.md` is its
+  white-box overlay; `operator-core-blue.md` owns the blue incident loop.
+- `agent/AGENTS.md`, `agent/AGENTS-blue.md`, and `agent/CLAUDE.md` are generated outputs. Edit their
+  source prompts and rerender.
+- `agent/agents/*.md` owns role-specific identity, reasoning, and handoffs.
+- `agent/shared-constraints*.md` owns rules that every applicable specialist loads first.
+- `agent/rules/*.md` owns always-active behavior, not payload or endpoint contracts.
+- `vigil assess` helpers own durable payload and lifecycle truth; prompts point to those helpers.
 
 ## Editing rules
 
-- Put workflow and orchestration changes in `operator-core.md`, `operator-core-code.md`, or `operator-core-blue.md`,
-  because those files define how the system moves between phases and specialists.
-- Put cross-specialist constraints in `shared-constraints*.md`, because that is where subagents
-  load durable recording and scope rules before role-specific instructions.
-- Put role-specific reasoning guidance in `agent/agents/*.md`, because that is where identity,
-  examples, and handoff semantics live.
-- Put payload-shape and lifecycle truth in CLI helpers when possible. Prompts should reference
-  helper commands such as `vigil assess contract`, `finding record`, `finding verify`
-  (`--status false_positive` for a kill), and `finding update` (`--status draft` to reopen)
-  rather than duplicating raw schema details.
-- Treat generated artifacts as drift detectors, not authoring targets. If you edit a generated
-  prompt directly, the next render will overwrite it.
+- Put workflow in operator cores, cross-role rules in shared constraints, and role-specific guidance
+  in `agent/agents/*.md`.
+- Put payload and lifecycle truth in CLI helpers such as `vigil assess contract`, `finding record`,
+  `finding verify`, and `finding update`; do not duplicate schemas in prompts.
+- Generated artifacts are drift detectors, never authoring targets.
 
 ## Prompt edit checklist
 
@@ -482,22 +474,22 @@ The verification surface is **not one command**: 4 pytest scopes + a render-chec
 
 - **Integration tests are deselected by default** (`-m 'not integration'` in both pyprojects); opt in with `pytest -m integration` only after rebuilding the runtime image (`test_oob_correlate.py`, backend `test_runtime_tooling_contract.py`, `test_kali_cli.py`).
 - **Pre-push: mirror the blocking CI gates locally.** Before pushing a branch, run the gates CI blocks on — all four pytest rows above (backend, root `tests/`, assess CLI, deterministic eval; the sync-lint rides inside backend pytest), `uvx ruff check .`, and `uvx --with-editable . mypy src/vigil_cli`. CI runs on a clean checkout, so it catches drift a warm local venv hides.
-- **CI covers all four pytest scopes.** Every suite in the table above is a blocking PR gate: `backend-tests`, `eval`, `root-tests` (root `tests/`, less `tests/eval`), and `assess-tests` (`agent/scripts/assess/tests`). Until 0.2.0 the last two were unguarded and had to be run by hand; four red `vigil email` tests survived an entire hardening effort in that gap, which is why they are gates now rather than a note. Each of the three path-scoped jobs passes an **absolute** path to avoid working-directory ambiguity. Relative paths resolve against `--directory orchestrator/backend`'s cwd: `../../tests/eval` selects the root eval suite, while `tests/eval` names a nonexistent backend directory and exits with an error. Check the collected test count and pytest's own exit status; zero collected tests are not evidence of a passing suite. Run them locally anyway before pushing, per the pre-push bullet; CI is the backstop, not the first look.
-- **The `**/data/` ignore trap.** Shipped data a test or feature depends on — resolver lists, fixtures, golden files — often lives under a `data/` dir, which `.gitignore`'s broad `**/data/` rule silently drops: it passes locally (file on disk) but fails in CI (clean checkout never received it). When you add *required* shipped data, add a targeted `!` negation in `.gitignore` (re-include each path level down to the files, since git won't descend into an ignored dir) **and** `git add -f` it, then confirm `git ls-files <path>` tracks it. This is exactly what bit `test_shipped_resolver_lists_exist_and_are_within_cap`.
+- **CI covers all four pytest scopes.** `backend-tests`, `eval`, `root-tests`, and `assess-tests`
+  are blocking. Path-scoped jobs use absolute paths because `uv --directory` changes the working
+  directory. Check pytest's exit status and collected count; an empty selection proves nothing.
+- **The `**/data/` ignore trap.** Required resolver lists, fixtures, or golden files under `data/`
+  need targeted `.gitignore` negations for every ignored path level. Track them with
+  `jj file track <path>` and confirm with `jj file list <path>`; a local untracked file is absent in CI.
 - **`skeleton/` sidecars vs mypy.** Bench `skeleton/` `.py` files are container-runtime sidecars that import runtime-only siblings (e.g. `oracle_checkpoint`) mypy can't resolve. They are excluded from mypy via `[tool.mypy] exclude` in `pyproject.toml` (or keep sidecars as `.tmpl`, which mypy ignores). Do **not** "fix" such an `import-not-found` by adding the runtime module to the type path.
 
 ## Live tests (billed — read before launching)
 
 `vigil bench run --launch auto` spawns real Claude/Codex agents against generated targets: it **costs money and runs for hours** (reference: a full K=5 × 3 seed-0 run is ~5–6h / ~$50). Validate without a model first via the free paths — `--launch scripted` (reference solver, docker) and `vigil bench selftest`. Do not launch `--launch auto` without an explicit go-ahead.
 
-## Per-family wall-clock timeouts (D-5)
+## Per-family wall-clock timeouts
 
-The benchmark harness kills a stuck run at a **per-family** wall-clock budget, defined in the editable table `FAMILY_TIMEOUTS` in `src/vigil_cli/bench/models.py`. A measured family uses a budget derived from its observed runs (≈1.5–2× the observed max wall time under `~/.vigil-bench/runs/`); an unmeasured family (no table entry) falls back to the generous `GENEROUS_UNKNOWN_FAMILY_TIMEOUT` so it is never killed before its real duration is known.
-
-After a new benchmark family completes its first measured run, record the
-observed wall-clock time and set or refresh its entry in `FAMILY_TIMEOUTS`. Until
-that evidence exists, the generous unmeasured-family fallback is intentional;
-never invent a tighter timeout from the family level alone.
+`src/vigil_cli/bench/models.py:FAMILY_TIMEOUTS` owns measured family budgets. Set one only from an
+observed run (roughly 1.5–2× its maximum); unknown families deliberately use the generous fallback.
 
 # Orchestrator backend
 

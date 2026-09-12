@@ -37,11 +37,12 @@ import argparse
 import json
 
 from assess.lib import contracts
+from assess.lib.phases import PHASE_INPUT_ALIASES
 
 
-# `--phase` accepts every canonical phase plus the readiness command's short
-# `consume` alias (both resolve via contracts.canonical_phase).
-_PHASE_CHOICES = (*contracts.CATALOG_PHASES, "consume", "consume_test")
+# `--phase` accepts every canonical phase plus the declared input aliases (both
+# resolve via contracts.canonical_phase).
+_PHASE_CHOICES = (*contracts.CATALOG_PHASES, *PHASE_INPUT_ALIASES)
 
 # `--goal` accepts the canonical cross-cutting goal vocabulary (a command's
 # `goals` tags are a subset of this). Sourced from contracts so a new goal is

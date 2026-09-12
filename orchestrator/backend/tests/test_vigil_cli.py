@@ -20,6 +20,15 @@ import pytest
 repo_root = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(repo_root))
 sys.path.insert(0, str(repo_root / "src"))
+# `agent/scripts` is the root the agent-side packages are canonically imported
+# from: `assess.lib.client`, never `agent.scripts.assess.lib.client`. The repo
+# root above makes the second spelling resolve too — to an independent SECOND
+# copy of the same file, whose classes fail `except`/`pytest.raises` identity
+# checks against the canonical ones. Declaring the real root here keeps the
+# canonical spelling working under any test selection; it otherwise arrives only
+# as a side effect of app.main importing the backend's taxonomy bridge, which is
+# documented to tolerate an absent agent tree.
+sys.path.insert(0, str(repo_root / "agent" / "scripts"))
 
 from tests.proof_fixtures import post_artifact_backed_source_observation  # noqa: E402
 
@@ -9139,6 +9148,16 @@ def test_blue_engage_start_chains_into_operator_session(
         "create_engagement",
         lambda _options: SimpleNamespace(path=created_path, key="eng-1"),
     )
+    preflight_calls: list[tuple[Path, Path, str]] = []
+
+    def fake_preflight(install_root: Path, path: Path, client: str) -> None:
+        preflight_calls.append((install_root, path, client))
+
+    monkeypatch.setattr(
+        blue_module,
+        "_preflight_engagement_start",
+        fake_preflight,
+    )
     start_calls: list[tuple] = []
     monkeypatch.setattr(
         blue_module,
@@ -9162,6 +9181,7 @@ def test_blue_engage_start_chains_into_operator_session(
     # stdout is still just the path — flushed before the (mocked) execv launcher.
     assert captured.out.strip() == str(created_path)
     # start_engagement is the final statement: (install_root, path, client, []).
+    assert preflight_calls == [(tmp_path, created_path, "codex")]
     assert start_calls == [(tmp_path, created_path, "codex", [])]
     assert "[vigil blue] launching operator session (codex)" in captured.err
     assert "Paste the alert into the operator chat" in captured.err
@@ -14061,7 +14081,7 @@ class _CapturingClient:
         self.handoff_calls.append({"payload": payload, "upsert": upsert})
         prior = self.handoffs_by_id.get(payload.get("agent_id"))
         if prior is not None and not upsert:
-            from agent.scripts.assess.lib.client import AssessError  # type: ignore
+            from assess.lib.client import AssessError  # type: ignore[import-not-found]
             raise AssessError("HTTP 409:\nduplicate (engagement, agent_id)")
         # Latest write wins (upsert semantics).
         merged = {"id": 42, **(prior or {}), **payload}
@@ -15595,7 +15615,7 @@ def test_dispatch_record_handoff_is_idempotent_for_repeat_calls(
 
 def test_record_handoff_client_upsert_falls_back_to_patch_on_409() -> None:
     """The client helper itself catches 409 and re-issues a PATCH."""
-    from agent.scripts.assess.lib.client import AssessError, AssessmentClient
+    from assess.lib.client import AssessError, AssessmentClient  # type: ignore[import-not-found]
 
     captured: dict[str, object] = {"posts": [], "patches": []}
 
@@ -15641,7 +15661,7 @@ def test_record_handoff_client_upsert_falls_back_to_patch_on_409() -> None:
 
 def test_record_handoff_client_upsert_does_not_patch_role_mismatch_409() -> None:
     """Role-mismatch 409s are validation failures, not duplicate-row upserts."""
-    from agent.scripts.assess.lib.client import AssessError, AssessmentClient
+    from assess.lib.client import AssessError, AssessmentClient  # type: ignore[import-not-found]
 
     captured: dict[str, object] = {"posts": [], "patches": []}
 

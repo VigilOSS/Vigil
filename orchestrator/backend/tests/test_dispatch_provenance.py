@@ -171,6 +171,28 @@ def test_dispatch_api_rejects_caller_attested_launcher_effective_identity(
     assert response.status_code == 422, response.text
 
 
+def test_dispatch_api_rejects_complete_caller_attested_launcher_effective_identity(
+    client,
+    isolate_settings,
+) -> None:
+    """A forged complete tuple must not bypass the per-field rejection coverage."""
+    _seed(client, isolate_settings["engagements_dir"])
+
+    response = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": "FORGED-LAUNCHER-EFFECTIVE-TUPLE",
+            "agent_role": "recon-specialist",
+            "client_name": "opencode",
+            "launcher_effective_model": "caller-forged-model",
+            "launcher_effective_reasoning": "caller-forged-reasoning",
+            "launcher_effective_source": "caller-forged-source",
+        },
+    )
+
+    assert response.status_code == 422, response.text
+
+
 def test_dispatch_provenance_rejects_malformed_hashes_and_status(
     client,
     isolate_settings,

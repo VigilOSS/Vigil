@@ -64,6 +64,9 @@ payload = {
             "GOOSE_PROVIDER",
             "GOOSE_MODEL",
             "GOOSE_RECIPE_PATH",
+            "GOOSE_DISABLE_KEYRING",
+            "GOOSE_MODE",
+            "GOOSE_DISABLE_SESSION_NAMING",
         )
     },
     "files": {
@@ -86,6 +89,19 @@ def _write_agent_sources(agent_root: Path) -> None:
     (agent_root / ".claude" / "agents").mkdir(parents=True)
     (agent_root / ".claude" / "agents" / "operator.md").write_text("# Operator\n")
     (agent_root / ".claude" / "settings.json").write_text("{}\n")
+
+    # Rendered operator commands: one Claude slash command per canonical source,
+    # one Codex project skill directory per canonical source.
+    (agent_root / ".claude" / "commands").mkdir(parents=True)
+    for command_name in ("vigil-resume", "vigil-compact"):
+        (agent_root / ".claude" / "commands" / f"{command_name}.md").write_text(
+            f"---\ndescription: {command_name}\n---\n\nbody\n"
+        )
+        skill_dir = agent_root / ".codex" / "skills" / command_name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {command_name}\ndescription: {command_name}\n---\n\nbody\n"
+        )
 
     (agent_root / ".opencode" / "agent").mkdir(parents=True)
     (agent_root / ".opencode" / "agent" / "operator.md").write_text("# Operator\n")
@@ -208,9 +224,7 @@ def _build_entrypoint_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     engagement_dir.mkdir(parents=True)
     _write_agent_sources(agent_root)
 
-    (install_root / ".env").write_text(
-        "DEEPSEEK_API_KEY=test-deepseek\nOPENROUTER_API_KEY=test-openrouter\n"
-    )
+    (install_root / ".env").write_text("DEEPSEEK_API_KEY=test-deepseek\n")
     (engagement_dir / ".orchestrator.env").write_text(
         "ORCHESTRATOR_BASE_URL=http://engagement.test:8000/\n"
     )
@@ -369,12 +383,12 @@ def test_physical_client_roster_refresh_rejects_collision_before_any_write(
             "opencode",
             [
                 "opencode",
-                "run",
                 "--agent",
                 "operator",
                 "--dangerously-skip-permissions",
                 "--model",
                 "test-model",
+                "--prompt",
                 "operator task",
             ],
         ),
@@ -383,7 +397,7 @@ def test_physical_client_roster_refresh_rejects_collision_before_any_write(
             [
                 "goose",
                 "run",
-                "--no-session",
+                "--interactive",
                 "--with-builtin",
                 "developer",
                 "--model",
@@ -410,6 +424,9 @@ def test_generated_client_entrypoint_executes_canonical_contract(
         "GOOSE_PROVIDER",
         "GOOSE_MODEL",
         "GOOSE_RECIPE_PATH",
+        "GOOSE_DISABLE_KEYRING",
+        "GOOSE_MODE",
+        "GOOSE_DISABLE_SESSION_NAMING",
         "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
     ):
         env.pop(key, None)
@@ -421,13 +438,24 @@ def test_generated_client_entrypoint_executes_canonical_contract(
             "VIGIL_GOOSE_REASONING_PROXY": "0",
         }
     )
+    if client == "goose":
+        env["OPENAI_API_KEY"] = "test-openai"
+        env["OPENAI_HOST"] = "https://api.openai.com/v1"
+        env["GOOSE_PROVIDER"] = "ambient-provider"
+        env["GOOSE_MODEL"] = "deepseek-v4-flash"
+        env["GOOSE_RECIPE_PATH"] = "/tmp/ambient-recipes"
+        env["GOOSE_DISABLE_KEYRING"] = "0"
+        env["GOOSE_MODE"] = "approve"
+        env["GOOSE_DISABLE_SESSION_NAMING"] = "false"
 
+    # Go through the exact argv `vigil engagement start` builds, so the launcher's
+    # forwarding and Vigil's message placement are asserted as one contract.
     result = subprocess.run(
         [
             str(engagement_dir / f"start_{client}.sh"),
-            "--model",
-            "test-model",
-            "operator task",
+            *engagements.client_launch_argv(
+                client, ["--model", "test-model", "operator task"]
+            ),
         ],
         cwd=engagement_dir,
         env=env,
@@ -463,7 +491,7 @@ def test_generated_client_entrypoint_executes_canonical_contract(
         assert payload["files"][".claude/agents/operator.md"] == "# Operator\n"
     elif client == "opencode":
         assert payload["env"]["DEEPSEEK_API_KEY"] == "test-deepseek"
-        assert payload["env"]["OPENROUTER_API_KEY"] == "test-openrouter"
+        assert payload["env"]["OPENROUTER_API_KEY"] is None
         assert json.loads(payload["files"]["opencode.json"])["permission"]["*"] == "allow"
         assert payload["files"][".opencode/agent/operator.md"] == "# Operator\n"
         assert payload["files"][".opencode/plugin/standard-hooks.js"] == "// hook\n"
@@ -476,6 +504,9 @@ def test_generated_client_entrypoint_executes_canonical_contract(
         assert payload["env"]["GOOSE_RECIPE_PATH"] == str(
             engagement_dir / ".goose" / "recipes"
         )
+        assert payload["env"]["GOOSE_DISABLE_KEYRING"] == "1"
+        assert payload["env"]["GOOSE_MODE"] == "auto"
+        assert payload["env"]["GOOSE_DISABLE_SESSION_NAMING"] == "true"
         assert "dispatch, do not solo" in payload["files"][".goosehints"]
         assert payload["files"][".goose/recipes/recon-specialist.yaml"] == "name: recon\n"
         assert "PostToolUse" in payload["files"][
@@ -503,9 +534,7 @@ def test_install_upgrade_reconciles_all_client_entrypoints_for_existing_engageme
     engagement_dir.mkdir(parents=True)
     _write_agent_sources(agent_root)
     (install_root / ".runtime-data").mkdir()
-    (install_root / ".env").write_text(
-        "DEEPSEEK_API_KEY=test-deepseek\nOPENROUTER_API_KEY=test-openrouter\n"
-    )
+    (install_root / ".env").write_text("DEEPSEEK_API_KEY=test-deepseek\n")
     (engagement_dir / ".orchestrator.env").write_text(
         "ORCHESTRATOR_BASE_URL=http://engagement.test:8000/\n"
     )
@@ -589,8 +618,8 @@ def test_install_upgrade_reconciles_all_client_entrypoints_for_existing_engageme
     command_prefixes = {
         "codex": ["codex"],
         "claude": ["claude"],
-        "opencode": ["opencode", "run", "--agent", "operator"],
-        "goose": ["goose", "run", "--no-session", "--with-builtin", "developer"],
+        "opencode": ["opencode", "--agent", "operator"],
+        "goose": ["goose", "run", "--interactive", "--with-builtin", "developer"],
         "kimi": ["kimi"],
     }
     for client in ("codex", "claude", "opencode", "goose", "kimi"):
@@ -617,7 +646,10 @@ def test_install_upgrade_reconciles_all_client_entrypoints_for_existing_engageme
             }
         )
         result = subprocess.run(
-            [str(engagement_dir / f"start_{client}.sh"), "operator task"],
+            [
+                str(engagement_dir / f"start_{client}.sh"),
+                *engagements.client_launch_argv(client, ["operator task"]),
+            ],
             cwd=engagement_dir,
             env=env,
             check=False,
@@ -630,7 +662,7 @@ def test_install_upgrade_reconciles_all_client_entrypoints_for_existing_engageme
         expected_argv = [
             *command_prefixes[client],
             *permission_args[client],
-            *(["-t"] if client == "goose" else []),
+            *{"goose": ["-t"], "opencode": ["--prompt"]}.get(client, []),
             "operator task",
         ]
         assert [Path(payload["argv"][0]).name, *payload["argv"][1:]] == expected_argv
@@ -647,7 +679,7 @@ def test_install_upgrade_reconciles_all_client_entrypoints_for_existing_engageme
             assert payload["files"][".claude/agents/operator.md"] == "# Operator\n"
         elif client == "opencode":
             assert payload["env"]["DEEPSEEK_API_KEY"] == "test-deepseek"
-            assert payload["env"]["OPENROUTER_API_KEY"] == "test-openrouter"
+            assert payload["env"]["OPENROUTER_API_KEY"] is None
             opencode_config = json.loads(payload["files"]["opencode.json"])
             assert opencode_config["theme"] == "operator-custom"
             assert opencode_config["permission"]["*"] == "allow"
@@ -1236,3 +1268,440 @@ def test_noninteractive_selection_fails_before_starting_fzf(
 
     with pytest.raises(SystemExit, match="non-interactive"):
         engagements._select_engagement([row])
+
+
+# ── Session-shaped goose / opencode launches (no headless one-shot) ───────────
+
+
+@pytest.mark.parametrize(
+    ("client_args", "expected_tail"),
+    [
+        # A bare `vigil engagement start <key> --client goose` is the documented
+        # spelling; it must open a session, not invoke `goose run` with no
+        # instruction (which exits 1 before the model is ever asked anything).
+        ([], ["goose", "session", "--with-builtin", "developer"]),
+        # A flag VALUE is never the operator prompt.
+        (
+            ["--model", "test-model"],
+            ["goose", "session", "--with-builtin", "developer", "--model", "test-model"],
+        ),
+        (
+            ["operator task"],
+            [
+                "goose",
+                "run",
+                "--interactive",
+                "--with-builtin",
+                "developer",
+                "-t",
+                "operator task",
+            ],
+        ),
+        # An explicitly passed-through goose instruction flag still routes to `run`.
+        (
+            ["-t", "operator task"],
+            [
+                "goose",
+                "run",
+                "--interactive",
+                "--with-builtin",
+                "developer",
+                "-t",
+                "operator task",
+            ],
+        ),
+    ],
+)
+def test_goose_launcher_routes_between_run_and_session(
+    tmp_path: Path, client_args: list[str], expected_tail: list[str]
+) -> None:
+    install_root, engagement_dir, bin_dir = _build_entrypoint_fixture(tmp_path)
+    capture = tmp_path / "goose.json"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{bin_dir}{os.pathsep}{env['PATH']}",
+            "VIGIL_ENTRYPOINT_CAPTURE": str(capture),
+            "VIGIL_PATH_EXPANSION": "must-not-expand",
+            "VIGIL_GOOSE_REASONING_PROXY": "0",
+        }
+    )
+
+    result = subprocess.run(
+        [
+            str(engagement_dir / "start_goose.sh"),
+            *engagements.client_launch_argv("goose", client_args),
+        ],
+        cwd=engagement_dir,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(capture.read_text())
+    assert [Path(payload["argv"][0]).name, *payload["argv"][1:]] == expected_tail
+
+
+@pytest.mark.parametrize(
+    ("client_args", "expected_tail"),
+    [
+        # The TUI is the session; `opencode run` is the one-shot form and must not
+        # be what an engagement start execs.
+        ([], ["opencode", "--agent", "operator", "--dangerously-skip-permissions"]),
+        (
+            ["--model", "test-model"],
+            [
+                "opencode",
+                "--agent",
+                "operator",
+                "--dangerously-skip-permissions",
+                "--model",
+                "test-model",
+            ],
+        ),
+        (
+            ["operator task"],
+            [
+                "opencode",
+                "--agent",
+                "operator",
+                "--dangerously-skip-permissions",
+                "--prompt",
+                "operator task",
+            ],
+        ),
+    ],
+)
+def test_opencode_launcher_opens_a_session(
+    tmp_path: Path, client_args: list[str], expected_tail: list[str]
+) -> None:
+    install_root, engagement_dir, bin_dir = _build_entrypoint_fixture(tmp_path)
+    capture = tmp_path / "opencode.json"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{bin_dir}{os.pathsep}{env['PATH']}",
+            "VIGIL_ENTRYPOINT_CAPTURE": str(capture),
+            "VIGIL_PATH_EXPANSION": "must-not-expand",
+        }
+    )
+
+    result = subprocess.run(
+        [
+            str(engagement_dir / "start_opencode.sh"),
+            *engagements.client_launch_argv("opencode", client_args),
+        ],
+        cwd=engagement_dir,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(capture.read_text())
+    assert [Path(payload["argv"][0]).name, *payload["argv"][1:]] == expected_tail
+
+
+@pytest.mark.parametrize(
+    ("client", "client_args", "expected"),
+    [
+        # `-- --model x` must not hand "x" to the model as the operator prompt.
+        ("goose", ["--model", "x"], ["--model", "x"]),
+        ("opencode", ["--model", "x"], ["--model", "x"]),
+        ("goose", ["--model", "x", "task"], ["--model", "x", "-t", "task"]),
+        ("goose", ["--model=x", "task"], ["--model=x", "-t", "task"]),
+        (
+            "opencode",
+            ["--model=x", "task"],
+            ["--model=x", "--prompt", "task"],
+        ),
+        ("opencode", ["task"], ["--prompt", "task"]),
+        # Clients that take the prompt positionally are untouched.
+        ("claude", ["--model", "x", "task"], ["--model", "x", "task"]),
+        ("codex", [], []),
+    ],
+)
+def test_client_launch_argv_places_the_operator_message(
+    client: str, client_args: list[str], expected: list[str]
+) -> None:
+    assert engagements.client_launch_argv(client, client_args) == expected
+
+
+_RENDERED_COMMANDS = ("vigil-resume", "vigil-compact")
+
+
+@pytest.mark.parametrize(
+    ("body", "expected_error"),
+    [
+        (
+            "<!-- vigil:only cursor -->\nprivate\n<!-- vigil:end -->\n",
+            "unknown capability client 'cursor'",
+        ),
+        (
+            "<!-- vigil:only claude -->\n<!-- vigil:only codex -->\n"
+            "private\n<!-- vigil:end -->\n<!-- vigil:end -->\n",
+            "nested capability block",
+        ),
+        (
+            "<!-- vigil:only claude -->\nprivate\n",
+            "missing <!-- vigil:end -->",
+        ),
+        ("<!-- vigil:end -->\n", "unmatched <!-- vigil:end -->"),
+    ],
+    ids=("unknown-client", "nested", "missing-end", "unmatched-end"),
+)
+def test_command_renderer_rejects_malformed_capability_blocks(
+    tmp_path: Path, body: str, expected_error: str
+) -> None:
+    source = Path(__file__).resolve().parents[1] / "agent"
+    agent_root = tmp_path / "agent"
+    shutil.copytree(source, agent_root, symlinks=True)
+    (agent_root / "commands" / "vigil-resume.md").write_text(
+        "---\nname: vigil-resume\ndescription: test\n---\n\n" + body,
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        ["bash", str(agent_root / "scripts" / "render-operator-prompts.sh"), "repo"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert expected_error in result.stderr
+
+
+def _assert_command_pointers(engagement_dir: Path, agent_root: Path) -> None:
+    """Every rendered command reaches the engagement as a pointer, not a copy."""
+    for command_name in _RENDERED_COMMANDS:
+        claude_command = engagement_dir / ".claude" / "commands" / f"{command_name}.md"
+        assert claude_command.is_symlink(), f"{command_name} must be a pointer, not a copy"
+        assert (
+            claude_command.resolve()
+            == (agent_root / ".claude" / "commands" / f"{command_name}.md").resolve()
+        )
+        assert claude_command.read_text(encoding="utf-8").startswith("---")
+
+        codex_skill = engagement_dir / ".codex" / "skills" / command_name
+        assert codex_skill.is_symlink()
+        assert codex_skill.resolve() == (
+            agent_root / ".codex" / "skills" / command_name
+        ).resolve()
+        assert (codex_skill / "SKILL.md").is_file()
+
+    # The owning directories are real, so a hand-authored sibling can coexist and
+    # so the repair symlink guards keep working.
+    assert not (engagement_dir / ".claude" / "commands").is_symlink()
+    assert not (engagement_dir / ".codex" / "skills").is_symlink()
+
+
+def test_generated_engagement_exposes_operator_commands_to_claude_and_codex_only(
+    tmp_path: Path,
+) -> None:
+    install_root, engagement_dir, _ = _build_entrypoint_fixture(tmp_path)
+    agent_root = install_root / "agent"
+
+    _assert_command_pointers(engagement_dir, agent_root)
+
+    # opencode / goose / kimi get no commands: they have no project-command
+    # surface, and shipping an unreadable directory would imply one exists.
+    assert not (engagement_dir / ".opencode" / "commands").exists()
+    assert not (engagement_dir / ".opencode" / "skills").exists()
+    assert not (engagement_dir / ".goose" / "commands").exists()
+    assert not (engagement_dir / ".goose" / "skills").exists()
+    assert not (engagement_dir / "commands").exists()
+    assert not (engagement_dir / "skills").exists()
+
+
+def test_entrypoint_repair_backfills_operator_commands_for_existing_engagement(
+    tmp_path: Path,
+) -> None:
+    install_root, engagement_dir, _ = _build_entrypoint_fixture(tmp_path)
+    agent_root = install_root / "agent"
+
+    shutil.rmtree(engagement_dir / ".claude" / "commands")
+    shutil.rmtree(engagement_dir / ".codex" / "skills")
+
+    result = engagements.repair_engagement_client_entrypoints(install_root)
+
+    assert result.reconciled == (engagement_dir.name,)
+    _assert_command_pointers(engagement_dir, agent_root)
+
+
+def test_command_pointers_preserve_hand_authored_engagement_local_command(
+    tmp_path: Path,
+) -> None:
+    """An operator-authored command of the same name is never clobbered.
+
+    Engagement directories carry operator-owned content.  The generated pointer
+    yields to a real file the operator wrote, exactly as the roster machinery
+    preserves unknown entries rather than deleting them.
+    """
+    install_root, engagement_dir, _ = _build_entrypoint_fixture(tmp_path)
+
+    commands_dir = engagement_dir / ".claude" / "commands"
+    hand_authored = commands_dir / "vigil-resume.md"
+    hand_authored.unlink()
+    hand_authored.write_text("---\ndescription: mine\n---\n\nhand authored\n")
+    sibling = commands_dir / "engagement-only.md"
+    sibling.write_text("---\ndescription: local\n---\n\nlocal only\n")
+
+    engagements.repair_engagement_client_entrypoints(install_root)
+
+    assert not hand_authored.is_symlink()
+    assert "hand authored" in hand_authored.read_text(encoding="utf-8")
+    assert sibling.is_file()
+    assert (commands_dir / "vigil-compact.md").is_symlink()
+
+
+def test_entrypoint_repair_skips_engagement_whose_commands_dir_is_a_symlink(
+    tmp_path: Path,
+) -> None:
+    install_root, engagement_dir, _ = _build_entrypoint_fixture(tmp_path)
+
+    commands_dir = engagement_dir / ".claude" / "commands"
+    shutil.rmtree(commands_dir)
+    outside = tmp_path / "outside-commands"
+    outside.mkdir()
+    commands_dir.symlink_to(outside, target_is_directory=True)
+
+    result = engagements.repair_engagement_client_entrypoints(install_root)
+
+    assert result.reconciled == ()
+    assert [skip.reason for skip in result.skipped] == ["unsafe_repair_destination"]
+    assert result.skipped[0].evidence == (".claude/commands",)
+    assert not any(outside.iterdir())
+
+
+def test_claude_settings_materialize_absolute_paths_for_compaction_and_session_hooks(
+    tmp_path: Path,
+) -> None:
+    """PreCompact/SessionEnd hook commands are rewritten like the tool hooks.
+
+    A bare engagement session has no `VIGIL_AGENT_ROOT` and its cwd is the
+    engagement, not the agent root, so a relative hook path resolves to nothing
+    and the hook silently never runs.
+    """
+    agent_root = tmp_path / "agent root 'with spaces'"
+    claude_dir = tmp_path / "engagement" / ".claude"
+    hooks_dir = agent_root / "scripts" / "hooks"
+    hooks_dir.mkdir(parents=True)
+    for script in ("pre-compact.sh", "session-end.sh"):
+        (hooks_dir / script).write_text("#!/usr/bin/env bash\nexit 0\n")
+    (agent_root / ".claude").mkdir()
+    (agent_root / ".claude" / "settings.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreCompact": [
+                        {"hooks": [{"type": "command", "command": "bash scripts/hooks/pre-compact.sh"}]}
+                    ],
+                    "SessionEnd": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "bash scripts/hooks/session-end.sh",
+                                    "timeout": 10,
+                                }
+                            ]
+                        }
+                    ],
+                }
+            }
+        )
+    )
+
+    client_rosters.ensure_claude_settings(agent_root, claude_dir)
+
+    settings = json.loads((claude_dir / "settings.json").read_text(encoding="utf-8"))
+    pre_compact = settings["hooks"]["PreCompact"][0]["hooks"][0]
+    session_end = settings["hooks"]["SessionEnd"][0]["hooks"][0]
+    assert pre_compact["command"] == shlex.join(
+        ["bash", str(hooks_dir / "pre-compact.sh")]
+    )
+    assert session_end["command"] == shlex.join(
+        ["bash", str(hooks_dir / "session-end.sh")]
+    )
+    # An explicit timeout survives the rewrite: SessionEnd hooks share a 1.5s
+    # default budget, so dropping it would silently truncate the activity write.
+    assert session_end["timeout"] == 10
+    # No matcher on either event — PreCompact must cover manual and auto alike.
+    assert "matcher" not in settings["hooks"]["PreCompact"][0]
+    assert "matcher" not in settings["hooks"]["SessionEnd"][0]
+
+
+def test_codex_config_materializes_absolute_paths_for_all_hooks(tmp_path: Path) -> None:
+    """Codex hooks must also work when the client is opened without a launcher."""
+    import tomllib
+
+    repo_root = Path(__file__).resolve().parents[1]
+    agent_root = tmp_path / "agent root 'with spaces'"
+    source_dir = agent_root / ".codex"
+    source_dir.mkdir(parents=True)
+    shutil.copy2(repo_root / "agent" / ".codex" / "config.toml", source_dir / "config.toml")
+    hooks_dir = agent_root / "scripts" / "hooks"
+    hooks_dir.mkdir(parents=True)
+    for script in ("scope-check.sh", "post-tool-log.sh", "session-end.sh"):
+        (hooks_dir / script).write_text("#!/usr/bin/env bash\nexit 0\n")
+
+    engagement_dir = tmp_path / "engagement"
+    engagement_dir.mkdir()
+    engagements._write_codex_config(agent_root, engagement_dir)
+
+    config = tomllib.loads(
+        (engagement_dir / ".codex" / "config.toml").read_text(encoding="utf-8")
+    )
+    commands = [
+        hook["command"]
+        for event in config["hooks"].values()
+        for entry in event
+        for hook in entry["hooks"]
+    ]
+    assert commands == [
+        shlex.join(["bash", str(hooks_dir / "scope-check.sh")]),
+        shlex.join(["bash", str(hooks_dir / "post-tool-log.sh")]),
+        shlex.join(["bash", str(hooks_dir / "session-end.sh")]),
+    ]
+    assert all("VIGIL_AGENT_ROOT" not in command for command in commands)
+
+
+def test_committed_claude_settings_register_compaction_and_session_end_hooks() -> None:
+    """The committed generated settings are what every engagement copy is made from."""
+    repo_root = Path(__file__).resolve().parents[1]
+    settings = json.loads(
+        (repo_root / "agent" / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    hooks = settings["hooks"]
+    assert "PreCompact" in hooks and "SessionEnd" in hooks
+    for event, script in (("PreCompact", "pre-compact.sh"), ("SessionEnd", "session-end.sh")):
+        entries = hooks[event]
+        assert len(entries) == 1, f"{event} must be one no-matcher entry"
+        assert "matcher" not in entries[0]
+        commands = entries[0]["hooks"]
+        assert len(commands) == 1
+        assert script in commands[0]["command"]
+    assert hooks["SessionEnd"][0]["hooks"][0]["timeout"] >= 5
+
+
+def test_committed_codex_config_registers_session_end_but_no_compaction_hook() -> None:
+    """Codex gets the session-end receipt hook, deliberately no PreCompact."""
+    import tomllib
+
+    repo_root = Path(__file__).resolve().parents[1]
+    config = tomllib.loads(
+        (repo_root / "agent" / ".codex" / "config.toml").read_text(encoding="utf-8")
+    )
+    hooks = config["hooks"]
+    assert "PreCompact" not in hooks
+    session_end = hooks["SessionEnd"]
+    assert len(session_end) == 1
+    command = session_end[0]["hooks"][0]
+    assert "session-end.sh" in command["command"]
+    assert command["timeout"] >= 5

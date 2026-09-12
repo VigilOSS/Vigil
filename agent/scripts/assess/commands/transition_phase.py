@@ -15,36 +15,15 @@ import sys
 
 from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import Config, load_config
+from assess.lib.phases import (
+    BLUE_TRANSITION_PHASES as BLUE_PHASES,
+    CODE_TRANSITION_PHASES as CODE_PHASES,
+    WEB_TRANSITION_PHASES as WEB_PHASES,
+)
 from assess.lib.scope import mutate_scope
 
-WEB_PHASES = [
-    "recon",
-    "collect",
-    "consume-test",
-    "verify",
-    "exploit",
-    "report",
-    "complete",
-]
-
-CODE_PHASES = [
-    "ingest",
-    "classify-map",
-    "hunt",
-    "verify-variant",
-    "fuzz",
-    "complete",
-]
-
-BLUE_PHASES = [
-    "intake",
-    "triage",
-    "investigate",
-    "verify",
-    "respond",
-    "report",
-    "complete",
-]
+# The three ordered rosters (terminal `complete` included) come from
+# `assess.lib.phases`, the single source of truth for phase vocabulary.
 
 WEB_TRANSITION_ORDER = {phase: i for i, phase in enumerate(WEB_PHASES)}
 CODE_TRANSITION_ORDER = {phase: i for i, phase in enumerate(CODE_PHASES)}

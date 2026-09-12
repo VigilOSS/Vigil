@@ -595,6 +595,16 @@ Every dispatch launches a fresh agent — treat each dispatch as a clean-room en
 
 **Operator continuity** — register each dispatch up front and mark it `done` with its finding slugs (the `vigil assess agent start` / `agent done` shape is in Specialist Dispatch Contract above), then run `vigil assess agent render-handoff <agent-id>` and paste its output into the next dispatch's prompt. The renderer emits a markdown blob hard-capped at `--max-lines` (default 40): it collapses findings, runtime issues, and artifacts first; if multiline load-bearing prose alone still exceeds the cap, it emits an explicit truncation marker naming `--max-lines` rather than silently overflowing. The blob carries finding slugs (title + severity, `fetch`-able), working-artifact paths with present/missing state, captured credential ids (vuln-analyst / exploit-developer only), and the recorded next-step list. When a handoff is `ready`/`blocked`, close it with `vigil assess agent close <agent-id>`; use `vigil assess agent reconcile-stale --dry-run` during resume/phase transitions to find dispatches with closable or missing handoffs.
 
+**Operator checkpoint — your own handoff row.** Specialists write handoffs; you did not, so your state died with the session. Before a phase transition, before a long dispatch wave, and at session end, record one:
+
+```bash
+vigil assess operator-checkpoint record --intent "what I was about to do and why" \
+  --finding VA-047 --agent-id <agent-id> --command-run <id> --artifact <id>
+vigil assess operator-checkpoint show          # current checkpoint; --all walks the supersession chain
+```
+
+The checkpoint stores REFERENCES to rows the backend already holds (phase is server-derived; unknown finding / agent / command-run / artifact ids refuse the write naming them). `--intent` is the single free-text field and is recorded and rendered as **UNVERIFIED operator intent** — never a finding, a measurement, or evidence; those still go through `finding record` / `record-probe` / `intel record`. Storage is append-only: correct a wrong checkpoint by recording a new one, and the superseded row stays readable as `superseded by checkpoint #N`.
+
 **Pass forward the bounded blob, never transcript pastes** — full transcript pastes crowd out the objective and inflate context linearly across long chains; the blob stays bounded and pulls canonical state from the backend. Durable content (findings, intel, activity, credentials) lives in the backend; the dispatch prompt carries pointers plus the blob.
 
 **DEDUP** — `vigil assess agent list --task-q "<keyword>"` is the dispatches-table view of the canonical DEDUP rule (Pre-Dispatch Checklist); use it alongside the activity-log check, not as a second rule.

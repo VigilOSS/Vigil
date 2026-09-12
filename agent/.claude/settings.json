@@ -39,6 +39,27 @@
           }
         ]
       }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'if [ -n \"${VIGIL_AGENT_ROOT:-}\" ]; then exec bash \"$VIGIL_AGENT_ROOT/scripts/hooks/pre-compact.sh\"; fi; if [ -f scripts/hooks/pre-compact.sh ]; then exec bash scripts/hooks/pre-compact.sh; fi; if [ -f agent/scripts/hooks/pre-compact.sh ]; then exec bash agent/scripts/hooks/pre-compact.sh; fi'"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'if [ -n \"${VIGIL_AGENT_ROOT:-}\" ]; then exec bash \"$VIGIL_AGENT_ROOT/scripts/hooks/session-end.sh\"; fi; if [ -f scripts/hooks/session-end.sh ]; then exec bash scripts/hooks/session-end.sh; fi; if [ -f agent/scripts/hooks/session-end.sh ]; then exec bash agent/scripts/hooks/session-end.sh; fi'",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }

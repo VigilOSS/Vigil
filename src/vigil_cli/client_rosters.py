@@ -135,6 +135,119 @@ def ensure_opencode_agents_link(agent_root: Path, opencode_dir: Path) -> None:
     )
 
 
+def _ensure_entry_links(source_dir: Path, dest_dir: Path) -> None:
+    """Point an engagement at each generated entry in ``source_dir`` individually.
+
+    The specialist rosters link one whole directory, because nothing else is ever
+    written into them.  Operator commands are different: an engagement may carry
+    hand-authored commands of its own beside the shipped ones, and a directory
+    symlink would either hide them or refuse to install anything at all.  So the
+    owning directory stays real and each generated entry becomes its own pointer.
+
+    Two properties follow, both deliberate:
+
+    * A real file the operator wrote **wins** and is never replaced.  Engagement
+      directories hold operator-owned content; the generated set yields to it,
+      the same way the physical-roster refresh preserves unknown entries.
+    * A pointer whose generated source has since been removed is pruned, so a
+      renamed or retired command does not keep shipping as a dangling link.
+
+    ADR 0017: engagement files stay bounded pointers, never copies that drift.
+    """
+    if not source_dir.is_dir():
+        return
+    if dest_dir.is_symlink():
+        # Never write through a symlinked owning directory — following it could
+        # land generated content somewhere unrelated to this engagement.
+        return
+    if dest_dir.exists() and not dest_dir.is_dir():
+        return
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    canonical_names = set()
+    for entry in sorted(source_dir.iterdir(), key=lambda child: child.name):
+        if entry.name.startswith("."):
+            continue
+        canonical_names.add(entry.name)
+        destination = dest_dir / entry.name
+        if destination.is_symlink():
+            try:
+                if destination.resolve() == entry.resolve():
+                    continue
+            except (OSError, RuntimeError):
+                pass
+            destination.unlink()
+        elif destination.exists():
+            continue
+        destination.symlink_to(entry.resolve(), target_is_directory=entry.is_dir())
+
+    source_resolved = source_dir.resolve()
+    for destination in sorted(dest_dir.iterdir(), key=lambda child: child.name):
+        if destination.name in canonical_names or not destination.is_symlink():
+            continue
+        try:
+            target = destination.readlink()
+        except OSError:
+            continue
+        if target.parent == source_resolved:
+            destination.unlink()
+
+
+def ensure_claude_commands_link(agent_root: Path, claude_dir: Path) -> None:
+    """Expose the generated operator slash commands inside an engagement cwd.
+
+    Claude Code reads project slash commands from ``.claude/commands/<name>.md``.
+    """
+    _ensure_entry_links(agent_root / ".claude" / "commands", claude_dir / "commands")
+
+
+def ensure_codex_skills_link(agent_root: Path, codex_dir: Path) -> None:
+    """Expose the generated operator skills inside an engagement cwd.
+
+    Codex reads project skills from ``.codex/skills/<name>/SKILL.md`` and invokes
+    one as ``$<name>``.  Verified against Codex 0.154.0 with
+    ``codex debug prompt-input``: a project ``.codex/skills`` tree is discovered,
+    a bare ``skills/`` is not, and both a symlinked skill directory and a
+    symlinked skills root resolve normally.
+    """
+    _ensure_entry_links(agent_root / ".codex" / "skills", codex_dir / "skills")
+
+
+def ensure_codex_config(
+    agent_root: Path,
+    codex_dir: Path,
+    *,
+    rendered_agent_root: Path | None = None,
+) -> None:
+    """Copy Codex config with hooks bound to the installed agent root."""
+    config_src = agent_root / ".codex" / "config.toml"
+    if not config_src.is_file():
+        return
+    target_root = rendered_agent_root or agent_root
+    script_names = ("scope-check.sh", "post-tool-log.sh", "session-end.sh")
+    rendered_lines: list[str] = []
+    for line in config_src.read_text(encoding="utf-8").splitlines(keepends=True):
+        script_name = next((name for name in script_names if name in line), None)
+        if script_name is not None and line.lstrip().startswith("command ="):
+            command = shlex.join(
+                ["bash", str(target_root / "scripts" / "hooks" / script_name)]
+            )
+            newline = "\n" if line.endswith("\n") else ""
+            line = f"command = {json.dumps(command)}{newline}"
+        rendered_lines.append(line)
+    config_text = "".join(rendered_lines)
+
+    codex_dir.mkdir(parents=True, exist_ok=True)
+    config_dest = codex_dir / "config.toml"
+    if config_dest.is_symlink():
+        config_dest.unlink()
+    elif config_dest.exists() and not config_dest.is_file():
+        return
+    if config_dest.exists() and config_dest.read_text(encoding="utf-8") == config_text:
+        return
+    config_dest.write_text(config_text, encoding="utf-8")
+
+
 def ensure_claude_settings(
     agent_root: Path,
     claude_dir: Path,
@@ -176,7 +289,12 @@ def ensure_claude_settings(
                 command_text = command.get("command")
                 if not isinstance(command_text, str):
                     continue
-                for script_name in ("post-tool-log.sh", "scope-check.sh"):
+                for script_name in (
+                    "post-tool-log.sh",
+                    "scope-check.sh",
+                    "pre-compact.sh",
+                    "session-end.sh",
+                ):
                     if script_name in command_text:
                         target = (
                             rendered_agent_root or agent_root
@@ -553,6 +671,8 @@ def repair_engagement_client_rosters(
                     ".claude",
                     ".opencode",
                     ".goose",
+                    ".claude/commands",
+                    ".codex/skills",
                     ".agents/plugins/vigil-standard/hooks/hooks.json",
                 ),
             )
@@ -590,7 +710,9 @@ def repair_engagement_client_rosters(
     for plan in plans:
         eng_dir = plan.engagement_dir
         if plan.codex_needed:
-            ensure_codex_agents_link(agent_root, eng_dir / ".codex")
+            codex_dir = eng_dir / ".codex"
+            ensure_codex_agents_link(agent_root, codex_dir)
+            ensure_codex_skills_link(agent_root, codex_dir)
         if plan.claude_needed:
             claude_dir = eng_dir / ".claude"
             ensure_claude_settings(
@@ -599,6 +721,7 @@ def repair_engagement_client_rosters(
                 rendered_agent_root=rendered_agent_root,
             )
             ensure_claude_agents_link(agent_root, claude_dir)
+            ensure_claude_commands_link(agent_root, claude_dir)
         if plan.opencode_needed:
             opencode_dir = eng_dir / ".opencode"
             ensure_opencode_plugin(agent_root, opencode_dir)

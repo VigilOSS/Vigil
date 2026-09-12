@@ -110,6 +110,15 @@ set_output_paths() {
   # `.goosehints` and the default `goose run` agent dispatches specialists via the
   # `delegate` tool by recipe name. See docs/goose-bench.md.
   GOOSE_RECIPES_DIR="$OUTPUT_DIR/.goose/recipes"
+  # Operator commands. ONE canonical source per command under agent/commands/,
+  # rendered to one wrapper path per client (ADR 0017). Claude reads project
+  # slash commands from .claude/commands/<name>.md; Codex reads project skills
+  # from .codex/skills/<name>/SKILL.md (verified empirically against Codex
+  # 0.154.0 with `codex debug prompt-input`; a bare `skills/` is NOT discovered).
+  # opencode/goose/kimi get no commands — those clients have no equivalent
+  # project-command surface, and their operators run the verbs directly.
+  CLAUDE_COMMANDS_DIR="$OUTPUT_DIR/.claude/commands"
+  CODEX_SKILLS_DIR="$OUTPUT_DIR/.codex/skills"
 }
 set_output_paths
 
@@ -145,6 +154,178 @@ BLUE_AGENT_NAMES=(
   osint-analyst
   report-writer
 )
+
+# -----------------------------------------------------------------------------
+# Operator command roster
+# -----------------------------------------------------------------------------
+# CANONICAL COMMAND FORMAT (agent/commands/<name>.md)
+#
+#   ---
+#   name: vigil-resume
+#   description: one line, shown in the client's command picker
+#   ---
+#   <shared markdown body>
+#
+# Commands are client-agnostic by default. Where a client capability differs,
+# wrap the divergent text in a capability block — one canonical file, no forked
+# content:
+#
+#   <!-- vigil:only claude -->
+#   ...text using $ARGUMENTS, !`bash` command substitution, or @file...
+#   <!-- vigil:end -->
+#   <!-- vigil:only codex -->
+#   ...the same instruction, degraded honestly: state the command for the agent
+#      to RUN, because Codex skills have no substitution...
+#   <!-- vigil:end -->
+#
+# Blocks whose client is not the render target are dropped along with their
+# markers. Everything outside a block is emitted for every client. Commands are
+# NOT split red/blue: the roster below is rendered once per invocation.
+#
+# The roster is explicit rather than a glob so a forgotten file is caught: a
+# canonical source that is not listed here is reported as drift by render-check.
+COMMAND_NAMES=(
+  vigil-start
+  vigil-resume
+  vigil-handoff
+  vigil-compact
+  vigil-hunt-deeper
+  vigil-escalate-honestly
+  vigil-fresh-skeptic-verify
+  vigil-triage-reply
+  vigil-encapsulate-win
+)
+
+COMMANDS_SRC_DIR="$SOURCE_DIR/commands"
+
+# Value of a frontmatter field in a canonical command source.
+command_field() {
+  local src="$1" field="$2"
+  awk -v field="$field" '
+    NR == 1 && $0 == "---" { inside = 1; next }
+    inside && $0 == "---" { exit }
+    inside {
+      key = field ":"
+      if (index($0, key) == 1) { print substr($0, length(key) + 2); exit }
+    }
+  ' "$src"
+}
+
+# Canonical body for one client: frontmatter stripped, capability blocks for
+# other clients dropped, leading blank lines trimmed.
+command_body() {
+  local src="$1" client="$2"
+  awk -v want="$client" -v src="$src" '
+    function fail(reason) {
+      printf "%s:%d: %s\n", src, NR, reason > "/dev/stderr"
+      failed = 1
+      exit 2
+    }
+    NR == 1 && $0 == "---" { fm = 1; next }
+    fm && $0 == "---" { fm = 0; next }
+    fm { next }
+    /^<!-- vigil:only/ {
+      if ($0 !~ /^<!-- vigil:only [^ ]+ -->$/) {
+        fail("malformed capability block marker")
+      }
+      split($0, part, " ")
+      if (part[3] != "claude" && part[3] != "codex") {
+        fail("unknown capability client \047" part[3] "\047")
+      }
+      if (in_block) {
+        fail("nested capability block")
+      }
+      in_block = 1
+      block_start = NR
+      skip = (part[3] == want) ? 0 : 1
+      next
+    }
+    /^<!-- vigil:end -->$/ {
+      if (!in_block) {
+        fail("unmatched <!-- vigil:end -->")
+      }
+      in_block = 0
+      skip = 0
+      next
+    }
+    skip { next }
+    !emitted && $0 == "" { next }
+    { emitted = 1; print }
+    END {
+      if (!failed && in_block) {
+        printf "%s:%d: missing <!-- vigil:end --> for capability block\n", src, block_start > "/dev/stderr"
+        exit 2
+      }
+    }
+  ' "$src"
+}
+
+# Claude project slash command: .claude/commands/<name>.md. Claude supports only
+# `description` in this frontmatter (`name` comes from the filename), and the
+# body keeps the $ARGUMENTS / !`bash` / @file substitutions.
+render_claude_command() {
+  local name="$1"
+  local src="$COMMANDS_SRC_DIR/$name.md"
+  [[ -f "$src" ]] || return 0
+  local description out
+  description=$(command_field "$src" description)
+  out="$CLAUDE_COMMANDS_DIR/$name.md"
+  mkdir -p "$(dirname "$out")"
+  {
+    cat <<EOF
+---
+description: $description
+---
+
+<!-- GENERATED FILE — DO NOT EDIT. -->
+<!-- Source: agent/commands/$name.md -->
+<!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
+EOF
+    render_stamp md
+    printf '\n'
+    command_body "$src" claude
+  } > "$out"
+  perl -0pi -e 's/\n+\z/\n/' "$out"
+}
+
+# Codex project skill: .codex/skills/<name>/SKILL.md, invoked as `$<name>`.
+# Codex skill frontmatter carries `name` and `description`. Codex performs NO
+# argument or command substitution in a skill body, so the codex capability
+# blocks state the commands for the agent to run instead of pre-substituting
+# their output.
+render_codex_skill() {
+  local name="$1"
+  local src="$COMMANDS_SRC_DIR/$name.md"
+  [[ -f "$src" ]] || return 0
+  local description out
+  description=$(command_field "$src" description)
+  out="$CODEX_SKILLS_DIR/$name/SKILL.md"
+  mkdir -p "$(dirname "$out")"
+  {
+    cat <<EOF
+---
+name: $name
+description: $description
+---
+
+<!-- GENERATED FILE — DO NOT EDIT. -->
+<!-- Source: agent/commands/$name.md -->
+<!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
+EOF
+    render_stamp md
+    printf '\n'
+    command_body "$src" codex
+  } > "$out"
+  perl -0pi -e 's/\n+\z/\n/' "$out"
+}
+
+render_all_commands() {
+  local name
+  for name in "${COMMAND_NAMES[@]}"; do
+    render_claude_command "$name"
+    render_codex_skill "$name"
+  done
+}
 
 # -----------------------------------------------------------------------------
 # Prompt stamp
@@ -209,6 +390,14 @@ source_stamp_sha() {
         for agent_name in "${roster[@]}"; do
           if [[ -f "$SOURCE_DIR/agents/$agent_name.md" ]]; then
             cat "$SOURCE_DIR/agents/$agent_name.md"
+          fi
+        done
+        # Commands are part of what this renderer produces, so an edit to one
+        # must move the digest that engagement mirrors compare themselves to.
+        local command_name
+        for command_name in "${COMMAND_NAMES[@]}"; do
+          if [[ -f "$SOURCE_DIR/commands/$command_name.md" ]]; then
+            cat "$SOURCE_DIR/commands/$command_name.md"
           fi
         done
       } | sha256_stdin
@@ -807,6 +996,9 @@ render_all_wrappers() {
     render_opencode_wrapper "$agent_name"
     render_goose_recipe "$agent_name"
   done
+  # Commands are roster-independent (identical for red and blue), so this is
+  # idempotent when both types are rendered in one run.
+  render_all_commands
 }
 
 # Return 0 if all blue specialist sources exist on disk, 1 otherwise. Used by
@@ -963,6 +1155,73 @@ check_render_one() {
     fi
   done
 
+  # Operator commands. Rendered from agent/commands/ into the same temp dir by
+  # render_all_wrappers above, so the same missing/differs contract applies.
+  local command_name
+  for command_name in "${COMMAND_NAMES[@]}"; do
+    local command_src="$SOURCE_DIR/commands/$command_name.md"
+    if [[ ! -f "$command_src" ]]; then
+      printf 'DRIFT (%s): commands/%s.md missing — listed in COMMAND_NAMES but no canonical source\n' \
+        "$check_type" "$command_name" >&2
+      drift=1
+      continue
+    fi
+    local claude_command_rel=".claude/commands/$command_name.md"
+    local codex_skill_rel=".codex/skills/$command_name/SKILL.md"
+    local rel
+    for rel in "$claude_command_rel" "$codex_skill_rel"; do
+      if [[ ! -f "$source_output_dir/$rel" ]]; then
+        printf 'DRIFT (%s): %s missing — expected rendered command not present in repo\n' \
+          "$check_type" "$rel" >&2
+        drift=1
+      elif prompt_files_differ "$source_output_dir/$rel" "$tmp_dir/$rel"; then
+        printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$rel" >&2
+        print_prompt_diff "$source_output_dir/$rel" "$tmp_dir/$rel"
+        drift=1
+      fi
+    done
+  done
+
+  # Orphans. agent/.claude and agent/.codex are mirror-synced into the install
+  # root by `vigil install` (install.py::_sync_client_entrypoints_fds), so a
+  # rendered command left behind after its canonical source was renamed or
+  # deleted would keep shipping to every engagement with nothing regenerating
+  # it. A canonical source that is not in COMMAND_NAMES is caught the same way.
+  local rendered orphan_name
+  if [[ -d "$source_output_dir/.claude/commands" ]]; then
+    for rendered in "$source_output_dir"/.claude/commands/*.md; do
+      [[ -e "$rendered" ]] || continue
+      orphan_name=$(basename "$rendered" .md)
+      if [[ ! -f "$tmp_dir/.claude/commands/$orphan_name.md" ]]; then
+        printf 'DRIFT (%s): .claude/commands/%s.md is not rendered by any canonical source\n' \
+          "$check_type" "$orphan_name" >&2
+        drift=1
+      fi
+    done
+  fi
+  if [[ -d "$source_output_dir/.codex/skills" ]]; then
+    for rendered in "$source_output_dir"/.codex/skills/*/SKILL.md; do
+      [[ -e "$rendered" ]] || continue
+      orphan_name=$(basename "$(dirname "$rendered")")
+      if [[ ! -f "$tmp_dir/.codex/skills/$orphan_name/SKILL.md" ]]; then
+        printf 'DRIFT (%s): .codex/skills/%s/SKILL.md is not rendered by any canonical source\n' \
+          "$check_type" "$orphan_name" >&2
+        drift=1
+      fi
+    done
+  fi
+  if [[ -d "$COMMANDS_SRC_DIR" ]]; then
+    for rendered in "$COMMANDS_SRC_DIR"/*.md; do
+      [[ -e "$rendered" ]] || continue
+      orphan_name=$(basename "$rendered" .md)
+      if [[ ! -f "$tmp_dir/.claude/commands/$orphan_name.md" ]]; then
+        printf 'DRIFT (%s): commands/%s.md is not in COMMAND_NAMES — it renders to nothing\n' \
+          "$check_type" "$orphan_name" >&2
+        drift=1
+      fi
+    done
+  fi
+
   rm -rf "$tmp_dir"
   TYPE="$saved_type"
   OUTPUT_DIR="$saved_output_dir"
@@ -976,7 +1235,7 @@ check_render_one() {
     fi
     return 1
   fi
-  echo "render-check (${check_type}): clean (${#roster[@]} specialist wrappers match source)"
+  echo "render-check (${check_type}): clean (${#roster[@]} specialist wrappers, ${#COMMAND_NAMES[@]} operator commands match source)"
   return 0
 }
 

@@ -386,7 +386,9 @@ input {
 
 .waterfall {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  /* Sized by the roster, not a hardcoded count: PhaseWaterfall renders one card
+     per canonical web phase, so a new phase must not silently wrap. */
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 14px;
 }
 

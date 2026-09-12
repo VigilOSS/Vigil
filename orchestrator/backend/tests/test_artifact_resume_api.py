@@ -665,6 +665,34 @@ def test_resume_brief_work_buffer_counts_pending_by_gf_bucket(client, isolate_se
     assert "gf:sqli" not in work_buffer["by_bucket"]
 
 
+def test_resume_brief_recent_decision_count_respects_since(
+    client, isolate_settings
+) -> None:
+    """A filtered list must not be labelled with the engagement's all-time total."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    for choice in ("in_scope", "out_of_scope"):
+        response = client.post(
+            f"{BASE}/dispatch-decisions",
+            json={
+                "kind": "scope_decision",
+                "payload": {"host": "vendor.example.com", "choice": choice},
+                "surfaced_to_user": True,
+            },
+        )
+        assert response.status_code == 201, response.text
+
+    full = client.get(f"{BASE}/resume-brief").json()
+    assert full["recent_decisions_count"] == 2
+    assert len(full["recent_decisions"]) == 2
+
+    future = client.get(
+        f"{BASE}/resume-brief", params={"since": "2099-01-01T00:00:00Z"}
+    ).json()
+    assert future["recent_decisions"] == []
+    assert future["recent_decisions_count"] == 0
+
+
 def test_resume_brief_lists_coverage_and_read_first_intel_notes(client, isolate_settings) -> None:
     """build_resume_brief.intel.read_first_notes surfaces notes tagged coverage /
     read-first as bounded title pointers, and ignores untagged notes."""

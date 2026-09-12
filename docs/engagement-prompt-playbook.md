@@ -13,6 +13,10 @@
 > it forgets the operator role, it inflates severity to look productive, it stops at the first win. The
 > value of a human in the loop is catching each of those the moment it starts and saying the one sentence
 > that corrects it. Those sentences are below.
+>
+> **Where the rest lives.** This file is *mid-session* steering. The prompts you paste to start or resume a
+> session, the nine `vigil-*` client commands, and the compaction / session-end hooks are in
+> [`session-commands.md`](session-commands.md).
 
 ---
 
@@ -28,6 +32,8 @@
    habitual prompts are already enforced by the docs (so saying them is reinforcement, not instruction) and
    which are noise to drop.
 6. [§6 Templates](#6-copy-paste-templates) are fill-in-the-blank starting points.
+7. [§7 Client commands](#7-the-same-prompts-as-client-commands) is where most of §6 already
+   lives as a command you can invoke instead of paste — plus what runs automatically.
 
 ---
 
@@ -308,6 +314,62 @@ That [prompt/check/hypothesis] just [found a real bug / caught a false positive]
 [hunting.md / the FP-severity gate / the relevant skill] so it's applied automatically next engagement, then
 give me the file path you changed.
 ```
+
+---
+
+## 7. The same prompts as client commands
+
+Five of the §6 templates, plus four session-lifecycle prompts, ship as **client commands** so
+you do not have to paste them. They live in one canonical source per command under
+`agent/commands/<name>.md` and are rendered per client by
+`agent/scripts/render-operator-prompts.sh`; `render-operator-prompts.sh check` fails on drift,
+including on a missing rendered file. Never edit the rendered copies.
+
+| Command | What it is |
+|---|---|
+| `vigil-start` | Open a new authorized engagement from the top of the operator workflow |
+| `vigil-resume` | Re-hydrate the operator seat from the backend after a compaction, restart or handoff |
+| `vigil-handoff` | Write the next operator a brief grounded in backend state, not recollection |
+| `vigil-compact` | Show the standing compaction contract and audit whether it is being applied |
+| `vigil-hunt-deeper` | §6 Hunt-deeper |
+| `vigil-escalate-honestly` | §6 Escalate honestly |
+| `vigil-fresh-skeptic-verify` | §6 Fresh-skeptic verify |
+| `vigil-triage-reply` | §6 Triage reply |
+| `vigil-encapsulate-win` | §6 Encapsulate a win |
+
+The `vigil-` prefix is mandatory: bare `resume` and `compact` collide with built-ins in both
+clients.
+
+- **Claude Code** — `/vigil-resume`, `/vigil-hunt-deeper`, … Arguments are passed inline
+  (`/vigil-escalate-honestly idor-on-tenant-export`), and the commands run backend queries for
+  you before you read them.
+- **Codex** — `$vigil-resume`, `$vigil-hunt-deeper`, … Codex skills perform no argument or
+  command substitution, so the Codex rendering states the commands for the agent to run and
+  reads your intent from the message you send alongside the skill name.
+- **opencode, goose and kimi get no commands.** Those clients have no equivalent
+  project-command surface. Paste the §6 template, or the body of the matching
+  `agent/commands/<name>.md`, into the session by hand — the content is identical, only the
+  invocation differs.
+
+Commands reach an engagement as pointers, not copies: `<engagement>/.claude/commands/<name>.md`
+and `<engagement>/.codex/skills/<name>/` are per-entry symlinks into the install root, so an
+engagement never carries a stale copy. A command you write yourself in an engagement's
+`.claude/commands/` is preserved and wins over the shipped one of the same name.
+
+### Compaction and session end are also automatic
+
+- `agent/scripts/hooks/pre-compact.sh` is registered as a Claude Code `PreCompact` hook with no
+  matcher, so it fires on manual `/compact` **and** on automatic context-window compaction. Its
+  stdout becomes the summarizer's custom instructions, merged with any text you typed after
+  `/compact`. An engagement adds its own rules by dropping a `COMPACT.md` in the engagement
+  directory; it is appended to the standing contract, never a replacement. Vigil does not wire
+  Codex's supported compaction events, so Codex operators run `$vigil-compact` and apply the
+  contract by hand.
+- `agent/scripts/hooks/session-end.sh` is registered as a `SessionEnd` hook on **both** Claude
+  and Codex. It records an ordinary activity receipt that the client ended; it never replaces the
+  operator's separate **save my place** checkpoint. Treat the receipt as best-effort: a crash,
+  `SIGKILL` or host timeout fires no hook at all. The durable checkpoint is the one the operator
+  writes with `vigil assess operator-checkpoint record`.
 
 ---
 

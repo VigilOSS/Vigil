@@ -3,9 +3,17 @@
 ## Our commitment
 
 We are committed to making participation in this project a harassment-free experience for everyone,
-regardless of age, body size, disability, ethnicity, sex characteristics, gender identity and
-expression, level of experience, education, socio-economic status, nationality, personal appearance,
-race, caste, color, religion, or sexual identity and orientation.
+regardless of age, body size, visible or invisible disability, ethnicity, sex characteristics,
+gender identity and expression, level of experience, education, socio-economic status, nationality,
+personal appearance, race, caste, color, religion, or sexual identity and orientation.
+
+## Scope
+
+This policy applies in every project space — the repository, issues, pull requests, discussions,
+commit and review comments — and to anyone representing the project in a public space, such as
+using an official project account or acting as a project representative at an event. It also
+applies to conduct outside those spaces when that conduct affects the safety of someone
+participating here.
 
 ## Expected behavior
 
@@ -22,14 +30,23 @@ inappropriate in a professional setting is not acceptable.
 
 ## Enforcement
 
-Report conduct concerns through the repository's
-[private report form](https://github.com/vigil-oss/vigil/security/advisories/new) and prefix the title
-with `[Conduct]`. Do not include the report in a public issue. The maintainer may edit, remove, or
-reject contributions and may temporarily or permanently restrict participation when behavior
-violates this policy. Reports will be handled as privately as practical, subject to safety and legal
-obligations.
+Report conduct concerns privately by email to `operator@example.com`, with
+`[Conduct]` in the subject line. Do not file a conduct report as a public issue, and do not file one
+through the security advisory form — that form is for vulnerabilities and opens a draft security
+advisory. Security vulnerabilities go to [SECURITY.md](SECURITY.md#reporting-a-vulnerability).
+
+The maintainer may edit, remove, or reject contributions and may temporarily or permanently restrict
+participation when behavior violates this policy. Reports will be handled as privately as practical,
+subject to safety and legal obligations.
 
 ## Attribution
 
-This policy is adapted from the Contributor Covenant, version 2.1, available at
-https://www.contributor-covenant.org/version/2/1/code_of_conduct.html.
+This policy is an abridgement adapted from the [Contributor Covenant][homepage], version 2.1,
+available at https://www.contributor-covenant.org/version/2/1/code_of_conduct.html. It does not
+reproduce the Covenant's full enforcement guidelines.
+
+Answers to common questions about this code of conduct are available at
+https://www.contributor-covenant.org/faq. Translations are available at
+https://www.contributor-covenant.org/translations.
+
+[homepage]: https://www.contributor-covenant.org

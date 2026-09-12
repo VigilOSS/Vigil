@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import HTTPException, status
 
 from ..db import get_connection
-from . import artifact_index, intel, state_manager
+from . import artifact_index, intel, operator_checkpoints, state_manager
 from .events import _engagement_or_404
 from .search import canonical_finding_alias
 
@@ -88,9 +88,37 @@ def _limited_findings(
     return [_finding_summary(row) for row in rows]
 
 
+_DECISION_RENDER_CAP = 10
+
+
 def _recent_decisions(engagement_id: int, *, since: str = "") -> list[dict[str, Any]]:
     rows = state_manager.list_decisions(engagement_id, limit=10 if not since else 30)
-    return _since_filter(rows, since=since, field="created_at")[:10]
+    return _since_filter(rows, since=since, field="created_at")[:_DECISION_RENDER_CAP]
+
+
+def _decision_count(connection, engagement_id: int, *, since: str = "") -> int:
+    """Count the same decision window represented by ``recent_decisions``."""
+    if not since:
+        return _row_count(connection, "assessment_dispatch_decisions", engagement_id)
+    rows = connection.execute(
+        "SELECT created_at FROM assessment_dispatch_decisions WHERE engagement_id = ?",
+        (engagement_id,),
+    ).fetchall()
+    timestamps = [{"created_at": row["created_at"]} for row in rows]
+    return len(_since_filter(timestamps, since=since, field="created_at"))
+
+
+def _row_count(connection, table: str, engagement_id: int) -> int:
+    """Absolute row count for one engagement-scoped table.
+
+    The display lists above are capped, so the renderer needs the TRUE total to
+    print an honest "showing N of M" instead of implying the cap is the depth.
+    """
+    row = connection.execute(
+        f"SELECT COUNT(*) AS total FROM {table} WHERE engagement_id = ?",
+        (engagement_id,),
+    ).fetchone()
+    return int(row["total"]) if row is not None else 0
 
 
 def _to_naive_utc(value: dt.datetime | None) -> dt.datetime | None:
@@ -292,9 +320,21 @@ def _recent_dispatch_picture(
     # still signals the real depth of stale/gap/terminal work. The operator is
     # pointed at `reconcile-stale` (already wired in _recommended_actions) for the
     # full list + action.
+    # The display lists are capped at 10; the matching `*_count` fields carry
+    # the engagement's TRUE totals so the renderer can print an honest
+    # "showing N of M" rather than implying the cap is the whole picture.
+    with get_connection() as connection:
+        dispatch_total = _row_count(connection, "assessment_dispatches", engagement_id)
+        handoff_total = _row_count(
+            connection, "assessment_dispatch_handoffs", engagement_id
+        )
+    recent_dispatches = display_dispatches[:_DISPATCH_LIST_RENDER_CAP]
+    latest_handoffs = list(handoffs.values())[:_DISPATCH_LIST_RENDER_CAP]
     return {
-        "recent_dispatches": display_dispatches[:10],
-        "latest_handoffs": list(handoffs.values())[:10],
+        "recent_dispatches": recent_dispatches,
+        "recent_dispatches_count": dispatch_total,
+        "latest_handoffs": latest_handoffs,
+        "latest_handoffs_count": handoff_total,
         "stale_in_progress_dispatches": stale[:_DISPATCH_LIST_RENDER_CAP],
         "stale_in_progress_dispatches_count": len(stale),
         "handoff_gaps": gaps[:_DISPATCH_LIST_RENDER_CAP],
@@ -891,6 +931,9 @@ def build_resume_brief(
     }
     dispatch_picture = _recent_dispatch_picture(engagement_id, max_age_hours=max_age_hours)
     knowledge_drift = _knowledge_drift_section(engagement_id)
+    recent_decisions = _recent_decisions(engagement_id, since=since)
+    with get_connection() as connection:
+        decision_total = _decision_count(connection, engagement_id, since=since)
     if agent_id:
         dispatch_picture["selected_dispatch"] = state_manager.get_dispatch(engagement_id, agent_id)
         try:
@@ -915,7 +958,9 @@ def build_resume_brief(
         "per_input_coverage": per_input_coverage_section,
         "target_finding": target_finding,
         "findings": findings,
-        "recent_decisions": _recent_decisions(engagement_id, since=since),
+        "recent_decisions": recent_decisions,
+        "recent_decisions_count": decision_total,
+        "operator_checkpoint": operator_checkpoints.current_checkpoint(engagement_id),
         "dispatches": dispatch_picture,
         "command_runs": command_matches,
         "command_runs_page": command_page,

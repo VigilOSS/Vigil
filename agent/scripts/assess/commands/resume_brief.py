@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import sys
 from contextlib import redirect_stdout
 from types import SimpleNamespace
 from urllib.parse import quote, urlencode
 
 from assess.commands import kali_sweep_orphans
+from assess.commands.operator_checkpoint import render_intent_lines
 from assess.lib.client import AssessError, AssessmentClient, default_runtime_container
 from assess.lib.config import load_config
 from assess.lib.finding_render import UNTRUSTED_DATA_NOTICE, blocked_reason_summary
@@ -23,6 +25,11 @@ _DEGRADED_OUTPUT_RETENTION = {
     "unmeasured",
     "untrusted",
 }
+
+
+# The write-shaped verb that actually reconciles what the dry-run observes.
+# resume-brief names it verbatim rather than performing the write itself.
+_SWEEP_ORPHANS_COMMAND = "vigil assess kali sweep-orphans --scope all"
 
 
 def _orphan_attention(output: str) -> str:
@@ -45,6 +52,12 @@ def _orphan_attention(output: str) -> str:
     # ``skipped_unverifiable`` (liveness/pid/PATCH/pending-recovery failures),
     # NOT the conflated ``skipped``, mirroring how host_processes already keys
     # on its bad states (unverifiable/failed) rather than a catch-all (I-05).
+    # Under the dry run the counters read as "would": `finalized` is the row the
+    # sweep WOULD reconcile to lost and `recovered_pending`/`reaped` are the
+    # recoveries it WOULD perform, so those are the genuinely actionable states
+    # and each section names them alongside the states that are actionable in
+    # either mode. `recovered_degraded` stays listed because the wet run still
+    # reports it and the attention line carries its ids.
     sections = (
         (
             "command_runs",
@@ -54,13 +67,19 @@ def _orphan_attention(output: str) -> str:
                 "skipped_unverifiable",
                 "pending_recovery_failed",
                 "recovered_degraded",
+                "recovered_pending",
+                "finalized",
             ),
         ),
-        ("jobs", payload.get("jobs_summary"), ("still_running", "skipped_unverifiable")),
+        (
+            "jobs",
+            payload.get("jobs_summary"),
+            ("still_running", "skipped_unverifiable", "finalized"),
+        ),
         (
             "host_processes",
             payload.get("host_processes_summary"),
-            ("unverifiable", "failed"),
+            ("unverifiable", "failed", "reaped"),
         ),
     )
     rendered: list[str] = []
@@ -163,11 +182,14 @@ def register(subparsers) -> None:
 
 def run(args) -> None:
     cfg = load_config(args.engagement_dir)
-    # Resume hydration is a state-truth boundary: reconcile abandoned command
-    # runs, jobs, and precisely-owned host children before projecting the
-    # operating picture. The one-hour cutoff keeps this bounded and avoids
-    # touching legitimate recent work; sweep output is internal plumbing, not
-    # part of the resume-brief response contract.
+    # `resume-brief` is a READ. It OBSERVES abandoned command runs, jobs, and
+    # precisely-owned host children (dry_run=True) and names the write-shaped
+    # verb that reconciles them; it does not reconcile them itself. A
+    # read-shaped command that silently wrote was a hazard the moment a hook or
+    # another command could invoke it automatically. The reconciling write stays
+    # owned by `vigil assess kali sweep-orphans`, which says on the tin that it
+    # writes; the one-hour cutoff keeps the observation bounded and the sweep's
+    # own stdout is internal plumbing, not part of the response contract.
     try:
         sweep_output = io.StringIO()
         with redirect_stdout(sweep_output):
@@ -177,18 +199,23 @@ def run(args) -> None:
                     scope="all",
                     max_age_seconds=3600,
                     container_name=default_runtime_container(),
-                    dry_run=False,
+                    dry_run=True,
                 )
             )
         attention = _orphan_attention(sweep_output.getvalue())
         if attention:
             print(
-                f"WARN: resume-brief orphan reconciliation needs attention: {attention}",
+                "WARN: resume-brief observed unreconciled orphans "
+                f"(nothing was written): {attention}",
+                file=sys.stderr,
+            )
+            print(
+                f"WARN: reconcile them with `{_SWEEP_ORPHANS_COMMAND}`",
                 file=sys.stderr,
             )
     except (AssessError, OSError, SystemExit) as exc:
         print(
-            f"WARN: resume-brief orphan reconciliation failed: {exc}",
+            f"WARN: resume-brief orphan observation failed: {exc}",
             file=sys.stderr,
         )
     params = []
@@ -246,6 +273,7 @@ def _render_markdown(brief: dict) -> str:
             f"- query: q={query.get('q') or '-'} finding={query.get('finding') or '-'} "
             f"agent_id={query.get('agent_id') or '-'} since={query.get('since') or '-'}"
         )
+    _render_operator_checkpoint(lines, brief.get("operator_checkpoint"))
     lines.extend(["", "## Finding Counts"])
     counts = brief.get("finding_counts") or {}
     for key in ("workflow", "verification_status", "severity", "source"):
@@ -272,6 +300,11 @@ def _render_markdown(brief: dict) -> str:
     _render_work_buffer(lines, brief.get("work_buffer") or {})
     _render_attempts(lines, brief.get("attempts") or {})
     _render_per_input_coverage(lines, brief.get("per_input_coverage") or {})
+    _render_decisions(
+        lines,
+        brief.get("recent_decisions") or [],
+        brief.get("recent_decisions_count"),
+    )
     lines.extend(["", "## Dispatches"])
     dispatches = brief.get("dispatches") or {}
     # The lists are capped by the backend; the *_count fields carry the TRUE
@@ -298,6 +331,16 @@ def _render_markdown(brief: dict) -> str:
             "- no stale in-progress dispatches, handoff gaps, or terminal "
             "handoff-less dispatches across the engagement"
         )
+    _render_recent_dispatches(
+        lines,
+        dispatches.get("recent_dispatches") or [],
+        dispatches.get("recent_dispatches_count"),
+    )
+    _render_latest_handoffs(
+        lines,
+        dispatches.get("latest_handoffs") or [],
+        dispatches.get("latest_handoffs_count"),
+    )
     selected = dispatches.get("selected_dispatch")
     if selected:
         lines.extend(["", "## Selected Dispatch"])
@@ -318,7 +361,7 @@ def _render_markdown(brief: dict) -> str:
             ]
         )
         if selected.get("task"):
-            lines.append(f"- task: {_trim(str(selected.get('task') or ''), 200)}")
+            _append_contained_value(lines, "- task:", selected.get("task"))
         if selected.get("finding_slugs"):
             lines.append(f"- finding_slugs: {', '.join(selected.get('finding_slugs') or [])}")
     selected_handoff = dispatches.get("selected_handoff")
@@ -331,7 +374,9 @@ def _render_markdown(brief: dict) -> str:
             f"last_checkpoint_at={selected_handoff.get('last_checkpoint_at')}"
         )
         if selected_handoff.get("summary"):
-            lines.append(f"- summary: {_trim(str(selected_handoff.get('summary') or ''), 400)}")
+            _append_contained_value(
+                lines, "- summary:", selected_handoff.get("summary")
+            )
         if selected_handoff.get("finding_slugs"):
             lines.append(f"- finding_slugs: {', '.join(selected_handoff.get('finding_slugs') or [])}")
         for step in (selected_handoff.get("next_steps") or [])[:3]:
@@ -398,6 +443,125 @@ def _render_markdown(brief: dict) -> str:
             entity = f" [{row.get('entity_kind')} {row.get('entity_id')}]"
         lines.append(f"- {row.get('reason')}{entity}: `{row.get('command')}`")
     return "\n".join(lines)
+
+
+def _render_operator_checkpoint(lines: list, checkpoint: object) -> None:
+    """Render the operator's own last checkpoint, intent clearly UNVERIFIED.
+
+    Specialists leave handoff rows; before `operator-checkpoint` the operator
+    left nothing, so a resumed session had to guess what it had been doing. The
+    intent line is the one free-text field on that row and is labelled so it can
+    never be read back as a finding or as evidence."""
+    if not isinstance(checkpoint, dict) or not checkpoint:
+        return
+    lines.extend(["", "## Operator Checkpoint"])
+    header = (
+        f"- checkpoint #{checkpoint.get('checkpoint_version')} "
+        f"phase={checkpoint.get('current_phase') or 'unknown'} "
+        f"source={checkpoint.get('source') or 'unknown'} "
+        f"at={checkpoint.get('created_at') or 'unknown'}"
+    )
+    lines.append(header)
+    for label, key in (
+        ("findings", "finding_slugs"),
+        ("dispatch agent_ids", "dispatch_agent_ids"),
+        ("command runs", "command_run_ids"),
+        ("artifacts", "artifact_ids"),
+    ):
+        values = checkpoint.get(key) or []
+        rendered = ", ".join(str(value) for value in values) if values else "-"
+        lines.append(f"  - {label}: {rendered}")
+    # Shared with `operator-checkpoint show` so the two renders cannot drift on
+    # the UNVERIFIED label or on the containment that keeps a multi-line note
+    # from forging one of this brief's own section boundaries.
+    lines.extend(render_intent_lines(checkpoint.get("intent_note")))
+    lines.append(
+        "  - full chain: `vigil assess operator-checkpoint show --all`"
+    )
+
+
+_CONTAINED_VALUE_INDENT = "    "
+_RENDER_LINE_SEPARATOR = re.compile(r"\r\n|\r|\n|\u2028|\u2029")
+
+
+def _append_contained_value(lines: list, label: str, value: object) -> None:
+    """Append untrusted persisted text losslessly inside a fixed-indent block.
+
+    Decision payloads, dispatch tasks, and handoff summaries are operator-facing
+    records, so ADR 0019 forbids truncating, collapsing, or masking them. They can
+    also contain target-controlled line separators; emitted inline, a continuation
+    beginning ``##`` could impersonate a resume-brief heading. Preserve every
+    original character and insert only the rendering indent after every separator,
+    including bare CR and Unicode line/paragraph separators.
+    """
+    text = str(value)
+    contained = _RENDER_LINE_SEPARATOR.sub(
+        lambda match: f"{match.group(0)}{_CONTAINED_VALUE_INDENT}", text
+    )
+    lines.extend([label, f"{_CONTAINED_VALUE_INDENT}{contained}"])
+
+
+def _render_decisions(lines: list, rows: list, total) -> None:
+    """Render the recent operator decision ledger.
+
+    The backend has always carried `recent_decisions` and both the resume rule
+    and the operator prompt promise "recent decisions" in the brief — the
+    markdown path (the one the agent actually reads) never rendered them."""
+    if not rows:
+        return
+    lines.extend(["", "## Recent Decisions"])
+    lines.append("- point read: `vigil assess fetch dispatch-decisions/<id>`")
+    for row in rows:
+        state = "resolved" if row.get("resolved") else "open"
+        surfaced = " surfaced" if row.get("surfaced_to_user") else ""
+        payload = row.get("payload")
+        detail = (
+            json.dumps(payload, ensure_ascii=False, sort_keys=True)
+            if isinstance(payload, dict) and payload
+            else "-"
+        )
+        _append_contained_value(
+            lines,
+            f"- #{row.get('id')} {row.get('created_at')} {row.get('kind')} "
+            f"[{state}{surfaced}] ::",
+            detail,
+        )
+    _render_dispatch_more(lines, len(rows), total, "recent decisions")
+
+
+def _render_recent_dispatches(lines: list, rows: list, total) -> None:
+    """Render the newest dispatch rows across every status."""
+    if not rows:
+        return
+    lines.append(f"- recent dispatches ({len(rows)}):")
+    for row in rows:
+        slugs = ", ".join(row.get("finding_slugs") or []) or "-"
+        _append_contained_value(
+            lines,
+            f"  - {row.get('agent_id')} role={row.get('agent_role')} "
+            f"status={row.get('status')} dispatched_at={row.get('dispatched_at')} "
+            f"findings={slugs} ::",
+            str(row.get("task") or ""),
+        )
+    _render_dispatch_more(lines, len(rows), total, "dispatches")
+
+
+def _render_latest_handoffs(lines: list, rows: list, total) -> None:
+    """Render the newest specialist handoff rows — the "what was done" ledger."""
+    if not rows:
+        return
+    lines.append(f"- latest handoffs ({len(rows)}):")
+    for row in rows:
+        slugs = ", ".join(row.get("finding_slugs") or []) or "-"
+        _append_contained_value(
+            lines,
+            f"  - {row.get('agent_id')} role={row.get('agent_role')} "
+            f"status={row.get('handoff_status')} v{row.get('handoff_version')} "
+            f"last_checkpoint_at={row.get('last_checkpoint_at')} findings={slugs} "
+            "::",
+            str(row.get("summary") or ""),
+        )
+    _render_dispatch_more(lines, len(rows), total, "handoffs")
 
 
 def _render_page_truth(lines: list[str], page: object, noun: str) -> None:
