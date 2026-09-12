@@ -36,8 +36,18 @@ projection are implemented. Every new non-skipped receipt names exact current
 structural callables and/or disjoint non-callable source spans. A cross-file
 call-chain receipt contributes each callable to its referenced file's coverage
 union, while queue completion remains owned by the claimed file and lease.
-Ambiguous or missing legacy bindings remain visible in explicit history but do
-not count as current results, readiness, or coverage.
+Source spans are accepted only after the generation's callable publication is
+sealed. A complete function dimension must publish exactly `total_functions`
+callable identities; only `total_functions: 0` with an empty registry proves
+that a file has no callables. When structural analysis is unsupported or the
+function dimension is truncated or unavailable, a source span can prove manual
+review only by covering the whole file (and still naming every registered
+callable it overlaps), so a partial span cannot make omitted callable source
+look non-callable. New writes have no free-text `function_name` field;
+structural references and spans are their only source identity. Ambiguous or
+missing legacy bindings remain visible in explicit history but do not count as
+current results, readiness, or coverage. Queue-less
+legacy rows remain readable only through that explicit history surface.
 
 ## Consequences
 

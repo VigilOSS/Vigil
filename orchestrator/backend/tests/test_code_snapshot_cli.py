@@ -94,8 +94,28 @@ def _file_page(rows: list[dict], *, offset: int = 0, total: int | None = None) -
             {"repo_id": 7, "refresh_token": "refresh-7"},
             {"repo_id": 7, "repo_generation": 1, "source_manifest_digest": "z" * 64},
         ),
+        (
+            {"repo_id": 7, "refresh_token": "refresh-7"},
+            {
+                "repo_id": 7,
+                "repo_generation": 1,
+                "source_manifest_digest": "d" * 64,
+                "deleted": 0,
+            },
+        ),
+        (
+            {"repo_id": 7, "refresh_token": "refresh-7"},
+            {"repo_id": 7, "repo_generation": 1, "source_manifest_digest": "d" * 64},
+        ),
     ],
-    ids=["bool-start-id", "wrong-commit-repo", "bool-generation", "nonhex-digest"],
+    ids=[
+        "bool-start-id",
+        "wrong-commit-repo",
+        "bool-generation",
+        "nonhex-digest",
+        "retired-deleted-alias",
+        "missing-retired-count",
+    ],
 )
 def test_code_ingest_rejects_noncanonical_refresh_receipts(
     monkeypatch: pytest.MonkeyPatch,
@@ -699,7 +719,12 @@ def test_code_ingest_plain_directory_uses_canonical_directory_provenance(
             if endpoint == "code/repos/7/refresh/files":
                 return {"staged": len(payload["files"])}
             if endpoint == "code/repos/7/refresh/commit":
-                return {"repo_id": 7, "repo_generation": 1, "source_manifest_digest": "d" * 64}
+                return {
+                    "repo_id": 7,
+                    "repo_generation": 1,
+                    "source_manifest_digest": "d" * 64,
+                    "retired": 0,
+                }
             if endpoint == "code/repos/7/lsp-config":
                 assert payload["repo_generation"] == 1
                 assert payload["source_manifest_digest"] == "d" * 64
@@ -771,6 +796,7 @@ def test_code_ingest_authenticates_complete_exclusion_accounting(
                     "repo_id": 7,
                     "repo_generation": 3,
                     "source_manifest_digest": "d" * 64,
+                    "retired": 0,
                 }
             if endpoint == "code/repos/7/lsp-config":
                 return _lsp_publish_response(payload)
@@ -904,6 +930,7 @@ def test_code_ingest_accepts_git_file_and_publishes_read_only_content_addressed_
                     "repo_generation": 4,
                     "source_manifest_version": "code-source-manifest/v1",
                     "source_manifest_digest": "e" * 64,
+                    "retired": 0,
                 }
             if endpoint == "code/repos/7/lsp-config":
                 assert payload["repo_generation"] == 4
@@ -1571,7 +1598,14 @@ def test_code_index_build_emits_generation_scoped_v6_and_preserves_v4_history(
             "total_functions": 1,
             "total_exports": 0,
             "total_lines": 1,
-            "functions": [],
+            "functions": [
+                {
+                    "name": "main",
+                    "qualified_name": "main",
+                    "line_start": 1,
+                    "line_end": 1,
+                }
+            ],
             "entry_points": [],
             "security_sinks": [],
             "security_sources": [],
@@ -3767,7 +3801,12 @@ def test_code_index_sync_uses_observed_signal_counts_when_artifact_lists_are_cap
         "bytes_scanned": len(raw),
         "unavailable_dimensions": [],
         "artifact_truncated": True,
-        "truncated_dimensions": ["entry_points", "exports", "security_sinks"],
+        "truncated_dimensions": [
+            "entry_points",
+            "exports",
+            "functions",
+            "security_sinks",
+        ],
         "signal_counts": {
             "entry_points": 5,
             "imports": 0,
@@ -3863,6 +3902,19 @@ def _structural_metadata_artifact() -> dict[str, object]:
             "security_sources": 0,
         },
     }
+
+
+def test_code_index_sync_rejects_complete_callable_registry_shortfall() -> None:
+    module = _load_command("code_index_sync.py", "test_sync_callable_shortfall")
+    artifact = _structural_metadata_artifact()
+    artifact["total_functions"] = 1
+
+    with pytest.raises(ValueError, match="function total must match retained callables"):
+        module._validated_structural_metadata(
+            artifact,
+            rel_path="main.py",
+            source_size=12,
+        )
 
 
 @pytest.mark.parametrize(

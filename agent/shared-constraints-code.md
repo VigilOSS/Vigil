@@ -367,7 +367,11 @@ reasoning quota. One `file` receipt may group several callables in the claimed f
 `call_chain` receipt may group a traced chain across files in the same sealed repository snapshot.
 Name every covered callable with the exact structural-index identity, and use exact reviewed spans
 for non-callable source regions. A reviewed span cannot stand in for a registered callable it
-overlaps; include every overlapped callable as an exact `callable_ref`:
+overlaps; include every overlapped callable as an exact `callable_ref`. A complete function index
+publishes exactly its reported callable total. If structural analysis is unsupported or the
+function dimension is truncated or unavailable, only a whole-file reviewed span can prove the
+manual source review (and it must still name every retained callable it overlaps); a partial span
+cannot prove that omitted source is non-callable:
 
 - `finding` -- Confirmed vulnerability with CWE, evidence, and exploitability assessment
 - `suspicious` -- Anomalous pattern needing variant analysis or deeper context to confirm

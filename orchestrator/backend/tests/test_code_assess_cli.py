@@ -265,6 +265,7 @@ def _bound_ingest_commit() -> dict[str, object]:
         "repo_generation": 1,
         "source_manifest_version": "v1",
         "source_manifest_digest": "d" * 64,
+        "retired": 0,
     }
 
 
@@ -856,7 +857,14 @@ def test_code_index_default_output_uses_engagement_analysis_state(monkeypatch, t
             },
             "total_functions": 1,
             "total_exports": 0,
-            "functions": [],
+            "functions": [
+                {
+                    "name": "main",
+                    "qualified_name": "main",
+                    "line_start": 1,
+                    "line_end": 1,
+                }
+            ],
             "entry_points": [],
             "security_sinks": [],
             "security_sources": [],
@@ -2008,7 +2016,6 @@ def test_code_record_analysis_requires_grouped_source_receipt_before_post(
                 "agent_name": "code-vuln-hunter",
                 "lease_token": "lease-101",
                 "disposition": "clean",
-                "function_name": "legacy-name-is-not-proof",
             }
         ),
         encoding="utf-8",
@@ -2026,6 +2033,41 @@ def test_code_record_analysis_requires_grouped_source_receipt_before_post(
 
     assert excinfo.value.code == 1
     assert "callable_refs or reviewed_spans" in capsys.readouterr().err
+
+
+def test_code_record_analysis_rejects_legacy_function_name_before_post(
+    monkeypatch, tmp_path, capsys
+):
+    module = _load_code_record_analysis_module()
+    analysis_path = tmp_path / "analysis.json"
+    analysis_path.write_text(
+        json.dumps(
+            {
+                "queue_item_id": 101,
+                "agent_name": "code-vuln-hunter",
+                "lease_token": "lease-101",
+                "disposition": "clean",
+                "reviewed_spans": [
+                    {"file_id": 7, "start_line": 1, "end_line": 1}
+                ],
+                "function_name": "legacy-name-is-not-a-write-contract",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("must reject before backend")),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.run(
+            SimpleNamespace(analysis_json=str(analysis_path), engagement_dir=tmp_path)
+        )
+
+    assert excinfo.value.code == 1
+    assert "function_name is historical read/filter data" in capsys.readouterr().err
 
 
 def test_code_record_registers_variant_check_leaf():
@@ -2598,6 +2640,10 @@ def test_contract_prints_code_record_analysis_contract(capsys):
     assert "file_id = derived by the backend from queue_item_id" in out
     assert "receipt_kind" in out
     assert "callable_refs" in out
+    assert "sealed callable registry publication" in out
+    assert "whole-file reviewed span" in out
+    for incomplete_dimension in ("truncated", "unavailable", "unsupported"):
+        assert incomplete_dimension in out
     assert "file_id-only result -> include queue_item_id" in out
 
 

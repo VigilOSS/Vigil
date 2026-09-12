@@ -822,6 +822,23 @@ def _normalize_analysis_receipt_anchors(
             }
         )
 
+    if reviewed_spans:
+        callable_publication = connection.execute(
+            """
+            SELECT 1
+            FROM code_structural_callable_publications
+            WHERE engagement_id = ? AND repo_id = ? AND repo_generation = ?
+            """,
+            (engagement_id, repo_id, int(queue_row["repo_generation"])),
+        ).fetchone()
+        if callable_publication is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "reviewed spans require a sealed callable registry publication "
+                    "before they can prove non-callable source coverage"
+                ),
+            )
     canonical_spans: list[dict[str, Any]] = []
     seen_spans: set[tuple[int, int, int, str]] = set()
     for raw in reviewed_spans:
@@ -844,6 +861,31 @@ def _normalize_analysis_receipt_anchors(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="reviewed span must fall within the sealed file",
+            )
+        function_dimension_incomplete = (
+            str(file_rows[file_id].get("structural_analysis_status") or "")
+            == "unsupported"
+            or "functions"
+            in {
+                *_json_decode(
+                    file_rows[file_id].get("structural_unavailable_dimensions_json"),
+                    [],
+                ),
+                *_json_decode(
+                    file_rows[file_id].get("structural_truncated_dimensions_json"),
+                    [],
+                ),
+            }
+        )
+        if function_dimension_incomplete and (
+            start_line != 1 or end_line != int(file_rows[file_id]["loc"])
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "reviewed spans require whole-file coverage while the structural "
+                    "function registry is incomplete"
+                ),
             )
         identity = (file_id, start_line, end_line, label)
         if identity in seen_spans:
@@ -2552,7 +2594,7 @@ def commit_code_repo_refresh(
     engagement_id: int, repo_id: int, *, refresh_token: str, manifest_complete: bool
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
-    inserted = changed = renamed = deleted = unchanged = 0
+    inserted = changed = renamed = retired_count = unchanged = 0
     attestation: VerifiedSnapshotAttestation | None = None
     try:
         # Hash and validate the sealed tree before taking SQLite's global write
@@ -2907,7 +2949,7 @@ def commit_code_repo_refresh(
                     _sync_module_rollup(
                         connection, engagement.id, int(prior_module_id)
                     )
-                deleted += 1
+                retired_count += 1
 
             if generation_changed:
                 connection.execute(
@@ -3018,7 +3060,7 @@ def commit_code_repo_refresh(
             attestation.close()
     return {
         "repo_id": repo_id, "inserted": inserted, "changed": changed, "renamed": renamed,
-        "deleted": deleted, "unchanged": unchanged,
+        "retired": retired_count, "unchanged": unchanged,
         "repo_generation": repo_generation,
         "source_manifest_version": manifest_version,
         "source_manifest_digest": manifest_digest,
@@ -4012,6 +4054,14 @@ def bulk_update_structural_metadata(
             """,
             (engagement.id, repo_id, repo_generation),
         ).fetchone() is not None
+        if callable_registry_published and not publishes_callable_registry:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "structural callable registry is already sealed; every replay "
+                    "must publish the exact complete registry"
+                ),
+            )
         if (
             callable_registry_published
             and existing_callable_keys != submitted_callable_keys
@@ -5901,6 +5951,14 @@ def create_analysis_result(
     result: dict[str, Any],
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
+    if "function_name" in result:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "function_name is historical read/filter data and is not accepted "
+                "for new grouped source receipts"
+            ),
+        )
     disposition = str(result.get("disposition", "")).strip()
     if disposition not in _VALID_ANALYSIS_RESULT_DISPOSITIONS:
         raise HTTPException(
@@ -6246,14 +6304,14 @@ def create_analysis_result(
             INSERT INTO code_analysis_results (
                 engagement_id, queue_item_id, file_id,
                 agent_name, receipt_kind, callable_refs_json, reviewed_spans_json,
-                receipt_binding_status, function_name, hypothesis, evidence, evidence_ref,
+                receipt_binding_status, hypothesis, evidence, evidence_ref,
                 disposition, confidence, finding_slug, cwe_id,
                 slot_type, notes, audit_metadata_json,
                 cwe_coverage_json, cross_file_triggers_json,
                 lease_token, repo_generation, result_fingerprint,
                 supersedes_result_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     engagement.id,
@@ -6264,7 +6322,6 @@ def create_analysis_result(
                     _json_list_text(canonical_callable_refs),
                     _json_list_text(canonical_reviewed_spans),
                     receipt_binding_status,
-                    result.get("function_name", ""),
                     result.get("hypothesis", ""),
                     result.get("evidence", ""),
                     result.get("evidence_ref", ""),
@@ -6370,12 +6427,24 @@ def list_analysis_results(
                 allow_processing=True,
             ) + ")"
         )
+    queue_join = "LEFT JOIN" if include_superseded else "JOIN"
+    generation_file_join = ""
+    file_path_projection = "files.file_path"
+    if include_superseded:
+        generation_file_join = """
+        LEFT JOIN code_source_generation_files AS generation_files
+          ON generation_files.engagement_id = results.engagement_id
+         AND generation_files.repo_id = files.repo_id
+         AND generation_files.repo_generation = results.repo_generation
+         AND generation_files.file_id = results.file_id
+        """
+        file_path_projection = "COALESCE(generation_files.file_path, files.file_path)"
     query = f"""
         SELECT
             results.*,
             findings.status AS finding_workflow_status,
             findings.verification_status AS finding_verification_status,
-            files.file_path AS file_path,
+            {file_path_projection} AS file_path,
             (
                 SELECT replacement.id
                 FROM code_analysis_results AS replacement
@@ -6385,12 +6454,13 @@ def list_analysis_results(
         LEFT JOIN assessment_findings AS findings
           ON findings.engagement_id = results.engagement_id
          AND findings.slug = results.finding_slug
-        JOIN code_analysis_queue AS result_queue
+        {queue_join} code_analysis_queue AS result_queue
           ON result_queue.id = results.queue_item_id
          AND result_queue.engagement_id = results.engagement_id
         JOIN code_files AS files
           ON files.id = results.file_id
          AND files.engagement_id = results.engagement_id
+        {generation_file_join}
         JOIN code_repos AS repos
           ON repos.id = files.repo_id
          AND repos.engagement_id = files.engagement_id
@@ -9423,6 +9493,27 @@ def list_code_triggers(
         clauses.append("sf.repo_id = ?")
         params.append(repo_id)
 
+    source_file_path = "sf.file_path"
+    resolved_target_file_path = "tf.file_path"
+    generation_file_joins = ""
+    if include_superseded:
+        source_file_path = "COALESCE(source_generation_file.file_path, sf.file_path)"
+        resolved_target_file_path = (
+            "COALESCE(target_generation_file.file_path, tf.file_path, t.target_file_path)"
+        )
+        generation_file_joins = """
+            LEFT JOIN code_source_generation_files AS source_generation_file
+              ON source_generation_file.engagement_id = t.engagement_id
+             AND source_generation_file.repo_id = t.repo_id
+             AND source_generation_file.repo_generation = t.repo_generation
+             AND source_generation_file.file_id = t.source_file_id
+            LEFT JOIN code_source_generation_files AS target_generation_file
+              ON target_generation_file.engagement_id = t.engagement_id
+             AND target_generation_file.repo_id = t.repo_id
+             AND target_generation_file.repo_generation = t.repo_generation
+             AND target_generation_file.file_id = t.target_file_id
+        """
+
     with get_connection() as connection:
         if repo_id is not None:
             _get_published_repo_row(connection, engagement.id, int(repo_id))
@@ -9430,8 +9521,8 @@ def list_code_triggers(
             f"""
             SELECT
                 t.*,
-                sf.file_path AS source_file_path,
-                tf.file_path AS resolved_target_file_path
+                {source_file_path} AS source_file_path,
+                {resolved_target_file_path} AS resolved_target_file_path
             FROM code_analysis_triggers AS t
             JOIN code_files AS sf
               ON sf.id = t.source_file_id
@@ -9443,6 +9534,7 @@ def list_code_triggers(
             LEFT JOIN code_files AS tf
               ON tf.id = t.target_file_id
              AND tf.engagement_id = t.engagement_id
+            {generation_file_joins}
             WHERE {' AND '.join(clauses)}
             ORDER BY
                 CASE t.status

@@ -2004,7 +2004,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Record analysis results only for queue items fetched by code-dispatch. queue_item_id, agent_name, and lease_token are required; reclaimed leases reject stale writes.",
             "One receipt may cover multiple callables checked together. file receipts stay within the claimed file; call_chain receipts may cross files in the same sealed repository snapshot and must include the claimed file.",
             "The backend resolves each callable reference against the current structural registry, derives each referenced file's coverage from the union of bound callables, and treats functions_analyzed as advisory only. Cross-file coverage does not close the referenced file's separately leased review.",
-            "A reviewed_span is for non-callable source. It cannot substitute for an overlapped registered callable unless every overlapped callable is also supplied as an exact callable_ref.",
+            "A reviewed_span is accepted only after a sealed callable registry publication; omitting callables from structural metadata is not publication. It cannot substitute for an overlapped registered callable unless every overlapped callable is also supplied as an exact callable_ref. When structural analysis is unsupported or the function dimension is truncated or unavailable, only a whole-file reviewed span can prove manual source review.",
             "The backend copies the claimed repository generation onto the result and makes exact retries idempotent within that lease. To correct a result, set supersedes to its row ID; the replacement must match the same queue item, file, lease, source anchors, engagement, and generation. Refresh/requeue invalidation remains separate, so projections use only current explicitly unreplaced rows.",
             "For finding and suspicious dispositions, include concrete inline evidence or an engagement-owned evidence_ref before closeout; the backend verifies that evidence on the active lease.",
             "When file_id is supplied, the backend treats it as a consistency check and rejects it if it differs from the queue item's file.",
@@ -2012,7 +2012,6 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         common_mistakes=(
             ("file_id-only result", "include queue_item_id; file_id is optional and queue-derived"),
-            ("function_name-only result", "include exact callable_refs or reviewed_spans; function_name is legacy display metadata, not coverage proof"),
             ("reviewed_span over a registered callable", "include every overlapped structural callable as an exact callable_ref; spans cannot impersonate callable coverage"),
             ("artifact path only in notes", "put an engagement-owned path in evidence_ref so evidence-aware closeout can verify it"),
             ("confidence in finding record", "confidence belongs in code-record analysis, not finding record"),

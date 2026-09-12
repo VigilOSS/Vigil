@@ -282,6 +282,13 @@ def _validated_structural_metadata(
         raise ValueError(f"structural signal totals undercount retained records for {rel_path}")
     if int(indexed["total_exports"]) < len(indexed["exports"]):
         raise ValueError(f"structural export total undercounts retained records for {rel_path}")
+    if (
+        "functions" not in {*unavailable, *truncated_dimensions}
+        and int(indexed["total_functions"]) != len(indexed["functions"])
+    ):
+        raise ValueError(
+            f"structural function total must match retained callables for {rel_path}"
+        )
     unavailable_signals = set(unavailable).intersection(SIGNAL_DIMENSIONS)
     if (
         any(int(counts[dimension]) for dimension in unavailable_signals)

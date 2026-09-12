@@ -88,7 +88,6 @@ function parseQuery(q: string): ParsedQuery {
 
 function buildCorpus(r: CodeAnalysisResult): string {
   return [
-    r.function_name,
     r.receipt_kind,
     r.receipt_binding_status,
     ...r.callable_refs.flatMap((ref) => [ref.name, ref.qualified_name, ref.file_path]),
@@ -109,6 +108,24 @@ function buildCorpus(r: CodeAnalysisResult): string {
     .filter(Boolean)
     .join(" \n ")
     .toLowerCase();
+}
+
+function receiptIdentity(r: CodeAnalysisResult): string {
+  const callableIdentity = r.callable_refs
+    .map((ref) => `${ref.file_path}:${ref.start_line}-${ref.end_line} ${ref.qualified_name}`)
+    .join(" → ");
+  if (callableIdentity) return callableIdentity;
+  const spanIdentity = r.reviewed_spans
+    .map((span) => `${span.file_path}:${span.start_line}-${span.end_line}`)
+    .join(", ");
+  if (spanIdentity) return spanIdentity;
+  if (r.receipt_binding_status === "skipped_unbound") {
+    return `${r.receipt_kind} receipt (skipped/no source anchors)`;
+  }
+  if (["legacy_ambiguous", "legacy_missing", "legacy_unbound"].includes(r.receipt_binding_status)) {
+    return `${r.receipt_kind} receipt (historical unbound identity)`;
+  }
+  return `${r.receipt_kind} receipt (no source anchors)`;
 }
 
 // ── Icons ───────────────────────────────────────────────
@@ -214,7 +231,6 @@ export function CodeAnalysisTab({
             break;
           case "function":
             if (
-              !(r.function_name || "").toLowerCase().includes(v) &&
               !r.callable_refs.some((ref) =>
                 `${ref.name} ${ref.qualified_name}`.toLowerCase().includes(v)
               )
@@ -798,7 +814,7 @@ export function CodeAnalysisTab({
                     <div className="code-result-header">
                       <span className={`badge code-disposition-${r.disposition}`}>{r.disposition}</span>
                       <strong className="mono-text">
-                        {r.function_name || `${r.receipt_kind} receipt (${r.callable_refs.length} callables, ${r.reviewed_spans.length} spans)`}
+                        {receiptIdentity(r)}
                       </strong>
                       {r.cwe_id && <span className="badge">{r.cwe_id}</span>}
                       {r.slot_type && <span className="badge">{r.slot_type}</span>}

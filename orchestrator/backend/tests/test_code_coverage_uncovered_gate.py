@@ -2,14 +2,14 @@
 
 A critical/high file that is terminal (analyzed/done) and whose structural index
 found functions, but which was closed with ZERO evidenced function-level analysis
-(no distinct analysis-result function rows), no linked finding, and no accepted-gap
+(no distinct structural callable references), no linked finding, and no accepted-gap
 resolution (all applicable families marked not_applicable), is the broad-18 near-miss where high files were
 closed with no function analysis. The coverage gate now surfaces these under
 ``gate.uncovered_high_risk_files`` so the transition-phase code gate can block on
 them — while leaving ``gate.passed`` (and the per-family effort threshold gate)
 unchanged, so the effort dimension stays a WARN.
 
-Escape valves proven here: record an evidenced analysis-result function row,
+Escape valves proven here: record an evidenced structural callable receipt,
 mark the applicable families not_applicable (accepted gap), or link a finding
 at ``file:<path>``. Caller-claimed counters remain advisory.
 """
@@ -24,12 +24,15 @@ from tests.test_code_analysis_api import (
     _create_repo,
     _finding_code_snapshot,
     _network_input_coverage,
+    _publish_structural_callables,
     _publish_structural_totals,
+    _record_fixture_source_receipt,
+    _structural_callable,
     write_engagement,
 )
 
 
-def _prepare(client, isolate_settings, key):
+def _prepare(client, isolate_settings, key, *, publish_callable=False):
     """Create a repo + critical parser.py with a non-zero structural function
     count, ready to be closed via the queue. Returns (repo, parser_file)."""
     write_engagement(isolate_settings["engagements_dir"], key)
@@ -37,17 +40,56 @@ def _prepare(client, isolate_settings, key):
     files = _create_files(client, key, int(repo["id"]))
     parser = next(f for f in files if f["file_path"] == "src/parser.py")
     _classify_file(client, key, int(parser["id"]), "critical", 100)
-    _publish_structural_totals(
-        client,
-        key,
-        int(repo["id"]),
-        files,
-        {int(parser["id"]): {"total_functions": 5}},
-    )
+    if publish_callable:
+        structural_files = [
+            {**row, "total_functions": 5}
+            if row["id"] == parser["id"]
+            else row
+            for row in files
+        ]
+        _publish_structural_callables(
+            client,
+            key,
+            int(repo["id"]),
+            structural_files,
+            {
+                int(parser["id"]): [
+                    _structural_callable(
+                        "parse_message" if index == 0 else f"parse_helper_{index}",
+                        start_line=index + 1,
+                        end_line=index + 2,
+                    )
+                    for index in range(5)
+                ]
+            },
+        )
+    else:
+        _publish_structural_totals(
+            client,
+            key,
+            int(repo["id"]),
+            files,
+            {int(parser["id"]): {"total_functions": 5}},
+        )
     return repo, parser
 
 
 def _complete(client, key, queue_item, cwe_coverage, disposition="clean"):
+    with db_module.get_connection() as connection:
+        has_receipt = connection.execute(
+            "SELECT 1 FROM code_analysis_results WHERE queue_item_id = ? LIMIT 1",
+            (queue_item["id"],),
+        ).fetchone()
+    if has_receipt is None:
+        _record_fixture_source_receipt(
+            client,
+            key,
+            queue_item,
+            disposition=disposition,
+            reviewed_spans=[
+                {"file_id": queue_item["file_id"], "start_line": 20, "end_line": 20}
+            ],
+        )
     return client.post(
         f"/engagements/{key}/assessment/code/analysis-queue/done",
         json={
@@ -200,13 +242,13 @@ def test_claimed_functions_analyzed_cannot_clear_uncovered_without_result_eviden
 
 
 # ---------------------------------------------------------------------------
-# Escape valve 1: record an evidenced analysis-result function row.
+# Escape valve 1: record an evidenced structural callable receipt.
 # ---------------------------------------------------------------------------
 
 
-def test_analysis_result_function_row_clears_uncovered(client, isolate_settings):
+def test_analysis_result_callable_receipt_clears_uncovered(client, isolate_settings):
     key = "2026-06-26-uncov-result"
-    repo, parser = _prepare(client, isolate_settings, key)
+    repo, parser = _prepare(client, isolate_settings, key, publish_callable=True)
     queue_item = _claim_file_for_analysis(client, key, int(parser["id"]))
     result = client.post(
         f"/engagements/{key}/assessment/code/analysis-results",
@@ -215,7 +257,16 @@ def test_analysis_result_function_row_clears_uncovered(client, isolate_settings)
             "file_id": parser["id"],
             "agent_name": "code-vuln-hunter",
             "lease_token": queue_item["lease_token"],
-            "function_name": "parse_message",
+            "callable_refs": [
+                {
+                    "file_id": parser["id"],
+                    **_structural_callable(
+                        "parse_message",
+                        start_line=1,
+                        end_line=2,
+                    ),
+                }
+            ],
             "hypothesis": "bounded",
             "evidence": "reviewed sinks",
             "disposition": "clean",
@@ -304,9 +355,9 @@ def test_legacy_whitespace_prefixed_linked_finding_clears_uncovered(
 # ---------------------------------------------------------------------------
 
 
-def test_low_effort_with_evidenced_function_is_warn_not_uncovered(client, isolate_settings):
+def test_low_effort_with_evidenced_callable_is_warn_not_uncovered(client, isolate_settings):
     key = "2026-06-26-uncov-loweffort"
-    repo, parser = _prepare(client, isolate_settings, key)
+    repo, parser = _prepare(client, isolate_settings, key, publish_callable=True)
     queue_item = _claim_file_for_analysis(client, key, int(parser["id"]))
     coverage = _network_input_coverage(
         default_effort=10,  # below the critical 70 threshold -> effort WARN
@@ -322,7 +373,16 @@ def test_low_effort_with_evidenced_function_is_warn_not_uncovered(client, isolat
             "file_id": parser["id"],
             "agent_name": queue_item["agent_name"],
             "lease_token": queue_item["lease_token"],
-            "function_name": "parse_message",
+            "callable_refs": [
+                {
+                    "file_id": parser["id"],
+                    **_structural_callable(
+                        "parse_message",
+                        start_line=1,
+                        end_line=2,
+                    ),
+                }
+            ],
             "hypothesis": "Low-effort review still inspected one concrete function.",
             "evidence": "Reviewed parse_message control flow and reachable sinks.",
             "disposition": "clean",

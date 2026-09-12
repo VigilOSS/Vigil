@@ -170,5 +170,15 @@ def test_code_analysis_result_schema_exposes_skip_and_explicit_supersession():
     ]
     supersedes = schema["properties"]["supersedes"]
     assert supersedes["exclusiveMinimum"] == 0
-    for identity_part in ("queue item", "lease token", "file", "function"):
+    for identity_part in (
+        "queue item",
+        "lease token",
+        "file",
+        "grouped source anchors",
+    ):
         assert identity_part in supersedes["description"]
+    reviewed_spans = schema["properties"]["reviewed_spans"]
+    assert "sealed callable registry publication" in reviewed_spans["description"]
+    assert "whole-file" in reviewed_spans["description"]
+    for incomplete_dimension in ("truncated", "unavailable", "unsupported"):
+        assert incomplete_dimension in reviewed_spans["description"]

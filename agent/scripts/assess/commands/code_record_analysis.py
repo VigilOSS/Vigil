@@ -63,6 +63,13 @@ def _validate_cross_file_triggers(item_index: int, result: dict) -> None:
 
 
 def _validate_source_receipt(item_index: int, result: dict) -> None:
+    if "function_name" in result:
+        print(
+            f"Item {item_index} function_name is historical read/filter data; "
+            "new writes require canonical callable_refs or reviewed_spans",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     receipt_kind = result.get("receipt_kind", "file")
     if receipt_kind not in {"file", "call_chain"}:
         print(f"Item {item_index} receipt_kind must be file or call_chain", file=sys.stderr)

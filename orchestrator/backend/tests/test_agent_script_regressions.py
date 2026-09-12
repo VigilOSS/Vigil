@@ -1170,7 +1170,7 @@ def test_code_ingest_posts_backend_contract_fields(monkeypatch, tmp_path: Path) 
                     "inserted": 1,
                     "changed": 0,
                     "renamed": 0,
-                    "deleted": 0,
+                    "retired": 0,
                     "repo_generation": 1,
                     "source_manifest_digest": "d" * 64,
                 }
@@ -1258,7 +1258,7 @@ def test_code_ingest_records_skipped_minified_manifest(monkeypatch, tmp_path: Pa
                     "inserted": 1,
                     "changed": 0,
                     "renamed": 0,
-                    "deleted": 0,
+                    "retired": 0,
                     "repo_generation": 1,
                     "source_manifest_digest": "d" * 64,
                 }
@@ -1359,7 +1359,7 @@ def test_code_ingest_include_path_can_queue_security_relevant_build_artifact(mon
                     "inserted": 2,
                     "changed": 0,
                     "renamed": 0,
-                    "deleted": 0,
+                    "retired": 0,
                     "repo_generation": 1,
                     "source_manifest_digest": "d" * 64,
                 }
@@ -1788,7 +1788,15 @@ def _write_bound_structural_fixture(
         "total_functions": total_functions,
         "total_exports": 0,
         "total_lines": 1,
-        "functions": [],
+        "functions": [
+            {
+                "name": f"fixture_function_{index + 1}",
+                "qualified_name": f"fixture_function_{index + 1}",
+                "line_start": 1,
+                "line_end": 1,
+            }
+            for index in range(total_functions)
+        ],
         "entry_points": [],
         "security_sinks": [],
         "security_sources": [],
@@ -2063,6 +2071,15 @@ def test_code_index_sync_repo_id_scopes_aggregate_to_matching_manifest(
             "total_entry_points": 0,
             "total_sinks": 0,
             "total_exports": 0,
+            "callables": [
+                {
+                    "name": f"fixture_function_{index + 1}",
+                    "qualified_name": f"fixture_function_{index + 1}",
+                    "start_line": 1,
+                    "end_line": 1,
+                }
+                for index in range(7)
+            ],
             "structural_analysis_status": "complete",
             "structural_analysis_mode": "tree_sitter",
             "structural_degradation_reason": None,

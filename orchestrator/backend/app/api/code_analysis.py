@@ -339,7 +339,6 @@ class AnalysisResultRecord(BaseModel):
         default_factory=list,
         max_length=10000,
     )
-    function_name: str = Field(default="", max_length=512)
     hypothesis: str = Field(default="", max_length=20000)
     evidence: str = Field(default="", max_length=20000)
     evidence_ref: str = Field(default="", max_length=4096)
@@ -547,6 +546,19 @@ class StructuralMetadataItem(BaseModel):
             raise ValueError("total_entry_points must match structural_signal_counts.entry_points")
         if self.total_sinks != self.structural_signal_counts.security_sinks:
             raise ValueError("total_sinks must match structural_signal_counts.security_sinks")
+        function_dimension_incomplete = "functions" in {
+            *self.structural_unavailable_dimensions,
+            *self.structural_truncated_dimensions,
+        }
+        if (
+            "callables" in self.model_fields_set
+            and not function_dimension_incomplete
+            and len(self.callables) != self.total_functions
+        ):
+            raise ValueError(
+                "callables must exactly match total_functions when the function "
+                "dimension is complete"
+            )
         if len(self.callables) > self.total_functions:
             raise ValueError("callables cannot exceed total_functions")
         identities = [

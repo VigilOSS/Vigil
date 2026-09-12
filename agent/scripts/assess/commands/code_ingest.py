@@ -125,6 +125,7 @@ def _require_refresh_commit_receipt(
     returned_repo_id = response.get("repo_id")
     repo_generation = response.get("repo_generation")
     source_manifest_digest = response.get("source_manifest_digest")
+    retired = response.get("retired")
     invalid: list[str] = []
     if (
         not isinstance(returned_repo_id, int)
@@ -143,6 +144,10 @@ def _require_refresh_commit_receipt(
         or _SHA256_PATTERN.fullmatch(source_manifest_digest) is None
     ):
         invalid.append("source_manifest_digest")
+    if not isinstance(retired, int) or isinstance(retired, bool) or retired < 0:
+        invalid.append("retired")
+    if "deleted" in response:
+        invalid.append("deleted is not a supported refresh-result field")
     if invalid:
         raise _refresh_receipt_error(
             "commit code repository refresh", ", ".join(invalid)

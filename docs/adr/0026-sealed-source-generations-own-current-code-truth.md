@@ -1,6 +1,6 @@
 # ADR 0026 — Sealed source generations own current code truth
 
-- Status: Accepted
+- Status: Accepted — implemented
 - Date: 2026-09-12
 
 ## Context
@@ -31,7 +31,12 @@ rewrite queue status, lease ownership, disposition, receipt identity, callable
 links, or trigger resolution. Files absent from the replacement inventory are
 retired rather than deleted so their generation-bound foreign keys and audit
 history remain intact; live file, coverage, and readiness projections exclude
-retired rows.
+retired rows. The refresh API and CLI call this count `retired`; `deleted` is not
+an accepted compatibility alias because no durable source record is deleted.
+Explicit history projects each result and trigger through its immutable
+generation-file inventory, so a later rename cannot rewrite the path that was
+reviewed. Current projections continue to join only the active generation and
+live file path.
 
 This decision does not authorize incremental reuse. A later design may define
 safe callable lineage and affected-scope reuse; until then, a new generation
