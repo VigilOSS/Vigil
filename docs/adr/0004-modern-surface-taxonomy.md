@@ -1,0 +1,100 @@
+# ADR 0004 — Deterministic-first modern surface taxonomy for URL triage
+
+- **Status:** Accepted — implemented. Code: `agent/scripts/assess/lib/classify_buckets.py`
+  (`_TYPE_FLOOR`, the 13 new/extended `_BUCKETS`, the regex-fragment mechanism,
+  `normalize_path_for_cluster`, and the `_PATH_OBJECT_REF_SEGMENT` redesign) and
+  `agent/scripts/assess/lib/vuln_taxonomy.py` (`GF_BUCKET_TO_CLASS` additions). The durable
+  regression boundary is `orchestrator/backend/tests/test_classify_type_floor.py`,
+  `test_classify_buckets_api_auth.py`, and `test_classify_buckets_storage_deser_debug.py`.
+- **Date:** 2026-06-15 (decided 2026-06-15; shipped same day).
+- **Decider:** Project owner.
+- **Supersedes / relates to:** the authoritative implementation contract is
+  `docs/plans/research/classify-surface-2026-06/IMPLEMENTATION-SPEC.md`; the public evidence
+  basis is the adjacent README and synthetic classifier regressions. Relates to ADR 0001
+  (the "no silent drops" philosophy this extends to the classifier).
+
+---
+
+## Context
+
+Vigil ingests historical-URL (GAU) and crawl (Katana) corpora into a SQLite work-buffer, where `classify_buckets.classify_row()` assigns each row a `priority_score`, a `cluster_key`, and a `priority_reason` so the operator can rank surfaces and dispatch specialists. The classifier was a port of the 7-year-old `1ndianl33t/Gf-Patterns` taxonomy — a param-key + path-fragment bucket set written circa 2017 for monolithic web apps.
+
+**The classifier buried dominant modern application surfaces at priority 0.** Across unrelated
+authorized public-sector, consumer-service, and modern SaaS shapes, legacy gf matching classified
+only a small fraction of routes while a large priority-zero fallback mixed actionable surfaces with
+genuinely inert content. Repeated adjudicated reviews identified the same structural gaps across
+those different environments. The largest gaps were classes the gf taxonomy simply has no concept
+for:
+
+- **`/graphql` at priority 0** — an important application surface falling entirely to the
+  `path:/` fallback.
+- **`api`** — plain `/api/...` and `/rest/...` routes with no param signal, the largest recurring
+  gap by volume.
+- **`auth`** entry points (`/login`, `/signin`, `/mfa`) at priority 0 — the gf taxonomy carried only a weight-15 `interestingparams` param-key signal.
+- Whole modern classes absent from gf: **api-versioning** (`/v2/`, `/dhrp/rns/v3/`), **oauth-oidc** (`/.well-known/openid-configuration`), **websocket**, **sso/saml**, **jwt**, **object-storage** (cloud + Domino/Lotus `.nsf`/`$FILE`), **deserialization** (Siteforce `/sfsites/` loader-state, ASP.NET ViewState), **webhook**.
+
+Successive deep-tail reviews showed that the initial sample materially undercounted the gap. Two
+precision problems compounded the recall problem: the `_PATH_OBJECT_REF_SEGMENT` IDOR regex was
+diluted by `/2024/` year and `/page/2` pagination matches (and was blind to pre-normalized `{id}`
+templates), and the `ssrf` bucket's `next`/`redirect`/`callback` param keys mis-classified
+open-redirect surfaces as SSRF at weight 45.
+
+An independent modern-SaaS review corroborated the two highest-value classes: `api` and `graphql`
+were dominant production surface shapes rather than niche cases. The public evidence contract
+retains that cross-corpus conclusion without publishing source rows or customer-derived counts (see
+the research `README.md`).
+
+## Decision
+
+**Replace the gf-only triage with a deterministic modern surface taxonomy: a producer-`type` floor, 13 new/extended buckets, path-template cluster normalization, and precision tightenings.** Ambiguous residual rows remain visible in the fallback set; Vigil does not guess their class or spend model context relabeling evidence that cannot support a deterministic classification.
+
+1. **Type-floor (`_TYPE_FLOOR`) — rescue the producer's own signal first.** The producer assigns each row a `type` at ingest; the classifier previously discarded it for all non-inert rows. A 9-row `type → (floor_bucket, floor_weight)` table makes it a first-class input: `graphql→45`, `api_spec→40`, `auth_entry→40`, `portal_session→35`, `debug_config→35`, `form→30`, `workflow→idor 30`, `event_feed→ssrf 25`, `api_route→api 20`. The score becomes `max(match_weight, floor_weight)` — **a floor can never lower a bucket-driven score, and never changes cluster routing when a bucket matched**; when no bucket matches, the row clusters as `gf:<floor_bucket>` instead of the `path:*` fallback so specialist routing still fires. Zero new path/param heuristics, zero false-positive risk, zero model cost.
+
+2. **13 modern buckets** addressing classes gf has no concept for: `graphql` (45), `auth` (40), `deserialization` (40), `oauth-oidc` (35), `sso` (35), `websocket` (30), `webhook` (30), `jwt` (30), `api-versioning` (25, a regex bucket), `object-storage` (25), `api` (20), plus extensions to `debug_logic` (compound-only actuator/health fragments) and the existing `upload_fields` (new REST `/attachments` fragments + content-type keys). Each uses boundary-anchored fragments (the pattern already proven to suppress `/admin` vs `/administration` false positives), with deliberate negative guards: no bare `/api/`, `/files/`, `/storage/`, `/health`, `/verify`, `/token`, `/callback` fragments (each flooded a content corpus or stole a regression-pinned cluster).
+
+3. **Regex-fragment mechanism** — a 5th `_BUCKETS` tuple field carries raw regex fragments consulted on the same single declaration-ordered iteration, preserving the one-list tie-break and reason-chain ordering contract. The only regex bucket this round is `api-versioning` (`/v[0-9]+(?=[/?#]|$)`), matching `/v1/`, `/dhrp/rns/v3/actions` while rejecting `/version/1.0`, `/vue/app`, `/v1beta/x`.
+
+4. **Path-template cluster normalization** (`normalize_path_for_cluster`) — collapses UUID / long-hex / year / numeric / opaque-token segments to placeholders *only* when building the `path:*` fallback cluster key, so `/explore-mvps/2024/M0004` and `/explore-mvps/2023/G0058` share one reviewable cluster. It is **never** consulted in bucket matching or in `_PATH_OBJECT_REF_SEGMENT` (which run on the raw URL).
+
+5. **Precision tightenings** (applied *before* widening recall, per C-5): year + small-int + collection-noun gates on the IDOR path-object-ref rule (plus literal `{id}`/`{uuid}`/`{n}` placeholder matching for pre-normalized templates); and the `redirect`/`callback`/`continue`/`next`/`link`/`dest` keys moved out of `ssrf` (which now fires on those only via its `/proxy/`, `/fetch/` path fragments), with `ssrf` reduced 45→40.
+
+6. **Soundness override #9 — the regression firewall is non-negotiable.** Weight affects triage *ordering only*, never skip/include. No change may regress an existing `_BUCKETS` entry or break an existing `test_work_buffer.py` test. Two tests pin exact strings (`gf:lfi+gf:upload_fields` reason chain; the `gf:trust_surface` ownership of `/oauth/callback`) and constrain the design — which is why `upload_fields` kept its name and weight 30, `api` carries no bare `/api/` fragment, and `oauth-oidc`/`webhook` omit `/oauth/`/`/callback`.
+
+7. **Drift-tested.** Every new bucket has a `GF_BUCKET_TO_CLASS` entry in `vuln_taxonomy.py` (so the 2b coverage bridge mints a class-typed coverage item and the taxonomy drift test passes), a `gf-patterns/*.md` reference doc, a DRIFT.md rationale entry, and ≥1 positive row + ≥1 negative guard in the 93-row consolidated test matrix.
+
+### Owner constraints baked into the decision
+- Deterministic classification: free, reproducible signals (type-floor + boundary-anchored buckets + precision gates) route supported classes; ambiguous residuals stay explicit instead of consuming model context or being guessed into a class.
+- No silent drops (ADR 0001): a buried surface is a missed bug; the floor + buckets exist so a real surface never disappears into a priority-0 `path:*` cluster.
+- Robustness over speed; the contract (IMPLEMENTATION-SPEC) wins over the plan where they conflict, and override #9 (no regression) wins over the research roster where *they* conflict.
+
+## Consequences
+
+**Positive**
+- The major buried high-value surface families (API, GraphQL, login, versioned API, Domino object storage, and Siteforce deserialization) are rescued from priority 0 with zero model cost and no new false-positive surface. Boundary anchoring and negative guards keep recall gains from flooding content-rich sites.
+- The high-cardinality `path:*` fallback collapses into a reviewable, route-family-templated set,
+  making operator defer/boost-by-cluster usable.
+- One declaration-ordered bucket list keeps tie-break and reason-chain order deterministic and testable; the type-floor makes the producer's strongest cheap signal load-bearing.
+
+**Negative / risks**
+- Widening path regexes on content-rich sites risks queue noise; mandatory route-context negative guards mitigate that risk. In particular, `workflow`, `admin`, and `auth` tokens can occur in ordinary page titles, so `workflow` remains a type-floor-only signal.
+- The deterministic taxonomy is calibrated against the synthetic public evidence contract. Its
+  boundary guards and no-regression suite are the
+  shipped trust boundary; new corpora can extend that evidence without being a
+  prerequisite for the current contract.
+- The residual ambiguous long tail remains unclassified by design: the deterministic evidence is
+  insufficient, so these rows stay outside this taxonomy rather than being guessed into a class.
+
+## Alternatives considered
+
+1. **Model classification of the residual fallback set.** Rejected: the strongest cheap signal (producer `type`) and the deterministic path/param structure of an API-first corpus are free and reproducible, while ambiguous residuals lack evidence for a trustworthy class. Spending model tokens to re-derive `/graphql → high-value` or to guess at the long tail adds context pressure and non-determinism without improving the durable contract. Residual rows remain visible and available to coverage-driven specialist review.
+2. **Tune down the existing gf weights / penalties instead of adding buckets.** Rejected: re-weighting cannot create a class the taxonomy lacks (`graphql`, `oauth-oidc`, `api-versioning` have no bucket to re-weight), so it leaves the dominant modern surfaces at priority 0 regardless.
+3. **Rename `upload_fields → file-upload` and raise it to weight 35 (the research roster's proposal).** Rejected where it conflicts with override #9: the rename + reweight would break the pinned `gf:lfi+gf:upload_fields` reason string and the pinned `priority_score == 40` arithmetic. The recall intent (REST `/attachments` fragments + content-type keys) is delivered on the same `upload_fields` bucket at its existing name and weight instead.
+4. **Add a bare `/api/` path fragment to the `api` bucket** (the research §4b proposal). Rejected: a bare `/api/` fragment fires on `/api/users/avatar` and corrupts the regression-pinned reason chain. The generic params-less `/api/...` rescue is delivered by the `api_route` type-floor (the semantically correct home); `/api/v<n>/` is covered by the `api-versioning` regex.
+
+## References
+- `docs/plans/research/classify-surface-2026-06/IMPLEMENTATION-SPEC.md` — the authoritative implementation CONTRACT (bucket declaration order, the `_TYPE_FLOOR` table, the `_PATH_OBJECT_REF_SEGMENT` redesign, `normalize_path_for_cluster`, the 11 soundness overrides, and the 93-row test matrix). Where the spec conflicts with the research findings, the spec wins.
+- `docs/plans/research/classify-surface-2026-06/README.md` — the public evidence summary and synthetic
+  cross-corpus conclusions.
+- `agent/references/gf-patterns/DRIFT.md` — the per-bucket accept/skip drift rationale (type-floor mechanism, all 13 buckets, precision tightenings, regex mechanism, corpus grounding).
+- `agent/references/gf-patterns/*.md` — per-bucket reference docs (`graphql.md`, `api.md`, `auth.md`, `api-versioning.md`, `oauth-oidc.md`, `object-storage.md`, `deserialization.md`, `sso.md`, `webhook.md`, etc.), each carrying its corpus grounding and attack-class notes.
+- ADR 0001 — the "no silent drops" / harness-not-gate philosophy this extends to URL triage.
