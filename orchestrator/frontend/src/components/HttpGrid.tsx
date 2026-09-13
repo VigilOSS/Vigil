@@ -9,7 +9,7 @@
 
 import { useMemo, useRef } from "react";
 import { AgGridReact } from "ag-grid-react";
-import type { ColDef, ICellRendererParams, RowClickedEvent } from "ag-grid-community";
+import type { CellKeyDownEvent, ColDef, ICellRendererParams, RowClickedEvent } from "ag-grid-community";
 import type { RequestVariant } from "../lib/api";
 import {
   AG_GRID_THEME,
@@ -17,6 +17,7 @@ import {
   GRID_ROW_HEIGHT,
   GRID_THEME_PROP,
   defaultColDef,
+  focusGridInvoker,
   registerAgGrid,
 } from "../lib/agGrid";
 import { RelTime, relTime } from "./formatting";
@@ -29,7 +30,7 @@ type HttpGridProps = {
   // variant id → number of recorded observations (for the count badge).
   observationCounts: Map<number, number>;
   selectedId: number | null;
-  onRowOpen: (variant: RequestVariant) => void;
+  onRowOpen: (variant: RequestVariant, invoker: HTMLElement | null) => void;
 };
 
 function MethodCell({ data }: ICellRendererParams<RequestVariant>) {
@@ -153,7 +154,14 @@ export default function HttpGrid({
   const onRowClicked = (event: RowClickedEvent<RequestVariant>) => {
     const sel = window.getSelection?.();
     if (sel && sel.type === "Range" && sel.toString().length > 0) return;
-    if (event.data) onRowOpen(event.data);
+    if (event.data) onRowOpen(event.data, focusGridInvoker(event.event));
+  };
+
+  const onCellKeyDown = (event: CellKeyDownEvent<RequestVariant>) => {
+    const keyboardEvent = event.event as KeyboardEvent;
+    if (!event.data || (keyboardEvent.key !== "Enter" && keyboardEvent.key !== " ")) return;
+    keyboardEvent.preventDefault();
+    onRowOpen(event.data, focusGridInvoker(keyboardEvent));
   };
 
   return (
@@ -167,9 +175,9 @@ export default function HttpGrid({
         getRowId={(p) => String(p.data.id)}
         rowHeight={GRID_ROW_HEIGHT}
         headerHeight={GRID_HEADER_HEIGHT}
-        suppressCellFocus
         animateRows
         onRowClicked={onRowClicked}
+        onCellKeyDown={onCellKeyDown}
         rowClassRules={{
           "ag-row-selected": (p) => p.data?.id === selectedId,
         }}

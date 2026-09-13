@@ -8,7 +8,7 @@
 //
 // The count lives on the window so HMR or multiple bundle copies share it.
 
-import { useEffect } from "react";
+import { useEffect, useRef, type RefObject } from "react";
 
 const CLASS_NAME = "detail-modal-open";
 const COUNT_KEY = "__aithModalOpenCount";
@@ -59,4 +59,82 @@ export function useBodyScrollLock(active: boolean = true): void {
       releaseScrollLock();
     };
   }, [active]);
+}
+
+const FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  '[tabindex]:not([tabindex="-1"])',
+].join(",");
+
+function focusableElements(panel: HTMLElement): HTMLElement[] {
+  return Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
+    (element) => element.getAttribute("aria-hidden") !== "true",
+  );
+}
+
+/** Keep keyboard focus inside a modal and restore it when the modal closes. */
+export function useModalFocus(
+  panelRef: RefObject<HTMLElement | null>,
+  onClose: () => void,
+  active: boolean = true,
+  returnFocusRef?: RefObject<HTMLElement | null>,
+): void {
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+
+  useEffect(() => {
+    if (!active) return undefined;
+    const panel = panelRef.current;
+    if (!panel) return undefined;
+    const priorFocus = returnFocusRef?.current ?? document.activeElement;
+
+    queueMicrotask(() => {
+      if (!panel.isConnected || panel.contains(document.activeElement)) return;
+      panel.focus();
+    });
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!panel.contains(document.activeElement)) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeRef.current();
+        return;
+      }
+      if (event.key !== "Tab") return;
+
+      const focusable = focusableElements(panel);
+      if (focusable.length === 0) {
+        event.preventDefault();
+        panel.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const current = document.activeElement;
+      if (
+        event.shiftKey
+        && (current === panel || current === first || !panel.contains(current))
+      ) {
+        event.preventDefault();
+        last.focus();
+      } else if (
+        !event.shiftKey
+        && (current === panel || current === last || !panel.contains(current))
+      ) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      if (priorFocus instanceof HTMLElement && priorFocus.isConnected) priorFocus.focus();
+    };
+  }, [active, panelRef, returnFocusRef]);
 }

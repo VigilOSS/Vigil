@@ -16,7 +16,7 @@ import {
 import { useResizableColumns } from "../lib/useResizableColumns";
 import { JsonTree } from "./ArtifactViewer";
 import { JsonView } from "./JsonView";
-import { useBodyScrollLock } from "../lib/modalScrollLock";
+import { useBodyScrollLock, useModalFocus } from "../lib/modalScrollLock";
 import { ProvenanceBlock } from "./formatting";
 import {
   KV,
@@ -560,9 +560,7 @@ function DetailModal({
   titleId?: string;
 }) {
   const panelRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    queueMicrotask(() => panelRef.current?.focus());
-  }, []);
+  useModalFocus(panelRef, onClose);
   useBodyScrollLock();
   return (
     <div

@@ -57,6 +57,7 @@ function navigate(route: string) {
 export default function App() {
   const [route, setRoute] = useState(currentRoute());
   const [engagements, setEngagements] = useState<Engagement[]>([]);
+  const [engagementsError, setEngagementsError] = useState<string | null>(null);
   // True until the first listing resolves, so the list view can show a
   // skeleton instead of the "no engagements" empty state on cold load.
   const [engagementsLoading, setEngagementsLoading] = useState(true);
@@ -86,6 +87,13 @@ export default function App() {
         const nextEngagements = await listEngagements();
         if (!cancelled) {
           setEngagements(nextEngagements);
+          setEngagementsError(null);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setEngagementsError(
+            error instanceof Error ? error.message : "Failed to load engagements",
+          );
         }
       } finally {
         refreshing = false;
@@ -136,6 +144,7 @@ export default function App() {
     <EngagementsPage
       engagements={engagements}
       loading={engagementsLoading}
+      loadError={engagementsError}
       onOpenEngagement={(engagementKey) => navigate(`/engagements/${encodeURIComponent(engagementKey)}`)}
       onEngagementDeleted={(engagementKey) => {
         setEngagements((current) => current.filter((engagement) => engagement.key !== engagementKey));

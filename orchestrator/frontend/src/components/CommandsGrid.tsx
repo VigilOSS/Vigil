@@ -10,13 +10,14 @@
 
 import { useMemo, useRef } from "react";
 import { AgGridReact } from "ag-grid-react";
-import type { ColDef, ICellRendererParams, RowClickedEvent } from "ag-grid-community";
+import type { CellKeyDownEvent, ColDef, ICellRendererParams, RowClickedEvent } from "ag-grid-community";
 import {
   AG_GRID_THEME,
   GRID_HEADER_HEIGHT,
   GRID_ROW_HEIGHT,
   GRID_THEME_PROP,
   defaultColDef,
+  focusGridInvoker,
   registerAgGrid,
 } from "../lib/agGrid";
 import {
@@ -33,7 +34,7 @@ type CommandsGridProps = {
   rows: Derived[];
   dupCounts: Map<string, number>;
   selectedId: number | null;
-  onRowOpen: (id: number) => void;
+  onRowOpen: (id: number, invoker: HTMLElement | null) => void;
   onTargetClick: (target: string) => void;
   onDupClick: (hash: string) => void;
 };
@@ -230,7 +231,19 @@ export default function CommandsGrid({
     if (sel && sel.type === "Range" && sel.toString().length > 0) return;
     const target = event.event?.target as HTMLElement | undefined;
     if (target?.closest('[role="button"]')) return;
-    if (event.data?.id != null) onRowOpen(event.data.id);
+    if (event.data?.id != null) onRowOpen(event.data.id, focusGridInvoker(event.event));
+  };
+
+  const onCellKeyDown = (event: CellKeyDownEvent<Derived>) => {
+    const keyboardEvent = event.event as KeyboardEvent;
+    const target = keyboardEvent.target as HTMLElement | null;
+    if (target?.closest('[role="button"]')) return;
+    if (
+      event.data?.id == null
+      || (keyboardEvent.key !== "Enter" && keyboardEvent.key !== " ")
+    ) return;
+    keyboardEvent.preventDefault();
+    onRowOpen(event.data.id, focusGridInvoker(keyboardEvent));
   };
 
   return (
@@ -244,9 +257,9 @@ export default function CommandsGrid({
         getRowId={(p) => String(p.data.id)}
         rowHeight={GRID_ROW_HEIGHT}
         headerHeight={GRID_HEADER_HEIGHT}
-        suppressCellFocus
         animateRows
         onRowClicked={onRowClicked}
+        onCellKeyDown={onCellKeyDown}
         rowClassRules={{
           "ag-row-selected": (p) => p.data?.id === selectedId,
         }}

@@ -11,10 +11,10 @@
 // so a client filter is simpler and avoids a round-trip per chip click.
 // The grid is lazy-loaded so ag-grid lands in the shared code-split chunk.
 
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type { OobInteraction, OobProbe, OobProbeDetail } from "../lib/api";
 import { getOobProbe, listOobProbes } from "../lib/api";
-import { useBodyScrollLock } from "../lib/modalScrollLock";
+import { useBodyScrollLock, useModalFocus } from "../lib/modalScrollLock";
 import { useToast } from "../contexts/ToastContext";
 import { CodeBlock, RelTime } from "./formatting";
 import { KV, ProseSection, UntrustedDataNotice } from "./drawer/DrawerKit";
@@ -120,25 +120,65 @@ export function OastTab({ engagementKey, refreshVersion }: OastTabProps) {
   // probe drawer opens.
   const [detailCache, setDetailCache] = useState<Map<string, OobProbeDetail>>(() => new Map());
   const [detailLoading, setDetailLoading] = useState<Set<string>>(() => new Set());
+  const [detailErrors, setDetailErrors] = useState<Map<string, string>>(() => new Map());
 
   const searchRef = useRef<HTMLInputElement | null>(null);
+  const drawerInvokerRef = useRef<HTMLElement | null>(null);
 
   const reloadInFlightRef = useRef(false);
+  const reloadQueuedRef = useRef<{ engagementKey: string; showSpinner: boolean } | null>(null);
+  const activeEngagementKeyRef = useRef(engagementKey);
+  activeEngagementKeyRef.current = engagementKey;
   const reload = useCallback(
     async (showSpinner = true) => {
-      if (reloadInFlightRef.current) return;
+      if (reloadInFlightRef.current) {
+        const queued = reloadQueuedRef.current;
+        reloadQueuedRef.current = {
+          engagementKey,
+          showSpinner: showSpinner || queued?.showSpinner === true,
+        };
+        return;
+      }
       reloadInFlightRef.current = true;
-      if (showSpinner) setLoading(true);
       try {
-        const items = await listOobProbes(engagementKey);
-        setProbes(items);
-        setLoadError(null);
-      } catch (err) {
-        if (showSpinner) setProbes([]);
-        setLoadError(err instanceof Error ? err.message : "Failed to load OAST probes");
+        let next: { engagementKey: string; showSpinner: boolean } | null = {
+          engagementKey,
+          showSpinner,
+        };
+        while (next) {
+          const request = next;
+          reloadQueuedRef.current = null;
+          if (request.showSpinner && activeEngagementKeyRef.current === request.engagementKey) {
+            setLoading(true);
+          }
+          try {
+            const items = await listOobProbes(request.engagementKey);
+            if (activeEngagementKeyRef.current === request.engagementKey) {
+              setProbes(items);
+              setLoadError(null);
+            }
+          } catch (err) {
+            if (
+              request.showSpinner
+              && activeEngagementKeyRef.current === request.engagementKey
+            ) {
+              setProbes([]);
+            }
+            if (activeEngagementKeyRef.current === request.engagementKey) {
+              setLoadError(err instanceof Error ? err.message : "Failed to load OAST probes");
+            }
+          } finally {
+            if (
+              request.showSpinner
+              && activeEngagementKeyRef.current === request.engagementKey
+            ) {
+              setLoading(false);
+            }
+          }
+          next = reloadQueuedRef.current;
+        }
       } finally {
         reloadInFlightRef.current = false;
-        if (showSpinner) setLoading(false);
       }
     },
     [engagementKey],
@@ -162,9 +202,19 @@ export function OastTab({ engagementKey, refreshVersion }: OastTabProps) {
   const refetchDetail = useCallback(
     (nonce: string) => {
       getOobProbe(engagementKey, nonce)
-        .then((detail) => setDetailCache((m) => new Map(m).set(nonce, detail)))
-        .catch(() => {
-          // Swallow — keep the stale detail on a transient failure.
+        .then((detail) => {
+          setDetailCache((m) => new Map(m).set(nonce, detail));
+          setDetailErrors((errors) => {
+            const next = new Map(errors);
+            next.delete(nonce);
+            return next;
+          });
+        })
+        .catch((error: unknown) => {
+          setDetailErrors((errors) => new Map(errors).set(
+            nonce,
+            error instanceof Error ? error.message : "Failed to refresh callback history",
+          ));
         });
     },
     [engagementKey],
@@ -177,9 +227,17 @@ export function OastTab({ engagementKey, refreshVersion }: OastTabProps) {
       getOobProbe(engagementKey, nonce)
         .then((detail) => {
           setDetailCache((m) => new Map(m).set(nonce, detail));
+          setDetailErrors((errors) => {
+            const next = new Map(errors);
+            next.delete(nonce);
+            return next;
+          });
         })
-        .catch(() => {
-          // Swallow — the drawer keeps showing the list-row metadata.
+        .catch((error: unknown) => {
+          setDetailErrors((errors) => new Map(errors).set(
+            nonce,
+            error instanceof Error ? error.message : "Failed to load callback history",
+          ));
         })
         .finally(() => {
           setDetailLoading((s) => {
@@ -350,7 +408,7 @@ export function OastTab({ engagementKey, refreshVersion }: OastTabProps) {
 
       {loadError && (
         <div className="panel findings-toolbar-panel" style={{ padding: 12 }}>
-          <p className="empty" style={{ textAlign: "left" }}>
+          <p className="error-text" role="alert" style={{ textAlign: "left" }}>
             {loadError}
           </p>
         </div>
@@ -367,7 +425,7 @@ export function OastTab({ engagementKey, refreshVersion }: OastTabProps) {
 
         {loading ? (
           <TableSkeleton rows={8} showHeader={false} />
-        ) : probes.length === 0 ? (
+        ) : loadError && probes.length === 0 ? null : probes.length === 0 ? (
           <p className="empty-state" style={{ padding: "20px", color: "var(--muted)" }}>
             No OAST probes minted yet.
           </p>
@@ -376,7 +434,8 @@ export function OastTab({ engagementKey, refreshVersion }: OastTabProps) {
             <OastGrid
               rows={filtered}
               selectedNonce={selected?.nonce ?? null}
-              onRowOpen={(probe) => {
+              onRowOpen={(probe, invoker) => {
+                drawerInvokerRef.current = invoker ?? searchRef.current;
                 setSelected(probe);
                 ensureDetail(probe.nonce);
               }}
@@ -390,10 +449,12 @@ export function OastTab({ engagementKey, refreshVersion }: OastTabProps) {
           probe={selected}
           detail={detailCache.get(selected.nonce) ?? null}
           detailLoading={detailLoading.has(selected.nonce)}
+          detailError={detailErrors.get(selected.nonce) ?? null}
           protocolClass={protocolClass}
           maybeDecode={maybeDecode}
           toast={toast}
           onClose={() => setSelected(null)}
+          returnFocusRef={drawerInvokerRef}
         />
       )}
 
@@ -417,20 +478,26 @@ function OastDrawer({
   probe,
   detail,
   detailLoading,
+  detailError,
   protocolClass,
   maybeDecode,
   toast,
   onClose,
+  returnFocusRef,
 }: {
   probe: OobProbe;
   detail: OobProbeDetail | null;
   detailLoading: boolean;
+  detailError: string | null;
   protocolClass: (proto: string) => string;
   maybeDecode: (raw: string) => string;
   toast: (message: string, type?: "success" | "error" | "info") => void;
   onClose: () => void;
+  returnFocusRef: RefObject<HTMLElement | null>;
 }) {
   useBodyScrollLock();
+  const panelRef = useRef<HTMLElement | null>(null);
+  useModalFocus(panelRef, onClose, true, returnFocusRef);
   const status = probe.status || "pending";
   const interactions: OobInteraction[] = detail?.interactions ?? [];
   const expectedCount = probe.interaction_count ?? 0;
@@ -438,10 +505,12 @@ function OastDrawer({
   return (
     <div className="finding-overlay" role="presentation" onClick={onClose}>
       <article
+        ref={panelRef}
         className="drawer-panel panel"
         role="dialog"
         aria-modal="true"
         aria-labelledby="oast-detail-modal-title"
+        tabIndex={-1}
         onClick={(event) => event.stopPropagation()}
         style={{ maxWidth: "760px", width: "min(94vw, 760px)", maxHeight: "90vh", overflow: "auto" }}
       >
@@ -518,34 +587,47 @@ function OastDrawer({
                 <Skeleton height={48} />
                 <Skeleton height={48} />
               </div>
-            ) : interactions.length === 0 ? (
-              <p className="empty" style={{ padding: "12px 0" }}>
-                No callbacks observed for this probe yet.
+            ) : detailError && !detail ? (
+              <p className="error-text" role="alert" style={{ padding: "12px 0" }}>
+                Callback history unavailable: {detailError}
               </p>
             ) : (
-              <div className="oob-interaction-list">
-                {interactions.map((it) => (
-                  <div key={it.id} className="oob-interaction-card">
-                    <div className="oob-interaction-head">
-                      <span className={`oob-proto-badge ${protocolClass(it.protocol)}`}>
-                        {it.protocol || "—"}
-                      </span>
-                      {it.remote_address && (
-                        <span className="oob-remote mono">{it.remote_address}</span>
-                      )}
-                      {it.query_type && <span className="tag">{it.query_type}</span>}
-                      <RelTime iso={it.observed_at || it.created_at} />
-                    </div>
-                    {it.raw_request && (
-                      <CodeBlock
-                        label="Raw request"
-                        text={maybeDecode(it.raw_request)}
-                        onCopied={() => toast("Copied", "success")}
-                      />
-                    )}
+              <>
+                {detailError ? (
+                  <p className="error-text" role="alert" style={{ padding: "12px 0" }}>
+                    Callback history refresh failed: {detailError} (showing the last loaded history)
+                  </p>
+                ) : null}
+                {interactions.length === 0 ? (
+                  <p className="empty" style={{ padding: "12px 0" }}>
+                    No callbacks observed for this probe yet.
+                  </p>
+                ) : (
+                  <div className="oob-interaction-list">
+                    {interactions.map((it) => (
+                      <div key={it.id} className="oob-interaction-card">
+                        <div className="oob-interaction-head">
+                          <span className={`oob-proto-badge ${protocolClass(it.protocol)}`}>
+                            {it.protocol || "—"}
+                          </span>
+                          {it.remote_address && (
+                            <span className="oob-remote mono">{it.remote_address}</span>
+                          )}
+                          {it.query_type && <span className="tag">{it.query_type}</span>}
+                          <RelTime iso={it.observed_at || it.created_at} />
+                        </div>
+                        {it.raw_request && (
+                          <CodeBlock
+                            label="Raw request"
+                            text={maybeDecode(it.raw_request)}
+                            onCopied={() => toast("Copied", "success")}
+                          />
+                        )}
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
+                )}
+              </>
             )}
           </div>
         </div>

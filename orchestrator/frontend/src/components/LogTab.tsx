@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ActivityEntry } from "../lib/api";
 import { listActivityEntries } from "../lib/api";
 
@@ -42,12 +42,16 @@ export function LogTab({ engagementKey }: LogTabProps) {
   const [entries, setEntries] = useState<ActivityEntry[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expandedIds, setExpandedIds] = useState<Record<number, boolean>>({});
+  const requestGeneration = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
+    const generation = ++requestGeneration.current;
     setLoading(true);
+    setLoadingMore(false);
     setError(null);
     const since = rangeToSince(range);
     listActivityEntries(engagementKey, {
@@ -57,23 +61,51 @@ export function LogTab({ engagementKey }: LogTabProps) {
       limit: PAGE_SIZE,
     })
       .then((resp) => {
-        if (cancelled) return;
+        if (cancelled || generation !== requestGeneration.current) return;
         setEntries(resp.items);
         setTotal(resp.total);
       })
       .catch((err: unknown) => {
-        if (cancelled) return;
+        if (cancelled || generation !== requestGeneration.current) return;
         setEntries([]);
         setTotal(0);
         setError(err instanceof Error ? err.message : "Failed to load activity log");
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled && generation === requestGeneration.current) setLoading(false);
       });
     return () => {
       cancelled = true;
     };
   }, [engagementKey, submittedQuery, actorKind, range]);
+
+  async function loadMore() {
+    if (loading || loadingMore || entries.length >= total) return;
+    const generation = requestGeneration.current;
+    setLoadingMore(true);
+    setError(null);
+    try {
+      const response = await listActivityEntries(engagementKey, {
+        q: submittedQuery || undefined,
+        actor_kind: actorKind || undefined,
+        since: rangeToSince(range),
+        limit: PAGE_SIZE,
+        offset: entries.length,
+      });
+      if (generation !== requestGeneration.current) return;
+      setEntries((current) => {
+        const merged = new Map(current.map((entry) => [entry.id, entry]));
+        for (const item of response.items) merged.set(item.id, item);
+        return [...merged.values()];
+      });
+      setTotal(response.total);
+    } catch (cause) {
+      if (generation !== requestGeneration.current) return;
+      setError(cause instanceof Error ? cause.message : "More activity could not be loaded");
+    } finally {
+      if (generation === requestGeneration.current) setLoadingMore(false);
+    }
+  }
 
   const sortedEntries = useMemo(() => {
     return [...entries].sort((a, b) => {
@@ -150,7 +182,7 @@ export function LogTab({ engagementKey }: LogTabProps) {
           </p>
         </div>
 
-        {error && <p className="error-text" style={{ padding: "0 14px" }}>{error}</p>}
+        {error && <p className="error-text" role="alert" style={{ padding: "0 14px" }}>{error}</p>}
 
         {!loading && sortedEntries.length === 0 && !error && (
           <p className="empty-state" style={{ padding: "20px" }}>No activity entries yet.</p>
@@ -201,6 +233,17 @@ export function LogTab({ engagementKey }: LogTabProps) {
             })}
           </div>
         )}
+        {entries.length < total ? (
+          <button
+            type="button"
+            className="ghost-button"
+            onClick={() => void loadMore()}
+            disabled={loadingMore}
+            style={{ marginTop: "14px" }}
+          >
+            {loadingMore ? "Loading more activity…" : "Load more activity"}
+          </button>
+        ) : null}
       </section>
     </>
   );

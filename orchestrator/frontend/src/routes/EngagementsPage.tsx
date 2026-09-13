@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   deleteEngagement,
   getDashboardSummary,
@@ -11,10 +11,12 @@ import { SeverityDonut } from "../components/charts/SeverityDonut";
 import { SeverityMiniBar } from "../components/charts/SeverityMiniBar";
 import { SummaryStatBar } from "../components/charts/SummaryStatBar";
 import type { SummaryStatBarItem } from "../components/charts/SummaryStatBar";
+import { useBodyScrollLock, useModalFocus } from "../lib/modalScrollLock";
 
 type EngagementsPageProps = {
   engagements: Engagement[];
   loading?: boolean;
+  loadError?: string | null;
   onOpenEngagement: (engagementKey: string) => void;
   onEngagementDeleted?: (engagementKey: string) => void;
 };
@@ -60,12 +62,20 @@ function descByIso(a: string | undefined, b: string | undefined): number {
   return vb - va;
 }
 
-export function EngagementsPage({ engagements, loading = false, onOpenEngagement, onEngagementDeleted }: EngagementsPageProps) {
+export function EngagementsPage({
+  engagements,
+  loading = false,
+  loadError = null,
+  onOpenEngagement,
+  onEngagementDeleted,
+}: EngagementsPageProps) {
   const [pendingDelete, setPendingDelete] = useState<Engagement | null>(null);
   const [confirmText, setConfirmText] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [sort, setSort] = useState<EngagementSort>(() => readEngagementSort());
+  const deleteDialogRef = useRef<HTMLDivElement | null>(null);
+  const deleteOpenerRef = useRef<HTMLButtonElement | null>(null);
 
   // Persist the chosen sort so it survives reload (FindingsTab persistence idiom).
   useEffect(() => {
@@ -186,12 +196,18 @@ export function EngagementsPage({ engagements, loading = false, onOpenEngagement
   );
   const statusBreakdownMax = statusBreakdown.reduce((max, [, n]) => Math.max(max, n), 0);
 
-  const closeDialog = () => {
+  const resetDialog = () => {
     setPendingDelete(null);
     setConfirmText("");
     setDeleteError(null);
     setIsSubmitting(false);
   };
+  const closeDialog = () => {
+    if (isSubmitting) return;
+    resetDialog();
+  };
+  useBodyScrollLock(pendingDelete != null);
+  useModalFocus(deleteDialogRef, closeDialog, pendingDelete != null, deleteOpenerRef);
 
   const submitDelete = async () => {
     if (!pendingDelete) return;
@@ -204,7 +220,7 @@ export function EngagementsPage({ engagements, loading = false, onOpenEngagement
     try {
       await deleteEngagement(pendingDelete.key);
       const deletedKey = pendingDelete.key;
-      closeDialog();
+      resetDialog();
       onEngagementDeleted?.(deletedKey);
     } catch (err) {
       setDeleteError(err instanceof Error ? err.message : String(err));
@@ -300,6 +316,11 @@ export function EngagementsPage({ engagements, loading = false, onOpenEngagement
       ) : null}
 
       <section className="engagement-column">
+        {loadError ? (
+          <section className="panel empty-state error-text" role="alert">
+            Engagement list unavailable: {loadError}
+          </section>
+        ) : null}
         {sortedEngagements.map((engagement, index) => {
           const rollup = findingByKey.get(engagement.key);
           return (
@@ -308,13 +329,18 @@ export function EngagementsPage({ engagements, loading = false, onOpenEngagement
               style={{ animationDelay: `${Math.min(index, 6) * 60}ms` }}
               key={engagement.key}
               onClick={() => onOpenEngagement(engagement.key)}
-              role="button"
-              tabIndex={0}
-              onKeyDown={(e) => { if (e.key === "Enter") onOpenEngagement(engagement.key); }}
             >
               <div className="engagement-heading">
                 <div>
-                  <h2>{engagement.target}</h2>
+                  <h2>
+                    <button
+                      type="button"
+                      className="engagement-open-button"
+                      aria-label={`Open engagement ${engagement.key}`}
+                    >
+                      {engagement.target}
+                    </button>
+                  </h2>
                   <p className="meta-text">{engagement.key}</p>
                 </div>
                 <div className="engagement-actions">
@@ -332,6 +358,7 @@ export function EngagementsPage({ engagements, loading = false, onOpenEngagement
                     className="engagement-delete-button"
                     onClick={(e) => {
                       e.stopPropagation();
+                      deleteOpenerRef.current = e.currentTarget;
                       setPendingDelete(engagement);
                       setConfirmText("");
                       setDeleteError(null);
@@ -360,7 +387,7 @@ export function EngagementsPage({ engagements, loading = false, onOpenEngagement
             <CardSkeleton key={i} lines={2} className="engagement-card" />
           ))
         ) : null}
-        {engagements.length === 0 && !loading ? (
+        {engagements.length === 0 && !loading && !loadError ? (
           <section className="panel empty-state">No engagements discovered under `agent/engagements`.</section>
         ) : null}
       </section>
@@ -372,10 +399,12 @@ export function EngagementsPage({ engagements, loading = false, onOpenEngagement
           role="presentation"
         >
           <div
+            ref={deleteDialogRef}
             className="panel finding-modal"
             role="dialog"
             aria-modal="true"
             aria-labelledby="delete-engagement-title"
+            tabIndex={-1}
             onClick={(e) => e.stopPropagation()}
           >
             <h2 id="delete-engagement-title">Delete engagement?</h2>

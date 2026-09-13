@@ -496,16 +496,34 @@ def plan_engagement(options: CreateEngagementOptions, *, now: datetime | None = 
     )
 
 
-def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
+def create_engagement(
+    options: CreateEngagementOptions,
+    *,
+    engagement_root: Path | None = None,
+    contact_backend: bool = True,
+) -> CreatedEngagement:
+    """Materialize an engagement, optionally as an offline isolated staging tree.
+
+    Ordinary callers use the default installed registry and backend checks. The
+    benchmark Lima path supplies a judge-side staging root and disables all host
+    database/network interaction; the copied guest tree is registered only by
+    the attempt-local backend.
+    """
+
     install_root = options.install_root.expanduser().resolve()
     agent_root = install_root / "agent"
     # Validate and derive everything before taking any side effect: an invalid
     # option set must not leave behind a DB snapshot or a half-made directory.
     plan = plan_engagement(options)
 
-    root = engagements_root(install_root)
+    root = (
+        engagement_root.expanduser().resolve()
+        if engagement_root is not None
+        else engagements_root(install_root)
+    )
     root.mkdir(parents=True, exist_ok=True)
-    _snapshot_orchestrator_database(install_root)
+    if contact_backend:
+        _snapshot_orchestrator_database(install_root)
 
     eng_dir = root / f"{plan.date_label}-{plan.time_label}-{plan.label}"
     counter = 2
@@ -557,7 +575,11 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
     # When an override IS configured (via env var, `vigil config`, or a legacy
     # install-root env file), we snapshot it into the engagement file so the
     # launcher re-exports it.
-    resolved_base_url = resolve_orchestrator_base_url(install_root, eng_dir)
+    resolved_base_url = (
+        resolve_orchestrator_base_url(install_root, eng_dir)
+        if contact_backend
+        else DEFAULT_ORCHESTRATOR_BASE_URL
+    )
     if resolved_base_url and resolved_base_url != DEFAULT_ORCHESTRATOR_BASE_URL:
         (eng_dir / ".orchestrator.env").write_text(
             f"ORCHESTRATOR_BASE_URL={resolved_base_url}\n",
@@ -595,11 +617,12 @@ def create_engagement(options: CreateEngagementOptions) -> CreatedEngagement:
         _write_goose_config(agent_root, eng_dir)
     _write_launchers(agent_root, eng_dir, client_kind, skip_permissions=options.skip_permissions)
     _emit_bootstrap_scope_summary(scope)
-    _verify_backend_install_root(install_root, eng_dir)
+    if contact_backend:
+        _verify_backend_install_root(install_root, eng_dir)
     # Blue engagements own their own footer (blue.py:_cmd_engage) and must not
     # emit the red-infra footer (mitmproxy/oob are irrelevant to incident
     # response). Skip entirely for blue so blue.py has sole footer ownership.
-    if options.engagement_type != "blue":
+    if contact_backend and options.engagement_type != "blue":
         _emit_post_create_footer(key)
     return CreatedEngagement(key=key, path=eng_dir)
 

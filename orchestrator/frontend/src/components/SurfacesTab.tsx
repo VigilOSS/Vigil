@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type {
   AssessmentFinding,
   AssessmentFindingDetail,
@@ -12,7 +12,7 @@ import {
   patchAssessmentSurface,
 } from "../lib/api";
 import { Copy } from "lucide-react";
-import { useBodyScrollLock } from "../lib/modalScrollLock";
+import { useBodyScrollLock, useModalFocus } from "../lib/modalScrollLock";
 import { useToast } from "../contexts/ToastContext";
 import { RelTime } from "./formatting";
 import { KV, ProseSection, SectionHead, UntrustedDataNotice } from "./drawer/DrawerKit";
@@ -55,6 +55,7 @@ const SurfacesGrid = lazy(() => import("./SurfacesGrid"));
 type SurfacesTabProps = {
   engagementKey: string;
   surfaces: AssessmentSurface[];
+  loadError?: string | null;
   // Findings list (already loaded by the parent) used to resolve a linked
   // finding's severity + title for the drawer's "Linked findings" section.
   // Optional so the tab still renders standalone (count-only, no severity).
@@ -151,6 +152,7 @@ const IconClose = () => (
 export function SurfacesTab({
   engagementKey,
   surfaces,
+  loadError = null,
   findings = [],
   onSurfaceUpdated,
 }: SurfacesTabProps) {
@@ -257,6 +259,7 @@ export function SurfacesTab({
   const [sourceFilters, setSourceFilters] = useState<Set<string>>(new Set());
 
   const searchRef = useRef<HTMLInputElement | null>(null);
+  const drawerInvokerRef = useRef<HTMLElement | null>(null);
   const canSubmitResolution = resolutionRationale.trim().length > 0;
 
   useEffect(() => {
@@ -398,6 +401,7 @@ export function SurfacesTab({
 
   const activeFilterCount =
     typeFilters.size + statusFilters.size + sourceFilters.size + (query ? 1 : 0);
+  const snapshotLimitReached = localSurfaces.length >= SURFACE_RETRY_FETCH_LIMIT;
 
   const selectedLinks = selected ? linksBySurfaceId.get(selected.id) ?? [] : [];
 
@@ -456,6 +460,9 @@ export function SurfacesTab({
               {filteredSurfaces.length} of {localSurfaces.length} surface
               {localSurfaces.length === 1 ? "" : "s"}
               {linksError ? " · links unavailable" : ""}
+              {snapshotLimitReached
+                ? " · surface limit reached · results may be incomplete"
+                : ""}
             </span>
           </div>
         </div>
@@ -532,7 +539,13 @@ export function SurfacesTab({
           </p>
         </div>
 
-        {localSurfaces.length === 0 ? (
+        {loadError ? (
+          <p className="error-text" role="alert" style={{ padding: "12px 20px" }}>
+            Surface ledger unavailable: {loadError}
+          </p>
+        ) : null}
+
+        {loadError && localSurfaces.length === 0 ? null : localSurfaces.length === 0 ? (
           <p className="empty-state" style={{ padding: "20px" }}>
             No surfaces discovered yet.
           </p>
@@ -542,7 +555,10 @@ export function SurfacesTab({
               rows={filteredSurfaces}
               linkCounts={linkCounts}
               selectedId={selected?.id ?? null}
-              onRowOpen={(surface) => setSelected(surface)}
+              onRowOpen={(surface, invoker) => {
+                drawerInvokerRef.current = invoker ?? searchRef.current;
+                setSelected(surface);
+              }}
             />
           </Suspense>
         )}
@@ -557,6 +573,7 @@ export function SurfacesTab({
           findingBySlug={findingBySlug}
           toast={toast}
           onClose={() => setSelected(null)}
+          returnFocusRef={drawerInvokerRef}
           resolutionRationale={resolutionRationale}
           setResolutionRationale={setResolutionRationale}
           pendingResolution={pendingResolution}
@@ -582,6 +599,7 @@ function SurfaceDrawer({
   findingBySlug,
   toast,
   onClose,
+  returnFocusRef,
   resolutionRationale,
   setResolutionRationale,
   pendingResolution,
@@ -595,6 +613,7 @@ function SurfaceDrawer({
   findingBySlug: Map<string, FindingLike>;
   toast: (message: string, type?: "success" | "error" | "info") => void;
   onClose: () => void;
+  returnFocusRef: RefObject<HTMLElement | null>;
   resolutionRationale: string;
   setResolutionRationale: (v: string) => void;
   pendingResolution: string | null;
@@ -603,6 +622,8 @@ function SurfaceDrawer({
   resolveSurfaceStatus: (status: SurfacePatchPayload["status"]) => void | Promise<void>;
 }) {
   useBodyScrollLock();
+  const panelRef = useRef<HTMLElement | null>(null);
+  useModalFocus(panelRef, onClose, true, returnFocusRef);
   const rationale = surface.rationale || "";
   const findingHref = (slug: string) =>
     `#/engagements/${encodeURIComponent(engagementKey)}?tab=findings&finding=${encodeURIComponent(slug)}`;
@@ -610,10 +631,12 @@ function SurfaceDrawer({
   return (
     <div className="finding-overlay" role="presentation" onClick={onClose}>
       <article
+        ref={panelRef}
         className="drawer-panel panel"
         role="dialog"
         aria-modal="true"
         aria-labelledby="surface-detail-modal-title"
+        tabIndex={-1}
         onClick={(event) => event.stopPropagation()}
         style={{ maxWidth: "720px", width: "min(92vw, 720px)", maxHeight: "90vh", overflow: "auto" }}
       >

@@ -6,7 +6,7 @@
 
 import { useMemo, useRef } from "react";
 import { AgGridReact } from "ag-grid-react";
-import type { ColDef, ICellRendererParams, RowClickedEvent } from "ag-grid-community";
+import type { CellKeyDownEvent, ColDef, ICellRendererParams, RowClickedEvent } from "ag-grid-community";
 import type { AssessmentSurface } from "../lib/api";
 import {
   AG_GRID_THEME,
@@ -14,6 +14,7 @@ import {
   GRID_ROW_HEIGHT,
   GRID_THEME_PROP,
   defaultColDef,
+  focusGridInvoker,
   registerAgGrid,
 } from "../lib/agGrid";
 
@@ -24,7 +25,7 @@ type SurfacesGridProps = {
   // surface id → number of linked findings (for the Findings count badge).
   linkCounts: Map<number, number>;
   selectedId: number | null;
-  onRowOpen: (surface: AssessmentSurface) => void;
+  onRowOpen: (surface: AssessmentSurface, invoker: HTMLElement | null) => void;
 };
 
 function StatusCell({ data }: ICellRendererParams<AssessmentSurface>) {
@@ -112,7 +113,14 @@ export default function SurfacesGrid({
   const onRowClicked = (event: RowClickedEvent<AssessmentSurface>) => {
     const sel = window.getSelection?.();
     if (sel && sel.type === "Range" && sel.toString().length > 0) return;
-    if (event.data) onRowOpen(event.data);
+    if (event.data) onRowOpen(event.data, focusGridInvoker(event.event));
+  };
+
+  const onCellKeyDown = (event: CellKeyDownEvent<AssessmentSurface>) => {
+    const keyboardEvent = event.event as KeyboardEvent;
+    if (!event.data || (keyboardEvent.key !== "Enter" && keyboardEvent.key !== " ")) return;
+    keyboardEvent.preventDefault();
+    onRowOpen(event.data, focusGridInvoker(keyboardEvent));
   };
 
   return (
@@ -126,9 +134,9 @@ export default function SurfacesGrid({
         getRowId={(p) => String(p.data.id)}
         rowHeight={GRID_ROW_HEIGHT}
         headerHeight={GRID_HEADER_HEIGHT}
-        suppressCellFocus
         animateRows
         onRowClicked={onRowClicked}
+        onCellKeyDown={onCellKeyDown}
         rowClassRules={{
           "ag-row-selected": (p) => p.data?.id === selectedId,
         }}

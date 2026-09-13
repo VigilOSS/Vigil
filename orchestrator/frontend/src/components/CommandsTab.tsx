@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type {
   AssessmentCommandRun,
   AssessmentCommandRunDetail,
@@ -7,7 +7,7 @@ import {
   getAssessmentCommandRun,
   listAssessmentCommandRuns,
 } from "../lib/api";
-import { useBodyScrollLock } from "../lib/modalScrollLock";
+import { useBodyScrollLock, useModalFocus } from "../lib/modalScrollLock";
 import { Skeleton, TableSkeleton } from "./Skeletons";
 import { UntrustedDataNotice } from "./drawer/DrawerKit";
 
@@ -529,22 +529,21 @@ function copyToClipboard(text: string): void {
 // Centred modal that hosts the per-row Drawer. Shared shell: three tabs
 // (Commands / Intel / Findings) reuse the same .detail-modal-* CSS.
 // Backdrop click + Esc + × button all close; focus moves into the panel
-// on open so keyboard users land inside the dialog. Restoring focus to
-// the row that opened it is done by the caller via onClose.
+// on open so keyboard users land inside the dialog, then restores the
+// explicit row/palette invoker supplied by the caller.
 function DetailModal({
   children,
   onClose,
   titleId,
+  returnFocusRef,
 }: {
   children: React.ReactNode;
   onClose: () => void;
   titleId?: string;
+  returnFocusRef: RefObject<HTMLElement | null>;
 }) {
   const panelRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    // Focus the panel on open. Use a microtask so the ref is attached.
-    queueMicrotask(() => panelRef.current?.focus());
-  }, []);
+  useModalFocus(panelRef, onClose, true, returnFocusRef);
   // Lock body scroll while the modal is mounted so wheel / trackpad /
   // PageUp/PageDown never bubble to the page behind. Reference-counted
   // via modalScrollLock so stacked or rapidly re-opened modals never
@@ -602,10 +601,7 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
   // the list without forcing the modal open, and so the modal closes on
   // Escape without discarding the keyboard-navigation cursor.
   const [detailOpen, setDetailOpen] = useState(false);
-  // Ref to the row that opened the modal — focus is restored here on
-  // close so keyboard users land back where they were.
-  const rowRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
-  const lastFocusIdRef = useRef<number | null>(null);
+  const detailInvokerRef = useRef<HTMLElement | null>(null);
 
   // Detail cache for full stdout/stderr. Keyed by command-run id and
   // populated lazily when the drawer's stdout/stderr tab is opened.
@@ -621,24 +617,62 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
   // as the user types. `showSpinner=false` is used for background refreshes
   // (poll tick, tab revisit) so the list doesn't flicker to a loading state.
   const reloadInFlightRef = useRef(false);
+  const reloadQueuedRef = useRef<{ engagementKey: string; showSpinner: boolean } | null>(null);
+  const activeEngagementKeyRef = useRef(engagementKey);
+  activeEngagementKeyRef.current = engagementKey;
   const reload = useCallback(
     async (showSpinner = true) => {
-      if (reloadInFlightRef.current) return;
+      if (reloadInFlightRef.current) {
+        const queued = reloadQueuedRef.current;
+        reloadQueuedRef.current = {
+          engagementKey,
+          showSpinner: showSpinner || queued?.showSpinner === true,
+        };
+        return;
+      }
       reloadInFlightRef.current = true;
-      if (showSpinner) setLoading(true);
       try {
-        const items = await listAssessmentCommandRuns(engagementKey, {
-          limit: INITIAL_FETCH_LIMIT,
-          offset: 0,
-        });
-        setRows(items);
-        setLoadError(null);
-      } catch (err) {
-        if (showSpinner) setRows([]);
-        setLoadError(err instanceof Error ? err.message : "Failed to load command runs");
+        let next: { engagementKey: string; showSpinner: boolean } | null = {
+          engagementKey,
+          showSpinner,
+        };
+        while (next) {
+          const request = next;
+          reloadQueuedRef.current = null;
+          if (request.showSpinner && activeEngagementKeyRef.current === request.engagementKey) {
+            setLoading(true);
+          }
+          try {
+            const items = await listAssessmentCommandRuns(request.engagementKey, {
+              limit: INITIAL_FETCH_LIMIT,
+              offset: 0,
+            });
+            if (activeEngagementKeyRef.current === request.engagementKey) {
+              setRows(items);
+              setLoadError(null);
+            }
+          } catch (err) {
+            if (
+              request.showSpinner
+              && activeEngagementKeyRef.current === request.engagementKey
+            ) {
+              setRows([]);
+            }
+            if (activeEngagementKeyRef.current === request.engagementKey) {
+              setLoadError(err instanceof Error ? err.message : "Failed to load command runs");
+            }
+          } finally {
+            if (
+              request.showSpinner
+              && activeEngagementKeyRef.current === request.engagementKey
+            ) {
+              setLoading(false);
+            }
+          }
+          next = reloadQueuedRef.current;
+        }
       } finally {
         reloadInFlightRef.current = false;
-        if (showSpinner) setLoading(false);
       }
     },
     [engagementKey],
@@ -666,10 +700,10 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
     };
   }, [reload]);
 
-  // Backend caps list at 1000 rows per request. If we got back exactly
-  // INITIAL_FETCH_LIMIT, assume there are older runs we didn't fetch —
-  // surface it so the operator doesn't silently audit an incomplete slice.
-  const truncated = rows.length >= INITIAL_FETCH_LIMIT;
+  // Equality proves only that the client reached its requested boundary,
+  // not that an older row exists. Report the uncertainty without claiming
+  // that the server definitely truncated the ledger.
+  const limitReached = rows.length >= INITIAL_FETCH_LIMIT;
 
   const derivedList = useMemo<Derived[]>(() => rows.map(derive), [rows]);
 
@@ -1055,14 +1089,14 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
             <span>
               {filtered.length} of {derivedList.length} runs
               {loading && " · loading…"}
-              {truncated && (
+              {limitReached && (
                 <>
                   {" · "}
                   <span
                     className="pill pill-unreviewed"
-                    title={`Backend capped the list at ${INITIAL_FETCH_LIMIT} newest runs. Narrow with filters (tool:, agent:, phase:) to see older rows.`}
+                    title={`The request returned ${INITIAL_FETCH_LIMIT} rows. More rows may exist. Filters only narrow this loaded snapshot; they do not fetch hidden rows.`}
                   >
-                    showing newest {INITIAL_FETCH_LIMIT} — older runs hidden
+                    command limit reached — results may be incomplete
                   </span>
                 </>
               )}
@@ -1233,14 +1267,14 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
 
       {loadError && (
         <div className="panel findings-toolbar-panel" style={{ padding: 12 }}>
-          <p className="empty" style={{ textAlign: "left" }}>
+          <p className="error-text" role="alert" style={{ textAlign: "left" }}>
             {loadError}
           </p>
         </div>
       )}
 
       {/* List (detail renders as a centred modal below) */}
-      <div className="findings-shell">
+      {loadError && rows.length === 0 ? null : <div className="findings-shell">
         <section className="list-panel panel">
           {loading ? (
             <TableSkeleton
@@ -1262,9 +1296,9 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
                 rows={filtered}
                 dupCounts={dupCounts}
                 selectedId={selectedId}
-                onRowOpen={(id) => {
+                onRowOpen={(id, invoker) => {
                   setSelectedId(id);
-                  lastFocusIdRef.current = id;
+                  detailInvokerRef.current = invoker ?? searchRef.current;
                   setDetailOpen(true);
                 }}
                 onTargetClick={(target) => setQuery(`target:${target}`)}
@@ -1277,22 +1311,13 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
           </div>
         </section>
 
-      </div>
+      </div>}
 
       {detailOpen && selectedDerived && (
         <DetailModal
-          onClose={() => {
-            setDetailOpen(false);
-            // Restore focus to the row that opened the modal so
-            // keyboard-only users don't lose their place.
-            const el = lastFocusIdRef.current != null
-              ? rowRefs.current.get(lastFocusIdRef.current)
-              : null;
-            // queueMicrotask is enough — React will unmount the modal
-            // on the next tick, and focus() after that lands cleanly.
-            queueMicrotask(() => el?.focus());
-          }}
+          onClose={() => setDetailOpen(false)}
           titleId="commands-detail-modal-title"
+          returnFocusRef={detailInvokerRef}
         >
           <Drawer
             d={selectedDerived}
@@ -1330,7 +1355,7 @@ export function CommandsTab({ engagementKey }: CommandsTabProps) {
           derivedList={derivedList}
           onSelect={(id) => {
             setSelectedId(id);
-            lastFocusIdRef.current = id;
+            detailInvokerRef.current = searchRef.current;
             setCmdOpen(false);
             setDetailOpen(true);
           }}

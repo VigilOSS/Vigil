@@ -163,6 +163,7 @@ export function EngagementPage({
   const [codeLoadError, setCodeLoadError] = useState<string | null>(null);
   const [intelSummary, setIntelSummary] = useState<IntelSummary | null>(null);
   const [assessmentSurfaces, setAssessmentSurfaces] = useState<AssessmentSurface[]>([]);
+  const [surfaceLoadError, setSurfaceLoadError] = useState<string | null>(null);
   const [activityTotal, setActivityTotal] = useState<number>(0);
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [selectedArtifact, setSelectedArtifact] = useState<ArtifactContent | null>(null);
@@ -298,6 +299,7 @@ export function EngagementPage({
         setCodeLoadError(null);
         setIntelSummary(null);
         setAssessmentSurfaces([]);
+        setSurfaceLoadError(null);
         setActivityTotal(0);
         setSelectedName(null);
         setSelectedArtifact(null);
@@ -344,7 +346,16 @@ export function EngagementPage({
           break;
         case "surfaces":
           promises.push(
-            listSurfaces(engagementKey, { limit: ASSESSMENT_WIDE_FETCH_LIMIT }).then(setAssessmentSurfaces).catch(() => setAssessmentSurfaces([])),
+            listSurfaces(engagementKey, { limit: ASSESSMENT_WIDE_FETCH_LIMIT })
+              .then((surfaces) => {
+                setAssessmentSurfaces(surfaces);
+                setSurfaceLoadError(null);
+              })
+              .catch((error: unknown) => {
+                setSurfaceLoadError(
+                  error instanceof Error ? error.message : "Failed to load attack surfaces",
+                );
+              }),
           );
           break;
         case "intel":
@@ -776,6 +787,7 @@ export function EngagementPage({
             <SurfacesTab
               engagementKey={engagementKey}
               surfaces={assessmentSurfaces}
+              loadError={surfaceLoadError}
               findings={displayFindings}
             />
           )}

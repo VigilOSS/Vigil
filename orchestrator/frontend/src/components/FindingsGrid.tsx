@@ -9,13 +9,14 @@
 
 import { useMemo, useRef } from "react";
 import { AgGridReact } from "ag-grid-react";
-import type { ColDef, ICellRendererParams, RowClickedEvent } from "ag-grid-community";
+import type { CellKeyDownEvent, ColDef, ICellRendererParams, RowClickedEvent } from "ag-grid-community";
 import {
   AG_GRID_THEME,
   GRID_HEADER_HEIGHT,
   GRID_ROW_HEIGHT,
   GRID_THEME_PROP,
   defaultColDef,
+  focusGridInvoker,
   registerAgGrid,
 } from "../lib/agGrid";
 import { relTime, sevDotColor, type Derived } from "./FindingsTab";
@@ -152,7 +153,18 @@ export default function FindingsGrid({ rows, selected, onOpen }: FindingsGridPro
   const onRowClicked = (event: RowClickedEvent<Derived>) => {
     const sel = window.getSelection?.();
     if (sel && sel.type === "Range" && sel.toString().length > 0) return;
-    if (event.data?.slug) onOpen(event.data.slug);
+    if (event.data?.slug) {
+      focusGridInvoker(event.event);
+      onOpen(event.data.slug);
+    }
+  };
+
+  const onCellKeyDown = (event: CellKeyDownEvent<Derived>) => {
+    const keyboardEvent = event.event as KeyboardEvent;
+    if (!event.data?.slug || (keyboardEvent.key !== "Enter" && keyboardEvent.key !== " ")) return;
+    keyboardEvent.preventDefault();
+    focusGridInvoker(keyboardEvent);
+    onOpen(event.data.slug);
   };
 
   return (
@@ -166,9 +178,9 @@ export default function FindingsGrid({ rows, selected, onOpen }: FindingsGridPro
         getRowId={(p) => p.data.slug}
         rowHeight={GRID_ROW_HEIGHT}
         headerHeight={GRID_HEADER_HEIGHT}
-        suppressCellFocus
         animateRows
         onRowClicked={onRowClicked}
+        onCellKeyDown={onCellKeyDown}
         rowClassRules={{
           "ag-row-selected": (p) => p.data?.slug === selected,
         }}

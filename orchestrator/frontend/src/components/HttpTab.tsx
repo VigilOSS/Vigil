@@ -9,7 +9,7 @@
 // ag-grid column filters). The grid itself is lazy-loaded so ag-grid lands
 // in the shared code-split chunk and never bloats the main entry bundle.
 
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type {
   CapturePolicy,
   CapturePolicyUpdate,
@@ -27,7 +27,7 @@ import {
   listRequestVariants,
   setCapturePolicy,
 } from "../lib/api";
-import { useBodyScrollLock } from "../lib/modalScrollLock";
+import { useBodyScrollLock, useModalFocus } from "../lib/modalScrollLock";
 import { useToast } from "../contexts/ToastContext";
 import { CodeBlock, RelTime } from "./formatting";
 import { KV, ProseSection, UntrustedDataNotice } from "./drawer/DrawerKit";
@@ -128,6 +128,8 @@ export function HttpTab({ engagementKey, refreshVersion }: HttpTabProps) {
   const { toast } = useToast();
   const [variants, setVariants] = useState<RequestVariant[]>([]);
   const [observations, setObservations] = useState<RequestObservation[]>([]);
+  const [observationsLoaded, setObservationsLoaded] = useState(false);
+  const [observationError, setObservationError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -137,36 +139,83 @@ export function HttpTab({ engagementKey, refreshVersion }: HttpTabProps) {
   const [view, setView] = useState<HttpView>("variants");
 
   const searchRef = useRef<HTMLInputElement | null>(null);
+  const drawerInvokerRef = useRef<HTMLElement | null>(null);
 
   // Fetch variants + observations together. Both are read-only and the
   // observations are grouped to variants client-side, so a single fetch
   // covers the whole tab. `showSpinner=false` is used for background
   // refreshes (WS tick / visibility) so the list doesn't flicker.
   const reloadInFlightRef = useRef(false);
+  const reloadQueuedRef = useRef<{ engagementKey: string; showSpinner: boolean } | null>(null);
+  const activeEngagementKeyRef = useRef(engagementKey);
+  activeEngagementKeyRef.current = engagementKey;
   const reload = useCallback(
     async (showSpinner = true) => {
-      if (reloadInFlightRef.current) return;
+      if (reloadInFlightRef.current) {
+        const queued = reloadQueuedRef.current;
+        reloadQueuedRef.current = {
+          engagementKey,
+          showSpinner: showSpinner || queued?.showSpinner === true,
+        };
+        return;
+      }
       reloadInFlightRef.current = true;
-      if (showSpinner) setLoading(true);
       try {
-        const [vs, obs] = await Promise.all([
-          listRequestVariants(engagementKey, { limit: INITIAL_FETCH_LIMIT }),
-          listRequestObservations(engagementKey, { limit: INITIAL_FETCH_LIMIT }).catch(
-            () => [] as RequestObservation[],
-          ),
-        ]);
-        setVariants(vs);
-        setObservations(obs);
-        setLoadError(null);
-      } catch (err) {
-        if (showSpinner) {
-          setVariants([]);
-          setObservations([]);
+        let next: { engagementKey: string; showSpinner: boolean } | null = {
+          engagementKey,
+          showSpinner,
+        };
+        while (next) {
+          const request = next;
+          reloadQueuedRef.current = null;
+          if (request.showSpinner && activeEngagementKeyRef.current === request.engagementKey) {
+            setLoading(true);
+          }
+          try {
+            const [variantResult, observationResult] = await Promise.allSettled([
+              listRequestVariants(request.engagementKey, { limit: INITIAL_FETCH_LIMIT }),
+              listRequestObservations(request.engagementKey, { limit: INITIAL_FETCH_LIMIT }),
+            ]);
+            if (activeEngagementKeyRef.current === request.engagementKey) {
+              if (variantResult.status === "rejected") throw variantResult.reason;
+              setVariants(variantResult.value);
+              setLoadError(null);
+              if (observationResult.status === "fulfilled") {
+                setObservations(observationResult.value);
+                setObservationsLoaded(true);
+                setObservationError(null);
+              } else {
+                setObservationError(
+                  observationResult.reason instanceof Error
+                    ? observationResult.reason.message
+                    : "Failed to load request observations",
+                );
+              }
+            }
+          } catch (err) {
+            if (
+              activeEngagementKeyRef.current === request.engagementKey
+              && request.showSpinner
+            ) {
+              setVariants([]);
+              setObservations([]);
+              setObservationsLoaded(false);
+            }
+            if (activeEngagementKeyRef.current === request.engagementKey) {
+              setLoadError(err instanceof Error ? err.message : "Failed to load HTTP traffic");
+            }
+          } finally {
+            if (
+              request.showSpinner
+              && activeEngagementKeyRef.current === request.engagementKey
+            ) {
+              setLoading(false);
+            }
+          }
+          next = reloadQueuedRef.current;
         }
-        setLoadError(err instanceof Error ? err.message : "Failed to load HTTP traffic");
       } finally {
         reloadInFlightRef.current = false;
-        if (showSpinner) setLoading(false);
       }
     },
     [engagementKey],
@@ -301,7 +350,8 @@ export function HttpTab({ engagementKey, refreshVersion }: HttpTabProps) {
     return () => window.removeEventListener("keydown", onKey);
   }, [selected, view]);
 
-  const truncated = variants.length >= INITIAL_FETCH_LIMIT;
+  const variantLimitReached = variants.length >= INITIAL_FETCH_LIMIT;
+  const observationLimitReached = observations.length >= INITIAL_FETCH_LIMIT;
 
   return (
     <div className="findings-redesign">
@@ -346,7 +396,7 @@ export function HttpTab({ engagementKey, refreshVersion }: HttpTabProps) {
               {filtered.length} of {variants.length} variant
               {variants.length === 1 ? "" : "s"}
               {loading && " · loading…"}
-              {truncated && " · list truncated"}
+              {variantLimitReached && " · variant limit reached · results may be incomplete"}
             </span>
           </div>
         </div>
@@ -382,8 +432,16 @@ export function HttpTab({ engagementKey, refreshVersion }: HttpTabProps) {
 
       {loadError && (
         <div className="panel findings-toolbar-panel" style={{ padding: 12 }}>
-          <p className="empty" style={{ textAlign: "left" }}>
+          <p className="error-text" role="alert" style={{ textAlign: "left" }}>
             {loadError}
+          </p>
+        </div>
+      )}
+      {observationError && (
+        <div className="panel findings-toolbar-panel" style={{ padding: 12 }}>
+          <p className="error-text" role="alert" style={{ textAlign: "left" }}>
+            Request observations unavailable: {observationError}
+            {observationsLoaded ? " (showing the last loaded observation history)" : ""}
           </p>
         </div>
       )}
@@ -394,13 +452,18 @@ export function HttpTab({ engagementKey, refreshVersion }: HttpTabProps) {
           <h2>Request variants</h2>
           <p className="meta-text">
             {filtered.length} variant{filtered.length === 1 ? "" : "s"}
-            {observations.length ? ` · ${observations.length} observations` : ""}
+            {observationsLoaded
+              ? ` · ${observations.length} observations`
+              : " · observations unavailable"}
+            {observationLimitReached
+              ? " · observation limit reached · results may be incomplete"
+              : ""}
           </p>
         </div>
 
         {loading ? (
           <TableSkeleton rows={8} showHeader={false} />
-        ) : variants.length === 0 ? (
+        ) : loadError && variants.length === 0 ? null : variants.length === 0 ? (
           <p className="empty-state" style={{ padding: "20px", color: "var(--muted)" }}>
             No HTTP request traffic recorded yet.
           </p>
@@ -410,7 +473,10 @@ export function HttpTab({ engagementKey, refreshVersion }: HttpTabProps) {
               rows={filtered}
               observationCounts={observationCounts}
               selectedId={selected?.id ?? null}
-              onRowOpen={(variant) => setSelected(variant)}
+              onRowOpen={(variant, invoker) => {
+                drawerInvokerRef.current = invoker ?? searchRef.current;
+                setSelected(variant);
+              }}
             />
           </Suspense>
         )}
@@ -420,8 +486,11 @@ export function HttpTab({ engagementKey, refreshVersion }: HttpTabProps) {
         <HttpDrawer
           variant={selected}
           observations={observationsByVariant.get(selected.id) ?? []}
+          observationsLoaded={observationsLoaded}
+          observationError={observationError}
           toast={toast}
           onClose={() => setSelected(null)}
+          returnFocusRef={drawerInvokerRef}
         />
       )}
 
@@ -479,15 +548,23 @@ function HttpViewToggle({
 function HttpDrawer({
   variant,
   observations,
+  observationsLoaded,
+  observationError,
   toast,
   onClose,
+  returnFocusRef,
 }: {
   variant: RequestVariant;
   observations: RequestObservation[];
+  observationsLoaded: boolean;
+  observationError: string | null;
   toast: (message: string, type?: "success" | "error" | "info") => void;
   onClose: () => void;
+  returnFocusRef: RefObject<HTMLElement | null>;
 }) {
   useBodyScrollLock();
+  const panelRef = useRef<HTMLElement | null>(null);
+  useModalFocus(panelRef, onClose, true, returnFocusRef);
   const method = (variant.method || "GET").toUpperCase();
 
   const schemaBlocks: { label: string; text: string }[] = [];
@@ -506,10 +583,12 @@ function HttpDrawer({
   return (
     <div className="finding-overlay" role="presentation" onClick={onClose}>
       <article
+        ref={panelRef}
         className="drawer-panel panel"
         role="dialog"
         aria-modal="true"
         aria-labelledby="http-detail-modal-title"
+        tabIndex={-1}
         onClick={(event) => event.stopPropagation()}
         style={{ maxWidth: "760px", width: "min(94vw, 760px)", maxHeight: "90vh", overflow: "auto" }}
       >
@@ -607,7 +686,11 @@ function HttpDrawer({
             <p className="section-title">
               Observations <span className="count">{observations.length}</span>
             </p>
-            {observations.length === 0 ? (
+            {observationError && !observationsLoaded ? (
+              <p className="error-text" role="alert" style={{ padding: "12px 0" }}>
+                Observation history unavailable: {observationError}
+              </p>
+            ) : observations.length === 0 ? (
               <p className="empty" style={{ padding: "12px 0" }}>
                 No observations recorded for this variant yet.
               </p>
@@ -686,24 +769,65 @@ function HttpFlowsView({
 
   const [selected, setSelected] = useState<HttpFlow | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
+  const drawerInvokerRef = useRef<HTMLElement | null>(null);
 
   // ── Unfiltered facet snapshot ────
   const reloadInFlightRef = useRef(false);
+  const reloadQueuedRef = useRef<{ engagementKey: string; showSpinner: boolean } | null>(null);
+  const activeEngagementKeyRef = useRef(engagementKey);
+  activeEngagementKeyRef.current = engagementKey;
   const reload = useCallback(
     async (showSpinner = true) => {
-      if (reloadInFlightRef.current) return;
+      if (reloadInFlightRef.current) {
+        const queued = reloadQueuedRef.current;
+        reloadQueuedRef.current = {
+          engagementKey,
+          showSpinner: showSpinner || queued?.showSpinner === true,
+        };
+        return;
+      }
       reloadInFlightRef.current = true;
-      if (showSpinner) setLoading(true);
       try {
-        const items = await listHttpFlows(engagementKey, { limit: FLOWS_FETCH_LIMIT });
-        setAllFlows(items);
-        setLoadError(null);
-      } catch (err) {
-        if (showSpinner) setAllFlows([]);
-        setLoadError(err instanceof Error ? err.message : "Failed to load HTTP flows");
+        let next: { engagementKey: string; showSpinner: boolean } | null = {
+          engagementKey,
+          showSpinner,
+        };
+        while (next) {
+          const request = next;
+          reloadQueuedRef.current = null;
+          if (request.showSpinner && activeEngagementKeyRef.current === request.engagementKey) {
+            setLoading(true);
+          }
+          try {
+            const items = await listHttpFlows(request.engagementKey, {
+              limit: FLOWS_FETCH_LIMIT,
+            });
+            if (activeEngagementKeyRef.current === request.engagementKey) {
+              setAllFlows(items);
+              setLoadError(null);
+            }
+          } catch (err) {
+            if (
+              request.showSpinner
+              && activeEngagementKeyRef.current === request.engagementKey
+            ) {
+              setAllFlows([]);
+            }
+            if (activeEngagementKeyRef.current === request.engagementKey) {
+              setLoadError(err instanceof Error ? err.message : "Failed to load HTTP flows");
+            }
+          } finally {
+            if (
+              request.showSpinner
+              && activeEngagementKeyRef.current === request.engagementKey
+            ) {
+              setLoading(false);
+            }
+          }
+          next = reloadQueuedRef.current;
+        }
       } finally {
         reloadInFlightRef.current = false;
-        if (showSpinner) setLoading(false);
       }
     },
     [engagementKey],
@@ -883,7 +1007,7 @@ function HttpFlowsView({
     toast("Exporting HAR…", "info");
   };
 
-  const snapshotTruncated = allFlows.length >= FLOWS_FETCH_LIMIT;
+  const snapshotLimitReached = allFlows.length >= FLOWS_FETCH_LIMIT;
 
   return (
     <>
@@ -919,7 +1043,7 @@ function HttpFlowsView({
               {results.length} of {allFlows.length} flow
               {allFlows.length === 1 ? "" : "s"}
               {(loading || resultsLoading) && " · loading…"}
-              {snapshotTruncated && " · snapshot capped"}
+              {snapshotLimitReached && " · flow limit reached · results may be incomplete"}
             </span>
             <button type="button" className="qa-btn" onClick={onExportHar}>
               Export HAR
@@ -1046,7 +1170,7 @@ function HttpFlowsView({
 
       {loadError && (
         <div className="panel findings-toolbar-panel" style={{ padding: 12 }}>
-          <p className="empty" style={{ textAlign: "left" }}>
+          <p className="error-text" role="alert" style={{ textAlign: "left" }}>
             {loadError}
           </p>
         </div>
@@ -1064,7 +1188,7 @@ function HttpFlowsView({
 
         {loading ? (
           <TableSkeleton rows={8} showHeader={false} />
-        ) : allFlows.length === 0 ? (
+        ) : loadError && allFlows.length === 0 ? null : allFlows.length === 0 ? (
           <p className="empty-state" style={{ padding: "20px", color: "var(--muted)" }}>
             No canonical HTTP flows captured yet. Enable raw-body capture above and route
             traffic through the vigil proxy to populate this view.
@@ -1074,7 +1198,10 @@ function HttpFlowsView({
             <HttpFlowsGrid
               rows={results}
               selectedUid={selected?.flow_uid ?? null}
-              onRowOpen={(flow) => setSelected(flow)}
+              onRowOpen={(flow, invoker) => {
+                drawerInvokerRef.current = invoker ?? searchRef.current;
+                setSelected(flow);
+              }}
             />
           </Suspense>
         )}
@@ -1086,6 +1213,7 @@ function HttpFlowsView({
           flow={selected}
           toast={toast}
           onClose={() => setSelected(null)}
+          returnFocusRef={drawerInvokerRef}
         />
       )}
 
@@ -1287,13 +1415,17 @@ function FlowDrawer({
   flow,
   toast,
   onClose,
+  returnFocusRef,
 }: {
   engagementKey: string;
   flow: HttpFlow;
   toast: ToastFn;
   onClose: () => void;
+  returnFocusRef: RefObject<HTMLElement | null>;
 }) {
   useBodyScrollLock();
+  const panelRef = useRef<HTMLElement | null>(null);
+  useModalFocus(panelRef, onClose, true, returnFocusRef);
   const [row, setRow] = useState<HttpFlow>(flow);
   useEffect(() => {
     setRow(flow);
@@ -1324,10 +1456,12 @@ function FlowDrawer({
   return (
     <div className="finding-overlay" role="presentation" onClick={onClose}>
       <article
+        ref={panelRef}
         className="drawer-panel panel"
         role="dialog"
         aria-modal="true"
         aria-labelledby="http-flow-modal-title"
+        tabIndex={-1}
         onClick={(event) => event.stopPropagation()}
         style={{ maxWidth: "820px", width: "min(94vw, 820px)", maxHeight: "90vh", overflow: "auto" }}
       >

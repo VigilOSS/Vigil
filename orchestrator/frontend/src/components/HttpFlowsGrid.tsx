@@ -8,7 +8,7 @@
 
 import { useRef } from "react";
 import { AgGridReact } from "ag-grid-react";
-import type { ColDef, ICellRendererParams, RowClickedEvent } from "ag-grid-community";
+import type { CellKeyDownEvent, ColDef, ICellRendererParams, RowClickedEvent } from "ag-grid-community";
 import type { HttpFlow } from "../lib/api";
 import {
   AG_GRID_THEME,
@@ -16,6 +16,7 @@ import {
   GRID_ROW_HEIGHT,
   GRID_THEME_PROP,
   defaultColDef,
+  focusGridInvoker,
   registerAgGrid,
 } from "../lib/agGrid";
 import { RelTime, relTime } from "./formatting";
@@ -26,7 +27,7 @@ registerAgGrid();
 type HttpFlowsGridProps = {
   rows: HttpFlow[];
   selectedUid: string | null;
-  onRowOpen: (flow: HttpFlow) => void;
+  onRowOpen: (flow: HttpFlow, invoker: HTMLElement | null) => void;
 };
 
 // Compact human byte size (matches the terse style used across the grids).
@@ -182,7 +183,14 @@ export default function HttpFlowsGrid({ rows, selectedUid, onRowOpen }: HttpFlow
   const onRowClicked = (event: RowClickedEvent<HttpFlow>) => {
     const sel = window.getSelection?.();
     if (sel && sel.type === "Range" && sel.toString().length > 0) return;
-    if (event.data) onRowOpen(event.data);
+    if (event.data) onRowOpen(event.data, focusGridInvoker(event.event));
+  };
+
+  const onCellKeyDown = (event: CellKeyDownEvent<HttpFlow>) => {
+    const keyboardEvent = event.event as KeyboardEvent;
+    if (!event.data || (keyboardEvent.key !== "Enter" && keyboardEvent.key !== " ")) return;
+    keyboardEvent.preventDefault();
+    onRowOpen(event.data, focusGridInvoker(keyboardEvent));
   };
 
   return (
@@ -196,9 +204,9 @@ export default function HttpFlowsGrid({ rows, selectedUid, onRowOpen }: HttpFlow
         getRowId={(p) => p.data.flow_uid || String(p.data.id)}
         rowHeight={GRID_ROW_HEIGHT}
         headerHeight={GRID_HEADER_HEIGHT}
-        suppressCellFocus
         animateRows
         onRowClicked={onRowClicked}
+        onCellKeyDown={onCellKeyDown}
         rowClassRules={{
           "ag-row-selected": (p) => (p.data?.flow_uid ?? null) === selectedUid,
         }}

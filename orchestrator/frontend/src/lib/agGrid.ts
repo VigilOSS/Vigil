@@ -62,9 +62,6 @@ export const GRID_ROW_HEIGHT = 38;
 export const GRID_HEADER_HEIGHT = 34;
 
 // Shared default column definition. Individual grids extend per-column.
-// `suppressCellFocus` (a grid-level option, set on the components) plus
-// these defaults give resizable + sortable columns with no in-cell focus
-// ring, matching our read-only table feel.
 export const defaultColDef = {
   resizable: true,
   sortable: true,
@@ -73,3 +70,14 @@ export const defaultColDef = {
   filter: false,
   suppressHeaderMenuButton: true,
 } as const;
+
+/** Focus and return the AG Grid cell that invoked a row-level action. */
+export function focusGridInvoker(
+  event: { target: EventTarget | null } | null | undefined,
+): HTMLElement | null {
+  const target = event?.target;
+  if (!(target instanceof HTMLElement)) return null;
+  const cell = target.closest<HTMLElement>('[role="gridcell"]');
+  cell?.focus();
+  return cell;
+}

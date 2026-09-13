@@ -18,7 +18,7 @@ import { Check, Copy, Link as LinkIcon, List, Table2 } from "lucide-react";
 import { listAssessmentFindingGroups, listAssessmentFindingLinks, listAssessmentFindingTransitions } from "../lib/api";
 import { JsonTree } from "./ArtifactViewer";
 import { JsonView } from "./JsonView";
-import { useBodyScrollLock } from "../lib/modalScrollLock";
+import { useBodyScrollLock, useModalFocus } from "../lib/modalScrollLock";
 import { CodeBlock, NotesBody, isCurlLike } from "./formatting";
 import { KV, Prose, ProseModeToggle, SectionHead, UntrustedDataNotice } from "./drawer/DrawerKit";
 import type { ProseMode, ToastFn } from "./drawer/DrawerKit";
@@ -533,9 +533,7 @@ function DetailModal({
   titleId?: string;
 }) {
   const panelRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    queueMicrotask(() => panelRef.current?.focus());
-  }, []);
+  useModalFocus(panelRef, onClose);
   useBodyScrollLock();
   return (
     <div

@@ -8,7 +8,7 @@
 
 import { useMemo, useRef } from "react";
 import { AgGridReact } from "ag-grid-react";
-import type { ColDef, ICellRendererParams, RowClickedEvent } from "ag-grid-community";
+import type { CellKeyDownEvent, ColDef, ICellRendererParams, RowClickedEvent } from "ag-grid-community";
 import type { OobProbe } from "../lib/api";
 import {
   AG_GRID_THEME,
@@ -16,6 +16,7 @@ import {
   GRID_ROW_HEIGHT,
   GRID_THEME_PROP,
   defaultColDef,
+  focusGridInvoker,
   registerAgGrid,
 } from "../lib/agGrid";
 import { RelTime, relTime } from "./formatting";
@@ -26,7 +27,7 @@ registerAgGrid();
 type OastGridProps = {
   rows: OobProbe[];
   selectedNonce: string | null;
-  onRowOpen: (probe: OobProbe) => void;
+  onRowOpen: (probe: OobProbe, invoker: HTMLElement | null) => void;
 };
 
 function StatusCell({ data }: ICellRendererParams<OobProbe>) {
@@ -148,7 +149,14 @@ export default function OastGrid({ rows, selectedNonce, onRowOpen }: OastGridPro
   const onRowClicked = (event: RowClickedEvent<OobProbe>) => {
     const sel = window.getSelection?.();
     if (sel && sel.type === "Range" && sel.toString().length > 0) return;
-    if (event.data) onRowOpen(event.data);
+    if (event.data) onRowOpen(event.data, focusGridInvoker(event.event));
+  };
+
+  const onCellKeyDown = (event: CellKeyDownEvent<OobProbe>) => {
+    const keyboardEvent = event.event as KeyboardEvent;
+    if (!event.data || (keyboardEvent.key !== "Enter" && keyboardEvent.key !== " ")) return;
+    keyboardEvent.preventDefault();
+    onRowOpen(event.data, focusGridInvoker(keyboardEvent));
   };
 
   return (
@@ -162,9 +170,9 @@ export default function OastGrid({ rows, selectedNonce, onRowOpen }: OastGridPro
         getRowId={(p) => p.data.nonce}
         rowHeight={GRID_ROW_HEIGHT}
         headerHeight={GRID_HEADER_HEIGHT}
-        suppressCellFocus
         animateRows
         onRowClicked={onRowClicked}
+        onCellKeyDown={onCellKeyDown}
         rowClassRules={{
           "ag-row-selected": (p) => p.data?.nonce === selectedNonce,
         }}
