@@ -4333,7 +4333,11 @@ def test_doctor_reports_missing_binary_without_crashing(tmp_path: Path, monkeypa
     monkeypatch.setattr(status_module.subprocess, "run", fake_run)
     monkeypatch.setattr(main_module, "docker_run_command", fake_docker)
 
-    main_module.main(["--root", str(tmp_path), "doctor"])
+    # `tmp_path` has no `agent/` tree, so doctor gates on that required row and
+    # exits non-zero. What this test pins is the row still being PRINTED rather
+    # than the command dying on an absent binary.
+    with pytest.raises(SystemExit):
+        main_module.main(["--root", str(tmp_path), "doctor"])
 
     assert "MISSING\tuv" in capsys.readouterr().out
 
@@ -4358,8 +4362,13 @@ def test_doctor_skips_docker_checks_when_docker_cli_missing(
     monkeypatch.setattr(status_module.subprocess, "run", fake_run)
     monkeypatch.setattr(main_module, "docker_run_command", fail_docker)
 
-    main_module.main(["--root", str(tmp_path), "doctor"])
+    # A host with no Docker CLI cannot run Vigil, so this now gates the exit —
+    # the daemon probe is skipped in that branch, so a MISSING `docker` row is
+    # the only signal there is.
+    with pytest.raises(SystemExit) as excinfo:
+        main_module.main(["--root", str(tmp_path), "doctor"])
 
+    assert excinfo.value.code != 0
     output = capsys.readouterr().out
     assert "MISSING\tdocker" in output
     assert "SKIPPED\tdocker-daemon" in output
@@ -17327,11 +17336,16 @@ def test_up_no_build_still_keeps_the_bounded_runner_out_of_the_proxy_build(
 
     `run_up` skips its own proxy build under `--no-build`, but still calls
     `_start_mitmproxy_if_needed`. `start_proxy` runs an independent freshness
-    check and builds the image itself, and `build_image` uses a non-None runner
-    for the build as well as its metadata calls. So on a host with a missing or
-    stale `vigil-proxy` image, handing it the bounded metadata runner puts a cold
-    build back under the 20s ceiling — the original blocker, through an unpatched
-    path.
+    check and builds the image itself, so on a host with a missing or stale
+    `vigil-proxy` image this is the only path to that build: it must carry the
+    unbounded build runner, or a cold build goes back under the 20s ceiling.
+
+    Both runners travel, in their own roles. Collapsing them — handing
+    `start_proxy` the streaming runner as its only runner — swapped one defect
+    for another: that runner returns empty stdout by design, so the image label
+    read back blank and rebuilt a current image every time, and the post-start
+    `docker ps` check saw nothing and declared the proxy it had just started
+    already dead.
     """
     from vigil_cli import up as up_module
 
@@ -17353,7 +17367,12 @@ def test_up_no_build_still_keeps_the_bounded_runner_out_of_the_proxy_build(
     monkeypatch.setattr(
         up_module,
         "start_proxy",
-        lambda _options, **kwargs: seen.__setitem__("proxy_runner", kwargs.get("runner")),
+        lambda _options, **kwargs: seen.update(
+            {
+                "proxy_runner": kwargs.get("runner"),
+                "proxy_build_runner": kwargs.get("build_runner"),
+            }
+        ),
     )
 
     up_module.run_up(
@@ -17362,5 +17381,58 @@ def test_up_no_build_still_keeps_the_bounded_runner_out_of_the_proxy_build(
         build_runner=build_runner,
     )
 
-    assert seen["proxy_runner"] is build_runner
-    assert seen["proxy_runner"] is not metadata_runner
+    assert seen["proxy_build_runner"] is build_runner
+    # The metadata role is not the build role: every non-build docker call in
+    # `start_proxy` reads the command's stdout.
+    assert seen["proxy_runner"] is metadata_runner
+
+
+def test_start_proxy_reads_docker_output_through_the_capturing_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The image label, `docker ps` and the log tail are all stdout reads.
+
+    `run_command_streaming` returns an empty stdout by design. Used as
+    `start_proxy`'s only runner it reports a current image as unstamped — the
+    rebuild-every-time loop the freshness stamp exists to remove — and makes the
+    liveness check after `docker run` see no container at all, so `vigil up`
+    dies claiming the proxy it just started exited within seconds.
+    """
+    from vigil_cli import docker as docker_module
+    from vigil_cli import mitmproxy as mitmproxy_module
+
+    engagements_root = tmp_path / "agent" / "engagements"
+    engagements_root.mkdir(parents=True)
+    seen: dict[str, object] = {}
+
+    def metadata_runner(argv, **_kwargs):
+        seen.setdefault("metadata_argv", []).append(argv)  # type: ignore[union-attr]
+        return docker_module.DockerResult(0, "", "")
+
+    def build_runner(argv, **_kwargs):
+        seen.setdefault("build_argv", []).append(argv)  # type: ignore[union-attr]
+        return docker_module.DockerResult(0, "", "")
+
+    monkeypatch.setattr(
+        mitmproxy_module.image_freshness, "image_outdated",
+        lambda *_a, **kwargs: seen.__setitem__("freshness_runner", kwargs.get("runner")) or False,
+    )
+    monkeypatch.setattr(
+        mitmproxy_module.docker, "container_running",
+        lambda *_a, **kwargs: seen.__setitem__("liveness_runner", kwargs.get("runner")) or True,
+    )
+    monkeypatch.setattr(
+        mitmproxy_module.docker, "container_exists", lambda *_a, **_k: False
+    )
+    monkeypatch.setattr(mitmproxy_module, "_wait_for_port", lambda *_a, **_k: True)
+
+    mitmproxy_module.start_proxy(
+        mitmproxy_module.MitmproxyOptions(
+            install_root=tmp_path, engagements_root=engagements_root
+        ),
+        runner=metadata_runner,
+        build_runner=build_runner,
+    )
+
+    assert seen["freshness_runner"] is metadata_runner
+    assert seen["liveness_runner"] is metadata_runner

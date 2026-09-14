@@ -169,6 +169,12 @@ def _start_mitmproxy_if_needed(
     check and builds, so under `--no-build` — where run_up skipped its own proxy
     build — this is the only path to that build. Handing it the bounded metadata
     runner would put a cold build back under the 20s ceiling.
+
+    Both runners go in, and they are not interchangeable. `start_proxy` reads
+    the image label, `docker ps` and a log tail through its `runner`, so passing
+    the streaming one there — which returns empty stdout by design — rebuilt a
+    current image every time and made the post-start liveness check declare the
+    proxy it had just started already dead.
     """
     if docker.container_running("vigil-proxy", runner=runner):
         if proxy_image_drift(runner=runner):
@@ -182,7 +188,8 @@ def _start_mitmproxy_if_needed(
     print("mitmproxy\tstarting (serves all active engagements)")
     start_proxy(
         MitmproxyOptions(install_root=install_root, engagements_root=engagements_root),
-        runner=build_runner,
+        runner=runner,
+        build_runner=build_runner,
     )
     del options  # accepted for signature parity; the proxy no longer pins to an engagement
 
