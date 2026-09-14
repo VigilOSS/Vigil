@@ -1786,3 +1786,50 @@ def test_start_oob_abort_mentions_the_configure_before_install_ordering(tmp_path
         start_oob(OobOptions(install_root=tmp_path, frp_host="", oob_domain="", frp_token=""))
 
     assert "vigil install" in str(excinfo.value)
+
+
+def test_configuring_oob_after_the_first_install_pins_the_shared_legacy_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Re-running install on an existing root does NOT allocate a dedicated slot.
+
+    `initialize_relay_route` allocates only when `is_upgrade` is false. A root
+    that already exists is an upgrade, so a second install with `oob.domain` now
+    set pins `legacy_relay_route` — the globally shared domain on ports 53/8443 —
+    rather than reserving this install its own block. Guidance must not promise
+    an allocation this path cannot deliver.
+    """
+    from vigil_cli.install import InstallOptions, install_from_source
+    from vigil_cli.oob_relay import load_relay_route
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
+    source = tmp_path / "source"
+    (source / "agent" / "engagements").mkdir(parents=True)
+    (source / "orchestrator" / "backend" / "data").mkdir(parents=True)
+    (source / "README.md").write_text("managed\n", encoding="utf-8")
+    install_root = tmp_path / "install"
+
+    # First install: no domain configured, so no route is written.
+    install_from_source(
+        InstallOptions(
+            source_root=source, install_root=install_root, verify_docker_image=False
+        )
+    )
+    assert load_relay_route(install_root) is None
+    assert "oob.domain" in capsys.readouterr().err
+
+    # Operator now follows the guidance: configure the domain, re-run install.
+    monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.com")
+    install_from_source(
+        InstallOptions(
+            source_root=source, install_root=install_root, verify_docker_image=False
+        )
+    )
+
+    route = load_relay_route(install_root)
+    assert route is not None
+    assert route.legacy is True, (
+        "a second install pins the shared legacy route, not a dedicated slot"
+    )
+    assert (route.dns_remote_port, route.reverse_remote_port) == (53, 8443)

@@ -2790,6 +2790,21 @@ def _write_launcher(
             '  [[ -f "$env_file" ]] || continue\n'
             f'  if [[ -z "${{{provider_key}:-}}" ]]; then\n'
             f'    candidate="$(grep -E "^{provider_key}=" "$env_file" | tail -n1 | cut -d= -f2- || true)"\n'
+            # Mirror preflight's `_dotenv_value`: trim, then strip one matching
+            # pair of surrounding quotes. `KEY=""` must read as unset, and a
+            # quoted real key must not export its quotes. Parameter expansion
+            # rather than sed — no nested-quote hazard in generated shell.
+            '    candidate="${candidate#"${candidate%%[![:space:]]*}"}"\n'
+            '    candidate="${candidate%"${candidate##*[![:space:]]}"}"\n'
+            '    case "$candidate" in\n'
+            '      \'"\'*\'"\') candidate="${candidate#\'"\'}"; candidate="${candidate%\'"\'}" ;;\n'
+            "      \"'\"*\"'\") candidate=\"${candidate#\"'\"}\"; candidate=\"${candidate%\"'\"}\" ;;\n"
+            '    esac\n'
+            # Trim again after unquoting: `KEY=\'   \'` must read as unset, the
+            # same as `KEY=""`. Preflight's `_dotenv_value` trims on both sides
+            # of the unwrap for this reason; the two must agree.
+            '    candidate="${candidate#"${candidate%%[![:space:]]*}"}"\n'
+            '    candidate="${candidate%"${candidate##*[![:space:]]}"}"\n'
             f'    [[ -n "$candidate" ]] && export {provider_key}="$candidate"\n'
             "  fi\n"
             "done\n"

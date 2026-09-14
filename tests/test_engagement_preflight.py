@@ -401,3 +401,34 @@ def test_blue_preflight_refusal_prints_nothing_on_stdout(
     assert str(blue_env["dir"]) not in captured.out
     assert "2026-01-01-0000-northstar" in captured.err
     assert "launching operator session" not in captured.err
+
+
+def test_provider_key_rejects_quoted_empty_and_unwraps_quoted_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dotenv quoting must be normalized before deciding a key exists.
+
+    `DEEPSEEK_API_KEY=""` is a conventional placeholder. Treating the two quote
+    characters as a credential lets the launch preflight pass, and the launcher
+    then exports the quotes rather than a key — so the operator learns at the
+    first provider request instead of before the session starts.
+    """
+    from vigil_cli.preflight import _resolve_provider_key
+
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    install_root = tmp_path / "install"
+    engagement = tmp_path / "eng"
+    install_root.mkdir()
+    engagement.mkdir()
+
+    (install_root / ".env").write_text('DEEPSEEK_API_KEY=""\n', encoding="utf-8")
+    assert _resolve_provider_key(install_root, engagement, "DEEPSEEK_API_KEY") is None
+
+    (install_root / ".env").write_text("DEEPSEEK_API_KEY='   '\n", encoding="utf-8")
+    assert _resolve_provider_key(install_root, engagement, "DEEPSEEK_API_KEY") is None
+
+    (install_root / ".env").write_text('DEEPSEEK_API_KEY="sk-real"\n', encoding="utf-8")
+    assert _resolve_provider_key(install_root, engagement, "DEEPSEEK_API_KEY") == "sk-real"
+
+    (install_root / ".env").write_text("DEEPSEEK_API_KEY=sk-bare\n", encoding="utf-8")
+    assert _resolve_provider_key(install_root, engagement, "DEEPSEEK_API_KEY") == "sk-bare"

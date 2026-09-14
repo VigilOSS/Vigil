@@ -627,8 +627,11 @@ def install_from_source(
                 # globally contended legacy ports without ever being told.
                 print(
                     "[vigil] no OOB route allocated: `oob.domain` is not set. "
-                    "Set it with `vigil config set oob.domain <domain>` and re-run "
-                    "this command to allocate one.",
+                    "A dedicated relay slot is reserved only by the install that "
+                    "first creates this root, so set `oob.domain` before installing. "
+                    "Setting it now and re-running pins the SHARED legacy route "
+                    "(ports 53/8443), which can collide with another install; "
+                    "`vigil oob start`'s conflict scan is what catches that.",
                     file=sys.stderr,
                 )
             if configured_oob_domain:

@@ -181,9 +181,12 @@ def test_json_output_shape(capsys):
 
 
 def test_prerequisite_status_reports_presence():
-    rows = prerequisite_status(which=_which_present)
+    # Inject the daemon probe too: docker's row is binary AND daemon, so a test
+    # that injects only `which` would consult the real host and fail wherever no
+    # daemon is running.
+    rows = prerequisite_status(which=_which_present, daemon_available=lambda: True)
     assert all(row.present for row in rows)
-    rows = prerequisite_status(which=_which_missing)
+    rows = prerequisite_status(which=_which_missing, daemon_available=lambda: False)
     assert all(not row.present for row in rows)
     assert [row.binary for row in rows] == ["uv", "git", "docker", "go", "npm"]
 

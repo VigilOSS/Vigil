@@ -46,13 +46,28 @@ def _resolve_provider_key(install_root: Path, engagement_dir: Path, key: str) ->
         except OSError:
             continue
         assignments = [
-            line.split("=", 1)[1]
+            _dotenv_value(line.split("=", 1)[1])
             for line in lines
             if line.startswith(f"{key}=")
         ]
         if assignments and assignments[-1]:
             return assignments[-1]
     return None
+
+
+def _dotenv_value(raw: str) -> str:
+    """Normalize one dotenv assignment the way a shell would read it.
+
+    `KEY=""` is a conventional placeholder for "not set yet". Taking the two
+    quote characters literally makes the preflight pass and the launcher export
+    quotes instead of a credential, so the operator learns at the first provider
+    request rather than before the session starts. A genuinely quoted value is
+    unwrapped for the same reason.
+    """
+    value = raw.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        value = value[1:-1]
+    return value.strip()
 
 
 def _preflight_engagement_start(
