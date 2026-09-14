@@ -1213,10 +1213,10 @@ def test_runtime_string_assess_flags_are_registered(
 # --------------------------------------------------------------------------
 # A logs tail is named with one of these tokens.
 _LOGS_VERB_RE = re.compile(r"vigil oob client logs|vigil logs oob")
-# Disclaimers that correctly mark a logs tail as NON-correlation. A line that
-# mentions a logs verb together with "correlat" is only acceptable when it
-# carries one of these markers (case-insensitive). These keywords mirror the
-# vocabulary the post-QA prose already uses to disavow correlation.
+# Disclaimers that correctly mark a logs tail as NON-correlation. These name the
+# "raw tail / infra debugging" framing specifically; plain grammatical negation
+# is handled by _LOGS_CORRELATION_DISAVOWED_RE below, because an allowlist of
+# phrasings cannot decide whether a sentence asserts correlation or denies it.
 _NEGATION_MARKERS = (
     "not correlation",
     "not the correlation",
@@ -1238,6 +1238,63 @@ _NEGATION_MARKERS = (
 )
 
 
+# The contract is about WHO correlates, so the check has to see negation, not a
+# fixed set of sentences. The marker list alone flagged "`vigil oob client logs`
+# does not correlate hits" and "... cannot correlate a callback to a request"
+# exactly as it flagged "Use `vigil oob client logs` to correlate callbacks" —
+# the two plainest ways to state the contract were indistinguishable from
+# breaking it, which pushes an author toward vaguer wording to satisfy the lint.
+# A negation token close in front of the correlation claim, with no sentence
+# break between them, is what separates them.
+_LOGS_CORRELATION_DISAVOWED_RE = re.compile(
+    r"\b(?:cannot|can't|cant|never|no|not|n't)\b[^.;:]{0,60}?(?:correlat|attribut)",
+    re.IGNORECASE,
+)
+
+
+def _logs_correlation_offence(line: str) -> bool:
+    """True when a line ties a logs tail to correlation without disavowing it."""
+    if not _LOGS_VERB_RE.search(line):
+        return False
+    lowered = line.lower()
+    if "correlat" not in lowered:
+        return False
+    if any(marker in lowered for marker in _NEGATION_MARKERS):
+        return False
+    return not _LOGS_CORRELATION_DISAVOWED_RE.search(line)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "`vigil oob client logs` cannot attribute callbacks; use `vigil oob poll` to correlate them",
+        "`vigil oob client logs` does not correlate hits; `vigil oob poll` does",
+        "`vigil oob client logs` cannot correlate a callback to a request",
+        "`vigil logs oob` is a raw tail and never correlates anything",
+    ],
+)
+def test_a_correct_disavowal_is_not_an_offence(line):
+    """Stating the contract plainly must not fail the lint that guards it.
+
+    Every line here says the logs tail does NOT correlate — which is exactly
+    what the contract requires prose to say — and the keyword allowlist
+    rejected the first three.
+    """
+    assert not _logs_correlation_offence(line)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Use `vigil oob client logs` to correlate callbacks",
+        "`vigil oob client logs` correlates each hit to the request that caused it",
+        "Correlate the callback with `vigil logs oob`",
+    ],
+)
+def test_claiming_a_logs_tail_correlates_is_still_an_offence(line):
+    assert _logs_correlation_offence(line)
+
+
 def test_logs_tail_never_described_as_correlation(doc_files):
     """No file may assert that `vigil oob client logs` / `vigil logs oob`
     *returns correlated* hits. Correlation is exclusively `vigil oob poll`."""
@@ -1245,14 +1302,8 @@ def test_logs_tail_never_described_as_correlation(doc_files):
     for path in doc_files:
         rel = path.relative_to(_REPO_ROOT).as_posix()
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-            if not _LOGS_VERB_RE.search(line):
-                continue
-            lowered = line.lower()
-            if "correlat" not in lowered:
-                continue
-            if any(marker in lowered for marker in _NEGATION_MARKERS):
-                continue
-            offenders.append(f"{rel}:{lineno}: {line.strip()}")
+            if _logs_correlation_offence(line):
+                offenders.append(f"{rel}:{lineno}: {line.strip()}")
     assert not offenders, (
         "A logs tail (`vigil oob client logs` / `vigil logs oob`) is described "
         "alongside correlation without disavowing it. Correlation is only "
