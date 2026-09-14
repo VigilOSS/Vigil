@@ -2353,6 +2353,31 @@ _LEGACY_SKIP_PERMISSION_ARGS = {
     "codex": ("--full-auto",),
 }
 
+# Arguments every generated launcher for a client carries, independent of the
+# creation-time `--skip-permissions` choice.
+#
+# Codex 0.154.0 gates project-local `[hooks]` behind a per-hash trust review:
+# the TUI opens on "Hooks need review", and an operator who presses esc or picks
+# "Continue without trusting" lands in an ordinary session where `scope-check.sh`
+# never runs — with nothing in the UI reporting that the guard is off. Scope and
+# ROE enforcement protects third parties (ADR 0019), so it cannot be conditional
+# on a startup keystroke, and a control that fails silently is worse than one
+# that fails loudly: under this flag Codex prints a standing "hooks may run
+# without review" warning for the whole session.
+#
+# "Automation that already vets hook sources" is Codex's own stated use for the
+# flag and is exactly this case — Vigil writes `.codex/config.toml` itself, from
+# its own installed agent root, at engagement create/repair time. The bypass is
+# per-invocation and covers every hook Codex has enabled, including any from the
+# operator's global `~/.codex/config.toml`; those are the operator's own hooks,
+# and Vigil does not defend against its own operator (ADR 0019).
+#
+# `vigil bench` passes the same flag for a different reason (an unattended run
+# cannot answer the review at all) — see docs/benchmarking.md.
+_REQUIRED_CLIENT_ARGS: dict[str, tuple[str, ...]] = {
+    "codex": ("--dangerously-bypass-hook-trust",),
+}
+
 # Provider key the generated open-model launchers source from engagement/install
 # env files. Both supported paths are direct DeepSeek. Claude/Codex/Kimi carry
 # their own vendor authentication and need no env export.
@@ -2561,8 +2586,17 @@ def _generated_primary_launcher_permission_mode(
         *_LEGACY_SKIP_PERMISSION_ARGS.get(client, ()),
     )
     permission_arg = "|".join(re.escape(value) for value in permission_args)
+    # The unconditional arguments are OPTIONAL in this pattern even though
+    # `_write_launcher` always emits them: a launcher generated before they
+    # existed must still parse, or repair would report it as unrecognized and
+    # leave it un-backfilled — which for Codex means leaving the scope guard off.
+    required_args = "".join(
+        rf"(?:{re.escape(value)}[ \t]+)?"
+        for value in _REQUIRED_CLIENT_ARGS.get(client, ())
+    )
     exec_pattern = re.compile(
-        rf'^exec {client}[ \t]+(?:(?P<permission>(?:{permission_arg}))[ \t]+)?"\$@"$'
+        rf'^exec {client}[ \t]+(?:(?P<permission>(?:{permission_arg}))[ \t]+)?'
+        rf'{required_args}"\$@"$'
     )
     exec_lines = [line for line in body.splitlines() if line.startswith("exec ")]
     if len(exec_lines) != 1:
@@ -2737,7 +2771,11 @@ def _write_launcher(
     provider_key: str | None = None,
     extra_env: str = "",
 ) -> None:
-    extra = f" {permission_arg}" if permission_arg else ""
+    # Permission choice first, then the client's unconditional arguments, so the
+    # repair-side exec parser can keep reading the permission slot in one place.
+    extra_args = [permission_arg] if permission_arg else []
+    extra_args.extend(_REQUIRED_CLIENT_ARGS.get(client, ()))
+    extra = "".join(f" {arg}" for arg in extra_args)
     # The command the launcher execs. Defaults to the bare client binary (claude,
     # codex, kimi); a client whose session entrypoint is a subcommand or needs a
     # pinned agent (opencode, goose) passes it explicitly. The launcher FILE is
@@ -2783,28 +2821,40 @@ def _write_launcher(
     provider_block = ""
     if provider_key:
         provider_block = (
+            "\n# Normalize one dotenv-style value exactly as preflight's `_dotenv_value`\n"
+            "# does: trim, strip one matching pair of surrounding quotes, trim again.\n"
+            "# `KEY=\"\"` must read as unset and a quoted real key must not export its\n"
+            "# quotes. Defined once and used for BOTH the inherited value and each file\n"
+            "# candidate, so the two cannot drift apart.\n"
+            "_vigil_dotenv_value() {\n"
+            '  local v="$1"\n'
+            '  v="${v#"${v%%[![:space:]]*}"}"\n'
+            '  v="${v%"${v##*[![:space:]]}"}"\n'
+            "  case \"$v\" in\n"
+            "    '\"'*'\"') v=\"${v#'\"'}\"; v=\"${v%'\"'}\" ;;\n"
+            "    \"'\"*\"'\") v=\"${v#\"'\"}\"; v=\"${v%\"'\"}\" ;;\n"
+            "  esac\n"
+            '  v="${v#"${v%%[![:space:]]*}"}"\n'
+            '  v="${v%"${v##*[![:space:]]}"}"\n'
+            '  printf %s "$v"\n'
+            "}\n"
+            "\n# An inherited value that normalizes to empty must not shadow the env\n"
+            "# files: otherwise an ambient placeholder wins over a usable key and the\n"
+            "# client fails auth on its first request.\n"
+            f'{provider_key}="$(_vigil_dotenv_value "${{{provider_key}:-}}")"\n'
+            f'if [[ -n "${{{provider_key}}}" ]]; then\n'
+            f"  export {provider_key}\n"
+            "else\n"
+            f"  unset {provider_key}\n"
+            "fi\n"
             "\n# Export the provider API key for the runner client from the same env files\n"
             "# the launcher already sources for ORCHESTRATOR_BASE_URL (first hit wins;\n"
-            "# a value already in the environment is never overwritten).\n"
+            "# a usable value already in the environment is never overwritten).\n"
             'for env_file in "$ENGAGEMENT_DIR/.orchestrator.env" "$VIGIL_INSTALL_DIR/.orchestrator.env" "$VIGIL_INSTALL_DIR/.env"; do\n'
             '  [[ -f "$env_file" ]] || continue\n'
             f'  if [[ -z "${{{provider_key}:-}}" ]]; then\n'
             f'    candidate="$(grep -E "^{provider_key}=" "$env_file" | tail -n1 | cut -d= -f2- || true)"\n'
-            # Mirror preflight's `_dotenv_value`: trim, then strip one matching
-            # pair of surrounding quotes. `KEY=""` must read as unset, and a
-            # quoted real key must not export its quotes. Parameter expansion
-            # rather than sed — no nested-quote hazard in generated shell.
-            '    candidate="${candidate#"${candidate%%[![:space:]]*}"}"\n'
-            '    candidate="${candidate%"${candidate##*[![:space:]]}"}"\n'
-            '    case "$candidate" in\n'
-            '      \'"\'*\'"\') candidate="${candidate#\'"\'}"; candidate="${candidate%\'"\'}" ;;\n'
-            "      \"'\"*\"'\") candidate=\"${candidate#\"'\"}\"; candidate=\"${candidate%\"'\"}\" ;;\n"
-            '    esac\n'
-            # Trim again after unquoting: `KEY=\'   \'` must read as unset, the
-            # same as `KEY=""`. Preflight's `_dotenv_value` trims on both sides
-            # of the unwrap for this reason; the two must agree.
-            '    candidate="${candidate#"${candidate%%[![:space:]]*}"}"\n'
-            '    candidate="${candidate%"${candidate##*[![:space:]]}"}"\n'
+            '    candidate="$(_vigil_dotenv_value "$candidate")"\n'
             f'    [[ -n "$candidate" ]] && export {provider_key}="$candidate"\n'
             "  fi\n"
             "done\n"

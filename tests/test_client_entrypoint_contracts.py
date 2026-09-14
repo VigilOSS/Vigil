@@ -370,6 +370,9 @@ def test_physical_client_roster_refresh_rejects_collision_before_any_write(
             [
                 "codex",
                 "--dangerously-bypass-approvals-and-sandbox",
+                # Keeps `scope-check.sh` live without an operator answering
+                # Codex's startup hook-trust review. See _REQUIRED_CLIENT_ARGS.
+                "--dangerously-bypass-hook-trust",
                 "--model",
                 "test-model",
                 "operator task",
@@ -617,6 +620,17 @@ def test_install_upgrade_reconciles_all_client_entrypoints_for_existing_engageme
         "goose": [],
         "kimi": ["--auto"] if skip_permissions else [],
     }
+    # Unconditional per-client arguments: not a permission choice, so they ride
+    # both `--skip-permissions` parametrizations. Codex gates project-local hooks
+    # behind an interactive startup trust review; without the bypass the scope
+    # guard silently does not run.
+    required_args = {
+        "codex": ["--dangerously-bypass-hook-trust"],
+        "claude": [],
+        "opencode": [],
+        "goose": [],
+        "kimi": [],
+    }
     command_prefixes = {
         "codex": ["codex"],
         "claude": ["claude"],
@@ -664,6 +678,7 @@ def test_install_upgrade_reconciles_all_client_entrypoints_for_existing_engageme
         expected_argv = [
             *command_prefixes[client],
             *permission_args[client],
+            *required_args[client],
             *{"goose": ["-t"], "opencode": ["--prompt"]}.get(client, []),
             "operator task",
         ]
@@ -1708,7 +1723,12 @@ def test_committed_codex_config_registers_session_end_but_no_compaction_hook() -
     assert len(session_end) == 1
     command = session_end[0]["hooks"][0]
     assert "session-end.sh" in command["command"]
-    assert command["timeout"] >= 5
+    # Codex 0.154.0 hard-caps the SessionEnd hook at 3s and prints
+    # "clamping SessionEnd hook timeout to 3s" on every launch for any larger
+    # value. Asking for more does not buy time, it only adds a warning, so the
+    # config states the budget Codex will actually honour. Claude keeps its own
+    # 10s in `.claude/settings.json`; the two clients are not required to match.
+    assert command["timeout"] == 3
 
 
 def test_engagement_settings_pin_claude_auto_memory_off_regardless_of_template(
@@ -1756,3 +1776,84 @@ def test_committed_client_configs_disable_cross_session_memory_for_both_clients(
         (repo_root / "agent" / ".codex" / "config.toml").read_text(encoding="utf-8")
     )
     assert codex_config["features"]["memories"] is False
+
+
+def test_codex_launcher_bypasses_hook_trust_regardless_of_permission_mode(
+    tmp_path: Path,
+) -> None:
+    """The Codex scope guard must not depend on an operator answering a prompt.
+
+    Codex 0.154.0 treats every project-local `[hooks]` entry as untrusted until
+    it is reviewed: the TUI opens on "Hooks need review" and an operator who
+    presses esc, or picks "Continue without trusting", gets a session in which
+    `scope-check.sh` never runs and nothing in the UI says so. That silent-off
+    state is the failure mode the bypass removes; the flag itself is loud, Codex
+    prints a standing "hooks may run without review" warning under it.
+
+    It is not a permission choice, so it holds for both `--skip-permissions`
+    modes. Only the Codex launcher carries it; no other client is affected.
+    """
+    agent_root = tmp_path / "install" / "agent"
+    _write_agent_sources(agent_root)
+
+    for skip_permissions in (False, True):
+        engagement_dir = agent_root / "engagements" / f"trust-{skip_permissions}"
+        engagement_dir.mkdir(parents=True)
+        engagements._write_launchers(
+            agent_root, engagement_dir, "both", skip_permissions=skip_permissions
+        )
+
+        codex_exec = [
+            line
+            for line in (engagement_dir / "start_codex.sh").read_text().splitlines()
+            if line.startswith("exec ")
+        ]
+        expected = "exec codex"
+        if skip_permissions:
+            expected += " --dangerously-bypass-approvals-and-sandbox"
+        expected += ' --dangerously-bypass-hook-trust "$@"'
+        assert codex_exec == [expected]
+
+        for client in ("claude", "opencode", "goose", "kimi"):
+            body = (engagement_dir / f"start_{client}.sh").read_text()
+            assert "--dangerously-bypass-hook-trust" not in body
+
+
+def test_entrypoint_repair_backfills_codex_hook_trust_bypass(tmp_path: Path) -> None:
+    """Engagements created before the bypass get it on repair.
+
+    Their scope guard is inert until they do, so recognizing the older exec line
+    matters as much as writing the new one: a launcher that failed to parse would
+    be skipped as unrecognized and keep running without the guard.
+    """
+    install_root = tmp_path / "install"
+    agent_root = install_root / "agent"
+    engagement_dir = agent_root / "engagements" / "legacy-hook-trust"
+    engagement_dir.mkdir(parents=True)
+    _write_agent_sources(agent_root)
+    (engagement_dir / "scope.json").write_text("{}\n")
+    engagements._write_prompt_wrappers(
+        agent_root, engagement_dir, "both", engagement_type="web"
+    )
+    engagements._write_codex_config(agent_root, engagement_dir)
+    engagements._write_claude_config(agent_root, engagement_dir)
+    engagements._write_launchers(
+        agent_root, engagement_dir, "both", skip_permissions=True
+    )
+    codex_launcher = engagement_dir / "start_codex.sh"
+    codex_launcher.write_text(
+        codex_launcher.read_text().replace(" --dangerously-bypass-hook-trust", "")
+    )
+
+    result = engagements.repair_engagement_client_entrypoints(install_root)
+
+    assert result.reconciled == ("legacy-hook-trust",)
+    assert result.skipped == ()
+    repaired = codex_launcher.read_text()
+    assert (
+        'exec codex --dangerously-bypass-approvals-and-sandbox'
+        ' --dangerously-bypass-hook-trust "$@"' in repaired
+    )
+    # The permission choice recorded in the legacy launcher must survive the
+    # backfill: reading it as "prompt" would silently downgrade the engagement.
+    assert "--dangerously-bypass-approvals-and-sandbox" in repaired

@@ -44,7 +44,15 @@ fi
 # whether combined (-fdx/-dfx/-xfd/...) or separate (-f -d), instead of a fixed
 # -fdx/-dfx spelling that missed 4 of the 6 orderings (L7-1). A dry-run (-n) or
 # interactive (-i) clean deletes nothing, so it is exempt.
-CLEAN_SEG=$(printf '%s\n' "$COMMAND" | grep -Eo '(^|[[:space:];|&(])git[[:space:]]+clean[^;&|]*' | head -1)
+# `git` accepts global options BEFORE the subcommand (-C <path>, -c k=v,
+# --git-dir=, --no-pager, …), so `git clean` is not the only spelling: an agent
+# that cannot cd rewrites `cd X && git clean -fd` as `git -C X clean -fd`, which
+# a `git[[:space:]]+clean` pattern lets straight through. Allow a run of
+# option-shaped tokens between the two words — option-shaped specifically, so an
+# unrelated subcommand that merely mentions clean (`git log --grep clean`) still
+# does not match.
+GIT_GLOBAL_OPT='([[:space:]]+(-[Cc][[:space:]]+[^[:space:]]+|--[[:alnum:]-]+=[^[:space:]]*|-[[:alpha:]]+|--[[:alnum:]-]+))*'
+CLEAN_SEG=$(printf '%s\n' "$COMMAND" | grep -Eo "(^|[[:space:];|&(])git${GIT_GLOBAL_OPT}[[:space:]]+clean[^;&|]*" | head -1)
 if [ -n "$CLEAN_SEG" ]; then
   if ! printf '%s' "$CLEAN_SEG" | grep -Eq '([[:space:]]-[[:alpha:]]*[ni]|[[:space:]]--dry-run|[[:space:]]--interactive)'; then
     if printf '%s' "$CLEAN_SEG" | grep -Eq '([[:space:]]--force|[[:space:]]-[[:alpha:]]*f)' \

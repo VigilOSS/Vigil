@@ -1,5 +1,15 @@
 # Project-local Codex config for Vigil.
 # These mirror agent/.claude/settings.json.
+#
+# HOOK TRUST. Codex 0.154.0 does not run a project-local hook until its exact
+# command has been trusted: the TUI opens on "Hooks need review" and records an
+# approval as `hooks.state."<config path>:<event>:<i>:<j>".trusted_hash` in the
+# operator's own ~/.codex/config.toml. Declining — or pressing esc — starts a
+# normal session in which NOTHING runs these hooks and no UI element says so, so
+# the generated `start_codex.sh` passes `--dangerously-bypass-hook-trust`
+# (src/vigil_cli/engagements.py). Editing a command below changes its hash, which
+# is why the launcher flag, not a persisted approval, is what keeps the scope
+# guard live across engagements.
 
 # Keep the engagement record in Vigil's backend ledger, not in a second
 # cross-session store. Mirrors "autoMemoryEnabled": false on the Claude side.
@@ -36,10 +46,17 @@ statusMessage = "Recording tool activity"
 #
 # There is deliberately NO Codex PreCompact hook: Codex operators get the
 # `$vigil-compact` skill instead. See docs/engagement-prompt-playbook.md.
+#
+# The 3s timeout below is not a preference. Codex 0.154.0 hard-caps SessionEnd at
+# 3s and warns "clamping SessionEnd hook timeout to 3s" on every launch for any
+# larger value; the PreToolUse/PostToolUse caps are far higher, so only this one
+# differs from Claude's 10s. 3s is already twice Claude Code's own 1500ms default
+# for the same hook, and session-end.sh claims its marker BEFORE the backend call
+# precisely so a budget cut loses a receipt rather than duplicating a row.
 [[hooks.SessionEnd]]
 
 [[hooks.SessionEnd.hooks]]
 type = "command"
 command = "bash -c 'if [ -n \"${VIGIL_AGENT_ROOT:-}\" ]; then exec bash \"$VIGIL_AGENT_ROOT/scripts/hooks/session-end.sh\"; fi; if [ -f scripts/hooks/session-end.sh ]; then exec bash scripts/hooks/session-end.sh; fi; if [ -f agent/scripts/hooks/session-end.sh ]; then exec bash agent/scripts/hooks/session-end.sh; fi'"
-timeout = 10
+timeout = 3
 statusMessage = "Recording session-end activity"
