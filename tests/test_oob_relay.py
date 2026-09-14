@@ -166,7 +166,10 @@ def test_concurrent_allocation_of_one_install_returns_one_identity(tmp_path: Pat
     assert len(json.loads(registry.read_text())["allocations"]) == 1
 
 
-def test_upgrade_without_metadata_pins_legacy_route_and_preserves_clients(tmp_path: Path) -> None:
+def test_live_oob_state_without_metadata_pins_legacy_route_and_preserves_clients(
+    tmp_path: Path,
+) -> None:
+    """Per-client correlation state is what the legacy pin protects."""
     from vigil_cli.oob_relay import initialize_relay_route
 
     install_root = tmp_path / "existing"
@@ -176,7 +179,6 @@ def test_upgrade_without_metadata_pins_legacy_route_and_preserves_clients(tmp_pa
 
     route = initialize_relay_route(
         install_root,
-        is_upgrade=True,
         base_domain="oob.example.test",
         registry_path=tmp_path / "allocations.json",
     )
@@ -186,6 +188,37 @@ def test_upgrade_without_metadata_pins_legacy_route_and_preserves_clients(tmp_pa
     assert route.dns_remote_port == 53
     assert route.reverse_remote_port == 8443
     assert legacy_client.read_text() == "correlation material"
+
+
+def test_an_interrupted_allocations_leftovers_are_not_mistaken_for_live_oob(
+    tmp_path: Path,
+) -> None:
+    """Routing bookkeeping is not evidence that callbacks ever ran.
+
+    An allocation that died between taking its lock and publishing its record
+    leaves `.lock` and temporary siblings in the same directory `vigil oob
+    start` writes to. Counting those as live OOB state would strand the retry
+    on the shared 53/8443 route for a root that never routed anything.
+    """
+    from vigil_cli.oob_relay import initialize_relay_route
+
+    install_root = tmp_path / "interrupted"
+    oob_dir = install_root / ".runtime-data/oob"
+    oob_dir.mkdir(parents=True)
+    (oob_dir / "relay-routing.lock").write_text("", encoding="utf-8")
+    (oob_dir / ".relay-routing.json.tmp").write_text("{}", encoding="utf-8")
+    (oob_dir / "tenant-routing.lock").write_text("", encoding="utf-8")
+
+    route = initialize_relay_route(
+        install_root,
+        base_domain="oob.example.test",
+        registry_path=tmp_path / "allocations.json",
+    )
+
+    assert route.legacy is False, (
+        "a stale lock from an interrupted allocation is not a live OOB channel"
+    )
+    assert route.oob_domain == f"{route.slot_prefix}.oob.example.test"
 
 
 def test_failed_metadata_publish_rolls_back_registry_allocation(tmp_path: Path) -> None:
@@ -427,7 +460,7 @@ def test_fresh_install_without_oob_configuration_does_not_persist_owner_defaults
     assert calls == []
 
 
-def test_fresh_install_allocates_route_but_upgrade_pins_legacy_route(
+def test_fresh_install_allocates_route_but_live_oob_state_pins_legacy_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from vigil_cli.install import InstallOptions, install_from_source
@@ -1155,6 +1188,11 @@ def test_upgrade_pins_ambient_domain_that_was_effective_before_metadata(
     (source_root / "agent").mkdir(parents=True)
     (source_root / "agent/README").write_text("managed", encoding="utf-8")
     (install_root / "agent/engagements/existing").mkdir(parents=True)
+    # The state a pre-routing `vigil oob start` left on that ambient domain —
+    # what makes this a legacy install rather than a merely pre-existing root.
+    frpc = install_root / ".runtime-data/oob/frpc.toml"
+    frpc.parent.mkdir(parents=True)
+    frpc.write_text("serverAddr = 'relay'\n", encoding="utf-8")
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     monkeypatch.setenv("VIGIL_OOB_DOMAIN", "legacy.custom.test")
 
@@ -1788,22 +1826,23 @@ def test_start_oob_abort_mentions_the_configure_before_install_ordering(tmp_path
     assert "vigil install" in str(excinfo.value)
 
 
-def test_configuring_oob_after_the_first_install_pins_the_shared_legacy_route(
+def test_configuring_oob_after_the_first_install_allocates_a_dedicated_slot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Re-running install on an existing root does NOT allocate a dedicated slot.
+    """The documented "set `oob.domain`, then `vigil install`" order must work.
 
-    `initialize_relay_route` allocates only when `is_upgrade` is false. A root
-    that already exists is an upgrade, so a second install with `oob.domain` now
-    set pins `legacy_relay_route` — the globally shared domain on ports 53/8443 —
-    rather than reserving this install its own block. Guidance must not promise
-    an allocation this path cannot deliver.
+    A root that merely exists is not a legacy OOB install: nothing has ever been
+    routed through it, so there are no live callbacks whose ports must be held
+    still. The retry has to reserve this install its own slot rather than pin
+    the shared 53/8443 route every other install would also land on.
     """
     from vigil_cli.install import InstallOptions, install_from_source
-    from vigil_cli.oob_relay import load_relay_route
+    from vigil_cli.oob_relay import PORT_BLOCK_START, load_relay_route
 
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
+    monkeypatch.delenv("VIGIL_RUNTIME_DATA_DIR", raising=False)
+    monkeypatch.delenv("KALI_MCP_DATA_DIR", raising=False)
     source = tmp_path / "source"
     (source / "agent" / "engagements").mkdir(parents=True)
     (source / "orchestrator" / "backend" / "data").mkdir(parents=True)
@@ -1829,7 +1868,219 @@ def test_configuring_oob_after_the_first_install_pins_the_shared_legacy_route(
 
     route = load_relay_route(install_root)
     assert route is not None
-    assert route.legacy is True, (
-        "a second install pins the shared legacy route, not a dedicated slot"
+    assert route.legacy is False, (
+        "a root that never ran OOB must be allocated its own slot, not the shared route"
     )
+    assert route.base_domain == "oob.example.com"
+    assert route.oob_domain == f"{route.slot_prefix}.oob.example.com"
+    assert route.dns_remote_port >= PORT_BLOCK_START
+    assert route.reverse_remote_port == route.dns_remote_port + 1
+    registry = json.loads(
+        (tmp_path / "oob-allocations.json").read_text(encoding="utf-8")
+    )
+    assert registry["allocations"][route.install_id]["install_root"] == str(
+        install_root
+    )
+
+
+def test_install_preserves_the_legacy_route_of_a_root_that_already_ran_oob(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A root with live OOB state keeps the shared 53/8443 route it is using.
+
+    `vigil oob start` with no routing record resolves the shared legacy route
+    (`oob.oob_options`), so this install's callbacks are already correlating on
+    the base domain and those ports. Moving them to a fresh slot would break
+    in-flight correlation for a running engagement.
+    """
+    from vigil_cli.install import InstallOptions, install_from_source
+    from vigil_cli.oob_relay import load_relay_route
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
+    monkeypatch.delenv("VIGIL_RUNTIME_DATA_DIR", raising=False)
+    monkeypatch.delenv("KALI_MCP_DATA_DIR", raising=False)
+    source = tmp_path / "source"
+    (source / "agent" / "engagements").mkdir(parents=True)
+    (source / "README.md").write_text("managed\n", encoding="utf-8")
+    install_root = tmp_path / "install"
+
+    install_from_source(
+        InstallOptions(
+            source_root=source, install_root=install_root, verify_docker_image=False
+        )
+    )
+
+    # What a pre-routing `vigil oob start` leaves behind on this host.
+    oob_state = install_root / ".runtime-data" / "oob"
+    (oob_state / "clients").mkdir(parents=True)
+    (oob_state / "frpc.toml").write_text("serverAddr = 'relay'\n", encoding="utf-8")
+    (oob_state / "clients" / "ssrf.session").write_text("correlation", encoding="utf-8")
+
+    monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.com")
+    install_from_source(
+        InstallOptions(
+            source_root=source, install_root=install_root, verify_docker_image=False
+        )
+    )
+
+    route = load_relay_route(install_root)
+    assert route is not None
+    assert route.legacy is True
+    assert route.oob_domain == "oob.example.com"
     assert (route.dns_remote_port, route.reverse_remote_port) == (53, 8443)
+    assert (oob_state / "clients" / "ssrf.session").read_text() == "correlation"
+    # A pinned legacy route owns no slot, so it must claim no registry block.
+    assert not (tmp_path / "oob-allocations.json").exists()
+
+
+def test_relocated_runtime_data_dir_still_proves_a_live_legacy_oob_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OOB state follows the container's `/data` mount, which is relocatable.
+
+    With `VIGIL_RUNTIME_DATA_DIR` set, `frpc.toml` and the per-client files land
+    outside `<install>/.runtime-data`. Looking only there would read a live
+    legacy install as never-configured and move its ports.
+    """
+    from vigil_cli.install import InstallOptions, install_from_source
+    from vigil_cli.oob_relay import load_relay_route
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.com")
+    data_dir = tmp_path / "elsewhere"
+    monkeypatch.setenv("VIGIL_RUNTIME_DATA_DIR", str(data_dir))
+    monkeypatch.delenv("KALI_MCP_DATA_DIR", raising=False)
+    source = tmp_path / "source"
+    (source / "agent" / "engagements").mkdir(parents=True)
+    (source / "README.md").write_text("managed\n", encoding="utf-8")
+    install_root = tmp_path / "install"
+    (install_root / "agent" / "engagements" / "existing").mkdir(parents=True)
+    (data_dir / "oob" / "clients").mkdir(parents=True)
+    (data_dir / "oob" / "frpc.log").write_text("start proxy success\n", encoding="utf-8")
+
+    install_from_source(
+        InstallOptions(
+            source_root=source, install_root=install_root, verify_docker_image=False
+        )
+    )
+
+    route = load_relay_route(install_root)
+    assert route is not None
+    assert route.legacy is True
+    assert (route.dns_remote_port, route.reverse_remote_port) == (53, 8443)
+
+
+def test_deferred_configuration_leaves_an_allocated_slot_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once a slot exists, further installs reconcile it and change nothing."""
+    from vigil_cli.install import InstallOptions, install_from_source
+    from vigil_cli.oob_relay import load_relay_route
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.com")
+    monkeypatch.delenv("VIGIL_RUNTIME_DATA_DIR", raising=False)
+    monkeypatch.delenv("KALI_MCP_DATA_DIR", raising=False)
+    source = tmp_path / "source"
+    (source / "agent" / "engagements").mkdir(parents=True)
+    (source / "README.md").write_text("managed\n", encoding="utf-8")
+    install_root = tmp_path / "install"
+
+    install_from_source(
+        InstallOptions(
+            source_root=source, install_root=install_root, verify_docker_image=False
+        )
+    )
+    allocated = load_relay_route(install_root)
+    assert allocated is not None and allocated.legacy is False
+
+    # A later `vigil oob start` leaves state behind; that must not now be read
+    # as legacy evidence and re-pin a route this install already owns.
+    (install_root / ".runtime-data" / "oob" / "frpc.log").write_text(
+        "start proxy success\n", encoding="utf-8"
+    )
+    install_from_source(
+        InstallOptions(
+            source_root=source, install_root=install_root, verify_docker_image=False
+        )
+    )
+
+    assert load_relay_route(install_root) == allocated
+    registry = json.loads(
+        (tmp_path / "oob-allocations.json").read_text(encoding="utf-8")
+    )
+    assert list(registry["allocations"]) == [allocated.install_id]
+
+
+def test_deferred_configuration_keeps_a_pre_rename_record_and_slot_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deferred path must still read `tenant-routing.json` and `oob.tenant`.
+
+    An install that allocated before the relay-slot rename owns its slot under
+    the old spellings; configuring `oob.domain` afterwards must reconcile that
+    record rather than mint a second one, and the pre-rename config key must
+    still name the slot when nothing has been allocated yet.
+    """
+    from vigil_cli.install import InstallOptions, install_from_source
+    from vigil_cli.oob_relay import (
+        LEGACY_RELAY_METADATA_RELATIVE_PATH,
+        RELAY_METADATA_RELATIVE_PATH,
+        load_relay_route,
+    )
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({"oob.domain": "oob.example.test", "oob.tenant": "pre-rename-slot"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("VIGIL_CONFIG", str(config_path))
+    monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
+    monkeypatch.delenv("VIGIL_RUNTIME_DATA_DIR", raising=False)
+    monkeypatch.delenv("KALI_MCP_DATA_DIR", raising=False)
+    source = tmp_path / "source"
+    (source / "agent" / "engagements").mkdir(parents=True)
+    (source / "README.md").write_text("managed\n", encoding="utf-8")
+
+    # A root whose only routing record is the pre-rename file.
+    pre_rename_root = tmp_path / "pre-rename"
+    existing = _allocated_route(tmp_path, pre_rename_root)
+    (pre_rename_root / LEGACY_RELAY_METADATA_RELATIVE_PATH).write_text(
+        json.dumps(_pre_rename_record(existing.serializable()), indent=2, sort_keys=True)
+        + "\n",
+        encoding="utf-8",
+    )
+    (pre_rename_root / RELAY_METADATA_RELATIVE_PATH).unlink()
+
+    install_from_source(
+        InstallOptions(
+            source_root=source,
+            install_root=pre_rename_root,
+            verify_docker_image=False,
+        )
+    )
+
+    kept = load_relay_route(pre_rename_root)
+    assert kept is not None
+    assert kept.slot_prefix == existing.slot_prefix
+    assert kept.oob_domain == existing.oob_domain
+    assert kept.metadata_path == pre_rename_root / LEGACY_RELAY_METADATA_RELATIVE_PATH
+    assert not (pre_rename_root / RELAY_METADATA_RELATIVE_PATH).exists()
+
+    # A never-configured root under the same config allocates under the
+    # pre-rename slot name.
+    fresh_root = tmp_path / "fresh"
+    fresh_root.mkdir()
+    (fresh_root / ".runtime-data").mkdir()
+    install_from_source(
+        InstallOptions(
+            source_root=source, install_root=fresh_root, verify_docker_image=False
+        )
+    )
+
+    allocated = load_relay_route(fresh_root)
+    assert allocated is not None
+    assert allocated.legacy is False
+    assert allocated.slot_name == "pre-rename-slot"
+    assert allocated.slot_prefix.startswith("pre-rename-slot-")

@@ -40,10 +40,12 @@ if TYPE_CHECKING:
 # Directories/files only a PRIOR Vigil install or run leaves behind. Source-tree
 # directory names ("agent", "orchestrator", ".claude", ".codex") are NOT a
 # signal: when the install root IS the source checkout they exist before Vigil
-# has ever run there, so the FIRST in-place install reported an upgrade and
-# `initialize_relay_route` pinned the legacy shared OOB domain (ports 53/8443)
-# instead of allocating an install-specific relay route — two fresh in-place developer
-# installs then collided at the FRP/OOB edge.
+# has ever run there, and the FIRST in-place install would report an upgrade.
+# OOB relay routing no longer keys off this flag at all — it reads the install's
+# own OOB state (`oob_relay._has_pre_routing_oob_state`), because "this root is
+# not brand new" never proved that live callbacks were riding the shared
+# 53/8443 route. This marker set still has to stay honest for every other
+# upgrade-sensitive decision.
 PRIOR_INSTALL_MARKERS = (
     INSTALL_META_FILENAME,  # stamped by every install_from_source
     ".runtime-data",  # created by the descriptor-relative installer sync
@@ -622,23 +624,22 @@ def install_from_source(
                     )
 
             if not configured_oob_domain:
-                # Allocation happens here and only here. Staying silent is how
-                # operators who configure OOB *after* installing end up on the
-                # globally contended legacy ports without ever being told.
+                # Allocation happens here and only here. Staying silent leaves an
+                # operator who configures OOB later with no idea that a second
+                # install is what reserves their relay slot.
                 print(
                     "[vigil] no OOB route allocated: `oob.domain` is not set. "
-                    "A dedicated relay slot is reserved only by the install that "
-                    "first creates this root, so set `oob.domain` before installing. "
-                    "Setting it now and re-running pins the SHARED legacy route "
-                    "(ports 53/8443), which can collide with another install; "
-                    "`vigil oob start`'s conflict scan is what catches that.",
+                    "Set it (`vigil config set oob.domain <domain>` or "
+                    "VIGIL_OOB_DOMAIN) and re-run `vigil install` to reserve this "
+                    "install its own relay slot. A root already running OOB on the "
+                    "shared legacy route (ports 53/8443) keeps that route instead, "
+                    "so its live callbacks are not moved.",
                     file=sys.stderr,
                 )
             if configured_oob_domain:
                 destination_boundary.require_attached()
                 initialize_relay_route(
                     phase_root,
-                    is_upgrade=is_upgrade,
                     slot_name=configured_oob_slot,
                     base_domain=configured_oob_domain,
                     registry_path=oob_registry_path,

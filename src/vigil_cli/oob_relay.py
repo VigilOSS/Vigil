@@ -29,6 +29,19 @@ RELAY_METADATA_RELATIVE_PATH = Path(".runtime-data/oob/relay-routing.json")
 # allocated a route then still own it, so every read falls back to this name and
 # leaves the file untouched; only an allocation or reconcile writes the new one.
 LEGACY_RELAY_METADATA_RELATIVE_PATH = Path(".runtime-data/oob/tenant-routing.json")
+# Everything an OOB session writes lives in one directory: the container's
+# ``/data/oob`` (rendered ``frpc.toml``, its log, the interactsh watch log, the
+# runtime route marker, one file per registered client) and, host-side, the
+# routing record plus the poll channel cache kept beside them.
+OOB_STATE_RELATIVE_PATH = RELAY_METADATA_RELATIVE_PATH.parent
+# Filename stems of the routing records THIS module writes, in both spellings,
+# covering their ``.lock`` and temporary siblings. They are bookkeeping, not
+# evidence of a live channel: an interrupted pin leaves a lock file behind with
+# nothing ever having been routed through it.
+_ROUTING_RECORD_STEMS = (
+    RELAY_METADATA_RELATIVE_PATH.stem,
+    LEGACY_RELAY_METADATA_RELATIVE_PATH.stem,
+)
 ROUTING_VERSION = 1
 PORT_BLOCK_START = 20_000
 PORT_BLOCK_SIZE = 2
@@ -523,10 +536,64 @@ def reconcile_relay_route_registry(
         )
 
 
+def _oob_state_directories(install_root: Path) -> tuple[Path, ...]:
+    """Every directory an OOB session could have written this install's state to."""
+    root = install_root.expanduser()
+    directories = [root / OOB_STATE_RELATIVE_PATH]
+    # `vigil oob start` writes frpc and interactsh state into the container's
+    # `/data`, whose host side is relocatable through VIGIL_RUNTIME_DATA_DIR or
+    # the install `.env`. Reuse runtime's own resolver instead of a second copy
+    # of that precedence: missing a relocated install's live OOB state would
+    # move its ports out from under running callbacks. Imported here because
+    # `runtime` pulls in the Docker helpers that the rest of this
+    # filesystem-only module never needs.
+    from .runtime import _resolve_runtime_data_dir
+
+    relocated = _resolve_runtime_data_dir(root) / OOB_STATE_RELATIVE_PATH.name
+    if relocated not in directories:
+        directories.append(relocated)
+    return tuple(directories)
+
+
+def _has_pre_routing_oob_state(install_root: Path) -> bool:
+    """True when this root was already running OOB before it had a relay route.
+
+    The legacy 53/8443 route exists for exactly one population: installs whose
+    callbacks are already live on the shared domain and whose correlation would
+    break if their ports moved. `vigil oob start` is the only thing that puts an
+    install in that population — with no routing record it resolves the shared
+    route through :func:`legacy_relay_route` (see `oob.oob_options`) — and it
+    cannot run without leaving its rendered `frpc.toml`, logs, per-client files
+    and runtime route marker behind. That state is therefore the discriminator,
+    and it is absent from a root that has never had OOB configured or started.
+
+    Deliberately NOT evidence: a root merely being old. An install stamp,
+    `.runtime-data/logs` or an engagement directory proves a previous install or
+    engagement, never a live OOB channel; treating them as legacy is what
+    stranded every deferred-configuration install on the contended shared ports.
+    An entry in the allocation registry is not evidence either — a registry row
+    is only ever written for an allocated slot, so it proves the opposite.
+    """
+    for directory in _oob_state_directories(install_root):
+        if not directory.is_dir():
+            continue
+        try:
+            entries = list(directory.iterdir())
+        except OSError:
+            # The directory exists but will not be read. With no way to prove it
+            # empty, keep the route this install may be using.
+            return True
+        if any(
+            not entry.name.lstrip(".").startswith(_ROUTING_RECORD_STEMS)
+            for entry in entries
+        ):
+            return True
+    return False
+
+
 def initialize_relay_route(
     install_root: Path,
     *,
-    is_upgrade: bool,
     slot_name: str | None = None,
     base_domain: str,
     registry_path: Path | None = None,
@@ -547,7 +614,7 @@ def initialize_relay_route(
             registry_path=registry_path,
             preserve_install_path=preserve_install_path,
         )
-    if not is_upgrade:
+    if not _has_pre_routing_oob_state(install_root):
         return allocate_relay_route(
             install_root,
             slot_name=slot_name or registry_install_root.name,

@@ -637,13 +637,15 @@ def _oob_relay_check(install_root: Path) -> Check:
                 "oob.relay-route",
                 "WARN",
                 "no OOB route allocated; set `vigil config set oob.domain <domain>` "
-                "then `vigil install` — on an existing root that pins the shared "
-                "legacy route (53/8443), not a dedicated slot",
+                "then `vigil install`, which reserves this install its own relay slot "
+                "(a root already running OOB on the shared 53/8443 route keeps that "
+                "route instead)",
             )
         return Check(
             "oob.relay-route",
             "WARN",
-            "legacy install has no relay-slot metadata; run `vigil install` to pin its current route",
+            "no relay-slot metadata; run `vigil install` to allocate this install's "
+            "slot — or to pin the shared 53/8443 route it is already running OOB on",
         )
     mode = "legacy-pinned" if route.legacy else "slot"
     return Check(

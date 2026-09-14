@@ -51,15 +51,28 @@ an OOB domain is configured. The record pins the slot prefix, its subdomain, and
 the port block. Records written before the rename are named `tenant-routing.json`
 and spell their keys `tenant_prefix`/`tenant_name`; those are still read.
 
+Allocation is not limited to the install that first creates the root. Configure
+`oob.domain` afterwards and the next `vigil install` allocates the slot — the
+sequence at the top of this page works in either order. The one root that is not
+allocated is an install that was **already running OOB** before relay slots
+existed: it is still on the shared base domain and ports 53/8443, and its live
+callbacks would stop correlating if those moved, so `vigil install` pins that
+legacy route instead. The evidence is the install's own OOB state — the rendered
+`frpc.toml`, the frpc/watch logs, the per-client files and the runtime route
+marker that `vigil oob start` writes under the container's `/data/oob` (host
+side: `.runtime-data/oob`, or wherever `VIGIL_RUNTIME_DATA_DIR` puts it). A root
+that has never had OOB started carries none of it.
+
 `vigil oob start`, client metadata, status/doctor, `vigil assess`, and Nuclei
 `--oob-mode vigil` all resolve that record, so changing an ambient
 `VIGIL_OOB_DOMAIN` cannot silently redirect a persisted Vigil slot to an
 external Interactsh service.
 
-Set `oob.slot` before the first install when the install-directory name is not
-the label you want. It must be set **before** the install that allocates the
-route: allocation happens during `vigil install`, and only when `oob.domain` is
-already configured. (`oob.tenant` is still read as the pre-rename spelling.)
+Set `oob.slot` when the install-directory name is not the label you want. It
+must be set **before** the install that allocates the route — the first
+`vigil install` that runs with `oob.domain` configured — because a later install
+reconciles the persisted record rather than renaming it. (`oob.tenant` is still
+read as the pre-rename spelling.)
 
 ## Allocation across hosts
 
