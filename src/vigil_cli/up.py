@@ -278,5 +278,13 @@ def _build_mitmproxy_image(install_root: Path, *, runner: docker.Runner = docker
     `vigil up` used to assemble its own `docker build` argv here, which omitted
     the input-digest label. An unstamped image can never be proven current, so
     the very next `vigil up` rebuilt it again — forever.
+
+    One runner goes in and `build_image` uses it for its own freshness re-check
+    as well as the build, which for a streaming runner means that re-check can
+    only ever answer "outdated". That is safe HERE and only here: `run_up`
+    already decided the image is stale, through the capturing runner, before
+    calling this. Do not copy the single-runner call into a path without that
+    outer check — `start_proxy` is where that went wrong, and the fix there was
+    to pass `runner` and `build_runner` separately.
     """
     build_mitmproxy_image(install_root, runner=runner)
