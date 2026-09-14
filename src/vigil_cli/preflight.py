@@ -27,7 +27,10 @@ def _resolve_provider_key(install_root: Path, engagement_dir: Path, key: str) ->
     root's `.orchestrator.env` and `.env` — first hit wins (see
     `engagements._write_launcher`'s provider block).
     """
-    value = os.environ.get(key)
+    # Normalize the inherited value too, not just file assignments: an ambient
+    # `KEY=""` or whitespace would otherwise shadow a usable key in the env files
+    # and reach the provider as junk.
+    value = _dotenv_value(os.environ.get(key) or "")
     if value:
         return value
     for env_file in (

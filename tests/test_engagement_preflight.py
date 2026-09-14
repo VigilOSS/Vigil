@@ -432,3 +432,11 @@ def test_provider_key_rejects_quoted_empty_and_unwraps_quoted_values(
 
     (install_root / ".env").write_text("DEEPSEEK_API_KEY=sk-bare\n", encoding="utf-8")
     assert _resolve_provider_key(install_root, engagement, "DEEPSEEK_API_KEY") == "sk-bare"
+
+    # An inherited value gets the same treatment, and an empty-equivalent one must
+    # fall through to the files rather than shadowing a usable key.
+    monkeypatch.setenv("DEEPSEEK_API_KEY", '"   "')
+    assert _resolve_provider_key(install_root, engagement, "DEEPSEEK_API_KEY") == "sk-bare"
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", '"sk-inherited"')
+    assert _resolve_provider_key(install_root, engagement, "DEEPSEEK_API_KEY") == "sk-inherited"
