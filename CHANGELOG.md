@@ -19,7 +19,12 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 
 - **`vigil --version`** reports the CLI binary's version (`vigil status` still reports the working
   root's).
-- **`vigil doctor --json`**, and `doctor` now exits non-zero when any row is `FAIL`.
+- **`vigil doctor --json`**, and `doctor` now exits non-zero on a `FAIL` row or on a missing
+  required prerequisite — the Docker CLI, the install root, or the agent tree. It previously
+  reported `"ok": true` on a host with no Docker at all, because an absent CLI reads as
+  `MISSING` and skips the daemon probe that would have produced a `FAIL`. Optional rows such
+  as OOB configuration stay advisory, the gating rows are named on stderr, and `--json` rows
+  carry `required`.
 - **Operator checkpoints record both track phases.** A `both` engagement advances its web and code
   tracks independently; the checkpoint and the resume brief now report each by name.
 
@@ -39,6 +44,22 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   reserves a dedicated slot instead of pinning the globally shared legacy route.
 - **A quoted-empty provider key (`KEY=""`) reads as unset** in the launch preflight and the
   generated launchers, and a real quoted key no longer exports its quote characters.
+- **`vigil up` no longer kills the proxy it just started.** Starting a stopped mitmproxy passed the
+  streaming build runner as `start_proxy`'s only runner, and that runner returns empty stdout by
+  design — so a current image read back unstamped and was rebuilt, and the post-start `docker ps`
+  check saw no container and ended the command claiming the proxy had exited.
+- **`vigil oob start` warns when no relay slot was ever reserved**, instead of silently resolving
+  the shared 53/8443 route that another install in the same state also resolves. The documented
+  setup sequences now include the `vigil install` that reserves the slot.
+- **`code-ingest` churn rankings cover analyzed files only.** The "highest-churn files" block
+  ranked over full git history, so it listed files the same run had just reported as skipped —
+  minified bundles, font assets, lockfiles — and the same contamination reached the `git_churn`
+  metadata stored in the backend.
+- **`code-index build` repair hints name a usable path.** The `structural_index_stale` blocker
+  printed a `<snapshot-path>` placeholder, but the command binds to that snapshot's `source/`
+  directory and refused anything else without saying which path it wanted.
+- **A blank operator-checkpoint intent is refused.** `--intent "   "` was stored and superseded the
+  previous checkpoint, so resume hydration lost the operator's real save-my-place note.
 
 ## [1.0.0] - 2026-09-12
 
