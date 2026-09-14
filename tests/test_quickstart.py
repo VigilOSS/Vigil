@@ -246,8 +246,10 @@ def test_doctor_exits_non_zero_when_a_check_fails(monkeypatch: pytest.MonkeyPatc
     assert excinfo.value.code != 0
 
 
-def test_doctor_exits_zero_for_warn_and_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Only FAIL gates. WARN/MISSING are advisory — OOB is legitimately unset."""
+def test_doctor_exits_zero_for_warn_and_optional_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An advisory MISSING does not gate — OOB is legitimately unset."""
     from vigil_cli import main as main_module
     from vigil_cli.status import Check
 
@@ -262,6 +264,65 @@ def test_doctor_exits_zero_for_warn_and_missing(monkeypatch: pytest.MonkeyPatch)
     )
 
     main_module.main(["doctor"])  # must not raise
+
+
+def test_doctor_exits_non_zero_when_a_required_prerequisite_is_missing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A host with no Docker cannot run Vigil, and MISSING is how that reads.
+
+    `MISSING` carries both "not configured, and that is fine" and "this host
+    cannot run Vigil", so a filter that treats the status alone as advisory
+    reported `ok` on a host with no Docker CLI at all — the daemon probe is
+    skipped in that branch, so no FAIL row is ever produced to catch it.
+    """
+    from vigil_cli import main as main_module
+    from vigil_cli.status import Check
+
+    monkeypatch.setattr(
+        main_module,
+        "collect_doctor_checks",
+        lambda *_a, **_k: [
+            Check("docker", "MISSING", "not found", required=True),
+            Check("docker-daemon", "SKIPPED", "docker CLI not found"),
+            Check("oob.frp_token", "MISSING"),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        main_module.main(["doctor"])
+
+    assert excinfo.value.code != 0
+    # The gating row is named, so an operator is not left comparing two MISSING
+    # rows to work out which one ended the command.
+    err = capsys.readouterr().err
+    assert "docker (MISSING)" in err
+    assert "oob.frp_token" not in err
+
+
+def test_doctor_marks_docker_and_install_root_required_when_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The required flag is set by the collector, not hard-coded by the caller."""
+    from vigil_cli import status as status_module
+
+    monkeypatch.setattr(
+        status_module,
+        "_binary_check",
+        lambda command: status_module.Check(command, "MISSING", "not found"),
+    )
+
+    checks = {
+        check.name: check
+        for check in status_module.collect_doctor_checks(tmp_path / "absent")
+    }
+
+    assert checks["docker"].required is True
+    assert checks["install-root"].required is True
+    assert checks["agent-dir"].required is True
+    # A client binary is not a prerequisite: Vigil supports five and needs one.
+    assert checks["claude"].required is False
+    assert checks["codex"].required is False
 
 
 def test_doctor_json_is_machine_readable(
@@ -282,7 +343,12 @@ def test_doctor_json_is_machine_readable(
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["checks"] == [
-        {"name": "docker-daemon", "status": "FAIL", "detail": "no daemon"}
+        {
+            "name": "docker-daemon",
+            "status": "FAIL",
+            "detail": "no daemon",
+            "required": False,
+        }
     ]
     assert payload["ok"] is False
 

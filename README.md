@@ -316,6 +316,7 @@ correlating if its ports moved.
 
 ```bash
 vigil config set oob.frp_host oob-relay.example.com   # also: oob.frp_port, oob.domain, oob.frp_token
+vigil install                                        # reserves this install's relay slot
 vigil oob start && vigil oob status --json
 vigil oob client start example-agent --engagement <engagement-key> --agent vulnerability-analyst
 vigil oob test

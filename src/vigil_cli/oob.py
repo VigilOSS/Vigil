@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 import shlex
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -88,9 +89,10 @@ OOB_CONFIGURATION_HELP = (
     "Configure it with: vigil config set oob.frp_host <host>\n"
     "                   vigil config set oob.domain <domain>\n"
     "                   vigil config set oob.frp_token <token>\n"
-    "Set oob.domain BEFORE `vigil install` — the relay slot (this install's\n"
-    "subdomain and port block) is allocated during install, and only when a\n"
-    "domain is already configured."
+    "Then run `vigil install` — the relay slot (this install's subdomain and\n"
+    "port block) is reserved during install, and only when a domain is already\n"
+    "configured, so a domain set afterwards needs one more install to take\n"
+    "effect."
 )
 
 
@@ -106,6 +108,25 @@ def start_oob(
     if not options.frp_host or not options.oob_domain or not options.frp_token:
         raise SystemExit(
             "OOB infrastructure is not configured.\n" + OOB_CONFIGURATION_HELP
+        )
+    # A configured domain with no routing record resolves to the SHARED legacy
+    # route (ports 53/8443) through `oob_options`, and every other install in
+    # that state lands on the same ports and subdomain — callbacks then
+    # correlate to the wrong engagement. Documenting the `vigil install` step
+    # is not enough on its own: nothing stops an operator reaching this command
+    # without it, and the degraded route is otherwise indistinguishable from a
+    # reserved one at startup. A pinned legacy route (a record that says so) is
+    # a deliberate state and is not warned about here.
+    if load_relay_route(options.install_root) is None:
+        print(
+            "[vigil] warning: no relay slot reserved for this install — using the "
+            "SHARED legacy route "
+            f"({options.oob_domain}, ports {options.dns_remote_port}/"
+            f"{options.reverse_remote_port}). Another install in the same state "
+            "uses it too, and callbacks cannot be told apart. Run `vigil install` "
+            "with `oob.domain` set to reserve this install its own slot, then "
+            "restart OOB.",
+            file=sys.stderr,
         )
     _require_runtime(options.container_name, runner=runner)
     _require_runtime_tools(options.container_name, runner=runner)

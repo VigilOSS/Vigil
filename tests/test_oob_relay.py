@@ -1798,6 +1798,95 @@ def test_client_metadata_falls_back_to_the_pre_rename_route_key() -> None:
     )
 
 
+def _quiet_oob_runner(commands: list[str]):
+    """A `docker exec` runner that lets `start_oob` reach the end unchanged."""
+    from vigil_cli.docker import DockerResult
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        command = argv[-1] if argv else ""
+        commands.append(command)
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, "vigil\n", "")
+        if command in {
+            "tmux has-session -t oob-server",
+            "tmux has-session -t frpc",
+        }:
+            return DockerResult(1, "", "")
+        if "tmux list-sessions" in command:
+            return DockerResult(0, "", "")
+        if command.startswith("cat ") and "active-relay-routing.json" in command:
+            return DockerResult(1, "", "")
+        return DockerResult(0, "", "")
+
+    return runner
+
+
+def test_start_oob_warns_when_no_relay_slot_was_ever_reserved(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Reaching `oob start` without the allocating install must not be silent.
+
+    With `oob.domain` configured and no routing record, `oob_options` resolves
+    the SHARED legacy route — and so does every other install in that state, on
+    the same subdomain and the same 53/8443, which makes their callbacks
+    indistinguishable. The documented `vigil install` step cannot be the only
+    guard: nothing stops an operator arriving here without it, and a degraded
+    route looks exactly like a reserved one at startup.
+    """
+    from vigil_cli.oob import OobOptions, start_oob
+
+    start_oob(
+        OobOptions(
+            install_root=tmp_path,
+            frp_host="frp.example.test",
+            frp_token="secret",
+            slot_prefix="legacy",
+            oob_domain="oob.example.test",
+            dns_remote_port=53,
+            reverse_remote_port=8443,
+        ),
+        runner=_quiet_oob_runner([]),
+        frpc_ready_timeout=0,
+    )
+
+    err = capsys.readouterr().err
+    assert "no relay slot reserved" in err
+    assert "vigil install" in err
+    assert "53/8443" in err
+
+
+def test_start_oob_is_quiet_when_a_slot_is_reserved(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A reserved slot is the normal state and earns no warning."""
+    from vigil_cli.oob import OobOptions, start_oob
+    from vigil_cli.oob_relay import allocate_relay_route
+
+    route = allocate_relay_route(
+        tmp_path,
+        slot_name="reserved",
+        base_domain="oob.example.test",
+        registry_path=tmp_path / "allocations.json",
+    )
+
+    start_oob(
+        OobOptions(
+            install_root=tmp_path,
+            frp_host="frp.example.test",
+            frp_token="secret",
+            slot_prefix=route.slot_prefix,
+            oob_domain=route.oob_domain,
+            dns_remote_port=route.dns_remote_port,
+            reverse_remote_port=route.reverse_remote_port,
+            relay_route=route,
+        ),
+        runner=_quiet_oob_runner([]),
+        frpc_ready_timeout=0,
+    )
+
+    assert "no relay slot reserved" not in capsys.readouterr().err
+
+
 def test_start_oob_abort_names_every_key_it_requires(tmp_path: Path) -> None:
     """One refusal, not two — and it must name the token.
 

@@ -11,9 +11,15 @@ vigil config set oob.frp_host oob-relay.example.com
 vigil config set oob.frp_port 7000
 vigil config set oob.domain oob.example.com
 vigil config set oob.frp_token <token>
+vigil install                 # allocates this install's relay slot
 vigil oob start
 vigil oob status --json
 ```
+
+`vigil install` is load-bearing in that order, not a refresh step: the relay
+slot is reserved during install, so starting OOB before one has run with
+`oob.domain` set leaves this install resolving the shared legacy domain on
+ports 53/8443, where a second install lands too.
 
 The FRP token is required. `vigil up` prompts for it on first startup when it is
 missing and stores the value in `vigil config`; non-interactive installs should

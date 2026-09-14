@@ -7,7 +7,7 @@ import sqlite3
 import subprocess
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,6 +34,13 @@ class Check:
     name: str
     status: str
     detail: str = ""
+    # A prerequisite whose absence means this host cannot run Vigil at all, as
+    # opposed to one whose absence is a legitimate steady state. `MISSING` is
+    # used for both — an unset `oob.frp_token` and a missing Docker CLI produce
+    # the same status string — so the distinction has to live here rather than
+    # in the caller's status filter, which would otherwise have to hard-code
+    # row names to tell "not configured" from "cannot run".
+    required: bool = False
 
 
 def git_head_sha(repo: Path | None) -> str | None:
@@ -544,11 +551,35 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
     binary_status: dict[str, str] = {}
     for command in ("uv", "docker", "npm", "codex", "claude", "fzf"):
         check = _binary_check(command)
+        # Docker alone is required: every runtime, orchestrator, and proxy path
+        # goes through it. The client binaries are not — Vigil supports five and
+        # an operator needs one — and `uv`/`npm` are build-time tools an install
+        # can already have run.
+        if command == "docker" and check.status != "OK":
+            check = replace(check, required=True)
         checks.append(check)
         binary_status[command] = check.status
     install_root = install_root.expanduser().resolve()
-    checks.append(Check("install-root", "OK" if install_root.exists() else "MISSING", str(install_root)))
-    checks.append(Check("agent-dir", "OK" if (install_root / "agent").is_dir() else "MISSING", str(install_root / "agent")))
+    # Required: `vigil doctor` is the post-install health check AGENTS.md points
+    # at after `vigil up`. With no install root or no agent tree there is nothing
+    # to be healthy, and reporting that as advisory made the command exit 0.
+    checks.append(
+        Check(
+            "install-root",
+            "OK" if install_root.exists() else "MISSING",
+            str(install_root),
+            required=not install_root.exists(),
+        )
+    )
+    agent_dir_present = (install_root / "agent").is_dir()
+    checks.append(
+        Check(
+            "agent-dir",
+            "OK" if agent_dir_present else "MISSING",
+            str(install_root / "agent"),
+            required=not agent_dir_present,
+        )
+    )
     data_dir = install_root / "orchestrator" / "backend" / "data"
     checks.append(Check("backend-data", "OK" if data_dir.is_dir() else "MISSING"))
     checks.append(_database_check(data_dir / "orchestrator.sqlite3"))

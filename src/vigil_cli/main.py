@@ -1178,16 +1178,29 @@ def main(argv: list[str] | None = None) -> None:
             _print_post_install(result)
     elif args.command == "doctor":
         checks = collect_doctor_checks(install_root, runner=docker_run_command)
-        # Only FAIL gates. WARN/MISSING are advisory — an unconfigured OOB is a
-        # legitimate steady state, not a broken install.
-        failed = [check for check in checks if check.status == "FAIL"]
+        # FAIL gates, and so does a MISSING row the collector marked required.
+        # `MISSING` alone cannot decide it: an unset `oob.frp_token` and an
+        # absent Docker CLI carry the same status, and only one of them is a
+        # legitimate steady state. Treating every MISSING as advisory made
+        # `vigil doctor` exit 0 and report `"ok": true` on a host with no Docker
+        # at all — the same dishonesty as the earlier exit-0-on-FAIL.
+        failed = [
+            check
+            for check in checks
+            if check.status == "FAIL" or (check.required and check.status != "OK")
+        ]
         if args.json:
             print(
                 json.dumps(
                     {
                         "ok": not failed,
                         "checks": [
-                            {"name": c.name, "status": c.status, "detail": c.detail}
+                            {
+                                "name": c.name,
+                                "status": c.status,
+                                "detail": c.detail,
+                                "required": c.required,
+                            }
                             for c in checks
                         ],
                     },
@@ -1197,6 +1210,12 @@ def main(argv: list[str] | None = None) -> None:
         else:
             print_doctor(checks)
         if failed:
+            if not args.json:
+                print(
+                    "[vigil] not ready: "
+                    + ", ".join(f"{c.name} ({c.status})" for c in failed),
+                    file=sys.stderr,
+                )
             raise SystemExit(1)
     elif args.command == "status":
         status = collect_status(
