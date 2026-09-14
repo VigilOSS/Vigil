@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 
-def test_oob_tenant_module_imports_when_fcntl_is_unavailable() -> None:
+def test_oob_relay_module_imports_when_fcntl_is_unavailable() -> None:
     script = """
 import builtins
 real_import = builtins.__import__
@@ -21,7 +21,7 @@ def guarded_import(name, *args, **kwargs):
         raise ModuleNotFoundError('simulated Windows')
     return real_import(name, *args, **kwargs)
 builtins.__import__ = guarded_import
-import vigil_cli.oob_tenants
+import vigil_cli.oob_relay
 """
     result = subprocess.run(
         [sys.executable, "-c", script],
@@ -36,7 +36,7 @@ import vigil_cli.oob_tenants
 def test_windows_file_lock_backend_locks_a_real_byte(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import vigil_cli.oob_tenants as tenants
+    import vigil_cli.oob_relay as relay
 
     class FakeMsvcrt:
         LK_LOCK = 1
@@ -49,72 +49,72 @@ def test_windows_file_lock_backend_locks_a_real_byte(
             self.calls.append((mode, count))
 
     backend = FakeMsvcrt()
-    monkeypatch.setattr(tenants, "_fcntl", None)
-    monkeypatch.setattr(tenants, "_msvcrt", backend)
+    monkeypatch.setattr(relay, "_fcntl", None)
+    monkeypatch.setattr(relay, "_msvcrt", backend)
     with (tmp_path / "route.lock").open("a+", encoding="utf-8") as handle:
-        tenants._lock_file(handle)
-        tenants._unlock_file(handle)
+        relay._lock_file(handle)
+        relay._unlock_file(handle)
 
     assert backend.calls == [(backend.LK_LOCK, 1), (backend.LK_UNLCK, 1)]
     assert (tmp_path / "route.lock").stat().st_size == 1
 
 
-def test_fresh_tenant_allocation_is_sanitized_stable_and_persisted(tmp_path: Path) -> None:
-    from vigil_cli.oob_tenants import allocate_tenant_route
+def test_fresh_slot_allocation_is_sanitized_stable_and_persisted(tmp_path: Path) -> None:
+    from vigil_cli.oob_relay import allocate_relay_route
 
     install_root = tmp_path / "Customer Alpha"
     registry = tmp_path / "allocations.json"
 
-    first = allocate_tenant_route(
+    first = allocate_relay_route(
         install_root,
-        tenant_name=" Customer Alpha ",
+        slot_name=" Customer Alpha ",
         base_domain="oob.example.test",
         registry_path=registry,
         identity_factory=lambda: "install-identity-a",
     )
-    second = allocate_tenant_route(
+    second = allocate_relay_route(
         install_root,
-        tenant_name="ignored-after-first-write",
+        slot_name="ignored-after-first-write",
         base_domain="changed.example.test",
         registry_path=registry,
         identity_factory=lambda: "must-not-be-used",
     )
 
     assert first == second
-    assert first.tenant_prefix == "customer-alpha-be3e46b6d1911ed7"
+    assert first.slot_prefix == "customer-alpha-be3e46b6d1911ed7"
     assert first.oob_domain == "customer-alpha-be3e46b6d1911ed7.oob.example.test"
     assert first.dns_remote_port != 53
     assert first.reverse_remote_port == first.dns_remote_port + 1
-    assert first.metadata_path == install_root / ".runtime-data/oob/tenant-routing.json"
-    assert json.loads(first.metadata_path.read_text())["tenant_prefix"] == first.tenant_prefix
+    assert first.metadata_path == install_root / ".runtime-data/oob/relay-routing.json"
+    assert json.loads(first.metadata_path.read_text())["slot_prefix"] == first.slot_prefix
 
 
-@pytest.mark.parametrize("tenant", ["", "   ", ".", "../escape", "a/b", "🔥"])
-def test_tenant_allocation_rejects_malformed_identity(tmp_path: Path, tenant: str) -> None:
-    from vigil_cli.oob_tenants import allocate_tenant_route
+@pytest.mark.parametrize("slot", ["", "   ", ".", "../escape", "a/b", "🔥"])
+def test_slot_allocation_rejects_malformed_identity(tmp_path: Path, slot: str) -> None:
+    from vigil_cli.oob_relay import allocate_relay_route
 
-    with pytest.raises(SystemExit, match="tenant"):
-        allocate_tenant_route(
+    with pytest.raises(SystemExit, match="relay slot identity"):
+        allocate_relay_route(
             tmp_path / "install",
-            tenant_name=tenant,
+            slot_name=slot,
             registry_path=tmp_path / "allocations.json",
         )
 
 
 def test_colliding_candidate_slot_moves_to_next_free_block(tmp_path: Path) -> None:
-    from vigil_cli.oob_tenants import allocate_tenant_route
+    from vigil_cli.oob_relay import allocate_relay_route
 
     registry = tmp_path / "allocations.json"
-    one = allocate_tenant_route(
+    one = allocate_relay_route(
         tmp_path / "one",
-        tenant_name="one",
+        slot_name="one",
         registry_path=registry,
         identity_factory=lambda: "identity-one",
         slot_candidates=lambda _identity: [7, 8],
     )
-    two = allocate_tenant_route(
+    two = allocate_relay_route(
         tmp_path / "two",
-        tenant_name="two",
+        slot_name="two",
         registry_path=registry,
         identity_factory=lambda: "identity-two",
         slot_candidates=lambda _identity: [7, 8],
@@ -126,17 +126,17 @@ def test_colliding_candidate_slot_moves_to_next_free_block(tmp_path: Path) -> No
     assert one.oob_domain != two.oob_domain
 
 
-def test_duplicate_install_identity_cannot_overwrite_another_tenant(tmp_path: Path) -> None:
-    from vigil_cli.oob_tenants import allocate_tenant_route
+def test_duplicate_install_identity_cannot_overwrite_another_slot(tmp_path: Path) -> None:
+    from vigil_cli.oob_relay import allocate_relay_route
 
     registry = tmp_path / "allocations.json"
-    first = allocate_tenant_route(
-        tmp_path / "one", tenant_name="one", registry_path=registry,
+    first = allocate_relay_route(
+        tmp_path / "one", slot_name="one", registry_path=registry,
         identity_factory=lambda: "same-install-id", slot_candidates=lambda _: [1],
     )
     with pytest.raises(SystemExit, match="identity collision"):
-        allocate_tenant_route(
-            tmp_path / "two", tenant_name="two", registry_path=registry,
+        allocate_relay_route(
+            tmp_path / "two", slot_name="two", registry_path=registry,
             identity_factory=lambda: "same-install-id", slot_candidates=lambda _: [2],
         )
     payload = json.loads(registry.read_text())
@@ -144,16 +144,16 @@ def test_duplicate_install_identity_cannot_overwrite_another_tenant(tmp_path: Pa
 
 
 def test_concurrent_allocation_of_one_install_returns_one_identity(tmp_path: Path) -> None:
-    from vigil_cli.oob_tenants import allocate_tenant_route
+    from vigil_cli.oob_relay import allocate_relay_route
 
     install_root = tmp_path / "shared"
     registry = tmp_path / "allocations.json"
     identities = iter(f"identity-{index}" for index in range(20))
 
     def allocate():
-        return allocate_tenant_route(
+        return allocate_relay_route(
             install_root,
-            tenant_name="shared",
+            slot_name="shared",
             registry_path=registry,
             identity_factory=lambda: next(identities),
         )
@@ -167,14 +167,14 @@ def test_concurrent_allocation_of_one_install_returns_one_identity(tmp_path: Pat
 
 
 def test_upgrade_without_metadata_pins_legacy_route_and_preserves_clients(tmp_path: Path) -> None:
-    from vigil_cli.oob_tenants import initialize_tenant_route
+    from vigil_cli.oob_relay import initialize_relay_route
 
     install_root = tmp_path / "existing"
     legacy_client = install_root / ".runtime-data/oob/clients/ssrf.session"
     legacy_client.parent.mkdir(parents=True)
     legacy_client.write_text("correlation material", encoding="utf-8")
 
-    route = initialize_tenant_route(
+    route = initialize_relay_route(
         install_root,
         is_upgrade=True,
         base_domain="oob.example.test",
@@ -189,41 +189,41 @@ def test_upgrade_without_metadata_pins_legacy_route_and_preserves_clients(tmp_pa
 
 
 def test_failed_metadata_publish_rolls_back_registry_allocation(tmp_path: Path) -> None:
-    import vigil_cli.oob_tenants as tenant_module
+    import vigil_cli.oob_relay as relay_module
 
     registry = tmp_path / "allocations.json"
 
     def fail_metadata(path: Path, payload: dict[str, object]) -> None:
-        if path.name == "tenant-routing.json":
+        if path.name == "relay-routing.json":
             raise OSError("disk full")
-        tenant_module._atomic_write_json_real(path, payload)
+        relay_module._atomic_write_json_real(path, payload)
 
     with pytest.raises(OSError, match="disk full"):
-        tenant_module.allocate_tenant_route(
+        relay_module.allocate_relay_route(
             tmp_path / "broken",
-            tenant_name="broken",
+            slot_name="broken",
             registry_path=registry,
             atomic_writer=fail_metadata,
         )
 
     payload = json.loads(registry.read_text())
     assert payload["allocations"] == {}
-    assert not (tmp_path / "broken/.runtime-data/oob/tenant-routing.json").exists()
+    assert not (tmp_path / "broken/.runtime-data/oob/relay-routing.json").exists()
 
 
-def test_tenant_metadata_rejects_corrupt_or_silently_changed_routing(tmp_path: Path) -> None:
-    from vigil_cli.oob_tenants import TENANT_METADATA_RELATIVE_PATH, load_tenant_route
+def test_relay_metadata_rejects_corrupt_or_silently_changed_routing(tmp_path: Path) -> None:
+    from vigil_cli.oob_relay import RELAY_METADATA_RELATIVE_PATH, load_relay_route
 
     install_root = tmp_path / "install"
-    path = install_root / TENANT_METADATA_RELATIVE_PATH
+    path = install_root / RELAY_METADATA_RELATIVE_PATH
     path.parent.mkdir(parents=True)
     path.write_text(
         json.dumps(
             {
                 "version": 1,
                 "install_id": "id",
-                "tenant_name": "alpha",
-                "tenant_prefix": "alpha-00000000",
+                "slot_name": "alpha",
+                "slot_prefix": "alpha-00000000",
                 "base_domain": "oob.example.test",
                 "oob_domain": "evil.example.test",
                 "allocation_slot": 2,
@@ -235,15 +235,15 @@ def test_tenant_metadata_rejects_corrupt_or_silently_changed_routing(tmp_path: P
     )
 
     with pytest.raises(SystemExit, match="routing metadata"):
-        load_tenant_route(install_root)
+        load_relay_route(install_root)
 
 
-def test_edge_routing_config_is_deterministic_and_tenant_specific(tmp_path: Path) -> None:
-    from vigil_cli.oob_tenants import allocate_tenant_route, render_edge_routing
+def test_edge_routing_config_is_deterministic_and_slot_specific(tmp_path: Path) -> None:
+    from vigil_cli.oob_relay import allocate_relay_route, render_edge_routing
 
-    route = allocate_tenant_route(
-        tmp_path / "tenant",
-        tenant_name="Acme",
+    route = allocate_relay_route(
+        tmp_path / "slot",
+        slot_name="Acme",
         base_domain="oob.example.test",
         registry_path=tmp_path / "allocations.json",
         identity_factory=lambda: "acme-id",
@@ -262,18 +262,18 @@ def test_edge_routing_config_is_deterministic_and_tenant_specific(tmp_path: Path
     assert str(route.reverse_remote_port) in rendered["routing_json"]
 
 
-def test_oob_options_and_assess_environment_consume_resolved_tenant_metadata(
+def test_oob_options_and_assess_environment_consume_resolved_relay_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from vigil_cli import main as main_module
     from vigil_cli.oob import oob_options
-    from vigil_cli.oob_tenants import allocate_tenant_route
+    from vigil_cli.oob_relay import allocate_relay_route
 
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
-    install_root = tmp_path / "tenant"
-    route = allocate_tenant_route(
+    install_root = tmp_path / "slot"
+    route = allocate_relay_route(
         install_root,
-        tenant_name="Acme",
+        slot_name="Acme",
         base_domain="oob.example.test",
         registry_path=tmp_path / "allocations.json",
         identity_factory=lambda: "acme-id",
@@ -287,7 +287,7 @@ def test_oob_options_and_assess_environment_consume_resolved_tenant_metadata(
     assert options.dns_remote_port == route.dns_remote_port
     assert options.reverse_remote_port == route.reverse_remote_port
     assert env["VIGIL_OOB_DOMAIN"] == route.oob_domain
-    assert env["VIGIL_OOB_TENANT"] == route.tenant_prefix
+    assert env["VIGIL_OOB_SLOT"] == route.slot_prefix
     assert env["VIGIL_OOB_DNS_PORT"] == str(route.dns_remote_port)
     assert env["VIGIL_OOB_REVERSE_PORT"] == str(route.reverse_remote_port)
 
@@ -296,11 +296,11 @@ def test_external_domain_override_cannot_replace_persisted_vigil_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from vigil_cli.oob import oob_options
-    from vigil_cli.oob_tenants import allocate_tenant_route
+    from vigil_cli.oob_relay import allocate_relay_route
 
-    install_root = tmp_path / "tenant"
-    route = allocate_tenant_route(
-        install_root, tenant_name="Acme", registry_path=tmp_path / "allocations.json",
+    install_root = tmp_path / "slot"
+    route = allocate_relay_route(
+        install_root, slot_name="Acme", registry_path=tmp_path / "allocations.json",
         identity_factory=lambda: "acme-id", slot_candidates=lambda _: [11],
     )
     monkeypatch.setenv("VIGIL_OOB_DOMAIN", "public-interactsh.example")
@@ -333,8 +333,8 @@ def test_fresh_install_accepts_ambient_value_as_its_persisted_base_domain(
     )
 
     options = oob_options(install_root)
-    assert options.tenant_route is not None
-    assert options.tenant_route.base_domain == "custom.example.test"
+    assert options.relay_route is not None
+    assert options.relay_route.base_domain == "custom.example.test"
     assert options.oob_domain.endswith(".custom.example.test")
 
 
@@ -342,7 +342,7 @@ def test_install_reads_relative_config_from_caller_context_before_pinning_cwd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from vigil_cli.install import InstallOptions, install_from_source
-    from vigil_cli.oob_tenants import load_tenant_route
+    from vigil_cli.oob_relay import load_relay_route
 
     caller_root = tmp_path / "caller"
     config_path = caller_root / "config" / "vigil.json"
@@ -351,7 +351,7 @@ def test_install_reads_relative_config_from_caller_context_before_pinning_cwd(
         json.dumps(
             {
                 "oob.domain": "oob.example.test",
-                "oob.tenant": "caller-configured-tenant",
+                "oob.slot": "caller-configured-slot",
             }
         ),
         encoding="utf-8",
@@ -371,9 +371,9 @@ def test_install_reads_relative_config_from_caller_context_before_pinning_cwd(
         )
     )
 
-    route = load_tenant_route(install_root)
+    route = load_relay_route(install_root)
     assert route is not None
-    assert route.tenant_name == "caller-configured-tenant"
+    assert route.slot_name == "caller-configured-slot"
     registry_path = config_path.with_name("oob-allocations.json")
     registry = json.loads(registry_path.read_text(encoding="utf-8"))
     assert registry["allocations"][route.install_id]["install_root"] == str(
@@ -387,7 +387,7 @@ def test_fresh_install_without_oob_configuration_does_not_persist_owner_defaults
 ) -> None:
     from vigil_cli.install import InstallOptions, install_from_source
     from vigil_cli.oob import oob_options, start_oob
-    from vigil_cli.oob_tenants import load_tenant_route
+    from vigil_cli.oob_relay import load_relay_route
 
     source_root = tmp_path / "source"
     install_root = tmp_path / "fresh"
@@ -405,7 +405,7 @@ def test_fresh_install_without_oob_configuration_does_not_persist_owner_defaults
         )
     )
 
-    assert load_tenant_route(install_root) is None
+    assert load_relay_route(install_root) is None
     options = oob_options(install_root)
     assert options.frp_host == ""
     assert options.oob_domain == ""
@@ -416,7 +416,13 @@ def test_fresh_install_without_oob_configuration_does_not_persist_owner_defaults
         calls.append(list(argv))
         raise AssertionError("unconfigured OOB must fail before Docker access")
 
-    with pytest.raises(SystemExit, match=r"config set oob\.frp_host.*config set oob\.domain"):
+    # (?s) so `.` spans the checklist's newlines; the abort now names the
+    # token too, so an operator is not refused a second time for it.
+    with pytest.raises(
+        SystemExit,
+        match=r"(?s)config set oob\.frp_host.*config set oob\.domain"
+        r".*config set oob\.frp_token",
+    ):
         start_oob(options, runner=runner)
     assert calls == []
 
@@ -425,18 +431,18 @@ def test_fresh_install_allocates_route_but_upgrade_pins_legacy_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from vigil_cli.install import InstallOptions, install_from_source
-    from vigil_cli.oob_tenants import load_tenant_route
+    from vigil_cli.oob_relay import load_relay_route
 
     source_root = tmp_path / "source"
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.test")
     (source_root / "agent").mkdir(parents=True)
     (source_root / "agent/README").write_text("managed", encoding="utf-8")
-    fresh_root = tmp_path / "fresh-tenant"
+    fresh_root = tmp_path / "fresh-slot"
     fresh = install_from_source(
         InstallOptions(source_root=source_root, install_root=fresh_root, verify_docker_image=False)
     )
-    fresh_route = load_tenant_route(fresh_root)
+    fresh_route = load_relay_route(fresh_root)
     assert fresh.is_upgrade is False
     assert fresh_route is not None and fresh_route.legacy is False
 
@@ -448,13 +454,13 @@ def test_fresh_install_allocates_route_but_upgrade_pins_legacy_route(
     upgraded = install_from_source(
         InstallOptions(source_root=source_root, install_root=upgrade_root, verify_docker_image=False)
     )
-    upgrade_route = load_tenant_route(upgrade_root)
+    upgrade_route = load_relay_route(upgrade_root)
     assert upgraded.is_upgrade is True
     assert upgrade_route is not None and upgrade_route.legacy is True
     assert correlation.read_text() == "keep"
 
 
-def test_runtime_frp_and_client_metadata_use_tenant_route(tmp_path: Path) -> None:
+def test_runtime_frp_and_client_metadata_use_relay_route(tmp_path: Path) -> None:
     from vigil_cli.docker import DockerResult
     from vigil_cli.oob import OobOptions, _render_runtime_files, start_oob_client
 
@@ -462,7 +468,7 @@ def test_runtime_frp_and_client_metadata_use_tenant_route(tmp_path: Path) -> Non
     runtime_route = json.dumps(
         {
             "version": 1,
-            "tenant_prefix": "acme-12345678",
+            "slot_prefix": "acme-12345678",
             "oob_domain": "acme-12345678.oob.example.test",
             "dns_remote_port": 20120,
             "reverse_remote_port": 20121,
@@ -474,7 +480,7 @@ def test_runtime_frp_and_client_metadata_use_tenant_route(tmp_path: Path) -> Non
         commands.append(command)
         if argv[:3] == ["docker", "ps", "--format"]:
             return DockerResult(0, "vigil\n", "")
-        if command.startswith("cat ") and "active-tenant-routing.json" in command:
+        if command.startswith("cat ") and "active-relay-routing.json" in command:
             return DockerResult(0, runtime_route, "")
         if command == "tmux has-session -t oob-client-agent-a":
             return DockerResult(1, "", "")
@@ -484,7 +490,7 @@ def test_runtime_frp_and_client_metadata_use_tenant_route(tmp_path: Path) -> Non
         install_root=tmp_path,
         frp_token="secret",
         oob_domain="acme-12345678.oob.example.test",
-        tenant_prefix="acme-12345678",
+        slot_prefix="acme-12345678",
         dns_remote_port=20120,
         reverse_remote_port=20121,
     )
@@ -493,10 +499,10 @@ def test_runtime_frp_and_client_metadata_use_tenant_route(tmp_path: Path) -> Non
     rendered = "\n".join(commands)
     assert "remotePort = 20120" in rendered
     assert "remotePort = 20121" in rendered
-    assert '"tenant_prefix": "acme-12345678"' in rendered
+    assert '"slot_prefix": "acme-12345678"' in rendered
     assert '"dns_remote_port": 20120' in rendered
-    assert "/data/oob/active-tenant-routing.json" in rendered
-    assert "Path('/data/oob/tenant-routing.json').write_text" not in rendered
+    assert "/data/oob/active-relay-routing.json" in rendered
+    assert "Path('/data/oob/relay-routing.json').write_text" not in rendered
     assert "-server acme-12345678.oob.example.test" in rendered
 
 
@@ -510,7 +516,7 @@ def test_oob_poll_refuses_client_owned_by_another_engagement(tmp_path: Path) -> 
             "engagement": "engagement-b",
             "agent": "analyst",
             "server": "acme.oob.example.test",
-            "tenant_prefix": "acme",
+            "slot_prefix": "acme",
             "dns_remote_port": 20120,
             "reverse_remote_port": 20121,
         }
@@ -526,7 +532,7 @@ def test_oob_poll_refuses_client_owned_by_another_engagement(tmp_path: Path) -> 
         install_root=tmp_path,
         frp_token="secret",
         oob_domain="acme.oob.example.test",
-        tenant_prefix="acme",
+        slot_prefix="acme",
         dns_remote_port=20120,
         reverse_remote_port=20121,
     )
@@ -559,7 +565,7 @@ def test_oob_start_refuses_route_switch_while_unverifiable_client_is_running(
             return DockerResult(1, "", "")
         if "tmux list-sessions" in command:
             return DockerResult(0, "legacy-agent\n", "")
-        if "active-tenant-routing.json" in command:
+        if "active-relay-routing.json" in command:
             return DockerResult(1, "", "")
         if "/clients/legacy-agent.json" in command:
             return DockerResult(1, "", "")
@@ -571,8 +577,8 @@ def test_oob_start_refuses_route_switch_while_unverifiable_client_is_running(
                 install_root=tmp_path,
                 frp_host="frp.example.test",
                 frp_token="secret",
-                tenant_prefix="tenant-new",
-                oob_domain="tenant-new.oob.example.test",
+                slot_prefix="slot-new",
+                oob_domain="slot-new.oob.example.test",
                 dns_remote_port=20120,
                 reverse_remote_port=20121,
             ),
@@ -594,8 +600,8 @@ def test_oob_client_start_refuses_mismatched_runtime_route_before_writing_metada
     old_route = json.dumps(
         {
             "version": 1,
-            "tenant_prefix": "tenant-old",
-            "oob_domain": "tenant-old.oob.example.test",
+            "slot_prefix": "slot-old",
+            "oob_domain": "slot-old.oob.example.test",
             "dns_remote_port": 20010,
             "reverse_remote_port": 20011,
         }
@@ -606,7 +612,7 @@ def test_oob_client_start_refuses_mismatched_runtime_route_before_writing_metada
         commands.append(command)
         if argv[:3] == ["docker", "ps", "--format"]:
             return DockerResult(0, "vigil\n", "")
-        if "active-tenant-routing.json" in command:
+        if "active-relay-routing.json" in command:
             return DockerResult(0, old_route, "")
         return DockerResult(0, "", "")
 
@@ -614,8 +620,8 @@ def test_oob_client_start_refuses_mismatched_runtime_route_before_writing_metada
         start_oob_client(
             OobOptions(
                 install_root=tmp_path,
-                tenant_prefix="tenant-new",
-                oob_domain="tenant-new.oob.example.test",
+                slot_prefix="slot-new",
+                oob_domain="slot-new.oob.example.test",
                 dns_remote_port=20120,
                 reverse_remote_port=20121,
             ),
@@ -636,8 +642,8 @@ def test_oob_client_start_never_overwrites_mismatched_running_session_metadata(
     commands: list[str] = []
     requested_route = {
         "version": 1,
-        "tenant_prefix": "tenant-new",
-        "oob_domain": "tenant-new.oob.example.test",
+        "slot_prefix": "slot-new",
+        "oob_domain": "slot-new.oob.example.test",
         "dns_remote_port": 20120,
         "reverse_remote_port": 20121,
     }
@@ -646,8 +652,8 @@ def test_oob_client_start_never_overwrites_mismatched_running_session_metadata(
             "name": "agent-a",
             "engagement": "old-engagement",
             "agent": "old-agent",
-            "server": "tenant-old.oob.example.test",
-            "tenant_prefix": "tenant-old",
+            "server": "slot-old.oob.example.test",
+            "slot_prefix": "slot-old",
             "dns_remote_port": 20010,
             "reverse_remote_port": 20011,
         }
@@ -658,7 +664,7 @@ def test_oob_client_start_never_overwrites_mismatched_running_session_metadata(
         commands.append(command)
         if argv[:3] == ["docker", "ps", "--format"]:
             return DockerResult(0, "vigil\n", "")
-        if "active-tenant-routing.json" in command:
+        if "active-relay-routing.json" in command:
             return DockerResult(0, json.dumps(requested_route), "")
         if command == "tmux has-session -t oob-client-agent-a":
             return DockerResult(0, "", "")
@@ -666,12 +672,12 @@ def test_oob_client_start_never_overwrites_mismatched_running_session_metadata(
             return DockerResult(0, old_client_metadata, "")
         return DockerResult(0, "", "")
 
-    with pytest.raises(SystemExit, match="running OOB client.*another tenant route"):
+    with pytest.raises(SystemExit, match="running OOB client.*another relay route"):
         start_oob_client(
             OobOptions(
                 install_root=tmp_path,
-                tenant_prefix="tenant-new",
-                oob_domain="tenant-new.oob.example.test",
+                slot_prefix="slot-new",
+                oob_domain="slot-new.oob.example.test",
                 dns_remote_port=20120,
                 reverse_remote_port=20121,
             ),
@@ -698,8 +704,8 @@ def test_oob_client_start_reuses_exact_running_session_without_mutation(
     commands: list[str] = []
     route = {
         "version": 1,
-        "tenant_prefix": "tenant-a",
-        "oob_domain": "tenant-a.oob.example.test",
+        "slot_prefix": "slot-a",
+        "oob_domain": "slot-a.oob.example.test",
         "dns_remote_port": 20010,
         "reverse_remote_port": 20011,
     }
@@ -708,7 +714,7 @@ def test_oob_client_start_reuses_exact_running_session_without_mutation(
         "engagement": "eng-a",
         "agent": "hunter",
         "server": route["oob_domain"],
-        "tenant_prefix": route["tenant_prefix"],
+        "slot_prefix": route["slot_prefix"],
         "dns_remote_port": route["dns_remote_port"],
         "reverse_remote_port": route["reverse_remote_port"],
     }
@@ -718,7 +724,7 @@ def test_oob_client_start_reuses_exact_running_session_without_mutation(
         commands.append(command)
         if argv[:3] == ["docker", "ps", "--format"]:
             return DockerResult(0, "vigil\n", "")
-        if "active-tenant-routing.json" in command:
+        if "active-relay-routing.json" in command:
             return DockerResult(0, json.dumps(route), "")
         if command == "tmux has-session -t oob-client-agent-a":
             return DockerResult(0, "", "")
@@ -729,8 +735,8 @@ def test_oob_client_start_reuses_exact_running_session_without_mutation(
     start_oob_client(
         OobOptions(
             install_root=tmp_path,
-            tenant_prefix="tenant-a",
-            oob_domain="tenant-a.oob.example.test",
+            slot_prefix="slot-a",
+            oob_domain="slot-a.oob.example.test",
             dns_remote_port=20010,
             reverse_remote_port=20011,
         ),
@@ -753,7 +759,7 @@ def test_oob_client_start_reuses_constrained_pre_wave2_legacy_metadata_without_m
     commands: list[str] = []
     route = {
         "version": 1,
-        "tenant_prefix": "legacy",
+        "slot_prefix": "legacy",
         "oob_domain": "oob.example.test",
         "dns_remote_port": 53,
         "reverse_remote_port": 8443,
@@ -770,7 +776,7 @@ def test_oob_client_start_reuses_constrained_pre_wave2_legacy_metadata_without_m
         commands.append(command)
         if argv[:3] == ["docker", "ps", "--format"]:
             return DockerResult(0, "vigil\n", "")
-        if "active-tenant-routing.json" in command:
+        if "active-relay-routing.json" in command:
             return DockerResult(0, json.dumps(route), "")
         if command == "tmux has-session -t oob-client-agent-a":
             return DockerResult(0, "", "")
@@ -781,7 +787,7 @@ def test_oob_client_start_reuses_constrained_pre_wave2_legacy_metadata_without_m
     start_oob_client(
         OobOptions(
             install_root=tmp_path,
-            tenant_prefix="legacy",
+            slot_prefix="legacy",
             oob_domain="oob.example.test",
             dns_remote_port=53,
             reverse_remote_port=8443,
@@ -822,7 +828,7 @@ def test_oob_start_admits_constrained_pre_wave2_legacy_client_ownership(
             return DockerResult(1, "", "")
         if "tmux list-sessions" in command:
             return DockerResult(0, "agent-a\n", "")
-        if command.startswith("cat ") and "active-tenant-routing.json" in command:
+        if command.startswith("cat ") and "active-relay-routing.json" in command:
             return DockerResult(1, "", "")
         if command.startswith("cat ") and "/clients/agent-a.json" in command:
             return DockerResult(0, json.dumps(legacy_metadata), "")
@@ -833,7 +839,7 @@ def test_oob_start_admits_constrained_pre_wave2_legacy_client_ownership(
             install_root=tmp_path,
             frp_host="frp.example.test",
             frp_token="secret",
-            tenant_prefix="legacy",
+            slot_prefix="legacy",
             oob_domain="oob.example.test",
             dns_remote_port=53,
             reverse_remote_port=8443,
@@ -854,7 +860,7 @@ def test_oob_start_admits_constrained_pre_wave2_legacy_client_ownership(
     [
         (
             {
-                "tenant_prefix": "legacy",
+                "slot_prefix": "legacy",
                 "oob_domain": "oob.example.test",
                 "dns_remote_port": 53,
                 "reverse_remote_port": 8443,
@@ -863,7 +869,7 @@ def test_oob_start_admits_constrained_pre_wave2_legacy_client_ownership(
         ),
         (
             {
-                "tenant_prefix": "legacy",
+                "slot_prefix": "legacy",
                 "oob_domain": "oob.example.test",
                 "dns_remote_port": 20010,
                 "reverse_remote_port": 20011,
@@ -872,15 +878,15 @@ def test_oob_start_admits_constrained_pre_wave2_legacy_client_ownership(
         ),
         (
             {
-                "tenant_prefix": "tenant-a",
-                "oob_domain": "tenant-a.oob.example.test",
+                "slot_prefix": "slot-a",
+                "oob_domain": "slot-a.oob.example.test",
                 "dns_remote_port": 20010,
                 "reverse_remote_port": 20011,
             },
-            "tenant-a.oob.example.test",
+            "slot-a.oob.example.test",
         ),
     ],
-    ids=["foreign-domain", "nonlegacy-ports", "nonlegacy-tenant"],
+    ids=["foreign-domain", "nonlegacy-ports", "nonlegacy-slot"],
 )
 def test_oob_client_start_rejects_pre_wave2_metadata_outside_legacy_constraints(
     tmp_path: Path,
@@ -905,7 +911,7 @@ def test_oob_client_start_rejects_pre_wave2_metadata_outside_legacy_constraints(
         commands.append(command)
         if argv[:3] == ["docker", "ps", "--format"]:
             return DockerResult(0, "vigil\n", "")
-        if "active-tenant-routing.json" in command:
+        if "active-relay-routing.json" in command:
             return DockerResult(0, json.dumps(route), "")
         if command == "tmux has-session -t oob-client-agent-a":
             return DockerResult(0, "", "")
@@ -913,7 +919,7 @@ def test_oob_client_start_rejects_pre_wave2_metadata_outside_legacy_constraints(
             return DockerResult(0, json.dumps(legacy_metadata), "")
         return DockerResult(0, "", "")
 
-    with pytest.raises(SystemExit, match="another tenant route"):
+    with pytest.raises(SystemExit, match="another relay route"):
         start_oob_client(
             OobOptions(install_root=tmp_path, **options_kwargs),
             "agent-a",
@@ -925,14 +931,14 @@ def test_oob_client_start_rejects_pre_wave2_metadata_outside_legacy_constraints(
     assert not any("write_text" in command for command in commands)
 
 
-def test_health_status_and_doctor_surface_tenant_routing(tmp_path: Path) -> None:
+def test_health_status_and_doctor_surface_relay_routing(tmp_path: Path) -> None:
     from vigil_cli.docker import DockerResult
     from vigil_cli.oob import oob_status
-    from vigil_cli.oob_tenants import allocate_tenant_route
-    from vigil_cli.status import _oob_tenant_check
+    from vigil_cli.oob_relay import allocate_relay_route
+    from vigil_cli.status import _oob_relay_check
 
-    route = allocate_tenant_route(
-        tmp_path / "tenant", tenant_name="Acme", registry_path=tmp_path / "allocations.json",
+    route = allocate_relay_route(
+        tmp_path / "slot", slot_name="Acme", registry_path=tmp_path / "allocations.json",
         identity_factory=lambda: "acme-id", slot_candidates=lambda _: [11],
     )
 
@@ -941,29 +947,29 @@ def test_health_status_and_doctor_surface_tenant_routing(tmp_path: Path) -> None
 
     payload = oob_status(
         oob_domain=route.oob_domain,
-        tenant_prefix=route.tenant_prefix,
+        slot_prefix=route.slot_prefix,
         dns_remote_port=route.dns_remote_port,
         reverse_remote_port=route.reverse_remote_port,
         runner=runner,
         deep=False,
     )
-    assert payload["tenant_prefix"] == route.tenant_prefix
+    assert payload["slot_prefix"] == route.slot_prefix
     assert payload["port_range"] == [route.dns_remote_port, route.reverse_remote_port]
-    check = _oob_tenant_check(tmp_path / "tenant")
+    check = _oob_relay_check(tmp_path / "slot")
     assert check.status == "OK"
-    assert route.tenant_prefix in check.detail
+    assert route.slot_prefix in check.detail
 
 
 def test_oob_routing_cli_emits_deployment_metadata_without_mutating_services(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from vigil_cli import main as main_module
-    from vigil_cli.oob_tenants import allocate_tenant_route
+    from vigil_cli.oob_relay import allocate_relay_route
 
-    install_root = tmp_path / "tenant"
+    install_root = tmp_path / "slot"
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
-    route = allocate_tenant_route(
-        install_root, tenant_name="Acme", registry_path=tmp_path / "allocations.json",
+    route = allocate_relay_route(
+        install_root, slot_name="Acme", registry_path=tmp_path / "allocations.json",
         identity_factory=lambda: "acme-id", slot_candidates=lambda _: [11],
     )
 
@@ -975,22 +981,22 @@ def test_oob_routing_cli_emits_deployment_metadata_without_mutating_services(
     assert payload["reverse_tcp_port"] == route.reverse_remote_port
 
 
-def test_cross_tenant_client_payload_and_correlation_are_isolated(tmp_path: Path) -> None:
+def test_cross_slot_client_payload_and_correlation_are_isolated(tmp_path: Path) -> None:
     from vigil_cli.oob import (
         interactions_for_domain,
         match_interactions_to_nonces,
         parse_client_payload_host,
         parse_interactsh_log,
     )
-    from vigil_cli.oob_tenants import allocate_tenant_route
+    from vigil_cli.oob_relay import allocate_relay_route
 
     registry = tmp_path / "allocations.json"
-    alpha = allocate_tenant_route(
-        tmp_path / "alpha", tenant_name="alpha", registry_path=registry,
+    alpha = allocate_relay_route(
+        tmp_path / "alpha", slot_name="alpha", registry_path=registry,
         identity_factory=lambda: "alpha-id", slot_candidates=lambda _: [1],
     )
-    beta = allocate_tenant_route(
-        tmp_path / "beta", tenant_name="beta", registry_path=registry,
+    beta = allocate_relay_route(
+        tmp_path / "beta", slot_name="beta", registry_path=registry,
         identity_factory=lambda: "beta-id", slot_candidates=lambda _: [2],
     )
     alpha_id = "a" * 33
@@ -1006,7 +1012,7 @@ def test_cross_tenant_client_payload_and_correlation_are_isolated(tmp_path: Path
     assert matched == []
 
 
-def test_tenant_filter_admits_compact_interactsh_client_callback() -> None:
+def test_slot_filter_admits_compact_interactsh_client_callback() -> None:
     """Current interactsh -v logs omit the configured domain from callback brackets."""
     from vigil_cli.oob import interactions_for_domain, parse_interactsh_log
 
@@ -1017,15 +1023,15 @@ def test_tenant_filter_admits_compact_interactsh_client_callback() -> None:
 
     admitted = interactions_for_domain(
         callback,
-        "tenant.oob.example.com",
-        client_payload_host="client-correlation-id.tenant.oob.example.com",
+        "slot.oob.example.com",
+        client_payload_host="client-correlation-id.slot.oob.example.com",
     )
 
     assert admitted == callback
 
 
-def test_tenant_filter_rejects_compact_callback_for_another_client() -> None:
-    """A short callback has no tenant suffix and must match the selected client."""
+def test_slot_filter_rejects_compact_callback_for_another_client() -> None:
+    """A short callback has no slot suffix and must match the selected client."""
     from vigil_cli.oob import interactions_for_domain, parse_interactsh_log
 
     callback = parse_interactsh_log(
@@ -1045,27 +1051,27 @@ def test_tenant_filter_rejects_compact_callback_for_another_client() -> None:
 def test_existing_route_repairs_missing_registry_entry_before_new_allocation(
     tmp_path: Path,
 ) -> None:
-    from vigil_cli.oob_tenants import allocate_tenant_route
+    from vigil_cli.oob_relay import allocate_relay_route
 
     registry = tmp_path / "allocations.json"
-    original = allocate_tenant_route(
+    original = allocate_relay_route(
         tmp_path / "original",
-        tenant_name="original",
+        slot_name="original",
         registry_path=registry,
         identity_factory=lambda: "original-id",
         slot_candidates=lambda _: [9],
     )
     registry.write_text(json.dumps({"version": 1, "allocations": {}}), encoding="utf-8")
 
-    restored = allocate_tenant_route(
+    restored = allocate_relay_route(
         tmp_path / "original",
-        tenant_name="ignored",
+        slot_name="ignored",
         registry_path=registry,
         identity_factory=lambda: pytest.fail("existing metadata must supply identity"),
     )
-    newcomer = allocate_tenant_route(
+    newcomer = allocate_relay_route(
         tmp_path / "newcomer",
-        tenant_name="newcomer",
+        slot_name="newcomer",
         registry_path=registry,
         identity_factory=lambda: "newcomer-id",
         slot_candidates=lambda _: [9, 10],
@@ -1080,26 +1086,26 @@ def test_existing_route_repairs_missing_registry_entry_before_new_allocation(
 
 
 def test_copied_live_install_metadata_is_rejected_by_registry(tmp_path: Path) -> None:
-    from vigil_cli.oob_tenants import TENANT_METADATA_RELATIVE_PATH, allocate_tenant_route
+    from vigil_cli.oob_relay import RELAY_METADATA_RELATIVE_PATH, allocate_relay_route
 
     registry = tmp_path / "allocations.json"
     original_root = tmp_path / "original"
     clone_root = tmp_path / "clone"
-    allocate_tenant_route(
+    allocate_relay_route(
         original_root,
-        tenant_name="original",
+        slot_name="original",
         registry_path=registry,
         identity_factory=lambda: "shared-id",
         slot_candidates=lambda _: [4],
     )
-    clone_path = clone_root / TENANT_METADATA_RELATIVE_PATH
+    clone_path = clone_root / RELAY_METADATA_RELATIVE_PATH
     clone_path.parent.mkdir(parents=True)
-    shutil.copy2(original_root / TENANT_METADATA_RELATIVE_PATH, clone_path)
+    shutil.copy2(original_root / RELAY_METADATA_RELATIVE_PATH, clone_path)
 
     with pytest.raises(SystemExit, match="another install root"):
-        allocate_tenant_route(
+        allocate_relay_route(
             clone_root,
-            tenant_name="clone",
+            slot_name="clone",
             registry_path=registry,
         )
 
@@ -1109,31 +1115,31 @@ def test_copied_live_install_metadata_is_rejected_by_registry(tmp_path: Path) ->
     ["", ".", "*.example.test", "bad_domain.test", "evil.test\n}\nattacker {"],
 )
 def test_allocator_rejects_non_dns_base_domains(tmp_path: Path, domain: str) -> None:
-    from vigil_cli.oob_tenants import allocate_tenant_route
+    from vigil_cli.oob_relay import allocate_relay_route
 
     with pytest.raises(SystemExit, match="domain"):
-        allocate_tenant_route(
+        allocate_relay_route(
             tmp_path / "install",
-            tenant_name="tenant",
+            slot_name="slot",
             base_domain=domain,
             registry_path=tmp_path / "allocations.json",
         )
 
 
-def test_allocator_rejects_base_domain_when_tenant_domain_exceeds_dns_limit(
+def test_allocator_rejects_base_domain_when_slot_domain_exceeds_dns_limit(
     tmp_path: Path,
 ) -> None:
-    from vigil_cli.oob_tenants import allocate_tenant_route
+    from vigil_cli.oob_relay import allocate_relay_route
 
     base_domain = f"{'a' * 63}.{'b' * 63}.{'c' * 63}.{'d' * 61}"
     assert len(base_domain) == 253
     with pytest.raises(SystemExit, match="domain"):
-        allocate_tenant_route(
+        allocate_relay_route(
             tmp_path / "install",
-            tenant_name="tenant",
+            slot_name="slot",
             base_domain=base_domain,
             registry_path=tmp_path / "allocations.json",
-            identity_factory=lambda: "tenant-id",
+            identity_factory=lambda: "slot-id",
             slot_candidates=lambda _: [1],
         )
 
@@ -1142,7 +1148,7 @@ def test_upgrade_pins_ambient_domain_that_was_effective_before_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from vigil_cli.install import InstallOptions, install_from_source
-    from vigil_cli.oob_tenants import load_tenant_route
+    from vigil_cli.oob_relay import load_relay_route
 
     source_root = tmp_path / "source"
     install_root = tmp_path / "upgrade"
@@ -1160,13 +1166,13 @@ def test_upgrade_pins_ambient_domain_that_was_effective_before_metadata(
         )
     )
 
-    route = load_tenant_route(install_root)
+    route = load_relay_route(install_root)
     assert route is not None and route.legacy
     assert route.oob_domain == "legacy.custom.test"
 
 
 def test_metadata_parent_symlink_cannot_escape_install_root(tmp_path: Path) -> None:
-    from vigil_cli.oob_tenants import allocate_tenant_route
+    from vigil_cli.oob_relay import allocate_relay_route
 
     install_root = tmp_path / "install"
     outside = tmp_path / "outside"
@@ -1175,53 +1181,53 @@ def test_metadata_parent_symlink_cannot_escape_install_root(tmp_path: Path) -> N
     (install_root / ".runtime-data").symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(SystemExit, match="escapes install root"):
-        allocate_tenant_route(
+        allocate_relay_route(
             install_root,
-            tenant_name="tenant",
+            slot_name="slot",
             registry_path=tmp_path / "allocations.json",
         )
-    assert not (outside / "oob/tenant-routing.json").exists()
+    assert not (outside / "oob/relay-routing.json").exists()
 
 
 def test_metadata_file_symlink_is_rejected(tmp_path: Path) -> None:
-    from vigil_cli.oob_tenants import (
-        TENANT_METADATA_RELATIVE_PATH,
-        allocate_tenant_route,
-        load_tenant_route,
+    from vigil_cli.oob_relay import (
+        RELAY_METADATA_RELATIVE_PATH,
+        allocate_relay_route,
+        load_relay_route,
     )
 
     source_root = tmp_path / "source"
-    source = allocate_tenant_route(
+    source = allocate_relay_route(
         source_root,
-        tenant_name="source",
+        slot_name="source",
         registry_path=tmp_path / "allocations.json",
         identity_factory=lambda: "source-id",
         slot_candidates=lambda _: [1],
     )
     install_root = tmp_path / "install"
-    linked = install_root / TENANT_METADATA_RELATIVE_PATH
+    linked = install_root / RELAY_METADATA_RELATIVE_PATH
     linked.parent.mkdir(parents=True)
     linked.symlink_to(source.metadata_path)
 
     with pytest.raises(SystemExit, match="symlink"):
-        load_tenant_route(install_root)
+        load_relay_route(install_root)
 
 
 def test_atomic_writer_tolerates_unsupported_directory_fsync(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import vigil_cli.oob_tenants as tenants
+    import vigil_cli.oob_relay as relay
 
-    real_open = tenants.os.open
+    real_open = relay.os.open
 
     def portable_open(path: object, flags: int, *args: object) -> int:
         if Path(path) == tmp_path and flags == os.O_RDONLY:
             raise PermissionError("directory handles are unsupported")
         return real_open(path, flags, *args)
 
-    monkeypatch.setattr(tenants.os, "open", portable_open)
+    monkeypatch.setattr(relay.os, "open", portable_open)
     destination = tmp_path / "routing.json"
-    tenants._atomic_write_json_real(destination, {"safe": True})
+    relay._atomic_write_json_real(destination, {"safe": True})
 
     assert json.loads(destination.read_text(encoding="utf-8")) == {"safe": True}
 
@@ -1229,7 +1235,7 @@ def test_atomic_writer_tolerates_unsupported_directory_fsync(
 def test_atomic_writer_does_not_follow_predictable_temporary_symlink(
     tmp_path: Path,
 ) -> None:
-    import vigil_cli.oob_tenants as tenants
+    import vigil_cli.oob_relay as relay
 
     destination = tmp_path / "routing.json"
     victim = tmp_path / "victim.txt"
@@ -1240,11 +1246,11 @@ def test_atomic_writer_does_not_follow_predictable_temporary_symlink(
     temporary.symlink_to(victim)
 
     with pytest.raises(FileExistsError):
-        tenants._atomic_write_json_real(destination, {"safe": True})
+        relay._atomic_write_json_real(destination, {"safe": True})
     assert victim.read_text(encoding="utf-8") == "keep"
 
 
-def test_frp_proxy_names_are_stable_and_derived_from_tenant_not_container(
+def test_frp_proxy_names_are_stable_and_derived_from_slot_not_container(
     tmp_path: Path,
 ) -> None:
     from vigil_cli.docker import DockerResult
@@ -1259,8 +1265,8 @@ def test_frp_proxy_names_are_stable_and_derived_from_tenant_not_container(
     _render_runtime_files(
         OobOptions(
             install_root=tmp_path,
-            tenant_prefix="tenant-a-0123456789abcdef",
-            oob_domain="tenant-a-0123456789abcdef.oob.example.test",
+            slot_prefix="slot-a-0123456789abcdef",
+            oob_domain="slot-a-0123456789abcdef.oob.example.test",
         ),
         runner=runner,
     )
@@ -1269,14 +1275,14 @@ def test_frp_proxy_names_are_stable_and_derived_from_tenant_not_container(
     assert 'name = "vigil-' in rendered
 
 
-def test_oob_status_degrades_when_live_runtime_belongs_to_another_tenant() -> None:
+def test_oob_status_degrades_when_live_runtime_belongs_to_another_slot() -> None:
     from vigil_cli.docker import DockerResult
     from vigil_cli.oob import oob_status
 
     runtime_route = json.dumps(
         {
-            "tenant_prefix": "tenant-a",
-            "oob_domain": "tenant-a.oob.example.test",
+            "slot_prefix": "slot-a",
+            "oob_domain": "slot-a.oob.example.test",
             "dns_remote_port": 20010,
             "reverse_remote_port": 20011,
         }
@@ -1288,15 +1294,15 @@ def test_oob_status_degrades_when_live_runtime_belongs_to_another_tenant() -> No
             return DockerResult(0, "vigil\n", "")
         if "tmux has-session" in command:
             return DockerResult(0, "", "")
-        if "tenant-routing.json" in command:
+        if "relay-routing.json" in command:
             return DockerResult(0, runtime_route, "")
         if "tmux list-sessions" in command:
             return DockerResult(0, "", "")
         return DockerResult(0, "", "")
 
     payload = oob_status(
-        oob_domain="tenant-b.oob.example.test",
-        tenant_prefix="tenant-b",
+        oob_domain="slot-b.oob.example.test",
+        slot_prefix="slot-b",
         dns_remote_port=20020,
         reverse_remote_port=20021,
         runner=runner,
@@ -1304,7 +1310,7 @@ def test_oob_status_degrades_when_live_runtime_belongs_to_another_tenant() -> No
     )
     assert payload["route_matches"] is False
     assert payload["health"] == "degraded"
-    assert any("another tenant" in issue for issue in payload["issues"])
+    assert any("another relay route" in issue for issue in payload["issues"])
 
 
 def test_oob_status_treats_malformed_runtime_marker_as_route_mismatch() -> None:
@@ -1317,7 +1323,7 @@ def test_oob_status_treats_malformed_runtime_marker_as_route_mismatch() -> None:
             return DockerResult(0, "vigil\n", "")
         if "tmux has-session" in command:
             return DockerResult(0, "", "")
-        if "tenant-routing.json" in command:
+        if "relay-routing.json" in command:
             return DockerResult(0, "{not-json", "")
         return DockerResult(0, "", "")
 
@@ -1328,7 +1334,7 @@ def test_oob_status_treats_malformed_runtime_marker_as_route_mismatch() -> None:
     assert any("marker is invalid" in issue for issue in payload["issues"])
 
 
-def test_up_refuses_to_reuse_active_oob_sessions_from_another_tenant(
+def test_up_refuses_to_reuse_active_oob_sessions_from_another_slot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from vigil_cli import up
@@ -1339,8 +1345,8 @@ def test_up_refuses_to_reuse_active_oob_sessions_from_another_tenant(
         "_oob_options",
         lambda _root: OobOptions(
             install_root=tmp_path,
-            tenant_prefix="tenant-b",
-            oob_domain="tenant-b.oob.example.test",
+            slot_prefix="slot-b",
+            oob_domain="slot-b.oob.example.test",
             dns_remote_port=20020,
             reverse_remote_port=20021,
         ),
@@ -1353,8 +1359,430 @@ def test_up_refuses_to_reuse_active_oob_sessions_from_another_tenant(
     monkeypatch.setattr(
         up,
         "start_oob",
-        lambda *_args, **_kwargs: pytest.fail("must not mutate another tenant's sessions"),
+        lambda *_args, **_kwargs: pytest.fail("must not mutate another relay slot's sessions"),
     )
 
-    with pytest.raises(SystemExit, match="another tenant"):
+    with pytest.raises(SystemExit, match="another relay slot"):
         up._start_oob_if_needed(tmp_path, runner=lambda _argv: None)
+
+
+def test_doctor_names_the_real_remedy_when_oob_domain_is_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The remedy must be actionable, not a no-op loop.
+
+    `vigil install` allocates a route only when `oob.domain` is already set
+    (`install.py`), so telling an operator with no domain configured to "run
+    `vigil install`" sends them round a loop that cannot clear the warning.
+    Name the missing input instead.
+    """
+    from vigil_cli import status as status_module
+    from vigil_cli.status import _oob_relay_check
+
+    monkeypatch.setattr(status_module, "get_config_value", lambda *_a, **_k: None)
+    monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
+
+    check = _oob_relay_check(tmp_path / "install")
+
+    assert check.status == "WARN"
+    assert "oob.domain" in check.detail, (
+        "the warning must name the setting that unblocks it"
+    )
+    assert "run `vigil install` to pin" not in check.detail, (
+        "must not point back at the command that just ran"
+    )
+
+
+def test_doctor_still_points_at_install_when_domain_is_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a domain set, `vigil install` IS the remedy — keep saying so."""
+    from vigil_cli import status as status_module
+    from vigil_cli.status import _oob_relay_check
+
+    monkeypatch.setattr(
+        status_module,
+        "get_config_value",
+        lambda key, *_a, **_k: "oob.example.com" if key == "oob.domain" else None,
+    )
+
+    check = _oob_relay_check(tmp_path / "install")
+
+    assert check.status == "WARN"
+    assert "vigil install" in check.detail
+
+
+def test_install_says_why_it_allocated_no_oob_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Silence here is the ordering trap that strands operators on a legacy route.
+
+    Route allocation happens during `vigil install`, and only when `oob.domain`
+    is already configured. Configure OOB afterwards — the order the docs imply —
+    and there is no allocation and no message saying so; the install silently
+    falls back to the globally contended legacy ports, and re-running install
+    pins that fallback rather than fixing it. Say it out loud instead.
+    """
+    from vigil_cli.install import InstallOptions, install_from_source
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
+    source = tmp_path / "source"
+    (source / "agent" / "engagements").mkdir(parents=True)
+    (source / "orchestrator" / "backend" / "data").mkdir(parents=True)
+    (source / "README.md").write_text("managed source\n", encoding="utf-8")
+
+    install_from_source(
+        InstallOptions(
+            source_root=source,
+            install_root=tmp_path / "install",
+            verify_docker_image=False,
+        )
+    )
+
+    err = capsys.readouterr().err
+    assert "oob.domain" in err, "must name the unset setting"
+    assert "oob route" in err.lower(), "must say no route was allocated"
+
+
+def test_up_skip_message_names_every_key_oob_start_requires(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Following this message verbatim must not land on a second failure.
+
+    `vigil oob start` aborts without a token just as it aborts without a host or
+    domain, so a checklist that names only two of the three sends the operator
+    to `vigil oob start` to be refused again.
+    """
+    from vigil_cli import up as up_module
+
+    up_module._print_oob_configuration_help()
+
+    out = capsys.readouterr().out
+    for key in ("oob.frp_host", "oob.domain", "oob.frp_token"):
+        assert key in out, f"{key} is required by `vigil oob start` but unlisted"
+
+
+def test_doctor_missing_token_says_how_to_set_it() -> None:
+    """A bare `MISSING oob.frp_token` row tells the operator nothing actionable."""
+    from vigil_cli import status as status_module
+
+    check = status_module._oob_token_check()
+
+    assert check.status == "MISSING"
+    assert "oob.frp_token" in check.detail
+
+
+# --- pre-rename ("tenant") compatibility -------------------------------------
+# The OOB relay slot was called a "tenant" until it collided with the blue
+# engagement meaning of the word. Installs allocated before the rename keep
+# their on-disk records and config keys, so every read path must still see them.
+
+
+def _pre_rename_record(payload: dict[str, object]) -> dict[str, object]:
+    """Re-spell a current routing record the way a pre-rename install wrote it."""
+    legacy = dict(payload)
+    legacy["tenant_name"] = legacy.pop("slot_name")
+    legacy["tenant_prefix"] = legacy.pop("slot_prefix")
+    return legacy
+
+
+def _allocated_route(tmp_path: Path, install_root: Path):
+    from vigil_cli.oob_relay import allocate_relay_route
+
+    return allocate_relay_route(
+        install_root,
+        slot_name="Acme",
+        base_domain="oob.example.test",
+        registry_path=tmp_path / "allocations.json",
+        identity_factory=lambda: "acme-id",
+        slot_candidates=lambda _identity: [11],
+    )
+
+
+def test_load_relay_route_reads_pre_rename_metadata_without_rewriting_it(
+    tmp_path: Path,
+) -> None:
+    from vigil_cli.oob_relay import (
+        LEGACY_RELAY_METADATA_RELATIVE_PATH,
+        RELAY_METADATA_RELATIVE_PATH,
+        load_relay_route,
+    )
+
+    install_root = tmp_path / "install"
+    route = _allocated_route(tmp_path, install_root)
+    legacy_path = install_root / LEGACY_RELAY_METADATA_RELATIVE_PATH
+    legacy_path.write_text(
+        json.dumps(_pre_rename_record(route.serializable()), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (install_root / RELAY_METADATA_RELATIVE_PATH).unlink()
+    before = legacy_path.read_bytes()
+
+    loaded = load_relay_route(install_root)
+
+    assert loaded is not None
+    assert loaded.slot_name == route.slot_name
+    assert loaded.slot_prefix == route.slot_prefix
+    assert loaded.oob_domain == route.oob_domain
+    assert loaded.dns_remote_port == route.dns_remote_port
+    assert loaded.metadata_path == legacy_path
+    # A read must not migrate the operator's file behind their back.
+    assert legacy_path.read_bytes() == before
+    assert not (install_root / RELAY_METADATA_RELATIVE_PATH).exists()
+
+
+def test_pre_rename_metadata_keeps_its_route_through_allocation(tmp_path: Path) -> None:
+    """A pre-rename install must never be handed a second, different slot."""
+    from vigil_cli.oob_relay import (
+        LEGACY_RELAY_METADATA_RELATIVE_PATH,
+        RELAY_METADATA_RELATIVE_PATH,
+        allocate_relay_route,
+    )
+
+    install_root = tmp_path / "install"
+    registry = tmp_path / "allocations.json"
+    route = _allocated_route(tmp_path, install_root)
+    (install_root / LEGACY_RELAY_METADATA_RELATIVE_PATH).write_text(
+        json.dumps(_pre_rename_record(route.serializable()), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (install_root / RELAY_METADATA_RELATIVE_PATH).unlink()
+
+    reallocated = allocate_relay_route(
+        install_root,
+        slot_name="ignored-after-first-write",
+        base_domain="changed.example.test",
+        registry_path=registry,
+        identity_factory=lambda: "must-not-be-used",
+    )
+
+    assert reallocated.slot_prefix == route.slot_prefix
+    assert reallocated.oob_domain == route.oob_domain
+    assert reallocated.dns_remote_port == route.dns_remote_port
+
+
+def test_allocation_registry_accepts_pre_rename_rows(tmp_path: Path) -> None:
+    """A pre-rename row must reconcile as-is, and new rows use the current key."""
+    from vigil_cli.oob_relay import (
+        allocate_relay_route,
+        load_relay_route,
+        reconcile_relay_route_registry,
+    )
+
+    install_root = tmp_path / "install"
+    registry = tmp_path / "allocations.json"
+    route = _allocated_route(tmp_path, install_root)
+    persisted = json.loads(registry.read_text(encoding="utf-8"))
+    row = persisted["allocations"][route.install_id]
+    row["tenant_prefix"] = row.pop("slot_prefix")
+    registry.write_text(json.dumps(persisted, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    loaded = load_relay_route(install_root)
+    assert loaded is not None
+    reconciled = reconcile_relay_route_registry(
+        loaded, install_root, registry_path=registry
+    )
+    assert reconciled.slot_prefix == route.slot_prefix
+
+    # A second install writing the same registry must neither trip over the
+    # pre-rename row nor be handed its slot. This write is the one flow allowed to
+    # normalize the older row, because it rewrites the whole registry anyway.
+    newcomer = allocate_relay_route(
+        tmp_path / "newcomer",
+        slot_name="Newcomer",
+        base_domain="oob.example.test",
+        registry_path=registry,
+        identity_factory=lambda: "newcomer-id",
+        slot_candidates=lambda _identity: [11, 12],
+    )
+
+    rewritten = json.loads(registry.read_text(encoding="utf-8"))["allocations"]
+    assert newcomer.allocation_slot != route.allocation_slot
+    assert rewritten[newcomer.install_id]["slot_prefix"] == newcomer.slot_prefix
+    assert rewritten[route.install_id]["slot_prefix"] == route.slot_prefix
+
+
+def test_install_honours_pre_rename_oob_tenant_config_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli.install import InstallOptions, install_from_source
+    from vigil_cli.oob_relay import load_relay_route
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({"oob.domain": "oob.example.test", "oob.tenant": "pre-rename-slot"}),
+        encoding="utf-8",
+    )
+    source_root = tmp_path / "source"
+    (source_root / "agent").mkdir(parents=True)
+    (source_root / "agent/README").write_text("managed", encoding="utf-8")
+    install_root = tmp_path / "install"
+    monkeypatch.setenv("VIGIL_CONFIG", str(config_path))
+
+    install_from_source(
+        InstallOptions(
+            source_root=source_root,
+            install_root=install_root,
+            verify_docker_image=False,
+        )
+    )
+
+    route = load_relay_route(install_root)
+    assert route is not None
+    assert route.slot_name == "pre-rename-slot"
+    assert route.slot_prefix.startswith("pre-rename-slot-")
+
+
+def test_current_oob_slot_config_key_wins_over_the_pre_rename_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vigil_cli.install import InstallOptions, install_from_source
+    from vigil_cli.oob_relay import load_relay_route
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "oob.domain": "oob.example.test",
+                "oob.slot": "current-slot",
+                "oob.tenant": "pre-rename-slot",
+            }
+        ),
+        encoding="utf-8",
+    )
+    source_root = tmp_path / "source"
+    (source_root / "agent").mkdir(parents=True)
+    (source_root / "agent/README").write_text("managed", encoding="utf-8")
+    install_root = tmp_path / "install"
+    monkeypatch.setenv("VIGIL_CONFIG", str(config_path))
+
+    install_from_source(
+        InstallOptions(
+            source_root=source_root,
+            install_root=install_root,
+            verify_docker_image=False,
+        )
+    )
+
+    route = load_relay_route(install_root)
+    assert route is not None
+    assert route.slot_name == "current-slot"
+
+
+def test_assess_environment_still_exports_the_pre_rename_variable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`vigil assess` execs the INSTALLED agent tree, which may predate the rename."""
+    from vigil_cli import main as main_module
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    install_root = tmp_path / "install"
+    route = _allocated_route(tmp_path, install_root)
+
+    env = main_module._assess_exec_environment(install_root)
+
+    assert env["VIGIL_OOB_SLOT"] == route.slot_prefix
+    assert env["VIGIL_OOB_TENANT"] == route.slot_prefix
+
+
+def test_runtime_route_marker_falls_back_to_the_pre_rename_file_and_key() -> None:
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.oob import _runtime_relay_route
+
+    commands: list[str] = []
+    legacy_marker = json.dumps(
+        {
+            "version": 1,
+            "tenant_prefix": "acme-0123456789abcdef",
+            "oob_domain": "acme-0123456789abcdef.oob.example.test",
+            "dns_remote_port": 20022,
+            "reverse_remote_port": 20023,
+        }
+    )
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        commands.append(argv[-1])
+        if "active-relay-routing.json" in argv[-1]:
+            return DockerResult(0, legacy_marker, "")
+        return DockerResult(0, "", "")
+
+    route, issue = _runtime_relay_route("vigil", runner=runner)
+
+    assert issue is None
+    assert route == {
+        "slot_prefix": "acme-0123456789abcdef",
+        "oob_domain": "acme-0123456789abcdef.oob.example.test",
+        "dns_remote_port": 20022,
+        "reverse_remote_port": 20023,
+    }
+    # The pre-rename marker is still looked for; `/data` is a host bind mount, so a
+    # runtime started before the rename keeps that filename across an upgrade.
+    assert any("active-tenant-routing.json" in command for command in commands)
+
+
+def test_client_metadata_falls_back_to_the_pre_rename_route_key() -> None:
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.oob import OobOptions, _client_metadata_matches_options, _read_oob_client_metadata
+
+    legacy_metadata = json.dumps(
+        {
+            "name": "demo",
+            "engagement": None,
+            "agent": None,
+            "server": "acme-0123456789abcdef.oob.example.test",
+            "tenant_prefix": "acme-0123456789abcdef",
+            "dns_remote_port": 20022,
+            "reverse_remote_port": 20023,
+        }
+    )
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if argv[-1].startswith("cat ") and "clients/demo.json" in argv[-1]:
+            return DockerResult(0, legacy_metadata, "")
+        return DockerResult(0, "", "")
+
+    metadata, issue = _read_oob_client_metadata("vigil", "demo", runner=runner)
+
+    assert issue is None
+    assert metadata is not None
+    assert metadata["slot_prefix"] == "acme-0123456789abcdef"
+    assert "tenant_prefix" not in metadata
+    assert _client_metadata_matches_options(
+        metadata,
+        OobOptions(
+            install_root=Path("/install"),
+            slot_prefix="acme-0123456789abcdef",
+            oob_domain="acme-0123456789abcdef.oob.example.test",
+            dns_remote_port=20022,
+            reverse_remote_port=20023,
+        ),
+    )
+
+
+def test_start_oob_abort_names_every_key_it_requires(tmp_path: Path) -> None:
+    """One refusal, not two — and it must name the token.
+
+    `start_oob` checks host/domain first and the token later, so an operator who
+    fixes the two keys the first message names is refused a second time for the
+    token. This abort is reachable directly through `vigil oob start`, not only
+    via `vigil up`, so it needs the same complete checklist.
+    """
+    from vigil_cli.oob import OobOptions, start_oob
+
+    with pytest.raises(SystemExit) as excinfo:
+        start_oob(OobOptions(install_root=tmp_path, frp_host="", oob_domain="", frp_token=""))
+
+    message = str(excinfo.value)
+    for key in ("oob.frp_host", "oob.domain", "oob.frp_token"):
+        assert key in message, f"{key} is required but unlisted in the abort"
+
+
+def test_start_oob_abort_mentions_the_configure_before_install_ordering(tmp_path: Path) -> None:
+    """The route is allocated during `vigil install`, and only with a domain set."""
+    from vigil_cli.oob import OobOptions, start_oob
+
+    with pytest.raises(SystemExit) as excinfo:
+        start_oob(OobOptions(install_root=tmp_path, frp_host="", oob_domain="", frp_token=""))
+
+    assert "vigil install" in str(excinfo.value)

@@ -160,7 +160,7 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 
 ### src/vigil_cli/ — the universal CLI
 
-- `src/vigil_cli/main.py` — the `vigil` entrypoint: install/update, config, doctor/status, runtime and orchestrator lifecycle, and the `vigil assess` passthrough.
+- `src/vigil_cli/main.py` — the `vigil` entrypoint: install, config, doctor/status, runtime and orchestrator lifecycle, and the `vigil assess` passthrough.
 - `src/vigil_cli/engagements.py` + `blue.py` + `client_rosters.py` — engagement bootstrap: run directories, bounded operator pointers, generated launchers, and the per-client prompt/command links.
 - `src/vigil_cli/preflight.py` — `_preflight_engagement_start`, `_resolve_provider_key`, `_warn_if_install_stale`. It lives outside `main.py` so `blue.py` can import it without a cycle; `main.py` re-exports what it uses.
 - `src/vigil_cli/quickstart.py` — the onboarding wizard. Plans by default; only installs behind an explicit flag.
@@ -168,7 +168,7 @@ A prompt change is **not** prompt-only when the prompt defines an artifact the b
 - `src/vigil_cli/mitmproxy.py` — the single owner of the proxy `docker build` argv, including the inputs-digest label without which the image can never be proven current.
 - `src/vigil_cli/bench/` — the benchmark harness. Verbs are `list`, `run`, `run-all`, `score`, `teardown`, `selftest`, `history`, and the `vm` group. `run-all` defaults to a **billed** launch; `run` does not. See: ADR 0020.
 - `src/vigil_cli/bench/anticheat.py` — the bench guards are **generated at runtime as strings** by this module, not committed files: `bench-guard.sh` is written into the off-tree bench home, `bench-guard.js` into the attempt engagement's OpenCode plugin dirs.
-- `src/vigil_cli/oob_tenants.py` — the single owner of the install/tenant OOB identity contract; `oob.py`, `install.py`, `up.py`, and `status.py` consume that record rather than deriving routes independently.
+- `src/vigil_cli/oob_relay.py` — the single owner of the install's OOB relay-slot identity contract; `oob.py`, `install.py`, `up.py`, and `status.py` consume that record rather than deriving routes independently.
 
 ### orchestrator/backend
 

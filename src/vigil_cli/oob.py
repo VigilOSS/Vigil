@@ -13,7 +13,7 @@ from pathlib import Path
 
 from . import config as config_module
 from . import docker
-from .oob_tenants import OobTenantRoute, legacy_tenant_route, load_tenant_route
+from .oob_relay import OobRelayRoute, legacy_relay_route, load_relay_route
 from .paths import default_runtime_container
 
 DEFAULT_FRP_HOST = ""
@@ -25,7 +25,11 @@ DEFAULT_OOB_DOMAIN = ""
 OOB_TCP_REMOTE_PORT = 8443
 OOB_UDP_REMOTE_PORT = 53
 OOB_ROOT = "/data/oob"
-OOB_TENANT_ROUTE_FILE = f"{OOB_ROOT}/active-tenant-routing.json"
+OOB_RELAY_ROUTE_FILE = f"{OOB_ROOT}/active-relay-routing.json"
+# Marker name written by installs from before the relay-slot rename. `/data` is a
+# host bind mount, so a runtime started then still has this file and nothing else;
+# reading it is what keeps those live sessions claimable after an upgrade.
+LEGACY_OOB_RELAY_ROUTE_FILE = f"{OOB_ROOT}/active-tenant-routing.json"
 FRPC_READY_TIMEOUT_SECONDS = 15.0
 MAX_OOB_POLL_RECORDS = 10_000
 OOB_STATUS_RETRY_DELAY_SECONDS = 1.0
@@ -38,10 +42,10 @@ class OobOptions:
     frp_port: int = DEFAULT_FRP_PORT
     frp_token: str = ""
     oob_domain: str = DEFAULT_OOB_DOMAIN
-    tenant_prefix: str = "legacy"
+    slot_prefix: str = "legacy"
     dns_remote_port: int = OOB_UDP_REMOTE_PORT
     reverse_remote_port: int = OOB_TCP_REMOTE_PORT
-    tenant_route: OobTenantRoute | None = None
+    relay_route: OobRelayRoute | None = None
     container_name: str = field(default_factory=default_runtime_container)
 
 
@@ -55,16 +59,16 @@ def oob_options(install_root: Path) -> OobOptions:
         or config_module.get_config_value("oob.domain", DEFAULT_OOB_DOMAIN)
         or DEFAULT_OOB_DOMAIN
     )
-    route = load_tenant_route(install_root)
+    route = load_relay_route(install_root)
     if route is None and configured_domain:
-        route = legacy_tenant_route(install_root, base_domain=configured_domain)
+        route = legacy_relay_route(install_root, base_domain=configured_domain)
     elif route is not None:
         external_domain = os.environ.get("VIGIL_OOB_DOMAIN")
         external_value = external_domain.strip().rstrip(".").lower() if external_domain else ""
         if external_value and external_value not in {route.base_domain, route.oob_domain}:
             raise SystemExit(
-                "VIGIL_OOB_DOMAIN cannot override persisted Vigil tenant routing. "
-                f"Expected tenant domain {route.oob_domain!r} or its persisted base domain "
+                "VIGIL_OOB_DOMAIN cannot override persisted Vigil relay routing. "
+                f"Expected relay slot domain {route.oob_domain!r} or its persisted base domain "
                 f"{route.base_domain!r}, got {external_domain!r}."
             )
     return OobOptions(
@@ -73,11 +77,21 @@ def oob_options(install_root: Path) -> OobOptions:
         frp_port=port,
         frp_token=token,
         oob_domain=route.oob_domain if route is not None else "",
-        tenant_prefix=route.tenant_prefix if route is not None else "legacy",
+        slot_prefix=route.slot_prefix if route is not None else "legacy",
         dns_remote_port=route.dns_remote_port if route is not None else OOB_UDP_REMOTE_PORT,
         reverse_remote_port=route.reverse_remote_port if route is not None else OOB_TCP_REMOTE_PORT,
-        tenant_route=route,
+        relay_route=route,
     )
+
+
+OOB_CONFIGURATION_HELP = (
+    "Configure it with: vigil config set oob.frp_host <host>\n"
+    "                   vigil config set oob.domain <domain>\n"
+    "                   vigil config set oob.frp_token <token>\n"
+    "Set oob.domain BEFORE `vigil install` — the relay slot (this install's\n"
+    "subdomain and port block) is allocated during install, and only when a\n"
+    "domain is already configured."
+)
 
 
 def start_oob(
@@ -86,21 +100,20 @@ def start_oob(
     runner: docker.Runner = docker.run_command,
     frpc_ready_timeout: float = FRPC_READY_TIMEOUT_SECONDS,
 ) -> None:
-    if not options.frp_host or not options.oob_domain:
+    # Every key `start_oob` requires is named in ONE refusal. Checking host and
+    # domain here and the token further down used to refuse the operator twice:
+    # once for the pair, then again for the token they were never told about.
+    if not options.frp_host or not options.oob_domain or not options.frp_token:
         raise SystemExit(
-            "OOB infrastructure is not configured. Set it with "
-            "`vigil config set oob.frp_host <host>` and "
-            "`vigil config set oob.domain <domain>`, then retry."
+            "OOB infrastructure is not configured.\n" + OOB_CONFIGURATION_HELP
         )
     _require_runtime(options.container_name, runner=runner)
-    if not options.frp_token:
-        raise SystemExit("Missing OOB FRP token. Set it with `vigil config set oob.frp_token <token>`.")
     _require_runtime_tools(options.container_name, runner=runner)
     active = any(
         _tmux_has_session(options.container_name, session, runner=runner)
         for session in ("oob-server", "frpc")
     )
-    runtime_route, route_issue = _runtime_tenant_route(options.container_name, runner=runner)
+    runtime_route, route_issue = _runtime_relay_route(options.container_name, runner=runner)
     route_matches: bool | None = None
     if route_issue:
         route_matches = False
@@ -119,17 +132,17 @@ def start_oob(
             )
         if not _client_metadata_matches_options(client_metadata, options):
             raise SystemExit(
-                f"The running OOB client {client_name!r} belongs to another tenant route. "
+                f"The running OOB client {client_name!r} belongs to another relay route. "
                 f"Stop it explicitly with `vigil oob client stop {client_name}` before switching routes."
             )
     if active and (
         route_matches is False
-        or (route_matches is None and options.tenant_prefix != "legacy")
+        or (route_matches is None and options.slot_prefix != "legacy")
     ):
         detail = route_issue or "the active sessions do not match this install's persisted route"
         raise SystemExit(
-            "OOB sessions are already active for another tenant (or their tenant route cannot be verified): "
-            f"{detail}. Run `vigil oob restart` intentionally before switching tenant routes."
+            "OOB sessions are already active for another relay slot (or their relay route cannot be verified): "
+            f"{detail}. Run `vigil oob restart` intentionally before switching relay routes."
         )
     _kill_stale_oob_processes(options.container_name, runner=runner)
     _render_runtime_files(options, runner=runner)
@@ -167,7 +180,7 @@ def oob_status(
     container_name: str | None = None,
     *,
     oob_domain: str | None = None,
-    tenant_prefix: str = "legacy",
+    slot_prefix: str = "legacy",
     dns_remote_port: int = OOB_UDP_REMOTE_PORT,
     reverse_remote_port: int = OOB_TCP_REMOTE_PORT,
     runner: docker.Runner = docker.run_command,
@@ -180,7 +193,7 @@ def oob_status(
     domain does not resolve (broken Route53 delegation). So with ``deep=True``
     (the default, used by ``vigil oob status``) this also checks, for each RUNNING
     client, whether it actually registered an interactsh payload, and whether the
-    OOB domain resolves and its two-label public HTTP route reaches this tenant,
+    OOB domain resolves and its two-label public HTTP route reaches this relay slot,
     then derives a ``health``
     (`ok`/`degraded`/`down`) + human ``issues``.
 
@@ -196,7 +209,7 @@ def oob_status(
         return {
             "state": "stopped", "health": "down", "server": False, "frpc": False,
             "clients": [], "running": [], "client_health": [], "domain": domain,
-            "tenant_prefix": tenant_prefix,
+            "slot_prefix": slot_prefix,
             "port_range": [dns_remote_port, reverse_remote_port],
             "runtime_route": None,
             "route_matches": None,
@@ -207,14 +220,14 @@ def oob_status(
         }
     server = _tmux_has_session(container_name, "oob-server", runner=runner)
     frpc = _tmux_has_session(container_name, "frpc", runner=runner)
-    runtime_route, route_issue = _runtime_tenant_route(container_name, runner=runner)
+    runtime_route, route_issue = _runtime_relay_route(container_name, runner=runner)
     route_matches = None
     if route_issue:
         route_matches = False
     elif runtime_route:
         route_matches = _route_matches_values(
             runtime_route,
-            tenant_prefix=tenant_prefix,
+            slot_prefix=slot_prefix,
             oob_domain=domain,
             dns_remote_port=dns_remote_port,
             reverse_remote_port=reverse_remote_port,
@@ -286,15 +299,15 @@ def oob_status(
         if route_issue:
             issues.append(route_issue)
         issues.append(
-            "Active OOB sessions belong to another tenant route; callbacks and FRP ports would be routed "
-            "to the wrong install. Run `vigil oob restart` intentionally before switching tenants."
+            "Active OOB sessions belong to another relay route; callbacks and FRP ports would be routed "
+            "to the wrong install. Run `vigil oob restart` intentionally before switching relay slots."
         )
         if health == "ok":
             health = "degraded"
-    elif active and route_matches is None and tenant_prefix != "legacy":
+    elif active and route_matches is None and slot_prefix != "legacy":
         issues.append(
-            "Active OOB sessions have no valid tenant-routing marker, so this install cannot safely claim them. "
-            "Run `vigil oob restart` to bind the sessions to the persisted tenant route."
+            "Active OOB sessions have no valid relay-routing marker, so this install cannot safely claim them. "
+            "Run `vigil oob restart` to bind the sessions to the persisted relay route."
         )
         if health == "ok":
             health = "degraded"
@@ -311,7 +324,7 @@ def oob_status(
         "running": running,
         "client_health": client_health,
         "domain": domain,
-        "tenant_prefix": tenant_prefix,
+        "slot_prefix": slot_prefix,
         "port_range": [dns_remote_port, reverse_remote_port],
         "runtime_route": runtime_route,
         "route_matches": route_matches,
@@ -351,9 +364,9 @@ def _assess_oob_health(
         )
     if domain and edge_route_healthy is False:
         issues.append(
-            f"OOB HTTP edge route for '{domain}' did not return a direct tenant response on two probes — "
-            "callbacks may be redirecting or reaching another tenant. Inspect the server-side Caddy "
-            "and frps containers plus the persisted tenant route."
+            f"OOB HTTP edge route for '{domain}' did not return a direct slot response on two probes — "
+            "callbacks may be redirecting or reaching another relay slot. Inspect the server-side Caddy "
+            "and frps containers plus the persisted relay route."
         )
     # Only flag registration when it was actually checked (deep=True); a None
     # entry means "not probed" (deep=False) and must not read as unregistered.
@@ -395,7 +408,7 @@ def _oob_domain_resolves(container_name: str, domain: str, *, runner: docker.Run
 def _oob_http_route_healthy(
     container_name: str, domain: str, *, runner: docker.Runner
 ) -> bool:
-    """Confirm the public HTTP edge reaches this tenant, without accepting redirects."""
+    """Confirm the public HTTP edge reaches this relay slot, without accepting redirects."""
     marker = f"healthcheck.client-probe.{domain}"
     result = _run_exec(
         container_name,
@@ -440,7 +453,7 @@ def start_oob_client(
     _require_runtime(options.container_name, runner=runner)
     client_name = sanitize_name(name)
     session = f"oob-client-{client_name}"
-    runtime_route, route_issue = _runtime_tenant_route(
+    runtime_route, route_issue = _runtime_relay_route(
         options.container_name, runner=runner
     )
     if route_issue:
@@ -456,7 +469,7 @@ def start_oob_client(
     if not _route_matches_options(runtime_route, options):
         raise SystemExit(
             "OOB client start refused because the active runtime route does not match "
-            "this install's persisted tenant route. Stop clients for the old route explicitly, "
+            "this install's persisted relay route. Stop clients for the old route explicitly, "
             "then run `vigil oob restart`."
         )
     metadata = {
@@ -464,7 +477,7 @@ def start_oob_client(
         "engagement": engagement,
         "agent": agent,
         "server": options.oob_domain,
-        "tenant_prefix": options.tenant_prefix,
+        "slot_prefix": options.slot_prefix,
         "dns_remote_port": options.dns_remote_port,
         "reverse_remote_port": options.reverse_remote_port,
     }
@@ -480,7 +493,7 @@ def start_oob_client(
             )
         if not _client_metadata_matches_options(existing, options):
             raise SystemExit(
-                f"The running OOB client {client_name!r} belongs to another tenant route. "
+                f"The running OOB client {client_name!r} belongs to another relay route. "
                 f"Stop it explicitly with `vigil oob client stop {client_name}` before reusing this name."
             )
         ownership_keys = ("name", "engagement", "agent")
@@ -564,17 +577,21 @@ def _read_oob_client_metadata(
         server = payload["server"]
         if not isinstance(server, str) or not server:
             raise ValueError("missing or malformed route fields")
-        route_fields = ("tenant_prefix", "dns_remote_port", "reverse_remote_port")
+        if "slot_prefix" not in payload and "tenant_prefix" in payload:
+            # Pre-rename clients spell the route key `tenant_prefix`. Normalizing it
+            # here keeps every comparison below — and in the callers — single-shape.
+            payload["slot_prefix"] = payload.pop("tenant_prefix")
+        route_fields = ("slot_prefix", "dns_remote_port", "reverse_remote_port")
         present_route_fields = [field in payload for field in route_fields]
         if any(present_route_fields) and not all(present_route_fields):
             raise ValueError("partially populated client route metadata")
         if not _is_pre_wave2_client_metadata(payload):
-            tenant_prefix = payload["tenant_prefix"]
+            slot_prefix = payload["slot_prefix"]
             dns_port = payload["dns_remote_port"]
             reverse_port = payload["reverse_remote_port"]
             if (
-                not isinstance(tenant_prefix, str)
-                or not tenant_prefix
+                not isinstance(slot_prefix, str)
+                or not slot_prefix
                 or isinstance(dns_port, bool)
                 or not isinstance(dns_port, int)
                 or isinstance(reverse_port, bool)
@@ -591,14 +608,14 @@ def _client_metadata_matches_options(
 ) -> bool:
     if _is_pre_wave2_client_metadata(metadata):
         return (
-            options.tenant_prefix == "legacy"
+            options.slot_prefix == "legacy"
             and metadata.get("server")
             == options.oob_domain.strip().rstrip(".").lower()
             and options.dns_remote_port == OOB_UDP_REMOTE_PORT
             and options.reverse_remote_port == OOB_TCP_REMOTE_PORT
         )
     return (
-        metadata.get("tenant_prefix") == options.tenant_prefix
+        metadata.get("slot_prefix") == options.slot_prefix
         and metadata.get("server") == options.oob_domain.strip().rstrip(".").lower()
         and metadata.get("dns_remote_port") == options.dns_remote_port
         and metadata.get("reverse_remote_port") == options.reverse_remote_port
@@ -606,7 +623,7 @@ def _client_metadata_matches_options(
 
 
 def _is_pre_wave2_client_metadata(metadata: dict[str, object]) -> bool:
-    route_fields = ("tenant_prefix", "dns_remote_port", "reverse_remote_port")
+    route_fields = ("slot_prefix", "dns_remote_port", "reverse_remote_port")
     return not any(field in metadata for field in route_fields)
 
 
@@ -660,7 +677,7 @@ def verify_oob_channel(
     runner: docker.Runner = docker.run_command,
     callback_timeout: float = 10.0,
 ) -> ChannelVerification:
-    """Prove the public DNS and HTTP routes actually reach this tenant's OOB server.
+    """Prove the public DNS and HTTP routes actually reach this relay slot's OOB server.
 
     Mints a throwaway marker, resolves it against public DNS, fetches it over
     public HTTP, and waits for the callback to appear in the client's log — the
@@ -780,7 +797,7 @@ def verify_oob_channel(
 
 # Where a channel verdict is remembered between CLI invocations. Every
 # `vigil oob poll` is a fresh process, so an in-process cache would never hit;
-# the file lives beside the tenant routing record it is keyed against.
+# the file lives beside the relay routing record it is keyed against.
 CHANNEL_VERIFICATION_CACHE_RELATIVE_PATH = Path(".runtime-data/oob/channel-verification.json")
 # How long a verdict stays usable. A live channel is stable across a poll loop
 # (it breaks on runtime/route events, not between two polls), so trusting it for
@@ -796,7 +813,7 @@ def _channel_cache_path(options: OobOptions) -> Path:
 
 
 def _channel_cache_key(options: OobOptions, client: str) -> str:
-    # One verdict per tenant domain + client: a different client is a different
+    # One verdict per slot domain + client: a different client is a different
     # payload host and a different interactsh log, so it is a different channel.
     # The name is sanitized exactly as :func:`verify_oob_channel` pins it, so two
     # spellings of one client share the verdict they would both have produced.
@@ -892,7 +909,7 @@ def verify_oob_channel_cached(
 
 
 def test_oob(options: OobOptions, *, runner: docker.Runner = docker.run_command) -> None:
-    """Prove the public DNS and HTTP routes reach this tenant's OOB server."""
+    """Prove the public DNS and HTTP routes reach this relay slot's OOB server."""
     result = verify_oob_channel(options, runner=runner)
     if not result.verified:
         raise SystemExit(f"oob test: {result.reason}")
@@ -1220,15 +1237,15 @@ def interactions_for_domain(
     *,
     client_payload_host: str = "",
 ) -> list[OobInteraction]:
-    """Admit interactions emitted by one tenant client's dedicated log.
+    """Admit interactions emitted by one relay slot client's dedicated log.
 
     Interactsh's verbose client output uses either a complete callback FQDN or
     a compact ``<probe>.<correlation-id>`` bracket with the configured server
-    domain omitted. The caller reads exactly one tenant-bound client log, so a
-    compact one- or two-label identifier carries no tenant suffix, so it is
+    domain omitted. The caller reads exactly one slot-bound client log, so a
+    compact one- or two-label identifier carries no slot suffix, so it is
     admitted only when its rightmost label matches this client's current
     registered correlation ID. Complete hostnames must still match the
-    persisted tenant domain.
+    persisted slot domain.
     """
     domain = oob_domain.strip().rstrip(".").lower()
     if not domain:
@@ -1279,7 +1296,7 @@ def read_client_log(
     lines. A physical-line tail therefore lets a DNS burst evict a nearby HTTP
     interaction and creates a false negative. Reverse-scan the file and retain
     only the newest bounded parser candidates: verbose ``Received ...
-    interaction`` summaries and JSONL protocol records. The parser and tenant
+    interaction`` summaries and JSONL protocol records. The parser and slot
     admission remain authoritative; this grep is only a compact prefilter.
 
     Best-effort: a missing log yields ``""``.
@@ -1377,7 +1394,7 @@ def poll_client_payload_host(
         )
     if not _client_metadata_matches_options(metadata, options):
         raise SystemExit(
-            f"OOB poll refused because client {client_name!r} belongs to another tenant route."
+            f"OOB poll refused because client {client_name!r} belongs to another relay route."
         )
     if metadata.get("engagement") != engagement:
         raise SystemExit(
@@ -1584,7 +1601,7 @@ def _check_frpc_for_conflicts(
 ) -> None:
     """Post-flight: confirm frpc registered our proxies, surface conflicts loudly.
 
-    Tenant routes own a persisted domain and two-port FRP block. If another
+    Relay routes own a persisted domain and two-port FRP block. If another
     client holds either resource when we register, frps rejects our registration
     and frpc retries silently every ~30s (`loginFailExit = false`). Polling
     `/data/oob/frpc.log` for the success/conflict lines lets us turn that
@@ -1611,11 +1628,11 @@ def _check_frpc_for_conflicts(
             raise SystemExit(
                 "OOB resources are already held by another frpc client. frps reported:\n"
                 + "\n".join(f"  {line}" for line in conflicts[:10])
-                + f"\n\nTenant route {options.tenant_prefix!r} owns remotePort "
+                + f"\n\nRelay route {options.slot_prefix!r} owns remotePort "
                 + f"{options.dns_remote_port}/{options.reverse_remote_port} and customDomains {options.oob_domain!r}.\n"
                 "Resolve the duplicate allocation in the shared OOB registry, stop the conflicting instance, then retry. To inspect:\n"
                 f"  docker exec {options.container_name} tail -n 200 {OOB_ROOT}/frpc.log\n"
-                "(See README §Callback, Listener & Tunnel Handling.)"
+                "(See docs/oob-routing.md for the relay-slot allocation contract.)"
             )
         registered = _frpc_registered_proxy_labels(last_log)
         if registered >= _FRPC_EXPECTED_PROXY_LABELS:
@@ -1660,7 +1677,7 @@ def _render_runtime_files(options: OobOptions, *, runner: docker.Runner) -> None
     _run_exec(options.container_name, f"mkdir -p {OOB_ROOT}/clients", runner=runner)
     proxy_prefix = (
         "vigil-"
-        + hashlib.sha256(options.tenant_prefix.encode("utf-8")).hexdigest()[:16]
+        + hashlib.sha256(options.slot_prefix.encode("utf-8")).hexdigest()[:16]
     )
     render = f"""python3 - <<'PY'
 from pathlib import Path
@@ -1701,26 +1718,34 @@ PY"""
     _run_exec(options.container_name, render, runner=runner)
     runtime_route = {
         "version": 1,
-        "tenant_prefix": options.tenant_prefix,
+        "slot_prefix": options.slot_prefix,
         "oob_domain": options.oob_domain,
         "dns_remote_port": options.dns_remote_port,
         "reverse_remote_port": options.reverse_remote_port,
     }
     _write_runtime_file(
         options.container_name,
-        OOB_TENANT_ROUTE_FILE,
+        OOB_RELAY_ROUTE_FILE,
         json.dumps(runtime_route, indent=2, sort_keys=True) + "\n",
         runner=runner,
     )
     _write_runtime_file(options.container_name, f"{OOB_ROOT}/oob_server_watch.py", _server_watch_source(options), runner=runner)
 
 
-def _runtime_tenant_route(
+def _route_slot_prefix(payload: dict[str, object]) -> object:
+    """Read the marker's slot prefix under its current or pre-rename key."""
+    if "slot_prefix" in payload:
+        return payload["slot_prefix"]
+    return payload["tenant_prefix"]
+
+
+def _runtime_relay_route(
     container_name: str, *, runner: docker.Runner
 ) -> tuple[dict[str, object] | None, str | None]:
     result = _run_exec(
         container_name,
-        f"cat {shlex.quote(OOB_TENANT_ROUTE_FILE)} 2>/dev/null",
+        f"cat {shlex.quote(OOB_RELAY_ROUTE_FILE)} 2>/dev/null "
+        f"|| cat {shlex.quote(LEGACY_OOB_RELAY_ROUTE_FILE)} 2>/dev/null",
         runner=runner,
         check=False,
     )
@@ -1730,13 +1755,13 @@ def _runtime_tenant_route(
         payload = json.loads(result.stdout)
         if not isinstance(payload, dict):
             raise ValueError("expected a JSON object")
-        tenant_prefix = payload["tenant_prefix"]
+        slot_prefix = _route_slot_prefix(payload)
         oob_domain = payload["oob_domain"]
         dns_port = payload["dns_remote_port"]
         reverse_port = payload["reverse_remote_port"]
         if (
-            not isinstance(tenant_prefix, str)
-            or not tenant_prefix
+            not isinstance(slot_prefix, str)
+            or not slot_prefix
             or not isinstance(oob_domain, str)
             or not oob_domain
             or isinstance(dns_port, bool)
@@ -1746,9 +1771,9 @@ def _runtime_tenant_route(
         ):
             raise ValueError("missing or malformed route fields")
     except (json.JSONDecodeError, KeyError, ValueError) as exc:
-        return None, f"Active OOB tenant-routing marker is invalid: {exc}"
+        return None, f"Active OOB relay-routing marker is invalid: {exc}"
     return {
-        "tenant_prefix": tenant_prefix,
+        "slot_prefix": slot_prefix,
         "oob_domain": oob_domain.strip().rstrip(".").lower(),
         "dns_remote_port": dns_port,
         "reverse_remote_port": reverse_port,
@@ -1758,13 +1783,13 @@ def _runtime_tenant_route(
 def _route_matches_values(
     runtime_route: dict[str, object],
     *,
-    tenant_prefix: str,
+    slot_prefix: str,
     oob_domain: str,
     dns_remote_port: int,
     reverse_remote_port: int,
 ) -> bool:
     return runtime_route == {
-        "tenant_prefix": tenant_prefix,
+        "slot_prefix": slot_prefix,
         "oob_domain": oob_domain.strip().rstrip(".").lower(),
         "dns_remote_port": dns_remote_port,
         "reverse_remote_port": reverse_remote_port,
@@ -1774,7 +1799,7 @@ def _route_matches_values(
 def _route_matches_options(runtime_route: dict[str, object], options: OobOptions) -> bool:
     return _route_matches_values(
         runtime_route,
-        tenant_prefix=options.tenant_prefix,
+        slot_prefix=options.slot_prefix,
         oob_domain=options.oob_domain,
         dns_remote_port=options.dns_remote_port,
         reverse_remote_port=options.reverse_remote_port,

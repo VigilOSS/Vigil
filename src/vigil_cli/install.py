@@ -29,7 +29,7 @@ from .install_fs import (
     remove_entry,
     unsafe_path,
 )
-from .oob_tenants import OOB_ALLOCATION_REGISTRY_FILENAME, initialize_tenant_route
+from .oob_relay import OOB_ALLOCATION_REGISTRY_FILENAME, initialize_relay_route
 from .runtime import build_runtime
 from .status import write_install_meta
 
@@ -41,8 +41,8 @@ if TYPE_CHECKING:
 # directory names ("agent", "orchestrator", ".claude", ".codex") are NOT a
 # signal: when the install root IS the source checkout they exist before Vigil
 # has ever run there, so the FIRST in-place install reported an upgrade and
-# `initialize_tenant_route` pinned the legacy shared OOB domain (ports 53/8443)
-# instead of allocating a tenant-specific route — two fresh in-place developer
+# `initialize_relay_route` pinned the legacy shared OOB domain (ports 53/8443)
+# instead of allocating an install-specific relay route — two fresh in-place developer
 # installs then collided at the FRP/OOB edge.
 PRIOR_INSTALL_MARKERS = (
     INSTALL_META_FILENAME,  # stamped by every install_from_source
@@ -456,7 +456,29 @@ def _sync_install_files(source_root: Path, install_root: Path) -> PinnedDirector
             raise
 
 
-def install_from_source(options: InstallOptions, *, runner: docker.Runner = docker.run_command) -> InstallResult:
+def _configured_oob_slot(caller_config: dict[str, str]) -> str:
+    """Resolve the configured OOB relay slot name, honouring the pre-rename key.
+
+    `oob.tenant` is the name this setting shipped under before the OOB "tenant"
+    concept was renamed to a relay slot. An install configured then must keep
+    allocating the slot the operator named, not silently fall back to the
+    install-directory name.
+    """
+    for value in (
+        caller_config.get("oob.slot"),
+        caller_config.get("oob.tenant"),
+    ):
+        if value and value.strip():
+            return value.strip()
+    return ""
+
+
+def install_from_source(
+    options: InstallOptions,
+    *,
+    runner: docker.Runner = docker.run_command,
+    build_runner: docker.Runner = docker.run_command_streaming,
+) -> InstallResult:
     source_path = options.source_root.expanduser()
     install_path = options.install_root.expanduser()
 
@@ -490,7 +512,7 @@ def install_from_source(options: InstallOptions, *, runner: docker.Runner = dock
     configured_oob_domain = (
         os.environ.get("VIGIL_OOB_DOMAIN") or caller_config.get("oob.domain") or ""
     )
-    configured_oob_tenant = caller_config.get("oob.tenant") or install_root.name
+    configured_oob_slot = _configured_oob_slot(caller_config) or install_root.name
     oob_registry_path = caller_config_path.with_name(
         OOB_ALLOCATION_REGISTRY_FILENAME
     )
@@ -599,12 +621,22 @@ def install_from_source(options: InstallOptions, *, runner: docker.Runner = dock
                         file=sys.stderr,
                     )
 
+            if not configured_oob_domain:
+                # Allocation happens here and only here. Staying silent is how
+                # operators who configure OOB *after* installing end up on the
+                # globally contended legacy ports without ever being told.
+                print(
+                    "[vigil] no OOB route allocated: `oob.domain` is not set. "
+                    "Set it with `vigil config set oob.domain <domain>` and re-run "
+                    "this command to allocate one.",
+                    file=sys.stderr,
+                )
             if configured_oob_domain:
                 destination_boundary.require_attached()
-                initialize_tenant_route(
+                initialize_relay_route(
                     phase_root,
                     is_upgrade=is_upgrade,
-                    tenant_name=configured_oob_tenant,
+                    slot_name=configured_oob_slot,
                     base_domain=configured_oob_domain,
                     registry_path=oob_registry_path,
                     canonical_install_root=install_root,
@@ -627,7 +659,7 @@ def install_from_source(options: InstallOptions, *, runner: docker.Runner = dock
                 if options.force_image or not docker.image_exists(image, runner=runner):
                     # build_runtime owns the runtime-input label contract.
                     destination_boundary.require_attached()
-                    build_runtime(phase_root, runner=runner)
+                    build_runtime(phase_root, runner=build_runner)
                     destination_boundary.require_attached()
                     image_built = True
     finally:

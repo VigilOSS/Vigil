@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import ipaddress
+import importlib.metadata
 import json
 import os
 import shlex
@@ -87,7 +88,7 @@ from .oob import (
     test_oob,
     verify_oob_channel_cached,
 )
-from .oob_tenants import legacy_tenant_route, render_edge_routing
+from .oob_relay import legacy_relay_route, render_edge_routing
 from .orchestrator import (
     OrchestratorOptions,
     build_frontend,
@@ -127,13 +128,14 @@ def _print_post_install(result: InstallResult) -> None:
     else:
         print("Install complete. Next steps:")
         print(f"  1. Configure tokens and API keys in {root / '.env'}")
-        print("  2. Optional OOB: vigil config set oob.frp_token <token>")
+        print("  2. Optional OOB: set oob.frp_host, oob.domain, and oob.frp_token")
+        print("     (set oob.domain and re-run this command to allocate a relay slot)")
         print("  3. vigil up                      # build/start runtime, orchestrator, and OOB")
         print("  4. vigil engagement create <target>  # create your first engagement")
         print("  5. vigil assess kali --help      # discover target-facing CLI verbs")
     print()
     print(
-        "Two-layer model: `vigil install`/`update` upgraded the WORKING ROOT "
+        "Two-layer model: `vigil install` upgraded the WORKING ROOT "
         "(code/prompts/skills/scripts). `uv tool upgrade vigil` upgrades only the CLI "
         "binary. `vigil status` warns when the working root differs from its source."
     )
@@ -183,6 +185,21 @@ class _SiblingHintParser(argparse.ArgumentParser):
         super().error(message)
 
 
+
+def _cli_version() -> str:
+    """Installed distribution version, or a marker when there is no metadata.
+
+    The bench participant bundle runs this CLI from a copied source tree with no
+    installed distribution, so resolving the version must never raise — an
+    exception here is built at parser-construction time and would break every
+    invocation, not just `--version`.
+    """
+    try:
+        return importlib.metadata.version("vigil")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown (running from a source tree without package metadata)"
+
+
 def main(argv: list[str] | None = None) -> None:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     raw_argv = _hoist_engagement_start_root(raw_argv)
@@ -193,6 +210,15 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="vigil", description="Vigil operator CLI")
     parser.add_argument("--root", help="Install root (default: $VIGIL_INSTALL_DIR or ~/vigil)")
     parser.add_argument("--source", help="Source checkout root for install/upgrade")
+    # The CLI binary and the working root upgrade separately, so reconciling a
+    # stale-install warning starts with knowing which CLI is installed.
+    parser.add_argument(
+        "--version",
+        "-V",
+        action="version",
+        version=f"vigil {_cli_version()}",
+        help="Print the installed CLI version and exit",
+    )
     sub = parser.add_subparsers(
         dest="command", required=True, parser_class=_SiblingHintParser
     )
@@ -218,28 +244,6 @@ def main(argv: list[str] | None = None) -> None:
             "inside legacy physical roster directories without deleting extra files"
         ),
     )
-    update_p = sub.add_parser("update", help="Alias for install")
-    update_p.add_argument("install_dir", nargs="?")
-    update_p.add_argument("--dry-run", action="store_true")
-    update_p.add_argument("--force-image", action="store_true")
-    update_p.add_argument("--skip-image-check", action="store_true")
-    update_p.add_argument(
-        "--repair-ambiguous-client-permissions-as-skip",
-        action="store_true",
-        help=(
-            "Explicitly regenerate configured legacy client entrypoints whose permission "
-            "mode is otherwise ambiguous using skip/dangerous permissions"
-        ),
-    )
-    update_p.add_argument(
-        "--refresh-physical-client-rosters",
-        action="store_true",
-        help=(
-            "Explicitly add or refresh canonical generated client-roster files "
-            "inside legacy physical roster directories without deleting extra files"
-        ),
-    )
-
     quickstart_p = sub.add_parser(
         "quickstart",
         help="Onboarding wizard: probe host prerequisites/recon tools and print the setup checklist",
@@ -278,7 +282,8 @@ def main(argv: list[str] | None = None) -> None:
     quickstart_p.add_argument("--hosts", help="In-scope hosts (comma-separated) for the checklist")
     quickstart_p.add_argument("--json", action="store_true", help="Emit the readiness report as JSON")
 
-    sub.add_parser("doctor")
+    doctor_p = sub.add_parser("doctor")
+    doctor_p.add_argument("--json", action="store_true")
     status_p = sub.add_parser("status")
     status_p.add_argument("--json", action="store_true")
     status_p.add_argument(
@@ -1004,7 +1009,7 @@ def main(argv: list[str] | None = None) -> None:
     oob_status_p.add_argument("--json", action="store_true")
     oob_routing_p = oob_sub.add_parser(
         "routing",
-        help="Render tenant DNS/Caddy/JSON deployment inputs without applying external changes.",
+        help="Render relay-slot DNS/Caddy/JSON deployment inputs without applying external changes.",
     )
     oob_routing_p.add_argument(
         "--format", choices=("all", "json", "caddy", "dns"), default="all",
@@ -1137,7 +1142,7 @@ def main(argv: list[str] | None = None) -> None:
         args.client_args = _engagement_start_client_args(start_p, client_extras)
     else:
         args = parser.parse_args(raw_argv)
-    sync_command = args.command in {"install", "update", "up"}
+    sync_command = args.command in {"install", "up"}
     install_value = getattr(args, "install_dir", None) or args.root
     install_root = (
         resolve_install_root(install_value, preserve_path=True)
@@ -1145,7 +1150,7 @@ def main(argv: list[str] | None = None) -> None:
         else resolve_install_root(install_value)
     )
 
-    if args.command in {"install", "update"}:
+    if args.command == "install":
         source_root = resolve_source_root(
             args.source,
             install_root=install_root,
@@ -1172,7 +1177,27 @@ def main(argv: list[str] | None = None) -> None:
         else:
             _print_post_install(result)
     elif args.command == "doctor":
-        print_doctor(collect_doctor_checks(install_root, runner=docker_run_command))
+        checks = collect_doctor_checks(install_root, runner=docker_run_command)
+        # Only FAIL gates. WARN/MISSING are advisory — an unconfigured OOB is a
+        # legitimate steady state, not a broken install.
+        failed = [check for check in checks if check.status == "FAIL"]
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "ok": not failed,
+                        "checks": [
+                            {"name": c.name, "status": c.status, "detail": c.detail}
+                            for c in checks
+                        ],
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            print_doctor(checks)
+        if failed:
+            raise SystemExit(1)
     elif args.command == "status":
         status = collect_status(
             install_root,
@@ -1458,7 +1483,12 @@ def _assess_exec_environment(install_root: Path) -> dict[str, str]:
     env = dict(os.environ)
     options = _oob_options(install_root)
     env["VIGIL_OOB_DOMAIN"] = options.oob_domain.strip().rstrip(".")
-    env["VIGIL_OOB_TENANT"] = getattr(options, "tenant_prefix", "legacy")
+    slot_prefix = getattr(options, "slot_prefix", "legacy")
+    env["VIGIL_OOB_SLOT"] = slot_prefix
+    # Pre-rename spelling. `vigil assess` execs the *installed* agent tree, which a
+    # CLI-only upgrade leaves at its older revision, so anything in there still
+    # reading the old name must see the same value rather than nothing.
+    env["VIGIL_OOB_TENANT"] = slot_prefix
     env["VIGIL_OOB_DNS_PORT"] = str(getattr(options, "dns_remote_port", 53))
     env["VIGIL_OOB_REVERSE_PORT"] = str(getattr(options, "reverse_remote_port", 8443))
     return env
@@ -2510,7 +2540,7 @@ def _print_oob_status(payload: dict[str, object], *, as_json: bool) -> None:
         print(
             f"{payload.get('state')}\thealth={health}\tserver={payload.get('server')}\tfrpc={payload.get('frpc')}"
             f"\tclients={client_count}\trunning={len(running)}\tregistered={registered}/{len(running)}"
-            f"\tdomain_resolves={resolves_str}\ttenant={payload.get('tenant_prefix')}"
+            f"\tdomain_resolves={resolves_str}\tslot={payload.get('slot_prefix')}"
             f"\tports={payload.get('port_range')}\tdomain={payload.get('domain')}"
         )
     issues = payload.get("issues") or []
@@ -2554,7 +2584,7 @@ def _oob(args: argparse.Namespace, install_root: Path) -> None:
     elif args.oob_command == "status":
         payload = oob_status(
             oob_domain=options.oob_domain,
-            tenant_prefix=options.tenant_prefix,
+            slot_prefix=options.slot_prefix,
             dns_remote_port=options.dns_remote_port,
             reverse_remote_port=options.reverse_remote_port,
             runner=docker_run_command,
@@ -2563,7 +2593,7 @@ def _oob(args: argparse.Namespace, install_root: Path) -> None:
     elif args.oob_command == "test":
         test_oob(options, runner=docker_run_command)
     elif args.oob_command == "routing":
-        route = options.tenant_route or legacy_tenant_route(
+        route = options.relay_route or legacy_relay_route(
             install_root, base_domain=options.oob_domain
         )
         rendered = render_edge_routing(route)

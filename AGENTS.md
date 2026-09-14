@@ -61,11 +61,21 @@ it helps quality and depth. Do not answer at one altitude only — a single-alti
 
 # Version control: Jujutsu (jj)
 
-This repository is managed with **[Jujutsu (`jj`)](https://github.com/jj-vcs/jj)** (v0.40+),
-**colocated** with Git — a `.jj/` and a `.git/` sit side by side. Plain `git` *read* commands
-(`git log`, `git status`, `git diff`) still work and reflect the live state, but make all
-commits / branches / pushes with `jj`, **not** `git` — mixing in `git commit`/`checkout`/`branch`
+Maintainers work this repository with **[Jujutsu (`jj`)](https://github.com/jj-vcs/jj)**
+(v0.40+), **colocated** with Git. A fresh `git clone` has no `.jj/`, so colocate yours once:
+
+```bash
+jj git init --colocate
+```
+
+After that a `.jj/` and a `.git/` sit side by side. Plain `git` *read* commands (`git log`,
+`git status`, `git diff`) still work and reflect the live state, but make all commits /
+branches / pushes with `jj`, **not** `git` — mixing in `git commit`/`checkout`/`branch`
 desyncs the colocation. To learn more load the Jujutsu skill.
+
+This is a contributor convention, not a requirement for *using* Vigil: an operator who installs
+the CLI and runs engagements never needs `jj`. If you are only consuming the tool, ignore this
+section — and note that plain `git` is fine for a read-only clone you never push from.
 
 # Newcomer walkthrough: clone to first dispatch
 
@@ -84,7 +94,7 @@ there for the full reference, env-var precedence, and resource sizing.
    `vigil install ~/vigil` seeds (or upgrades, in place) the working root that holds the
    shared prompt tree, generated client wrappers, runtime assets, and orchestrator state. Engagements,
    the orchestrator DB, and `.env` are never moved or deleted on re-install. See
-   [Install the CLI and workspace](README.md#install-the-cli-and-workspace).
+   [The two layers: CLI binary vs working root](README.md#the-two-layers-cli-binary-vs-working-root).
 
 2. **Start the local stack.** One command brings up the Kali runtime, the orchestrator backend (which
    builds the frontend when needed), and any configured mitmproxy/OOB services:
@@ -96,7 +106,7 @@ there for the full reference, env-var precedence, and resource sizing.
    ```
 
    The runtime is one shared long-lived Kali container, not per-engagement. See
-   [Stack details](README.md#stack-details).
+   [Runtime model](README.md#runtime-model).
 
 3. **Create an engagement.** The default in non-interactive runs is the parsed hostname as the sole
    in-scope host and `exploit_policy: pause`:
@@ -107,11 +117,13 @@ there for the full reference, env-var precedence, and resource sizing.
 
    The command prints the engagement directory on stdout and a status footer (mitmproxy/OOB state +
    the exact start command) on stderr. For code analysis use `--type code`/`--type both`, and for blue
-   incident work use `vigil blue engage`. See [Starting an engagement](README.md#starting-an-engagement).
+   incident work use `vigil blue engage`. See [Running an engagement](README.md#running-an-engagement).
 
-4. **Start a client in the engagement.** The CLI verb changes into the engagement directory, exports
-   `ENGAGEMENT_DIR`, mounts the `.codex/agents` / `.claude/agents` prompt symlinks, and execs the
-   launcher:
+4. **Start a client in the engagement.** The CLI verb changes into the engagement directory,
+   exports `ENGAGEMENT_DIR`, `ENGAGEMENT_KEY`, and `VIGIL_CLIENT_NAME`, and execs the launcher.
+   (The `.codex/agents` / `.claude/agents` prompt symlinks are already there — `create` writes
+   them, not `start`.) Always start through this verb rather than the generated
+   `start_<client>.sh` or a bare client; see [Running an engagement](README.md#running-an-engagement):
 
    ```bash
    vigil engagement list --json                              # find the key
@@ -131,8 +143,8 @@ there for the full reference, env-var precedence, and resource sizing.
    work, routes tool execution through `vigil assess kali ...`, and records findings/activity through
    `vigil assess`. You stay in the loop for numbered next-step decisions and the exploit-approval
    checkpoint when `exploit_policy` is `pause`. See
-   [Engagement operator start prompts](README.md#engagement-operator-start-prompts) for the generic
-   and resume forms, and [Blue incident engagements](README.md#blue-incident-engagements) for the
+   [Start and resume prompts](docs/session-commands.md) for the generic
+   and resume forms, and [Blue incident engagements](docs/blue-engagements.md) for the
    blue variant.
 
 # Adding to the system: step-by-step recipes
@@ -258,9 +270,9 @@ authoritative registry, but registration shape depends on the command.
 
    ```bash
    uv run --directory orchestrator/backend --extra dev pytest \
-     "$(jj root)/agent/scripts/assess/tests/test_<name>.py"
+     "$VIGIL_REPO/agent/scripts/assess/tests/test_<name>.py"
    uv run --directory orchestrator/backend --extra dev pytest \
-     "$(jj root)/agent/scripts/assess/tests/test_cli_canonical_shapes.py"
+     "$VIGIL_REPO/agent/scripts/assess/tests/test_cli_canonical_shapes.py"
    ```
 
    If the verb persists a new field that the backend stores, follow the coupling and registration
@@ -290,7 +302,7 @@ reproducible verdict (anomaly ranking, payload classification, reachability) the
 
    ```bash
    uv run --directory orchestrator/backend --extra dev pytest \
-     "$(jj root)/agent/scripts/assess/tests/test_<name>.py"
+     "$VIGIL_REPO/agent/scripts/assess/tests/test_<name>.py"
    ```
 
    When an invariant must exist in exactly one place (a bucket table, an enum, a noise filter), make
@@ -459,12 +471,19 @@ The verification surface is **not one command**: 4 pytest scopes + a render-chec
 
 > **Never run a bare `pytest` from the repo root, and always go through the backend venv.** Scope every run to one suite — duplicate `test_vigil_cli.py` basenames in `tests/` and `agent/scripts/assess/tests/` collide under a single collection. The backend venv (`uv run --directory orchestrator/backend --extra dev …`) is the one interpreter that can collect every suite; the root `.venv` hard-errors on `tests/eval` (unconditional `import yaml`), and `uv run` *without* `--extra dev` fails to spawn pytest in a clean env.
 
+Set `VIGIL_REPO` to your checkout root first — the commands below are absolute
+because `uv --directory` changes the working directory:
+
+```bash
+VIGIL_REPO=$(git rev-parse --show-toplevel)   # or: VIGIL_REPO=$(jj root)
+```
+
 | Suite / gate | Command | Cost |
 |---|---|---|
 | Backend (incl. sync-lint) | `uv run --directory orchestrator/backend --extra dev pytest` | free |
-| Root CLI / bench harness (excluding eval) | `uv run --directory orchestrator/backend --extra dev pytest "$(jj root)/tests" --ignore="$(jj root)/tests/eval"` | free |
-| Assess CLI | `uv run --directory orchestrator/backend --extra dev pytest "$(jj root)/agent/scripts/assess/tests"` | free |
-| Deterministic eval | `uv run --directory orchestrator/backend --extra dev pytest "$(jj root)/tests/eval"` | free |
+| Root CLI / bench harness (excluding eval) | `uv run --directory orchestrator/backend --extra dev pytest "$VIGIL_REPO/tests" --ignore="$VIGIL_REPO/tests/eval"` | free |
+| Assess CLI | `uv run --directory orchestrator/backend --extra dev pytest "$VIGIL_REPO/agent/scripts/assess/tests"` | free |
+| Deterministic eval | `uv run --directory orchestrator/backend --extra dev pytest "$VIGIL_REPO/tests/eval"` | free |
 | Prompt render-check | `cd agent && ./scripts/render-operator-prompts.sh check` | free |
 | Schema `--check` | `uv run --directory orchestrator/backend python scripts/generate_agent_schemas.py --check` | free |
 | Lint / types | `uvx ruff check .`  ·  `uvx --with-editable . mypy src/vigil_cli` | free |

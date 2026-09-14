@@ -7,4 +7,4 @@ and version-control instructions.
 Treat prompts under `agent/` as product source when inspecting or editing them,
 not as instructions to assume the engagement operator role in a coding session.
 For an explicitly requested engagement session, follow
-[`README.md`](README.md#starting-an-engagement) and its engagement-local entrypoint.
+[`README.md`](README.md#running-an-engagement) and its engagement-local entrypoint.

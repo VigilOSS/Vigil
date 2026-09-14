@@ -23,6 +23,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import docker
 from .runtime import HOST_RECON_TOOLS, HostTool
 
 WhichFn = Callable[[str], str | None]
@@ -50,7 +51,7 @@ PREREQUISITES: tuple[Prerequisite, ...] = (
     Prerequisite(
         "docker",
         "brew install --cask docker",
-        "Kali runtime + orchestrator containers (launch Docker Desktop after install)",
+        "Kali runtime + mitmproxy containers (the orchestrator runs on the host)",
     ),
     Prerequisite("go", "brew install go", "builds the go-installable host recon tools"),
     Prerequisite("npm", "brew install node", "orchestrator frontend build"),
@@ -63,6 +64,7 @@ class ToolStatus:
     present: bool
     macos_hint: str
     note: str
+    detail: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,12 +91,32 @@ def _default_runner(argv: Sequence[str]) -> "subprocess.CompletedProcess[str]":
     return subprocess.run(list(argv), text=True, capture_output=True, check=False)
 
 
-def prerequisite_status(*, which: WhichFn = shutil.which) -> list[ToolStatus]:
-    """Presence of each bootstrap prerequisite, in declaration order."""
-    return [
-        ToolStatus(p.binary, which(p.binary) is not None, p.macos_hint, p.note)
-        for p in PREREQUISITES
-    ]
+def prerequisite_status(
+    *,
+    which: WhichFn = shutil.which,
+    daemon_available: Callable[[], bool] | None = None,
+) -> list[ToolStatus]:
+    """Readiness of each bootstrap prerequisite, in declaration order.
+
+    Docker is the one prerequisite where the binary is not the capability: the
+    checklist this wizard prints leads straight to an image build, so a client
+    binary with no reachable daemon is not ready. Same probe `vigil doctor`
+    uses, so the two commands cannot disagree about the same host.
+    """
+    probe = daemon_available if daemon_available is not None else docker.daemon_available
+    rows: list[ToolStatus] = []
+    for prerequisite in PREREQUISITES:
+        present = which(prerequisite.binary) is not None
+        detail = ""
+        if present and prerequisite.binary == "docker" and not probe():
+            present = False
+            detail = "binary found but the Docker daemon is not reachable — start Docker"
+        rows.append(
+            ToolStatus(
+                prerequisite.binary, present, prerequisite.macos_hint, prerequisite.note, detail
+            )
+        )
+    return rows
 
 
 def _host_tool_command(tool: HostTool, system_name: str) -> str | None:
@@ -253,7 +275,7 @@ def _emit_text(
     print("prerequisites (install these yourself if MISSING):")
     for p in prereqs:
         state = "ok " if p.present else "MISS"
-        suffix = "" if p.present else f"  {p.macos_hint}"
+        suffix = "" if p.present else f"  {p.detail or p.macos_hint}"
         print(f"  [{state}] {p.binary:<8} {p.note}{suffix}")
     print()
     print("host recon tools:")
@@ -306,7 +328,13 @@ def _emit_json(
         "dry_run": options.dry_run,
         "installs_executed": ran_installs,
         "prerequisites": [
-            {"binary": p.binary, "present": p.present, "macos_hint": p.macos_hint, "note": p.note}
+            {
+                "binary": p.binary,
+                "present": p.present,
+                "macos_hint": p.macos_hint,
+                "note": p.note,
+                "detail": p.detail,
+            }
             for p in prereqs
         ],
         "host_tools": [

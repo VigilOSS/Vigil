@@ -12,7 +12,13 @@ from . import docker
 from .image_freshness import image_outdated, proxy_image_drift
 from .install import InstallOptions, install_from_source
 from .mitmproxy import MitmproxyOptions, build_image as build_mitmproxy_image, mitmproxy_image_inputs, start_proxy
-from .oob import OobOptions, oob_options as _oob_options, oob_status, start_oob
+from .oob import (
+    OOB_CONFIGURATION_HELP,
+    OobOptions,
+    oob_options as _oob_options,
+    oob_status,
+    start_oob,
+)
 from .orchestrator import OrchestratorOptions, start_orchestrator
 from .paths import default_runtime_container, resolve_source_root
 from .runtime import RuntimeOptions, build_runtime, runtime_image_inputs, start_runtime, stop_runtime
@@ -28,7 +34,20 @@ class UpOptions:
     no_restart_runtime: bool = False
 
 
-def run_up(options: UpOptions, *, runner: docker.Runner = docker.run_command) -> None:
+def run_up(
+    options: UpOptions,
+    *,
+    runner: docker.Runner = docker.run_command,
+    build_runner: docker.Runner = docker.run_command_streaming,
+) -> None:
+    """Bring the local stack up.
+
+    Two runners, deliberately: ``runner`` bounds fast metadata queries so a
+    wedged daemon errors instead of hanging, while ``build_runner`` streams
+    without a timeout because a cold image build legitimately runs for minutes.
+    Never pass ``runner`` to a build site — that bound kills the build at 20s
+    and swallows its progress output.
+    """
     install_root = Path(os.path.abspath(options.install_root.expanduser()))
 
     try:
@@ -45,6 +64,7 @@ def run_up(options: UpOptions, *, runner: docker.Runner = docker.run_command) ->
                 verify_docker_image=False,
             ),
             runner=runner,
+            build_runner=build_runner,
         )
     except SystemExit:
         print("source sync\tskipped (no source checkout found)")
@@ -58,7 +78,7 @@ def run_up(options: UpOptions, *, runner: docker.Runner = docker.run_command) ->
         "vigil:latest", _runtime_image_inputs(install_root), root=install_root, runner=runner
     ):
         print("runtime image\tbuilding")
-        build_runtime(install_root, runner=runner)
+        build_runtime(install_root, runner=build_runner)
         runtime_built = True
     else:
         print("runtime image\tcurrent")
@@ -74,12 +94,12 @@ def run_up(options: UpOptions, *, runner: docker.Runner = docker.run_command) ->
         runner=runner,
     ):
         print("mitmproxy image\tbuilding")
-        _build_mitmproxy_image(install_root, runner=runner)
+        _build_mitmproxy_image(install_root, runner=build_runner)
     else:
         print("mitmproxy image\tcurrent")
 
     start_orchestrator(OrchestratorOptions(install_root=install_root, allow_existing=True))
-    _start_mitmproxy_if_needed(install_root, options, runner=runner)
+    _start_mitmproxy_if_needed(install_root, options, runner=runner, build_runner=build_runner)
     _start_oob_if_needed(install_root, runner=runner)
 
 
@@ -136,7 +156,20 @@ def _confirm_runtime_restart(options: UpOptions) -> bool:
     return answer in {"y", "yes"}
 
 
-def _start_mitmproxy_if_needed(install_root: Path, options: UpOptions, *, runner: docker.Runner) -> None:
+def _start_mitmproxy_if_needed(
+    install_root: Path,
+    options: UpOptions,
+    *,
+    runner: docker.Runner,
+    build_runner: docker.Runner,
+) -> None:
+    """Start the proxy, building its image first if `start_proxy` finds it stale.
+
+    `build_runner` is not optional here: `start_proxy` runs its own freshness
+    check and builds, so under `--no-build` — where run_up skipped its own proxy
+    build — this is the only path to that build. Handing it the bounded metadata
+    runner would put a cold build back under the 20s ceiling.
+    """
     if docker.container_running("vigil-proxy", runner=runner):
         if proxy_image_drift(runner=runner):
             print("mitmproxy\trunning old image; restart to pick up rebuilt image")
@@ -149,7 +182,7 @@ def _start_mitmproxy_if_needed(install_root: Path, options: UpOptions, *, runner
     print("mitmproxy\tstarting (serves all active engagements)")
     start_proxy(
         MitmproxyOptions(install_root=install_root, engagements_root=engagements_root),
-        runner=runner,
+        runner=build_runner,
     )
     del options  # accepted for signature parity; the proxy no longer pins to an engagement
 
@@ -158,7 +191,7 @@ def _start_oob_if_needed(install_root: Path, *, runner: docker.Runner) -> None:
     options = _oob_options(install_root)
     status = oob_status(
         oob_domain=options.oob_domain,
-        tenant_prefix=options.tenant_prefix,
+        slot_prefix=options.slot_prefix,
         dns_remote_port=options.dns_remote_port,
         reverse_remote_port=options.reverse_remote_port,
         runner=runner,
@@ -167,20 +200,18 @@ def _start_oob_if_needed(install_root: Path, *, runner: docker.Runner) -> None:
     if status.get("server") or status.get("frpc"):
         route_matches = status.get("route_matches")
         if route_matches is False or (
-            route_matches is None and options.tenant_prefix != "legacy"
+            route_matches is None and options.slot_prefix != "legacy"
         ):
             raise SystemExit(
-                "OOB sessions are already active for another tenant, or their tenant route cannot be verified. "
-                "Run `vigil oob restart` intentionally before switching tenant routes."
+                "OOB sessions are already active for another relay slot, or their relay route cannot be verified. "
+                "Run `vigil oob restart` intentionally before switching relay routes."
             )
         print("oob\talready active; existing FRP/interactsh sessions left untouched")
         return
 
     if not options.frp_host or not options.oob_domain:
         print("oob\tskipped; infrastructure is not configured")
-        print("Configure it with: vigil config set oob.frp_host <host>")
-        print("                   vigil config set oob.domain <domain>")
-        print("Then start OOB with: vigil oob start")
+        _print_oob_configuration_help()
         return
 
     if not options.frp_token:
@@ -193,10 +224,10 @@ def _start_oob_if_needed(install_root: Path, *, runner: docker.Runner) -> None:
                 frp_port=options.frp_port,
                 frp_token=token,
                 oob_domain=options.oob_domain,
-                tenant_prefix=options.tenant_prefix,
+                slot_prefix=options.slot_prefix,
                 dns_remote_port=options.dns_remote_port,
                 reverse_remote_port=options.reverse_remote_port,
-                tenant_route=options.tenant_route,
+                relay_route=options.relay_route,
             )
         else:
             print("oob\tskipped; missing FRP token")
@@ -223,6 +254,16 @@ def _runtime_image_drift(options: RuntimeOptions, *, runner: docker.Runner) -> b
     configured_id = docker.image_id(options.image, runner=runner)
     return bool(container_id and configured_id and container_id != configured_id)
 
+
+
+def _print_oob_configuration_help() -> None:
+    """Print the same checklist `vigil oob start` aborts with.
+
+    One source of truth, so the skip message here and the refusal there cannot
+    drift into naming different keys.
+    """
+    print(OOB_CONFIGURATION_HELP)
+    print("Then start OOB with: vigil oob start")
 
 def _build_mitmproxy_image(install_root: Path, *, runner: docker.Runner = docker.run_command_streaming) -> None:
     """Delegate to the one proxy-image builder.

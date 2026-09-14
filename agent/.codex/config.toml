@@ -1,5 +1,12 @@
-# Project-local Codex hooks for Vigil.
-# These mirror the Claude Code hooks in agent/.claude/settings.json.
+# Project-local Codex config for Vigil.
+# These mirror agent/.claude/settings.json.
+
+# Keep the engagement record in Vigil's backend ledger, not in a second
+# cross-session store. Mirrors "autoMemoryEnabled": false on the Claude side.
+# Codex ships this off by default; pinning it here also overrides an operator
+# whose global ~/.codex/config.toml turns it on.
+[features]
+memories = false
 
 [hooks]
 

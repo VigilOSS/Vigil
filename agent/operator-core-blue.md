@@ -1,4 +1,4 @@
-[operator] Vigil (blue) ready. Ensure 'vigil runtime start' is running. Use 'vigil blue customers' to confirm the tenant ref, then 'vigil blue engage --customer <slug> --platform <p>', cd into the printed engagement directory, start Codex/Claude, and paste the alert into this operator chat.
+[operator] Vigil (blue) ready. Ensure 'vigil runtime start' is running. Use 'vigil blue customers' to confirm the tenant ref, then 'vigil blue engage --customer <slug> --platform <p>', start the client with 'vigil engagement start <key> --client codex' (or claude), and paste the alert into this operator chat.
 
 ## Activation
 

@@ -24,7 +24,11 @@ try:
 except ImportError:  # POSIX
     _msvcrt = None  # type: ignore[assignment]
 
-TENANT_METADATA_RELATIVE_PATH = Path(".runtime-data/oob/tenant-routing.json")
+RELAY_METADATA_RELATIVE_PATH = Path(".runtime-data/oob/relay-routing.json")
+# Spelling this record shipped under before the relay-slot rename. Installs that
+# allocated a route then still own it, so every read falls back to this name and
+# leaves the file untouched; only an allocation or reconcile writes the new one.
+LEGACY_RELAY_METADATA_RELATIVE_PATH = Path(".runtime-data/oob/tenant-routing.json")
 ROUTING_VERSION = 1
 PORT_BLOCK_START = 20_000
 PORT_BLOCK_SIZE = 2
@@ -39,11 +43,11 @@ _DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 
 @dataclass(frozen=True, slots=True)
-class OobTenantRoute:
+class OobRelayRoute:
     version: int
     install_id: str
-    tenant_name: str
-    tenant_prefix: str
+    slot_name: str
+    slot_prefix: str
     base_domain: str
     oob_domain: str
     allocation_slot: int
@@ -62,13 +66,13 @@ class OobTenantRoute:
         return payload
 
 
-def sanitize_tenant_prefix(value: str) -> str:
+def sanitize_slot_prefix(value: str) -> str:
     raw = str(value).strip()
     if not raw or raw in {".", ".."} or "/" in raw or "\\" in raw:
-        raise SystemExit(f"Invalid OOB tenant identity {value!r}: expected a tenant name, not a path.")
+        raise SystemExit(f"Invalid OOB relay slot identity {value!r}: expected a slot name, not a path.")
     clean = re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")
     if not clean:
-        raise SystemExit(f"Invalid OOB tenant identity {value!r}: no DNS-safe characters remain.")
+        raise SystemExit(f"Invalid OOB relay slot identity {value!r}: no DNS-safe characters remain.")
     return clean[:40].rstrip("-")
 
 
@@ -100,13 +104,16 @@ def _default_slot_candidates(identity: str) -> Iterable[int]:
 
 
 def _metadata_path(
-    install_root: Path, *, preserve_install_path: bool = False
+    install_root: Path,
+    *,
+    preserve_install_path: bool = False,
+    relative_path: Path = RELAY_METADATA_RELATIVE_PATH,
 ) -> Path:
     root = install_root.expanduser()
     resolved_root = root.resolve()
     if not preserve_install_path:
         root = resolved_root
-    path = root / TENANT_METADATA_RELATIVE_PATH
+    path = root / relative_path
     if not path.parent.resolve(strict=False).is_relative_to(resolved_root):
         raise SystemExit(
             f"Invalid OOB metadata path {path}: parent escapes install root through a symlink."
@@ -226,13 +233,13 @@ def _fsync_directory(path: Path) -> None:
         os.close(directory_fd)
 
 
-def _route_from_payload(path: Path, payload: dict[str, object]) -> OobTenantRoute:
+def _route_from_payload(path: Path, payload: dict[str, object]) -> OobRelayRoute:
     try:
-        route = OobTenantRoute(
+        route = OobRelayRoute(
             version=_payload_int(payload, "version"),
             install_id=str(payload["install_id"]),
-            tenant_name=str(payload["tenant_name"]),
-            tenant_prefix=str(payload["tenant_prefix"]),
+            slot_name=str(_payload_field(payload, "slot_name", "tenant_name")),
+            slot_prefix=str(_payload_field(payload, "slot_prefix", "tenant_prefix")),
             base_domain=normalize_base_domain(str(payload["base_domain"])),
             oob_domain=str(payload["oob_domain"]).strip().rstrip(".").lower(),
             allocation_slot=_payload_int(payload, "allocation_slot"),
@@ -245,6 +252,18 @@ def _route_from_payload(path: Path, payload: dict[str, object]) -> OobTenantRout
         raise SystemExit(f"Invalid OOB routing metadata at {path}: missing or malformed fields.") from exc
     _validate_route(route)
     return route
+
+
+def _payload_field(payload: dict[str, object], key: str, legacy_key: str) -> object:
+    """Read one record field under its current name or its pre-rename name.
+
+    Records written before the relay-slot rename spell these keys ``tenant_*``.
+    Surfacing them under the current names keeps an existing install's route
+    loadable without rewriting a file the caller only meant to read.
+    """
+    if key in payload:
+        return payload[key]
+    return payload[legacy_key]
 
 
 def _payload_int(payload: dict[str, object], key: str) -> int:
@@ -261,14 +280,14 @@ def _payload_bool(payload: dict[str, object], key: str) -> bool:
     return value
 
 
-def _validate_route(route: OobTenantRoute) -> None:
+def _validate_route(route: OobRelayRoute) -> None:
     if route.version != ROUTING_VERSION or not route.install_id:
         raise SystemExit(f"Invalid OOB routing metadata at {route.metadata_path}: unsupported identity/version.")
-    clean = sanitize_tenant_prefix(route.tenant_name)
+    clean = sanitize_slot_prefix(route.slot_name)
     normalized_oob_domain = normalize_base_domain(route.oob_domain)
     if route.legacy:
         valid = (
-            route.tenant_prefix == "legacy"
+            route.slot_prefix == "legacy"
             and normalized_oob_domain == route.base_domain
             and route.allocation_slot == -1
             and route.dns_remote_port == LEGACY_DNS_REMOTE_PORT
@@ -280,7 +299,7 @@ def _validate_route(route: OobTenantRoute) -> None:
         expected_dns = PORT_BLOCK_START + route.allocation_slot * PORT_BLOCK_SIZE
         valid = (
             0 <= route.allocation_slot < PORT_SLOT_COUNT
-            and route.tenant_prefix == expected_prefix
+            and route.slot_prefix == expected_prefix
             and normalized_oob_domain == f"{expected_prefix}.{route.base_domain}"
             and route.dns_remote_port == expected_dns
             and route.reverse_remote_port == expected_dns + 1
@@ -288,38 +307,44 @@ def _validate_route(route: OobTenantRoute) -> None:
     if not valid:
         raise SystemExit(
             f"Invalid OOB routing metadata at {route.metadata_path}: routing metadata is inconsistent; "
-            "refusing to change callback correlation or tenant routing silently."
+            "refusing to change callback correlation or relay routing silently."
         )
 
 
-def load_tenant_route(
+def load_relay_route(
     install_root: Path, *, preserve_install_path: bool = False
-) -> OobTenantRoute | None:
-    path = _metadata_path(
-        install_root, preserve_install_path=preserve_install_path
-    )
-    if path.is_symlink():
-        raise SystemExit(f"Invalid OOB routing metadata at {path}: symlink files are not allowed.")
-    if not path.exists():
-        return None
-    return _route_from_payload(path, _read_json(path))
+) -> OobRelayRoute | None:
+    for relative_path in (
+        RELAY_METADATA_RELATIVE_PATH,
+        LEGACY_RELAY_METADATA_RELATIVE_PATH,
+    ):
+        path = _metadata_path(
+            install_root,
+            preserve_install_path=preserve_install_path,
+            relative_path=relative_path,
+        )
+        if path.is_symlink():
+            raise SystemExit(f"Invalid OOB routing metadata at {path}: symlink files are not allowed.")
+        if path.exists():
+            return _route_from_payload(path, _read_json(path))
+    return None
 
 
-def legacy_tenant_route(
+def legacy_relay_route(
     install_root: Path,
     *,
     base_domain: str,
     preserve_install_path: bool = False,
-) -> OobTenantRoute:
+) -> OobRelayRoute:
     path = _metadata_path(
         install_root, preserve_install_path=preserve_install_path
     )
     domain = normalize_base_domain(base_domain)
-    route = OobTenantRoute(
+    route = OobRelayRoute(
         version=ROUTING_VERSION,
         install_id="legacy-single-tenant",
-        tenant_name="legacy",
-        tenant_prefix="legacy",
+        slot_name="legacy",
+        slot_prefix="legacy",
         base_domain=domain,
         oob_domain=domain,
         allocation_slot=-1,
@@ -338,10 +363,10 @@ def _resolved_registry_path(registry_path: Path | None) -> Path:
     ).expanduser().resolve()
 
 
-def _allocation_row(route: OobTenantRoute, install_root: Path) -> dict[str, object]:
+def _allocation_row(route: OobRelayRoute, install_root: Path) -> dict[str, object]:
     return {
         "install_root": str(install_root),
-        "tenant_prefix": route.tenant_prefix,
+        "slot_prefix": route.slot_prefix,
         "oob_domain": route.oob_domain,
         "allocation_slot": route.allocation_slot,
         "dns_remote_port": route.dns_remote_port,
@@ -371,7 +396,7 @@ def _validated_allocations(
             )
         try:
             install_root = str(value["install_root"]).strip()
-            tenant_prefix = str(value["tenant_prefix"]).strip()
+            slot_prefix = str(_payload_field(value, "slot_prefix", "tenant_prefix")).strip()
             domain = normalize_base_domain(str(value["oob_domain"]))
             slot_value = value["allocation_slot"]
             dns_value = value["dns_remote_port"]
@@ -388,24 +413,24 @@ def _validated_allocations(
         expected_dns = PORT_BLOCK_START + slot * PORT_BLOCK_SIZE
         if (
             not install_root
-            or not tenant_prefix
+            or not slot_prefix
             or not 0 <= slot < PORT_SLOT_COUNT
             or dns_port != expected_dns
             or reverse_port != expected_dns + 1
-            or not domain.startswith(f"{tenant_prefix}.")
+            or not domain.startswith(f"{slot_prefix}.")
         ):
             raise SystemExit(
                 f"Invalid OOB allocation registry at {registry_path}: inconsistent allocation for {install_id!r}."
             )
         if slot in used_slots or domain in used_domains:
             raise SystemExit(
-                f"Invalid OOB allocation registry at {registry_path}: duplicate tenant domain or FRP block."
+                f"Invalid OOB allocation registry at {registry_path}: duplicate slot domain or FRP block."
             )
         used_slots[slot] = install_id
         used_domains[domain] = install_id
         allocations[install_id] = {
             "install_root": install_root,
-            "tenant_prefix": tenant_prefix,
+            "slot_prefix": slot_prefix,
             "oob_domain": domain,
             "allocation_slot": slot,
             "dns_remote_port": dns_port,
@@ -415,13 +440,13 @@ def _validated_allocations(
 
 
 def _reconcile_existing_route_locked(
-    route: OobTenantRoute,
+    route: OobRelayRoute,
     install_root: Path,
     registry_path: Path,
     *,
     atomic_writer: Callable[[Path, dict[str, object]], None] = _atomic_write_json_real,
     preserve_install_path: bool = False,
-) -> OobTenantRoute:
+) -> OobRelayRoute:
     if route.legacy:
         return route
     registry = _read_json(
@@ -440,12 +465,12 @@ def _reconcile_existing_route_locked(
             if prior_root.exists():
                 raise SystemExit(
                     f"OOB install identity {route.install_id!r} is already registered to another install root "
-                    f"({prior_root}); refusing a copied tenant route."
+                    f"({prior_root}); refusing a copied relay route."
                 )
             prior = {**prior, "install_root": str(install_root)}
         if any(prior.get(key) != expected[key] for key in expected if key != "install_root"):
             raise SystemExit(
-                f"OOB allocation registry at {registry_path} disagrees with persisted tenant routing; "
+                f"OOB allocation registry at {registry_path} disagrees with persisted relay routing; "
                 "refusing to change correlation or FRP ownership silently."
             )
         if prior == expected:
@@ -457,7 +482,7 @@ def _reconcile_existing_route_locked(
                 or row["oob_domain"] == route.oob_domain
             ):
                 raise SystemExit(
-                    f"OOB allocation registry at {registry_path} assigns this tenant's domain or FRP block "
+                    f"OOB allocation registry at {registry_path} assigns this slot's domain or FRP block "
                     f"to {owner!r}; refusing a collision."
                 )
     allocations[route.install_id] = expected
@@ -477,13 +502,13 @@ def _install_identity_path(
     return expanded.resolve()
 
 
-def reconcile_tenant_route_registry(
-    route: OobTenantRoute,
+def reconcile_relay_route_registry(
+    route: OobRelayRoute,
     install_root: Path,
     *,
     registry_path: Path | None = None,
     preserve_install_path: bool = False,
-) -> OobTenantRoute:
+) -> OobRelayRoute:
     install_root = _install_identity_path(
         install_root, preserve_install_path=preserve_install_path
     )
@@ -498,17 +523,17 @@ def reconcile_tenant_route_registry(
         )
 
 
-def initialize_tenant_route(
+def initialize_relay_route(
     install_root: Path,
     *,
     is_upgrade: bool,
-    tenant_name: str | None = None,
+    slot_name: str | None = None,
     base_domain: str,
     registry_path: Path | None = None,
     canonical_install_root: Path | None = None,
     preserve_install_path: bool = False,
-) -> OobTenantRoute:
-    existing = load_tenant_route(
+) -> OobRelayRoute:
+    existing = load_relay_route(
         install_root, preserve_install_path=preserve_install_path
     )
     registry_install_root = _install_identity_path(
@@ -516,29 +541,29 @@ def initialize_tenant_route(
         preserve_install_path=preserve_install_path,
     )
     if existing is not None:
-        return reconcile_tenant_route_registry(
+        return reconcile_relay_route_registry(
             existing,
             registry_install_root,
             registry_path=registry_path,
             preserve_install_path=preserve_install_path,
         )
     if not is_upgrade:
-        return allocate_tenant_route(
+        return allocate_relay_route(
             install_root,
-            tenant_name=tenant_name or registry_install_root.name,
+            slot_name=slot_name or registry_install_root.name,
             base_domain=base_domain,
             registry_path=registry_path,
             canonical_install_root=registry_install_root,
             preserve_install_path=preserve_install_path,
         )
-    route = legacy_tenant_route(
+    route = legacy_relay_route(
         install_root,
         base_domain=base_domain,
         preserve_install_path=preserve_install_path,
     )
     path = route.metadata_path
     with _FileLock(path.with_suffix(".lock")):
-        existing = load_tenant_route(
+        existing = load_relay_route(
             install_root, preserve_install_path=preserve_install_path
         )
         if existing is not None:
@@ -547,10 +572,10 @@ def initialize_tenant_route(
     return route
 
 
-def allocate_tenant_route(
+def allocate_relay_route(
     install_root: Path,
     *,
-    tenant_name: str,
+    slot_name: str,
     base_domain: str = "oob.invalid",
     registry_path: Path | None = None,
     identity_factory: Callable[[], str] = _default_identity,
@@ -558,8 +583,8 @@ def allocate_tenant_route(
     atomic_writer: Callable[[Path, dict[str, object]], None] = _atomic_write_json_real,
     canonical_install_root: Path | None = None,
     preserve_install_path: bool = False,
-) -> OobTenantRoute:
-    clean = sanitize_tenant_prefix(tenant_name)
+) -> OobRelayRoute:
+    clean = sanitize_slot_prefix(slot_name)
     filesystem_install_root = install_root.expanduser()
     registry_install_root = _install_identity_path(
         canonical_install_root or filesystem_install_root,
@@ -574,7 +599,7 @@ def allocate_tenant_route(
     registry_path = _resolved_registry_path(registry_path)
     lock_path = registry_path.with_suffix(registry_path.suffix + ".lock")
     with _FileLock(lock_path):
-        existing = load_tenant_route(
+        existing = load_relay_route(
             filesystem_install_root,
             preserve_install_path=preserve_install_path,
         )
@@ -595,7 +620,7 @@ def allocate_tenant_route(
         if prior_identity is not None:
             raise SystemExit(
                 "OOB install identity collision: the generated identity is already allocated to "
-                f"{prior_identity!r}; refusing to overwrite another tenant route."
+                f"{prior_identity!r}; refusing to overwrite another relay route."
             )
         used_slots = {
             cast(int, row["allocation_slot"])
@@ -604,9 +629,9 @@ def allocate_tenant_route(
         try:
             slot = next(candidate for candidate in slot_candidates(install_id) if candidate not in used_slots)
         except StopIteration as exc:
-            raise SystemExit("OOB tenant allocation exhausted: no free FRP port block remains.") from exc
+            raise SystemExit("OOB relay slot allocation exhausted: no free FRP port block remains.") from exc
         if not 0 <= slot < PORT_SLOT_COUNT:
-            raise SystemExit(f"OOB tenant allocator returned invalid slot {slot}.")
+            raise SystemExit(f"OOB relay slot allocator returned invalid slot {slot}.")
         digest = hashlib.sha256(install_id.encode("utf-8")).hexdigest()[:16]
         prefix = f"{clean}-{digest}"
         domain = normalize_base_domain(base_domain)
@@ -616,14 +641,14 @@ def allocate_tenant_route(
             for row in allocations.values()
         ):
             raise SystemExit(
-                f"OOB tenant domain collision for {oob_domain!r}; generate a new install identity."
+                f"OOB relay slot domain collision for {oob_domain!r}; generate a new install identity."
             )
         dns_port = PORT_BLOCK_START + slot * PORT_BLOCK_SIZE
-        route = OobTenantRoute(
+        route = OobRelayRoute(
             version=ROUTING_VERSION,
             install_id=install_id,
-            tenant_name=tenant_name.strip(),
-            tenant_prefix=prefix,
+            slot_name=slot_name.strip(),
+            slot_prefix=prefix,
             base_domain=domain,
             oob_domain=oob_domain,
             allocation_slot=slot,
@@ -645,7 +670,7 @@ def allocate_tenant_route(
         return route
 
 
-def render_edge_routing(route: OobTenantRoute, *, frp_http_vhost_port: int = 8080) -> dict[str, str]:
+def render_edge_routing(route: OobRelayRoute, *, frp_http_vhost_port: int = 8080) -> dict[str, str]:
     """Render deployment inputs; callers apply them explicitly outside this CLI."""
     callback_hosts = (
         route.oob_domain,
@@ -677,7 +702,7 @@ def render_edge_routing(route: OobTenantRoute, *, frp_http_vhost_port: int = 808
     )
     routing_json = json.dumps(
         {
-            "tenant_prefix": route.tenant_prefix,
+            "slot_prefix": route.slot_prefix,
             "domain": route.oob_domain,
             "dns_upstream": f"127.0.0.1:{route.dns_remote_port}",
             "reverse_tcp_port": route.reverse_remote_port,

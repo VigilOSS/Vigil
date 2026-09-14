@@ -23,7 +23,7 @@ from .install_manifest import (
     install_source_content_sha256,
 )
 from .oob import oob_options, oob_status
-from .oob_tenants import load_tenant_route
+from .oob_relay import load_relay_route
 from .orchestrator import orchestrator_status
 from .paths import default_runtime_container, engagements_root, resolve_orchestrator_base_url
 from .runtime import runtime_mounts_ok, runtime_resource_state, runtime_status
@@ -368,7 +368,7 @@ def collect_status(
         # `vigil oob status` runs the full health check.
         "oob": oob_status(
             oob_domain=resolved_oob.oob_domain,
-            tenant_prefix=resolved_oob.tenant_prefix,
+            slot_prefix=resolved_oob.slot_prefix,
             dns_remote_port=resolved_oob.dns_remote_port,
             reverse_remote_port=resolved_oob.reverse_remote_port,
             runner=runner,
@@ -442,7 +442,7 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
     print(f"mitmproxy\t{mitm_dict.get('state', '-')}\tca_volume={mitm_dict.get('ca_volume')}{drift_note}")
     print(
         f"oob\t{oob.get('state', '-')}\tclients={len(oob.get('clients') or [])}"
-        f"\ttenant={oob.get('tenant_prefix') or '-'}\tports={oob.get('port_range') or '-'}"
+        f"\tslot={oob.get('slot_prefix') or '-'}\tports={oob.get('port_range') or '-'}"
         f"\tdomain={oob.get('domain') or '-'}"
     )
     print(f"backup\t{backup['latest'] or '-'}")  # type: ignore[index]
@@ -466,7 +466,7 @@ def print_status(status: dict[str, object], *, json_output: bool = False) -> Non
 def _print_install_staleness_warning(staleness: object) -> None:
     """Non-fatal WARN when the working root lags the source it was installed from.
 
-    Two-layer model (I-5): `vigil install`/`update` refreshes the WORKING ROOT
+    Two-layer model (I-5): `vigil install` refreshes the WORKING ROOT
     (code/prompts/skills/scripts); `uv tool upgrade vigil` only refreshes the CLI
     BINARY. A lagging working root makes the new feature set inert, so nudge the
     operator to re-run `vigil install`.
@@ -590,8 +590,8 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
     checks.append(_install_staleness_check(install_root))
     checks.append(_failed_audit_marker_check(install_root))
     checks.append(_host_recon_tools_check())
-    checks.append(_oob_tenant_check(install_root))
-    checks.append(Check("oob.frp_token", "OK" if os.environ.get("VIGIL_FRP_TOKEN") or get_config_value("oob.frp_token") else "MISSING"))
+    checks.append(_oob_relay_check(install_root))
+    checks.append(_oob_token_check())
     return checks
 
 
@@ -601,22 +601,54 @@ def print_doctor(checks: list[Check]) -> None:
         print(f"{check.status}\t{check.name}{suffix}")
 
 
-def _oob_tenant_check(install_root: Path) -> Check:
-    try:
-        route = load_tenant_route(install_root)
-    except SystemExit as exc:
-        return Check("oob.tenant-routing", "FAIL", str(exc))
-    if route is None:
-        return Check(
-            "oob.tenant-routing",
-            "WARN",
-            "legacy install has no tenant metadata; run `vigil install` to pin its current route",
-        )
-    mode = "legacy-pinned" if route.legacy else "tenant"
+
+def _oob_token_check() -> Check:
+    """The FRP shared secret, with the command that sets it.
+
+    A bare MISSING row leaves the operator to guess; `vigil oob start` refuses
+    without this, so the remedy belongs next to the finding.
+    """
+    if os.environ.get("VIGIL_FRP_TOKEN") or get_config_value("oob.frp_token"):
+        return Check("oob.frp_token", "OK")
     return Check(
-        "oob.tenant-routing",
+        "oob.frp_token",
+        "MISSING",
+        "required by `vigil oob start`; set `vigil config set oob.frp_token <token>` "
+        "(or export VIGIL_FRP_TOKEN) — it must match your frps `auth.token`",
+    )
+
+def _oob_relay_check(install_root: Path) -> Check:
+    try:
+        route = load_relay_route(install_root)
+    except SystemExit as exc:
+        return Check("oob.relay-route", "FAIL", str(exc))
+    if route is None:
+        # `vigil install` allocates a route only when oob.domain is already set,
+        # so the remedy depends on whether it is. Naming `vigil install` while
+        # the domain is unset sends the operator round a loop that cannot clear
+        # this warning.
+        configured_domain = (
+            os.environ.get("VIGIL_OOB_DOMAIN")
+            or get_config_value("oob.domain")
+            or ""
+        )
+        if not configured_domain:
+            return Check(
+                "oob.relay-route",
+                "WARN",
+                "no OOB route allocated; set `vigil config set oob.domain <domain>` "
+                "first, then run `vigil install` to allocate one",
+            )
+        return Check(
+            "oob.relay-route",
+            "WARN",
+            "legacy install has no relay-slot metadata; run `vigil install` to pin its current route",
+        )
+    mode = "legacy-pinned" if route.legacy else "slot"
+    return Check(
+        "oob.relay-route",
         "OK",
-        f"{mode}={route.tenant_prefix} domain={route.oob_domain} ports={route.dns_remote_port}-{route.reverse_remote_port}",
+        f"{mode}={route.slot_prefix} domain={route.oob_domain} ports={route.dns_remote_port}-{route.reverse_remote_port}",
     )
 
 

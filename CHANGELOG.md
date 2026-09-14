@@ -20,6 +20,10 @@ summarizing that history.
 - **Engagement launch preflight.** Client availability and provider credentials fail before launch;
   unavailable services and stale installs warn with an explicit bypass for deliberate recovery.
 
+- **`vigil doctor --json`.** The readiness command gained machine-readable output and now exits
+  non-zero when any check is `FAIL`, so it can gate a script or CI job. `WARN` and `MISSING` stay
+  successful — an unconfigured OOB is a steady state, not a broken install.
+
 ### Changed
 
 - **`consume-test` is the canonical phase spelling.** `consume` and `consume_test` remain accepted
@@ -27,8 +31,31 @@ summarizing that history.
 - **Client launchers are interactive engagement entrypoints.** Unknown client flags forward with a
   typo guard, while benchmark validation for all clients remains explicitly deferred in `TODO.md`.
 
+- **Client cross-session memory is disabled in the engagement's own config, not by the launcher.**
+  `.claude/settings.json` carries `"autoMemoryEnabled": false` and `.codex/config.toml` carries
+  `[features] memories = false`, so the setting holds however the client was started rather than
+  only when `vigil engagement start` execs it. The orchestrator ledger stays the engagement's
+  single record.
+
+### Removed
+
+- **`vigil update`.** It was a verbatim duplicate of `vigil install` with no behaviour of its own.
+  Use `vigil install`, which is unchanged.
+
 ### Fixed
 
+- **Cold image builds are no longer killed after 20 seconds.** `vigil up` and `vigil install` were
+  threading the bounded metadata Docker runner into image builds, so a first-run Kali build died at
+  the metadata timeout and produced no progress output. Builds now take the streaming runner, as
+  `docker.py` already documented they must.
+- **`vigil quickstart` no longer reports a working Docker when only the client binary is present.**
+  It probes the daemon with the same check `vigil doctor` uses, so the two cannot disagree about one
+  host, and the prerequisite note no longer describes the orchestrator as a container.
+- **OOB route allocation explains itself.** The per-install route is allocated during
+  `vigil install`, and only when `oob.domain` is already configured; configuring OOB afterwards
+  silently produced no allocation. `vigil install` now says when it skips allocation and why, the
+  doctor warning names the setting that unblocks it instead of pointing back at `vigil install`,
+  and the `vigil up` setup checklist names every key `vigil oob start` requires.
 - **Maintainer and user documentation now follows executable contracts.** Extension recipes name the
   real registries and test suites, session docs list all nine commands, eval instructions use the
   backend dev environment, and a structural guard rejects dead paths or an oversized `CODE-MAP.md`.
@@ -57,7 +84,7 @@ described here.
 - **Engagement credentials live in the backend, not on disk.** The `engagement_credentials` table
   holds one record per `(engagement, identity)`, managed through `vigil auth`. There is no
   `auth.json` file to read, edit, or back up separately. See the
-  [README runtime model](README.md#authentication).
+  [authentication reference](docs/authentication.md).
 - **The durable work buffer is a backend table.** `assessment_work_items` replaces the former
   per-engagement `cases.db`, with the same engagement scoping and inline classification applied
   server-side in the ingest transaction. See

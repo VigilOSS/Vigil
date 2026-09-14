@@ -1,6 +1,6 @@
 # Install integrity and staleness detection
 
-How `vigil install` / `vigil update` / `vigil up` copy the managed tree, and how
+How `vigil install` / `vigil up` copy the managed tree, and how
 Vigil detects a working root that has drifted behind the CLI binary.
 
 For the operator-facing summary — the two layers and the three warning surfaces —

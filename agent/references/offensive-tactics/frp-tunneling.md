@@ -55,12 +55,12 @@ vigil config set oob.domain <configured-oob-domain>
 vigil config set oob.frp_token <token>
 ```
 
-After both endpoints are configured, installation persists an isolated tenant domain and FRP port
-block under `.runtime-data/oob/tenant-routing.json`. Inspect that authoritative allocation with
-`vigil oob routing --format all`; apply its DNS/Caddy output to the shared edge before relying on callbacks.
-Existing single-tenant installs retain their legacy domain and ports until an explicitly
-coordinated migration. See README "Per-tenant OOB routing and upgrade behavior" for the deployment
-contract.
+After both endpoints are configured, installation persists this install's relay slot — its own
+subdomain and FRP port block — under `.runtime-data/oob/relay-routing.json`. Inspect that
+authoritative allocation with `vigil oob routing --format all`; apply its DNS/Caddy output to the
+shared edge before relying on callbacks. Installs predating the relay-slot rename keep their legacy
+domain, ports, and `tenant-routing.json` filename until an explicitly coordinated migration. See
+[`docs/oob-routing.md`](../../../docs/oob-routing.md) for the deployment contract.
 
 There is no built-in host or domain. The port defaults to `7000`, while `oob.frp_host`,
 `oob.domain`, and `oob.frp_token` are required. Environment

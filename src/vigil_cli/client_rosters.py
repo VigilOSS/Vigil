@@ -259,6 +259,13 @@ def ensure_claude_settings(
     Engagement directories get their own settings.json copy so Claude can load
     hooks from the engagement cwd. Refresh stale copies during repair so hook
     command path fixes reach existing engagements too.
+
+    Auto-memory is pinned off here rather than trusted from the template, for
+    the same reason hook command paths are rewritten below: this file is the
+    engagement's settings contract, and the backend ledger is meant to be the
+    engagement's single record of truth. Setting it in the file (not only as a
+    launcher env export) means it also holds for a bare `claude` started in the
+    engagement directory.
     """
     settings_src = agent_root / ".claude" / "settings.json"
     if not settings_src.is_file():
@@ -266,6 +273,7 @@ def ensure_claude_settings(
     claude_dir.mkdir(parents=True, exist_ok=True)
     settings_dest = claude_dir / "settings.json"
     settings = json.loads(settings_src.read_text(encoding="utf-8"))
+    settings["autoMemoryEnabled"] = False
     hooks = settings.get("hooks", {})
     post_hooks = hooks.get("PostToolUse")
     if isinstance(post_hooks, list):

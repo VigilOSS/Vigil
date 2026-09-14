@@ -487,7 +487,9 @@ def test_generated_client_entrypoint_executes_canonical_contract(
     if client == "claude":
         assert payload["env"]["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
         assert "Read `AGENTS.md`" in payload["files"]["CLAUDE.md"]
-        assert json.loads(payload["files"][".claude/settings.json"]) == {}
+        assert json.loads(payload["files"][".claude/settings.json"]) == {
+            "autoMemoryEnabled": False,
+        }
         assert payload["files"][".claude/agents/operator.md"] == "# Operator\n"
     elif client == "opencode":
         assert payload["env"]["DEEPSEEK_API_KEY"] == "test-deepseek"
@@ -574,7 +576,7 @@ def test_install_upgrade_reconciles_all_client_entrypoints_for_existing_engageme
     ambiguous_evidence = ambiguous_dir / "evidence.bin"
     ambiguous_evidence.write_bytes(b"ambiguous state must remain")
 
-    monkeypatch.setattr(install_module, "initialize_tenant_route", lambda *args, **kwargs: None)
+    monkeypatch.setattr(install_module, "initialize_relay_route", lambda *args, **kwargs: None)
     monkeypatch.setattr(install_module.config_module, "get_config_value", lambda *args: None)
     install_result = install_module.install_from_source(
         install_module.InstallOptions(
@@ -675,7 +677,9 @@ def test_install_upgrade_reconciles_all_client_entrypoints_for_existing_engageme
             assert payload["files"][".codex/agents/operator.toml"] == "name = 'operator'\n"
         elif client == "claude":
             assert payload["env"]["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
-            assert json.loads(payload["files"][".claude/settings.json"]) == {}
+            assert json.loads(payload["files"][".claude/settings.json"]) == {
+                "autoMemoryEnabled": False,
+            }
             assert payload["files"][".claude/agents/operator.md"] == "# Operator\n"
         elif client == "opencode":
             assert payload["env"]["DEEPSEEK_API_KEY"] == "test-deepseek"
@@ -1185,7 +1189,7 @@ def test_install_upgrade_applies_explicit_ambiguous_permission_override(
     (engagement_dir / ".claude").mkdir()
     roster_pairs, extra = _seed_physical_client_rosters(agent_root, engagement_dir)
 
-    monkeypatch.setattr(install_module, "initialize_tenant_route", lambda *args, **kwargs: None)
+    monkeypatch.setattr(install_module, "initialize_relay_route", lambda *args, **kwargs: None)
     monkeypatch.setattr(install_module.config_module, "get_config_value", lambda *args: None)
     result = install_module.install_from_source(
         install_module.InstallOptions(
@@ -1705,3 +1709,50 @@ def test_committed_codex_config_registers_session_end_but_no_compaction_hook() -
     command = session_end[0]["hooks"][0]
     assert "session-end.sh" in command["command"]
     assert command["timeout"] >= 5
+
+
+def test_engagement_settings_pin_claude_auto_memory_off_regardless_of_template(
+    tmp_path: Path,
+) -> None:
+    """Auto-memory is a settings-file guarantee, not a launcher-only env export.
+
+    The engagement's own `.claude/settings.json` carries it, so it holds for a
+    bare `claude` started in the engagement directory too — not just for the
+    launcher `vigil engagement start` execs. Pinned in code so editing the
+    committed template cannot silently re-enable a second context store
+    alongside the backend ledger.
+    """
+    agent_root = tmp_path / "agent"
+    (agent_root / ".claude").mkdir(parents=True)
+    # Template deliberately tries to turn it back ON.
+    (agent_root / ".claude" / "settings.json").write_text(
+        json.dumps({"autoMemoryEnabled": True, "hooks": {}}), encoding="utf-8"
+    )
+    claude_dir = tmp_path / "engagement" / ".claude"
+
+    client_rosters.ensure_claude_settings(agent_root, claude_dir)
+
+    settings = json.loads((claude_dir / "settings.json").read_text(encoding="utf-8"))
+    assert settings["autoMemoryEnabled"] is False
+
+
+def test_committed_client_configs_disable_cross_session_memory_for_both_clients() -> None:
+    """Claude and Codex get the same treatment: no second cross-session store.
+
+    Claude uses `autoMemoryEnabled`; Codex uses `[features] memories`. Both ship
+    off so the backend ledger stays the engagement's single record of truth, and
+    so an operator's global config cannot turn either on inside an engagement.
+    """
+    import tomllib
+
+    repo_root = Path(__file__).resolve().parents[1]
+
+    claude_settings = json.loads(
+        (repo_root / "agent" / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    assert claude_settings["autoMemoryEnabled"] is False
+
+    codex_config = tomllib.loads(
+        (repo_root / "agent" / ".codex" / "config.toml").read_text(encoding="utf-8")
+    )
+    assert codex_config["features"]["memories"] is False

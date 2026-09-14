@@ -1332,7 +1332,7 @@ def test_install_preserves_local_state_and_replaces_managed_files(tmp_path: Path
 # .vigil-install-meta.json so `vigil status` can warn (non-fatally) when the
 # working root (~/vigil/agent tree) has fallen behind the source it was
 # installed from (the I-5 root cause: a lagging install silently disables the
-# whole feature set). Two-layer model: `vigil install`/`update` upgrades the
+# whole feature set). Two-layer model: `vigil install` upgrades the
 # WORKING ROOT; `uv tool upgrade vigil` upgrades only the CLI BINARY.
 # --------------------------------------------------------------------------- #
 
@@ -2014,7 +2014,7 @@ def test_install_metadata_alias_never_mutates_external_inode(
     assert external.read_text(encoding="utf-8") == "external untouched\n"
 
 
-@pytest.mark.parametrize("command", ["install", "update"])
+@pytest.mark.parametrize("command", ["install"])
 @pytest.mark.parametrize("carrier", ["explicit", "environment", "config"])
 def test_public_sync_commands_preserve_source_and_install_aliases(
     tmp_path: Path,
@@ -2250,11 +2250,11 @@ def test_post_sync_phases_use_the_pinned_destination_inode(
     requested_install_root = Path(os.path.abspath(install))
     registry_path = tmp_path / "oob-allocations.json"
     if existing_oob_route:
-        from vigil_cli.oob_tenants import allocate_tenant_route
+        from vigil_cli.oob_relay import allocate_relay_route
 
-        allocate_tenant_route(
+        allocate_relay_route(
             install,
-            tenant_name="install",
+            slot_name="install",
             base_domain="oob.example.test",
             registry_path=registry_path,
             identity_factory=lambda: "existing-install-identity",
@@ -2291,12 +2291,12 @@ def test_post_sync_phases_use_the_pinned_destination_inode(
             skipped=(),
         )
 
-    real_initialize_tenant_route = install_module.initialize_tenant_route
+    real_initialize_relay_route = install_module.initialize_relay_route
 
     def oob(root: Path, **kwargs) -> None:
         if phase == "oob":
             swap_public_root(root)
-            real_initialize_tenant_route(root, **kwargs)
+            real_initialize_relay_route(root, **kwargs)
 
     real_write_install_meta = install_module.write_install_meta
 
@@ -2323,7 +2323,7 @@ def test_post_sync_phases_use_the_pinned_destination_inode(
     monkeypatch.setattr(
         engagements_module, "repair_engagement_client_entrypoints", entrypoint
     )
-    monkeypatch.setattr(install_module, "initialize_tenant_route", oob)
+    monkeypatch.setattr(install_module, "initialize_relay_route", oob)
     monkeypatch.setattr(install_module, "write_install_meta", stamp)
     monkeypatch.setattr(install_module, "build_runtime", image)
     if phase == "oob":
@@ -2338,6 +2338,7 @@ def test_post_sync_phases_use_the_pinned_destination_inode(
                 verify_docker_image=phase == "image",
             ),
             runner=runner,
+            build_runner=runner,
         )
 
     assert received_roots == [Path(".")]
@@ -2631,7 +2632,7 @@ def test_install_from_source_stamps_every_sync_path(tmp_path: Path, monkeypatch:
     """The stamp is written by the sync itself, not by the CLI dispatch table.
 
     `vigil up` calls install_from_source directly, so a stamp owned by the
-    `install`/`update` dispatch branch left `up` syncing without re-stamping —
+    `install` dispatch branch left `up` syncing without re-stamping —
     the recorded sha stayed pinned at the last explicit install and `vigil status`
     reported a permanent false "stale".
     """
@@ -2659,17 +2660,17 @@ def test_install_from_source_stamps_every_sync_path(tmp_path: Path, monkeypatch:
     assert (read_install_meta(install) or {})["source_sha"] == advanced
 
 
-def _capture_tenant_route(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+def _capture_relay_route(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
     """Record the ``is_upgrade`` verdict install_from_source hands the OOB layer."""
     from vigil_cli import install as install_module
 
     seen: list[bool] = []
 
-    def fake_initialize_tenant_route(install_root, *, is_upgrade, **_kwargs):
+    def fake_initialize_relay_route(install_root, *, is_upgrade, **_kwargs):
         seen.append(is_upgrade)
         return None
 
-    monkeypatch.setattr(install_module, "initialize_tenant_route", fake_initialize_tenant_route)
+    monkeypatch.setattr(install_module, "initialize_relay_route", fake_initialize_relay_route)
     return seen
 
 
@@ -2691,8 +2692,8 @@ def test_install_in_place_first_run_is_not_an_upgrade(
 
     Upgrade detection used to test for `agent`/`orchestrator`/`.claude`/`.codex`
     directories, which exist in the checkout itself before Vigil has ever run
-    there. The false "upgrade" made `initialize_tenant_route` pin the legacy
-    SHARED OOB domain and ports 53/8443 instead of allocating a tenant-specific
+    there. The false "upgrade" made `initialize_relay_route` pin the legacy
+    SHARED OOB domain and ports 53/8443 instead of allocating an install-specific
     route, so two fresh in-place developer installs collided at the FRP/OOB edge.
     """
     from vigil_cli.install import InstallOptions, install_from_source
@@ -2701,7 +2702,7 @@ def test_install_in_place_first_run_is_not_an_upgrade(
     monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.test")
     root = tmp_path / "checkout"
     _seed_source_tree(root)
-    seen = _capture_tenant_route(monkeypatch)
+    seen = _capture_relay_route(monkeypatch)
 
     result = install_from_source(
         InstallOptions(source_root=root, install_root=root, verify_docker_image=False)
@@ -2722,7 +2723,7 @@ def test_install_in_place_second_run_is_an_upgrade(
     monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.test")
     root = tmp_path / "checkout"
     _seed_source_tree(root)
-    seen = _capture_tenant_route(monkeypatch)
+    seen = _capture_relay_route(monkeypatch)
     options = InstallOptions(source_root=root, install_root=root, verify_docker_image=False)
 
     install_from_source(options)
@@ -2737,7 +2738,7 @@ def test_install_out_of_tree_over_existing_install_is_an_upgrade(
 ) -> None:
     """The normal `~/vigil` upgrade path must still report an upgrade.
 
-    Both markers predate tenant routing, so any install root that could hold a
+    Both markers predate relay routing, so any install root that could hold a
     legacy shared route carries at least one of them.
     """
     from vigil_cli.install import InstallOptions, install_from_source
@@ -2763,7 +2764,7 @@ def test_install_out_of_tree_over_existing_install_is_an_upgrade(
             target.write_text("{}", encoding="utf-8")
         else:
             target.mkdir(parents=True)
-        seen = _capture_tenant_route(monkeypatch)
+        seen = _capture_relay_route(monkeypatch)
 
         result = install_from_source(
             InstallOptions(
@@ -2784,7 +2785,7 @@ def test_install_out_of_tree_into_empty_root_is_not_an_upgrade(
     monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.test")
     source = tmp_path / "source"
     _seed_source_tree(source)
-    seen = _capture_tenant_route(monkeypatch)
+    seen = _capture_relay_route(monkeypatch)
 
     result = install_from_source(
         InstallOptions(
@@ -2828,7 +2829,7 @@ def test_install_from_source_dry_run_preflights_and_reports_state_without_writes
 
     monkeypatch.setattr("vigil_cli.install._sync_install_files", forbidden)
     monkeypatch.setattr("vigil_cli.install.config_module.load_config", forbidden)
-    monkeypatch.setattr("vigil_cli.install.initialize_tenant_route", forbidden)
+    monkeypatch.setattr("vigil_cli.install.initialize_relay_route", forbidden)
     monkeypatch.setattr("vigil_cli.install.repair_engagement_client_rosters", forbidden)
     monkeypatch.setattr("vigil_cli.install.write_install_meta", forbidden)
     monkeypatch.setattr("vigil_cli.install.build_runtime", forbidden)
@@ -5343,11 +5344,11 @@ def test_verify_oob_channel_returns_a_verdict_instead_of_raising(
     marker = _pin_self_test_marker(monkeypatch, "deadbeef")
     monkeypatch.setattr(
         "vigil_cli.oob.client_payload_host",
-        lambda *_args, **_kwargs: "client-id.tenant.oob.example.test",
+        lambda *_args, **_kwargs: "client-id.slot.oob.example.test",
     )
 
     result = verify_oob_channel(
-        OobOptions(install_root=tmp_path, oob_domain="tenant.oob.example.test"),
+        OobOptions(install_root=tmp_path, oob_domain="slot.oob.example.test"),
         client="probe",
         runner=runner,
     )
@@ -5365,7 +5366,7 @@ def test_verify_oob_channel_unverified_when_runtime_is_down(
     from vigil_cli.oob import OobOptions, verify_oob_channel
 
     result = verify_oob_channel(
-        OobOptions(install_root=tmp_path, oob_domain="tenant.oob.example.test"),
+        OobOptions(install_root=tmp_path, oob_domain="slot.oob.example.test"),
         runner=lambda *_a, **_k: DockerResult(0, "", ""),
     )
 
@@ -5402,7 +5403,7 @@ def _channel_probe_runner(
 def _cached_channel_options(tmp_path: Path):
     from vigil_cli.oob import OobOptions
 
-    return OobOptions(install_root=tmp_path, oob_domain="tenant.oob.example.test")
+    return OobOptions(install_root=tmp_path, oob_domain="slot.oob.example.test")
 
 
 @pytest.fixture
@@ -5410,7 +5411,7 @@ def _channel_check_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     _pin_self_test_marker(monkeypatch, "cafebabe")
     monkeypatch.setattr(
         "vigil_cli.oob.client_payload_host",
-        lambda *_args, **_kwargs: "agent-a.tenant.oob.example.test",
+        lambda *_args, **_kwargs: "agent-a.slot.oob.example.test",
     )
 
 
@@ -5588,7 +5589,7 @@ def test_channel_verdict_cache_write_failure_never_fails_the_check(
     assert result.cached is False
 
 
-# `_oob_options` resolves the default tenant domain, and `interactions_for_domain`
+# `_oob_options` resolves the default relay slot domain, and `interactions_for_domain`
 # filters callbacks against it — the fixture host must live under it.
 def _oob_poll_payload_host() -> str:
     return "agent-a.oob.example.test"
@@ -5890,13 +5891,13 @@ def test_oob_test_fails_when_public_dns_probe_fails(
     )
     monkeypatch.setattr(
         "vigil_cli.oob.client_payload_host",
-        lambda *_args, **_kwargs: "client-id.tenant.oob.example.test",
+        lambda *_args, **_kwargs: "client-id.slot.oob.example.test",
     )
     with pytest.raises(SystemExit, match="public DNS probe failed"):
         test_oob(
             OobOptions(
                 install_root=tmp_path,
-                oob_domain="tenant.oob.example.test",
+                oob_domain="slot.oob.example.test",
             ),
             runner=runner,
         )
@@ -5924,7 +5925,7 @@ def test_oob_test_reports_bounded_dns_and_http_success(
         if command.startswith("grep "):
             return DockerResult(
                 0,
-                f"[{marker}.client-id.tenant.oob.example.test] "
+                f"[{marker}.client-id.slot.oob.example.test] "
                 "Received HTTP interaction\n",
                 "",
             )
@@ -5936,23 +5937,23 @@ def test_oob_test_reports_bounded_dns_and_http_success(
     )
     monkeypatch.setattr(
         "vigil_cli.oob.client_payload_host",
-        lambda *_args, **_kwargs: "client-id.tenant.oob.example.test",
+        lambda *_args, **_kwargs: "client-id.slot.oob.example.test",
     )
     test_oob(
         OobOptions(
             install_root=tmp_path,
-            oob_domain="tenant.oob.example.test",
+            oob_domain="slot.oob.example.test",
         ),
         runner=runner,
     )
 
     assert capsys.readouterr().out == (
-        "oob test\tok\tdomain=tenant.oob.example.test"
+        "oob test\tok\tdomain=slot.oob.example.test"
         f"\tmarker={marker}\tdns=203.0.113.10\thttp=200\n"
     )
     assert len(commands) == 3
     assert all(
-        f"{marker}.client-id.tenant.oob.example.test" in command
+        f"{marker}.client-id.slot.oob.example.test" in command
         for command in commands[:2]
     )
     assert marker in commands[2]
@@ -5981,13 +5982,13 @@ def test_oob_test_fails_when_public_http_probe_fails(
     )
     monkeypatch.setattr(
         "vigil_cli.oob.client_payload_host",
-        lambda *_args, **_kwargs: "client-id.tenant.oob.example.test",
+        lambda *_args, **_kwargs: "client-id.slot.oob.example.test",
     )
     with pytest.raises(SystemExit, match="public HTTP probe failed"):
         test_oob(
             OobOptions(
                 install_root=tmp_path,
-                oob_domain="tenant.oob.example.test",
+                oob_domain="slot.oob.example.test",
             ),
             runner=runner,
         )
@@ -6020,14 +6021,14 @@ def test_oob_test_fails_when_callback_does_not_reach_client_log(
     )
     monkeypatch.setattr(
         "vigil_cli.oob.client_payload_host",
-        lambda *_args, **_kwargs: "client-id.tenant.oob.example.test",
+        lambda *_args, **_kwargs: "client-id.slot.oob.example.test",
     )
 
     with pytest.raises(SystemExit, match="callback was not observed"):
         test_oob(
             OobOptions(
                 install_root=tmp_path,
-                oob_domain="tenant.oob.example.test",
+                oob_domain="slot.oob.example.test",
             ),
             runner=runner,
         )
@@ -6055,14 +6056,14 @@ def test_oob_test_rejects_http_redirects(
     )
     monkeypatch.setattr(
         "vigil_cli.oob.client_payload_host",
-        lambda *_args, **_kwargs: "client-id.tenant.oob.example.test",
+        lambda *_args, **_kwargs: "client-id.slot.oob.example.test",
     )
 
     with pytest.raises(SystemExit, match="public HTTP probe failed"):
         test_oob(
             OobOptions(
                 install_root=tmp_path,
-                oob_domain="tenant.oob.example.test",
+                oob_domain="slot.oob.example.test",
             ),
             runner=runner,
         )
@@ -6253,7 +6254,7 @@ def test_oob_client_start_uses_session_file_for_domain_resume(tmp_path: Path) ->
     runtime_route = json.dumps(
         {
             "version": 1,
-            "tenant_prefix": "legacy",
+            "slot_prefix": "legacy",
             "oob_domain": "oob.example.test",
             "dns_remote_port": 53,
             "reverse_remote_port": 8443,
@@ -6264,7 +6265,7 @@ def test_oob_client_start_uses_session_file_for_domain_resume(tmp_path: Path) ->
         commands.append(argv)
         if argv[:3] == ["docker", "ps", "--format"]:
             return DockerResult(0, "vigil\n", "")
-        if argv[-1].startswith("cat ") and "active-tenant-routing.json" in argv[-1]:
+        if argv[-1].startswith("cat ") and "active-relay-routing.json" in argv[-1]:
             return DockerResult(0, runtime_route, "")
         if argv[:3] == ["docker", "exec", "vigil"] and "tmux has-session -t oob-client-demo" in argv[-1] and "tmux new-session" not in argv[-1]:
             return DockerResult(1, "", "")
@@ -6417,10 +6418,20 @@ def test_up_passes_injected_runner_to_image_builds(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(up_module, "build_runtime", fake_build_runtime)
     monkeypatch.setattr(up_module, "_build_mitmproxy_image", fake_build_mitmproxy)
 
-    up_module.run_up(up_module.UpOptions(install_root=tmp_path), runner=fake_runner)
+    def fake_build_runner(*_args, **_kwargs):
+        return None
 
-    assert seen["runtime_runner"] is fake_runner
-    assert seen["mitmproxy_runner"] is fake_runner
+    up_module.run_up(
+        up_module.UpOptions(install_root=tmp_path),
+        runner=fake_runner,
+        build_runner=fake_build_runner,
+    )
+
+    # Builds take `build_runner`, never the caller's bounded metadata `runner`:
+    # the 20s bound that makes a wedged daemon fail fast would kill a cold image
+    # build outright.
+    assert seen["runtime_runner"] is fake_build_runner
+    assert seen["mitmproxy_runner"] is fake_build_runner
 
 
 # ---------------------------------------------------------------------------
@@ -17189,6 +17200,7 @@ def test_install_built_image_carries_runtime_inputs_label(tmp_path):
             verify_docker_image=True,
         ),
         runner=runner,
+        build_runner=runner,
     )
     assert result.image_built is True
     build = next(c for c in calls if c[:3] == ["docker", "build", "-t"])
@@ -17196,3 +17208,152 @@ def test_install_built_image_carries_runtime_inputs_label(tmp_path):
     label_value = build[build.index("--label") + 1]
     expected = f"com.vigil.runtime-inputs-sha256={runtime.runtime_inputs_digest(install_root)}"
     assert label_value == expected
+
+
+def test_install_routes_image_build_to_the_unbounded_streaming_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A build must never inherit the caller's bounded metadata runner.
+
+    `docker.run_command` carries a 20s timeout so a wedged daemon degrades to an
+    error instead of a hang — correct for image/container inspects, fatal for a
+    cold Kali build that legitimately runs for minutes. `docker.py` states the
+    invariant ("image BUILDS deliberately route through run_command_streaming")
+    and `build_runtime` defaults to it, but `install_from_source` took a single
+    `runner` and handed it to the build site, overriding that default and
+    killing every first-run bring-up at 20s.
+    """
+    from vigil_cli import docker as docker_module
+    from vigil_cli.docker import DockerResult
+    from vigil_cli.install import InstallOptions, install_from_source
+
+    source = tmp_path / "source"
+    (source / "agent" / "engagements").mkdir(parents=True)
+    (source / "orchestrator" / "backend" / "data").mkdir(parents=True)
+    (source / "README.md").write_text("managed source\n", encoding="utf-8")
+    install = tmp_path / "install"
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+
+    def metadata_runner(argv: list[str], **_kwargs: object) -> DockerResult:
+        assert argv[:2] != ["docker", "build"], (
+            "the bounded metadata runner reached a build"
+        )
+        return DockerResult(1, "", "")
+
+    seen: dict[str, object] = {}
+
+    def capture_build(root: Path, **kwargs: object) -> None:
+        seen["runner"] = kwargs.get("runner")
+
+    monkeypatch.setattr("vigil_cli.install.build_runtime", capture_build)
+
+    install_from_source(
+        InstallOptions(
+            source_root=source,
+            install_root=install,
+            force_image=True,
+            verify_docker_image=True,
+        ),
+        runner=metadata_runner,
+    )
+
+    assert seen["runner"] is docker_module.run_command_streaming
+    assert seen["runner"] is not metadata_runner
+
+
+def test_up_routes_both_image_builds_to_the_unbounded_streaming_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`vigil up` is the README-blessed bring-up; both its builds must stream.
+
+    Same invariant as the install path, asserted on the command a first-run
+    operator actually types, and covering the mitmproxy build alongside the
+    runtime one — `_build_mitmproxy_image` defaults to the streaming runner but
+    was being handed the bounded one at the call site.
+    """
+    from vigil_cli import docker as docker_module
+    from vigil_cli import up as up_module
+    from vigil_cli.docker import DockerResult
+
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    install = tmp_path / "install"
+    install.mkdir()
+
+    def metadata_runner(argv: list[str], **_kwargs: object) -> DockerResult:
+        assert argv[:2] != ["docker", "build"], (
+            "the bounded metadata runner reached a build"
+        )
+        return DockerResult(0, "", "")
+
+    seen: dict[str, object] = {}
+
+    monkeypatch.setattr(up_module, "install_from_source", lambda *_a, **_k: None)
+    monkeypatch.setattr(up_module, "resolve_source_root", lambda *_a, **_k: tmp_path / "src")
+    monkeypatch.setattr(up_module, "image_outdated", lambda *_a, **_k: True)
+    monkeypatch.setattr(up_module, "_runtime_image_inputs", lambda *_a, **_k: ())
+    monkeypatch.setattr(up_module, "mitmproxy_image_inputs", lambda *_a, **_k: ())
+    monkeypatch.setattr(up_module, "_start_or_restart_runtime", lambda *_a, **_k: None)
+    monkeypatch.setattr(up_module, "_start_mitmproxy_if_needed", lambda *_a, **_k: None)
+    monkeypatch.setattr(up_module, "_start_oob_if_needed", lambda *_a, **_k: None)
+    monkeypatch.setattr(up_module, "start_orchestrator", lambda *_a, **_k: None)
+    monkeypatch.setattr(up_module.docker, "container_running", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        up_module, "build_runtime", lambda _root, **kw: seen.__setitem__("runtime", kw.get("runner"))
+    )
+    monkeypatch.setattr(
+        up_module,
+        "_build_mitmproxy_image",
+        lambda _root, **kw: seen.__setitem__("mitmproxy", kw.get("runner")),
+    )
+
+    up_module.run_up(up_module.UpOptions(install_root=install), runner=metadata_runner)
+
+    assert seen["runtime"] is docker_module.run_command_streaming
+    assert seen["mitmproxy"] is docker_module.run_command_streaming
+
+
+def test_up_no_build_still_keeps_the_bounded_runner_out_of_the_proxy_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--no-build` must not reopen the 20s build bound through a side door.
+
+    `run_up` skips its own proxy build under `--no-build`, but still calls
+    `_start_mitmproxy_if_needed`. `start_proxy` runs an independent freshness
+    check and builds the image itself, and `build_image` uses a non-None runner
+    for the build as well as its metadata calls. So on a host with a missing or
+    stale `vigil-proxy` image, handing it the bounded metadata runner puts a cold
+    build back under the 20s ceiling — the original blocker, through an unpatched
+    path.
+    """
+    from vigil_cli import up as up_module
+
+    seen: dict[str, object] = {}
+
+    def metadata_runner(*_args, **_kwargs):
+        return None
+
+    def build_runner(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(up_module, "resolve_source_root", lambda *_a, **_k: tmp_path)
+    monkeypatch.setattr(up_module, "install_from_source", lambda *_a, **_k: None)
+    monkeypatch.setattr(up_module.docker, "container_running", lambda *_a, **_k: False)
+    monkeypatch.setattr(up_module, "proxy_image_drift", lambda **_k: False)
+    monkeypatch.setattr(up_module, "_start_or_restart_runtime", lambda *_a, **_k: None)
+    monkeypatch.setattr(up_module, "start_orchestrator", lambda *_a, **_k: None)
+    monkeypatch.setattr(up_module, "_start_oob_if_needed", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        up_module,
+        "start_proxy",
+        lambda _options, **kwargs: seen.__setitem__("proxy_runner", kwargs.get("runner")),
+    )
+
+    up_module.run_up(
+        up_module.UpOptions(install_root=tmp_path, no_build=True),
+        runner=metadata_runner,
+        build_runner=build_runner,
+    )
+
+    assert seen["proxy_runner"] is build_runner
+    assert seen["proxy_runner"] is not metadata_runner

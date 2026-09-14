@@ -45,7 +45,7 @@ response.
 | [`docs/authentication.md`](docs/authentication.md) | Credential records, capture, freshness clocks, liveness verdicts, proxy routing. |
 | [`docs/blue-engagements.md`](docs/blue-engagements.md) | Blue incident response, end to end. |
 | [`docs/code-analysis.md`](docs/code-analysis.md) | White-box code analysis, end to end. |
-| [`docs/oob-routing.md`](docs/oob-routing.md) | Per-tenant OOB routing, CoreDNS/Caddy inputs, the frpc conflict scan. |
+| [`docs/oob-routing.md`](docs/oob-routing.md) | Per-install relay-slot OOB routing, CoreDNS/Caddy inputs, the frpc conflict scan. |
 | [`docs/operations.md`](docs/operations.md) | Runtime sizing, kernel limits, orchestrator data and backups. |
 | [`docs/engagement-prompt-playbook.md`](docs/engagement-prompt-playbook.md) | Steering prompts for a session that goes shallow, overclaims, or loses the loop. |
 | [`agent/references/`](agent/references/) | Payloads, tactics, recon, tenants, tools. Discover with `vigil assess list-references`. |
@@ -60,6 +60,7 @@ uv tool install --from git+https://github.com/vigil-oss/vigil.git vigil
 vigil quickstart
 
 # 3. Install a working root and bring the local stack up (Kali runtime + orchestrator)
+#    First run builds the Kali image — several GB, and it needs Docker running.
 vigil install ~/vigil && vigil up
 
 # 4. Create an engagement against an authorized target
@@ -79,7 +80,9 @@ revision for reproducible installs, or use `uv tool install --editable .` for de
 The **CLI binary** (`vigil` itself) is installed and upgraded with `uv tool install` /
 `uv tool upgrade vigil`. The **working root** (`~/vigil` — the `agent/` tree of code, prompts,
 skills, and scripts, plus the orchestrator) is installed and upgraded with `vigil install`
-(alias `vigil update`), or with `vigil up`, which syncs first.
+or with `vigil up`, which syncs first.
+
+`vigil --version` reports the CLI binary's version; `vigil status` reports the working root's.
 
 Upgrading one does not upgrade the other, and a newer CLI against a stale working root leaves
 the affected features silently inert. Every sync path stamps a SHA-256 manifest of what it
@@ -156,6 +159,13 @@ preflight **warns and continues** when the orchestrator is not running, the Kali
 is not running, or the install root is stale.
 `--skip-preflight` bypasses all five.
 
+**Start engagements with `vigil engagement start` and nothing else.** An engagement directory
+also holds a generated `start_<client>.sh`, and a bare `claude` or `codex` run from inside it
+will start too — both are implementation detail, not supported entrypoints. Only the CLI verb
+runs the preflight, refreshes the active-engagement pointer, and exports `ENGAGEMENT_KEY` and
+`VIGIL_CLIENT_NAME`. Without the first, tool calls build malformed `/engagements/<key>/...`
+container paths; without the second, the session-end receipt records the client as `unknown`.
+
 Then tell the operator what it is authorized to do:
 
 ```
@@ -183,6 +193,11 @@ commands. Setup, launch behaviour, and flag forwarding:
 | `kimi` | Kimi Code (Moonshot K3) | No — runs inline | No | Kimi Code CLI installed (`kimi login`). |
 | `goose` | goose on direct DeepSeek | Yes — headless (`delegate`) | No | `brew install block-goose-cli`; set `DEEPSEEK_API_KEY`. |
 | `opencode` | opencode on direct DeepSeek | No — runs inline | No | opencode installed; set `DEEPSEEK_API_KEY`. |
+
+**Client memory is off.** Claude and Codex run with their cross-session memory disabled in each
+engagement's own client config, so the orchestrator ledger stays the engagement's single record —
+a second context store would hold engagement facts Vigil cannot audit, export, or hand to the
+next operator.
 
 **goose is the recommended open-model client** — it dispatches custom specialist subagents
 headlessly and its anti-cheat hook fires inside them. A bare start opens an interactive
@@ -290,8 +305,11 @@ the addon's routing precedence: [`docs/authentication.md`](docs/authentication.m
 
 **Callbacks, listeners, and tunnels** — frp tunnels, pwncat-vl listeners, and interactsh
 callback servers are **operator-controlled** shared infrastructure. Agents provide commands but
-never start them. Configure the four `oob.*` keys, then start the shared services; the FRP token
-is required, and Vigil ships no maintainer-owned fallback infrastructure.
+never start them. `vigil oob start` refuses without `oob.frp_host`, `oob.domain`, and
+`oob.frp_token`; `oob.frp_port` defaults to 7000. Vigil ships no maintainer-owned fallback
+infrastructure — the relay itself is yours to run. Set the keys **before** `vigil install`: this
+install's relay slot (its reserved subdomain and port block on the shared relay) is allocated
+during install, and only when `oob.domain` is already configured.
 
 ```bash
 vigil config set oob.frp_host oob-relay.example.com   # also: oob.frp_port, oob.domain, oob.frp_token
@@ -300,7 +318,7 @@ vigil oob client start example-agent --engagement <engagement-key> --agent vulne
 vigil oob test
 ```
 
-Per-tenant routing records, the CoreDNS and Caddy inputs `vigil oob routing` renders, and the
+Relay-slot routing records, the CoreDNS and Caddy inputs `vigil oob routing` renders, and the
 frpc conflict scan: [`docs/oob-routing.md`](docs/oob-routing.md). Payload-side tradecraft:
 [`frp-tunneling.md`](agent/references/offensive-tactics/frp-tunneling.md) and
 [`shell-handling.md`](agent/references/offensive-tactics/shell-handling.md).
@@ -310,9 +328,9 @@ frpc conflict scan: [`docs/oob-routing.md`](docs/oob-routing.md). Payload-side t
 | Command | Purpose |
 |---------|---------|
 | `vigil quickstart` | Probe host prerequisites and recon tools, print the setup checklist. Installs host tools only with `--install-host-tools`. |
-| `vigil install [path]` (alias `vigil update`) | Install or upgrade the working root in place. Engagements, DB, and `.env` are preserved. |
+| `vigil install [path]` | Install or upgrade the working root in place. Engagements, DB, and `.env` are preserved. Builds the Kali image when it is missing, so it needs a running Docker daemon — `--skip-image-check` syncs without one. |
 | `vigil up` | Sync source, build stale images, start the local stack. |
-| `vigil doctor` | Check local readiness and prerequisites. |
+| `vigil doctor` | Check local readiness and prerequisites. Exits non-zero on a `FAIL` row; `--json` for a machine-readable report. |
 | `vigil status` | Report live service state. |
 | `vigil logs <target> [--lines N]` | Tail logs for `orchestrator`, `runtime`, `mitmproxy`, `oob`, or `all`. |
 | `vigil runtime build \| start \| stop \| restart \| status \| shell \| shell-exec \| resources` | Manage the shared Kali runtime container. |
@@ -323,7 +341,7 @@ frpc conflict scan: [`docs/oob-routing.md`](docs/oob-routing.md). Payload-side t
 | `vigil blue ...` | Blue incident response — see [`docs/blue-engagements.md`](docs/blue-engagements.md). |
 | `vigil auth status \| show \| edit \| clear \| export \| quarantine \| import \| alias \| env-check \| set-active \| keepalive` | Manage engagement credentials in the backend store. |
 | `vigil mitmproxy start \| stop \| status \| build \| reload \| routes` | Manage the shared MITM proxy. |
-| `vigil oob start \| stop \| restart \| status \| routing \| test \| clean \| mint \| poll \| client` | Manage shared OOB and render tenant edge-routing inputs. |
+| `vigil oob start \| stop \| restart \| status \| routing \| test \| clean \| mint \| poll \| client` | Manage shared OOB and render relay-slot edge-routing inputs. |
 | `vigil config path \| list \| get \| set \| unset \| edit` | Read and write persistent CLI config. |
 | `vigil backup create \| list \| show \| restore` | Manual orchestrator DB backup operations. |
 | `vigil bench ...` | Benchmark harness — see [`docs/benchmarking.md`](docs/benchmarking.md). |

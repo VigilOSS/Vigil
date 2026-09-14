@@ -1,6 +1,6 @@
 # Out-of-band routing (frp + interactsh)
 
-Deep reference for per-tenant OOB routing, the edge configuration Vigil renders,
+Deep reference for per-install relay-slot routing, the edge configuration Vigil renders,
 and the frpc conflict scan. The operator-facing setup sequence is in
 [the README](../README.md#optional-capabilities).
 
@@ -21,22 +21,45 @@ set it first with `vigil config set oob.frp_token <token>` or `VIGIL_FRP_TOKEN`.
 
 Vigil ships no maintainer-owned fallback infrastructure. Without `oob.frp_host`
 and `oob.domain`, install and non-OOB workflows remain available, and
-`vigil oob start` stops before Docker and prints the exact two configuration
-commands.
+`vigil oob start` stops before Docker and prints every configuration command it
+needs in one refusal — host, domain, and token — rather than refusing once for
+the pair and again for the token.
 
-## The tenant routing record
+## The relay slot
 
-A `vigil install` creates `.runtime-data/oob/tenant-routing.json` atomically once
-an OOB domain is configured. The record pins a DNS-safe tenant prefix, a tenant
-subdomain, and a two-port FRP block.
+OOB has two levels, and they are scoped differently:
+
+| Level | Scope | What it is | Created by |
+|---|---|---|---|
+| **Relay slot** | one **install** | A DNS-safe prefix, a subdomain under the OOB base domain, and a two-port FRP block — plus the single `frpc` tunnel and `interactsh` server that run in the shared Kali container | `vigil install` |
+| **OOB client** | one **engagement + agent** | A correlation subdomain underneath that slot, polled into its own log and matched against that engagement's probes | `vigil oob client start <name> --engagement <key> --agent <role>` |
+
+So the slot is *not* per engagement. One install runs one tunnel and one interactsh
+server; every engagement on that install shares them, and each engagement's agents
+get their own client underneath. That is why the slot is allocated at install time
+and why it is keyed to the install root.
+
+The slot exists so several Vigil **installs** can point at the same relay without
+colliding on ports or callback hostnames — the `frpc` conflict scan below is what
+catches it when they do.
+
+(Unrelated to a blue engagement's *tenant*, which is the customer organisation
+under investigation. Different concept, deliberately different word.)
+
+A `vigil install` creates `.runtime-data/oob/relay-routing.json` atomically once
+an OOB domain is configured. The record pins the slot prefix, its subdomain, and
+the port block. Records written before the rename are named `tenant-routing.json`
+and spell their keys `tenant_prefix`/`tenant_name`; those are still read.
 
 `vigil oob start`, client metadata, status/doctor, `vigil assess`, and Nuclei
 `--oob-mode vigil` all resolve that record, so changing an ambient
-`VIGIL_OOB_DOMAIN` cannot silently redirect a persisted Vigil tenant to an
+`VIGIL_OOB_DOMAIN` cannot silently redirect a persisted Vigil slot to an
 external Interactsh service.
 
-Set `oob.tenant` before the first install when the install-directory name is not
-the desired tenant label.
+Set `oob.slot` before the first install when the install-directory name is not
+the label you want. It must be set **before** the install that allocates the
+route: allocation happens during `vigil install`, and only when `oob.domain` is
+already configured. (`oob.tenant` is still read as the pre-rename spelling.)
 
 ## Allocation across hosts
 
@@ -56,8 +79,8 @@ the persisted record. Applying them to public DNS, FRP, and Caddy is an explicit
 deployment operation — Vigil does not mutate those external services.
 
 **DNS.** The emitted block is a CoreDNS input, not a Route53 record. The public
-edge must accept TCP and UDP 53, select the longest matching tenant zone, and
-forward it to the tenant's private FRP UDP port.
+edge must accept TCP and UDP 53, select the longest matching slot zone, and
+forward it to that slot's private FRP UDP port.
 
 **Caddy.** The output includes direct HTTP plus on-demand HTTPS routes for the
 apex, client-id, and real `nonce.client-id` callback depths. Its HTTPS block must
@@ -78,12 +101,12 @@ registered and applied.
 ## The frpc conflict scan
 
 After spawning the `frpc` tmux session, `start_oob` tails `/data/oob/frpc.log`
-for up to ~15s, looking for either success lines for all three rendered tenant
+for up to ~15s, looking for either success lines for all three rendered slot
 proxies (`*-oob-dns`, `*-oob`, and `*-oob-rev`) or one of `port already used` /
 `router config conflict` / `proxy name [...] already exists` from frps.
 
 On a reported conflict the tmux sessions are torn down and the command exits with
-the offending log lines verbatim. It tears down only the attempted tenant
+the offending log lines verbatim. It tears down only the attempted slot's
 sessions and names the persisted domain/port block that must be repaired. This
 post-flight scan is the final defense against a stale or independently allocated
 registry.

@@ -21,14 +21,21 @@ authenticated; they carry their own vendor auth, so the start preflight does not
 check for a provider key.
 
 - **claude** — execs `claude`, with `--dangerously-skip-permissions` when the
-  engagement was created with `--skip-permissions`. The launcher sets
-  `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`. Vigil does not broker or replace Claude's
-  native authentication. For subscription use, remember that Claude gives inherited
+  engagement was created with `--skip-permissions`. The engagement's
+  `.claude/settings.json` pins `"autoMemoryEnabled": false`, and the launcher
+  also exports `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`; because the setting lives in
+  the engagement's own settings file, it holds however the client was started.
+  Vigil does not broker or replace Claude's native authentication. For
+  subscription use, remember that Claude gives inherited
   `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` and cloud-provider routing variables
   precedence over `/login`; remove unintended overrides and use `/status` to confirm
   the active credential ([Claude authentication precedence](https://code.claude.com/docs/en/team#authentication-precedence)).
 - **codex** — execs `codex`, with `--dangerously-bypass-approvals-and-sandbox`
-  under `--skip-permissions`.
+  under `--skip-permissions`. The engagement's `.codex/config.toml` sets
+  `[features] memories = false`, the Codex counterpart to Claude's
+  `autoMemoryEnabled`. Codex ships memories off by default; Vigil pins it so an
+  operator whose global `~/.codex/config.toml` enables the feature does not get
+  a second cross-session store inside an engagement.
 - **kimi** — execs `kimi`, with `--auto` under `--skip-permissions`. Runs the
   operator inline from the same prompt; it has no generated specialist roster or
   scope-guard hooks, and is not a `vigil bench run --client` option. Its model is
