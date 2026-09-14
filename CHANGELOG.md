@@ -1,72 +1,44 @@
 # Changelog
 
-Notable changes to Vigil. Format follows [Keep a Changelog][keepachangelog]; versioning follows
-[Semantic Versioning][semver].
+Notable changes to Vigil. Format follows [Keep a Changelog][keepachangelog];
+versioning follows [Semantic Versioning][semver].
 
-1.0.0 is the first public release. Pre-1.0 development happened in this repository's version
-control, and `jj log` remains the record of it; this file starts at the release rather than
-summarizing that history.
+Durable design decisions live in [`docs/adr/`](docs/adr/).
 
 ## [Unreleased]
 
-### Added
-
-- **Nine operator session commands now share one rendered source contract.** `vigil-start` and
-  `vigil-encapsulate-win` join the resume, handoff, compaction, depth, escalation, verification, and
-  triage commands rendered for Claude and Codex.
-- **Operator checkpoints and richer resume hydration.** The assessment CLI records a bounded pointer
-  to durable engagement state, and `resume-brief` returns the current checkpoint plus honest totals
-  for recent decisions, dispatches, and handoffs.
-- **Engagement launch preflight.** Client availability and provider credentials fail before launch;
-  unavailable services and stale installs warn with an explicit bypass for deliberate recovery.
-
-- **`vigil doctor --json`.** The readiness command gained machine-readable output and now exits
-  non-zero when any check is `FAIL`, so it can gate a script or CI job. `WARN` and `MISSING` stay
-  successful — an unconfigured OOB is a steady state, not a broken install.
-
-### Changed
-
-- **`consume-test` is the canonical phase spelling.** `consume` and `consume_test` remain accepted
-  input aliases; readiness responses return `consume-test`.
-- **Client launchers are interactive engagement entrypoints.** Unknown client flags forward with a
-  typo guard, while benchmark validation for all clients remains explicitly deferred in `TODO.md`.
-
-- **Client cross-session memory is disabled in the engagement's own config, not by the launcher.**
-  `.claude/settings.json` carries `"autoMemoryEnabled": false` and `.codex/config.toml` carries
-  `[features] memories = false`, so the setting holds however the client was started rather than
-  only when `vigil engagement start` execs it. The orchestrator ledger stays the engagement's
-  single record.
-
 ### Removed
 
-- **`vigil update`.** It was a verbatim duplicate of `vigil install` with no behaviour of its own.
-  Use `vigil install`, which is unchanged.
+- **`vigil update` is gone.** It was a verbatim duplicate of `vigil install` with no behavior of
+  its own. Use `vigil install` — it upgrades a working root in place.
+- **Two session commands are gone.** `vigil-escalate-honestly` paraphrased the FP/severity gate a
+  session already runs; `vigil-encapsulate-win` told the model to write its own conclusions into
+  the shared methodology mid-engagement, which is a human review decision.
+
+### Added
+
+- **`vigil --version`** reports the CLI binary's version (`vigil status` still reports the working
+  root's).
+- **`vigil doctor --json`**, and `doctor` now exits non-zero when any row is `FAIL`.
+- **Operator checkpoints record both track phases.** A `both` engagement advances its web and code
+  tracks independently; the checkpoint and the resume brief now report each by name.
 
 ### Fixed
 
-- **Cold image builds are no longer killed after 20 seconds.** `vigil up` and `vigil install` were
-  threading the bounded metadata Docker runner into image builds, so a first-run Kali build died at
-  the metadata timeout and produced no progress output. Builds now take the streaming runner, as
-  `docker.py` already documented they must.
-- **`vigil quickstart` no longer reports a working Docker when only the client binary is present.**
-  It probes the daemon with the same check `vigil doctor` uses, so the two cannot disagree about one
-  host, and the prerequisite note no longer describes the orchestrator as a container.
-- **OOB route allocation explains itself.** The per-install route is allocated during
-  `vigil install`, and only when `oob.domain` is already configured; configuring OOB afterwards
-  silently produced no allocation. `vigil install` now says when it skips allocation and why, the
-  doctor warning names the setting that unblocks it instead of pointing back at `vigil install`,
-  and the `vigil up` setup checklist names every key `vigil oob start` requires.
-- **Maintainer and user documentation now follows executable contracts.** Extension recipes name the
-  real registries and test suites, session docs list all nine commands, eval instructions use the
-  backend dev environment, and a structural guard rejects dead paths or an oversized `CODE-MAP.md`.
-- **Session end no longer replaces the operator's place marker.** The automatic hook records an
-  activity receipt; the explicit operator checkpoint remains current for the next session.
-- **Checkpoint identity and rendering stay truthful.** Create requests cannot self-assert a client
-  or writer source, supersession displays engagement-local checkpoint versions, and every Markdown
-  line ending is contained without hiding the operator's text.
-- **Client entrypoints resolve the intended environment.** Codex hook commands are materialized to
-  installed paths, post-subcommand `--root` remains a Vigil option, provider-key precedence matches
-  generated launchers, and malformed env/config input fails with a controlled explanation.
+- **Cold image builds no longer die at 20s.** `vigil up` and `vigil install` threaded one bounded
+  runner through both fast metadata queries and image builds, so the bound that makes a wedged
+  daemon fail fast killed every first-run Kali build and swallowed its progress output.
+- **The Codex scope guard stays live.** Codex gates project-local hooks behind a per-hash trust
+  review; declining it started a normal-looking session with `scope-check.sh` disabled and no
+  indication anywhere in the UI. Generated Codex launchers now vouch for the hooks Vigil itself
+  wrote. The guard also missed `git -C <path> clean -fd`, which it now refuses.
+- **`vigil quickstart` no longer reports `[ok] docker`** on a host with the client binary and no
+  running daemon; it shares `vigil doctor`'s daemon probe.
+- **A relay slot is allocated whenever OOB is configured**, not only by the install that first
+  creates the root. Configuring `oob.domain` after installing and re-running `vigil install` now
+  reserves a dedicated slot instead of pinning the globally shared legacy route.
+- **A quoted-empty provider key (`KEY=""`) reads as unset** in the launch preflight and the
+  generated launchers, and a real quoted key no longer exports its quote characters.
 
 ## [1.0.0] - 2026-09-12
 
@@ -223,5 +195,3 @@ for use outside this repository. Install it fresh:
 
 [keepachangelog]: https://keepachangelog.com/en/1.1.0/
 [semver]: https://semver.org/spec/v2.0.0.html
-[unreleased]: https://github.com/vigil-oss/vigil/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/vigil-oss/vigil/releases/tag/v1.0.0

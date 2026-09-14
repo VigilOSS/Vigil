@@ -307,9 +307,12 @@ the addon's routing precedence: [`docs/authentication.md`](docs/authentication.m
 callback servers are **operator-controlled** shared infrastructure. Agents provide commands but
 never start them. `vigil oob start` refuses without `oob.frp_host`, `oob.domain`, and
 `oob.frp_token`; `oob.frp_port` defaults to 7000. Vigil ships no maintainer-owned fallback
-infrastructure — the relay itself is yours to run. Set the keys **before** `vigil install`: this
-install's relay slot (its reserved subdomain and port block on the shared relay) is allocated
-during install, and only when `oob.domain` is already configured.
+infrastructure — the relay itself is yours to run. This install's relay slot — its reserved
+subdomain and port block on the shared relay — is allocated by `vigil install`, and only when
+`oob.domain` is already configured, so configure the keys first or re-run `vigil install` after
+setting them. The one root that keeps the shared legacy route (ports 53/8443) instead is an
+install that was already running OOB before relay slots existed, whose live callbacks would stop
+correlating if its ports moved.
 
 ```bash
 vigil config set oob.frp_host oob-relay.example.com   # also: oob.frp_port, oob.domain, oob.frp_token
@@ -335,12 +338,12 @@ frpc conflict scan: [`docs/oob-routing.md`](docs/oob-routing.md). Payload-side t
 | `vigil logs <target> [--lines N]` | Tail logs for `orchestrator`, `runtime`, `mitmproxy`, `oob`, or `all`. |
 | `vigil runtime build \| start \| stop \| restart \| status \| shell \| shell-exec \| resources` | Manage the shared Kali runtime container. |
 | `vigil orchestrator start \| stop \| restart \| status \| open \| build` | Manage the orchestrator backend and UI. |
-| `vigil engagement create \| list \| start \| open \| path \| current \| cd-init \| archive \| export \| export-pdf` | Create and drive engagements. |
+| `vigil engagement create \| list \| start \| open \| path \| current \| cd-init \| archive \| export \| export-pdf` | Create and drive engagements. Scope edits (`add-host`, `add-oos`, `set-header`, `add-track`, `set-rate-limit`, …) live here too — `vigil engagement --help`. |
 | `vigil use <key>` | Set the persisted active engagement for global services. |
 | `vigil assess ...` | The assessment surface — see [`docs/assessment-cli.md`](docs/assessment-cli.md). |
 | `vigil blue ...` | Blue incident response — see [`docs/blue-engagements.md`](docs/blue-engagements.md). |
 | `vigil auth status \| show \| edit \| clear \| export \| quarantine \| import \| alias \| env-check \| set-active \| keepalive` | Manage engagement credentials in the backend store. |
-| `vigil mitmproxy start \| stop \| status \| build \| reload \| routes` | Manage the shared MITM proxy. |
+| `vigil mitmproxy start \| stop \| status \| cert \| build \| reload \| routes` | Manage the shared MITM proxy. |
 | `vigil oob start \| stop \| restart \| status \| routing \| test \| clean \| mint \| poll \| client` | Manage shared OOB and render relay-slot edge-routing inputs. |
 | `vigil config path \| list \| get \| set \| unset \| edit` | Read and write persistent CLI config. |
 | `vigil backup create \| list \| show \| restore` | Manual orchestrator DB backup operations. |
