@@ -239,12 +239,22 @@ The specialist roster is shared across tracks and shipped with every engagement:
 `incident-verifier`, `ir-lead`). Validator-, chain-, and ranker-style behaviours are folded into
 those roles rather than adding roster surface.
 
-Transitions are gated. `--force` records a durable override decision, and some integrity
-blockers cannot be forced at all.
+Transitions are gated on every track by `transition-phase`, which resolves the track from the
+engagement (`--track web|code|blue` overrides). `--force` records a durable override decision, and
+some integrity blockers cannot be forced at all.
 
 ```bash
-vigil assess check-phase-readiness --phase <phase>
-vigil assess transition-phase <phase> [--force --reason "<why>"]
+vigil assess transition-phase <phase> [--track code] [--force --reason "<why>"]
+```
+
+Previewing readiness before a transition is per-track, because the tracks measure different
+things. `check-phase-readiness` is the **web** gate and accepts only web phases; the code track
+reads its readiness out of the coverage ledger; the blue gate runs inside `transition-phase`
+itself and has no separate preview command.
+
+```bash
+vigil assess check-phase-readiness --phase <web-phase>                 # web
+vigil assess code-coverage --require-transition-ready <code-phase>     # code
 ```
 
 Blue engagements start from an alert and a tenant reference rather than a web host, and

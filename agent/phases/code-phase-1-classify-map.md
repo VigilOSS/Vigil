@@ -22,7 +22,7 @@ Provide:
 - Git churn data as a short summary or artifact path from `code_repos.git_churn_json`
 - The generation-bound `structural_index_manifest_path` from the identity block. If it is missing or
   stale, return to Phase 0 and run
-  `vigil assess code-index build --repo-id <repo-id> <snapshot-path>` plus
+  `vigil assess code-index build --repo-id <repo-id> <snapshot-path>/source` plus
   `vigil assess code-index sync` before dispatching
 
 Phase 1 produces six required deliverables plus one optional historical-CVE artifact. The call

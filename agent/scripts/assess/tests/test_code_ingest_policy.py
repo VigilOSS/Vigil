@@ -357,3 +357,24 @@ def test_analyzed_churn_is_empty_when_only_skipped_artifacts_churned():
 
     assert analyzed == {}
     assert excluded == 1
+
+
+# --- code-index refuses the snapshot dir and says what to pass --------------
+
+
+def test_code_index_refusal_names_the_source_subdirectory(tmp_path):
+    """Found trialing a real engagement: the `structural_index_stale` blocker
+    prints `code-index build <snapshot-path> --repo-id N`, and the snapshot
+    directory is the obvious thing to substitute — but the index binds to the
+    sealed `source/` tree inside it. The refusal must carry the fix, not just
+    restate the rule."""
+    from assess.commands import code_index
+
+    snapshot = tmp_path / "abc123"
+    snapshot.mkdir()
+
+    with pytest.raises(ValueError) as excinfo:
+        code_index._load_snapshot(snapshot)
+
+    message = str(excinfo.value)
+    assert f"{snapshot}/source" in message

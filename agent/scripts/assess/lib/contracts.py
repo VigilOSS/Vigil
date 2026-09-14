@@ -1816,8 +1816,8 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Build the structural index under the engagement analysis-state directory.",
         schema_name="structural-index aggregate manifest, per-repo manifest, and per-file index JSON",
         preferred_invocations=(
-            "vigil assess code-index build <sealed-snapshot-path> --repo-id <repo-id>",
-            "vigil assess code-index build <sealed-snapshot-path> --repo-id <repo-id> --output-dir <engagement-dir>/tools/analysis-state",
+            "vigil assess code-index build <sealed-snapshot-path>/source --repo-id <repo-id>",
+            "vigil assess code-index build <sealed-snapshot-path>/source --repo-id <repo-id> --output-dir <engagement-dir>/tools/analysis-state",
             "vigil assess code-index sync --repo-id <repo-id>",
         ),
         author_supplied_fields=(

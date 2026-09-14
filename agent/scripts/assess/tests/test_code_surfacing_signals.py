@@ -73,7 +73,7 @@ def test_source_identity_block_names_an_unbound_repo_and_its_repair(capsys):
     )
     out = capsys.readouterr().out
     assert "repo 42: generation 3 | snapshot verified | structural index UNBOUND" in out
-    assert "code-index build <snapshot-path> --repo-id 42" in out
+    assert "code-index build <snapshot-path>/source --repo-id 42" in out
     assert "code-index sync --repo-id 42" in out
     assert "neither advances it" in out
     # A bound repo is reported without a repair line.
@@ -104,7 +104,7 @@ def test_readiness_blocker_names_its_repo_and_repair_verb(capsys):
     out = capsys.readouterr().out
     assert "[structural_index_stale] (repo 42)" in out
     assert "[integrity; non-overrideable]" in out
-    assert "repair: vigil assess code-index build <snapshot-path> --repo-id 42" in out
+    assert "repair: vigil assess code-index build <snapshot-path>/source --repo-id 42" in out
     # A blocker with no known repair verb gets no invented one.
     assert "[files_unclassified] 12 files remain unclassified" in out
 

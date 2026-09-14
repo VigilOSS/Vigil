@@ -151,12 +151,12 @@ def _repo_selector(repo_id: object) -> str:
 # generation-bound review, index, and threat model.
 _BLOCKER_REPAIRS = {
     'structural_index_stale': lambda repo_id: (
-        f"vigil assess code-index build <snapshot-path> {_repo_selector(repo_id)} "
+        f"vigil assess code-index build <snapshot-path>/source {_repo_selector(repo_id)} "
         f"then vigil assess code-index sync {_repo_selector(repo_id)} "
         "(rebinds the existing generation; neither advances it)"
     ),
     'structural_index_metadata_incomplete': lambda repo_id: (
-        f"vigil assess code-index build <snapshot-path> {_repo_selector(repo_id)} "
+        f"vigil assess code-index build <snapshot-path>/source {_repo_selector(repo_id)} "
         f"then vigil assess code-index sync {_repo_selector(repo_id)} "
         "(rebinds the existing generation; neither advances it)"
     ),
