@@ -200,6 +200,48 @@ def test_record_rejects_a_caller_supplied_code_phase(client, engagement) -> None
     assert response.status_code == 422, response.text
 
 
+@pytest.mark.parametrize("blank", ["   ", "\n", "\t\n ", ""])
+def test_record_refuses_a_blank_intent_note(client, engagement, blank) -> None:
+    """A blank note is not a harmless no-op — it supersedes the useful one.
+
+    `min_length=1` accepted `"   "`, which a shell expansion of an unset
+    variable produces easily. Every record supersedes the previous current row,
+    so the blank became the CURRENT checkpoint and resume hydration — which
+    reads the current one — stopped showing the operator's real save-my-place
+    note. The record exists to survive a context boundary; silently losing it
+    to an empty write is the one failure it cannot have.
+    """
+    response = _record(client, intent_note=blank)
+
+    assert response.status_code == 422, response.text
+
+
+def test_a_blank_intent_note_leaves_the_previous_checkpoint_current(
+    client, engagement
+) -> None:
+    """The refusal must not have cost the operator the note they already had."""
+    first = _record(client, intent_note="mid-dispatch on the admin panel")
+    assert first.status_code == 201, first.text
+
+    assert _record(client, intent_note="   ").status_code == 422
+
+    current = client.get(f"{BASE}/operator-checkpoints").json()["checkpoints"]
+    assert len(current) == 1
+    assert current[0]["intent_note"] == "mid-dispatch on the admin panel"
+    assert current[0]["checkpoint_version"] == 1
+
+
+def test_record_keeps_a_meaningful_note_byte_for_byte(client, engagement) -> None:
+    """Only the check strips. Operator-authored text is stored verbatim, so a
+    note whose leading indentation carries meaning survives the round trip."""
+    note = "  re-dispatching:\n    - admin panel\n    - tenant export\n"
+
+    response = _record(client, intent_note=note)
+
+    assert response.status_code == 201, response.text
+    assert response.json()["intent_note"] == note
+
+
 def test_record_refuses_an_unknown_finding_slug(client, engagement) -> None:
     known = _seed_finding(client)
 

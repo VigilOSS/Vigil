@@ -4969,6 +4969,30 @@ class OperatorCheckpointCreate(BaseModel):
         default_factory=list, max_length=operator_checkpoints.MAX_REFERENCES
     )
 
+    @field_validator("intent_note")
+    @classmethod
+    def _intent_note_must_say_something(cls, value: str) -> str:
+        """Refuse a note that is only whitespace; keep a real one byte-for-byte.
+
+        ``min_length=1`` accepts `"   "` and `"\n"`, which a shell expansion of
+        an unset variable produces easily. Recording one is not a harmless
+        no-op: every write supersedes the previous row, so the blank becomes
+        the CURRENT checkpoint and resume hydration — which reads the current
+        one — stops showing the operator's real save-my-place note. The whole
+        point of the record is to survive a context boundary, so losing it to
+        an empty write is the one failure it cannot have.
+
+        Only the check strips. The stored text stays verbatim, because the
+        renderers are deliberately lossless about operator-authored content.
+        """
+        if not value.strip():
+            raise ValueError(
+                "intent_note cannot be blank: record what you were about to do "
+                "and why. A whitespace-only note would supersede the last "
+                "checkpoint and leave resume with nothing to rehydrate from."
+            )
+        return value
+
 
 @router.post("/operator-checkpoints", status_code=status.HTTP_201_CREATED)
 async def create_operator_checkpoint(
