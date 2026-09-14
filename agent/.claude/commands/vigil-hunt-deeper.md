@@ -8,28 +8,32 @@ description: Push past a shallow stopping point — wider batches, deeper dispat
 
 You have stopped short. Restart the hunt at depth.
 
-Keep dispatching specialists across **all** surfaces — in batches, in parallel, each with
-enough scope and budget to actually run deep. A thirty-second dispatch is a lookup, not an
-assessment; if a lane returns almost immediately with nothing, the dispatch was too narrow,
-not the surface.
+**Re-read `agent/rules/hunting.md` rules 5, 9, 15, 16 and 16a before the first batch.** They
+govern this push, including when a surface is genuinely dry and you should rotate off it rather
+than grind. This command widens dispatch volume; it does not override those rules, and it does
+not widen the target boundary — reconfirm `scope.json` hosts and `exploit_policy` first, and
+keep exploit work behind whatever gate the policy sets.
 
-Rules for this push:
+Then dispatch specialists across all surfaces in parallel batches. A thirty-second dispatch is
+a lookup, not an assessment: if a lane returns almost immediately with nothing, the dispatch was
+too narrow, not the surface.
 
-- **Exhaust a surface before rotating off it.** Slow is not the same as dry. Rotating early
-  is the single most common way real bugs get left behind.
-- **Try the non-trivial paths.** Chained state, second-order effects, unusual verbs and
-  content types, race and ordering assumptions, anything the obvious scanner would not reach.
-- **Hunt siblings and clusters off anything that signals.** One weak signal on one endpoint
-  almost always means the same mistake exists on its neighbours. Enumerate the family.
-- **Record to the backend as you go**, not at the end. A lane whose findings only exist in
-  your context is a lane whose findings are lost at the next context boundary.
-- **Do not stop at a stopping point.** When you reach one, push past it, then tell the
-  operator explicitly what is still unexplored and what it would cost to cover.
-- **Re-read the operator prompt every few batches.** Dispatch discipline is what decays first
-  in a long push, and the failure mode is you quietly starting to probe things yourself.
+Every dispatch in this push:
 
-Report back with: batches dispatched and what each owned, what returned, what signalled and
-what you did about it, and the honest remaining surface.
+- Sets `hunt_scope: deep` and one mindset lens. Copy `agent/references/runtime-guides/dispatch-template.md`
+  rather than re-deriving the shape.
+- Declares its resource envelope — candidate count, rate limit, threads, retries, timeout, output
+  mode, stop condition, expected wall-clock — from
+  `agent/references/runtime-guides/dispatch-resource-policy.md`. "Enough budget" is not a number,
+  and parallel batches against a rate-limited target are how an engagement gets blocked.
+- Records to the backend as it goes, not at the end. A lane whose findings exist only in your
+  context is a lane whose findings are lost at the next context boundary.
+
+**Stop when every surface in the work buffer has had at least one `hunt_scope: deep` dispatch.**
+Then report and hand the next decision back — do not open a second full rotation on your own.
+
+Report back with: batches dispatched and what each owned, what returned, what signalled and what
+you did about it, and the honest remaining surface with what it would cost to cover.
 
 Surfaces or constraints the operator named for this push (may be empty): $ARGUMENTS
 

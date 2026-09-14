@@ -147,6 +147,24 @@ cat <<'CONTRACT'
 
 Treat this summary as a lossy index into the backend, never as the record itself.
 
+## Write the summary under these headings
+
+Use every heading, in this order. Write `none` under one that is genuinely empty
+— an empty section and a forgotten section are indistinguishable to the next
+reader, and only one of them is safe.
+
+    ## Scope and ROE
+    ## Phase and exit passes
+    ## In-flight lanes        (agent id, surface owned, what it was asked to prove)
+    ## Claims — verified      (claim + where the evidence lives)
+    ## Claims — unverified
+    ## Open decisions         (awaiting the user)
+    ## Settled decisions      (already made; do not re-litigate)
+    ## Auth state
+
+Per-item structure is the point: prose loses the one-lane-per-line shape that
+makes "two specialists on one surface" visible at a glance.
+
 ## Carry forward verbatim — losing any of these is an incident
 
 - **ROE and scope.** In-scope hosts, out-of-scope hosts, forbidden techniques,
@@ -169,8 +187,10 @@ Treat this summary as a lossy index into the backend, never as the record itself
 
 ## Safe to drop
 
-- Raw tool output already recorded in the backend (activity entries, command
-  runs, registered artifacts). It is retrievable; re-reading it is cheap.
+- Raw output from any `vigil assess` record/log/ingest call that returned
+  success, and raw output whose conclusion is restated later in the transcript.
+  It is retrievable; re-reading it is cheap. (Stated as something visible in the
+  transcript: you cannot tell from here what reached the backend.)
 - Superseded drafts, abandoned hypotheses that were explicitly ruled out, and
   the reasoning that led to a decision already recorded.
 - Full file contents that can be re-read on demand.

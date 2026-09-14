@@ -198,14 +198,7 @@ pattern* across the whole surface/codebase.
 > "Pick the 10 files/surfaces most likely to hide something like [archetype]; dispatch hunters for variants of
 > that exact pattern, plus the unsuspecting ones."
 
-### C. Encapsulate every win into a rule or skill
-When a prompt, check, or hypothesis finds a real bug — or catches a real false positive — have the model write
-it into the methodology (`hunting.md`, the FP/severity gate, a vuln-class skill, a per-target reference) so the
-next engagement starts smarter. This is how the steering library grows itself.
-> "That check just caught a false positive — encapsulate it into the FP/severity doc so it's applied
-> automatically next time."
-
-### D. For code targets: trust the code over the docs
+### C. For code targets: trust the code over the docs
 A recurring, embarrassing failure is submitting against documented behavior that the actual code contradicts.
 > "Ignore what the finding/submission claims and read the code itself. Verify against the source, not the docs —
 > docs are often wrong where the code is right, and that's what makes a submission look amateur."
@@ -213,7 +206,7 @@ A recurring, embarrassing failure is submitting against documented behavior that
 Pair it with a prior-art check: *"Research similar CVEs and prior reports — confirm this is real and not already
 known or fixed in a later commit."*
 
-### E. Calibrate dispatch depth — don't burn shallow agents
+### D. Calibrate dispatch depth — don't burn shallow agents
 A swarm of 20–30s dispatches is wasted tokens. Push the model to give each specialist enough scope to run for
 minutes and actually go deep.
 > "Each specialist should have enough scope to run for several minutes and go deep — don't burn a dispatch on a
@@ -221,23 +214,23 @@ minutes and actually go deep.
 
 (The dispatch-mode table governs item counts; this governs *depth per dispatch*, which it doesn't.)
 
-### F. Defeat tunnel vision after the first win
+### E. Defeat tunnel vision after the first win
 The model tends to declare victory at the first confirmed bug and forget the surrounding cluster.
 > "Don't stop at the [SSRF] and forget how you found it — there may be variants or other findings clustered
 > here. Keep going."
 
-### G. Concurrency discipline
+### F. Concurrency discipline
 On multi-agent runs, state changes you didn't initiate are normal. Tell the model not to thrash.
 > "Another agent is working this — if something changes unexpectedly, review and decide what's best; don't
 > reflexively revert it."
 
-### H. Human gates for risk and money
+### G. Human gates for risk and money
 On production, `.gov`/regulated, or destructive-capable steps, keep an explicit approval gate — and use it to
 force a pause for review, not just safety.
 > "Prove the attacker impact but stop at proof — don't over-exploit. Present numbered options and wait for my
 > approval before the destructive/exploit step."
 
-### I. Periodic core re-read as an anti-laziness mechanism
+### H. Periodic core re-read as an anti-laziness mechanism
 The most reliable cure for mid-engagement drift. Bake it into a long run (a Stop-hook goal, or just say it every
 few batches).
 > "Read operator-core.md every few batches so the phases and method stay loaded, and keep dispatching until all
@@ -308,18 +301,11 @@ proves impact with evidence — only if it'll actually end the pushback. If they
 resubmit-under-different-VRT or drop.
 ```
 
-### Encapsulate a win
-```
-That [prompt/check/hypothesis] just [found a real bug / caught a false positive]. Encapsulate it into
-[hunting.md / the FP-severity gate / the relevant skill] so it's applied automatically next engagement, then
-give me the file path you changed.
-```
-
 ---
 
 ## 7. The same prompts as client commands
 
-Five of the §6 templates, plus four session-lifecycle prompts, ship as **client commands** so
+Three of the §6 templates, plus four session-lifecycle prompts, ship as **client commands** so
 you do not have to paste them. They live in one canonical source per command under
 `agent/commands/<name>.md` and are rendered per client by
 `agent/scripts/render-operator-prompts.sh`; `render-operator-prompts.sh check` fails on drift,
@@ -332,16 +318,14 @@ including on a missing rendered file. Never edit the rendered copies.
 | `vigil-handoff` | Write the next operator a brief grounded in backend state, not recollection |
 | `vigil-compact` | Show the standing compaction contract and audit whether it is being applied |
 | `vigil-hunt-deeper` | §6 Hunt-deeper |
-| `vigil-escalate-honestly` | §6 Escalate honestly |
 | `vigil-fresh-skeptic-verify` | §6 Fresh-skeptic verify |
 | `vigil-triage-reply` | §6 Triage reply |
-| `vigil-encapsulate-win` | §6 Encapsulate a win |
 
 The `vigil-` prefix is mandatory: bare `resume` and `compact` collide with built-ins in both
 clients.
 
 - **Claude Code** — `/vigil-resume`, `/vigil-hunt-deeper`, … Arguments are passed inline
-  (`/vigil-escalate-honestly idor-on-tenant-export`), and the commands run backend queries for
+  (`/vigil-fresh-skeptic-verify idor-on-tenant-export`), and the commands run backend queries for
   you before you read them.
 - **Codex** — `$vigil-resume`, `$vigil-hunt-deeper`, … Codex skills perform no argument or
   command substitution, so the Codex rendering states the commands for the agent to run and

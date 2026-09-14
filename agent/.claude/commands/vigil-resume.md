@@ -68,13 +68,26 @@ not errors; report which relevant ones were absent.
 
 **5. Re-establish live state from the backend.** The backend is canonical; recollection is not.
 
-!`vigil assess resume-brief 2>&1`
+The brief is the bounded core hydration: it already carries your operator checkpoint, the finding
+queues, stale dispatches, handoff gaps, and the newest dispatch and handoff rows. Read it first,
+then pull only the sections it tells you that you need. Capped lists print `… showing N of M` —
+read the M before assuming you have the whole picture, and page rather than widening the default.
 
-!`vigil assess agent list --status in-progress 2>&1`
+!`vigil assess resume-brief 2>&1 || true`
 
-!`vigil assess finding list 2>&1`
+Drill down from the brief, not by re-listing everything. Each of these narrows or pages:
 
-!`vigil assess operator-checkpoint show 2>&1`
+    vigil assess resume-brief --finding <slug>      # one finding's context
+    vigil assess resume-brief --agent-id <id>       # one dispatch's handoff detail
+    vigil assess resume-brief --q <topic>           # command and artifact context for a topic
+    vigil assess agent list --status in-progress    # add --limit N when the roster is long
+    vigil assess finding list --status active --limit 25 [--offset N]
+    vigil assess finding list --severity <sev> | --slug <slug> | --root-cause <slug>
+    vigil assess operator-checkpoint show
+
+Prefer a narrowed query over a full listing: `finding list` defaults to `--limit 100` at roughly
+twenty fields a row, and resume runs when context is scarcest. Nothing here is off limits — page
+through as far as you need — but pull it because the brief pointed at it, not by reflex.
 
 A checkpoint's intent is the operator's prior **save my place** note, not verified evidence. The
 automatic session-end hook writes a separate activity receipt and never supersedes that checkpoint.

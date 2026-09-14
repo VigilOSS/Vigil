@@ -41,8 +41,8 @@ or --agent-id for targeted continuation).
 
 Authorized engagement: https://bugcrowd.com/engagements/<slug>
 Continue phases <X, Y, Z> to completion. Use specialist agents for all dispatched work;
-you are the orchestrator brain. Track orchestration, prompt, and backend issues to ISSUES.md.
-Keep dispatching agents until [specify tools / objectives] have completed.
+you are the orchestrator brain. Record activity and findings through `vigil assess` as you go,
+not at the end. Keep dispatching agents until <name the surfaces or objectives> are covered.
 
 Depth is the default. "Quick" is not desired — thorough and deep coverage is.
 Prefer claude-opus-4-8 / gpt-5.6 xhigh for substantial work; medium only for bounded sidecar tasks.
@@ -84,7 +84,7 @@ where latency matters more than depth.
 
 ## Session commands
 
-Nine commands are available. Each has one canonical source under
+Seven commands are available. Each has one canonical source under
 [`agent/commands/`](../agent/commands/), rendered to one wrapper per client.
 
 | Command | What it does |
@@ -94,10 +94,8 @@ Nine commands are available. Each has one canonical source under
 | `vigil-handoff` | Writes a handoff brief for the next session, grounded in backend state rather than recollection. |
 | `vigil-compact` | Shows the standing compaction contract and audits whether it is actually being applied. |
 | `vigil-hunt-deeper` | Pushes past a shallow stopping point with wider batches, deeper dispatches, and siblings off anything that signals. |
-| `vigil-escalate-honestly` | Escalates a finding on real impact — entrypoint, mechanism, attacker outcome — without inflating it. |
 | `vigil-fresh-skeptic-verify` | Dispatches a fresh low-context specialist to attack a finding as a hostile triager would. |
 | `vigil-triage-reply` | Assesses a program's pushback on a submission and decides whether to rebut, resubmit, or drop. |
-| `vigil-encapsulate-win` | Turns a verified finding or false-positive kill into one proportionate, reusable methodology improvement. |
 
 ### How each client invokes them
 

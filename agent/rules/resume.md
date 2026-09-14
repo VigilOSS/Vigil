@@ -11,6 +11,15 @@ true:
 - The current phase is past initialization
 - Findings, dispatch rows, activity entries, or command runs may already exist
 - You are unsure whether the engagement is fresh
+- The session was compacted, truncated, or restarted
+
+**Compaction is a context boundary, so it is a resume trigger.** On Claude the
+`PreCompact` hook steers the summarizer; on Codex there is no compaction hook at
+all, so nothing shapes what survives. Either way the durable recovery is the same
+and it is this rule: record `vigil assess operator-checkpoint` before a long
+dispatch wave, and run resume hydration after any boundary. A Codex operator who
+waits until compaction has fired has nothing left to steer — the checkpoint is
+what carries the seat across, not the summary.
 
 Run the core resume hydration before target-facing commands, specialist dispatch, phase
 transitions, finding writes, or report work:

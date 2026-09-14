@@ -190,10 +190,8 @@ COMMAND_NAMES=(
   vigil-handoff
   vigil-compact
   vigil-hunt-deeper
-  vigil-escalate-honestly
   vigil-fresh-skeptic-verify
   vigil-triage-reply
-  vigil-encapsulate-win
 )
 
 COMMANDS_SRC_DIR="$SOURCE_DIR/commands"
