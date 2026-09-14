@@ -10,7 +10,10 @@ from types import SimpleNamespace
 from urllib.parse import quote, urlencode
 
 from assess.commands import kali_sweep_orphans
-from assess.commands.operator_checkpoint import render_intent_lines
+from assess.commands.operator_checkpoint import (
+    render_intent_lines,
+    render_phase_field,
+)
 from assess.lib.client import AssessError, AssessmentClient, default_runtime_container
 from assess.lib.config import load_config
 from assess.lib.finding_render import UNTRUSTED_DATA_NOTICE, blocked_reason_summary
@@ -455,9 +458,11 @@ def _render_operator_checkpoint(lines: list, checkpoint: object) -> None:
     if not isinstance(checkpoint, dict) or not checkpoint:
         return
     lines.extend(["", "## Operator Checkpoint"])
+    # Shared with `operator-checkpoint show` so the two renders cannot drift on
+    # which tracks a combined engagement reports.
     header = (
         f"- checkpoint #{checkpoint.get('checkpoint_version')} "
-        f"phase={checkpoint.get('current_phase') or 'unknown'} "
+        f"{render_phase_field(checkpoint)} "
         f"source={checkpoint.get('source') or 'unknown'} "
         f"at={checkpoint.get('created_at') or 'unknown'}"
     )

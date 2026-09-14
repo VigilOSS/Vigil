@@ -490,3 +490,56 @@ def test_command_errors_are_catchable_by_the_cli_top_level_handler(
 
     assert operator_checkpoint.AssessError is assess.lib.client.AssessError
     assert assess.cli.__name__ == "assess.cli"
+
+
+def test_show_labels_both_tracks_for_a_combined_engagement(
+    bind, capsys, operator_checkpoint
+) -> None:
+    """A `both` engagement runs the web and code tracks independently.
+
+    Rendering one unlabelled `phase=` would let a reader read a code-track
+    position as a web one (or the reverse), so both are named by track.
+    """
+    bind(
+        _FakeClient(
+            get_response={
+                "checkpoints": [_row(current_phase="recon", code_phase="hunt")],
+                "returned_count": 1,
+                "total_count": 1,
+            }
+        )
+    )
+
+    operator_checkpoint._run_show(
+        SimpleNamespace(engagement_dir=None, show_all=False, as_json=False)
+    )
+
+    out = capsys.readouterr().out
+    assert "web_phase=recon code_phase=hunt" in out
+    # No bare `phase=` survives: an unlabelled one is what confuses the tracks.
+    assert " phase=" not in out
+
+
+def test_show_keeps_one_unlabelled_phase_when_there_is_no_code_track(
+    bind, capsys, operator_checkpoint
+) -> None:
+    # A web-only engagement has exactly one track, so `phase=` is unambiguous
+    # and no empty code field belongs in the render.
+    bind(
+        _FakeClient(
+            get_response={
+                "checkpoints": [_row(code_phase=None)],
+                "returned_count": 1,
+                "total_count": 1,
+            }
+        )
+    )
+
+    operator_checkpoint._run_show(
+        SimpleNamespace(engagement_dir=None, show_all=False, as_json=False)
+    )
+
+    out = capsys.readouterr().out
+    assert "phase=consume-test" in out
+    assert "code_phase" not in out
+    assert "web_phase" not in out

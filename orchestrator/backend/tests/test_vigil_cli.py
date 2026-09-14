@@ -2660,14 +2660,21 @@ def test_install_from_source_stamps_every_sync_path(tmp_path: Path, monkeypatch:
     assert (read_install_meta(install) or {})["source_sha"] == advanced
 
 
-def _capture_relay_route(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
-    """Record the ``is_upgrade`` verdict install_from_source hands the OOB layer."""
+def _capture_relay_route(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Stub the OOB layer out of install and record the roots it was handed.
+
+    The upgrade verdict is no longer routed through it: relay routing decides
+    legacy-vs-allocate from the install's own OOB state
+    (``oob_relay._has_pre_routing_oob_state``), so ``InstallResult.is_upgrade``
+    is where that contract is asserted. Recording the calls still proves the OOB
+    phase ran rather than being silently skipped.
+    """
     from vigil_cli import install as install_module
 
-    seen: list[bool] = []
+    seen: list[Path] = []
 
-    def fake_initialize_relay_route(install_root, *, is_upgrade, **_kwargs):
-        seen.append(is_upgrade)
+    def fake_initialize_relay_route(install_root, **_kwargs):
+        seen.append(Path(install_root))
         return None
 
     monkeypatch.setattr(install_module, "initialize_relay_route", fake_initialize_relay_route)
@@ -2709,7 +2716,7 @@ def test_install_in_place_first_run_is_not_an_upgrade(
     )
 
     assert result.is_upgrade is False
-    assert seen == [False]
+    assert len(seen) == 1
 
 
 def test_install_in_place_second_run_is_an_upgrade(
@@ -2730,7 +2737,7 @@ def test_install_in_place_second_run_is_an_upgrade(
     result = install_from_source(options)
 
     assert result.is_upgrade is True
-    assert seen == [False, True]
+    assert len(seen) == 2
 
 
 def test_install_out_of_tree_over_existing_install_is_an_upgrade(
@@ -2773,7 +2780,7 @@ def test_install_out_of_tree_over_existing_install_is_an_upgrade(
         )
 
         assert result.is_upgrade is True, marker
-        assert seen == [True], marker
+        assert len(seen) == 1, marker
 
 
 def test_install_out_of_tree_into_empty_root_is_not_an_upgrade(
@@ -2794,7 +2801,7 @@ def test_install_out_of_tree_into_empty_root_is_not_an_upgrade(
     )
 
     assert result.is_upgrade is False
-    assert seen == [False]
+    assert len(seen) == 1
 
 
 @pytest.mark.parametrize(

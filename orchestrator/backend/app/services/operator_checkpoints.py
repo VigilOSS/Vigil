@@ -13,9 +13,11 @@ Two mechanisms enforce that, and neither is advisory:
    transaction. A checkpoint pointing at a finding, dispatch, command run, or
    artifact that does not exist is itself a false claim, so the write is
    refused (400) naming the unknown ids rather than stored.
-2. ``current_phase`` is read from engagement state at write time; ``source``
-   and ``client_name`` are server-owned constants for new rows. The request
-   model deliberately has no such fields, so a caller cannot assert them.
+2. Both track phases (``current_phase`` and, where the engagement has a code
+   track, ``code_phase``) are read from engagement state at write time;
+   ``source`` and ``client_name`` are server-owned constants for new rows. The
+   request model deliberately has no such fields, so a caller cannot assert
+   them.
 
 ``intent_note`` is the single free-text block. It is "what I was about to do and
 why" — unverified operator intent — and every renderer labels it as such. There
@@ -74,6 +76,9 @@ def _serialize(row) -> dict[str, Any]:
             int(successor_version) if successor_version is not None else None
         ),
         "current_phase": str(row["current_phase"]),
+        "code_phase": (
+            str(row["code_phase"]) if row["code_phase"] is not None else None
+        ),
         "finding_slugs": _json_list(row["finding_slugs_json"]),
         "dispatch_agent_ids": _json_list(row["dispatch_agent_ids_json"]),
         "command_run_ids": _json_list(row["command_run_ids_json"]),
@@ -135,15 +140,25 @@ def _unknown_rows(
     return unknown
 
 
-def _current_phase(engagement) -> str:
-    """Read the phase from the canonical engagement view, never from a caller.
+def _track_phases(engagement) -> tuple[str, str | None]:
+    """Read BOTH track phases from the canonical engagement view.
 
     ``get_engagement_view_or_404`` is the same reader the dashboard and resume
-    brief resolve ``current_phase`` through, so a checkpoint can never disagree
-    with the phase the rest of the backend reports.
+    brief resolve phases through, so a checkpoint can never disagree with the
+    phase the rest of the backend reports.
+
+    A ``both`` engagement advances the web track (``current_phase``) and the
+    code track (``code_phase``) independently, so recording only the first
+    reports the position of a track the operator may not have been working —
+    the checkpoint exists to carry that position across a context boundary, so
+    naming the wrong one is worse than naming none. ``code_phase`` is ``None``
+    for every engagement without a code track, web and code-only alike: a
+    code-only engagement keeps its code-track phase in ``current_phase``, so it
+    has one phase to record, not two.
     """
 
-    return engagement_service.get_engagement_view_or_404(engagement.key).current_phase
+    view = engagement_service.get_engagement_view_or_404(engagement.key)
+    return view.current_phase, view.code_phase
 
 
 def record_checkpoint(
@@ -158,7 +173,7 @@ def record_checkpoint(
     """Append checkpoint N+1 and stamp the previous current row as superseded."""
 
     engagement = _engagement_or_404(engagement_id)
-    phase = _current_phase(engagement)
+    phase, code_phase = _track_phases(engagement)
     findings = _dedupe(str(slug).strip() for slug in finding_slugs if str(slug).strip())
     agents = _dedupe(str(value).strip() for value in dispatch_agent_ids if str(value).strip())
     runs = _dedupe(int(value) for value in command_run_ids)
@@ -230,14 +245,16 @@ def record_checkpoint(
             """
             INSERT INTO assessment_operator_checkpoints (
                 engagement_id, checkpoint_version, superseded_by_id, current_phase,
-                finding_slugs_json, dispatch_agent_ids_json, command_run_ids_json,
-                artifact_ids_json, intent_note, source, client_name, created_at
-            ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                code_phase, finding_slugs_json, dispatch_agent_ids_json,
+                command_run_ids_json, artifact_ids_json, intent_note, source,
+                client_name, created_at
+            ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 engagement.id,
                 next_version,
                 phase,
+                code_phase,
                 _json_text(findings),
                 _json_text(agents),
                 _json_text(runs),

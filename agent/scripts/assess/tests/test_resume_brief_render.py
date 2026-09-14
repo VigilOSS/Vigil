@@ -860,6 +860,33 @@ def test_operator_checkpoint_renders_with_the_intent_marked_unverified():
     assert "vigil assess operator-checkpoint show --all" in out
 
 
+def test_operator_checkpoint_labels_both_tracks_for_a_combined_engagement():
+    """A `both` engagement advances the web and code tracks independently, so a
+    single unlabelled `phase=` would report a position the operator may never
+    have held. A resuming agent reads this brief as its operating picture."""
+    out = resume_brief._render_markdown(
+        {
+            "engagement": {"key": "eng"},
+            "operator_checkpoint": {
+                "checkpoint_version": 4,
+                "current_phase": "recon",
+                "code_phase": "verify-variant",
+                "finding_slugs": [],
+                "dispatch_agent_ids": [],
+                "command_run_ids": [],
+                "artifact_ids": [],
+                "intent_note": "confirming the sink variant before re-dispatching",
+                "source": "operator",
+                "client_name": "claude",
+                "created_at": "2026-09-12T18:00:00Z",
+            },
+        }
+    )
+
+    assert "checkpoint #4 web_phase=recon code_phase=verify-variant source=operator" in out
+    assert " phase=" not in out
+
+
 def test_operator_checkpoint_section_is_absent_when_none_was_recorded():
     out = resume_brief._render_markdown({"engagement": {"key": "eng"}})
 

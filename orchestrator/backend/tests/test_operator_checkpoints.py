@@ -30,7 +30,12 @@ ENGAGEMENT_KEY = "2026-09-13-090000-opcheckpoint"
 BASE = f"/engagements/{ENGAGEMENT_KEY}/assessment"
 
 
-def _write_engagement(engagements_dir: Path, key: str = ENGAGEMENT_KEY) -> Path:
+def _write_engagement(
+    engagements_dir: Path,
+    key: str = ENGAGEMENT_KEY,
+    *,
+    scope_overrides: dict | None = None,
+) -> Path:
     eng = engagements_dir / key
     (eng / "sessions").mkdir(parents=True, exist_ok=True)
     (eng / "engagement.json").write_text(
@@ -44,17 +49,14 @@ def _write_engagement(engagements_dir: Path, key: str = ENGAGEMENT_KEY) -> Path:
         ),
         encoding="utf-8",
     )
-    (eng / "scope.json").write_text(
-        json.dumps(
-            {
-                "hostname": "example.com",
-                "hosts": ["example.com"],
-                "status": "in_progress",
-                "current_phase": "consume-test",
-            }
-        ),
-        encoding="utf-8",
-    )
+    scope = {
+        "hostname": "example.com",
+        "hosts": ["example.com"],
+        "status": "in_progress",
+        "current_phase": "consume-test",
+    }
+    scope.update(scope_overrides or {})
+    (eng / "scope.json").write_text(json.dumps(scope), encoding="utf-8")
     return eng
 
 
@@ -186,6 +188,14 @@ def test_record_stores_only_backend_references_plus_one_intent_note(
 
 def test_record_rejects_a_caller_supplied_current_phase(client, engagement) -> None:
     response = _record(client, current_phase="report")
+
+    assert response.status_code == 422, response.text
+
+
+def test_record_rejects_a_caller_supplied_code_phase(client, engagement) -> None:
+    # The code-track phase is server-derived for the same reason the web one is:
+    # a caller-assertable phase is a factual claim about engagement state.
+    response = _record(client, code_phase="hunt")
 
     assert response.status_code == 422, response.text
 
@@ -425,4 +435,170 @@ def test_stored_rows_cannot_be_edited_in_place(client, engagement) -> None:
             connection.execute(
                 "DELETE FROM assessment_operator_checkpoints WHERE id = ?",
                 (int(row["id"]),),
+            )
+
+
+# --- Two-track phase capture -------------------------------------------------
+#
+# A ``both`` engagement runs the web track (``scope.json.current_phase``) and
+# the code track (``scope.json.code_phase``) INDEPENDENTLY. A checkpoint that
+# stored only ``current_phase`` therefore recorded the web position for an
+# operator who was working the code track — a continuity record naming a place
+# the operator was never at, which is exactly the false claim this table is
+# built to be incapable of.
+
+
+def test_both_engagement_checkpoint_records_each_track_phase(
+    client, isolate_settings
+) -> None:
+    key = "2026-09-13-091600-opcheckpoint-both"
+    _write_engagement(
+        isolate_settings["engagements_dir"],
+        key,
+        scope_overrides={
+            "engagement_type": "both",
+            "current_phase": "recon",
+            "code_phase": "hunt",
+        },
+    )
+    assert client.get(f"/engagements/{key}").status_code == 200
+
+    response = client.post(
+        f"/engagements/{key}/assessment/operator-checkpoints",
+        json={"intent_note": "mid-hunt in the auth middleware; web recon is parked"},
+    )
+
+    assert response.status_code == 201, response.text
+    row = response.json()
+    assert row["current_phase"] == "recon"
+    assert row["code_phase"] == "hunt"
+
+
+def test_web_engagement_checkpoint_carries_no_code_phase(client, engagement) -> None:
+    # A web engagement has no code track at all, so the record must not invent
+    # one; renderers omit the field rather than printing an empty track.
+    row = _record(client).json()
+
+    assert row["current_phase"] == "consume-test"
+    assert row["code_phase"] is None
+
+
+def test_code_engagement_checkpoint_records_the_code_track_phase(
+    client, isolate_settings
+) -> None:
+    # A code-only engagement persists its code-track phase in ``current_phase``
+    # and has no ``code_phase`` key, so the single stored phase is already the
+    # code one — there is no second track to record.
+    key = "2026-09-13-091700-opcheckpoint-code"
+    _write_engagement(
+        isolate_settings["engagements_dir"],
+        key,
+        scope_overrides={"engagement_type": "code", "current_phase": "verify-variant"},
+    )
+    assert client.get(f"/engagements/{key}").status_code == 200
+
+    response = client.post(
+        f"/engagements/{key}/assessment/operator-checkpoints",
+        json={"intent_note": "confirming the sink variant in the parser"},
+    )
+
+    assert response.status_code == 201, response.text
+    row = response.json()
+    assert row["current_phase"] == "verify-variant"
+    assert row["code_phase"] is None
+
+
+_LEGACY_CHECKPOINT_SCHEMA = """
+CREATE TABLE engagements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT NOT NULL UNIQUE,
+    target TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    engagement_root TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE assessment_operator_checkpoints (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    engagement_id INTEGER NOT NULL REFERENCES engagements(id) ON DELETE CASCADE,
+    checkpoint_version INTEGER NOT NULL CHECK(checkpoint_version >= 1),
+    superseded_by_id INTEGER REFERENCES assessment_operator_checkpoints(id),
+    current_phase TEXT NOT NULL,
+    finding_slugs_json TEXT NOT NULL DEFAULT '[]',
+    dispatch_agent_ids_json TEXT NOT NULL DEFAULT '[]',
+    command_run_ids_json TEXT NOT NULL DEFAULT '[]',
+    artifact_ids_json TEXT NOT NULL DEFAULT '[]',
+    intent_note TEXT NOT NULL,
+    source TEXT NOT NULL,
+    client_name TEXT NOT NULL DEFAULT 'unknown',
+    created_at TEXT NOT NULL,
+    UNIQUE(engagement_id, checkpoint_version)
+);
+CREATE TRIGGER assessment_operator_checkpoints_append_only_update
+BEFORE UPDATE ON assessment_operator_checkpoints
+WHEN NOT (
+    OLD.superseded_by_id IS NULL
+    AND NEW.superseded_by_id IS NOT NULL
+    AND NEW.id = OLD.id
+    AND NEW.engagement_id = OLD.engagement_id
+    AND NEW.checkpoint_version = OLD.checkpoint_version
+    AND NEW.current_phase = OLD.current_phase
+    AND NEW.finding_slugs_json = OLD.finding_slugs_json
+    AND NEW.dispatch_agent_ids_json = OLD.dispatch_agent_ids_json
+    AND NEW.command_run_ids_json = OLD.command_run_ids_json
+    AND NEW.artifact_ids_json = OLD.artifact_ids_json
+    AND NEW.intent_note = OLD.intent_note
+    AND NEW.source = OLD.source
+    AND NEW.client_name = OLD.client_name
+    AND NEW.created_at = OLD.created_at
+)
+BEGIN
+    SELECT RAISE(ABORT, 'operator checkpoints are append-only');
+END;
+INSERT INTO engagements (id, key) VALUES (1, 'legacy-checkpoint-engagement');
+INSERT INTO assessment_operator_checkpoints (
+    engagement_id, checkpoint_version, superseded_by_id, current_phase,
+    finding_slugs_json, dispatch_agent_ids_json, command_run_ids_json,
+    artifact_ids_json, intent_note, source, client_name, created_at
+) VALUES (1, 1, NULL, 'exploit', '["VA-001"]', '[]', '[]', '[]',
+          'legacy row written before the code track was recorded',
+          'operator', 'unknown', '2026-07-01T00:00:00Z');
+"""
+
+
+def test_checkpoint_written_before_the_code_phase_column_still_loads(
+    isolate_settings,
+) -> None:
+    """The column is additive, so rows that predate it stay readable.
+
+    A legacy row has no code-track phase to report and must read back saying so,
+    never borrowing the web phase. The same migration has to replace the
+    append-only trigger, whose stale body could not see the new column.
+    """
+    import sqlite3
+    from contextlib import closing
+
+    from app import db as db_module
+
+    path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.executescript(_LEGACY_CHECKPOINT_SCHEMA)
+
+    db_module.init_db()
+
+    with db_module.get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM assessment_operator_checkpoints WHERE checkpoint_version = 1"
+        ).fetchone()
+        record = operator_checkpoints._serialize(row)
+        assert record["current_phase"] == "exploit"
+        assert record["code_phase"] is None
+        assert record["finding_slugs"] == ["VA-001"]
+
+        # The rebuilt trigger covers the new column; the stale body did not
+        # mention it, so it would have let an edit through.
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE assessment_operator_checkpoints "
+                "SET code_phase = 'hunt', superseded_by_id = 2 WHERE id = ?",
+                (int(record["id"]),),
             )

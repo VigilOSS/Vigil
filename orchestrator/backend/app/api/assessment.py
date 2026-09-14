@@ -4939,9 +4939,10 @@ async def patch_decision(
     return record
 
 
-# The operator's own checkpoint. Deliberately NO ``current_phase`` field: the
-# phase is server-derived at write time, so a caller cannot assert a phase the
-# engagement is not in. The list caps and the note cap are validation bounds —
+# The operator's own checkpoint. Deliberately NO ``current_phase`` or
+# ``code_phase`` field: both track phases are server-derived at write time, so a
+# caller cannot assert a phase the engagement is not in — on either of its two
+# independent tracks. The list caps and the note cap are validation bounds —
 # over-long input is REFUSED with a clear error, never silently truncated.
 class OperatorCheckpointCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")

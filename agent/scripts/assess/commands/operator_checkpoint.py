@@ -234,12 +234,29 @@ def _require_checkpoint_page(body: object) -> dict:
     return body
 
 
+def render_phase_field(row: dict) -> str:
+    """Render the checkpoint's position on every track the engagement runs.
+
+    A ``both`` engagement advances the web track (``current_phase``) and the
+    code track (``code_phase``) independently, so one unlabelled ``phase=``
+    would let a reader take a code-track position for a web one. When both are
+    present each is named by its track; a single-track engagement has nothing
+    to confuse it with, so it keeps the bare ``phase=`` and gains no empty
+    code field.
+    """
+    current = row.get("current_phase") or "unknown"
+    code_phase = row.get("code_phase")
+    if not code_phase:
+        return f"phase={current}"
+    return f"web_phase={current} code_phase={code_phase}"
+
+
 def render_checkpoint_lines(row: dict) -> list[str]:
     """Shared human render — the intent is always labelled UNVERIFIED."""
 
     version = row.get("checkpoint_version")
     superseded_by = row.get("superseded_by_checkpoint_version")
-    header = f"- checkpoint #{version} phase={row.get('current_phase') or 'unknown'}"
+    header = f"- checkpoint #{version} {render_phase_field(row)}"
     header += f" source={row.get('source') or 'unknown'}"
     header += f" client={row.get('client_name') or 'unknown'}"
     header += f" at={row.get('created_at') or 'unknown'}"

@@ -5134,10 +5134,17 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
     # state died with the session. This table is that missing row — and it is
     # deliberately built so it CANNOT hold a new factual claim about the target:
     # every column except ``intent_note`` is a reference to a row the backend
-    # already holds (phase, finding slugs, dispatch agent ids, command-run ids,
-    # artifact ids), and ``current_phase`` is server-derived at write time rather
+    # already holds (phases, finding slugs, dispatch agent ids, command-run ids,
+    # artifact ids), and both phases are server-derived at write time rather
     # than caller-supplied. ``intent_note`` is the single free-text block and is
     # rendered everywhere as UNVERIFIED operator intent, never as evidence.
+    #
+    # ``current_phase`` and ``code_phase`` are the two INDEPENDENT engagement
+    # tracks (``scope.json.current_phase`` / ``scope.json.code_phase``), not one
+    # value spelled two ways. ``code_phase`` is NULL for every engagement that
+    # has no code track, which is also what a row written before the column
+    # existed reads back as — honest in both cases, because neither has a
+    # code-track position to report.
     #
     # Storage is append-only: a correction is a NEW row (version N+1) that stamps
     # the previous current row's ``superseded_by_id``, matching the ledger idiom
@@ -5158,6 +5165,7 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
                 checkpoint_version INTEGER NOT NULL CHECK(checkpoint_version >= 1),
                 superseded_by_id INTEGER REFERENCES assessment_operator_checkpoints(id),
                 current_phase TEXT NOT NULL,
+                code_phase TEXT,
                 finding_slugs_json TEXT NOT NULL DEFAULT '[]',
                 dispatch_agent_ids_json TEXT NOT NULL DEFAULT '[]',
                 command_run_ids_json TEXT NOT NULL DEFAULT '[]',
@@ -5170,6 +5178,21 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
             )
             """
     )
+    # Additive migration for deployments whose table predates the code track.
+    # Nullable with no default, so every existing row keeps its web phase and
+    # reports no code-track position rather than inheriting a fabricated one.
+    # The append-only trigger enumerates every column, so a body written before
+    # ``code_phase`` existed cannot guard it; drop the stale trigger here and
+    # let the CREATE TRIGGER below rebuild it against the current column set
+    # (the same drop-on-shape-change guard the command-run FTS triggers use).
+    checkpoint_columns = _table_columns(connection, "assessment_operator_checkpoints")
+    if checkpoint_columns and "code_phase" not in checkpoint_columns:
+        connection.execute(
+            "ALTER TABLE assessment_operator_checkpoints ADD COLUMN code_phase TEXT"
+        )
+        connection.execute(
+            "DROP TRIGGER IF EXISTS assessment_operator_checkpoints_append_only_update"
+        )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_operator_checkpoints_engagement_current "
         "ON assessment_operator_checkpoints(engagement_id, superseded_by_id)"
@@ -5192,6 +5215,10 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
             AND NEW.engagement_id = OLD.engagement_id
             AND NEW.checkpoint_version = OLD.checkpoint_version
             AND NEW.current_phase = OLD.current_phase
+            -- ``IS``, not ``=``: ``code_phase`` is NULL on every single-track
+            -- and every pre-migration row, and ``NULL = NULL`` is NULL, which
+            -- would leave the guard unable to decide and let the edit through.
+            AND NEW.code_phase IS OLD.code_phase
             AND NEW.finding_slugs_json = OLD.finding_slugs_json
             AND NEW.dispatch_agent_ids_json = OLD.dispatch_agent_ids_json
             AND NEW.command_run_ids_json = OLD.command_run_ids_json
