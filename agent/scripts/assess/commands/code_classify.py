@@ -330,7 +330,7 @@ def _warn_on_structural_invalidation(result: object) -> None:
                 )
     for repo_id in repo_ids:
         print(
-            f"  repair repo {repo_id}: vigil assess code-index build <snapshot-path>/source "
+            f"  repair repo {repo_id}: vigil assess code-index build <snapshot-dir>/source "
             f"--repo-id {repo_id} then vigil assess code-index sync --repo-id {repo_id} "
             "(neither advances the generation)",
             file=sys.stderr,

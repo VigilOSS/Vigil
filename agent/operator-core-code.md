@@ -394,8 +394,9 @@ When source code is obtained mid-engagement (exposed .git, source maps, backup d
    Ingestion never changes engagement type or authorization as a side effect.
 2. Download/reconstruct source to `$DIR/source/<name>/`
 3. Run `vigil assess code-ingest "$DIR/source/<name>"`
-4. Use the ingest result's repo ID and sealed snapshot path with
-   `vigil assess code-index build --repo-id <repo-id> <snapshot-path>/source`, then run
+4. Use the ingest result's repo ID and its `Sealed source:` path — already the snapshot's
+   `source/` directory — with
+   `vigil assess code-index build --repo-id <repo-id> <sealed-source-path>`, then run
    `vigil assess code-index sync` (the script bootstraps bundled tree-sitter packages through `uv`
    on first run)
 5. Code analysis phases run in parallel with ongoing web testing

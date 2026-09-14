@@ -1816,12 +1816,12 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Build the structural index under the engagement analysis-state directory.",
         schema_name="structural-index aggregate manifest, per-repo manifest, and per-file index JSON",
         preferred_invocations=(
-            "vigil assess code-index build <sealed-snapshot-path>/source --repo-id <repo-id>",
-            "vigil assess code-index build <sealed-snapshot-path>/source --repo-id <repo-id> --output-dir <engagement-dir>/tools/analysis-state",
+            "vigil assess code-index build <sealed-source-path> --repo-id <repo-id>",
+            "vigil assess code-index build <sealed-source-path> --repo-id <repo-id> --output-dir <engagement-dir>/tools/analysis-state",
             "vigil assess code-index sync --repo-id <repo-id>",
         ),
         author_supplied_fields=(
-            "sealed snapshot path returned by code-ingest",
+            "the `Sealed source:` path code-ingest printed — the snapshot's `source/` directory, which is what the index binds to. Pass it unchanged; the snapshot directory one level up is refused",
             "--repo-id for the backend repository bound to that snapshot",
             "--repo-key only as an optional assertion against the sealed snapshot",
             "--output-dir only for intentional non-engagement output",
