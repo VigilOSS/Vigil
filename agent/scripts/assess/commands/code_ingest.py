@@ -1186,6 +1186,23 @@ def _git_security_history_args(commit_count: int | None) -> list[str]:
     return ['--all']
 
 
+def _analyzed_churn(
+    churn_scores: dict[str, int], files: list[dict[str, object]]
+) -> tuple[dict[str, int], int]:
+    """Churn restricted to the files this generation analyzes, plus what that dropped.
+
+    `git log` reports every path in the window, so raw churn names build
+    artifacts, vendored bundles, and files deleted before HEAD — none of which
+    this ingest admitted. The count of what was set aside is returned with it so
+    the caller can say so instead of silently presenting a shorter list.
+    """
+    analyzed_paths = {str(record["file_path"]) for record in files}
+    analyzed = {
+        path: score for path, score in churn_scores.items() if path in analyzed_paths
+    }
+    return analyzed, len(churn_scores) - len(analyzed)
+
+
 def _git_churn_scores(repo_path: str, since: str = _GIT_CHURN_LOOKBACK) -> dict[str, int]:
     """Compute per-file churn scores from git log --numstat over a bounded time window."""
     churn: dict[str, int] = {}
@@ -1417,6 +1434,16 @@ def run(args) -> None:
 
     skipped = sum(record.get("kind") != "directory" for record in skipped_records)
     skip_census = _skip_reason_census(skipped_records)
+    # Churn comes from `git log` over the WHOLE history, so it names paths this
+    # ingest never admitted — skipped build artifacts and vendored bundles, and
+    # files deleted before HEAD. Ranking those alongside analyzed source told
+    # the operator a minified stylesheet and two lockfiles were where the change
+    # was concentrated, one screen after listing them as skipped. Restrict every
+    # ranking to files this generation actually analyzes, and say how much was
+    # set aside rather than quietly shrinking the list. Per-file
+    # `git_churn_score` is unaffected: those records only exist for admitted
+    # files already.
+    analyzed_churn_scores, unanalyzed_churn_paths = _analyzed_churn(churn_scores, files)
     # Language support controls structural indexing, not whether sealed source
     # remains reviewable through direct source analysis.
     analyzable_files = len(files)
@@ -1485,7 +1512,15 @@ def run(args) -> None:
             'total_loc': total_loc,
             'commit_hash': str(git_provenance['head']),
             'branch': str(git_provenance['branch']),
-            'git_churn': {'churn_scores': dict(sorted(churn_scores.items(), key=lambda x: -x[1])[:30])} if churn_scores else {},
+            'git_churn': (
+                {
+                    'churn_scores': dict(
+                        sorted(analyzed_churn_scores.items(), key=lambda x: -x[1])[:30]
+                    )
+                }
+                if analyzed_churn_scores
+                else {}
+            ),
         }
         refresh = client.post('code/repos/refresh/start', repo_payload)
         repo_id, refresh_token = _require_refresh_start_receipt(refresh)
@@ -1604,13 +1639,26 @@ def run(args) -> None:
         print(f"Skipped artifact manifest: {skipped_manifest}")
     print(f"Total LOC: {total_loc:,}")
 
-    if churn_scores:
-        # Top 10 highest-churn files
-        sorted_churn = sorted(churn_scores.items(), key=lambda x: x[1], reverse=True)[:10]
-        print("\nTop 10 highest-churn files (last year):")
+    if analyzed_churn_scores:
+        # Top 10 highest-churn ANALYZED files
+        sorted_churn = sorted(
+            analyzed_churn_scores.items(), key=lambda x: x[1], reverse=True
+        )[:10]
+        print("\nTop 10 highest-churn analyzed files (last year):")
         for path, score in sorted_churn:
             marker = " [security-history]" if path in security_files else ""
             print(f"  {score:>6}  {path}{marker}")
+        if unanalyzed_churn_paths:
+            print(
+                f"  ({unanalyzed_churn_paths} churning paths excluded: skipped "
+                "artifacts, or files not present in this generation)"
+            )
+    elif churn_scores:
+        print(
+            f"\nNo analyzed file changed in the last year "
+            f"({len(churn_scores)} churning paths are all skipped artifacts or "
+            "absent from this generation)."
+        )
 
     if security_files:
         print(f"\nFiles with security-related commit history: {len(security_files)}")

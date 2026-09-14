@@ -310,3 +310,50 @@ def test_one_matching_pattern_keeps_the_run_alive_but_still_warns(tmp_path, caps
         "dist/bundle.js",
         "src/app.js",
     }
+
+
+# --- churn rankings must not name files the ingest skipped ------------------
+
+
+def test_churn_rankings_cover_only_the_files_this_generation_analyzes():
+    """Found trialing a real ingest: seven of the ten "highest-churn" files were
+    ones the same run had just listed as skipped — a minified stylesheet, three
+    font SVGs, two lockfiles. `git log` reports every path in the window, so raw
+    churn is not a statement about reviewable source, and presenting it as the
+    concentration of change points the operator at build output.
+    """
+    churn = {
+        "src/app.py": 40,
+        "themes/site.min.css": 17886,
+        "build/package-lock.json": 5626,
+        "deleted/gone.py": 300,
+    }
+    files = [{"file_path": "src/app.py"}, {"file_path": "src/quiet.py"}]
+
+    analyzed, excluded = code_ingest._analyzed_churn(churn, files)
+
+    assert analyzed == {"src/app.py": 40}
+    # Three dropped: two skipped artifacts and one path absent from this
+    # generation. The count is returned so the caller can report the omission
+    # rather than silently showing a shorter list.
+    assert excluded == 3
+
+
+def test_analyzed_churn_reports_zero_excluded_when_every_path_is_analyzed():
+    churn = {"src/app.py": 5, "src/other.py": 2}
+    files = [{"file_path": "src/app.py"}, {"file_path": "src/other.py"}]
+
+    analyzed, excluded = code_ingest._analyzed_churn(churn, files)
+
+    assert analyzed == churn
+    assert excluded == 0
+
+
+def test_analyzed_churn_is_empty_when_only_skipped_artifacts_churned():
+    """The honest answer is "no analyzed file changed", not a truncated list."""
+    analyzed, excluded = code_ingest._analyzed_churn(
+        {"build/bundle.min.js": 900}, [{"file_path": "src/app.py"}]
+    )
+
+    assert analyzed == {}
+    assert excluded == 1
