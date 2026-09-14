@@ -221,12 +221,15 @@ Vigil runs three independent tracks, each with its own ordered roster terminatin
 | Track | Phases | Persisted as |
 |---|---|---|
 | **web** (red) | `recon → collect → consume-test → verify → exploit → report` | `scope.json.current_phase` |
-| **code** (white-box) | `ingest → classify-map → hunt → verify-variant → fuzz` | `scope.json.code_phase` |
+| **code** (white-box) | `ingest → classify-map → hunt → verify-variant → fuzz` | `scope.json.current_phase`, or `scope.json.code_phase` on a `both` engagement |
 | **blue** (incident response) | `intake → triage → investigate → verify → respond → report` | `scope.json.current_phase` |
 
 `complete` is a terminal state, not a working phase: no readiness gate, no audit tag, no
 per-phase operator doc. The code vocabulary is deliberately distinct from the web one, and a
-`both` engagement advances the two tracks independently. Phase values are persisted, so
+`both` engagement advances the two tracks independently — which is why the second phase field
+exists at all: an engagement runs one track in `current_phase` and only a `both` engagement needs
+`code_phase` as well. A `--type code` engagement holds its code-track position in
+`current_phase` and has no `code_phase` key. Phase values are persisted, so
 `consume` and `consume_test` are accepted as input aliases resolving to the canonical
 `consume-test` at the boundary; the UI labels it "Consume & Test". Optional Athena log
 investigation is a numbered step inside the exploit phase, not a phase of its own.
